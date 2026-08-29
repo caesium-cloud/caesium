@@ -34,6 +34,31 @@ func setupHandler(t *testing.T) (*run.Store, *run.LeaseStore, *Handler) {
 	return store, ls, h
 }
 
+// assignTestRunLease makes an already-seeded run belong to the test handler.
+// Some fixtures create runs through Store.Start, which may have installed the
+// initial lease for the process's configured node before the test server's
+// address is known. AcquireLease is intentionally insert-only, so tests must
+// update that existing row explicitly instead of mistaking an unchanged lease
+// for a successful ownership transfer.
+func assignTestRunLease(t *testing.T, store *run.Store, ls *run.LeaseStore, runID uuid.UUID, ownerNode string) run.LeaseVersion {
+	t.Helper()
+	_, err := ls.AcquireLease(context.Background(), runID, ownerNode, 30*time.Second)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	res := store.DB().Model(&models.RunLease{}).
+		Where("run_id = ?", runID.String()).
+		Updates(map[string]interface{}{
+			"owner_node":       ownerNode,
+			"acquired_at":      now,
+			"lease_expires_at": now.Add(30 * time.Second),
+			"generation":       int64(1),
+			"state_revision":   int64(1),
+		})
+	require.NoError(t, res.Error)
+	require.Equal(t, int64(1), res.RowsAffected)
+	return run.LeaseVersion{Generation: 1, StateRevision: 1}
+}
+
 // postJSON sends a POST request with JSON body to the given handler func.
 func postJSON(t *testing.T, handler http.HandlerFunc, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
@@ -96,9 +121,11 @@ func TestHandleComplete_StaleGeneration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Send generation=99 but current lease is generation=1.
+	taskRunID := uuid.New()
 	req := CompleteRequest{
 		RunID:           runID,
 		TaskID:          uuid.New(),
+		TaskRunID:       taskRunID,
 		OwnerGeneration: 99,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
@@ -123,9 +150,11 @@ func TestHandleComplete_NotOwner(t *testing.T) {
 	_, err := ls.AcquireLease(context.Background(), runID, "10.0.0.9:8080", 30*time.Second)
 	require.NoError(t, err)
 
+	taskRunID := uuid.New()
 	req := CompleteRequest{
 		RunID:           runID,
 		TaskID:          uuid.New(),
+		TaskRunID:       taskRunID,
 		OwnerGeneration: 1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
@@ -143,9 +172,11 @@ func TestHandleComplete_NotOwner(t *testing.T) {
 func TestHandleComplete_RunNotFound(t *testing.T) {
 	_, _, h := setupHandler(t)
 
+	taskRunID := uuid.New()
 	req := CompleteRequest{
 		RunID:           uuid.New(), // no lease exists
 		TaskID:          uuid.New(),
+		TaskRunID:       taskRunID,
 		OwnerGeneration: 1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
@@ -342,7 +373,7 @@ func TestHandleComplete_ExpiredLease(t *testing.T) {
 // --- Phase 2 B2: HandleDispatch accept/reject + worker submit seam ---
 
 // fakeSubmitter is a test WorkerSubmitter that records accepted dispatches and
-// can be told to reject (simulating a full inbound buffer).
+// can be told to reject (simulating exhausted worker capacity).
 type fakeSubmitter struct {
 	accepted []InboundDispatch
 	err      error
@@ -408,20 +439,116 @@ func taskStatus(t *testing.T, store *run.Store, runID, taskID uuid.UUID) (string
 	return tr.Status, tr.ClaimedBy
 }
 
+func addPendingTaskToRun(t *testing.T, store *run.Store, runID uuid.UUID, name string) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	var jobRun models.JobRun
+	require.NoError(t, store.DB().First(&jobRun, "id = ?", runID).Error)
+	now := time.Now().UTC()
+	atom := &models.Atom{
+		ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "busybox:1.36.1",
+		Command: `["sh","-c","echo hi"]`, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.DB().Create(atom).Error)
+	task := &models.Task{
+		ID: uuid.New(), JobID: jobRun.JobID, AtomID: atom.ID, Name: name,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.DB().Create(task).Error)
+	row := &models.TaskRun{
+		ID: uuid.New(), JobRunID: runID, TaskID: task.ID, AtomID: atom.ID,
+		Engine: atom.Engine, Image: atom.Image, Command: atom.Command,
+		Status: string(run.TaskStatusPending), Attempt: 1, MaxAttempts: 1,
+		OutstandingPredecessors: 0, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, store.DB().Create(row).Error)
+	return task.ID, row.ID
+}
+
+func TestHandleComplete_RequiresExactTaskRunTupleAndAttempt(t *testing.T) {
+	t.Run("missing task-run id", func(t *testing.T) {
+		store, ls, h := setupHandler(t)
+		runID, taskID := seedPendingTaskRun(t, store)
+		assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
+		claimed, err := store.ClaimTaskForDispatch(runID, taskID, ownerNodeAddr, 1, 1, time.Minute, false)
+		require.NoError(t, err)
+
+		w := postJSON(t, h.HandleComplete, CompleteRequest{
+			RunID: runID, TaskID: taskID, OwnerGeneration: 1,
+			Attempt: claimed.ClaimAttempt, WorkerNode: ownerNodeAddr,
+			Status: string(run.TaskStatusSucceeded), Result: "success",
+		})
+		require.Equal(t, http.StatusConflict, w.Code)
+		var body ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		require.Equal(t, ReasonTaskIdentity, body.Code)
+
+		var got models.TaskRun
+		require.NoError(t, store.DB().First(&got, "id = ?", claimed.ID).Error)
+		require.Equal(t, string(run.TaskStatusRunning), got.Status, "invalid identity must not write")
+	})
+
+	t.Run("wrong catalog task for row", func(t *testing.T) {
+		store, ls, h := setupHandler(t)
+		runID, taskA := seedPendingTaskRun(t, store)
+		taskB, _ := addPendingTaskToRun(t, store, runID, "step2")
+		assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
+		claimA, err := store.ClaimTaskForDispatch(runID, taskA, ownerNodeAddr, 1, 1, time.Minute, false)
+		require.NoError(t, err)
+		claimB, err := store.ClaimTaskForDispatch(runID, taskB, ownerNodeAddr, 1, 1, time.Minute, false)
+		require.NoError(t, err)
+		require.Equal(t, claimA.ClaimAttempt, claimB.ClaimAttempt, "precondition: same-worker claims share an attempt number")
+
+		w := postJSON(t, h.HandleComplete, CompleteRequest{
+			RunID: runID, TaskID: taskA, TaskRunID: claimB.ID,
+			OwnerGeneration: 1, Attempt: claimB.ClaimAttempt,
+			WorkerNode: ownerNodeAddr, Status: string(run.TaskStatusSucceeded), Result: "success",
+		})
+		require.Equal(t, http.StatusConflict, w.Code)
+		var body ErrorResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		require.Equal(t, ReasonTaskIdentity, body.Code)
+		for _, id := range []uuid.UUID{claimA.ID, claimB.ID} {
+			var got models.TaskRun
+			require.NoError(t, store.DB().First(&got, "id = ?", id).Error)
+			require.Equal(t, string(run.TaskStatusRunning), got.Status, "wrong tuple must not mutate either task")
+		}
+	})
+
+	t.Run("zero claim attempt", func(t *testing.T) {
+		store, ls, h := setupHandler(t)
+		runID, taskID := seedPendingTaskRun(t, store)
+		assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
+		claimed, err := store.ClaimTaskForDispatch(runID, taskID, ownerNodeAddr, 1, 1, time.Minute, false)
+		require.NoError(t, err)
+
+		w := postJSON(t, h.HandleComplete, CompleteRequest{
+			RunID: runID, TaskID: taskID, TaskRunID: claimed.ID,
+			OwnerGeneration: 1, Attempt: 0, WorkerNode: ownerNodeAddr,
+			Status: string(run.TaskStatusSucceeded), Result: "success",
+		})
+		require.Equal(t, http.StatusConflict, w.Code)
+		var got models.TaskRun
+		require.NoError(t, store.DB().First(&got, "id = ?", claimed.ID).Error)
+		require.Equal(t, string(run.TaskStatusRunning), got.Status, "zero-attempt completion must not write")
+	})
+}
+
 // TestHandleDispatch_AcceptsAndSubmits verifies the happy path: a dispatch
 // addressed to this node claims the task, hands it to the worker, and returns
 // 202 with the owner metadata threaded into the InboundDispatch.
 func TestHandleDispatch_AcceptsAndSubmits(t *testing.T) {
-	store, _, h := setupHandler(t)
+	store, ls, h := setupHandler(t)
 	sub := &fakeSubmitter{}
 	h = h.WithWorkerSubmitter(sub)
 
 	runID, taskID := seedPendingTaskRun(t, store)
+	assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
 
 	req := DispatchRequest{
 		RunID:           runID,
 		TaskID:          taskID,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		OwnerBaseURL:    "http://10.0.0.1:8080",
@@ -445,19 +572,21 @@ func TestHandleDispatch_AcceptsAndSubmits(t *testing.T) {
 }
 
 // TestHandleDispatch_RejectsAndRollsBackWhenWorkerFull verifies that when the
-// worker cannot accept (buffer full), the handler rolls the claim back to
+// worker cannot accept (no capacity), the handler rolls the claim back to
 // pending/unclaimed so the owner re-dispatches, and returns 409.
 func TestHandleDispatch_RejectsAndRollsBackWhenWorkerFull(t *testing.T) {
-	store, _, h := setupHandler(t)
+	store, ls, h := setupHandler(t)
 	sub := &fakeSubmitter{err: ErrInboundFullSentinel}
 	h = h.WithWorkerSubmitter(sub)
 
 	runID, taskID := seedPendingTaskRun(t, store)
+	assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
 
 	req := DispatchRequest{
 		RunID:           runID,
 		TaskID:          taskID,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		OwnerBaseURL:    "http://10.0.0.1:8080",
@@ -484,6 +613,7 @@ func TestHandleDispatch_RejectsWhenNoWorker(t *testing.T) {
 		RunID:           runID,
 		TaskID:          taskID,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		Deadline:        time.Now().Add(5 * time.Minute),
@@ -497,11 +627,11 @@ func TestHandleDispatch_RejectsWhenNoWorker(t *testing.T) {
 	require.Equal(t, "", claimedBy)
 }
 
-// ErrInboundFullSentinel mirrors the worker's full-buffer error for the
+// ErrInboundFullSentinel mirrors the worker's no-capacity error for the
 // dispatch-package test without importing the worker package (which would
 // create an import cycle). Its identity is irrelevant to the handler — any
 // non-nil error triggers the rollback path.
-var ErrInboundFullSentinel = &sentinelError{"inbound buffer full"}
+var ErrInboundFullSentinel = &sentinelError{"no worker capacity"}
 
 type sentinelError struct{ msg string }
 

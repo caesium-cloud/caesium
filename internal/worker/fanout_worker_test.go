@@ -110,7 +110,7 @@ func seedFanOutTaskRun(t *testing.T, alias string, fanOutConfig string, part pkg
 		tr := &models.TaskRun{
 			ID: uuid.New(), JobRunID: jobRun.ID, TaskID: task.ID, AtomID: atomModel.ID,
 			Engine: atomModel.Engine, Image: atomModel.Image, Command: atomModel.Command,
-			Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", Attempt: 1, MaxAttempts: 1,
+			Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", ClaimAttempt: 1, Attempt: 1, MaxAttempts: 1,
 			PartitionValue: p.Key, PartitionIndex: index, PartitionCount: siblings,
 			PartitionFingerprint: p.Fingerprint,
 			CacheEnabled:         cacheEnabled,
@@ -289,7 +289,7 @@ func seedProducerTaskRun(t *testing.T, alias string) fanOutTaskRunFixture {
 	taskRun := &models.TaskRun{
 		ID: uuid.New(), JobRunID: jobRun.ID, TaskID: task.ID, AtomID: atomModel.ID,
 		Engine: atomModel.Engine, Image: atomModel.Image, Command: atomModel.Command,
-		Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", Attempt: 1, MaxAttempts: 1,
+		Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", ClaimAttempt: 1, Attempt: 1, MaxAttempts: 1,
 		CacheEnabled: true, CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, db.Create(taskRun).Error)
@@ -355,7 +355,7 @@ func (f *fanOutTaskRunFixture) newProducerRunAttempt(t *testing.T) *models.TaskR
 	taskRun := &models.TaskRun{
 		ID: uuid.New(), JobRunID: jobRun.ID, TaskID: f.task.ID, AtomID: f.taskRun.AtomID,
 		Engine: f.taskRun.Engine, Image: f.taskRun.Image, Command: f.taskRun.Command,
-		Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", Attempt: 1, MaxAttempts: 1,
+		Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", ClaimAttempt: 1, Attempt: 1, MaxAttempts: 1,
 		CacheEnabled: true, CreatedAt: now, UpdatedAt: now,
 	}
 	require.NoError(t, f.db.Create(taskRun).Error)

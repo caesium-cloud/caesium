@@ -32,9 +32,10 @@ type ExpandedInstance struct {
 // FanOutExpansion is the payload CompleteTaskResult returns so all three
 // advancement paths observe the same instance set.
 type FanOutExpansion struct {
-	ProducerTaskID uuid.UUID
-	Partitions     []pkgtask.Partition
-	Groups         []ExpandedGroup
+	ProducerTaskID    uuid.UUID
+	ProducerTaskRunID uuid.UUID
+	Partitions        []pkgtask.Partition
+	Groups            []ExpandedGroup
 }
 
 // ExpandedGroup is the N instances of one fanned successor step.
@@ -369,7 +370,9 @@ func (s *Store) expandFanOutSuccessors(
 		}
 	}
 
-	expansion := &FanOutExpansion{ProducerTaskID: producerTaskID, Partitions: partitions}
+	expansion := &FanOutExpansion{
+		ProducerTaskID: producerTaskID, ProducerTaskRunID: producerRow.ID, Partitions: partitions,
+	}
 	serverCap := fanOutServerCap()
 
 	for _, succID := range successorTaskIDs {
@@ -547,7 +550,21 @@ func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanO
 	if expansion == nil {
 		return nil
 	}
-	if producer, err := loadUniqueTaskRun(tx, runID, expansion.ProducerTaskID); err == nil && producer != nil {
+	var producer *models.TaskRun
+	if expansion.ProducerTaskRunID != uuid.Nil {
+		var row models.TaskRun
+		if err := tx.Where("id = ? AND job_run_id = ?", expansion.ProducerTaskRunID, runID).First(&row).Error; err != nil {
+			return err
+		}
+		producer = &row
+	} else {
+		var err error
+		producer, err = loadUniqueTaskRun(tx, runID, expansion.ProducerTaskID)
+		if err != nil {
+			return err
+		}
+	}
+	if producer != nil {
 		if err := s.persistProducerPartitionsTx(tx, producer.ID, expansion.Partitions); err != nil {
 			return err
 		}
@@ -1004,6 +1021,7 @@ func (s *Store) resolveInstanceFailureTx(
 	tx *gorm.DB,
 	runID, catalogTaskID uuid.UUID,
 	row *models.TaskRun,
+	advanceUnfanned bool,
 	pendingEvents *[]event.Event,
 	skippedTaskIDs *[]uuid.UUID,
 	counts *dbWriteCounts,
@@ -1032,9 +1050,19 @@ func (s *Store) resolveInstanceFailureTx(
 		}
 	}
 
-	// Only a fanned group has a group to resolve. An unfanned task's successors
-	// are advanced by the ordinary trigger-rule path, not from here.
-	if row == nil || !isFanOutInstance(row) {
+	if row == nil {
+		return nil
+	}
+	if !isFanOutInstance(row) {
+		// Under the global task failure policy "continue", a failed unfanned
+		// source must resolve its all_success successors before the failed row is
+		// visible outside this transaction. Otherwise the aggregate waiter can
+		// finalize the run (or a retry can reopen it) in the gap, leaving pending
+		// descendants that no scheduler will ever resolve. The caller explicitly
+		// chooses this policy; halt mode keeps the historical no-advance behavior.
+		if advanceUnfanned {
+			return s.advanceCrossStepSuccessorsTx(tx, runID, catalogTaskID, pendingEvents, skippedTaskIDs, counts)
+		}
 		return nil
 	}
 	allTerminal, err := s.groupAllTerminalTx(tx, runID, catalogTaskID)

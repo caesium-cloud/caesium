@@ -489,19 +489,24 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				return err
 			}
 
-			result := tx.Model(&models.TaskRun{}).
-				Where(expiredWhere, expiredArgs...).
-				Updates(map[string]interface{}{
-					"status":           string(run.TaskStatusPending),
-					"claimed_by":       "",
-					"claim_expires_at": nil,
-					"runtime_id":       "",
-					"started_at":       nil,
-				})
-			if result.Error != nil {
-				return result.Error
+			// Revalidate the full expiry + live-run-lease predicate on EACH row's
+			// UPDATE. A worker renewal or owner lease acquisition between the Find
+			// and this loop must win without being reset or receiving expiry events.
+			// The Store owns the evidence-reset contract so this pull-lane reaper
+			// cannot drift from owner recovery and operator retry again.
+			reclaimed := make([]models.TaskRun, 0, len(expired))
+			for i := range expired {
+				updated, resetErr := c.store.ResetTaskRunForReclaimTx(tx, &expired[i], expiredWhere, expiredArgs...)
+				if resetErr != nil {
+					return resetErr
+				}
+				if !updated {
+					continue
+				}
+				reclaimed = append(reclaimed, expired[i])
+				counts.addTaskRunStatus(1)
 			}
-			counts.addTaskRunStatus(int(result.RowsAffected))
+			expired = reclaimed
 
 			// Batch all lease-expired + task-ready events into a single INSERT.
 			if len(expired) > 0 {

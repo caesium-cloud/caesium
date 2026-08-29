@@ -9,10 +9,10 @@ import "time"
 // run state after the previous owner crashes — recovery bounded by the
 // checkpoint interval.
 //
-// Like task_runs, a checkpoint is per-run and transactionally local to its
-// run's other rows: it lives in the catalog DB when unsharded, and in the run's
-// hot shard when sharding is enabled (so it appears in both models.All and
-// hotPathModels).
+// Today checkpoints and the owner mutations they fence use the same catalog
+// connection, so a retry can delete snapshots, reset task rows, and bump the
+// lease revision atomically. Any future routing to hot shards must preserve
+// that single-transaction invariant.
 type RunCheckpoint struct {
 	// RunID identifies the job run.  Stored as text per existing GORM
 	// convention for run-owner tables.
@@ -28,6 +28,12 @@ type RunCheckpoint struct {
 	// column so a stale owner's checkpoint can be distinguished from the current
 	// owner's during a takeover race.
 	OwnerGeneration int64 `gorm:"not null" json:"owner_generation"`
+
+	// StateRevision is the RunLease.StateRevision the snapshot was built from.
+	// A retry deletes old checkpoints and increments the lease revision in one
+	// transaction; the writer also validates this value before inserting, so a
+	// stale owner cannot recreate the deleted snapshot afterward.
+	StateRevision int64 `gorm:"not null;default:0" json:"state_revision"`
 
 	// StateBlob is the serialized RunState snapshot (or delta).  Encoding is an
 	// internal detail owned by the checkpoint writer/reader (JSON in v1); the

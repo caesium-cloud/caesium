@@ -158,7 +158,8 @@ func orderedParts() []pkgtask.Partition {
 // has to clear.
 func claimAndDispatch(t *testing.T, f *fanOutFailoverFixture, mgr *OwnerManager, node string, gen int64, dt DispatchableTask) {
 	t.Helper()
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, dt.ExecutionRef(), node, gen, time.Minute, true))
+	_, err := f.store.ClaimTaskForDispatch(f.runID, dt.ExecutionRef(), node, gen, 1, time.Minute, true)
+	require.NoError(t, err)
 	mgr.MarkDispatched(f.runID, dt.ExecutionRef(), node, dt.Attempt, 0)
 }
 
@@ -287,9 +288,11 @@ func TestFailoverMidGroup_ReDispatchesOnlyUnfinishedInstances(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, rec.Complete, "half the group is unfinished")
 
-	// c was in flight in the checkpoint, so it is explicit re-dispatch work.
-	require.Equal(t, []uuid.UUID{inst["c"].ID}, rec.ReDispatch,
-		"only the instance the dead owner left running is re-dispatch work")
+	// b and c were both durably running under the dead owner's generation. The
+	// takeover requeues every prior-generation claim, including b which was
+	// dispatched after the last checkpoint.
+	require.ElementsMatch(t, []uuid.UUID{inst["b"].ID, inst["c"].ID}, rec.ReDispatch,
+		"every instance claimed by the dead owner is explicit re-dispatch work")
 
 	// The full dispatchable set after the takeover: every unfinished instance
 	// whose prerequisites are satisfied, and nothing else.
@@ -433,11 +436,10 @@ func TestFailoverMidGroup_CheckpointPredatesExpansion(t *testing.T) {
 	require.Equal(t, 2, or.state.maxParallel[f.process])
 	require.Len(t, rec.Ready, 2, "four instances are dispatchable; maxParallel offers two")
 
-	// c was running in the DB when the owner died.  The snapshot predates the
-	// group, so the rebuilt instance is pending rather than running — which is
-	// why it is offered through Ready rather than ReDispatch — and
-	// ResetInFlightTasks must have cleared its claim so that offer is claimable.
-	require.Empty(t, rec.ReDispatch)
+	// c was running in the DB when the owner died. Even though the snapshot
+	// predates the group, recovery rebuilds the instance from durable rows and
+	// reports the prior-generation claim as explicit re-dispatch work.
+	require.Equal(t, []uuid.UUID{inst["c"].ID}, rec.ReDispatch)
 	cRow := f.rowByID(t, inst["c"].ID)
 	require.Equal(t, string(TaskStatusPending), cRow.Status)
 	require.Equal(t, "", cRow.ClaimedBy, "the dead owner's claim must be cleared for the re-dispatch")

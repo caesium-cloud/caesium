@@ -34,6 +34,17 @@ import (
 // in-memory attempt is bumped by RunState.RequeueExpiredRows for dispatch
 // bookkeeping).
 func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64) ([]models.TaskRun, error) {
+	return s.reclaimOwnerExpiredClaimsVersion(runID, LeaseVersion{Generation: ownerGeneration}, false)
+}
+
+// ReclaimOwnerExpiredClaimsVersion is the in-memory owner's revision-fenced
+// reclaim path. A retry that changed the durable rows wins instead of allowing
+// a stale cache to requeue claims afterward.
+func (s *Store) ReclaimOwnerExpiredClaimsVersion(runID uuid.UUID, version LeaseVersion) ([]models.TaskRun, error) {
+	return s.reclaimOwnerExpiredClaimsVersion(runID, version, true)
+}
+
+func (s *Store) reclaimOwnerExpiredClaimsVersion(runID uuid.UUID, version LeaseVersion, requireVersion bool) ([]models.TaskRun, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("run: reclaim owner expired claims: nil store")
 	}
@@ -45,11 +56,20 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 4)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			var err error
+			if requireVersion {
+				err = s.validateOwnerVersionTx(tx, runID, version)
+			} else {
+				err = validateRunLeaseVersionTx(tx, runID, version)
+			}
+			if err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 			// One predicate shared by the Find and the Updates so the two can
 			// never drift apart and reset a row the caller was never told about.
 			where := "job_run_id = ? AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND owner_generation <= ?"
-			args := []interface{}{runID, string(TaskStatusRunning), now, ownerGeneration}
+			args := []interface{}{runID, string(TaskStatusRunning), now, version.Generation}
 
 			var expired []models.TaskRun
 			if err := tx.Where(where, args...).Find(&expired).Error; err != nil {
@@ -58,19 +78,25 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			if len(expired) == 0 {
 				return nil
 			}
+			// A lost execution may already have written logs, schema violations,
+			// exit code, output, or cache evidence before its claim expired. Reuse
+			// the full retry reset contract so attempt 2 cannot inherit attempt 1's
+			// incident evidence, while preserving the execution retry Attempt and
+			// monotonic ClaimAttempt counters across a lease reclaim.
+			updates := retryResetColumns()
+			delete(updates, "attempt")
 			res := tx.Model(&models.TaskRun{}).
 				Where(where, args...).
-				Updates(map[string]interface{}{
-					"status":           string(TaskStatusPending),
-					"claimed_by":       "",
-					"claim_expires_at": nil,
-					"runtime_id":       "",
-					"started_at":       nil,
-				})
+				Updates(updates)
 			if res.Error != nil {
 				return res.Error
 			}
 			counts.addTaskRunStatus(int(res.RowsAffected))
+			for i := range expired {
+				if err := clearRetryDescriptorEffectiveHashTx(tx, &expired[i]); err != nil {
+					return err
+				}
+			}
 
 			if s.eventStore != nil {
 				for i := range expired {

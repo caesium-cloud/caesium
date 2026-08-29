@@ -50,14 +50,15 @@ func Retry(c *echo.Context) error {
 	}
 
 	store := runstorage.Default()
-	r, err := store.RetryFromFailure(runID)
+	r, stateRevision, err := store.RetryFromFailureVersion(runID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 
 	go func() {
 		runCtx := runstorage.WithContext(context.Background(), r.ID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
+		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params),
+			job.WithExpectedStateRevision(stateRevision)).Run(runCtx); err != nil {
 			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()

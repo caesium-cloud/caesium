@@ -639,10 +639,12 @@ func TestFanOutMaxParallelCapsInFlightInstances(t *testing.T) {
 		Update("outstanding_predecessors", 0).Error)
 
 	rows := f.instances(t)
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, rows[0].ID, "worker-a", 0, time.Minute, false))
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, rows[1].ID, "worker-b", 0, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, rows[0].ID, "worker-a", 0, 0, time.Minute, false)
+	require.NoError(t, err)
+	_, err = f.store.ClaimTaskForDispatch(f.runID, rows[1].ID, "worker-b", 0, 0, time.Minute, false)
+	require.NoError(t, err)
 
-	err = f.store.ClaimTaskForDispatch(f.runID, rows[2].ID, "worker-c", 0, time.Minute, false)
+	_, err = f.store.ClaimTaskForDispatch(f.runID, rows[2].ID, "worker-c", 0, 0, time.Minute, false)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch, "maxParallel=2 must refuse a third in-flight instance")
 
 	assertRunningCount(t, f, 2)
@@ -650,7 +652,8 @@ func TestFanOutMaxParallelCapsInFlightInstances(t *testing.T) {
 	// Finish one; the third is now claimable.
 	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", rows[0].ID).
 		Update("status", string(TaskStatusSucceeded)).Error)
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, rows[2].ID, "worker-c", 0, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, rows[2].ID, "worker-c", 0, 0, time.Minute, false)
+	require.NoError(t, err)
 	assertRunningCount(t, f, 2)
 }
 
@@ -679,7 +682,8 @@ func TestFanOutOrderedChainCompletesUnderMaxParallelOne(t *testing.T) {
 			Order("partition_index ASC").Find(&ready).Error)
 		require.Len(t, ready, 1, "exactly one instance is ready at each step of an ordered chain")
 
-		require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, ready[0].ID, "worker", 0, time.Minute, false))
+		_, err = f.store.ClaimTaskForDispatch(f.runID, ready[0].ID, "worker", 0, 0, time.Minute, false)
+		require.NoError(t, err)
 		assertRunningCount(t, f, 1)
 
 		// Complete it, which decrements the next instance in the chain.

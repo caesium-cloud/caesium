@@ -57,7 +57,8 @@ func TestOwnerManager_ReclaimsExpiredWorkerClaimAndCompletesRun(t *testing.T) {
 	// stamped in memory is the dispatch deadline, and the durable claim carries
 	// the same one; the worker holding it then dies, so BOTH lapse — which is
 	// what the elapsed timestamps below stand in for.
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskA, "node-1", 1, 30*time.Second, true))
+	_, err := store.ClaimTaskForDispatch(runID, taskA, "node-1", 1, 1, 30*time.Second, true)
+	require.NoError(t, err)
 	mgr.MarkDispatched(runID, taskA, "node-1", 1, time.Now().Add(-time.Minute).UnixMilli())
 	require.Empty(t, mgr.ReadyForDispatch(runID), "a dispatched task must leave the ready queue")
 
@@ -81,13 +82,15 @@ func TestOwnerManager_ReclaimsExpiredWorkerClaimAndCompletesRun(t *testing.T) {
 	require.Equal(t, 2, ready[0].Attempt, "a re-dispatch after a lost worker is a new attempt")
 
 	// Re-dispatch and drive the run to completion.
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskA, "node-2", 1, 30*time.Second, true))
+	_, err = store.ClaimTaskForDispatch(runID, taskA, "node-2", 1, 1, 30*time.Second, true)
+	require.NoError(t, err)
 	mgr.MarkDispatched(runID, taskA, "node-2", 2, time.Now().Add(30*time.Second).UnixMilli())
 	res, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-2", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, []uuid.UUID{taskB}, res.Ready)
 
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskB, "node-2", 1, 30*time.Second, true))
+	_, err = store.ClaimTaskForDispatch(runID, taskB, "node-2", 1, 1, 30*time.Second, true)
+	require.NoError(t, err)
 	mgr.MarkDispatched(runID, taskB, "node-2", 1, time.Now().Add(30*time.Second).UnixMilli())
 	res, err = mgr.Complete(runID, taskB, TaskStatusSucceeded, "success", "", "node-2", nil, nil)
 	require.NoError(t, err)
@@ -96,6 +99,41 @@ func TestOwnerManager_ReclaimsExpiredWorkerClaimAndCompletesRun(t *testing.T) {
 	var jobRun models.JobRun
 	require.NoError(t, db.First(&jobRun, "id = ?", runID).Error)
 	require.Equal(t, string(StatusSucceeded), jobRun.Status)
+}
+
+func TestRecoverPreservesExecutionAttemptSeparateFromClaimAttempt(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db).WithLeaseStore(NewLeaseStore(db))
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "")
+	claimExpiry := time.Now().UTC().Add(time.Minute)
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskA).
+		Updates(map[string]any{
+			"status":           string(TaskStatusRunning),
+			"claimed_by":       "worker-a",
+			"claim_expires_at": claimExpiry,
+			"attempt":          2,
+			"claim_attempt":    7,
+			"owner_generation": int64(1),
+			"runtime_id":       "container-a",
+		}).Error)
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err := mgr.RecoverVersion(runID, LeaseVersion{Generation: 1, StateRevision: 1})
+	require.NoError(t, err)
+	or, ok := mgr.get(runID)
+	require.True(t, ok)
+	state, ok := or.state.TaskState(taskA)
+	require.True(t, ok)
+	require.Equal(t, 2, state.Attempt,
+		"RunState carries execution retry Attempt, never the claim-attempt ABA counter")
+	require.Equal(t, "worker-a", state.ClaimedBy)
+	require.True(t, state.Started)
+
+	row := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, 2, row.Attempt)
+	require.Equal(t, 7, row.ClaimAttempt)
 }
 
 // TestOwnerManager_ReclaimLeavesLiveClaimsAlone: a claim that has NOT lapsed is
@@ -110,7 +148,8 @@ func TestOwnerManager_ReclaimLeavesLiveClaimsAlone(t *testing.T) {
 	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3}).
 		WithReclaimInterval(time.Millisecond)
 	require.NoError(t, mgr.Adopt(runID, 1))
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskA, "node-1", 1, time.Hour, true))
+	_, err := store.ClaimTaskForDispatch(runID, taskA, "node-1", 1, 1, time.Hour, true)
+	require.NoError(t, err)
 	mgr.MarkDispatched(runID, taskA, "node-1", 1, time.Now().Add(-time.Minute).UnixMilli())
 
 	// The owner's own lease bookkeeping is stale (the worker renewed the durable
@@ -129,7 +168,8 @@ func TestReclaimOwnerExpiredClaims_FencesOnNewerOwnerGeneration(t *testing.T) {
 	store := NewStore(db)
 	runID, taskA, _ := seedTwoTaskRun(t, db, store, "")
 
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskA, "node-2", 5, 30*time.Second, true))
+	_, err := store.ClaimTaskForDispatch(runID, taskA, "node-2", 5, 1, 30*time.Second, true)
+	require.NoError(t, err)
 	expireClaim(t, db, runID, taskA)
 
 	stale, err := store.ReclaimOwnerExpiredClaims(runID, 1)

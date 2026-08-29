@@ -90,7 +90,8 @@ func TestDispatchRun_SQLModeReclaimsExpiredClaimAndCompletesRun(t *testing.T) {
 	require.NoError(t, err)
 
 	// The first dispatch lands and is claimed...
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, "dead-worker:9001", generation, 30*time.Second, false))
+	_, err = store.ClaimTaskForDispatch(runID, taskID, "dead-worker:9001", generation, 1, 30*time.Second, false)
+	require.NoError(t, err)
 	// ...and then that worker dies.
 	killWorkerHoldingClaim(t, db, runID, taskID)
 
@@ -124,6 +125,7 @@ func TestDispatchRun_SQLModeReclaimsExpiredClaimAndCompletesRun(t *testing.T) {
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&row).Error)
 	require.Equal(t, string(run.TaskStatusRunning), row.Status)
 	require.Equal(t, nodeID, row.ClaimedBy, "the live node now holds the claim, not the dead worker")
+	require.Equal(t, 2, row.ClaimAttempt, "the reclaimed claim must advance its durable identity")
 	require.NotNil(t, row.ClaimExpiresAt)
 	require.True(t, row.ClaimExpiresAt.After(time.Now().UTC()), "the re-claim carries a fresh lease")
 
@@ -133,7 +135,7 @@ func TestDispatchRun_SQLModeReclaimsExpiredClaimAndCompletesRun(t *testing.T) {
 		TaskID:          taskID,
 		TaskRunID:       row.ID,
 		OwnerGeneration: generation,
-		Attempt:         1,
+		Attempt:         row.ClaimAttempt,
 		WorkerNode:      nodeID,
 		Status:          string(run.TaskStatusSucceeded),
 		Result:          "success",
@@ -184,7 +186,8 @@ func TestDispatchRun_SQLModeLeavesLiveClaimsAlone(t *testing.T) {
 
 	generation, err := ls.AcquireLease(context.Background(), runID, nodeID, 30*time.Second)
 	require.NoError(t, err)
-	require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, "busy-worker:9001", generation, time.Hour, false))
+	_, err = store.ClaimTaskForDispatch(runID, taskID, "busy-worker:9001", generation, 1, time.Hour, false)
+	require.NoError(t, err)
 
 	loop := NewDispatchLoop(DispatchLoopConfig{
 		NodeID:     nodeID,
@@ -224,12 +227,12 @@ func TestDispatchLoop_ReclaimClockIsThrottledAndBounded(t *testing.T) {
 	require.True(t, loop.dueForReclaim(runID, now.Add(ownerReclaimInterval)),
 		"the sweep resumes once the interval has elapsed")
 
-	loop.forgetUnownedReclaims(map[uuid.UUID]int64{runID: 1})
+	loop.forgetUnownedReclaims(map[uuid.UUID]run.LeaseVersion{runID: {Generation: 1}})
 	loop.reclaimMu.Lock()
 	require.Len(t, loop.lastReclaim, 1, "an owned run keeps its clock")
 	loop.reclaimMu.Unlock()
 
-	loop.forgetUnownedReclaims(map[uuid.UUID]int64{})
+	loop.forgetUnownedReclaims(map[uuid.UUID]run.LeaseVersion{})
 	loop.reclaimMu.Lock()
 	require.Empty(t, loop.lastReclaim, "a run this node no longer owns must not leak its clock")
 	loop.reclaimMu.Unlock()

@@ -34,11 +34,6 @@ func NewPool(size int) *Pool {
 	}
 }
 
-// Size reports the pool's maximum concurrency.
-func (p *Pool) Size() int {
-	return cap(p.sem)
-}
-
 // TryAcquire reserves one execution slot without blocking, reporting whether a
 // slot was available.  A successful reservation MUST be handed to Go (which
 // consumes it) or returned with Release.

@@ -49,7 +49,7 @@ func TestCompleteTaskOwner_WritesTerminalRowsWithoutAdvancing(t *testing.T) {
 	err = store.CompleteTaskOwner(
 		runRecord.ID, taskA.ID, TaskStatusSucceeded, "success", "", "node-1",
 		map[string]string{"k": "v"}, nil,
-		5, 7,
+		5, 7, 0,
 		[]SkippedTask{{TaskID: taskB.ID, TerminalSequence: 6, Reason: "branch not selected"}},
 		nil,
 	)
@@ -101,7 +101,7 @@ func TestCompleteTaskOwner_ClaimMismatch(t *testing.T) {
 	}).Error)
 
 	// A completion from a node that does not hold the claim is rejected.
-	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil, nil)
+	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, 0, nil, nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
 }
 
@@ -140,12 +140,13 @@ func TestClaimTaskForDispatch_TrustOwnerReadiness(t *testing.T) {
 
 	// SQL mode: the predecessor check rejects a not-yet-ready successor.
 	mk()
-	err = store.ClaimTaskForDispatch(runRecord.ID, task.ID, "n1", 1, time.Minute, false)
+	_, err = store.ClaimTaskForDispatch(runRecord.ID, task.ID, "n1", 1, 1, time.Minute, false)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch, "SQL-mode claim must respect outstanding_predecessors")
 
 	// In-memory mode: trust the owner's readiness decision and claim anyway.
 	mk()
-	require.NoError(t, store.ClaimTaskForDispatch(runRecord.ID, task.ID, "n1", 1, time.Minute, true),
+	_, err = store.ClaimTaskForDispatch(runRecord.ID, task.ID, "n1", 1, 1, time.Minute, true)
+	require.NoError(t, err,
 		"in-memory-mode claim must succeed despite outstanding_predecessors>0")
 	var tr models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).First(&tr).Error)

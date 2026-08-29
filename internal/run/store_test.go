@@ -1385,6 +1385,53 @@ func TestPredecessorHashesUsesEffectiveHash(t *testing.T) {
 	hashes, err = store.PredecessorHashes(runRecord.ID, taskB.ID)
 	require.NoError(t, err)
 	require.Equal(t, []string{"pred-hash-old"}, hashes, "empty effective hash must not clear an already-set one")
+
+	// The equivalence belongs only to the completed attempt that proved it. A
+	// retry of that task must clear both the row and descriptor copies before
+	// the next attempt can become a predecessor; otherwise downstream work keeps
+	// seeing pred-hash-old even after the retried task presents pred-hash-new.
+	now := time.Now().UTC()
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskA.ID).
+		Updates(map[string]any{
+			"status":       string(TaskStatusFailed),
+			"completed_at": now,
+			"result":       "failure",
+			"error":        "retry me",
+		}).Error)
+	require.NoError(t, db.Model(&models.JobRun{}).
+		Where("id = ?", runRecord.ID).
+		Updates(map[string]any{
+			"status":       string(StatusFailed),
+			"completed_at": now,
+			"error":        "retry me",
+		}).Error)
+
+	_, err = store.RetryFromFailure(runRecord.ID)
+	require.NoError(t, err)
+	var reset models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskA.ID).First(&reset).Error)
+	require.Empty(t, reset.EffectiveHash)
+	var descriptor models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(reset.ExecutionDescriptor, &descriptor))
+	require.Empty(t, descriptor.Baseline.EffectiveHash)
+	require.Empty(t, descriptor.Cache.EffectiveHash)
+
+	// Model the successful next attempt. Hash is deliberately preserved by the
+	// reset because it is the task's current computed identity; with the stale
+	// effective hash gone, downstream cache input must now observe that hash.
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("id = ?", reset.ID).
+		Updates(map[string]any{
+			"status":       string(TaskStatusSucceeded),
+			"completed_at": time.Now().UTC(),
+			"result":       "success",
+			"error":        "",
+		}).Error)
+	hashes, err = store.PredecessorHashes(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"pred-hash-new"}, hashes,
+		"the retried predecessor must present its current hash, not the prior attempt's equivalence")
 }
 
 func TestPredecessorHashesIncludesCachedPredecessors(t *testing.T) {

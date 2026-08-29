@@ -60,7 +60,10 @@ func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error
 			//     in-run retry paths address a row whose claim state is managed by
 			//     their caller (see RetryTaskClaimedInstance for the variant that
 			//     keeps the claim explicitly).
-			updates := retryResetColumns()
+			updates, resetErr := retryResetColumnsForTaskRun(&row)
+			if resetErr != nil {
+				return resetErr
+			}
 			updates["attempt"] = attempt
 			delete(updates, "claimed_by")
 			delete(updates, "claim_expires_at")
@@ -107,6 +110,21 @@ func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error
 // expired and was re-claimed elsewhere) yields ErrTaskClaimMismatch, which the
 // executor already treats as "abandon quietly".
 func (s *Store) RetryTaskClaimedInstance(runID, taskRunID uuid.UUID, attempt int, claimedBy string) error {
+	return s.retryTaskClaimedInstanceAttempt(runID, taskRunID, attempt, claimedBy, 0)
+}
+
+// RetryTaskClaimedInstanceAttempt keeps an in-process execution retry bound to
+// the exact dispatch claim. The execution-attempt counter may advance while
+// claimAttempt remains constant; a same-node reclaim advances claimAttempt and
+// must reject the old goroutine.
+func (s *Store) RetryTaskClaimedInstanceAttempt(runID, taskRunID uuid.UUID, attempt int, claimedBy string, claimAttempt int) error {
+	if claimAttempt <= 0 {
+		return ErrTaskClaimMismatch
+	}
+	return s.retryTaskClaimedInstanceAttempt(runID, taskRunID, attempt, claimedBy, claimAttempt)
+}
+
+func (s *Store) retryTaskClaimedInstanceAttempt(runID, taskRunID uuid.UUID, attempt int, claimedBy string, claimAttempt int) error {
 	if taskRunID == uuid.Nil {
 		return fmt.Errorf("run: retry claimed task instance: nil task run id")
 	}
@@ -135,14 +153,21 @@ func (s *Store) RetryTaskClaimedInstance(runID, taskRunID uuid.UUID, attempt int
 			//     next container itself.
 			//   claim   — NOT cleared, for the same reason: the claim was never
 			//     released and clearing it would invite a second claimer in.
-			updates := retryResetColumns()
+			updates, resetErr := retryResetColumnsForTaskRun(&row)
+			if resetErr != nil {
+				return resetErr
+			}
 			updates["attempt"] = attempt
 			delete(updates, "status")
 			delete(updates, "claimed_by")
 			delete(updates, "claim_expires_at")
 
-			result := tx.Model(&models.TaskRun{}).
-				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning)).
+			query := tx.Model(&models.TaskRun{}).
+				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning))
+			if claimAttempt > 0 {
+				query = query.Where("claim_attempt = ?", claimAttempt)
+			}
+			result := query.
 				Updates(updates)
 			if result.Error != nil {
 				return result.Error
@@ -227,7 +252,7 @@ func (s *Store) FailTaskInstance(runID, taskRunID uuid.UUID, failure error) erro
 	if taskRunID == uuid.Nil {
 		return fmt.Errorf("run: fail task instance: nil task run id")
 	}
-	return s.failTask(runID, taskRunID, failure, "", false)
+	return s.failTask(runID, taskRunID, failure, "", false, 0, false)
 }
 
 // GroupIdentityHash folds a fan-out group's per-instance identity hashes into
@@ -362,6 +387,39 @@ func ValidateTaskOutputSchemaInstance(
 	outputSchema []byte,
 	schemaValidation string,
 ) error {
+	return validateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output,
+		outputSchema, schemaValidation, "", 0, false)
+}
+
+// ValidateTaskOutputSchemaInstanceClaimedAttempt is the live worker form. If
+// the row has been reclaimed, it returns ErrTaskClaimMismatch and emits neither
+// stale evidence nor a schema incident for the newer execution.
+func ValidateTaskOutputSchemaInstanceClaimedAttempt(
+	store *Store,
+	runID, taskID, taskRunID uuid.UUID,
+	output map[string]string,
+	outputSchema []byte,
+	schemaValidation string,
+	claimedBy string,
+	claimAttempt int,
+) error {
+	if claimAttempt <= 0 {
+		return ErrTaskClaimMismatch
+	}
+	return validateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output,
+		outputSchema, schemaValidation, claimedBy, claimAttempt, true)
+}
+
+func validateTaskOutputSchemaInstance(
+	store *Store,
+	runID, taskID, taskRunID uuid.UUID,
+	output map[string]string,
+	outputSchema []byte,
+	schemaValidation string,
+	claimedBy string,
+	claimAttempt int,
+	enforceClaim bool,
+) error {
 	if len(outputSchema) == 0 || schemaValidation == "" {
 		return nil
 	}
@@ -380,7 +438,16 @@ func ValidateTaskOutputSchemaInstance(
 	if violationRef == uuid.Nil {
 		violationRef = taskID
 	}
-	if saveErr := store.SaveSchemaViolations(runID, violationRef, violations); saveErr != nil {
+	var saveErr error
+	if enforceClaim {
+		saveErr = store.SaveSchemaViolationsClaimedAttempt(runID, violationRef, violations, claimedBy, claimAttempt)
+	} else {
+		saveErr = store.SaveSchemaViolations(runID, violationRef, violations)
+	}
+	if saveErr != nil {
+		if enforceClaim {
+			return saveErr
+		}
 		log.Warn("failed to persist schema violations", "task_id", taskID, "task_run_id", taskRunID, "error", saveErr)
 	}
 
@@ -390,10 +457,14 @@ func ValidateTaskOutputSchemaInstance(
 		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskID, len(violations))
 	}
 
-	// In warn mode the task does NOT fail, so the incident manager would never
-	// observe the violation. Emit a dedicated schema_violation_recorded event so
-	// the leader-gated incident subscriber can open a schema_violation incident.
-	publishSchemaViolationEvent(store, runID, taskID, len(violations))
+	if !enforceClaim {
+		// The legacy/unclaimed lane has no later exact-claim acceptance point.
+		publishSchemaViolationEvent(store, runID, taskID, len(violations))
+	}
+	// The claimed lane publishes only after the exact terminal completion
+	// commits. Saving evidence and publishing here are not atomic: the claim can
+	// expire between them, allowing attempt N to emit an incident after attempt
+	// N+1 owns the row.
 
 	return nil
 }

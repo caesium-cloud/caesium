@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -160,6 +161,71 @@ func TestRunSchemaValidationWarnPersistsViolations(t *testing.T) {
 	require.Contains(t, violations[0].Message, "integer")
 }
 
+// TestWarnSchemaEventWaitsForExactCompletion coordinates the reclaim window
+// between validation evidence and completion. Attempt 1 may persist its
+// violations, but it must not publish a warn incident after attempt 2 owns the
+// row. Only the exact attempt whose terminal completion is accepted may emit
+// schema_violation_recorded.
+func TestWarnSchemaEventWaitsForExactCompletion(t *testing.T) {
+	taskRun, db := seedSchemaValidationTaskRun(t, jobdef.SchemaValidationWarn)
+	store := run.NewStore(db)
+	bus := event.New()
+	store.SetBus(bus)
+	events, err := bus.Subscribe(t.Context(), event.Filter{
+		RunID: taskRun.JobRunID,
+		Types: []event.Type{event.TypeSchemaViolationRecorded},
+	})
+	require.NoError(t, err)
+
+	executor := &runtimeExecutor{store: store}
+	badOutput := map[string]string{"rows_written": "unknown"}
+	require.NoError(t, executor.runSchemaValidation(taskRun, badOutput))
+	select {
+	case evt := <-events:
+		require.Failf(t, "schema event published before completion", "event=%+v", evt)
+	default:
+	}
+
+	// Simulate the reclaim reset: claim_attempt remains monotonic while all
+	// abandoned-attempt evidence is cleared and the same worker owns attempt 2.
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRun.ID).
+		Updates(map[string]any{
+			"status":            string(run.TaskStatusRunning),
+			"claimed_by":        taskRun.ClaimedBy,
+			"claim_attempt":     2,
+			"schema_violations": nil,
+		}).Error)
+	require.ErrorIs(t,
+		NewLocalSink(store).Succeeded(t.Context(), taskRun, "success", badOutput, nil),
+		run.ErrTaskClaimMismatch,
+	)
+	select {
+	case evt := <-events:
+		require.Failf(t, "stale schema event published after reclaim", "event=%+v", evt)
+	default:
+	}
+
+	var current models.TaskRun
+	require.NoError(t, db.First(&current, "id = ?", taskRun.ID).Error)
+	require.Equal(t, 2, current.ClaimAttempt)
+	require.NoError(t, executor.runSchemaValidation(&current, badOutput))
+	require.NoError(t, NewLocalSink(store).Succeeded(t.Context(), &current, "success", badOutput, nil))
+
+	select {
+	case evt := <-events:
+		require.Equal(t, event.TypeSchemaViolationRecorded, evt.Type)
+		require.Equal(t, taskRun.JobRunID, evt.RunID)
+		require.Equal(t, taskRun.TaskID, evt.TaskID)
+	case <-time.After(time.Second):
+		require.Fail(t, "accepted exact completion did not publish schema event")
+	}
+	select {
+	case evt := <-events:
+		require.Failf(t, "duplicate schema event", "event=%+v", evt)
+	default:
+	}
+}
+
 func TestRunSchemaValidationFailReturnsError(t *testing.T) {
 	taskRun, db := seedSchemaValidationTaskRun(t, jobdef.SchemaValidationFail)
 
@@ -265,19 +331,20 @@ func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
 		UpdatedAt: now,
 	}).Error)
 	taskRun := &models.TaskRun{
-		ID:          uuid.New(),
-		JobRunID:    jobRun.ID,
-		TaskID:      task.ID,
-		AtomID:      atomModel.ID,
-		Engine:      atomModel.Engine,
-		Image:       atomModel.Image,
-		Command:     atomModel.Command,
-		Status:      string(run.TaskStatusRunning),
-		ClaimedBy:   "node-a",
-		Attempt:     1,
-		MaxAttempts: 1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           uuid.New(),
+		JobRunID:     jobRun.ID,
+		TaskID:       task.ID,
+		AtomID:       atomModel.ID,
+		Engine:       atomModel.Engine,
+		Image:        atomModel.Image,
+		Command:      atomModel.Command,
+		Status:       string(run.TaskStatusRunning),
+		ClaimedBy:    "node-a",
+		ClaimAttempt: 1,
+		Attempt:      1,
+		MaxAttempts:  1,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	require.NoError(t, db.Create(taskRun).Error)
 
@@ -350,6 +417,7 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		Updates(map[string]any{
 			"status":        string(run.TaskStatusRunning),
 			"claimed_by":    "node-a",
+			"claim_attempt": 1,
 			"cache_enabled": true,
 			"cache_version": 1,
 		}).Error)
@@ -455,6 +523,8 @@ func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models
 		Image:            atom.Image,
 		Command:          atom.Command,
 		Status:           string(run.TaskStatusRunning),
+		ClaimedBy:        "node-a",
+		ClaimAttempt:     1,
 		Attempt:          1,
 		MaxAttempts:      1,
 		OutputSchema:     datatypes.JSON(schemaBytes),

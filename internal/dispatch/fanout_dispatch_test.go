@@ -117,8 +117,7 @@ func TestDispatchRunInMemory_FannedInstancesCarryBothIdentities(t *testing.T) {
 	store := run.NewStore(db).WithLeaseStore(ls)
 
 	runID, taskID, instanceIDs := seedFannedRun(t, db, store)
-	_, err := ls.AcquireLease(context.Background(), runID, nodeID, 30*time.Second)
-	require.NoError(t, err)
+	assignTestRunLease(t, store, ls, runID, nodeID)
 
 	mgr := run.NewOwnerManager(store, run.CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
 	limiter := &countingLimiter{}
@@ -187,8 +186,7 @@ func TestDispatchRun_SQLPathCarriesTaskRunID(t *testing.T) {
 	store := run.NewStore(db).WithLeaseStore(ls)
 
 	runID := uuid.New()
-	_, err := ls.AcquireLease(context.Background(), runID, nodeID, 30*time.Second)
-	require.NoError(t, err)
+	assignTestRunLease(t, store, ls, runID, nodeID)
 	taskID := uuid.New()
 	insertPendingTask(t, store, runID, taskID)
 
@@ -225,11 +223,12 @@ func TestDispatchRun_SQLPathCarriesTaskRunID(t *testing.T) {
 // catalog id that names N rows and failed ambiguously — no fan-out instance could
 // be accepted at all.
 func TestHandleDispatch_ClaimsTheNamedInstance(t *testing.T) {
-	store, _, h := setupHandler(t)
+	store, ls, h := setupHandler(t)
 	sub := &fakeSubmitter{}
 	h = h.WithWorkerSubmitter(sub)
 
 	runID, taskID, instanceIDs := seedFannedRun(t, store.DB(), store)
+	assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
 	target := instanceIDs[1]
 
 	req := DispatchRequest{
@@ -237,6 +236,7 @@ func TestHandleDispatch_ClaimsTheNamedInstance(t *testing.T) {
 		TaskID:          taskID,
 		TaskRunID:       target,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		OwnerBaseURL:    "http://10.0.0.1:8080",

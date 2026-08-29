@@ -144,7 +144,7 @@ func TestCompleteTaskOwnerInstanceSurvivesBusyRetry(t *testing.T) {
 
 	require.NoError(t, f.store.CompleteTaskOwner(
 		f.runID, rows[1].ID, TaskStatusSucceeded, "success", "", "node-a",
-		nil, nil, 7, 1, nil, nil,
+		nil, nil, 7, 1, 0, nil, nil,
 	), "a busy retry must re-address the same instance, not the ambiguous group")
 
 	after := f.instances(t)
@@ -233,8 +233,11 @@ func TestRetryPartitionLeavesNoStaleExecutionEvidence(t *testing.T) {
 		"log_truncated":          true,
 		"schema_violations":      []byte(`[{"key":"rows","message":"expected integer"}]`),
 		"exit_code":              exit,
+		"effective_hash":         "previous-effective-hash",
+		"execution_descriptor":   []byte(`{"schemaVersion":1,"baseline":{"effectiveHash":"previous-effective-hash"},"cache":{"effectiveHash":"previous-effective-hash"}}`),
 		"rate_limit_retry_after": now.Add(time.Hour),
 	}).Error)
+	markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
@@ -247,6 +250,11 @@ func TestRetryPartitionLeavesNoStaleExecutionEvidence(t *testing.T) {
 	assert.False(t, row.LogTruncated)
 	assert.Empty(t, row.SchemaViolations)
 	assert.Nil(t, row.ExitCode, "the failed attempt's exit code must not describe the pending one")
+	assert.Empty(t, row.EffectiveHash, "the previous attempt's equivalence proof must not survive retry")
+	var descriptor models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &descriptor))
+	assert.Empty(t, descriptor.Baseline.EffectiveHash)
+	assert.Empty(t, descriptor.Cache.EffectiveHash)
 	assert.Nil(t, row.RateLimitRetryAfter, "a retried instance must not stay parked")
 }
 
@@ -259,6 +267,7 @@ func TestRetryResetContractIsShared(t *testing.T) {
 		"status", "completed_at", "started_at", "result", "error",
 		"claimed_by", "claim_expires_at", "runtime_id", "attempt",
 		"cache_hit", "cache_origin_run_id", "cache_created_at", "cache_expires_at",
+		"effective_hash",
 		"output", "branch_selections", "log_text", "log_truncated",
 		"schema_violations", "exit_code", "rate_limit_retry_after",
 	} {
@@ -282,6 +291,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 			require.NoError(t, err)
 			rows := f.instances(t)
 			setInstanceOutcome(t, f.db, rows[0].ID, status, nil)
+			markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 			_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 			require.ErrorIs(t, err, ErrPartitionNotRetryable)
@@ -298,6 +308,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 		require.NoError(t, err)
 		rows := f.instances(t)
 		setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+		markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 		updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 		require.NoError(t, err)

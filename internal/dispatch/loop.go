@@ -74,6 +74,10 @@ type OwnerReader interface {
 	AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error)
 }
 
+type ownerVersionReader interface {
+	OwnedRunsWithVersions(ctx context.Context, ownerNode string) (map[uuid.UUID]run.LeaseVersion, error)
+}
+
 // peer pairs a peer's canonical node identity (host:dqlitePort — matches the
 // receiving handler's nodeID, derived from CAESIUM_NODE_ADDRESS) with the HTTP
 // base URL the dispatch loop POSTs to (http://host:apiPort). The receiving
@@ -98,6 +102,10 @@ type rateLimitTaskUpdater interface {
 	RateLimitTask(ctx context.Context, runID, taskID uuid.UUID, retryAfter time.Time) error
 }
 
+type rateLimitTaskVersionUpdater interface {
+	RateLimitTaskOwned(ctx context.Context, runID, taskID uuid.UUID, retryAfter time.Time, version run.LeaseVersion) error
+}
+
 // expiredClaimReclaimer is the optional store capability the SQL dispatch lane
 // uses to return a dead worker's in-flight rows to the dispatchable pool.
 // Declared as an optional interface, like rateLimitTaskUpdater above, so the
@@ -105,6 +113,10 @@ type rateLimitTaskUpdater interface {
 // stub store simply opts out.
 type expiredClaimReclaimer interface {
 	ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64) ([]models.TaskRun, error)
+}
+
+type expiredClaimVersionReclaimer interface {
+	ReclaimOwnerExpiredClaimsVersion(runID uuid.UUID, version run.LeaseVersion) ([]models.TaskRun, error)
 }
 
 // DispatchLoopConfig holds all parameters for the dispatch loop goroutine.
@@ -181,9 +193,12 @@ type DispatchLoop struct {
 	benchedPeers map[string]time.Time
 
 	// In-memory owner mode does not poll PendingTasksForDispatch, so it needs a
-	// local mirror of rate-limit retry-after times to avoid re-dispatch spin.
+	// local mirror of rate-limit retry-after times to avoid re-dispatch spin. A
+	// delay belongs to one durable run-state revision: retry clears the DB park
+	// and advances that revision, so the old local entry must not suppress the
+	// reopened work.
 	rateLimitDelayMu sync.Mutex
-	rateLimitDelays  map[uuid.UUID]map[uuid.UUID]time.Time
+	rateLimitDelays  map[uuid.UUID]map[uuid.UUID]rateLimitDelay
 
 	// lastReclaim throttles the SQL lane's expired-claim sweep to one query per
 	// run per ownerReclaimInterval.  The in-memory lane keeps this per-run clock
@@ -205,6 +220,11 @@ const ownerReclaimInterval = 15 * time.Second
 // transiently-unreachable peer rejoins the rotation quickly.
 const peerBenchCooldown = 10 * time.Second
 
+type rateLimitDelay struct {
+	retryAfter    time.Time
+	stateRevision int64
+}
+
 // NewDispatchLoop constructs a DispatchLoop from cfg.
 func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.Interval <= 0 {
@@ -222,7 +242,7 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	l := &DispatchLoop{
 		cfg:             cfg,
 		benchedPeers:    make(map[string]time.Time),
-		rateLimitDelays: make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		rateLimitDelays: make(map[uuid.UUID]map[uuid.UUID]rateLimitDelay),
 		lastReclaim:     make(map[uuid.UUID]time.Time),
 	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
@@ -295,12 +315,12 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 
 	// 2. Find runs this node owns AND their current generation in one query
 	//    (avoids the N+1 GetLease pattern as the owned set grows).
-	ownedRuns, err := l.cfg.LeaseStore.OwnedRunsWithGenerations(ctx, l.cfg.NodeID)
+	ownedRuns, err := l.ownedRunVersions(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Warn("dispatch loop: OwnedRunsWithGenerations failed", "error", err)
+		log.Warn("dispatch loop: owned-run version query failed", "error", err)
 		return
 	}
 	l.forgetUnownedReclaims(ownedRuns)
@@ -309,22 +329,37 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 	}
 
 	// 3. For each owned run, find ready tasks and dispatch them concurrently.
-	for runID, generation := range ownedRuns {
+	for runID, version := range ownedRuns {
 		if ctx.Err() != nil {
 			return
 		}
-		l.dispatchRun(ctx, runID, generation, peers)
+		l.dispatchRun(ctx, runID, version, peers)
 	}
+}
+
+func (l *DispatchLoop) ownedRunVersions(ctx context.Context) (map[uuid.UUID]run.LeaseVersion, error) {
+	if reader, ok := l.cfg.LeaseStore.(ownerVersionReader); ok {
+		return reader.OwnedRunsWithVersions(ctx, l.cfg.NodeID)
+	}
+	legacy, err := l.cfg.LeaseStore.OwnedRunsWithGenerations(ctx, l.cfg.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	versions := make(map[uuid.UUID]run.LeaseVersion, len(legacy))
+	for runID, generation := range legacy {
+		versions[runID] = run.LeaseVersion{Generation: generation}
+	}
+	return versions, nil
 }
 
 // dispatchRun dispatches up to BatchSize ready tasks for a single owned run.
 // Each task's PostDispatch fires in a worker goroutine bounded by BatchSize/4
 // (capped at 16) so slow or unreachable workers don't serialise the tick.
-func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, version run.LeaseVersion, peers []peer) {
 	// In-memory mode: dispatch from the owner's RunState ready queue rather than
 	// polling the DB.  Adopt-or-recover the run lazily on first sight.
 	if l.cfg.OwnerManager != nil {
-		l.dispatchRunInMemory(ctx, runID, generation, peers)
+		l.dispatchRunInMemory(ctx, runID, version, peers)
 		return
 	}
 
@@ -338,7 +373,7 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 	// to both and the task was never re-run.  Here the reset is the whole fix: a
 	// row back at pending is picked up by the very next poll, with no in-memory
 	// state to keep in step.
-	l.reclaimExpiredClaims(runID, generation)
+	l.reclaimExpiredClaims(runID, version)
 
 	tasks, err := l.cfg.Store.PendingTasksForDispatch(ctx, runID, l.cfg.BatchSize)
 	if err != nil {
@@ -382,7 +417,8 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 			// sharing one task_id; naming the row is what stops the worker from
 			// having to disambiguate siblings.
 			TaskRunID:       task.ID,
-			OwnerGeneration: generation,
+			OwnerGeneration: version.Generation,
+			StateRevision:   version.StateRevision,
 			Attempt:         task.Attempt,
 			// nodeID matches the recipient's CAESIUM_NODE_ADDRESS so the
 			// handler's `req.WorkerNode == h.nodeID` check passes.
@@ -399,7 +435,7 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, req.TaskRunID); !ok {
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, req.TaskRunID, version); !ok {
 				return
 			}
 			l.postOne(ctx, runID, p, req, task.Quarantine)
@@ -412,10 +448,10 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 // RunState.  It lazily adopts/recovers the run on first sight (Recover handles
 // both a freshly-created run — no checkpoint, fresh state — and a takeover —
 // replay from checkpoint + terminal tail, re-queuing lost in-flight work).
-func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID, version run.LeaseVersion, peers []peer) {
 	mgr := l.cfg.OwnerManager
-	if !mgr.Owns(runID) {
-		if _, err := mgr.Recover(runID, generation); err != nil {
+	if !mgr.OwnsVersion(runID, version) {
+		if _, err := mgr.RecoverVersion(runID, version); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -445,7 +481,7 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		// Rate-limit parking is per *row*: RateLimitTask stamps
 		// rate_limit_retry_after on one instance, so one parked sibling must not
 		// hold back the rest of its group.
-		if l.rateLimitDelayed(runID, dt.ExecutionRef(), now) {
+		if l.rateLimitDelayed(runID, dt.ExecutionRef(), version, now) {
 			continue
 		}
 		filtered = append(filtered, dt)
@@ -479,7 +515,8 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 			RunID:           runID,
 			TaskID:          dt.TaskID,
 			TaskRunID:       dt.TaskRunID,
-			OwnerGeneration: generation,
+			OwnerGeneration: version.Generation,
+			StateRevision:   version.StateRevision,
 			Attempt:         dt.Attempt,
 			WorkerNode:      p.nodeID,
 			OwnerBaseURL:    l.ownerBaseURL,
@@ -491,7 +528,7 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		go func(p peer, req DispatchRequest, execRef uuid.UUID) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, execRef); !ok {
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, execRef, version); !ok {
 				return
 			}
 			l.postOne(ctx, runID, p, req, false)
@@ -504,22 +541,31 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 // back to pending, fenced on the owner generation, at most once per
 // ownerReclaimInterval per run.  A store that does not implement the capability,
 // or a run swept too recently, is a no-op.
-func (l *DispatchLoop) reclaimExpiredClaims(runID uuid.UUID, generation int64) {
-	reclaimer, ok := l.cfg.Store.(expiredClaimReclaimer)
-	if !ok {
+func (l *DispatchLoop) reclaimExpiredClaims(runID uuid.UUID, version run.LeaseVersion) {
+	reclaimer, legacy := l.cfg.Store.(expiredClaimReclaimer)
+	versioned, exact := l.cfg.Store.(expiredClaimVersionReclaimer)
+	if !legacy && !exact {
 		return
 	}
 	if !l.dueForReclaim(runID, time.Now()) {
 		return
 	}
-	rows, err := reclaimer.ReclaimOwnerExpiredClaims(runID, generation)
+	var (
+		rows []models.TaskRun
+		err  error
+	)
+	if exact && version.StateRevision > 0 {
+		rows, err = versioned.ReclaimOwnerExpiredClaimsVersion(runID, version)
+	} else {
+		rows, err = reclaimer.ReclaimOwnerExpiredClaims(runID, version.Generation)
+	}
 	if err != nil {
 		log.Warn("dispatch loop: expired-claim reap failed", "run_id", runID, "error", err)
 		return
 	}
 	if len(rows) > 0 {
 		log.Warn("dispatch loop: re-queued tasks whose worker claim lease expired",
-			"run_id", runID, "generation", generation, "count", len(rows))
+			"run_id", runID, "generation", version.Generation, "count", len(rows))
 	}
 }
 
@@ -540,7 +586,7 @@ func (l *DispatchLoop) dueForReclaim(runID uuid.UUID, now time.Time) bool {
 // forgetUnownedReclaims drops reclaim clocks for runs this node no longer owns,
 // so the map tracks the owned set rather than growing for the life of the
 // process.
-func (l *DispatchLoop) forgetUnownedReclaims(owned map[uuid.UUID]int64) {
+func (l *DispatchLoop) forgetUnownedReclaims(owned map[uuid.UUID]run.LeaseVersion) {
 	l.reclaimMu.Lock()
 	defer l.reclaimMu.Unlock()
 	for runID := range l.lastReclaim {
@@ -557,7 +603,7 @@ func (l *DispatchLoop) forgetUnownedReclaims(owned map[uuid.UUID]int64) {
 // skipped.  execRef is the row to park when the budget is exhausted — the
 // instance for a fanned task, the catalog task otherwise — so one parked
 // instance does not delay its siblings.
-func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID, execRef uuid.UUID) bool {
+func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID, execRef uuid.UUID, version run.LeaseVersion) bool {
 	if l.cfg.RateLimiter == nil || l.cfg.RateLimitDB == nil {
 		return true
 	}
@@ -585,28 +631,34 @@ func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID, exec
 		return true
 	}
 
-	updater, ok := l.cfg.Store.(rateLimitTaskUpdater)
-	if !ok {
+	updater, legacy := l.cfg.Store.(rateLimitTaskUpdater)
+	versioned, exact := l.cfg.Store.(rateLimitTaskVersionUpdater)
+	if !legacy && !exact {
 		log.Warn("dispatch loop: rate limit rejected task but store cannot requeue", "run_id", runID, "task_id", taskID, "resource", rule.Resource)
 		return false
 	}
 	now := time.Now().UTC()
 	retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
-	if err := updater.RateLimitTask(ctx, runID, execRef, retryAfter); err != nil {
+	if exact && version.StateRevision > 0 {
+		err = versioned.RateLimitTaskOwned(ctx, runID, execRef, retryAfter, version)
+	} else {
+		err = updater.RateLimitTask(ctx, runID, execRef, retryAfter)
+	}
+	if err != nil {
 		if ctx.Err() == nil {
 			log.Warn("dispatch loop: rate limit requeue failed", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "error", err)
 		}
 		return false
 	}
 	if l.cfg.OwnerManager != nil {
-		l.rememberRateLimitDelay(runID, execRef, retryAfter)
+		l.rememberRateLimitDelay(runID, execRef, version, retryAfter)
 	}
 	metrics.RunSkippedTotal.WithLabelValues(rule.JobAlias, "rate_limit").Inc()
 	log.Info("dispatch loop: task delayed by rate limit", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter)
 	return false
 }
 
-func (l *DispatchLoop) rememberRateLimitDelay(runID, taskID uuid.UUID, retryAfter time.Time) {
+func (l *DispatchLoop) rememberRateLimitDelay(runID, taskID uuid.UUID, version run.LeaseVersion, retryAfter time.Time) {
 	if retryAfter.IsZero() {
 		return
 	}
@@ -614,24 +666,34 @@ func (l *DispatchLoop) rememberRateLimitDelay(runID, taskID uuid.UUID, retryAfte
 	defer l.rateLimitDelayMu.Unlock()
 	tasks := l.rateLimitDelays[runID]
 	if tasks == nil {
-		tasks = make(map[uuid.UUID]time.Time)
+		tasks = make(map[uuid.UUID]rateLimitDelay)
 		l.rateLimitDelays[runID] = tasks
 	}
-	tasks[taskID] = retryAfter.UTC()
+	tasks[taskID] = rateLimitDelay{
+		retryAfter:    retryAfter.UTC(),
+		stateRevision: version.StateRevision,
+	}
 }
 
-func (l *DispatchLoop) rateLimitDelayed(runID, taskID uuid.UUID, now time.Time) bool {
+func (l *DispatchLoop) rateLimitDelayed(runID, taskID uuid.UUID, version run.LeaseVersion, now time.Time) bool {
 	l.rateLimitDelayMu.Lock()
 	defer l.rateLimitDelayMu.Unlock()
 	tasks := l.rateLimitDelays[runID]
 	if tasks == nil {
 		return false
 	}
-	retryAfter, ok := tasks[taskID]
+	delay, ok := tasks[taskID]
 	if !ok {
 		return false
 	}
-	if retryAfter.After(now.UTC()) {
+	if delay.stateRevision != version.StateRevision {
+		delete(tasks, taskID)
+		if len(tasks) == 0 {
+			delete(l.rateLimitDelays, runID)
+		}
+		return false
+	}
+	if delay.retryAfter.After(now.UTC()) {
 		return true
 	}
 	delete(tasks, taskID)
@@ -689,7 +751,9 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		if dispatched == uuid.Nil {
 			dispatched = req.TaskID
 		}
-		l.cfg.OwnerManager.MarkDispatched(runID, dispatched, p.nodeID, req.Attempt, leaseMs)
+		l.cfg.OwnerManager.MarkDispatchedVersion(runID, dispatched, p.nodeID, req.Attempt, leaseMs, run.LeaseVersion{
+			Generation: req.OwnerGeneration, StateRevision: req.StateRevision,
+		})
 	}
 	log.Debug("dispatch loop: task dispatched",
 		"run_id", runID,

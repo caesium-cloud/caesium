@@ -15,20 +15,28 @@ import (
 // write against a stale owner; blob is the serialized state (RunState.Snapshot);
 // incremental marks a delta vs a full snapshot.  Re-writing the same
 // (run_id, sequence_high) overwrites — checkpoints are idempotent at a sequence.
-func (s *Store) WriteCheckpoint(runID uuid.UUID, sequenceHigh, ownerGeneration int64, blob []byte, incremental bool) error {
+func (s *Store) WriteCheckpoint(runID uuid.UUID, sequenceHigh, ownerGeneration, stateRevision int64, blob []byte, incremental bool) error {
 	cp := &models.RunCheckpoint{
 		RunID:           runID.String(),
 		SequenceHigh:    sequenceHigh,
 		OwnerGeneration: ownerGeneration,
+		StateRevision:   stateRevision,
 		StateBlob:       blob,
 		IsIncremental:   incremental,
 		CreatedAt:       time.Now().UTC(),
 	}
 	return withStoreBusyRetry(func() error {
-		return s.db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "run_id"}, {Name: "sequence_high"}},
-			UpdateAll: true,
-		}).Create(cp).Error
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if err := s.validateOwnerVersionTx(tx, runID, LeaseVersion{
+				Generation: ownerGeneration, StateRevision: stateRevision,
+			}); err != nil {
+				return err
+			}
+			return tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "run_id"}, {Name: "sequence_high"}},
+				UpdateAll: true,
+			}).Create(cp).Error
+		})
 	})
 }
 
@@ -65,26 +73,32 @@ func (s *Store) CheckpointDeltasSince(runID uuid.UUID, fromSeq int64) ([]models.
 // PruneCheckpoints retains the most recent keepFulls full snapshots for runID
 // (and every checkpoint at or after the oldest retained full's sequence),
 // deleting anything older.  A no-op until more than keepFulls fulls exist.
-func (s *Store) PruneCheckpoints(runID uuid.UUID, keepFulls int) error {
+func (s *Store) PruneCheckpoints(runID uuid.UUID, keepFulls int, ownerGeneration, stateRevision int64) error {
 	if keepFulls < 1 {
 		keepFulls = 1
 	}
-	var fullSeqs []int64
-	if err := s.db.Model(&models.RunCheckpoint{}).
-		Where("run_id = ? AND is_incremental = ?", runID.String(), false).
-		Order("sequence_high DESC").
-		Limit(keepFulls).
-		Pluck("sequence_high", &fullSeqs).Error; err != nil {
-		return err
-	}
-	if len(fullSeqs) < keepFulls {
-		return nil
-	}
-	threshold := fullSeqs[len(fullSeqs)-1] // oldest full we are keeping
 	return withStoreBusyRetry(func() error {
-		return s.db.
-			Where("run_id = ? AND sequence_high < ?", runID.String(), threshold).
-			Delete(&models.RunCheckpoint{}).Error
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if err := s.validateOwnerVersionTx(tx, runID, LeaseVersion{
+				Generation: ownerGeneration, StateRevision: stateRevision,
+			}); err != nil {
+				return err
+			}
+			var fullSeqs []int64
+			if err := tx.Model(&models.RunCheckpoint{}).
+				Where("run_id = ? AND is_incremental = ?", runID.String(), false).
+				Order("sequence_high DESC").
+				Limit(keepFulls).
+				Pluck("sequence_high", &fullSeqs).Error; err != nil {
+				return err
+			}
+			if len(fullSeqs) < keepFulls {
+				return nil
+			}
+			threshold := fullSeqs[len(fullSeqs)-1]
+			return tx.Where("run_id = ? AND sequence_high < ?", runID.String(), threshold).
+				Delete(&models.RunCheckpoint{}).Error
+		})
 	})
 }
 

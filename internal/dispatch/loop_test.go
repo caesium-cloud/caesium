@@ -45,6 +45,10 @@ func (r *testOwnerReader) OwnedRunsWithGenerations(ctx context.Context, ownerNod
 	return r.ls.OwnedRunsWithGenerations(ctx, ownerNode)
 }
 
+func (r *testOwnerReader) OwnedRunsWithVersions(ctx context.Context, ownerNode string) (map[uuid.UUID]run.LeaseVersion, error) {
+	return r.ls.OwnedRunsWithVersions(ctx, ownerNode)
+}
+
 func (r *testOwnerReader) AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error) {
 	return r.ls.AcquireExpiredLeases(ctx, newOwner, ttl)
 }
@@ -131,6 +135,29 @@ func insertPendingTask(t *testing.T, store *run.Store, runID, taskID uuid.UUID) 
 }
 
 // -- Tests -------------------------------------------------------------------
+
+func TestRateLimitDelayIsScopedToRunStateRevision(t *testing.T) {
+	loop := NewDispatchLoop(DispatchLoopConfig{})
+	runID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now().UTC()
+	revisionN := run.LeaseVersion{Generation: 3, StateRevision: 41}
+	revisionNPlusOne := run.LeaseVersion{Generation: 3, StateRevision: 42}
+
+	loop.rememberRateLimitDelay(runID, taskID, revisionN, now.Add(time.Hour))
+	require.True(t, loop.rateLimitDelayed(runID, taskID, revisionN, now),
+		"the same durable run revision must honor its unexpired local delay")
+	require.True(t, loop.rateLimitDelayed(runID, taskID,
+		run.LeaseVersion{Generation: 4, StateRevision: revisionN.StateRevision}, now),
+		"an owner takeover preserves the logical revision and therefore its delay")
+	require.False(t, loop.rateLimitDelayed(runID, taskID, revisionNPlusOne, now),
+		"a retry advances state revision and must not inherit the prior revision's delay")
+
+	loop.rateLimitDelayMu.Lock()
+	_, retained := loop.rateLimitDelays[runID]
+	loop.rateLimitDelayMu.Unlock()
+	require.False(t, retained, "observing a newer revision removes the stale local entry")
+}
 
 // TestDispatchLoop_HappyPath verifies that the loop finds one ready task on an
 // owned run, dispatches it to a stub worker that returns 202, and increments

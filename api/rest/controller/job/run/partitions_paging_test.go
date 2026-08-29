@@ -169,6 +169,30 @@ func TestRetryPartitionAllowedInDistributedExecutionMode(t *testing.T) {
 	assert.Equal(t, "pending", row.Status)
 }
 
+func TestRetryPartitionRejectsMalformedParamsBeforeReset(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.setExecutionMode(t, "distributed")
+	f.failPartition(t, 1)
+	require.NoError(t, f.db.Model(&models.JobRun{}).
+		Where("id = ?", f.runID).
+		Update("params", []byte("{")).Error)
+
+	err := f.retry(t, 1)
+	require.Error(t, err)
+	var httpErr *echo.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusInternalServerError, httpErr.Code)
+
+	var row models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ? AND partition_index = ?",
+		f.runID, f.taskID, 1).First(&row).Error)
+	require.Equal(t, string(runstorage.TaskStatusFailed), row.Status,
+		"parameter validation must happen before the retry transaction resets the row")
+	var runRow models.JobRun
+	require.NoError(t, f.db.First(&runRow, "id = ?", f.runID).Error)
+	require.Equal(t, string(runstorage.StatusFailed), runRow.Status)
+}
+
 // --- fixture --------------------------------------------------------------
 
 type partitionsFixture struct {
@@ -234,6 +258,10 @@ func (f *partitionsFixture) failPartition(t *testing.T, index int) {
 			"status": "failed", "result": "failure", "error": "boom",
 			"started_at": now.Add(-time.Minute), "completed_at": now,
 		}).Error)
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{
+			"status": string(runstorage.StatusFailed), "completed_at": now,
+		}).Error)
 }
 
 func (f *partitionsFixture) call(t *testing.T, query string) (*httptest.ResponseRecorder, error) {
@@ -288,8 +316,8 @@ func (f *partitionsFixture) retry(t *testing.T, index int) error {
 func usePartitionTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	store := runstorage.NewStore(db)
-	origDB, origJob, origRun, origRetry :=
-		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance
+	origDB, origJob, origRun, origRetry, origResume :=
+		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance, partitionResumeRun
 
 	partitionDB = func() *gorm.DB { return db }
 	partitionJobExists = func(_ context.Context, jobID uuid.UUID) error {
@@ -303,12 +331,13 @@ func usePartitionTestDB(t *testing.T, db *gorm.DB) {
 		}
 		return r.JobID, nil
 	}
-	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
-		return store.RetryPartition(ctx, runID, taskRunID)
+	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, int64, error) {
+		return store.RetryPartitionVersion(ctx, runID, taskRunID)
 	}
+	partitionResumeRun = func(*models.Job, *models.JobRun, map[string]string, int64) {}
 
 	t.Cleanup(func() {
-		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance =
-			origDB, origJob, origRun, origRetry
+		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance, partitionResumeRun =
+			origDB, origJob, origRun, origRetry, origResume
 	})
 }

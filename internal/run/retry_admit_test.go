@@ -1,6 +1,7 @@
 package run
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -144,4 +145,40 @@ func TestRetryFromFailureAdmittedNoPolicy(t *testing.T) {
 	var row models.JobRun
 	require.NoError(t, db.First(&row, "id = ?", failedRun).Error)
 	require.Equal(t, string(StatusRunning), row.Status)
+}
+
+// A retry response is part of the reset transaction's success condition. If
+// the reset commits first and the response is loaded afterward, a transient
+// read failure can make the endpoint report an error and skip launching the
+// waiter even though the run is already reopened. The seam rejects any load
+// that is not running on the transaction connection, deterministically pinning
+// that ordering without depending on a timing race.
+func TestRetryFromFailureCapturesResponseBeforeCommit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	job := createConcurrencyJob(t, db, "retry-response-transaction", jobdef.ConcurrencyStrategyQueue, 1)
+	runID := seedFailedRun(t, db, job.ID)
+
+	postCommitRead := errors.New("injected post-commit retry response read")
+	loadCalls := 0
+	store.retryFromFailureLoadFn = func(conn *gorm.DB, gotRunID uuid.UUID) (*JobRun, error) {
+		loadCalls++
+		if _, inTransaction := conn.Statement.ConnPool.(gorm.TxCommitter); !inTransaction {
+			return nil, postCommitRead
+		}
+		return store.loadRunWithDB(conn, gotRunID)
+	}
+
+	reopened, err := store.RetryFromFailure(runID)
+	require.NoError(t, err)
+	require.NotNil(t, reopened)
+	require.Equal(t, runID, reopened.ID)
+	require.Equal(t, StatusRunning, reopened.Status)
+	require.Equal(t, 1, loadCalls, "the transaction snapshot is also the returned response")
+
+	var durable models.JobRun
+	require.NoError(t, db.First(&durable, "id = ?", runID).Error)
+	require.Equal(t, string(StatusRunning), durable.Status)
 }

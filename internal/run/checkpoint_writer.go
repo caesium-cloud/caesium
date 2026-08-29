@@ -9,8 +9,8 @@ import (
 // checkpointPersister is the slice of *Store the writer depends on, named as an
 // interface so tests can substitute a fake.
 type checkpointPersister interface {
-	WriteCheckpoint(runID uuid.UUID, sequenceHigh, ownerGeneration int64, blob []byte, incremental bool) error
-	PruneCheckpoints(runID uuid.UUID, keepFulls int) error
+	WriteCheckpoint(runID uuid.UUID, sequenceHigh, ownerGeneration, stateRevision int64, blob []byte, incremental bool) error
+	PruneCheckpoints(runID uuid.UUID, keepFulls int, ownerGeneration, stateRevision int64) error
 }
 
 // CheckpointConfig controls checkpoint cadence and retention.
@@ -27,17 +27,18 @@ type CheckpointConfig struct {
 // full snapshots (is_incremental=false); delta checkpoints are a later
 // optimization.  Not safe for concurrent use.
 type CheckpointWriter struct {
-	store   checkpointPersister
-	runID   uuid.UUID
-	cfg     CheckpointConfig
-	lastSeq int64
-	lastAt  time.Time
-	now     func() time.Time // injectable for tests
+	store    checkpointPersister
+	runID    uuid.UUID
+	cfg      CheckpointConfig
+	lastSeq  int64
+	lastAt   time.Time
+	now      func() time.Time // injectable for tests
+	revision int64
 }
 
 // NewCheckpointWriter builds a writer for runID; zero/negative config values
 // fall back to the design defaults (100 events, 2s, keep 3 fulls).
-func NewCheckpointWriter(store checkpointPersister, runID uuid.UUID, cfg CheckpointConfig) *CheckpointWriter {
+func NewCheckpointWriter(store checkpointPersister, runID uuid.UUID, cfg CheckpointConfig, stateRevision ...int64) *CheckpointWriter {
 	if cfg.Events <= 0 {
 		cfg.Events = 100
 	}
@@ -48,6 +49,9 @@ func NewCheckpointWriter(store checkpointPersister, runID uuid.UUID, cfg Checkpo
 		cfg.KeepFulls = 3
 	}
 	w := &CheckpointWriter{store: store, runID: runID, cfg: cfg, now: time.Now}
+	if len(stateRevision) > 0 {
+		w.revision = stateRevision[0]
+	}
 	w.lastAt = w.now()
 	return w
 }
@@ -78,10 +82,10 @@ func (w *CheckpointWriter) Force(rs *RunState, ownerGeneration int64) error {
 		return err
 	}
 	seq := rs.Sequence()
-	if err := w.store.WriteCheckpoint(w.runID, seq, ownerGeneration, blob, false); err != nil {
+	if err := w.store.WriteCheckpoint(w.runID, seq, ownerGeneration, w.revision, blob, false); err != nil {
 		return err
 	}
 	w.lastSeq = seq
 	w.lastAt = w.now()
-	return w.store.PruneCheckpoints(w.runID, w.cfg.KeepFulls)
+	return w.store.PruneCheckpoints(w.runID, w.cfg.KeepFulls, ownerGeneration, w.revision)
 }

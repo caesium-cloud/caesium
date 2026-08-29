@@ -114,16 +114,18 @@ func TestGetCapabilities_ReadsALegacyPeerAsIncapable(t *testing.T) {
 // opaque 409 or drives a legacy group-wide write.  It is rejected up front, with
 // a reason code that names the mismatch, and nothing is claimed.
 func TestHandleDispatch_RejectsInstanceBlindDispatchForAnExpandedGroup(t *testing.T) {
-	store, _, h := setupHandler(t)
+	store, ls, h := setupHandler(t)
 	sub := &fakeSubmitter{}
 	h = h.WithWorkerSubmitter(sub)
 
 	runID, taskID, _ := seedFannedRun(t, store.DB(), store)
+	assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
 
 	req := DispatchRequest{
 		RunID:           runID,
 		TaskID:          taskID,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		OwnerBaseURL:    "http://10.0.0.1:8080",
@@ -153,16 +155,18 @@ func TestHandleDispatch_RejectsInstanceBlindDispatchForAnExpandedGroup(t *testin
 // ambiguity guard must not break the legitimate legacy path, where a catalog id
 // names exactly one row.
 func TestHandleDispatch_UnfannedTaskWithoutTaskRunIDStillWorks(t *testing.T) {
-	store, _, h := setupHandler(t)
+	store, ls, h := setupHandler(t)
 	sub := &fakeSubmitter{}
 	h = h.WithWorkerSubmitter(sub)
 
 	runID, taskID := seedPendingTaskRun(t, store)
+	assignTestRunLease(t, store, ls, runID, ownerNodeAddr)
 
 	req := DispatchRequest{
 		RunID:           runID,
 		TaskID:          taskID,
 		OwnerGeneration: 1,
+		StateRevision:   1,
 		Attempt:         1,
 		WorkerNode:      ownerNodeAddr,
 		OwnerBaseURL:    "http://10.0.0.1:8080",

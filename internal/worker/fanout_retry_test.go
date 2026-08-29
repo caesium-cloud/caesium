@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -228,6 +229,68 @@ func TestWorkerExhaustedRetriesStillTerminalizeTheInstance(t *testing.T) {
 	require.Equal(t, string(atom.Failure), row.Result,
 		"the container's own result must survive onto the failed row")
 	require.Equal(t, []string{string(run.TaskStatusFailed)}, terminalWrites())
+}
+
+// TestWorkerContinuePolicyFinalNonzeroSkipsUnfannedDescendants pins the
+// result-bearing failure route. A final non-zero container result is reported
+// through sink.Succeeded (with result=failure) before Execute observes the
+// returned error. The source completion must therefore resolve its global
+// taskFailurePolicy=continue successors in that FIRST transaction; a later
+// sink.Failed call sees an already-terminal source and cannot safely repair the
+// gap.
+func TestWorkerContinuePolicyFinalNonzeroSkipsUnfannedDescendants(t *testing.T) {
+	f := seedFanOutTaskRun(t, "unfanned-continue-result-job", "", pkgtask.Partition{}, 1, false)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", f.taskRun.ID).
+		Update("partition_count", 0).Error)
+	f.taskRun.PartitionCount = 0
+
+	now := time.Now().UTC()
+	mkSuccessor := func(name string) (*models.Task, *models.TaskRun) {
+		task := &models.Task{
+			ID: uuid.New(), JobID: f.jobRun.JobID, AtomID: f.task.AtomID,
+			Name: name, CreatedAt: now, UpdatedAt: now,
+		}
+		require.NoError(t, f.db.Create(task).Error)
+		row := &models.TaskRun{
+			ID: uuid.New(), JobRunID: f.jobRun.ID, TaskID: task.ID, AtomID: f.task.AtomID,
+			Status: string(run.TaskStatusPending), OutstandingPredecessors: 1,
+			Attempt: 1, MaxAttempts: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		require.NoError(t, f.db.Create(row).Error)
+		return task, row
+	}
+
+	direct, directRow := mkSuccessor("direct")
+	grandchild, grandchildRow := mkSuccessor("grandchild")
+	require.NoError(t, f.db.Create(&models.TaskEdge{
+		ID: uuid.New(), JobID: f.jobRun.JobID,
+		FromTaskID: f.task.ID, ToTaskID: direct.ID,
+		CreatedAt: now, UpdatedAt: now,
+	}).Error)
+	require.NoError(t, f.db.Create(&models.TaskEdge{
+		ID: uuid.New(), JobID: f.jobRun.JobID,
+		FromTaskID: direct.ID, ToTaskID: grandchild.ID,
+		CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	engine := &attemptResultEngine{results: []atom.Result{atom.Failure}}
+	executor := &runtimeExecutor{
+		store:             f.store,
+		localSink:         NewLocalSink(f.store),
+		continueOnFailure: true,
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}
+	executor.Execute(context.Background(), f.taskRun)
+
+	source := reloadInstanceRow(t, f.db, f.taskRun.ID)
+	require.Equal(t, string(run.TaskStatusFailed), source.Status)
+	require.Equal(t, string(atom.Failure), source.Result,
+		"the real final container result must be the write that owns the cascade")
+	require.Equal(t, string(run.TaskStatusSkipped), reloadInstanceRow(t, f.db, directRow.ID).Status)
+	require.Equal(t, string(run.TaskStatusSkipped), reloadInstanceRow(t, f.db, grandchildRow.ID).Status,
+		"the direct skip must propagate before the source transaction commits")
 }
 
 // TestWorkerSchemaViolationsRecordOnTheOffendingInstance pins finding 4 for the

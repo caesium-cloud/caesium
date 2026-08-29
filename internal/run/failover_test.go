@@ -48,7 +48,8 @@ func TestFailover_TakeoverAndResume(t *testing.T) {
 	// fence was fixed: a new owner at generation 2 could not re-claim a row a dead
 	// predecessor had stamped at generation 1.
 	mgrA.MarkDispatched(runID, b, "node-A", 1, 0)
-	require.NoError(t, store.ClaimTaskForDispatch(runID, b, "node-A", 1, time.Minute, true))
+	_, err = store.ClaimTaskForDispatch(runID, b, "node-A", 1, 1, time.Minute, true)
+	require.NoError(t, err)
 
 	// --- Owner A dies: expire its lease ---
 	require.NoError(t, db.Model(&models.RunLease{}).
@@ -85,7 +86,8 @@ func TestFailover_TakeoverAndResume(t *testing.T) {
 		}
 	}
 	require.NotZero(t, bAttempt, "b must be in the recovered owner's ready-for-dispatch set")
-	require.NoError(t, store.ClaimTaskForDispatch(runID, b, "node-B", genB, time.Minute, true))
+	_, err = store.ClaimTaskForDispatch(runID, b, "node-B", genB, 1, time.Minute, true)
+	require.NoError(t, err)
 	mgrB.MarkDispatched(runID, b, "node-B", bAttempt, 0)
 	resB, err := mgrB.Complete(runID, b, TaskStatusSucceeded, "success", "", "node-B", nil, nil)
 	require.NoError(t, err)

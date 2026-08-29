@@ -118,9 +118,11 @@ func TestCancelRunTransitionsRunTasksAndLease(t *testing.T) {
 	require.Equal(t, string(TaskStatusCancelled), statuses[taskRunning])
 	require.Equal(t, string(TaskStatusSucceeded), statuses[taskSucceeded])
 
-	var leases int64
-	require.NoError(t, db.Model(&models.RunLease{}).Where("run_id = ?", runID.String()).Count(&leases).Error)
-	require.Zero(t, leases)
+	var lease models.RunLease
+	require.NoError(t, db.First(&lease, "run_id = ?", runID.String()).Error)
+	require.Equal(t, retiredRunLeaseOwner, lease.OwnerNode)
+	require.Equal(t, int64(1), lease.StateRevision)
+	require.False(t, lease.LeaseExpiresAt.After(time.Now().UTC()))
 }
 
 func TestDequeueNextRunClaimsOneRowByPriority(t *testing.T) {

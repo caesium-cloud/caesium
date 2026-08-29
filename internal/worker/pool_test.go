@@ -124,14 +124,3 @@ func TestPoolFreeSignalsReleasedSlot(t *testing.T) {
 	}
 	pool.Wait()
 }
-
-// TestPoolSizeReportsCapacity guards the floor NewPool applies, which is what
-// the worker's inbound dispatch buffer is sized from.
-func TestPoolSizeReportsCapacity(t *testing.T) {
-	if got := NewPool(3).Size(); got != 3 {
-		t.Fatalf("expected size 3, got %d", got)
-	}
-	if got := NewPool(0).Size(); got != 1 {
-		t.Fatalf("expected a non-positive size to floor at 1, got %d", got)
-	}
-}

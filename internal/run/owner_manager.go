@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -41,6 +42,23 @@ type OwnerManager struct {
 
 	mu   sync.Mutex
 	runs map[uuid.UUID]*ownedRun
+	// invalidating tombstones one run while a local retry or state refresh is in
+	// flight. Durable StateRevision is the cross-process/ABA fence; the condition
+	// variable only serializes overlapping local guards for the same run without
+	// coupling unrelated runs.
+	invalidating map[uuid.UUID]*ownerRunInvalidation
+	invalidated  *sync.Cond
+	// beforeRunLock/afterRunLock are deterministic test seams around the lookup →
+	// per-run-lock → post-lock-validation sequence. Nil in production.
+	beforeRunLock     func(uuid.UUID)
+	afterRunLock      func(uuid.UUID)
+	afterRecoveryRead func(uuid.UUID)
+	// adoptPersistedExpansionFn is a deterministic fault seam for the
+	// commit-landed/no-ack recovery path. Nil uses durable row/catalog reads.
+	adoptPersistedExpansionFn func(*RunState, uuid.UUID) error
+	// recoveryJobIDFn is a deterministic fault seam for the recovery metadata
+	// read. Nil uses the durable JobRun row.
+	recoveryJobIDFn func(uuid.UUID) (uuid.UUID, error)
 }
 
 // defaultOwnerReclaimInterval is the floor between owner-side expired-claim
@@ -55,6 +73,11 @@ type ownedRun struct {
 	state  *RunState
 	writer *CheckpointWriter
 	gen    int64
+	rev    int64
+	// retired is set before an entry is removed. A caller that obtained this
+	// pointer before map deletion must re-check it after taking mu and refuse to
+	// mutate or checkpoint the stale state.
+	retired bool
 	// lastReap is when this run last ran the owner-side expired-claim query.
 	// It bounds that query to one per reclaimInterval per run in the common case
 	// where nothing has gone wrong (see OwnerManager.ReclaimExpiredClaims).
@@ -69,12 +92,14 @@ func NewOwnerManager(store *Store, cfg CheckpointConfig) *OwnerManager {
 		cfg:             cfg,
 		reclaimInterval: defaultOwnerReclaimInterval,
 		runs:            make(map[uuid.UUID]*ownedRun),
+		invalidating:    make(map[uuid.UUID]*ownerRunInvalidation),
 	}
+	m.invalidated = sync.NewCond(&m.mu)
 	// This manager is a CACHE of the store's task_runs rows, so the store has to
 	// be able to invalidate it. Registering here rather than in the server
 	// bootstrap keeps the two halves of the contract in one place: a retry that
 	// re-opens a run must not leave a snapshot behind that still calls it
-	// complete (Store.invalidateRunState).
+	// complete (Store.beginRunStateInvalidation).
 	store.SetRunStateCache(m)
 	return m
 }
@@ -87,34 +112,104 @@ func (m *OwnerManager) get(runID uuid.UUID) (*ownedRun, bool) {
 	return or, ok
 }
 
-// put publishes a freshly-built ownedRun into the map.  Idempotent: if the run
-// is already tracked it keeps the existing entry and reports false.
-func (m *OwnerManager) put(runID uuid.UUID, or *ownedRun) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.runs[runID]; ok {
+// lockActive returns the current run with its per-run lock held. Map lookup and
+// locking are deliberately split so slow work for one run does not hold the
+// global map lock; activeLocked closes that gap by validating the pointer again
+// after the per-run lock is acquired.
+func (m *OwnerManager) lockActive(runID uuid.UUID) (*ownedRun, bool) {
+	or, ok := m.get(runID)
+	if !ok {
+		return nil, false
+	}
+	if m.beforeRunLock != nil {
+		m.beforeRunLock(runID)
+	}
+	or.mu.Lock()
+	if !m.activeLocked(runID, or) {
+		or.mu.Unlock()
+		return nil, false
+	}
+	if m.afterRunLock != nil {
+		m.afterRunLock(runID)
+	}
+	return or, true
+}
+
+// activeLocked reports whether or is still the published, mutable state for
+// runID. The caller holds or.mu. This post-lock check is what fences a method
+// that captured or immediately before Drop or BeginInvalidation retired it.
+func (m *OwnerManager) activeLocked(runID uuid.UUID, or *ownedRun) bool {
+	if or == nil || or.retired {
 		return false
 	}
-	m.runs[runID] = or
-	return true
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, invalidating := m.invalidating[runID]; invalidating {
+		return false
+	}
+	return m.runs[runID] == or
+}
+
+func versionMatches(or *ownedRun, version LeaseVersion) bool {
+	if or == nil {
+		return false
+	}
+	if version.Generation != 0 && or.gen != version.Generation {
+		return false
+	}
+	return version.StateRevision <= 0 || or.rev == version.StateRevision
+}
+
+func (m *OwnerManager) lockActiveVersion(runID uuid.UUID, version LeaseVersion) (*ownedRun, bool) {
+	or, ok := m.lockActive(runID)
+	if !ok {
+		return nil, false
+	}
+	if !versionMatches(or, version) {
+		or.mu.Unlock()
+		return nil, false
+	}
+	return or, true
 }
 
 // Adopt seeds a fresh in-memory state for a run this node created and owns at
 // the given generation.  Topology is loaded from the catalog (outside any lock).
 // Idempotent: a second Adopt for an already-tracked run is a no-op.
 func (m *OwnerManager) Adopt(runID uuid.UUID, generation int64) error {
-	if _, ok := m.get(runID); ok {
+	version, err := m.versionForGeneration(runID, generation)
+	if err != nil {
+		return err
+	}
+	return m.AdoptVersion(runID, version)
+}
+
+// AdoptVersion seeds a new state only while the exact durable lease version is
+// current. It uses the same per-run guard as recovery, so a retry cannot finish
+// during topology loading and later receive an unreplayed candidate.
+func (m *OwnerManager) AdoptVersion(runID uuid.UUID, version LeaseVersion) error {
+	guard := m.beginOwnerInvalidation(runID)
+	if versionMatches(guard.or, version) && guard.or != nil && !guard.or.retired {
+		guard.Abort()
 		return nil
 	}
 	topo, err := m.store.LoadRunTopology(runID)
 	if err != nil {
+		guard.Abort()
 		return err
 	}
-	m.put(runID, &ownedRun{
+	if err := m.validateVersion(runID, version); err != nil {
+		guard.Abort()
+		return err
+	}
+	candidate := &ownedRun{
 		state:  NewRunState(topo, 0),
-		writer: NewCheckpointWriter(m.store, runID, m.cfg),
-		gen:    generation,
-	})
+		writer: NewCheckpointWriter(m.store, runID, m.cfg, version.StateRevision),
+		gen:    version.Generation,
+		rev:    version.StateRevision,
+	}
+	candidate.mu.Lock()
+	guard.replace(candidate)
+	candidate.mu.Unlock()
 	return nil
 }
 
@@ -124,13 +219,45 @@ func (m *OwnerManager) Adopt(runID uuid.UUID, generation int64) error {
 // not yet published).  The RecoveryResult tells the caller which tasks are ready
 // and which running tasks were re-queued for dispatch.
 func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResult, error) {
+	version, err := m.versionForGeneration(runID, generation)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	return m.RecoverVersion(runID, version)
+}
+
+// RecoverVersion rebuilds and publishes the exact durable owner-state version.
+// Every side effect after loading is version-fenced; a retry that commits while
+// the candidate is loading or initializing rejects it with ErrOwnerStateChanged.
+func (m *OwnerManager) RecoverVersion(runID uuid.UUID, version LeaseVersion) (RecoveryResult, error) {
+	guard := m.beginOwnerInvalidation(runID)
+	if versionMatches(guard.or, version) && guard.or != nil && !guard.or.retired {
+		guard.Abort()
+		return RecoveryResult{}, nil
+	}
+	if err := m.validateVersion(runID, version); err != nil {
+		guard.Abort()
+		return RecoveryResult{}, err
+	}
+
 	topo, err := m.store.LoadRunTopology(runID)
 	if err != nil {
+		guard.Abort()
 		return RecoveryResult{}, err
 	}
 	checkpoint, err := m.store.LatestFullCheckpoint(runID)
 	if err != nil {
+		guard.Abort()
 		return RecoveryResult{}, err
+	}
+	if checkpoint != nil && version.StateRevision > 0 {
+		legacyInitial := version.StateRevision == 1 && checkpoint.StateRevision == 0
+		if checkpoint.StateRevision != version.StateRevision && !legacyInitial {
+			log.Warn("owner manager: ignoring checkpoint from stale state revision",
+				"run_id", runID, "checkpoint_revision", checkpoint.StateRevision,
+				"state_revision", version.StateRevision)
+			checkpoint = nil
+		}
 	}
 	// Decide whether the checkpoint is usable BEFORE the tail query, not after.
 	// The tail is filtered by the checkpoint's sequence_high; RecoverRunState
@@ -154,12 +281,14 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	}
 	rows, err := m.store.TerminalTaskRunsSince(runID, afterSeq)
 	if err != nil {
+		guard.Abort()
 		return RecoveryResult{}, err
 	}
 	var allRows []models.TaskRun
 	var catalog []models.Task
 	if m.store != nil && m.store.DB() != nil {
 		if err := m.store.DB().Where("job_run_id = ?", runID).Find(&allRows).Error; err != nil {
+			guard.Abort()
 			return RecoveryResult{}, err
 		}
 		// The catalog rows carry fanOut (maxParallel, step name), which the
@@ -167,53 +296,174 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 		// disagree after a partial write, so the catalog stays authoritative.
 		// Without them a takeover drops the group's in-flight cap for the rest
 		// of the run.
-		var jobRun models.JobRun
-		if err := m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
-			if err := m.store.DB().Where("job_id = ?", jobRun.JobID).Find(&catalog).Error; err != nil {
-				return RecoveryResult{}, err
-			}
+		var (
+			jobID uuid.UUID
+			err   error
+		)
+		if m.recoveryJobIDFn != nil {
+			jobID, err = m.recoveryJobIDFn(runID)
+		} else {
+			var jobRun models.JobRun
+			err = m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error
+			jobID = jobRun.JobID
+		}
+		if err != nil {
+			guard.Abort()
+			return RecoveryResult{}, err
+		}
+		if err := m.store.DB().Where("job_id = ?", jobID).Find(&catalog).Error; err != nil {
+			guard.Abort()
+			return RecoveryResult{}, err
 		}
 	}
 	rs, res, err := RecoverRunStateWithFanOut(topo, checkpoint, rows, allRows, catalog)
 	if err != nil {
+		guard.Abort()
 		return RecoveryResult{}, err
 	}
-	// Reset every DB row the dead owner left running back to pending (clearing
-	// the stale claim) so the new owner can re-dispatch+claim them.  Always run
-	// this, not just when RunState re-queued tasks: the checkpoint can lag the
-	// DB (the dead owner dispatched a task after its last checkpoint), so a row
-	// may be "running" in the DB while the recovered in-memory state shows it
-	// "ready".  Best-effort: a failure just delays the re-claim.
-	if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
-		log.Warn("owner manager: reset in-flight tasks failed", "run_id", runID, "error", rErr)
+	// Recovery first requeues every running node restored from a checkpoint. Then
+	// durable rows from the CURRENT generation are overlaid as still in flight.
+	// They are healthy workers whose completions remain valid across a same-owner
+	// revision refresh. Older-generation rows stay ready and are reset below.
+	res.ReDispatch = res.ReDispatch[:0]
+	for i := range allRows {
+		row := &allRows[i]
+		if TaskStatus(row.Status) != TaskStatusRunning {
+			continue
+		}
+		id := row.TaskID
+		if _, ok := rs.TaskState(row.ID); ok {
+			id = row.ID
+		}
+		if row.OwnerGeneration != version.Generation {
+			res.ReDispatch = append(res.ReDispatch, id)
+			continue
+		}
+		leaseExpiresAtMs := int64(0)
+		if row.ClaimExpiresAt != nil {
+			leaseExpiresAtMs = row.ClaimExpiresAt.UnixMilli()
+		}
+		// RunState's Attempt is the task's execution-retry attempt. The durable
+		// claim_attempt is a separate ABA fence carried by the TaskRun returned
+		// from ClaimTaskForDispatch and by the completion envelope; feeding it
+		// into MarkDispatched would silently change which execution attempt a
+		// recovered owner dispatches next.
+		attempt := row.Attempt
+		if attempt <= 0 {
+			attempt = 1
+		}
+		rs.MarkDispatched(id, row.ClaimedBy, attempt, leaseExpiresAtMs)
 	}
-	or := &ownedRun{
+	rs.SyncStartedFromRows(allRows)
+	res.Ready = rs.ReadyTasks()
+	res.Complete = rs.IsComplete()
+	if m.afterRecoveryRead != nil {
+		m.afterRecoveryRead(runID)
+	}
+	if err := m.validateVersion(runID, version); err != nil {
+		guard.Abort()
+		return RecoveryResult{}, err
+	}
+	candidate := &ownedRun{
 		state:  rs,
-		writer: NewCheckpointWriter(m.store, runID, m.cfg),
-		gen:    generation,
+		writer: NewCheckpointWriter(m.store, runID, m.cfg, version.StateRevision),
+		gen:    version.Generation,
+		rev:    version.StateRevision,
 	}
-	// Persist a checkpoint stamped with the new generation immediately.
-	_ = or.writer.Force(rs, generation)
-	m.put(runID, or)
-	log.Info("run owner: recovered run on takeover", "run_id", runID, "generation", generation,
+	candidate.mu.Lock()
+	guard.replace(candidate)
+	// Reset only rows stamped by an older owner generation. Current-generation
+	// workers keep their claim identity and can complete into the refreshed state.
+	if rErr := m.store.ResetInFlightTasksVersion(runID, version, true); rErr != nil {
+		m.retireLocked(runID, candidate)
+		candidate.mu.Unlock()
+		return RecoveryResult{}, rErr
+	}
+	if wErr := candidate.writer.Force(rs, version.Generation); wErr != nil {
+		m.retireLocked(runID, candidate)
+		candidate.mu.Unlock()
+		return RecoveryResult{}, wErr
+	}
+	// A takeover can reconstruct an already-complete state when the previous
+	// owner committed the last task row and died before finalizing JobRun. No
+	// future task completion will arrive to run the normal finalizer, so recovery
+	// must close that gap under the same exact-version fence. Keep the complete
+	// candidate published on success: the retained lease/revision is required by
+	// retry of this existing run, and it also prevents a recover/finalize loop on
+	// every dispatch tick.
+	if res.Complete {
+		var runErr error
+		if rs.HasFailures() {
+			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
+		}
+		if cErr := m.store.CompleteOwned(runID, runErr, version); cErr != nil {
+			m.retireLocked(runID, candidate)
+			candidate.mu.Unlock()
+			return RecoveryResult{}, cErr
+		}
+	}
+	candidate.mu.Unlock()
+	log.Info("run owner: recovered run", "run_id", runID, "generation", version.Generation,
+		"state_revision", version.StateRevision,
 		"ready", len(res.Ready), "redispatch", len(res.ReDispatch), "complete", res.Complete)
 	return res, nil
 }
 
-// Owns reports whether this node is tracking in-memory state for the run.
+func (m *OwnerManager) validateVersion(runID uuid.UUID, version LeaseVersion) error {
+	if m == nil || m.store == nil || m.store.leaseStore == nil {
+		return nil
+	}
+	if version.StateRevision <= 0 {
+		return ErrOwnerStateChanged
+	}
+	return m.store.leaseStore.ValidateVersion(context.Background(), runID, version)
+}
+
+func (m *OwnerManager) versionForGeneration(runID uuid.UUID, generation int64) (LeaseVersion, error) {
+	version := LeaseVersion{Generation: generation}
+	if m == nil || m.store == nil || m.store.leaseStore == nil {
+		return version, nil
+	}
+	lease, err := m.store.leaseStore.GetLease(context.Background(), runID)
+	if err != nil {
+		return LeaseVersion{}, err
+	}
+	if lease.Generation != generation || lease.StateRevision <= 0 {
+		return LeaseVersion{}, ErrOwnerStateChanged
+	}
+	version.StateRevision = lease.StateRevision
+	return version, nil
+}
+
+// Owns reports whether this node is tracking in-memory state for the run. An
+// invalidation guard counts as ownership so the dispatch loop cannot Recover a
+// replacement while the reset transaction is in flight.
 func (m *OwnerManager) Owns(runID uuid.UUID) bool {
-	_, ok := m.get(runID)
-	return ok
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	or, owned := m.runs[runID]
+	return owned && or != nil
+}
+
+// OwnsVersion reports whether the published state exactly matches the durable
+// lease version observed by the caller.
+func (m *OwnerManager) OwnsVersion(runID uuid.UUID, version LeaseVersion) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, invalidating := m.invalidating[runID]; invalidating {
+		return false
+	}
+	or := m.runs[runID]
+	return or != nil && versionMatches(or, version)
 }
 
 // Ready returns the run's current ready queue in dispatch order, or nil if the
 // run is not owned by this node.
 func (m *OwnerManager) Ready(runID uuid.UUID) []uuid.UUID {
-	or, ok := m.get(runID)
+	or, ok := m.lockActive(runID)
 	if !ok {
 		return nil
 	}
-	or.mu.Lock()
 	defer or.mu.Unlock()
 	return or.state.ReadyTasks()
 }
@@ -247,11 +497,10 @@ func (d DispatchableTask) ExecutionRef() uuid.UUID {
 // ReadyForDispatch returns the run's ready tasks paired with their current
 // attempt, for the dispatch loop to push.  Nil if the run is not owned here.
 func (m *OwnerManager) ReadyForDispatch(runID uuid.UUID) []DispatchableTask {
-	or, ok := m.get(runID)
+	or, ok := m.lockActive(runID)
 	if !ok {
 		return nil
 	}
-	or.mu.Lock()
 	defer or.mu.Unlock()
 	ready := or.state.ReadyTasks()
 	out := make([]DispatchableTask, 0, len(ready))
@@ -272,11 +521,17 @@ func (m *OwnerManager) ReadyForDispatch(runID uuid.UUID) []DispatchableTask {
 
 // MarkDispatched records that a ready task was pushed to a worker.
 func (m *OwnerManager) MarkDispatched(runID, taskID uuid.UUID, worker string, attempt int, leaseExpiresAtMs int64) {
-	or, ok := m.get(runID)
+	m.MarkDispatchedVersion(runID, taskID, worker, attempt, leaseExpiresAtMs, LeaseVersion{})
+}
+
+// MarkDispatchedVersion records an accepted push only on the exact state that
+// sent it. A late HTTP 202 from an older revision must not remove retried work
+// from the refreshed ready queue.
+func (m *OwnerManager) MarkDispatchedVersion(runID, taskID uuid.UUID, worker string, attempt int, leaseExpiresAtMs int64, version LeaseVersion) {
+	or, ok := m.lockActiveVersion(runID, version)
 	if !ok {
 		return
 	}
-	or.mu.Lock()
 	defer or.mu.Unlock()
 	or.state.MarkDispatched(taskID, worker, attempt, leaseExpiresAtMs)
 }
@@ -305,14 +560,23 @@ type CompleteResult struct {
 // terminal_sequence = 0 and recovery reads the terminal tail with
 // `terminal_sequence > ?`, making the row invisible after a takeover.
 //
-// All run work is serialized by the run's own lock; finalize/drop run after that
-// lock is released, so the brief map lock is never held during a DB call.
+// All run work, including durable finalization, is serialized by the run's own
+// lock. Drop removes the entry afterward; the brief map lock is never held
+// during a DB call.
 func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, result, errMsg, claimedBy string, output map[string]string, branchSelections []string) (CompleteResult, error) {
 	return m.CompleteInstance(runID, taskID, uuid.Nil, status, result, errMsg, claimedBy, output, branchSelections, nil)
 }
 
 func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, status TaskStatus, result, errMsg, claimedBy string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) (CompleteResult, error) {
-	or, ok := m.get(runID)
+	return m.CompleteInstanceAttempt(runID, taskID, taskRunID, status, result, errMsg, claimedBy, 0,
+		output, branchSelections, partitions)
+}
+
+// CompleteInstanceAttempt applies a completion fenced by the worker claim
+// attempt. Revision is intentionally not part of the envelope: current-gen
+// workers already in flight remain valid across an owner state refresh.
+func (m *OwnerManager) CompleteInstanceAttempt(runID, taskID, taskRunID uuid.UUID, status TaskStatus, result, errMsg, claimedBy string, claimAttempt int, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) (CompleteResult, error) {
+	or, ok := m.lockActive(runID)
 	if !ok {
 		return CompleteResult{Owned: false}, nil
 	}
@@ -328,8 +592,6 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	// sink.Failed delivery — after the DAG had advanced — so the row and the
 	// owner's state disagreed. One reported outcome, one status, both lanes.
 	status = effectiveTerminalStatus(status, result)
-
-	or.mu.Lock()
 
 	// Every transition below is staged on a CLONE and published only after the
 	// durable write commits.  Applying to the authoritative state first and
@@ -370,8 +632,10 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 			exp, planErr := m.store.PlanFanOutExpansionForRow(runID, taskID, identity, partitions)
 			switch {
 			case planErr == nil:
-				if exp != nil && len(exp.Groups) > 0 {
+				if exp != nil {
 					expansion = exp
+				}
+				if exp != nil && len(exp.Groups) > 0 {
 					expansionSkipped = staged.ApplyExpansion(exp)
 					m.seedFanOutPolicies(staged, exp)
 				}
@@ -385,7 +649,10 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 				// reconstruction recovery performs on takeover.
 				log.Warn("owner manager: fan-out group already expanded durably; adopting persisted rows",
 					"run_id", runID, "task_id", taskID, "error", planErr)
-				m.adoptPersistedExpansion(staged, runID)
+				if adoptErr := m.adoptPersistedExpansion(staged, runID); adoptErr != nil {
+					or.mu.Unlock()
+					return CompleteResult{Owned: true}, fmt.Errorf("adopt persisted fan-out expansion: %w", adoptErr)
+				}
 			default:
 				status = TaskStatusFailed
 				if errMsg == "" {
@@ -401,15 +668,16 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		// state cannot make on its own, because a dispatch is recorded when a
 		// peer accepts the push, not when its worker creates the container.
 		// Refresh it from the durable rows first; runtime_id is the marker both
-		// lanes use (see taskRunStarted). Best effort: a read failure leaves the
-		// flags as they were, which can only make the cancel more conservative.
+		// lanes use (see taskRunStarted). Fail closed on a read error: a default
+		// Started=false is permissive and could cancel a sibling whose container
+		// already exists.
 		if catalogID, isInstance := staged.CatalogTaskID(identity); isInstance {
-			if rows, rErr := m.store.TaskRunsForTask(runID, catalogID); rErr == nil {
-				staged.SyncStartedFromRows(rows)
-			} else {
-				log.Warn("owner manager: could not refresh fan-out group start state",
-					"run_id", runID, "task_id", catalogID, "error", rErr)
+			rows, rErr := m.store.TaskRunsForTask(runID, catalogID)
+			if rErr != nil {
+				or.mu.Unlock()
+				return CompleteResult{Owned: true}, fmt.Errorf("refresh fan-out group start state: %w", rErr)
 			}
+			staged.SyncStartedFromRows(rows)
 		}
 	}
 
@@ -436,21 +704,34 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	// terminal_sequence = 0, and recovery reads the terminal tail with
 	// `terminal_sequence > ?`, so the row would be invisible to a future takeover.
 	if res.Durable() {
-		if err := m.store.CompleteTaskOwner(runID, identity, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, res.Skipped, expansion); err != nil {
+		var persistErr error
+		if claimAttempt > 0 {
+			persistErr = m.store.CompleteTaskOwnerAttempt(runID, identity, status, result, errMsg, claimedBy, claimAttempt, output, branchSelections, partitions, res.TerminalSequence, or.gen, or.rev, res.Skipped, expansion)
+		} else {
+			persistErr = m.store.CompleteTaskOwner(runID, identity, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, or.rev, res.Skipped, expansion)
+		}
+		if persistErr != nil {
 			// The staged state is dropped on the floor: nothing was published, so
 			// the authoritative state still shows this task in flight and the
 			// worker's retry re-plans the expansion and re-stamps the same
 			// sequence from an unchanged cursor.  Publishing here is what created
 			// instance ids with no rows behind them.
 			or.mu.Unlock()
-			return CompleteResult{Owned: true}, err
+			return CompleteResult{Owned: true}, persistErr
 		}
 		// The write landed — publish the staged transition.
 		or.state = staged
 
 		// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable
 		// from the durable terminal rows, so it must not fail the completion).
-		_ = or.writer.Maybe(or.state, or.gen)
+		if err := or.writer.Maybe(or.state, or.gen); err != nil {
+			if errors.Is(err, ErrOwnerStateChanged) {
+				m.retireLocked(runID, or)
+				or.mu.Unlock()
+				return CompleteResult{Owned: true}, err
+			}
+			log.Warn("owner manager: checkpoint failed", "run_id", runID, "error", err)
+		}
 	}
 	// A result with nothing durable is a no-op replay (or a completion for a task
 	// this state never tracked); its staged copy is discarded for the same reason
@@ -463,6 +744,26 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	// this call just applied. Taken inside the run lock (it mutates the
 	// already-reported set), observed outside it.
 	resolvedGroups := or.state.TakeResolvedGroups()
+
+	// Finalization is part of the owner mutation critical section. A retry guard
+	// publishes its tombstone before waiting for this lock; keeping the durable
+	// status write inside the lock guarantees it lands before the retry reset,
+	// never afterward.
+	if complete {
+		var runErr error
+		if hasFailures {
+			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
+		}
+		if cErr := m.store.CompleteOwned(runID, runErr, LeaseVersion{
+			Generation: or.gen, StateRevision: or.rev,
+		}); cErr != nil {
+			if errors.Is(cErr, ErrOwnerStateChanged) {
+				m.retireLocked(runID, or)
+			}
+			or.mu.Unlock()
+			return CompleteResult{Owned: true}, cErr
+		}
+	}
 	or.mu.Unlock()
 
 	if len(resolvedGroups) > 0 {
@@ -482,21 +783,12 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		}
 	}
 
-	// When the DAG is complete, finalize the run.  This makes the owner the
+	// When the DAG is complete, drop the finalized run. This makes the owner the
 	// authoritative finalizer, which is essential after a takeover (the original
 	// node's waitForRunCompletion is gone); in the normal case the triggering
 	// node's waitForRunCompletion also calls store.Complete, which is an
-	// idempotent no-op once we have set the terminal status.  Done after the run
-	// lock is released so the finalize DB call doesn't extend the critical
-	// section.
+	// idempotent no-op once we have set the terminal status.
 	if complete {
-		var runErr error
-		if hasFailures {
-			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
-		}
-		if cErr := m.store.Complete(runID, runErr); cErr != nil {
-			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
-		}
 		m.Drop(runID)
 	}
 
@@ -533,11 +825,10 @@ func (m *OwnerManager) WithReclaimInterval(d time.Duration) *OwnerManager {
 // The reset and the re-queue happen under the run's own lock, so this cannot
 // race the dispatch it feeds.  Returns nil for a run this node does not own.
 func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
-	or, ok := m.get(runID)
+	or, ok := m.lockActive(runID)
 	if !ok {
 		return nil
 	}
-	or.mu.Lock()
 	defer or.mu.Unlock()
 
 	now := time.Now()
@@ -554,8 +845,13 @@ func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
 	}
 	or.lastReap = now
 
-	rows, err := m.store.ReclaimOwnerExpiredClaims(runID, or.gen)
+	rows, err := m.store.ReclaimOwnerExpiredClaimsVersion(runID, LeaseVersion{
+		Generation: or.gen, StateRevision: or.rev,
+	})
 	if err != nil {
+		if errors.Is(err, ErrOwnerStateChanged) {
+			m.retireLocked(runID, or)
+		}
 		log.Warn("owner manager: expired-claim reap failed", "run_id", runID, "error", err)
 		return nil
 	}
@@ -571,27 +867,30 @@ func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
 // run's durable instance rows.  It is the "reload from rows" arm of the staged
 // completion path: when the planner reports the successor template is ambiguous,
 // the group is already materialized in the DB and the owner must adopt it rather
-// than fail the producer.  Best-effort — a read failure leaves the state as it
-// was, and the completion proceeds against the unexpanded catalog node.
-func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID) {
+// than fail the producer. Every read is required: publishing the producer
+// completion with a partially rehydrated group can leave catalog template IDs
+// ready even though the durable group contains only instance rows.
+func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID) error {
+	if m != nil && m.adoptPersistedExpansionFn != nil {
+		return m.adoptPersistedExpansionFn(state, runID)
+	}
 	if state == nil || m.store == nil || m.store.DB() == nil {
-		return
+		return errors.New("owner manager: missing state store for persisted expansion")
 	}
 	var rows []models.TaskRun
 	if err := m.store.DB().Where("job_run_id = ?", runID).Find(&rows).Error; err != nil {
-		log.Warn("owner manager: could not load rows to adopt persisted expansion",
-			"run_id", runID, "error", err)
-		return
+		return fmt.Errorf("load task rows for run %s: %w", runID, err)
 	}
 	var catalog []models.Task
 	var jobRun models.JobRun
-	if err := m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
-		if err := m.store.DB().Where("job_id = ?", jobRun.JobID).Find(&catalog).Error; err != nil {
-			log.Warn("owner manager: could not load catalog to adopt persisted expansion",
-				"run_id", runID, "error", err)
-		}
+	if err := m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+		return fmt.Errorf("load job run %s for persisted expansion: %w", runID, err)
+	}
+	if err := m.store.DB().Where("job_id = ?", jobRun.JobID).Find(&catalog).Error; err != nil {
+		return fmt.Errorf("load catalog for run %s: %w", runID, err)
 	}
 	state.RehydrateInGroupEdges(rows, catalog)
+	return nil
 }
 
 // seedFanOutPolicies records each freshly-expanded group's fanOut.failurePolicy
@@ -647,19 +946,124 @@ func (m *OwnerManager) jobAliasForRun(runID uuid.UUID) string {
 	return "unknown"
 }
 
-// Drop releases the run's in-memory state (on completion or lease loss).  A
+// Drop releases the run's in-memory state (on completion or lease loss). A
 // final checkpoint is forced so a subsequent takeover replays the least tail.
+// The entry is retired while its lock is held before map deletion, fencing a
+// caller that obtained its pointer just before the deletion.
 func (m *OwnerManager) Drop(runID uuid.UUID) {
-	m.mu.Lock()
-	or, ok := m.runs[runID]
-	if ok {
-		delete(m.runs, runID)
-	}
-	m.mu.Unlock()
+	or, ok := m.get(runID)
 	if !ok {
 		return
 	}
 	or.mu.Lock()
-	_ = or.writer.Force(or.state, or.gen)
+	if !m.activeLocked(runID, or) {
+		or.mu.Unlock()
+		return
+	}
+	or.retired = true
+	if err := or.writer.Force(or.state, or.gen); err != nil && !errors.Is(err, ErrOwnerStateChanged) {
+		log.Warn("owner manager: final checkpoint failed", "run_id", runID, "error", err)
+	}
+	m.mu.Lock()
+	if m.runs[runID] == or {
+		delete(m.runs, runID)
+	}
+	m.mu.Unlock()
 	or.mu.Unlock()
+}
+
+// ownerRunInvalidation holds the per-run lock and the manager's retry guard from
+// before the reset transaction begins until it commits or rolls back.
+type ownerRunInvalidation struct {
+	manager *OwnerManager
+	runID   uuid.UUID
+	or      *ownedRun
+	done    bool
+}
+
+// BeginInvalidation publishes a tombstone before waiting for the old state.
+// Thus an already-active writer is allowed to finish first, while every caller
+// that has not yet passed its post-lock validation is fenced immediately.
+func (m *OwnerManager) BeginInvalidation(runID uuid.UUID) runStateInvalidation {
+	return m.beginOwnerInvalidation(runID)
+}
+
+func (m *OwnerManager) beginOwnerInvalidation(runID uuid.UUID) *ownerRunInvalidation {
+	m.mu.Lock()
+	for m.invalidating[runID] != nil {
+		m.invalidated.Wait()
+	}
+	guard := &ownerRunInvalidation{manager: m, runID: runID}
+	m.invalidating[runID] = guard
+	or := m.runs[runID]
+	guard.or = or
+	m.mu.Unlock()
+	if or != nil {
+		or.mu.Lock()
+	}
+	return guard
+}
+
+func (g *ownerRunInvalidation) Commit() { g.finish(true) }
+func (g *ownerRunInvalidation) Abort()  { g.finish(false) }
+
+func (g *ownerRunInvalidation) finish(commit bool) {
+	if g == nil || g.done {
+		return
+	}
+	g.done = true
+	m := g.manager
+	if commit && g.or != nil {
+		g.or.retired = true
+	}
+	m.mu.Lock()
+	if commit && g.or != nil && m.runs[g.runID] == g.or {
+		delete(m.runs, g.runID)
+	}
+	if m.invalidating[g.runID] == g {
+		delete(m.invalidating, g.runID)
+		m.invalidated.Broadcast()
+	}
+	m.mu.Unlock()
+	if g.or != nil {
+		g.or.mu.Unlock()
+	}
+}
+
+// replace publishes candidate while the guard still owns the old run lock.
+// The caller holds candidate.mu so no operation can observe it before its
+// version-fenced recovery side effects complete.
+func (g *ownerRunInvalidation) replace(candidate *ownedRun) {
+	if g == nil || g.done {
+		return
+	}
+	g.done = true
+	m := g.manager
+	if g.or != nil {
+		g.or.retired = true
+	}
+	m.mu.Lock()
+	if m.invalidating[g.runID] == g {
+		m.runs[g.runID] = candidate
+		delete(m.invalidating, g.runID)
+		m.invalidated.Broadcast()
+	}
+	m.mu.Unlock()
+	if g.or != nil {
+		g.or.mu.Unlock()
+	}
+}
+
+// retireLocked removes a stale version after a durable fence rejects one of
+// its writes. The caller holds or.mu.
+func (m *OwnerManager) retireLocked(runID uuid.UUID, or *ownedRun) {
+	if or == nil {
+		return
+	}
+	or.retired = true
+	m.mu.Lock()
+	if m.runs[runID] == or {
+		delete(m.runs, runID)
+	}
+	m.mu.Unlock()
 }

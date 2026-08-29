@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -55,14 +56,38 @@ func publishSchemaViolationEvent(store *Store, runID, taskID uuid.UUID, count in
 	if store == nil {
 		return
 	}
+	store.PublishEvents(newSchemaViolationEvent(runID, taskID, count))
+}
+
+func newSchemaViolationEvent(runID, taskID uuid.UUID, count int) event.Event {
 	payload, _ := json.Marshal(struct {
 		Violations int `json:"violations"`
 	}{Violations: count})
-	store.PublishEvents(event.Event{
+	return event.Event{
 		Type:      event.TypeSchemaViolationRecorded,
 		RunID:     runID,
 		TaskID:    taskID,
 		Timestamp: time.Now().UTC(),
 		Payload:   payload,
-	})
+	}
+}
+
+// claimedSchemaViolationEvent builds the warn-mode incident event carried by
+// an accepted exact terminal completion. The claimed validation path persists
+// evidence but deliberately does not publish: its claim can expire before the
+// completion is accepted, and publishing then would attribute an incident to a
+// stale execution that no longer owns the row.
+func claimedSchemaViolationEvent(runID, taskID uuid.UUID, row *models.TaskRun) (*event.Event, error) {
+	if row == nil || row.SchemaValidation != jobdef.SchemaValidationWarn || len(row.SchemaViolations) == 0 {
+		return nil, nil
+	}
+	var violations []pkgtask.SchemaViolation
+	if err := json.Unmarshal(row.SchemaViolations, &violations); err != nil {
+		return nil, fmt.Errorf("decode claimed schema violations: %w", err)
+	}
+	if len(violations) == 0 {
+		return nil, nil
+	}
+	evt := newSchemaViolationEvent(runID, taskID, len(violations))
+	return &evt, nil
 }

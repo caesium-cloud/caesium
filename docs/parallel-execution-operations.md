@@ -36,12 +36,16 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 
 ## Worker Capacity
 
-`CAESIUM_WORKER_POOL_SIZE` is an admission limit, not merely an execution limit: a node never marks a task `running` unless it already holds a free pool slot for it. A node therefore reports at most `CAESIUM_WORKER_POOL_SIZE` tasks in `running`.
+`CAESIUM_WORKER_POOL_SIZE` bounds admission, not just execution. The pull path never claims without a reserved slot. On the push path, a worker returns `202` only after the task is registered against a reserved slot; every rejection rolls its provisional claim back. A node executes at most `CAESIUM_WORKER_POOL_SIZE` tasks at a time.
 
 - **Pull path** — the worker reserves a slot before it calls the claimer, so a saturated node issues no claim at all. Ready tasks stay `pending` (and claimable by another node) instead of being parked `running` behind a busy pool.
 - **Push path (run-owner mode)** — a dispatch that reaches a saturated node is rejected with `409 worker busy; task returned to dispatch pool`. The owner rolls the claim back to `pending` and re-dispatches on a later tick, here or to another peer.
 
-Expect `caesium_dispatch_rejected_total{reason="worker_rejected"}` to be non-zero whenever workers are the bottleneck; that is normal backpressure, not an error. Sustained growth alongside a flat `caesium_dispatch_sent_total` means the cluster is under-provisioned — raise `CAESIUM_WORKER_POOL_SIZE` or add worker nodes.
+**Do not alert solely because `running` briefly exceeds pool size.** On the push path the owner claims a task (`status=running`, `started_at` stamped) *before* it asks a worker to take it, and it dispatches up to 16 tasks concurrently per owned run per tick — so a saturated node briefly shows more `running` rows than it has slots, until each refusal's rollback lands. Those rows are refused work in the process of returning to `pending`, not executing work. Alert on tasks that *stay* `running` on a node without progressing, or on the rejection metric below.
+
+**Throughput on many short tasks.** Completing a task does not trigger a new dispatch batch: work refused for lack of capacity waits for a later `CAESIUM_RUN_OWNER_DISPATCH_INTERVAL` tick (default `1s`). The requests within one batch are concurrent, however, so a very short task can release a slot in time for a later request from that same batch to reuse it. For short-task workloads (dynamic fan-out is the usual shape), lower `CAESIUM_RUN_OWNER_DISPATCH_INTERVAL` or raise `CAESIUM_WORKER_POOL_SIZE`.
+
+Expect `caesium_dispatch_rejected_total{reason="worker_rejected"}` to be non-zero under normal capacity backpressure, but do not diagnose capacity from that label alone: it also includes non-202 authentication, protocol, stale-identity, and server-error responses. Inspect the rejection status/reason and worker logs first. Sustained confirmed `worker busy` rejections alongside flat `caesium_dispatch_sent_total` indicate saturation; then raise `CAESIUM_WORKER_POOL_SIZE` or add worker nodes.
 
 ## Run-Owner Mode (Phase 2 Phase A, experimental)
 
@@ -71,6 +75,16 @@ Distributed wakeups use the dqlite cluster membership list, not `CAESIUM_DATABAS
 `CAESIUM_DATABASE_SHARDS=1` keeps every table in the catalog database. Higher shard counts open `caesium_hot_XX` databases on the same dqlite cluster and route run lifecycle rows by job run ID. See [database-sharding.md](database-sharding.md) for the table map and router contract.
 
 ## Rollout Procedure (Distributed Mode)
+
+Run-owner dispatch protocol v3 requires a positive durable state revision on
+every internal dispatch. Every completion must carry the exact run, catalog
+task, task-run tuple plus a positive owner generation and claim attempt. The
+owner resolves its current revision when that completion arrives, so healthy
+same-generation work remains valid across a state refresh. Do not mix protocol
+versions while distributed traffic is live: drain or disable distributed
+execution, upgrade every replica, verify that the cluster is homogeneous, and
+only then re-enable it. A v3 receiver fails closed on an unversioned request;
+an older receiver cannot enforce the new revision and claim-identity fences.
 
 1. Deploy the target version to all nodes with `CAESIUM_EXECUTION_MODE=local`.
 2. Verify all nodes are healthy and on the same binary revision.

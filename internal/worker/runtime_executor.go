@@ -27,7 +27,6 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 const (
@@ -329,10 +328,18 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// hash and hash-input blob would never land, leaving `caesium why
 		// --partition`, `receipt get` and `run retry --partition` with no identity
 		// to match. The descriptor write below already passes taskRun.ID.
-		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.ID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+		if err := e.store.SetTaskHashWithBlobClaimedAttempt(taskRun.JobRunID, taskRun.ID, cacheHash, resolvedImageDigest, hashInputBlob, taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
+			if errors.Is(err, run.ErrTaskClaimMismatch) {
+				log.Info("worker task claim changed before identity persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+				return
+			}
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
-		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.ID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+		if err := e.store.UpdateTaskExecutionDescriptorInputsClaimedAttempt(taskRun.JobRunID, taskRun.ID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob, taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
+			if errors.Is(err, run.ErrTaskClaimMismatch) {
+				log.Info("worker task claim changed before descriptor persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+				return
+			}
 			log.Warn("cache: failed to persist task execution descriptor inputs", "task_id", taskRun.TaskID, "error", err)
 		}
 
@@ -490,7 +497,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// unreachable on both lanes. This worker never released the claim and is
 		// about to launch the next container itself, so the row stays running and
 		// claimed between attempts.
-		if retryErr := e.store.RetryTaskClaimedInstance(taskRun.JobRunID, taskRun.ID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
+		if retryErr := e.store.RetryTaskClaimedInstanceAttempt(taskRun.JobRunID, taskRun.ID, attempt+1, taskRun.ClaimedBy, taskRun.ClaimAttempt); retryErr != nil {
 			if errors.Is(retryErr, run.ErrTaskClaimMismatch) {
 				log.Info("worker task claim changed before retry persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 				return
@@ -511,29 +518,19 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 	}
 
-	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
+	var persistErr error
+	if continuing, ok := sink.(continuingFailureSink); e.continueOnFailure && ok {
+		persistErr = continuing.FailedContinue(ctx, taskRun, lastErr)
+	} else {
+		persistErr = sink.Failed(ctx, taskRun, lastErr)
+	}
+	if persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
 		}
 		log.Error("failed to persist worker task failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
-	}
-
-	if !e.continueOnFailure {
 		return
-	}
-
-	descendants, descErr := collectDescendantsFromEdges(e.store.DB(), taskRun.TaskID)
-	if descErr != nil {
-		log.Error("failed to collect descendant tasks", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", descErr)
-		return
-	}
-
-	reason := fmt.Sprintf("skipped due to failed dependency task %s", taskRun.TaskID)
-	for _, taskID := range descendants {
-		if skipErr := e.store.SkipTask(taskRun.JobRunID, taskID, reason); skipErr != nil {
-			log.Error("failed to persist skipped descendant task", "run_id", taskRun.JobRunID, "task_id", taskID, "error", skipErr)
-		}
 	}
 }
 
@@ -703,7 +700,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		for _, resolved := range secretIdentities {
 			refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
 		}
-		if err := e.store.UpdateTaskExecutionDescriptorSecretRefs(taskRun.JobRunID, taskRun.ID, refs); err != nil {
+		if err := e.store.UpdateTaskExecutionDescriptorSecretRefsClaimedAttempt(taskRun.JobRunID, taskRun.ID, refs, taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
+			if errors.Is(err, run.ErrTaskClaimMismatch) {
+				return nil, err
+			}
 			log.Warn("failed to persist worker task execution descriptor secret identity", "task_id", taskRun.TaskID, "error", err)
 		}
 	}
@@ -735,12 +735,12 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// moment a task that was resolved out from under this worker can still be
 	// prevented from running. Real time passes between the claim and this point
 	// — image pulls, secret and output resolution, and for a dispatched task the
-	// hop through the inbound hand-off — and
+	// hop through the dispatched-task hand-off — and
 	// fail_fast cancelling a sibling of an already-failed group revokes its claim
 	// (internal/run: markInstanceCancelledBeforeStartTx). Without this check the
 	// cancelled instance's container starts, and only the StartTaskClaimed below
 	// notices, after the work has begun.
-	if err := e.store.EnsureTaskRunStartable(taskRun.JobRunID, taskRun.ID, taskRun.ClaimedBy); err != nil {
+	if err := e.store.EnsureTaskRunStartableAttempt(taskRun.JobRunID, taskRun.ID, taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
 		return nil, err
 	}
 
@@ -754,7 +754,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.ID, a.ID(), taskRun.ClaimedBy); err != nil {
+	if err := e.store.StartTaskClaimedAttempt(taskRun.JobRunID, taskRun.ID, a.ID(), taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
 		// The authoritative fence: the row is no longer running-and-claimed by
 		// this worker, so the task was resolved while Create was in flight. The
 		// container is already up, so tear it down rather than leaving it to run
@@ -784,7 +784,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// Capture the raw exit code before Result() folds it into a coarse status and
 	// the incident classifier loses it. Best-effort: a persistence failure must
 	// not fail an otherwise-complete task.
-	if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.ID, a.ExitCode()); err != nil {
+	if err := e.store.SetTaskExitCodeClaimedAttempt(taskRun.JobRunID, taskRun.ID, a.ExitCode(), taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
+		if errors.Is(err, run.ErrTaskClaimMismatch) {
+			return nil, err
+		}
 		log.Warn("failed to persist task exit code", "task_id", taskRun.TaskID, "error", err)
 	}
 
@@ -832,7 +835,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// outputSchema below is precisely the one whose log someone will open.
 	// Keyed on the TaskRun primary key so a fan-out instance records its own log
 	// instead of broadcasting across (job_run_id, task_id) siblings.
-	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
+	if err := e.store.SaveTaskLogSnapshotClaimedAttempt(taskRun.JobRunID, taskRun.ID, logSnapshot, taskRun.ClaimedBy, taskRun.ClaimAttempt); err != nil {
+		if errors.Is(err, run.ErrTaskClaimMismatch) {
+			return nil, err
+		}
 		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
 	}
 
@@ -891,6 +897,9 @@ func (e *runtimeExecutor) reportCompletion(
 	branchSelections []string,
 	partitions []pkgtask.Partition,
 ) error {
+	if continuing, ok := sink.(continuingFailureSink); e.continueOnFailure && ok && !run.IsSuccessfulTaskResult(result) {
+		return continuing.SucceededWithPartitionsContinue(ctx, taskRun, result, taskOutput, branchSelections, partitions)
+	}
 	if withParts, ok := sink.(interface {
 		SucceededWithPartitions(context.Context, *models.TaskRun, string, map[string]string, []string, []pkgtask.Partition) error
 	}); ok && len(partitions) > 0 {
@@ -910,9 +919,10 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 	if taskRun == nil {
 		return nil
 	}
-	return run.ValidateTaskOutputSchemaInstance(
+	return run.ValidateTaskOutputSchemaInstanceClaimedAttempt(
 		e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID,
 		output, taskRun.OutputSchema, taskRun.SchemaValidation,
+		taskRun.ClaimedBy, taskRun.ClaimAttempt,
 	)
 }
 
@@ -989,7 +999,7 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 		// catalog task ID naming N fan-out siblings returns ErrAmbiguousTaskRun
 		// and the short-circuit hash is never persisted — silently, because the
 		// failure is only logged. Matches the SetTaskHashWithBlob call above.
-		if scErr := e.store.SetTaskEffectiveHash(taskRun.JobRunID, taskRun.ID, effectiveHash); scErr != nil {
+		if scErr := e.store.SetTaskEffectiveHashClaimedAttempt(taskRun.JobRunID, taskRun.ID, effectiveHash, taskRun.ClaimedBy, taskRun.ClaimAttempt); scErr != nil {
 			log.Warn("short-circuit: failed to persist effective hash", "task_id", taskRun.TaskID, "error", scErr)
 		}
 	}
@@ -1111,31 +1121,4 @@ func normalizeTaskFailurePolicy(value string) string {
 	default:
 		return taskFailurePolicyHalt
 	}
-}
-
-func collectDescendantsFromEdges(db *gorm.DB, start uuid.UUID) ([]uuid.UUID, error) {
-	queue := []uuid.UUID{start}
-	seen := map[uuid.UUID]struct{}{}
-	descendants := make([]uuid.UUID, 0)
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		var edges []models.TaskEdge
-		if err := db.Where("from_task_id = ?", current).Find(&edges).Error; err != nil {
-			return nil, err
-		}
-
-		for _, edge := range edges {
-			if _, ok := seen[edge.ToTaskID]; ok {
-				continue
-			}
-			seen[edge.ToTaskID] = struct{}{}
-			descendants = append(descendants, edge.ToTaskID)
-			queue = append(queue, edge.ToTaskID)
-		}
-	}
-
-	return descendants, nil
 }

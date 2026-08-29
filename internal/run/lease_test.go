@@ -2,14 +2,92 @@ package run
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestCompleteAtStateRevisionSurvivesGenerationTakeover(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	leases := NewLeaseStore(db)
+	store := NewStore(db).WithLeaseStore(leases)
+	runRecord, err := store.Start(uuid.New(), nil)
+	require.NoError(t, err)
+	observed, err := leases.GetLease(context.Background(), runRecord.ID)
+	require.NoError(t, err)
+
+	// A peer takes over the route, but no retry rewrites the logical execution.
+	require.NoError(t, db.Model(&models.RunLease{}).
+		Where("run_id = ?", runRecord.ID.String()).
+		Update("lease_expires_at", time.Now().UTC().Add(-time.Second)).Error)
+	taken, err := leases.AcquireExpiredLeases(context.Background(), "node-b", time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), taken)
+
+	disposition, err := store.CompleteAtStateRevision(runRecord.ID, nil, observed.StateRevision)
+	require.NoError(t, err)
+	require.Equal(t, CompletionFinalized, disposition)
+
+	var row models.JobRun
+	require.NoError(t, db.First(&row, "id = ?", runRecord.ID).Error)
+	require.Equal(t, string(StatusSucceeded), row.Status)
+	require.Equal(t, int64(1), executionEventCount(t, db, runRecord.ID, event.TypeRunCompleted))
+	require.Equal(t, int64(1), executionEventCount(t, db, runRecord.ID, event.TypeRunTerminal))
+
+	// A same-revision replay remains callback-eligible but emits nothing twice.
+	disposition, err = store.CompleteAtStateRevision(runRecord.ID, nil, observed.StateRevision)
+	require.NoError(t, err)
+	require.Equal(t, CompletionAlreadyTerminal, disposition)
+	require.Equal(t, int64(1), executionEventCount(t, db, runRecord.ID, event.TypeRunCompleted))
+	require.Equal(t, int64(1), executionEventCount(t, db, runRecord.ID, event.TypeRunTerminal))
+}
+
+func TestCompleteAtStateRevisionSuppressesRetriedExecution(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	leases := NewLeaseStore(db)
+	firstStore := NewStore(db).WithLeaseStore(leases)
+	retryStore := NewStore(db).WithLeaseStore(leases)
+	runRecord, err := firstStore.Start(uuid.New(), nil)
+	require.NoError(t, err)
+	observed, err := leases.GetLease(context.Background(), runRecord.ID)
+	require.NoError(t, err)
+
+	disposition, err := retryStore.CompleteAtStateRevision(runRecord.ID, fmt.Errorf("first attempt failed"), observed.StateRevision)
+	require.NoError(t, err)
+	require.Equal(t, CompletionFinalized, disposition)
+	_, err = retryStore.RetryFromFailure(runRecord.ID)
+	require.NoError(t, err)
+
+	before := executionEventCount(t, db, runRecord.ID, event.TypeRunTerminal)
+	disposition, err = firstStore.CompleteAtStateRevision(runRecord.ID, nil, observed.StateRevision)
+	require.NoError(t, err)
+	require.Equal(t, CompletionSuperseded, disposition)
+	require.Equal(t, before, executionEventCount(t, db, runRecord.ID, event.TypeRunTerminal))
+
+	var row models.JobRun
+	require.NoError(t, db.First(&row, "id = ?", runRecord.ID).Error)
+	require.Equal(t, string(StatusRunning), row.Status)
+}
+
+func executionEventCount(t *testing.T, db *gorm.DB, runID uuid.UUID, typ event.Type) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&models.ExecutionEvent{}).
+		Where("run_id = ? AND type = ?", runID, string(typ)).
+		Count(&count).Error)
+	return count
+}
 
 // TestLeaseStore_AcquireAndRenew tests the basic lease lifecycle:
 //  1. AcquireLease writes a row and returns generation=1.
@@ -52,6 +130,21 @@ func TestLeaseStore_AcquireAndRenew(t *testing.T) {
 
 	require.NoError(t, db.First(&lease, "run_id = ?", runID.String()).Error)
 	require.True(t, lease.LeaseExpiresAt.After(before), "expiry must advance after renewal")
+}
+
+func TestLeaseStore_ValidatesFullStateVersion(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ls := NewLeaseStore(db)
+	runID := uuid.New()
+	_, err := ls.AcquireLease(context.Background(), runID, "node-1", time.Minute)
+	require.NoError(t, err)
+	lease, err := ls.GetLease(context.Background(), runID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), lease.StateRevision)
+	require.NoError(t, ls.ValidateVersion(context.Background(), runID, LeaseVersion{
+		Generation: lease.Generation, StateRevision: lease.StateRevision,
+	}))
 }
 
 // TestLeaseStore_OwnerModeFlagOff tests that no run_leases row is written

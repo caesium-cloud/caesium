@@ -177,7 +177,7 @@ func TestOwnerManager_CompletionAfterDurableExpansionAdoptsPersistedRows(t *test
 	exp, err := store.PlanFanOutExpansion(fx.runID, fx.producer.ID, partitions)
 	require.NoError(t, err)
 	require.NoError(t, store.CompleteTaskOwner(fx.runID, fx.producer.ID, TaskStatusSucceeded,
-		"success", "", "node-1", nil, nil, 1, 1, nil, exp))
+		"success", "", "node-1", nil, nil, 1, 1, 0, nil, exp))
 
 	var shardRows []models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", fx.runID, fx.shard.ID).Find(&shardRows).Error)
@@ -210,6 +210,77 @@ func TestOwnerManager_CompletionAfterDurableExpansionAdoptsPersistedRows(t *test
 		require.True(t, rowIDs[dt.TaskRunID],
 			"adopted instance ids must be the DURABLE ones: %s", dt.TaskRunID)
 	}
+}
+
+// TestOwnerManager_PersistedExpansionReadFailurePublishesNothing covers the
+// commit-landed/no-ack path when the required rehydration read itself fails.
+// Proceeding best-effort would terminalize the catalog producer while leaving
+// the stale catalog template ready; that ID cannot be claimed once N durable
+// instance rows exist. The owner must answer retryable and leave its published
+// state untouched until every row/catalog read succeeds.
+func TestOwnerManager_PersistedExpansionReadFailurePublishesNothing(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	fx := seedFanOutProducerRun(t, db, store)
+	partitions := []pkgtask.Partition{{Key: "a"}, {Key: "b"}}
+
+	exp, err := store.PlanFanOutExpansion(fx.runID, fx.producer.ID, partitions)
+	require.NoError(t, err)
+	require.NoError(t, store.CompleteTaskOwner(fx.runID, fx.producer.ID, TaskStatusSucceeded,
+		"success", "", "node-1", nil, nil, 1, 1, 0, nil, exp))
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(fx.runID, 1))
+	mgr.MarkDispatched(fx.runID, fx.producer.ID, "node-1", 1, 0)
+	mgr.adoptPersistedExpansionFn = func(*RunState, uuid.UUID) error {
+		return errors.New("injected persisted-expansion read failure")
+	}
+
+	res, err := mgr.CompleteInstance(fx.runID, fx.producer.ID, uuid.Nil, TaskStatusSucceeded,
+		"success", "", "node-1", nil, nil, partitions)
+	require.ErrorContains(t, err, "injected persisted-expansion read failure")
+	require.True(t, res.Owned)
+	or, ok := mgr.get(fx.runID)
+	require.True(t, ok)
+	producerState, known := or.state.TaskState(fx.producer.ID)
+	require.True(t, known)
+	require.False(t, IsTerminal(producerState.Status),
+		"a failed adoption read must not publish the staged producer completion")
+	require.Empty(t, mgr.ReadyForDispatch(fx.runID),
+		"the catalog template must not become dispatchable over durable instance rows")
+
+	mgr.adoptPersistedExpansionFn = nil
+	res, err = mgr.CompleteInstance(fx.runID, fx.producer.ID, uuid.Nil, TaskStatusSucceeded,
+		"success", "", "node-1", nil, nil, partitions)
+	require.NoError(t, err)
+	require.True(t, res.Owned)
+	require.Len(t, mgr.ReadyForDispatch(fx.runID), 2,
+		"the identical redelivery must converge once rehydration reads succeed")
+}
+
+func TestOwnerManager_RecoveryMetadataReadFailurePublishesNothing(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db).WithLeaseStore(NewLeaseStore(db))
+	runID, _, _ := seedTwoTaskRun(t, db, store, "")
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	mgr.recoveryJobIDFn = func(uuid.UUID) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("injected JobRun metadata read failure")
+	}
+
+	_, err := mgr.RecoverVersion(runID, LeaseVersion{Generation: 1, StateRevision: 1})
+	require.ErrorContains(t, err, "injected JobRun metadata read failure")
+	require.False(t, mgr.Owns(runID),
+		"a partial recovery must not publish a candidate without its catalog metadata")
+	checkpoint, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Nil(t, checkpoint, "a rejected recovery must not checkpoint partial state")
+
+	mgr.recoveryJobIDFn = nil
+	_, err = mgr.RecoverVersion(runID, LeaseVersion{Generation: 1, StateRevision: 1})
+	require.NoError(t, err)
+	require.True(t, mgr.Owns(runID))
 }
 
 // TestRunState_CloneIsolatesEveryMutation is the unit-level guarantee the staged

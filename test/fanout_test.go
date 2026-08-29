@@ -535,12 +535,19 @@ steps:
 
 	s.Require().Equal(http.StatusOK, resp.StatusCode,
 		"retrying a failed instance in a distributed lane must be accepted: %s", body)
+	var accepted struct {
+		TaskRunID string `json:"task_run_id"`
+		Status    string `json:"status"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &accepted))
+	s.Equal("pending", accepted.Status,
+		"the transactional response must describe the reset row before asynchronous re-execution")
+	s.Equal(failRow.TaskRunID, accepted.TaskRunID)
 
-	// The reset happens inside the request, so this half is deterministic in
-	// every distributed configuration regardless of dispatch cadence.
+	// The resume goroutine starts before the response is written, so a subsequent
+	// GET may already observe pending, running, or the command's second failure.
+	// Identity and sibling isolation remain deterministic across that race.
 	after := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
-	s.NotEqual("failed", after["fail"].Status,
-		"a 200 retry must reset the instance for another attempt, got %q", after["fail"].Status)
 	s.Equal(failRow.TaskRunID, after["fail"].TaskRunID,
 		"a retry reuses the instance row; a new row would orphan its logs and receipts")
 	s.Equal(keepRow.Status, after["keep"].Status, "retrying `fail` must not disturb its sibling")
@@ -564,6 +571,14 @@ steps:
 		}
 		time.Sleep(fanOutPollInterval)
 	}
+
+	// The task row becoming terminal is not enough: partition retry reopens the
+	// existing JobRun, and the resumed waiter must finalize that aggregate again
+	// (and own its callback lifecycle). Without the waiter, SQL-owner mode leaves
+	// the run stuck `running` even though the retried partition finished.
+	retriedRun := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Equal("failed", retriedRun.Status,
+		"the command still fails for partition `fail`, so the reopened JobRun must be finalized as failed")
 }
 
 // ---------------------------------------------------------------------------

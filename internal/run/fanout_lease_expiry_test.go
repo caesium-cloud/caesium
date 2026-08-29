@@ -124,11 +124,13 @@ func TestFanOutLeaseExpiryMidGroupReDispatchesOnlyThatInstance(t *testing.T) {
 
 	// Put the gate in flight up front so it never appears in the poll results
 	// below; it is completed last, after the group has resolved.
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, gate.ID, "worker-gate", generation, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, gate.ID, "worker-gate", generation, 1, time.Minute, false)
+	require.NoError(t, err)
 
 	// The producer runs and completes through the claimed (distributed) path,
 	// expanding the group inside its own completion transaction.
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, f.producer.ID, "worker-1", generation, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, f.producer.ID, "worker-1", generation, 1, time.Minute, false)
+	require.NoError(t, err)
 	require.NoError(t, f.store.CompleteTaskClaimedWithPartitions(
 		f.runID, f.producer.ID, "success", "worker-1", nil, nil, strParts("a", "b", "c")))
 
@@ -141,10 +143,12 @@ func TestFanOutLeaseExpiryMidGroupReDispatchesOnlyThatInstance(t *testing.T) {
 	c := instanceRowByKey(t, f, "c")
 
 	// maxParallel is enforced in the claim itself, so only two partitions run.
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, a.ID, "worker-1", generation, time.Minute, false))
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, b.ID, "worker-1", generation, time.Minute, false))
-	require.ErrorIs(t,
-		f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-1", generation, time.Minute, false),
+	_, err = f.store.ClaimTaskForDispatch(f.runID, a.ID, "worker-1", generation, 1, time.Minute, false)
+	require.NoError(t, err)
+	_, err = f.store.ClaimTaskForDispatch(f.runID, b.ID, "worker-1", generation, 1, time.Minute, false)
+	require.NoError(t, err)
+	_, err = f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-1", generation, 1, time.Minute, false)
+	require.ErrorIs(t, err,
 		ErrTaskClaimMismatch, "fanOut.maxParallel must refuse a third concurrent instance")
 
 	// Partition a finishes, freeing a slot for c on a second worker.
@@ -154,7 +158,8 @@ func TestFanOutLeaseExpiryMidGroupReDispatchesOnlyThatInstance(t *testing.T) {
 	require.Equal(t, string(TaskStatusSucceeded), aAfterSuccess.Status)
 	require.NotNil(t, aAfterSuccess.CompletedAt)
 
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-2", generation, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-2", generation, 1, time.Minute, false)
+	require.NoError(t, err)
 
 	// ...and worker-2 dies mid-partition.
 	killWorkerHoldingInstanceClaim(t, f, c.ID)
@@ -202,7 +207,8 @@ func TestFanOutLeaseExpiryMidGroupReDispatchesOnlyThatInstance(t *testing.T) {
 	require.Len(t, pending, 1)
 	require.Equal(t, c.ID, pending[0].ID, "only the reclaimed instance is re-dispatched")
 
-	require.NoError(t, f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-3", generation, time.Minute, false))
+	_, err = f.store.ClaimTaskForDispatch(f.runID, c.ID, "worker-3", generation, 1, time.Minute, false)
+	require.NoError(t, err)
 	require.Equal(t, 2, instanceRowByKey(t, f, "c").ClaimAttempt,
 		"the reclaimed instance is claimed a second time — this is a re-dispatch, not a resume")
 

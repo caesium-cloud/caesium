@@ -26,4 +26,10 @@ type RunLease struct {
 	// coordination writes include AND owner_generation = <generation> so
 	// stale-owner writes are rejected at the DB layer.
 	Generation int64 `gorm:"not null" json:"generation"`
+
+	// StateRevision is incremented by every retry transaction that rewrites the
+	// run's durable task state. Unlike Generation it does not transfer ownership:
+	// healthy workers dispatched by the same owner keep a valid generation while
+	// the owner's in-memory cache is forced to rebuild from the rewritten rows.
+	StateRevision int64 `gorm:"not null;default:1" json:"state_revision"`
 }

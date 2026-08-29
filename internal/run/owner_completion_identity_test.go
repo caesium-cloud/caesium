@@ -51,7 +51,8 @@ func newOwnerIdentityFixture(t *testing.T, fanned bool) *ownerIdentityFixture {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
-	store := NewStore(db)
+	leases := NewLeaseStore(db)
+	store := NewStore(db).WithLeaseStore(leases)
 
 	now := time.Now().UTC()
 	trigger := &models.Trigger{ID: uuid.New(), Alias: "oid-trig-" + uuid.NewString()[:8], Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
@@ -148,6 +149,84 @@ func TestOwnerCompleteInstanceAcceptsUnfannedTaskRunID(t *testing.T) {
 	var instances []models.TaskRun
 	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", f.runID, f.process.ID).Find(&instances).Error)
 	require.Len(t, instances, 3, "the group must be materialized in the database, not only in memory")
+}
+
+func TestOwnerExactAttemptTerminalRedeliveryRequiresIdenticalEnvelope(t *testing.T) {
+	f := newOwnerIdentityFixture(t, true)
+	const claimAttempt = 7
+	f.producer.Type = "branch"
+	require.NoError(t, f.db.Model(&models.Task{}).
+		Where("id = ?", f.producer.ID).
+		Update("type", f.producer.Type).Error)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", f.rowID[f.producer.ID]).
+		Updates(map[string]any{
+			"status":           string(TaskStatusRunning),
+			"claimed_by":       "node-1",
+			"claim_attempt":    claimAttempt,
+			"owner_generation": int64(1),
+		}).Error)
+
+	parts := []pkgtask.Partition{{Key: "a"}, {Key: "b"}}
+	output := map[string]string{"manifest": "v1"}
+	branches := []string{"process"}
+	first, err := f.mgr.CompleteInstanceAttempt(
+		f.runID, f.producer.ID, f.rowID[f.producer.ID],
+		TaskStatusSucceeded, "success", "", "node-1", claimAttempt,
+		output, branches, parts,
+	)
+	require.NoError(t, err)
+	require.Len(t, first.Ready, 2)
+
+	var persisted models.TaskRun
+	require.NoError(t, f.db.First(&persisted, "id = ?", f.rowID[f.producer.ID]).Error)
+	require.Equal(t, string(TaskStatusSucceeded), persisted.Status)
+	require.Equal(t, claimAttempt, persisted.ClaimAttempt)
+	require.Positive(t, persisted.TerminalSequence)
+	require.NotEmpty(t, persisted.Partitions)
+	require.JSONEq(t, `["process"]`, string(persisted.BranchSelections))
+	sequence := persisted.TerminalSequence
+	var eventsAfterFirst int64
+	require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsAfterFirst).Error)
+
+	_, err = f.mgr.CompleteInstanceAttempt(
+		f.runID, f.producer.ID, f.rowID[f.producer.ID],
+		TaskStatusSucceeded, "success", "", "node-1", claimAttempt,
+		output, branches, parts,
+	)
+	require.NoError(t, err, "an identical exact-attempt redelivery must be idempotently accepted")
+	var afterRedelivery models.TaskRun
+	require.NoError(t, f.db.First(&afterRedelivery, "id = ?", f.rowID[f.producer.ID]).Error)
+	require.Equal(t, sequence, afterRedelivery.TerminalSequence)
+	var eventsAfterRedelivery int64
+	require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsAfterRedelivery).Error)
+	require.Equal(t, eventsAfterFirst, eventsAfterRedelivery,
+		"terminal redelivery must not emit duplicate events")
+
+	for name, changed := range map[string]struct {
+		output     map[string]string
+		branches   []string
+		partitions []pkgtask.Partition
+	}{
+		"output":     {output: map[string]string{"manifest": "changed"}, branches: branches, partitions: parts},
+		"branches":   {output: output, branches: []string{}, partitions: parts},
+		"partitions": {output: output, branches: branches, partitions: []pkgtask.Partition{{Key: "a"}, {Key: "c"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, mismatchErr := f.mgr.CompleteInstanceAttempt(
+				f.runID, f.producer.ID, f.rowID[f.producer.ID],
+				TaskStatusSucceeded, "success", "", "node-1", claimAttempt,
+				changed.output, changed.branches, changed.partitions,
+			)
+			require.ErrorIs(t, mismatchErr, ErrTaskClaimMismatch)
+			var current models.TaskRun
+			require.NoError(t, f.db.First(&current, "id = ?", f.rowID[f.producer.ID]).Error)
+			require.Equal(t, sequence, current.TerminalSequence)
+			require.JSONEq(t, string(afterRedelivery.Output), string(current.Output))
+			require.JSONEq(t, string(afterRedelivery.BranchSelections), string(current.BranchSelections))
+			require.JSONEq(t, string(afterRedelivery.Partitions), string(current.Partitions))
+		})
+	}
 }
 
 // TestOwnerCompleteInstanceUnfannedRunReachesCompletion is the same defect at
@@ -334,19 +413,8 @@ func TestOwnerCompleteInstanceDerivesFailureFromResult(t *testing.T) {
 	}
 }
 
-// TestOwnerStateIsInvalidatedByRetryFromFailure pins the third stall: a RETRIED
-// run must not be dispatched from the snapshot taken before it was re-opened.
-//
-// When a run completes the owner drops its state — but the dispatch loop
-// recovers any run whose lease it still holds, so a completed run is put back
-// into the map with a state that says `complete`. RetryFromFailure then resets
-// the rows to pending, and because dispatchRunInMemory only rebuilds a run it
-// does NOT already own, that stale state is never refreshed: ReadyForDispatch
-// returns nothing forever. The pull-path claimer will not rescue it either — the
-// run still holds a live lease, and liveLeaseGuardSQL defers to the owner.
-func TestOwnerStateIsInvalidatedByRetryFromFailure(t *testing.T) {
-	f := newOwnerIdentityFixture(t, false)
-
+func completeOwnerForRetry(t *testing.T, f *ownerIdentityFixture) {
+	t.Helper()
 	// Drive the run to a terminal failure through the owner, exactly as a run
 	// would reach one in production.
 	_, err := f.mgr.CompleteInstance(
@@ -360,21 +428,76 @@ func TestOwnerStateIsInvalidatedByRetryFromFailure(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, res.Complete)
+}
+
+func completeAndRecoverOwnerForRetry(t *testing.T, f *ownerIdentityFixture) *ownedRun {
+	t.Helper()
+	completeOwnerForRetry(t, f)
 
 	// The dispatch loop still holds the run's lease, so it recovers the finished
 	// run and republishes a `complete` state into the manager.
-	_, err = f.mgr.Recover(f.runID, 1)
+	_, err := f.mgr.Recover(f.runID, 1)
 	require.NoError(t, err)
 	require.True(t, f.mgr.Owns(f.runID), "the loop's recover re-publishes the completed run")
 	require.Empty(t, f.mgr.ReadyForDispatch(f.runID))
+	or, ok := f.mgr.get(f.runID)
+	require.True(t, ok)
+	return or
+}
+
+type ownerCompletionCall struct {
+	result CompleteResult
+	err    error
+}
+
+// TestOwnerStateIsInvalidatedByRetryFromFailure pins both the original retry
+// stall and the lookup/delete race. A real completion redelivery captures the
+// old *ownedRun before invalidation, but does not acquire its lock until after
+// the reset committed. The post-lock validity check must route it to the SQL
+// fallback rather than letting it re-persist the terminal row/checkpoint.
+func TestOwnerStateIsInvalidatedByRetryFromFailure(t *testing.T) {
+	f := newOwnerIdentityFixture(t, false)
+	completeAndRecoverOwnerForRetry(t, f)
+
+	lookupDone := make(chan struct{})
+	allowLock := make(chan struct{})
+	f.mgr.beforeRunLock = func(runID uuid.UUID) {
+		if runID == f.runID {
+			close(lookupDone)
+			<-allowLock
+		}
+	}
+	completionDone := make(chan ownerCompletionCall, 1)
+	go func() {
+		result, err := f.mgr.CompleteInstance(
+			f.runID, f.process.ID, f.rowID[f.process.ID],
+			TaskStatusFailed, "failure", "late redelivery", "node-1", nil, nil, nil,
+		)
+		completionDone <- ownerCompletionCall{result: result, err: err}
+	}()
+	<-lookupDone
 
 	reopened, err := f.store.RetryFromFailure(f.runID)
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, reopened.Status)
+	close(allowLock)
+	completion := <-completionDone
+	f.mgr.beforeRunLock = nil
+	require.NoError(t, completion.err)
+	require.False(t, completion.result.Owned,
+		"a completion that captured the old state must be fenced after taking its lock")
 
 	require.False(t, f.mgr.Owns(f.runID),
 		"a re-opened run must not keep the snapshot that called it complete; "+
 			"the dispatch loop only rebuilds a run it does not own")
+	checkpoint, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.Nil(t, checkpoint, "the fenced completion must not recreate a terminal checkpoint")
+	var resetRow models.TaskRun
+	require.NoError(t, f.db.First(&resetRow, "id = ?", f.rowID[f.process.ID]).Error)
+	require.Equal(t, string(TaskStatusPending), resetRow.Status,
+		"the fenced completion must not re-persist a terminal row after the reset")
+	require.Empty(t, resetRow.Error)
 
 	// …and the rebuild sees the reset row, so the run is dispatchable again.
 	_, err = f.mgr.Recover(f.runID, 1)
@@ -382,4 +505,174 @@ func TestOwnerStateIsInvalidatedByRetryFromFailure(t *testing.T) {
 	ready := f.mgr.ReadyForDispatch(f.runID)
 	require.Len(t, ready, 1, "the retried task must be dispatchable after the rebuild")
 	require.Equal(t, f.process.ID, ready[0].TaskID)
+}
+
+// TestRecoverStartedBeforeRetryCannotPublishStaleState pins the publication
+// race around the whole recovery read window. Recover loads the terminal
+// checkpoint/rows and pauses. Retry then begins and commits in full, including
+// tombstone removal on another replica. When the stale candidate resumes, the
+// durable state revision must reject both publication and Force.
+func TestRecoverStartedBeforeRetryCannotPublishStaleState(t *testing.T) {
+	f := newOwnerIdentityFixture(t, false)
+	completeOwnerForRetry(t, f)
+	require.False(t, f.mgr.Owns(f.runID))
+	checkpointBefore, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.NotNil(t, checkpointBefore)
+
+	readDone := make(chan struct{})
+	allowPublish := make(chan struct{})
+	f.mgr.afterRecoveryRead = func(runID uuid.UUID) {
+		if runID == f.runID {
+			close(readDone)
+			<-allowPublish
+		}
+	}
+	type recoveryCall struct {
+		result RecoveryResult
+		err    error
+	}
+	recoveryDone := make(chan recoveryCall, 1)
+	version := LeaseVersion{Generation: 1, StateRevision: 1}
+	go func() {
+		result, err := f.mgr.RecoverVersion(f.runID, version)
+		recoveryDone <- recoveryCall{result: result, err: err}
+	}()
+	<-readDone
+
+	// A different replica has its own process-local cache/guard but shares the
+	// durable lease and run rows.
+	remoteLease := NewLeaseStore(f.db)
+	remoteStore := NewStore(f.db).WithLeaseStore(remoteLease)
+	reopened, err := remoteStore.RetryFromFailure(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, reopened.Status)
+	require.False(t, f.mgr.Owns(f.runID))
+	checkpointAfterRetry, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.Nil(t, checkpointAfterRetry)
+
+	// Model work claimed after the retry committed but before the pre-retry
+	// candidate resumes. A rejected recovery used to run ResetInFlightTasks
+	// before validating its epoch, silently stealing this current claim.
+	claimExpiry := time.Now().UTC().Add(time.Minute)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", f.rowID[f.process.ID]).
+		Updates(map[string]any{
+			"status":           string(TaskStatusRunning),
+			"claimed_by":       "post-retry-worker",
+			"claim_expires_at": claimExpiry,
+		}).Error)
+
+	close(allowPublish)
+	recovery := <-recoveryDone
+	f.mgr.afterRecoveryRead = nil
+	require.ErrorIs(t, recovery.err, ErrOwnerStateChanged)
+	require.False(t, f.mgr.Owns(f.runID),
+		"a recovery candidate older than the retry generation must not publish")
+	checkpointAfterRecovery, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.Nil(t, checkpointAfterRecovery,
+		"a rejected stale recovery must not Force its terminal snapshot")
+	var claimedRow models.TaskRun
+	require.NoError(t, f.db.First(&claimedRow, "id = ?", f.rowID[f.process.ID]).Error)
+	require.Equal(t, string(TaskStatusRunning), claimedRow.Status,
+		"a stale rejected recovery must not reset current post-retry work")
+	require.Equal(t, "post-retry-worker", claimedRow.ClaimedBy)
+
+	// A new candidate captures the post-retry generation and sees the reset row.
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", f.rowID[f.process.ID]).Updates(retryResetColumns()).Error)
+	_, err = f.mgr.Recover(f.runID, 1)
+	require.NoError(t, err)
+	ready := f.mgr.ReadyForDispatch(f.runID)
+	require.Len(t, ready, 1)
+	require.Equal(t, f.process.ID, ready[0].TaskID)
+}
+
+// TestRetryWaitsForActiveOwnerCompletion covers the stronger ordering case: a
+// real completion already holds ownedRun.mu and has passed the post-lock check
+// when retry begins. The tombstone must publish immediately, Recover must be
+// unable to publish/write while it is present, and the reset must wait until the
+// completion's durable terminal write/finalization has landed so it wins last.
+func TestRetryWaitsForActiveOwnerCompletion(t *testing.T) {
+	f := newOwnerIdentityFixture(t, false)
+	or := completeAndRecoverOwnerForRetry(t, f)
+	checkpointBefore, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.NotNil(t, checkpointBefore)
+
+	active := make(chan struct{})
+	allowCompletion := make(chan struct{})
+	f.mgr.afterRunLock = func(runID uuid.UUID) {
+		if runID == f.runID {
+			close(active)
+			<-allowCompletion
+		}
+	}
+	completionDone := make(chan ownerCompletionCall, 1)
+	go func() {
+		result, err := f.mgr.CompleteInstance(
+			f.runID, f.process.ID, f.rowID[f.process.ID],
+			TaskStatusFailed, "failure", "late active completion", "node-1", nil, nil, nil,
+		)
+		completionDone <- ownerCompletionCall{result: result, err: err}
+	}()
+	<-active
+
+	type retryCall struct {
+		run *JobRun
+		err error
+	}
+	retryDone := make(chan retryCall, 1)
+	go func() {
+		run, err := f.store.RetryFromFailure(f.runID)
+		retryDone <- retryCall{run: run, err: err}
+	}()
+	require.Eventually(t, func() bool {
+		f.mgr.mu.Lock()
+		defer f.mgr.mu.Unlock()
+		_, ok := f.mgr.invalidating[f.runID]
+		return ok
+	}, time.Second, time.Millisecond, "retry must publish its tombstone before waiting for the active completion")
+	select {
+	case result := <-retryDone:
+		t.Fatalf("retry returned before the active owner mutation released its lock: %+v", result)
+	default:
+	}
+
+	// The tombstone remains published while the active owner mutation drains;
+	// another local Recover waits behind this same per-run guard and therefore
+	// cannot publish or Force a replacement in the interval.
+	f.mgr.mu.Lock()
+	published := f.mgr.runs[f.runID]
+	f.mgr.mu.Unlock()
+	require.Same(t, or, published, "Recover must not replace state during invalidation")
+	checkpointDuring, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.NotNil(t, checkpointDuring)
+	require.Equal(t, checkpointBefore.OwnerGeneration, checkpointDuring.OwnerGeneration,
+		"a rejected Recover must not overwrite the checkpoint before put")
+	require.True(t, checkpointBefore.CreatedAt.Equal(checkpointDuring.CreatedAt),
+		"a rejected Recover must not rewrite the checkpoint during invalidation")
+
+	close(allowCompletion)
+	completion := <-completionDone
+	f.mgr.afterRunLock = nil
+	require.NoError(t, completion.err)
+	require.True(t, completion.result.Owned)
+	retried := <-retryDone
+	require.NoError(t, retried.err)
+	require.NotNil(t, retried.run)
+	require.Equal(t, StatusRunning, retried.run.Status,
+		"the reset must commit after the already-active finalizer")
+
+	var resetRow models.TaskRun
+	require.NoError(t, f.db.First(&resetRow, "id = ?", f.rowID[f.process.ID]).Error)
+	require.Equal(t, string(TaskStatusPending), resetRow.Status)
+	require.Empty(t, resetRow.Error)
+	checkpointAfter, err := f.store.LatestFullCheckpoint(f.runID)
+	require.NoError(t, err)
+	require.Nil(t, checkpointAfter, "the guarded reset must delete the active completion's checkpoint")
+	require.False(t, f.mgr.Owns(f.runID), "the completed invalidation must retire the old state")
 }

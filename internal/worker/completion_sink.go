@@ -56,6 +56,16 @@ type CompletionSink interface {
 	Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error
 }
 
+// continuingFailureSink is implemented only by the SQL-local sink. It makes a
+// failed exact claim and its taskFailurePolicy=continue successor resolution
+// one durable transaction. The owner sink deliberately omits it because the
+// owner applies DAG transitions itself (in memory) or its SQL handler is
+// configured with the same global failure policy.
+type continuingFailureSink interface {
+	SucceededWithPartitionsContinue(ctx context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error
+	FailedContinue(ctx context.Context, taskRun *models.TaskRun, failure error) error
+}
+
 // cachedPartitionSink is the optional extension a completion sink implements
 // when it can carry a fan-out producer's partition list on the CACHE-HIT route.
 // It mirrors SucceededWithPartitions and exists for the same reason: a cache hit
@@ -66,9 +76,10 @@ type cachedPartitionSink interface {
 	CachedWithPartitions(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error
 }
 
-// localSink is the default sink used by ClaimNext'd tasks.  It calls the same
-// run.Store.*Claimed methods the executor called inline before the sink
-// abstraction existed, so the pull path is byte-identical to Phase 1.
+// localSink is the default sink used by ClaimNext'd tasks. ClaimNext returns the
+// incremented durable ClaimAttempt, so every terminal route binds to that exact
+// claim instead of trusting claimed_by alone (which is vulnerable to a
+// same-node reclaim ABA).
 type localSink struct {
 	store *run.Store
 }
@@ -83,11 +94,24 @@ func (s *localSink) Succeeded(_ context.Context, taskRun *models.TaskRun, result
 }
 
 func (s *localSink) SucceededWithPartitions(_ context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
-	return s.store.CompleteTaskClaimedWithPartitions(taskRun.JobRunID, taskRun.ID, result, taskRun.ClaimedBy, outputs, branchSelections, partitions)
+	return s.store.CompleteTaskClaimedAttemptWithPartitions(taskRun.JobRunID, taskRun.ID, result, taskRun.ClaimedBy, taskRun.ClaimAttempt, outputs, branchSelections, partitions)
 }
 
 func (s *localSink) Failed(_ context.Context, taskRun *models.TaskRun, failure error) error {
-	return s.store.FailTaskClaimed(taskRun.JobRunID, taskRun.ID, failure, taskRun.ClaimedBy)
+	return s.store.FailTaskClaimedAttempt(taskRun.JobRunID, taskRun.ID, failure, taskRun.ClaimedBy, taskRun.ClaimAttempt)
+}
+
+func (s *localSink) SucceededWithPartitionsContinue(_ context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
+	return s.store.CompleteTaskClaimedAttemptWithPartitionsContinue(
+		taskRun.JobRunID, taskRun.ID, result, taskRun.ClaimedBy,
+		taskRun.ClaimAttempt, outputs, branchSelections, partitions,
+	)
+}
+
+func (s *localSink) FailedContinue(_ context.Context, taskRun *models.TaskRun, failure error) error {
+	return s.store.FailTaskClaimedAttemptContinue(
+		taskRun.JobRunID, taskRun.ID, failure, taskRun.ClaimedBy, taskRun.ClaimAttempt,
+	)
 }
 
 func (s *localSink) Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
@@ -95,14 +119,10 @@ func (s *localSink) Cached(ctx context.Context, taskRun *models.TaskRun, source 
 }
 
 func (s *localSink) CachedWithPartitions(_ context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
-	if len(partitions) > 0 {
-		// A cached fan-out producer must still expand its group: the store
-		// persists the hit and the partition list in one transaction. Called
-		// directly (not via an optional interface) so dropping the store method
-		// is a build error rather than a silently un-expanded group.
-		return s.store.CacheHitTaskClaimedWithPartitions(taskRun.JobRunID, taskRun.ID, source, result, taskRun.ClaimedBy, outputs, branchSelections, partitions)
-	}
-	return s.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.ID, source, result, taskRun.ClaimedBy, outputs, branchSelections)
+	// Called directly (not via an optional interface) so dropping the exact
+	// attempt + partition store method is a build error rather than silently
+	// losing either the claim fence or fan-out expansion.
+	return s.store.CacheHitTaskClaimedAttemptWithPartitions(taskRun.JobRunID, taskRun.ID, source, result, taskRun.ClaimedBy, taskRun.ClaimAttempt, outputs, branchSelections, partitions)
 }
 
 // completePoster is the seam the owner sink uses to reach the owner's

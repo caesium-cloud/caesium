@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -219,6 +220,89 @@ func (s *StoreMetricsSuite) TestCompleteResumedRunDoesNotDecrementGauge() {
 	// Counter should still record the completion.
 	ctr := s.counterValue(metrics.JobRunsTotal, jobID.String(), "succeeded")
 	s.Equal(float64(1), ctr)
+}
+
+func (s *StoreMetricsSuite) TestAlreadyTerminalCompleteRetiresLocalActiveGaugeOnce() {
+	jobID := uuid.New()
+	runRecord, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	// A different Store instance wins the terminal write. It did not start the
+	// run, so it cannot retire this process-local Store's active-run entry.
+	remote := NewStore(s.db)
+	s.Require().NoError(remote.Complete(runRecord.ID, nil))
+	s.Equal(float64(1), s.gaugeValue(metrics.JobsActive, jobID.String()))
+	s.Equal(float64(1), s.counterValue(metrics.JobRunsTotal, jobID.String(), "succeeded"))
+	count, _ := s.histogramValues(metrics.JobRunDurationSeconds, jobID.String(), "succeeded")
+	s.Equal(uint64(1), count)
+
+	// The originating Store observes the already-terminal row and retires only
+	// its own gauge bookkeeping. Replays stay idempotent for every metric.
+	s.Require().NoError(s.store.Complete(runRecord.ID, nil))
+	s.Require().NoError(s.store.Complete(runRecord.ID, nil))
+	s.Equal(float64(0), s.gaugeValue(metrics.JobsActive, jobID.String()))
+	s.Equal(float64(1), s.counterValue(metrics.JobRunsTotal, jobID.String(), "succeeded"))
+	count, _ = s.histogramValues(metrics.JobRunDurationSeconds, jobID.String(), "succeeded")
+	s.Equal(uint64(1), count)
+}
+
+func (s *StoreMetricsSuite) TestRetryTracksAndRetiresEachStateRevisionOnSameStore() {
+	leases := NewLeaseStore(s.db)
+	s.store.WithLeaseStore(leases)
+	jobID := uuid.New()
+	runRecord, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+	lease, err := leases.GetLease(context.Background(), runRecord.ID)
+	s.Require().NoError(err)
+	s.Equal(int64(1), lease.StateRevision)
+
+	// A remote finalizer closes revision 1 without owning this Store's local
+	// active-gauge entry. Retrying on the originating Store creates a distinct
+	// revision-2 entry instead of overwriting revision 1.
+	remote := NewStore(s.db).WithLeaseStore(NewLeaseStore(s.db))
+	disposition, err := remote.CompleteAtStateRevision(runRecord.ID, fmt.Errorf("rev1 failed"), 1)
+	s.Require().NoError(err)
+	s.Equal(CompletionFinalized, disposition)
+	_, err = s.store.RetryFromFailure(runRecord.ID)
+	s.Require().NoError(err)
+	s.Equal(float64(2), s.gaugeValue(metrics.JobsActive, jobID.String()))
+
+	disposition, err = s.store.CompleteAtStateRevision(runRecord.ID, nil, 1)
+	s.Require().NoError(err)
+	s.Equal(CompletionSuperseded, disposition)
+	s.Equal(float64(1), s.gaugeValue(metrics.JobsActive, jobID.String()),
+		"stale revision 1 must retire only its own epoch")
+
+	disposition, err = s.store.CompleteAtStateRevision(runRecord.ID, nil, 2)
+	s.Require().NoError(err)
+	s.Equal(CompletionFinalized, disposition)
+	s.Equal(float64(0), s.gaugeValue(metrics.JobsActive, jobID.String()))
+}
+
+func (s *StoreMetricsSuite) TestCrossStoreStaleWaiterRetiresOnlyItsRevision() {
+	leases := NewLeaseStore(s.db)
+	first := s.store.WithLeaseStore(leases)
+	second := NewStore(s.db).WithLeaseStore(NewLeaseStore(s.db))
+	jobID := uuid.New()
+	runRecord, err := first.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	disposition, err := second.CompleteAtStateRevision(runRecord.ID, fmt.Errorf("rev1 failed"), 1)
+	s.Require().NoError(err)
+	s.Equal(CompletionFinalized, disposition)
+	_, err = second.RetryFromFailure(runRecord.ID)
+	s.Require().NoError(err)
+	s.Equal(float64(2), s.gaugeValue(metrics.JobsActive, jobID.String()))
+
+	disposition, err = first.CompleteAtStateRevision(runRecord.ID, nil, 1)
+	s.Require().NoError(err)
+	s.Equal(CompletionSuperseded, disposition)
+	s.Equal(float64(1), s.gaugeValue(metrics.JobsActive, jobID.String()))
+
+	disposition, err = second.CompleteAtStateRevision(runRecord.ID, nil, 2)
+	s.Require().NoError(err)
+	s.Equal(CompletionFinalized, disposition)
+	s.Equal(float64(0), s.gaugeValue(metrics.JobsActive, jobID.String()))
 }
 
 func (s *StoreMetricsSuite) TestDBWritesTotalIncrements() {

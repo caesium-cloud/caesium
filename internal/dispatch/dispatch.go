@@ -47,6 +47,7 @@ const (
 	ReasonNotOwner        = "not_owner"
 	ReasonMissingRun      = "missing_run"
 	ReasonMalformed       = "malformed"
+	ReasonTaskIdentity    = "task_identity"
 	// ReasonContention labels caesium_complete_retryable_total when the owner
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
@@ -62,25 +63,25 @@ const (
 
 // Internal dispatch protocol versioning.
 //
-// The owner and the worker are separate processes upgraded separately.  Two
-// mixed-version directions matter, and only one is still guarded:
+// The owner and the worker are separate processes upgraded separately. Mixed
+// protocol versions are unsupported while distributed traffic is live:
 //
 //   - An OLD owner dispatching to this build omits TaskRunID; for a fan-out
 //     group that is already expanded its catalog id names N rows.
 //     HandleDispatch fails that closed with 409 ReasonAmbiguousTask rather
 //     than resolving it to an arbitrary sibling — see ClaimTaskForDispatch /
 //     ErrAmbiguousTaskRun.
-//   - A NEW owner dispatching to a PRE-v2 peer is NOT guarded: that peer
+//   - A NEW owner dispatching to a PRE-v3 peer is NOT guarded: that peer
 //     ignores the TaskRunID it does not understand and processes the catalog
-//     id.  The pre-flight capability probe that prevented this was removed in
-//     #358 on the premise that every deployed node speaks v2; a fleet that
-//     re-introduces a v1 node re-opens it.
+//     id and cannot enforce the revision/claim-attempt fences. Operators must
+//     drain distributed work and upgrade the fleet as one protocol unit.
 const (
 	// InternalProtocolVersion is the internal coordination protocol this build
 	// speaks.  Bumped when the wire contract gains a field a peer must
 	// understand rather than merely tolerate.  v1 was catalog-addressed
-	// dispatch; v2 added instance-addressed dispatch.
-	InternalProtocolVersion = 2
+	// dispatch; v2 added instance-addressed dispatch; v3 requires the durable
+	// owner revision on dispatch and exact claim identity on completion.
+	InternalProtocolVersion = 3
 )
 
 // CapabilitiesResponse is the body of GET /internal/capabilities: what this node
@@ -188,6 +189,7 @@ type DispatchRequest struct {
 	// ambiguity when more than one instance exists.
 	TaskRunID       uuid.UUID `json:"task_run_id,omitempty"`
 	OwnerGeneration int64     `json:"owner_generation"`
+	StateRevision   int64     `json:"state_revision,omitempty"`
 	Attempt         int       `json:"attempt"`
 	WorkerNode      string    `json:"worker_node"`
 	// OwnerBaseURL is the owner's own HTTP API base URL
@@ -202,8 +204,11 @@ type DispatchRequest struct {
 // CompleteRequest is the envelope sent by a worker back to the owner when a
 // task execution finishes.
 type CompleteRequest struct {
-	RunID           uuid.UUID         `json:"run_id"`
-	TaskID          uuid.UUID         `json:"task_id"`
+	RunID  uuid.UUID `json:"run_id"`
+	TaskID uuid.UUID `json:"task_id"`
+	// TaskRunID is mandatory in protocol v3. Together with RunID and TaskID it
+	// identifies one immutable execution row; receivers reject a missing or
+	// mismatched tuple rather than guessing a sibling.
 	TaskRunID       uuid.UUID         `json:"task_run_id,omitempty"`
 	OwnerGeneration int64             `json:"owner_generation"`
 	Attempt         int               `json:"attempt"`
@@ -252,10 +257,10 @@ type InboundDispatch struct {
 
 // WorkerSubmitter is the seam the dispatch handler uses to hand an accepted
 // task to the local worker's execution pool.  The worker implementation
-// (worker.Worker.SubmitDispatched) enqueues the task onto its inbound channel
-// for the Run loop to drain onto the shared pool.  It returns an error when the
-// worker cannot accept the task (inbound buffer full or worker not running) so
-// HandleDispatch can roll back the claim and let the owner re-dispatch.
+// (worker.Worker.SubmitDispatched) reserves capacity and registers the task on
+// the shared pool before accepting it. It returns an error when the worker has
+// no capacity or is not running so HandleDispatch can roll back the claim and
+// let the owner re-dispatch.
 //
 // It is an interface so dispatch tests can inject a fake without standing up a
 // real worker + pool.
@@ -278,6 +283,10 @@ type Handler struct {
 	// completions through the in-memory DAG state instead of the SQL-advancement
 	// path.  Nil keeps the proven B2 path.
 	ownerManager *run.OwnerManager
+	// continueOnFailure mirrors CAESIUM_TASK_FAILURE_POLICY on the owner. In the
+	// SQL owner lane, a failed worker completion must resolve cross-step
+	// successors in the same transaction as its source row.
+	continueOnFailure bool
 }
 
 // NewHandler constructs a Handler.  store is the run.Store; leaseStore is the
@@ -305,6 +314,14 @@ func (h *Handler) WithWorkerSubmitter(s WorkerSubmitter) *Handler {
 // of the SQL-advancement path.  Returns the handler for chaining.
 func (h *Handler) WithOwnerManager(m *run.OwnerManager) *Handler {
 	h.ownerManager = m
+	return h
+}
+
+// WithTaskFailurePolicy configures the SQL owner completion path with the same
+// global failure policy used by workers. Owner-memory mode advances the DAG in
+// RunState and does not consult this flag.
+func (h *Handler) WithTaskFailurePolicy(policy string) *Handler {
+	h.continueOnFailure = strings.EqualFold(strings.TrimSpace(policy), "continue")
 	return h
 }
 
@@ -401,6 +418,16 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Protocol v3 makes StateRevision mandatory for owner pushes. Revision zero
+	// used to bypass the durable retry fence as a compatibility sentinel, so an
+	// old or malformed owner envelope must fail closed.
+	if req.OwnerGeneration > 0 && req.StateRevision <= 0 {
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonStaleGeneration,
+			Message: "dispatch is missing a positive owner state revision",
+		})
+		return
+	}
 
 	// Derive the claim TTL from the envelope's deadline so a tight per-task
 	// deadline doesn't leave a stale 5-min claim if execution finishes early.
@@ -429,7 +456,8 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// outstanding_predecessors counter is intentionally stale), so trust the
 	// owner's readiness decision rather than re-checking it here.
 	trustOwnerReadiness := h.ownerManager != nil
-	if err := h.store.ClaimTaskForDispatch(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
+	taskRun, err := h.store.ClaimTaskForDispatch(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration, req.StateRevision, ttl, trustOwnerReadiness)
+	if err != nil {
 		// An instance-blind dispatch for a group that is already expanded.  Only
 		// an owner that predates instance-addressed dispatch omits TaskRunID, and
 		// for an expanded group its catalog id names N rows, so the claim's
@@ -470,40 +498,19 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load the full task row to execute (image/command/engine/etc.).  If the
-	// row vanished between claim and load (reclaimed by another node in the
-	// race window), roll back and reject.
-	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, dispatchTaskRef(req), h.nodeID)
-	if err != nil {
-		h.rollbackClaim(req)
-		// Surface the underlying error rather than dropping it: a missing row is
-		// the expected reclaim race, but a transient DB/connection failure here
-		// looks identical from the fixed 409 body otherwise.
-		log.Warn("dispatch: could not load claimed task row; rolled back claim",
-			"run_id", req.RunID,
-			"task_id", req.TaskID,
-			"error", err,
-		)
-		writeJSON(w, http.StatusConflict, ErrorResponse{
-			Code:    ReasonTaskNotRunning,
-			Message: "claimed task row not found",
-		})
-		return
-	}
-
 	// Hand the claimed task to the local worker pool.  SubmitDispatched is
-	// non-blocking: it returns an error if the inbound buffer is full or the
-	// worker is not running.  On failure we MUST NOT leave the task
+	// non-blocking: it returns an error if there is no execution capacity or the
+	// worker is not running. On failure we MUST NOT leave the task
 	// claimed-but-orphaned — roll the claim back to pending so the owner's next
 	// dispatch tick re-dispatches it (here or to a peer), and reject with 409.
 	if submitErr := h.submitter.SubmitDispatched(InboundDispatch{
 		Task:            taskRun,
 		OwnerBaseURL:    req.OwnerBaseURL,
 		OwnerGeneration: req.OwnerGeneration,
-		Attempt:         req.Attempt,
+		Attempt:         taskRun.ClaimAttempt,
 		WorkerNode:      h.nodeID,
 	}); submitErr != nil {
-		h.rollbackClaim(req)
+		h.rollbackClaim(req, taskRun.ClaimAttempt)
 		log.Warn("dispatch: worker could not accept task; rolled back claim",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
@@ -521,8 +528,8 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 
 // dispatchTaskRef is the row this dispatch addresses.  The claim, the load, and
 // the rollback must all resolve the *same* row, and for a fanned step the
-// catalog task id names N of them: every one of ClaimTaskForDispatch /
-// LoadDispatchedTaskRun / ReleaseTaskClaim resolves through
+// catalog task id names N of them: both ClaimTaskForDispatch and
+// ReleaseTaskClaim resolve through
 // loadTaskRunByIDOrUnique, which rejects that ambiguity rather than picking a
 // sibling.  An older owner omits TaskRunID, and the catalog id then still names
 // exactly one row (the rolling-upgrade fallback).
@@ -533,12 +540,12 @@ func dispatchTaskRef(req DispatchRequest) uuid.UUID {
 	return req.TaskID
 }
 
-// rollbackClaim reverts a just-claimed task back to the dispatchable pending
+// rollbackClaim reverts this exact claim attempt back to the dispatchable pending
 // state so the owner re-dispatches it.  Logged but not surfaced to the caller
 // beyond the 409 the caller already returns; a failed rollback is rare (the
 // claim lease still expires and ClaimNext recovery covers it).
-func (h *Handler) rollbackClaim(req DispatchRequest) {
-	if err := h.store.ReleaseTaskClaim(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration); err != nil {
+func (h *Handler) rollbackClaim(req DispatchRequest, claimAttempt int) {
+	if err := h.store.ReleaseTaskClaim(req.RunID, dispatchTaskRef(req), h.nodeID, claimAttempt, req.OwnerGeneration, req.StateRevision); err != nil {
 		log.Error("dispatch: failed to roll back claim after worker rejected task",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
@@ -601,6 +608,22 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if req.Attempt <= 0 {
+		recordRejected(ReasonTaskNotRunning)
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonTaskNotRunning,
+			Message: "owner completion requires a positive claim attempt",
+		})
+		return
+	}
+	if req.RunID == uuid.Nil || req.TaskID == uuid.Nil || req.TaskRunID == uuid.Nil {
+		recordRejected(ReasonTaskIdentity)
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonTaskIdentity,
+			Message: "completion requires run_id, task_id, and task_run_id",
+		})
+		return
+	}
 
 	// Rules 1 & 2 in a single DB call: GetLease returns the row, we check
 	// ownership (owner_node, expiry) and generation in memory.
@@ -630,20 +653,45 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TaskRunID, TaskID, and RunID are one immutable tuple. Checking the tuple
+	// before either DAG path prevents a wrong sibling row (which may have the
+	// same worker and claim-attempt values) from accepting another task's
+	// completion payload. These columns never change, so this read cannot race a
+	// legitimate claim transition into a different identity.
+	if identityErr := h.store.ValidateTaskRunIdentity(ctx, req.RunID, req.TaskID, req.TaskRunID); identityErr != nil {
+		if errors.Is(identityErr, run.ErrTaskClaimMismatch) {
+			recordRejected(ReasonTaskIdentity)
+			writeJSON(w, http.StatusConflict, ErrorResponse{
+				Code:    ReasonTaskIdentity,
+				Message: "task_run_id does not belong to the requested run_id and task_id",
+			})
+			return
+		}
+		h.rejectRetryable(w, req, identityErr, metricQuarantined())
+		return
+	}
+
 	// Run-owner in-memory path: when enabled and this node holds the run's
 	// in-memory state, advance the DAG in memory and persist terminal-only rows
-	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
-	// falls through to the SQL path below as a safety net.
+	// (no per-transition SQL advancement). Missing or stale state is recovered at
+	// the exact durable revision before applying the completion. Never fall
+	// through to SQL in this mode: doing so while recovery is between its reads
+	// can publish a cache that omits the just-written terminal transition.
 	if h.ownerManager != nil {
-		res, omErr := h.ownerManager.CompleteInstance(
-			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
-			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions,
-		)
-		if omErr != nil {
-			if dqlite.IsContentionError(omErr) {
-				h.rejectRetryable(w, req, omErr, metricQuarantined())
+		version := run.LeaseVersion{
+			Generation: lease.Generation, StateRevision: lease.StateRevision,
+		}
+		if !h.ownerManager.OwnsVersion(req.RunID, version) {
+			if _, recoverErr := h.ownerManager.RecoverVersion(req.RunID, version); recoverErr != nil {
+				h.rejectRetryable(w, req, recoverErr, metricQuarantined())
 				return
 			}
+		}
+		res, omErr := h.ownerManager.CompleteInstanceAttempt(
+			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
+			req.Result, req.Error, req.WorkerNode, req.Attempt, req.Outputs, req.BranchSelections, req.Partitions,
+		)
+		if omErr != nil {
 			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
 				recordRejected(ReasonWrongWorker)
 				writeJSON(w, http.StatusConflict, ErrorResponse{
@@ -654,17 +702,15 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Error("complete: owner-manager apply failed",
 				"run_id", req.RunID, "task_id", req.TaskID, "status", req.Status, "error", omErr)
-			writeJSON(w, http.StatusConflict, ErrorResponse{
-				Code:    ReasonTaskNotRunning,
-				Message: "failed to apply task completion",
-			})
+			h.rejectRetryable(w, req, omErr, metricQuarantined())
 			return
 		}
 		if res.Owned {
 			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 			return
 		}
-		// Not tracked in memory here — fall through to the SQL path.
+		h.rejectRetryable(w, req, run.ErrOwnerStateChanged, metricQuarantined())
+		return
 	}
 
 	// Rules 3 & 4 are enforced by the ClaimNext-path functions via
@@ -675,17 +721,17 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	case run.TaskStatusSucceeded, run.TaskStatusFailed:
 		var applyErr error
 		if run.TaskStatus(req.Status) == run.TaskStatusSucceeded {
-			completeID := req.TaskID
-			if req.TaskRunID != uuid.Nil {
-				completeID = req.TaskRunID
+			if h.continueOnFailure && !run.IsSuccessfulTaskResult(req.Result) {
+				applyErr = h.store.CompleteTaskClaimedAttemptWithPartitionsContinue(req.RunID, req.TaskRunID, req.Result, req.WorkerNode, req.Attempt, req.Outputs, req.BranchSelections, req.Partitions)
+			} else {
+				applyErr = h.store.CompleteTaskClaimedAttemptWithPartitions(req.RunID, req.TaskRunID, req.Result, req.WorkerNode, req.Attempt, req.Outputs, req.BranchSelections, req.Partitions)
 			}
-			applyErr = h.store.CompleteTaskClaimedWithPartitions(req.RunID, completeID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
 		} else {
-			failID := req.TaskID
-			if req.TaskRunID != uuid.Nil {
-				failID = req.TaskRunID
+			if h.continueOnFailure {
+				applyErr = h.store.FailTaskClaimedAttemptContinue(req.RunID, req.TaskRunID, fmt.Errorf("%s", req.Error), req.WorkerNode, req.Attempt)
+			} else {
+				applyErr = h.store.FailTaskClaimedAttempt(req.RunID, req.TaskRunID, fmt.Errorf("%s", req.Error), req.WorkerNode, req.Attempt)
 			}
-			applyErr = h.store.FailTaskClaimed(req.RunID, failID, fmt.Errorf("%s", req.Error), req.WorkerNode)
 		}
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
@@ -715,20 +761,11 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	case run.TaskStatusCached:
 		source := run.CacheHitSource{RunID: req.RunID}
-		cacheID := req.TaskID
-		if req.TaskRunID != uuid.Nil {
-			cacheID = req.TaskRunID
-		}
 		// A cached fan-out producer still carries its partition list, and the SQL
 		// lane expands the group inside the cache-hit transaction. Called
 		// directly so removing the store method is a build error, never a
 		// silently un-expanded group.
-		var applyErr error
-		if len(req.Partitions) > 0 {
-			applyErr = h.store.CacheHitTaskClaimedWithPartitions(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
-		} else {
-			applyErr = h.store.CacheHitTaskClaimed(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
-		}
+		applyErr := h.store.CacheHitTaskClaimedAttemptWithPartitions(req.RunID, req.TaskRunID, source, req.Result, req.WorkerNode, req.Attempt, req.Outputs, req.BranchSelections, req.Partitions)
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
 			writeJSON(w, http.StatusConflict, ErrorResponse{
@@ -781,16 +818,14 @@ func (h *Handler) completeMetricQuarantined(ctx context.Context, runID, taskID u
 	return quarantined
 }
 
-// rejectRetryable answers a completion the owner could not apply because of
-// transient dqlite contention.  It returns 503 (not 409) so the worker knows
-// the request is safe to re-send once the leader's contention clears, and logs
-// at warn rather than error because this is expected under burst load and is
-// not a lost completion unless the worker exhausts its own retries.
+// rejectRetryable answers a completion the owner could not durably apply or
+// finalize. It returns 503 (not 409) so the worker re-sends the same attempt;
+// exact claim identity makes that redelivery idempotent.
 func (h *Handler) rejectRetryable(w http.ResponseWriter, req CompleteRequest, applyErr error, quarantined bool) {
 	if !quarantined {
 		metrics.CompleteRetryableTotal.WithLabelValues(ReasonContention).Inc()
 	}
-	log.Warn("complete: transient contention, asking worker to retry",
+	log.Warn("complete: owner persistence incomplete, asking worker to retry",
 		"run_id", req.RunID,
 		"task_id", req.TaskID,
 		"status", req.Status,

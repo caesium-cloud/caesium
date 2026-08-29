@@ -85,8 +85,7 @@ func TestDispatchRunInMemory_FannedInstancesDispatchWithoutCapabilityProbe(t *te
 	store := run.NewStore(db).WithLeaseStore(ls)
 
 	runID, taskID, instanceIDs := seedFannedRun(t, db, store)
-	_, err := ls.AcquireLease(context.Background(), runID, selfNodeID, 30*time.Second)
-	require.NoError(t, err)
+	assignTestRunLease(t, store, ls, runID, selfNodeID)
 
 	mgr := run.NewOwnerManager(store, run.CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
 	loop := NewDispatchLoop(DispatchLoopConfig{
@@ -151,8 +150,7 @@ func TestDispatchRunInMemory_UnfannedWorkDispatchesWithoutCapabilityProbe(t *tes
 	store := run.NewStore(db).WithLeaseStore(ls)
 
 	runID, taskID := seedPendingTaskRun(t, store)
-	_, err := ls.AcquireLease(context.Background(), runID, nodeID, 30*time.Second)
-	require.NoError(t, err)
+	assignTestRunLease(t, store, ls, runID, nodeID)
 
 	mgr := run.NewOwnerManager(store, run.CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
 	loop := NewDispatchLoop(DispatchLoopConfig{

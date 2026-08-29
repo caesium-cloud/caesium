@@ -19,10 +19,10 @@ func TestCheckpointStore_WriteLoadLatest(t *testing.T) {
 		t.Fatalf("expected no checkpoint yet, got cp=%v err=%v", cp, err)
 	}
 
-	if err := store.WriteCheckpoint(runID, 5, 1, []byte(`{"sequence":5}`), false); err != nil {
+	if err := store.WriteCheckpoint(runID, 5, 1, 0, []byte(`{"sequence":5}`), false); err != nil {
 		t.Fatalf("write checkpoint 5: %v", err)
 	}
-	if err := store.WriteCheckpoint(runID, 12, 1, []byte(`{"sequence":12}`), false); err != nil {
+	if err := store.WriteCheckpoint(runID, 12, 1, 0, []byte(`{"sequence":12}`), false); err != nil {
 		t.Fatalf("write checkpoint 12: %v", err)
 	}
 
@@ -44,11 +44,11 @@ func TestCheckpointStore_RewriteSameSequence(t *testing.T) {
 	store := NewStore(db)
 	runID := uuid.New()
 
-	if err := store.WriteCheckpoint(runID, 7, 1, []byte("v1"), false); err != nil {
+	if err := store.WriteCheckpoint(runID, 7, 1, 0, []byte("v1"), false); err != nil {
 		t.Fatal(err)
 	}
 	// Re-writing the same (run_id, sequence_high) overwrites, not errors.
-	if err := store.WriteCheckpoint(runID, 7, 2, []byte("v2"), false); err != nil {
+	if err := store.WriteCheckpoint(runID, 7, 2, 0, []byte("v2"), false); err != nil {
 		t.Fatalf("rewrite at same sequence should upsert: %v", err)
 	}
 	cp, _ := store.LatestFullCheckpoint(runID)
@@ -64,11 +64,11 @@ func TestCheckpointStore_Prune(t *testing.T) {
 	runID := uuid.New()
 
 	for _, seq := range []int64{1, 2, 3, 4, 5} {
-		if err := store.WriteCheckpoint(runID, seq, 1, []byte("x"), false); err != nil {
+		if err := store.WriteCheckpoint(runID, seq, 1, 0, []byte("x"), false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.PruneCheckpoints(runID, 2); err != nil {
+	if err := store.PruneCheckpoints(runID, 2, 1, 0); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	// Only the 2 most recent fulls (4, 5) should remain.
@@ -98,12 +98,12 @@ type fakePersister struct {
 	lastSeq int64
 }
 
-func (f *fakePersister) WriteCheckpoint(_ uuid.UUID, seq, _ int64, _ []byte, _ bool) error {
+func (f *fakePersister) WriteCheckpoint(_ uuid.UUID, seq, _, _ int64, _ []byte, _ bool) error {
 	f.writes++
 	f.lastSeq = seq
 	return nil
 }
-func (f *fakePersister) PruneCheckpoints(_ uuid.UUID, _ int) error {
+func (f *fakePersister) PruneCheckpoints(_ uuid.UUID, _ int, _, _ int64) error {
 	f.prunes++
 	return nil
 }

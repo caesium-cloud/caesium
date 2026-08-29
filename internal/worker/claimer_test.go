@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -159,18 +160,52 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 		outstandingPredecessors: 0,
 		claimedBy:               "node-old",
 		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
-		claimAttempt:            2,
+		claimAttempt:            7,
 		createdAt:               now.Add(-2 * time.Minute),
 	})
 
-	_ = seedTaskRun(t, db, seedTaskRunInput{
+	nonexpired := seedTaskRun(t, db, seedTaskRunInput{
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-live",
 		claimExpiresAt:          ptrTime(now.Add(2 * time.Minute)),
-		claimAttempt:            1,
+		claimAttempt:            11,
 		createdAt:               now.Add(-2 * time.Minute),
 	})
+
+	cacheOrigin := uuid.New()
+	exitCode := 137
+	expiredEvidence := map[string]interface{}{
+		"attempt":                3,
+		"runtime_id":             "old-runtime",
+		"started_at":             now.Add(-time.Minute),
+		"completed_at":           now.Add(-30 * time.Second),
+		"result":                 "failure",
+		"error":                  "old attempt failed",
+		"output":                 []byte(`{"value":"old"}`),
+		"branch_selections":      []byte(`["old-branch"]`),
+		"log_text":               "old attempt log",
+		"log_truncated":          true,
+		"schema_violations":      []byte(`[{"key":"value","message":"bad"}]`),
+		"exit_code":              exitCode,
+		"cache_hit":              true,
+		"cache_origin_run_id":    cacheOrigin,
+		"cache_created_at":       now.Add(-time.Minute),
+		"cache_expires_at":       now.Add(time.Hour),
+		"rate_limit_retry_after": now.Add(time.Hour),
+		"hash":                   "current-task-hash",
+		"effective_hash":         "old-effective-hash",
+		"execution_descriptor":   []byte(`{"schemaVersion":1,"baseline":{"computedHash":"current-task-hash","effectiveHash":"old-effective-hash"},"cache":{"computedHash":"current-task-hash","effectiveHash":"old-effective-hash"}}`),
+	}
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", expired.ID).Updates(expiredEvidence).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", nonexpired.ID).Updates(map[string]interface{}{
+		"attempt":              5,
+		"result":               "still running",
+		"output":               []byte(`{"value":"live"}`),
+		"log_text":             "live attempt log",
+		"effective_hash":       "live-effective-hash",
+		"execution_descriptor": []byte(`{"schemaVersion":1,"baseline":{"effectiveHash":"live-effective-hash"},"cache":{"effectiveHash":"live-effective-hash"}}`),
+	}).Error)
 
 	claimer := NewClaimer("node-a", run.NewStore(db), time.Minute)
 	require.NoError(t, claimer.ReclaimExpired(context.Background()))
@@ -181,6 +216,44 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 	require.Equal(t, "", stale.ClaimedBy)
 	require.Nil(t, stale.ClaimExpiresAt)
 	require.Equal(t, "", stale.RuntimeID)
+	require.Nil(t, stale.StartedAt)
+	require.Nil(t, stale.CompletedAt)
+	require.Empty(t, stale.Result)
+	require.Empty(t, stale.Error)
+	require.Empty(t, stale.Output)
+	require.Empty(t, stale.BranchSelections)
+	require.Empty(t, stale.LogText)
+	require.False(t, stale.LogTruncated)
+	require.Empty(t, stale.SchemaViolations)
+	require.Nil(t, stale.ExitCode)
+	require.False(t, stale.CacheHit)
+	require.Nil(t, stale.CacheOriginRunID)
+	require.Nil(t, stale.CacheCreatedAt)
+	require.Nil(t, stale.CacheExpiresAt)
+	require.Nil(t, stale.RateLimitRetryAfter)
+	require.Empty(t, stale.EffectiveHash)
+	require.Equal(t, "current-task-hash", stale.Hash, "the task's computed identity is not abandoned-attempt evidence")
+	require.Equal(t, 3, stale.Attempt, "claim reclaim must not consume the task's execution retry budget")
+	require.Equal(t, 7, stale.ClaimAttempt, "claim attempts remain monotonic across reclaim")
+	var descriptor models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(stale.ExecutionDescriptor, &descriptor))
+	require.Equal(t, "current-task-hash", descriptor.Baseline.ComputedHash)
+	require.Equal(t, "current-task-hash", descriptor.Cache.ComputedHash)
+	require.Empty(t, descriptor.Baseline.EffectiveHash)
+	require.Empty(t, descriptor.Cache.EffectiveHash)
+
+	var live models.TaskRun
+	require.NoError(t, db.First(&live, "id = ?", nonexpired.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), live.Status)
+	require.Equal(t, "node-live", live.ClaimedBy)
+	require.NotNil(t, live.ClaimExpiresAt)
+	require.Equal(t, 5, live.Attempt)
+	require.Equal(t, 11, live.ClaimAttempt)
+	require.Equal(t, "still running", live.Result)
+	require.JSONEq(t, `{"value":"live"}`, string(live.Output))
+	require.Equal(t, "live attempt log", live.LogText)
+	require.Equal(t, "live-effective-hash", live.EffectiveHash,
+		"a nonexpired claim must not be reset from the earlier Find")
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerLeaseExpirationsTotal, "node-a"), float64(1))
 }
 

@@ -231,9 +231,9 @@ func TestOwnerManager_FailFastCancelsClaimedUnstartedSibling(t *testing.T) {
 	// HandleDispatch, which claims through ClaimTaskForDispatch and answers 409
 	// ReasonTaskNotRunning on ErrTaskClaimMismatch — before it submits anything
 	// to a worker (internal/dispatch/dispatch.go).
+	_, claimErr := store.ClaimTaskForDispatch(runID, after["gate"].ID, "worker-2", 1, 1, time.Minute, true)
 	require.ErrorIs(t,
-		store.ClaimTaskForDispatch(runID, after["gate"].ID, "worker-2", 1, time.Minute, true),
-		ErrTaskClaimMismatch,
+		claimErr, ErrTaskClaimMismatch,
 		"a sibling the owner cancelled must not be claimable by an in-flight dispatch")
 
 	var recheck models.TaskRun
@@ -366,7 +366,7 @@ func TestClaimTaskForDispatchRejectsACancelledInstance(t *testing.T) {
 		return err
 	}))
 
-	err := f.store.ClaimTaskForDispatch(f.runID, byKey["x"].ID, "worker-2", 1, time.Minute, true)
+	_, err := f.store.ClaimTaskForDispatch(f.runID, byKey["x"].ID, "worker-2", 1, 1, time.Minute, true)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch,
 		"a cancelled instance must not be claimable for dispatch")
 

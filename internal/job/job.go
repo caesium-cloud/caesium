@@ -138,6 +138,7 @@ type job struct {
 	schemaValidation       string
 	jobCacheConfig         interface{}
 	params                 map[string]string
+	expectedStateRevision  int64
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -313,6 +314,16 @@ func WithAtomPollInterval(interval time.Duration) JobOption {
 func WithParams(params map[string]string) JobOption {
 	return func(j *job) {
 		j.params = params
+	}
+}
+
+// WithExpectedStateRevision binds a resumed retry runner to the exact durable
+// revision committed by its retry transaction. Without this, a delayed rev-N
+// goroutine can start after retry N+1 and re-read/bless the newer revision,
+// becoming a duplicate waiter and callback sender for N+1.
+func WithExpectedStateRevision(stateRevision int64) JobOption {
+	return func(j *job) {
+		j.expectedStateRevision = stateRevision
 	}
 }
 
@@ -576,19 +587,59 @@ func (j *job) Run(ctx context.Context) error {
 	runID := snapshot.ID
 	runQuarantined := snapshot.Quarantine
 	ctx = run.WithContext(ctx, runID)
+	var leaseVersion run.LeaseVersion
+	if leases := store.LeaseStore(); leases != nil {
+		lease, err := leases.GetLease(ctx, runID)
+		if j.expectedStateRevision > 0 {
+			if err != nil {
+				return fmt.Errorf("resolve expected run lease revision for %s: %w", runID, err)
+			}
+			if lease.StateRevision != j.expectedStateRevision {
+				// The retry transaction already registered this exact execution in
+				// process-local active-run bookkeeping. If a later retry won before
+				// this goroutine started, it will never reach the deferred finalizer;
+				// retire only the superseded epoch here so its gauge cannot leak.
+				disposition, retireErr := store.CompleteAtStateRevision(runID, nil, j.expectedStateRevision)
+				if retireErr != nil {
+					return fmt.Errorf("retire superseded expected run revision for %s: %w", runID, retireErr)
+				}
+				if disposition != run.CompletionSuperseded {
+					return fmt.Errorf("retire expected run revision for %s: got disposition %d: %w",
+						runID, disposition, run.ErrOwnerStateChanged)
+				}
+				return fmt.Errorf("resolve expected run lease revision for %s: expected %d, got %d: %w",
+					runID, j.expectedStateRevision, lease.StateRevision, run.ErrOwnerStateChanged)
+			}
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("resolve run lease version for %s: %w", runID, err)
+		}
+		if err == nil {
+			leaseVersion = run.LeaseVersion{
+				Generation: lease.Generation, StateRevision: lease.StateRevision,
+			}
+			if leaseVersion.StateRevision <= 0 {
+				return fmt.Errorf("resolve run lease version for %s: %w", runID, run.ErrOwnerStateChanged)
+			}
+		}
+	} else if j.expectedStateRevision > 0 {
+		return fmt.Errorf("resolve expected run lease revision for %s: lease store unavailable: %w", runID, run.ErrOwnerStateChanged)
+	}
+	if j.expectedStateRevision > 0 {
+		switch snapshot.Status {
+		case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled:
+			// The bound execution reached a durable terminal state before this
+			// resumed goroutine began. This is especially important for a cancelled
+			// lease tombstone: its exact revision is retained for callback fencing,
+			// but it has no live owner and must never register or execute tasks.
+			j.finishRun(ctx, store, runID, runQuarantined, nil, leaseVersion)
+			return nil
+		}
+	}
 
 	var runErr error
 	defer func() {
-		if err := store.Complete(runID, runErr); err != nil {
-			log.Error("run completion persistence failure", "run_id", runID, "error", err)
-		}
-		if runQuarantined {
-			return
-		}
-		dispatchCtx := context.WithoutCancel(ctx)
-		if err := j.dispatchRunCallbacks(dispatchCtx, j.id, runID, runErr); err != nil {
-			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
-		}
+		j.finishRun(ctx, store, runID, runQuarantined, runErr, leaseVersion)
 	}()
 	if runQuarantined && executionMode != executionModeDistributed {
 		runErr = ErrLocalQuarantinedReplayUnsupported
@@ -2614,6 +2665,112 @@ func normalizeExecutionMode(value string) string {
 	}
 }
 
+func (j *job) finishRun(
+	ctx context.Context,
+	store *run.Store,
+	runID uuid.UUID,
+	quarantined bool,
+	runErr error,
+	leaseVersion run.LeaseVersion,
+) {
+	resolvedErr, dispatchCallbacks, err := finalizeRunForCallbacks(store, runID, runErr, leaseVersion)
+	if err != nil {
+		log.Error("run completion persistence failure", "run_id", runID, "error", err)
+		return
+	}
+	if !dispatchCallbacks {
+		log.Warn("run completion superseded by owner state refresh", "run_id", runID)
+		return
+	}
+	if quarantined {
+		return
+	}
+	dispatchCtx := context.WithoutCancel(ctx)
+	if err := j.dispatchRunCallbacks(dispatchCtx, j.id, runID, resolvedErr); err != nil {
+		log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
+	}
+}
+
+// finalizeRunForCallbacks closes the durable run and decides whether this job
+// invocation still owns callback delivery for the logical execution it
+// observed. Ownership generation can change during a SQL-owner takeover without
+// changing that execution, so the waiter finalizes against StateRevision alone
+// under the lease row lock. A retry changes StateRevision; waiters from the
+// previous revision must never deliver the retried execution's callback.
+func finalizeRunForCallbacks(
+	store *run.Store,
+	runID uuid.UUID,
+	runErr error,
+	observed run.LeaseVersion,
+) (resolvedErr error, dispatchCallbacks bool, persistErr error) {
+	if observed.StateRevision <= 0 {
+		if err := store.Complete(runID, runErr); err != nil {
+			return runErr, false, err
+		}
+		return runErr, true, nil
+	}
+
+	disposition, err := store.CompleteAtStateRevision(runID, runErr, observed.StateRevision)
+	if err != nil {
+		return runErr, false, err
+	}
+	switch disposition {
+	case run.CompletionFinalized:
+		return runErr, true, nil
+	case run.CompletionAlreadyTerminal:
+		return durableTerminalRunCallbackOutcome(store, runID, runErr)
+	case run.CompletionSuperseded:
+		return runErr, false, nil
+	case run.CompletionLeaseMissing:
+		return terminalRunCallbackOutcome(store, runID, runErr)
+	default:
+		return runErr, false, fmt.Errorf("finalize run %s: unknown completion disposition %d", runID, disposition)
+	}
+}
+
+// durableTerminalRunCallbackOutcome derives callback content from the winning
+// durable terminal row. This matters when another owner finalized first: the
+// losing waiter must not publish its stale local result (for example, success
+// after the durable winner recorded failure).
+func durableTerminalRunCallbackOutcome(store *run.Store, runID uuid.UUID, fallback error) (error, bool, error) {
+	current, err := store.Get(runID)
+	if err != nil {
+		return fallback, false, err
+	}
+	switch current.Status {
+	case run.StatusSucceeded:
+		return nil, true, nil
+	case run.StatusFailed, run.StatusCancelled:
+		if current.Error != "" {
+			return errors.New(current.Error), true, nil
+		}
+		return fmt.Errorf("run %s %s", runID, current.Status), true, nil
+	default:
+		return fallback, false, nil
+	}
+}
+
+// terminalRunCallbackOutcome handles cancellation, whose transaction removes
+// the lease after persisting the terminal JobRun. With no lease there is no
+// revision to retry against, so the durable terminal row supplies the callback
+// result. A nonterminal row remains suppressed.
+func terminalRunCallbackOutcome(store *run.Store, runID uuid.UUID, fallback error) (error, bool, error) {
+	current, err := store.Get(runID)
+	if err != nil {
+		return fallback, false, err
+	}
+	if current.Status != run.StatusCancelled {
+		// Cancellation is the only sanctioned terminal path that deletes the
+		// lease. Treating an unversioned succeeded/failed row as callback-eligible
+		// could let an old waiter claim a newer no-lease execution's outcome.
+		return fallback, false, nil
+	}
+	if current.Error != "" {
+		return errors.New(current.Error), true, nil
+	}
+	return fmt.Errorf("run %s %s", runID, current.Status), true, nil
+}
+
 func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID, taskCount int, continueOnFailure bool, pollInterval time.Duration) error {
 	if taskCount <= 0 {
 		return nil
@@ -2648,23 +2805,8 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				ch = nil
 				continue
 			}
-			if evt.Type == event.TypeRunFailed || evt.Type == event.TypeRunCancelled {
-				snapshot, err := store.Get(runID)
-				if err != nil {
-					return err
-				}
-				if snapshot.Status == run.StatusCancelled {
-					if snapshot.Error != "" {
-						return errors.New(snapshot.Error)
-					}
-					return fmt.Errorf("run %s cancelled", runID)
-				}
-				if snapshot.Error != "" {
-					return errors.New(snapshot.Error)
-				}
-				return fmt.Errorf("run %s failed", runID)
-			}
-			if evt.Type == event.TypeRunCompleted || evt.Type == event.TypeRunTerminal {
+			if evt.Type == event.TypeRunFailed || evt.Type == event.TypeRunCancelled ||
+				evt.Type == event.TypeRunCompleted || evt.Type == event.TypeRunTerminal {
 				snapshot, err := store.Get(runID)
 				if err != nil {
 					return err
@@ -2681,7 +2823,13 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 					}
 					return fmt.Errorf("run %s cancelled", runID)
 				}
-				return nil
+				if snapshot.Status == run.StatusSucceeded {
+					return nil
+				}
+				// Events are at-least-once and may have been queued before a retry
+				// transaction reopened the run. A currently nonterminal snapshot is
+				// authoritative: ignore the stale terminal event and keep waiting.
+				continue
 			}
 		case <-ticker.C:
 			snapshot, err := store.Get(runID)

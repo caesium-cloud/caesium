@@ -55,6 +55,52 @@ func ownerMeta() dispatchMeta {
 	}
 }
 
+func TestLocalSinkRejectsOldAttemptAfterSameNodeReclaim(t *testing.T) {
+	routes := map[string]func(CompletionSink, *models.TaskRun) error{
+		"succeeded": func(s CompletionSink, tr *models.TaskRun) error {
+			return s.Succeeded(t.Context(), tr, "success", nil, nil)
+		},
+		"failed": func(s CompletionSink, tr *models.TaskRun) error {
+			return s.Failed(t.Context(), tr, errors.New("stale failure"))
+		},
+		"cached": func(s CompletionSink, tr *models.TaskRun) error {
+			return s.Cached(t.Context(), tr, run.CacheHitSource{RunID: uuid.New()}, "success", nil, nil)
+		},
+	}
+
+	for name, complete := range routes {
+		t.Run(name, func(t *testing.T) {
+			store, db, stale := seedClaimedTaskRun(t)
+			require.Equal(t, 1, stale.ClaimAttempt)
+			require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", stale.ID).
+				Updates(map[string]interface{}{
+					"status":           string(run.TaskStatusRunning),
+					"claimed_by":       stale.ClaimedBy,
+					"claim_attempt":    2,
+					"claim_expires_at": time.Now().UTC().Add(time.Minute),
+				}).Error)
+
+			err := complete(NewLocalSink(store), stale)
+			require.ErrorIs(t, err, run.ErrTaskClaimMismatch)
+			var current models.TaskRun
+			require.NoError(t, db.First(&current, "id = ?", stale.ID).Error)
+			require.Equal(t, string(run.TaskStatusRunning), current.Status)
+			require.Equal(t, 2, current.ClaimAttempt)
+			require.Empty(t, current.Result)
+			require.Empty(t, current.Error)
+
+			// The stale attempt's refusal must not poison liveness for the exact
+			// current claim. A representative attempt-2 success still commits.
+			if name == "succeeded" {
+				require.NoError(t, NewLocalSink(store).Succeeded(t.Context(), &current, "success", nil, nil))
+				require.NoError(t, db.First(&current, "id = ?", stale.ID).Error)
+				require.Equal(t, string(run.TaskStatusSucceeded), current.Status)
+				require.Equal(t, "success", current.Result)
+			}
+		})
+	}
+}
+
 // TestOwnerSink_Succeeded asserts the owner sink POSTs a CompleteRequest with
 // all fencing fields and the succeeded status/result/outputs/branches.
 func TestOwnerSink_Succeeded(t *testing.T) {

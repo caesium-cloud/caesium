@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/incident"
+	internaljob "github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
 
@@ -30,19 +33,51 @@ type incidentActionOps struct {
 	runStore *run.Store
 }
 
+var incidentResumeRun = func(jobModel *models.Job, runID uuid.UUID, params map[string]string, stateRevision int64) {
+	go func() {
+		runCtx := run.WithContext(context.Background(), runID)
+		if runErr := internaljob.New(jobModel, internaljob.WithTriggerID(nil), internaljob.WithParams(params),
+			internaljob.WithExpectedStateRevision(stateRevision)).Run(runCtx); runErr != nil {
+			log.Error("incident retry run failure", "job_id", jobModel.ID, "run_id", runID, "error", runErr)
+		}
+	}()
+}
+
 func newIncidentActionOps(runStore *run.Store) *incidentActionOps {
 	return &incidentActionOps{runStore: runStore}
 }
 
 func (o *incidentActionOps) RetryFromFailure(_ context.Context, runID uuid.UUID) error {
-	_, err := o.runStore.RetryFromFailureAdmitted(runID)
+	// Resolve every input needed by the resumed runner before committing the
+	// reset. A post-commit lookup/JSON failure would otherwise leave a reopened
+	// run with no waiter to finalize it.
+	var runModel models.JobRun
+	if err := o.runStore.DB().First(&runModel, "id = ?", runID).Error; err != nil {
+		return err
+	}
+	var jobModel models.Job
+	if err := o.runStore.DB().First(&jobModel, "id = ?", runModel.JobID).Error; err != nil {
+		return err
+	}
+	params := make(map[string]string)
+	if len(runModel.Params) > 0 {
+		if err := json.Unmarshal(runModel.Params, &params); err != nil {
+			return fmt.Errorf("incident retry params for run %s: %w", runID, err)
+		}
+	}
+
+	reopened, stateRevision, err := o.runStore.RetryFromFailureAdmittedVersion(runID)
 	// A paused job or an exhausted concurrency slot is a transient, retryable
 	// refusal: surface it as incident.ErrRetryDeferred so a fired snooze_retry
 	// timer re-arms instead of dropping the retry.
 	if err != nil && (errors.Is(err, run.ErrJobPaused) || errors.Is(err, run.ErrMaxConcurrentRunsReached)) {
 		return fmt.Errorf("%w: %v", incident.ErrRetryDeferred, err)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	incidentResumeRun(&jobModel, reopened.ID, params, stateRevision)
+	return nil
 }
 
 func (o *incidentActionOps) RetryCallbacks(_ context.Context, _ uuid.UUID) error {

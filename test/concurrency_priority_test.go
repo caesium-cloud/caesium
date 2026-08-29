@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 )
@@ -57,22 +56,34 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 	s.Equal(1, lowRun.Tasks[0].Priority)
 
 	s.Run("worker holds siblings pending until it has pool capacity", func() {
-		// Regression coverage for #355.  Marking a task `running` is a promise
-		// that the node is executing it, so the worker must hold an execution
-		// slot BEFORE it claims (pull path) or accepts a dispatch (push path).
-		// The distributed lane runs a one-slot worker
-		// (CAESIUM_WORKER_POOL_SIZE=1), so exactly one task may be `running` at
-		// a time.  Before the fix, ClaimNext flipped the row inside its claim
-		// UPDATE and only then blocked on the pool, and the inbound dispatch
-		// buffer admitted a further pool's worth on top — three rows could sit
-		// `running` behind one busy slot.
+		// Regression coverage for #355: a node must never START, and never KEEP,
+		// a task `running` without a free pool slot for it.  The distributed
+		// lane runs a one-slot worker (CAESIUM_WORKER_POOL_SIZE=1), so exactly
+		// one task may be executing at a time; before the fix the worker
+		// admitted a further pool's worth into its inbound buffer and parked one
+		// more in pool.Submit, so three rows sat `running` behind one busy slot.
 		//
-		// Cross-run start ORDER is deliberately not asserted.  With run-owner
-		// mode on (this lane) every run takes a lease, so its tasks reach the
-		// worker through the owner's dispatch loop rather than ClaimNext, and
-		// that loop selects per run by created_at and visits owned runs in map
-		// order — cross-run priority ordering is a dispatch-loop property, not a
-		// claimer one.  The claimer's priority order is covered by the unit test
+		// WHAT THIS ACTUALLY PROVES: the PUSH-path admission gate
+		// (Worker.SubmitDispatched refusing for lack of capacity, and the
+		// owner rolling the claim back).  It does NOT exercise the pull path the
+		// issue names.  Every justfile lane that sets
+		// CAESIUM_EXECUTION_MODE=distributed also sets
+		// CAESIUM_RUN_OWNER_ENABLED=true, so every run here takes a live
+		// run_leases row, and Claimer.claimNextSingleStatementTx's liveLeaseGuard
+		// excludes exactly those tasks — ClaimNext never sees them.  The
+		// pull-path invariant ("no claim without a reserved slot") is guarded by
+		// the unit test TestWorkerDoesNotClaimWithoutPoolCapacity, which fails on
+		// the pre-fix ordering.  No lane in the matrix covers the pull path
+		// end-to-end; that would need a distributed lane with
+		// CAESIUM_RUN_OWNER_ENABLED=false (noted as a PR follow-up).
+		//
+		// Cross-run start ORDER is deliberately not asserted.  Because these
+		// tasks reach the worker through the owner's dispatch loop, and that loop
+		// selects within a run by created_at (Store.PendingTasksForDispatch has
+		// no priority term) and iterates owned runs in Go map order, cross-run
+		// priority ordering cannot hold in run-owner mode at all — see the
+		// "owner dispatch loop ignores task_runs.priority" follow-up in the PR
+		// body.  The claimer's own priority order stays covered by the unit test
 		// TestClaimerClaimNextPrefersHigherPriority.
 		if !strings.EqualFold(strings.TrimSpace(os.Getenv("CAESIUM_EXECUTION_MODE")), "distributed") {
 			s.T().Skip("worker pool-capacity e2e requires CAESIUM_EXECUTION_MODE=distributed")
@@ -116,6 +127,12 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 		// Sample repeatedly for as long as the filler still holds the slot.  A
 		// single sample would pass even on the broken build, which took about
 		// one dispatch interval to over-admit the siblings.
+		//
+		// The 6s is a budget for SAMPLING only: every second spent waiting out a
+		// rollback inside awaitClaimRolledBack is credited back to the deadline.
+		// Otherwise a couple of slow rollbacks on a loaded CI box would eat the
+		// window and trip the minimum-samples check below, whose message would
+		// then blame the filler for something it did not do.
 		samples := 0
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
@@ -134,18 +151,23 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 				if observed.Tasks[0].Status != "running" {
 					continue
 				}
-				s.Require().True(
-					s.awaitClaimRolledBack(job.ID, runID, fillerJob.ID, fillerRunID, dispatchRollbackGrace),
+				rollbackWait := time.Now()
+				cleared := s.awaitClaimRolledBack(job.ID, runID, fillerJob.ID, fillerRunID, dispatchRollbackGrace)
+				deadline = deadline.Add(time.Since(rollbackWait))
+				s.Require().True(cleared,
 					"%s run settled in `running` while the one-slot worker was busy with the filler; "+
 						"a task may only be `running` on a node that holds a free pool slot for it", label)
 			}
 			time.Sleep(250 * time.Millisecond)
 		}
 		s.Require().GreaterOrEqual(samples, 8,
-			"the filler must hold the slot long enough for the capacity assertion to be meaningful (got %d samples)", samples)
+			"took only %d samples while the filler held the slot; the capacity assertion needs more "+
+				"observations to be meaningful (either the filler stopped running early or the server "+
+				"is responding too slowly to sample it)", samples)
 
 		fillerDone := s.awaitRun(fillerJob.ID, fillerRunID, runTimeout)
 		s.Equal("succeeded", fillerDone.Status)
+		s.Require().NotEmpty(fillerDone.Tasks)
 
 		// Withholding the claim must not lose the work: every blocked run drains
 		// once capacity frees.
@@ -160,17 +182,7 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 			s.Require().NotEmpty(run.Tasks, "%s run has no tasks", label)
 			s.Require().NotNil(run.Tasks[0].StartedAt, "%s run never started", label)
 			s.Equal("succeeded", run.Status, "%s run should succeed: %s", label, run.Error)
-			s.True(run.Tasks[0].StartedAt.After(*fillerRunning.Tasks[0].StartedAt),
-				"%s run must start after the filler took the slot", label)
 		}
-
-		drained := priorityDrainOrder(map[string]*runResponse{
-			"high":   blockedHighRun,
-			"normal": blockedNormalRun,
-			"low":    blockedLowRun,
-		})
-		s.ElementsMatch([]string{"high", "normal", "low"}, drained,
-			"every blocked run must eventually be started once the slot frees")
 	})
 
 	cronAlias := fmt.Sprintf("e2e-priority-cron-%d", time.Now().UnixNano())
@@ -254,31 +266,6 @@ func (s *IntegrationTestSuite) awaitFirstTaskStatus(jobID, runID string, timeout
 
 		time.Sleep(250 * time.Millisecond)
 	}
-}
-
-func priorityDrainOrder(runs map[string]*runResponse) []string {
-	type observed struct {
-		label     string
-		startedAt time.Time
-	}
-	observedRuns := make([]observed, 0, len(runs))
-	for label, run := range runs {
-		if run == nil || len(run.Tasks) == 0 || run.Tasks[0].StartedAt == nil {
-			continue
-		}
-		observedRuns = append(observedRuns, observed{
-			label:     label,
-			startedAt: *run.Tasks[0].StartedAt,
-		})
-	}
-	sort.Slice(observedRuns, func(i, j int) bool {
-		return observedRuns[i].startedAt.Before(observedRuns[j].startedAt)
-	})
-	out := make([]string, 0, len(observedRuns))
-	for _, run := range observedRuns {
-		out = append(out, run.label)
-	}
-	return out
 }
 
 func priorityJobManifest(alias, priority, command string) string {

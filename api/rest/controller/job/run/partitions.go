@@ -12,9 +12,11 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	internaljob "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -44,8 +46,17 @@ var (
 		return entry.JobID, nil
 	}
 
-	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
-		return runstorage.Default().RetryPartition(ctx, runID, taskRunID)
+	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, int64, error) {
+		return runstorage.Default().RetryPartitionVersion(ctx, runID, taskRunID)
+	}
+	partitionResumeRun = func(j *models.Job, r *models.JobRun, params map[string]string, stateRevision int64) {
+		go func() {
+			runCtx := runstorage.WithContext(context.Background(), r.ID)
+			if err := internaljob.New(j, internaljob.WithTriggerID(nil), internaljob.WithParams(params),
+				internaljob.WithExpectedStateRevision(stateRevision)).Run(runCtx); err != nil {
+				log.Error("partition retry run failure", "job_id", j.ID, "run_id", r.ID, "error", err)
+			}
+		}()
 	}
 
 	partitionExecutionMode = func() string { return env.Variables().ExecutionMode }
@@ -255,6 +266,20 @@ func RetryPartition(c *echo.Context) error {
 	}
 
 	db := partitionDB()
+	var jobModel models.Job
+	if err := db.First(&jobModel, "id = ?", jobID).Error; err != nil {
+		return echo.ErrNotFound
+	}
+	var runModel models.JobRun
+	if err := db.First(&runModel, "id = ? AND job_id = ?", runID, jobID).Error; err != nil {
+		return echo.ErrNotFound
+	}
+	params := make(map[string]string)
+	if len(runModel.Params) > 0 {
+		if err := json.Unmarshal(runModel.Params, &params); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "invalid persisted run parameters").Wrap(err)
+		}
+	}
 	var row models.TaskRun
 	if err := db.Where("job_run_id = ? AND task_id = ? AND partition_index = ?", runID, taskID, index).
 		First(&row).Error; err != nil {
@@ -266,10 +291,11 @@ func RetryPartition(c *echo.Context) error {
 	// in-group indegree over non-terminal dependencies, re-open a finished run,
 	// and invalidate the owner checkpoints. Doing it here with a bare Updates()
 	// did none of that.
-	updated, err := partitionRetryInstance(ctx, runID, row.ID)
+	updated, stateRevision, err := partitionRetryInstance(ctx, runID, row.ID)
 	if err != nil {
 		return retryPartitionHTTPError(err)
 	}
+	partitionResumeRun(&jobModel, &runModel, params, stateRevision)
 
 	return c.JSON(http.StatusOK, map[string]any{
 		"retried":     true,
@@ -349,6 +375,8 @@ func retryPartitionHTTPError(err error) error {
 			"only a failed partition can be retried; a succeeded or cached instance would discard a result "+
 				"downstream steps already consumed, and a skipped or cancelled one was resolved deliberately "+
 				"(retry the run to re-run skipped work)")
+	case errors.Is(err, runstorage.ErrRunNotTerminal):
+		return echo.NewHTTPError(http.StatusConflict, "partition retry requires a failed or succeeded run")
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return echo.ErrNotFound
 	default:

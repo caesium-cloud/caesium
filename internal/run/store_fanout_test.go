@@ -324,11 +324,42 @@ func TestRateLimitTaskParksOneInstance(t *testing.T) {
 
 // --- E1: RetryPartition --------------------------------------------------
 
+func markRunTerminalForPartitionRetry(t *testing.T, db *gorm.DB, runID uuid.UUID, status Status) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", runID).
+		Updates(map[string]any{"status": string(status), "completed_at": now}).Error)
+}
+
+func TestRetryPartitionRejectsNonTerminalRun(t *testing.T) {
+	for _, status := range []Status{StatusRunning, StatusCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+			_, err := f.expand(t, strParts("a", "b"))
+			require.NoError(t, err)
+			rows := f.instances(t)
+			setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+			if status == StatusCancelled {
+				markRunTerminalForPartitionRetry(t, f.db, f.runID, status)
+			}
+
+			_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+			require.ErrorIs(t, err, ErrRunNotTerminal)
+
+			var row models.TaskRun
+			require.NoError(t, f.db.First(&row, "id = ?", rows[0].ID).Error)
+			assert.Equal(t, string(TaskStatusFailed), row.Status,
+				"a rejected retry must not reset the failed instance")
+		})
+	}
+}
+
 func TestRetryPartitionRejectsNonTerminalInstance(t *testing.T) {
 	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
 	_, err := f.expand(t, strParts("a", "b"))
 	require.NoError(t, err)
 	rows := f.instances(t)
+	markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 	// pending
 	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
@@ -375,6 +406,7 @@ func TestRetryPartitionResetsEveryExecutionColumn(t *testing.T) {
 		"cache_created_at":    now,
 		"cache_expires_at":    now.Add(time.Hour),
 	}).Error)
+	markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 	updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
@@ -425,6 +457,7 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	// its only in-group dependency already succeeded.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusSucceeded, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
+	markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 
 	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
@@ -440,6 +473,7 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	// from.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusFailed, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
+	markRunTerminalForPartitionRetry(t, f.db, f.runID, StatusFailed)
 	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
@@ -457,7 +491,7 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
 	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).
 		Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
-	require.NoError(t, f.store.WriteCheckpoint(f.runID, 5, 1, []byte(`{"v":1}`), false))
+	require.NoError(t, f.store.WriteCheckpoint(f.runID, 5, 1, 0, []byte(`{"v":1}`), false))
 
 	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
@@ -524,7 +558,7 @@ func TestCompleteTaskOwnerSkipsGroupWithPerInstanceSequences(t *testing.T) {
 
 	require.NoError(t, f.store.CompleteTaskOwner(
 		f.runID, f.producer.ID, TaskStatusSucceeded, "success", "", "worker-1",
-		nil, nil, 1, 1,
+		nil, nil, 1, 1, 0,
 		[]SkippedTask{{TaskID: f.consumer.ID, TerminalSequence: 2, Reason: "trigger rule not satisfied"}},
 		nil,
 	))

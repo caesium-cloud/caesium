@@ -335,7 +335,8 @@ func start(cmd *cobra.Command, args []string) error {
 		runStore.WithLeaseStore(leaseStore)
 
 		token := strings.TrimSpace(vars.InternalWakeupToken)
-		ownerDispatchHandler = dispatch.NewHandler(runStore, leaseStore, vars.NodeAddress, token)
+		ownerDispatchHandler = dispatch.NewHandler(runStore, leaseStore, vars.NodeAddress, token).
+			WithTaskFailurePolicy(vars.TaskFailurePolicy)
 
 		// B3: when the in-memory advancement flag is on, build the OwnerManager
 		// and route both completion application (handler) and dispatch (loop)

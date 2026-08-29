@@ -385,15 +385,62 @@ func TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate(t *testing.T) {
 	}
 }
 
-// --- Phase 2 B2: inbound dispatched-task channel ---
+// TestInFlightOldAttemptCannotUntrackNewSameNodeClaim pins the renewal side of
+// same-node reclaim ABA. Attempt 2 overwrites attempt 1 under the same TaskRun
+// id; when attempt 1 eventually returns, its defer must leave attempt 2 in the
+// renewal set.
+func TestInFlightOldAttemptCannotUntrackNewSameNodeClaim(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, 5*time.Minute, 0)
+	expires := time.Now().Add(time.Minute)
+	id := uuid.New()
+	oldAttempt := &models.TaskRun{ID: id, ClaimedBy: "node-a", ClaimAttempt: 1, ClaimExpiresAt: &expires}
+	newAttempt := &models.TaskRun{ID: id, ClaimedBy: "node-a", ClaimAttempt: 2, ClaimExpiresAt: &expires}
 
-// TestSubmitDispatched_NotAccepting verifies that a worker without the inbound
+	w.trackInFlight(oldAttempt)
+	w.trackInFlight(newAttempt)
+	w.untrackInFlight(id, oldAttempt.ClaimedBy, oldAttempt.ClaimAttempt)
+
+	w.inFlightMu.Lock()
+	current := w.inFlight[id]
+	w.inFlightMu.Unlock()
+	if current == nil || current.claimAttempt != 2 {
+		t.Fatalf("old attempt removed or replaced the current renewal claim: %+v", current)
+	}
+	w.renewLeasesNow(t.Context())
+	call, ok := renewer.lastCall()
+	if !ok || len(call.ids) != 1 || call.ids[0] != id {
+		t.Fatalf("new attempt was not renewed after old defer: %+v", call)
+	}
+
+	w.untrackInFlight(id, newAttempt.ClaimedBy, newAttempt.ClaimAttempt)
+	w.inFlightMu.Lock()
+	_, stillTracked := w.inFlight[id]
+	w.inFlightMu.Unlock()
+	if stillTracked {
+		t.Fatal("the exact current attempt should remove its own renewal entry")
+	}
+}
+
+// --- Phase 2 B2: dispatched-task pool admission ---
+
+// TestSubmitDispatched_NotAccepting verifies that a worker without the dispatch
 // path enabled rejects dispatched tasks (owner mode off → byte-identical Phase 1).
 func TestSubmitDispatched_NotAccepting(t *testing.T) {
 	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil)
 	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
 	if !errors.Is(err, ErrWorkerNotAccepting) {
 		t.Fatalf("expected ErrWorkerNotAccepting, got %v", err)
+	}
+}
+
+func TestSubmitDispatchedRejectsBeforeRun(t *testing.T) {
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithInboundDispatch("tok")
+	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
+	if !errors.Is(err, ErrWorkerNotAccepting) {
+		t.Fatalf("expected ErrWorkerNotAccepting before Run starts, got %v", err)
 	}
 }
 
@@ -410,26 +457,42 @@ func TestSubmitDispatched_NilTask(t *testing.T) {
 // for, further submits are rejected with ErrInboundFull so the owner can roll
 // the claim back and re-dispatch — admission is capacity, not buffer space.
 func TestSubmitDispatched_BufferFull(t *testing.T) {
-	// Pool size 2 → two reservations available. Don't run the worker so nothing drains.
-	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Millisecond, nil).
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	w := NewWorker(&sequenceClaimer{}, NewPool(2), 50*time.Millisecond, func(context.Context, *models.TaskRun) {
+		started <- struct{}{}
+		<-release
+	}).
 		WithInboundDispatch("tok")
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	waitForDispatchAccepting(t, w)
 
 	for i := 0; i < 2; i++ {
-		if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
-			t.Fatalf("submit %d should succeed (buffer not full yet), got %v", i, err)
-		}
+		var submitErr error
+		waitFor(t, time.Second, "a free slot for dispatched task", func() bool {
+			submitErr = w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
+			return submitErr == nil
+		})
+		<-started
 	}
-	// Third submit overflows the size-2 buffer.
+	// Both execution slots are occupied, so the third submit is rejected.
 	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
 	if !errors.Is(err, ErrInboundFull) {
 		t.Fatalf("expected ErrInboundFull on overflow, got %v", err)
 	}
+	close(release)
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
 }
 
-// TestWorkerRunDrainsInboundDispatch verifies the Run loop drains a dispatched
-// task onto the shared pool and executes it with the owner metadata threaded
+// TestWorkerRunStartsDispatchedTask verifies SubmitDispatched starts a task on
+// the shared pool and executes it with the owner metadata threaded
 // through the execution context (so the executor would select the owner sink).
-func TestWorkerRunDrainsInboundDispatch(t *testing.T) {
+func TestWorkerRunStartsDispatchedTask(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -437,8 +500,7 @@ func TestWorkerRunDrainsInboundDispatch(t *testing.T) {
 	var sawMeta bool
 	executed := make(chan struct{}, 1)
 
-	// Claimer returns no pull-path work, so the only execution is the dispatched
-	// task drained from the inbound channel.
+	// Claimer returns no pull-path work, so the only execution is the dispatched task.
 	w := NewWorker(&sequenceClaimer{}, NewPool(2), 50*time.Millisecond,
 		func(ec context.Context, task *models.TaskRun) {
 			gotMeta, sawMeta = dispatchMetaFrom(ec)
@@ -453,11 +515,13 @@ func TestWorkerRunDrainsInboundDispatch(t *testing.T) {
 		Attempt:         2,
 		WorkerNode:      "10.0.0.5:9001",
 	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	waitForDispatchAccepting(t, w)
 	if err := w.SubmitDispatched(meta); err != nil {
 		t.Fatalf("SubmitDispatched failed: %v", err)
 	}
-
-	if err := w.Run(ctx); err != nil {
+	if err := <-runErr; err != nil {
 		t.Fatalf("worker run failed: %v", err)
 	}
 
@@ -477,9 +541,9 @@ func TestWorkerRunDrainsInboundDispatch(t *testing.T) {
 	}
 }
 
-// TestWorkerRunDrainsInboundAndClaimNext verifies both paths share the pool:
+// TestWorkerRunStartsDispatchedAndClaimNext verifies both paths share the pool:
 // a dispatched task and a ClaimNext'd task both execute.
-func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
+func TestWorkerRunStartsDispatchedAndClaimNext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -496,12 +560,15 @@ func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
 			}
 		}).WithInboundDispatch("tok")
 
-	// Enqueue one dispatched task; ClaimNext yields one pull-path task.
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	waitForDispatchAccepting(t, w)
+	// Start one dispatched task; ClaimNext yields one pull-path task.
 	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
 		t.Fatalf("SubmitDispatched failed: %v", err)
 	}
 
-	if err := w.Run(ctx); err != nil {
+	if err := <-runErr; err != nil {
 		t.Fatalf("worker run failed: %v", err)
 	}
 	if got := atomic.LoadInt32(&executed); got != 2 {
@@ -595,21 +662,106 @@ func TestWorkerDoesNotClaimWithoutPoolCapacity(t *testing.T) {
 // time it POSTs the dispatch, so a worker with no free slot must refuse (the
 // handler then rolls the claim back to `pending`) rather than buffer the task.
 func TestSubmitDispatchedRejectsWithoutPoolCapacity(t *testing.T) {
-	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	executed := make(chan struct{}, 1)
+	var invocations int32
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), 50*time.Millisecond, func(context.Context, *models.TaskRun) {
+		if atomic.AddInt32(&invocations, 1) == 1 {
+			started <- struct{}{}
+			<-release
+			return
+		}
+		executed <- struct{}{}
+	}).
 		WithInboundDispatch("tok")
-
-	if !w.pool.TryAcquire() {
-		t.Fatal("could not reserve the only slot")
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	waitForDispatchAccepting(t, w)
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
+		t.Fatalf("expected first dispatch to occupy the slot, got %v", err)
 	}
+	<-started
 
 	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
 	if !errors.Is(err, ErrInboundFull) {
 		t.Fatalf("expected ErrInboundFull with no free pool slot, got %v", err)
 	}
 
-	w.pool.Release()
-	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
-		t.Fatalf("expected the dispatch to be accepted once a slot freed, got %v", err)
+	close(release)
+	waitFor(t, time.Second, "dispatch admission after the slot freed", func() bool {
+		return w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}) == nil
+	})
+	<-executed
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+}
+
+// TestSubmitDispatchedShutdownLifecycle pins the 202/shutdown ownership rule:
+// every accepted task is already registered in Pool's WaitGroup, cancellation
+// stops further acceptance, Run waits for that executor, and its slot is returned.
+func TestSubmitDispatchedShutdownLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	executorStarted := make(chan struct{})
+	executorDone := make(chan struct{})
+	reserved := make(chan struct{})
+	register := make(chan struct{})
+	taskID := uuid.New()
+	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Hour, func(execCtx context.Context, task *models.TaskRun) {
+		if task.ID != taskID {
+			t.Errorf("executor received task %s, want accepted task %s", task.ID, taskID)
+		}
+		close(executorStarted)
+		<-execCtx.Done()
+		close(executorDone)
+	}).WithInboundDispatch("tok")
+	w.beforeDispatchStart = func() {
+		close(reserved)
+		<-register
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+	waitForDispatchAccepting(t, w)
+
+	// Pause after capacity is reserved and the lifecycle check has passed, while
+	// Submit still holds dispatchMu and before Pool.Go/Add. Cancellation must wait
+	// behind that critical section: the submit is accepted and registered before
+	// Run can transition to not-accepting and Wait.
+	submitErr := make(chan error, 1)
+	go func() {
+		submitErr <- w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: taskID}})
+	}()
+	<-reserved
+	cancel()
+	close(register)
+	if err := <-submitErr; err != nil {
+		t.Fatalf("dispatch that won the shutdown race should be accepted: %v", err)
+	}
+
+	// Once cancellation is observable, later submissions lose the lifecycle
+	// race even if Run has not yet completed its shutdown defer.
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); !errors.Is(err, ErrWorkerNotAccepting) {
+		t.Fatalf("expected cancellation-window ErrWorkerNotAccepting, got %v", err)
+	}
+	<-executorStarted
+	<-executorDone
+	if err := <-runErr; err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); !errors.Is(err, ErrWorkerNotAccepting) {
+		t.Fatalf("expected post-stop ErrWorkerNotAccepting, got %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if !w.pool.TryAcquire() {
+			t.Fatalf("accepted task leaked pool slot %d across shutdown", i+1)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		w.pool.Release()
 	}
 }
 
@@ -665,4 +817,13 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out after %s waiting for %s", timeout, what)
+}
+
+func waitForDispatchAccepting(t *testing.T, w *Worker) {
+	t.Helper()
+	waitFor(t, time.Second, "worker to accept dispatched tasks", func() bool {
+		w.dispatchMu.Lock()
+		defer w.dispatchMu.Unlock()
+		return w.dispatchAccept && w.dispatchCtx != nil && w.dispatchCtx.Err() == nil
+	})
 }
