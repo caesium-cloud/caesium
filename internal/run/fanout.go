@@ -133,6 +133,134 @@ func (s *Store) PlanFanOutExpansionForRow(runID, producerTaskID, producerRowRef 
 	return s.expandFanOutSuccessors(s.db, runID, producerTaskID, producerRow, producer.Name, succIDs, partitions, nil, nil, false)
 }
 
+// HasAnyFanOutConsumerForRun reports whether ANY task in runID's job declares
+// a fanOut config at all. It is the cheap pre-filter HasFanOutSuccessor's
+// callers (internal/job/job.go, internal/worker/runtime_executor.go) run
+// first: on an ordinary run that never uses fan-out — the overwhelming
+// majority of cache hits — this single indexed join is the ENTIRE cost of the
+// F7 cache-hit gate, and HasFanOutSuccessor's fuller per-producer check never
+// runs at all.
+func (s *Store) HasAnyFanOutConsumerForRun(runID uuid.UUID) (bool, error) {
+	if hasAnyFanOutConsumerErrForTest != nil {
+		return false, hasAnyFanOutConsumerErrForTest
+	}
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("run: has any fan-out consumer: nil store")
+	}
+	var count int64
+	err := s.db.Model(&models.Task{}).
+		Joins("JOIN job_runs ON job_runs.job_id = tasks.job_id").
+		Where("job_runs.id = ? AND tasks.fan_out_config IS NOT NULL AND tasks.fan_out_config != ''", runID).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// HasFanOutSuccessor reports whether any task depending directly on
+// producerTaskID declares `fanOut.from` naming the producer AND still carries
+// an unexpanded, expandable template row for runID — i.e. whether completing
+// producerTaskID is expected to expand a fanned group right now. It applies
+// the identical gates expandFanOutSuccessors uses per successor
+// (fo.From == producer's name; fanOutTemplateExpandable), standalone, so a
+// cache-hit call site can decide BEFORE committing a completion whether an
+// entry with no recorded partition list (cache.Entry.Partitions == nil) is
+// safe to treat as a hit: a nil list only means "onEmpty" when something
+// downstream is actually still waiting to fan out from this producer. See
+// internal/job/job.go and internal/worker/runtime_executor.go's cache-hit
+// sites — both call HasAnyFanOutConsumerForRun first, so this heavier
+// per-successor query (a joined lookup plus one template check per matching
+// successor) only runs for runs that use fan-out somewhere at all.
+//
+// A malformed FanOutConfig on a successor is not this helper's error to
+// raise — expandFanOutSuccessors will surface it, correctly, at the point it
+// actually tries to expand that successor. Here it is treated as "does not
+// match", so a single bad successor never blocks a cache hit that has
+// nothing to do with it. Likewise a successor with no template row for this
+// run, or one already expanded into N sibling instances (ErrAmbiguousTaskRun),
+// is treated as "not currently expandable" rather than an error — mirroring
+// fanOutTemplateExpandable's own posture in expandFanOutSuccessors — so a
+// group the DAG already resolved (branch-skipped, cancelled, already
+// materialized) never forces a needless producer re-run.
+// hasFanOutSuccessorErrForTest, when non-nil, makes HasFanOutSuccessor return
+// it instead of running its real query. Test-only seam, set exclusively
+// through SetHasFanOutSuccessorErrForTest: internal/job and internal/worker
+// tests use it to exercise the fail-CLOSED behaviour their cache-hit gates
+// apply when this lookup itself errors (P2-A) — there is no narrower DB-level
+// fault to inject, since this query's tables (tasks, task_edges) are the same
+// ones ordinary DAG advancement needs, so sabotaging the schema breaks the
+// rest of the run too, not just this one call. Never set outside a test, and
+// always reset (nil) by the setting test's own cleanup — it is package-level
+// and therefore visible to every *Store in the process, though safe across
+// packages in practice because `go test` compiles and runs each package's
+// tests as its own process.
+var hasFanOutSuccessorErrForTest error
+
+// hasAnyFanOutConsumerErrForTest is the same kind of process-wide fault
+// injection for HasAnyFanOutConsumerForRun (the per-run pre-filter), so a
+// test can prove the OUTER lookup error fails closed too. Same rules: never
+// set outside a test, always reset by the setting test's own cleanup.
+var hasAnyFanOutConsumerErrForTest error
+
+// SetHasAnyFanOutConsumerErrForTest overrides HasAnyFanOutConsumerForRun's
+// result process-wide for exactly as long as the override is set. Pass nil to
+// restore the real behaviour; callers MUST do so (typically via t.Cleanup).
+func SetHasAnyFanOutConsumerErrForTest(err error) {
+	hasAnyFanOutConsumerErrForTest = err
+}
+
+// SetHasFanOutSuccessorErrForTest overrides HasFanOutSuccessor's result
+// process-wide for exactly as long as the override is set — see
+// hasFanOutSuccessorErrForTest. Pass nil to restore the real behaviour;
+// callers MUST do so (typically via t.Cleanup) before their test returns.
+func SetHasFanOutSuccessorErrForTest(err error) {
+	hasFanOutSuccessorErrForTest = err
+}
+
+func (s *Store) HasFanOutSuccessor(runID, producerTaskID uuid.UUID) (bool, error) {
+	if hasFanOutSuccessorErrForTest != nil {
+		return false, hasFanOutSuccessorErrForTest
+	}
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("run: has fan-out successor: nil store")
+	}
+	var producer models.Task
+	if err := s.db.Select("id", "name").First(&producer, "id = ?", producerTaskID).Error; err != nil {
+		return false, err
+	}
+
+	// Pre-filtered to successors that even DECLARE a fan-out config, in one
+	// joined query. The N+1 this replaces (a bare Find(edges) followed by one
+	// First(succ) per outgoing edge) was the dominant cost of this check on
+	// every cache hit that reached it.
+	var succs []models.Task
+	if err := s.db.
+		Joins("JOIN task_edges ON task_edges.to_task_id = tasks.id").
+		Where("task_edges.from_task_id = ? AND tasks.fan_out_config IS NOT NULL AND tasks.fan_out_config != ''", producerTaskID).
+		Find(&succs).Error; err != nil {
+		return false, err
+	}
+
+	for _, succ := range succs {
+		fo, decodeErr := decodeFanOutConfig(succ.FanOutConfig)
+		if decodeErr != nil || fo == nil || fo.From != producer.Name {
+			continue
+		}
+		template, err := loadUniqueTaskRun(s.db, runID, succ.ID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, ErrAmbiguousTaskRun) {
+				continue
+			}
+			return false, err
+		}
+		if fanOutTemplateExpandable(template) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) expandFanOutSuccessors(
 	tx *gorm.DB,
 	runID, producerTaskID uuid.UUID,

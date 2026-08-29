@@ -80,6 +80,51 @@ func TestCacheEntryWithoutPartitionsStaysNil(t *testing.T) {
 	require.Empty(t, model.Partitions, "an unfanned task must not write a partitions column")
 }
 
+// TestCacheEntryRecordedEmptyPartitionsStaysNonNilEmpty is the flip side of
+// TestCacheEntryWithoutPartitionsStaysNil: a producer that genuinely ran and
+// emitted zero partitions must round-trip as a non-nil, zero-length slice —
+// NOT collapse to the same nil a never-recorded entry reads back as. F7
+// (dynamic-fanout closeout) needs this distinction to tell "a pre-fan-out
+// cache entry, which never recorded a list" (nil — must be treated as a MISS
+// for a producer with a fan-out consumer, see run.Store.HasFanOutSuccessor)
+// apart from "recorded, and it was empty" (non-nil — a legitimate onEmpty).
+//
+// This is the store layer's isolated proof of the mechanism only. The
+// non-nil-empty value asserted here (`[]pkgtask.Partition{}`) is exactly what
+// pkg/task's partitionAccumulator.finish now returns for an explicit
+// `##caesium::partitions []` (see partition_test.go's
+// TestParseMarkers_EmptyPartitionsArrayStillValid) and what both cache-hit
+// writer sites assign straight onto cache.Entry.Partitions — the end-to-end
+// pipeline proof (producer executes once, second run is a real cache hit,
+// consumer still takes onEmpty) lives in
+// internal/job/fanout_local_test.go's
+// TestFanOutLocalEmptyProducerCacheHitTakesOnEmptyWithoutRerunning and
+// internal/worker/fanout_worker_test.go's
+// TestWorkerEmptyProducerCacheHitTakesOnEmptyWithoutRerunning.
+func TestCacheEntryRecordedEmptyPartitionsStaysNonNilEmpty(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	entry := &Entry{
+		Hash: "sha256:recorded-empty", JobID: uuid.New(), TaskName: "list",
+		Result: "success", RunID: uuid.New(), TaskRunID: uuid.New(),
+		Partitions: []pkgtask.Partition{},
+		CreatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, store.Put(entry))
+
+	got, found, err := store.Get(entry.Hash)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NotNil(t, got.Partitions, "a recorded-but-empty partition list must NOT read back as nil")
+	require.Empty(t, got.Partitions)
+
+	var model models.TaskCache
+	require.NoError(t, db.First(&model, "hash = ?", entry.Hash).Error)
+	require.NotEmpty(t, model.Partitions, "the column must carry a recorded marker (\"[]\"), not be left unset")
+}
+
 // TestCachePutUpsertRefreshesPartitions pins the easy-to-miss half of Put: the
 // OnConflict DoUpdates column list.  A hash re-Put with a new partition list
 // must overwrite it; omitting the column from DoUpdates silently keeps the old

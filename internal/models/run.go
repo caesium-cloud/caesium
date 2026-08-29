@@ -345,8 +345,17 @@ type TaskCache struct {
 	// mirrored from its TaskRun so a cache hit on the producer can still expand
 	// the downstream group. Without it a warm run replays the producer's result
 	// but has nothing to fan out from, and the group collapses to its single
-	// template row. Nullable: nil for every non-producer task and for every
-	// entry written before this column existed.
+	// template row. Nullable: unset for every non-producer task and for every
+	// entry written before this column existed — cache.Entry's entryToModel
+	// writes a literal "[]" (not NULL/unset) whenever the ORIGINATING run
+	// determined its producer's list, even when that list came out empty
+	// (pkg/task/partition.go's partitionAccumulator.finish returns a non-nil
+	// []Partition{} for an explicit `##caesium::partitions []`, the documented
+	// way to declare zero work). So an unset column distinguishes "no list was
+	// ever recorded" from a written "[]" ("recorded, and it was empty") once
+	// read back into cache.Entry.Partitions (nil vs a non-nil empty slice,
+	// respectively) — the state run.Store.HasFanOutSuccessor's cache-hit gate
+	// depends on to tell a legacy entry apart from a legitimately empty one.
 	Partitions datatypes.JSON `gorm:"type:json"`
 	CreatedAt  time.Time
 	ExpiresAt  *time.Time `gorm:"index:idx_task_cache_expires"`

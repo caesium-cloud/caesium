@@ -1437,6 +1437,19 @@ func (j *job) Run(ctx context.Context) error {
 				log.Warn("failed to persist partition descriptor inputs", "task", taskName, "partition", m.partition.Key, "error", err)
 			}
 
+			// This cache-hit site — a FANNED INSTANCE resolving its OWN
+			// per-partition result — is deliberately NOT gated like the two
+			// producer-facing cache-hit sites in this file and in
+			// internal/worker/runtime_executor.go (see F7,
+			// run.Store.HasFanOutSuccessor): a fanned instance can never itself
+			// be a fan-out PRODUCER, because pkg/jobdef/definition.go's step
+			// validation rejects chained fan-out ("fanOut.from %q is itself a
+			// fanOut step") for every job accepted through
+			// internal/jobdef/importer.go, which is the only writer of
+			// Task.FanOutConfig. So entry.Partitions is never consulted here,
+			// and there is no downstream group this hit could silently collapse.
+			// If chained fan-out is ever allowed, this invariant breaks and this
+			// site needs the same gate.
 			if cacheCfg.Enabled {
 				if attempt == 1 {
 					if entry, found, err := getCacheStore().Get(inputHash); err != nil {
@@ -2016,6 +2029,48 @@ func (j *job) Run(ctx context.Context) error {
 			}
 
 			entry, found, err := cacheStore.Get(inputHash)
+			// A cache entry with no recorded partition list (nil, not merely
+			// empty — see cache.Entry.Partitions) is ambiguous for a task with a
+			// downstream fan-out consumer: it might be a pre-fan-out entry (or
+			// one written before the parser learned to record an explicit `[]`)
+			// that never had the chance to record one. Treat that combination as
+			// a MISS, exactly like `found` were false, so the producer runs once
+			// more and backfills a real (possibly still-empty) list. Ordinary
+			// tasks are unaffected: HasAnyFanOutConsumerForRun/HasFanOutSuccessor
+			// are false for them, so a legitimately partition-less entry keeps
+			// hitting as before.
+			//
+			// BOTH lookup errors below fail CLOSED — treat the hit as a MISS, exactly
+			// as a cacheStore.Get error already does in this same block. An
+			// inconclusive answer from either query would otherwise let an
+			// unrecorded-partitions entry resolve "cached" on a run that DOES use
+			// fan-out: the group expands to nothing and the consumer is silently
+			// skipped via onEmpty — the exact collapse this gate exists to prevent.
+			// The cost of failing closed is one extra execution of this task on a
+			// rare transient read error; the cost of failing open is a silently
+			// empty group. (The per-run pre-filter is still what keeps ordinary
+			// hits cheap — it only changes what happens when that query ERRORS.)
+			if found && entry.Partitions == nil {
+				hasAnyFanOut, hafErr := store.HasAnyFanOutConsumerForRun(runID)
+				switch {
+				case hafErr != nil:
+					log.Warn("cache: failed to check whether this run uses fan-out; treating the hit as unusable (fail closed)",
+						"task", taskName, "hash", inputHash[:12], "error", hafErr)
+					found = false
+				case hasAnyFanOut:
+					hasConsumer, hcErr := store.HasFanOutSuccessor(runID, taskID)
+					switch {
+					case hcErr != nil:
+						log.Warn("cache: failed to check for a fan-out consumer; treating the hit as unusable (fail closed)",
+							"task", taskName, "hash", inputHash[:12], "error", hcErr)
+						found = false
+					case hasConsumer:
+						log.Info("cache: no partition list recorded on the cache entry; re-running producer to record one",
+							"task", taskName, "hash", inputHash[:12])
+						found = false
+					}
+				}
+			}
 			switch {
 			case err != nil:
 				log.Warn("cache lookup failed", "task", taskName, "error", err)

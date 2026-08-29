@@ -1,6 +1,6 @@
 # DAG-Native Infrastructure Deployment — `cache.chain` + the Terraform reagents
 
-Last updated: 2026-08-28
+Last updated: 2026-08-28 · **Status: COMPLETE** — every stream (A–E, H, N) shipped across Waves 1–3 on PR #351 (one squashed commit, `35c939c`); see the `## Progress` dashboard. Archived here from `active/`. The out-of-plan gaps found while shipping are tracked as GitHub issues #361–#368 (see `### Follow-ups outside this plan`).
 
 This plan ships the design in
 [`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md):
@@ -77,7 +77,7 @@ Settled by the spec (§3, §7, §12) and binding on every item:
   named exclusive locks, step-group templates (roadmap §2.2), node affinity,
   matrix fan-out, forge/PR-comment callbacks, a `caesium` Terraform provider.
 - **Dynamic fan-out and structured partitions are owned by
-  `docs/exec-plans/active/dynamic-fanout.md`** (Streams A/C there). This plan
+  `docs/exec-plans/completed/dynamic-fanout.md`** (Streams A/C there). This plan
   ships the hand-written per-stack form, which works today; the five-step
   fan-out form is documented as forward-looking and lands as an example only
   once fan-out ships. The fanout plan in turn defers the chain break to this
@@ -96,7 +96,7 @@ the branch-form cascade) are grounding corrections, not scope changes — if the
 spec is amended to address them, the amended spec wins. Where the spec touches
 the YAML contract, `pkg/jobdef/definition.go` is authoritative for the
 *current* shape and Stream A changes it. Dynamic fan-out and structured
-partition objects are owned by `docs/exec-plans/active/dynamic-fanout.md` and
+partition objects are owned by `docs/exec-plans/completed/dynamic-fanout.md` and
 `docs/design-dynamic-fanout.md`; tracking for them continues there.
 
 ## Progress (as of 2026-08-28)
@@ -216,107 +216,23 @@ historical design term.
 
 - `caesium job lint --server`'s breaking-contract gate is unscoped to the
   lint target (`internal/contract/derive.go`, `cmd/job/lint.go`) — any
-  unrelated breaking pair on a shared server fails every later server lint.
+  unrelated breaking pair on a shared server fails every later server lint (#362).
 - The Docker engine ignores `VolumeMount.SubPath` (podman and kubernetes
-  honour it); the lint is engine-aware, but the engine gap itself stands.
+  honour it); the lint is engine-aware, but the engine gap itself stands (#361).
 - No env-value interpolation exists, so a run param cannot reach `GIT_REF`;
   a `GIT_REF`-from-param mechanism (in `git-source` or the scheduler) is the
-  next step for per-commit deploy triggers.
+  next step for per-commit deploy triggers (#363).
 - `/cache/terraformrc` is a single slot: one provider set per `tfcache`
-  volume until the manifest can address a per-key config file.
+  volume until the manifest can address a per-key config file (#364).
 - The lossy `BuildOutputEnv` key round-trip means only snake_case Terraform
-  output names survive `IMPORT_OUTPUTS_FROM` exactly.
+  output names survive `IMPORT_OUTPUTS_FROM` exactly (#365).
 - Fan-out partitions of one step writing one volume are not modelled as
-  separate writers by the lint (documented).
+  separate writers by the lint (documented; #366).
 - arm64 reagent images are build-verified only until the infra lane has an
   arm64 twin; the infra lane needs `registry.terraform.io` egress for the
-  first warm.
+  first warm (#367).
 - `CAESIUM_CACHE_ENABLED` is unset on the default `integration-up` lane
-  (scenarios there rely on `metadata.cache: true`).
-
-## Streams` is the work
-backlog, `## Sequencing & Dependencies` captures cross-stream order,
-and `## Acceptance Criteria` lists the gates that close out the entire
-plan. Any agent can:
-
-1. Pick a numbered checklist item from `## Streams` whose dependencies
-   are satisfied (per `## Sequencing & Dependencies`).
-2. Land it as a self-contained PR.
-3. Run the verification block under `## Verification (Run For Every
-   PR)`.
-4. Tick the checkbox and update the active wave's per-stream bullet in
-   `## Progress`.
-
-For wave orchestration of the streams below, see
-[`.claude/skills/exec-plan-wave/`](../../../.claude/skills/exec-plan-wave/).
-For drafting new plans in this same shape, see
-[`.claude/skills/draft-exec-plan/`](../../../.claude/skills/draft-exec-plan/).
-
-## Strategic Decisions
-
-Settled by the spec (§3, §7, §12) and binding on every item:
-
-- **Caesium declares, orders, and mounts.** No HCL parsing, no Terraform
-  execution, no cloud credentials, no state storage, no HTTP-backend protocol,
-  no Terraform plugin in Caesium's Go. Terraform knowledge lives only inside
-  the reagent images (`terraform-exec` + `terraform-json`, per spec §6.7).
-- **The reagents are a separate Go module** (`reagents/go.mod`, no dependency on the root
-  module). This keeps `hashicorp/terraform-exec` / `terraform-json` out of the
-  root `go.mod`/`go.sum` (Caesium core unaffected; no `go.sum` collision with
-  sibling plans) and lets the images build from plain `golang:` + a pinned
-  Terraform binary rather than the CGO/dqlite builder image. The cost — the
-  root `just lint`/`just unit-test` do not cover `./reagents/...` — is paid by
-  dedicated `reagents-lint`/`reagents-test` targets wired into CI (B1, H-1).
-- **Fingerprint gate, drift job mandatory** (spec §3.2/§6.6): the drift job is
-  part of the feature, not an optional extra, and its steps never carry a
-  `cache` block.
-- **Warm-once, consume read-only** (spec §3.4): `filesystem_mirror`, never
-  `TF_PLUGIN_CACHE_DIR`; RWX storage on Kubernetes; RWO/node-affinity deferred.
-- **Out of scope, each with an existing home**: approval gates (roadmap §3.2),
-  named exclusive locks, step-group templates (roadmap §2.2), node affinity,
-  matrix fan-out, forge/PR-comment callbacks, a `caesium` Terraform provider.
-- **Dynamic fan-out and structured partitions are owned by
-  `docs/exec-plans/active/dynamic-fanout.md`** (Streams A/C there). This plan
-  ships the hand-written per-stack form, which works today; the five-step
-  fan-out form is documented as forward-looking and lands as an example only
-  once fan-out ships. The fanout plan in turn defers the chain break to this
-  plan's Stream A — the two plans meet at `cache.chain`, and neither may invent
-  a second mechanism for the other's half.
-
-## Source-Of-Truth Note
-
-When this plan and
-`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
-disagree, the spec wins — for intent, scope, the role contracts (§5.2), the
-`cache.chain` semantics (§4.3), the Terraform binding's behaviour (§6), the
-security requirements (§6.4 sensitive handling), the failure modes (§8), and
-the test scenarios (§9). The two exceptions recorded above (registry naming;
-the branch-form cascade) are grounding corrections, not scope changes — if the
-spec is amended to address them, the amended spec wins. Where the spec touches
-the YAML contract, `pkg/jobdef/definition.go` is authoritative for the
-*current* shape and Stream A changes it. Dynamic fan-out and structured
-partition objects are owned by `docs/exec-plans/active/dynamic-fanout.md` and
-`docs/design-dynamic-fanout.md`; tracking for them continues there.
-
-## Progress (as of 2026-08-26)
-
-No implementation waves have shipped yet. The plan was drafted from the spec
-merged in #343 (with the structured-partition amendment to the fan-out design
-in #344 already landed, so the ownership boundary between the two plans is
-settled); the first wave is the next eligible run of the `exec-plan-wave`
-skill against this doc.
-
-### Stream Status
-
-| Stream | Scope | Priority | Status |
-|--------|-------|----------|--------|
-| A | `cache.chain` + `ttl: never` — schema, hash semantics + golden test, wiring at all three `HashInput` sites, `caesium why` rendering, integration + generic-binding scenarios, generated schema reference | **P0** | Not started |
-| B | Pack scaffold (nested module, `build/Dockerfile.reagents`, protocol package) + `git-source` + `tf-discover` + hermetic fixture repo + discover/materialize integration scenarios | **P0** | Not started |
-| C | `tf-warm` + `tf-runner` (`tf-plan` / `tf-apply` / `tf-drift`) + the Terraform end-to-end scenarios (cache-skip, module edits, output chaining, warm marker, empty plan, sensitive values, drift) | **P0** | Not started |
-| D | Multi-writer volume lint warning + reference manifests (`infra-deploy`, `infra-drift`) in `docs/examples/` | P1 | Not started |
-| E | Console proposal panel — `proposal_kind` renderer registry with generic fallback, `terraform.plan.v1` renderer, optional run-level aggregate | P2 | Not started |
-| H | Harness — `integration-test-infra` lane + CI job, `reagents-lint`/`reagents-test` in CI, multi-arch publish of the four reagent images | P1 | Not started |
-| N | Docs — `docs/infrastructure-deployment.md` user guide + README index; roadmap row + spec status close-out | P1 | Not started |
+  (scenarios there rely on `metadata.cache: true`; #368).
 
 ## Streams
 
@@ -1186,12 +1102,12 @@ renders the summary and shows the reference.
 - [x] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in
-      `docs/exec-plans/active/dynamic-fanout.md` and
+      `docs/exec-plans/completed/dynamic-fanout.md` and
       `docs/design-dynamic-fanout.md` still describe the shipped behaviour; sync
       this plan's `## Progress` with merged PRs and move it to
       `docs/exec-plans/completed/`.
       Files: `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`,
-      `docs/roadmap.md`, `docs/exec-plans/active/dynamic-fanout.md`,
+      `docs/roadmap.md`, `docs/exec-plans/completed/dynamic-fanout.md`,
       `docs/design-dynamic-fanout.md`, this file.
       > Shipped (W3-α), scoped per this stream's workspace rules: banner
       > flipped, roadmap row flipped, cache.chain cross-links confirmed
@@ -1224,7 +1140,7 @@ renders the summary and shows the reference.
 - D2 depends on A1 (the example must lint with `chain`/`ttl: never`) and on
   C3/C4 (the env contracts it encodes).
 - N-1 depends on C4 and D2; N-2 runs last.
-- **Sibling plan**: `docs/exec-plans/active/dynamic-fanout.md` (unstarted) edits
+- **Sibling plan**: `docs/exec-plans/completed/dynamic-fanout.md` (shipped on #349) edits
   `internal/cache/hash.go`, `internal/job/job.go`,
   `internal/worker/runtime_executor.go`, `pkg/jobdef/definition.go`,
   `internal/jobdef/report/report.go`, `internal/run/why.go`/`whydiff.go`, and
@@ -1337,7 +1253,7 @@ The plan is done when **all** of these hold:
 7. **Docs** — `docs/infrastructure-deployment.md` exists and is indexed in
    `docs/README.md`; the spec's status banner reads Shipped; the Phase 4 roadmap
    row reads Shipped.
-8. `docs/roadmap.md`, `docs/exec-plans/active/dynamic-fanout.md`,
+8. `docs/roadmap.md`, `docs/exec-plans/completed/dynamic-fanout.md`,
    `docs/design-dynamic-fanout.md`, and `docs/design-incremental-execution.md`
    reflect every shipped stream; this plan's per-stream Progress entries match
    merged PRs.
@@ -1397,7 +1313,7 @@ Decisions this plan makes that the user may want to confirm before wave 1:
 - `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
   — the source of truth for this plan.
 - `docs/roadmap.md` — Phase 4 design-wave table row added at draft time.
-- `docs/exec-plans/active/dynamic-fanout.md` and `docs/design-dynamic-fanout.md`
+- `docs/exec-plans/completed/dynamic-fanout.md` and `docs/design-dynamic-fanout.md`
   — own dynamic fan-out and structured partition objects; defer the chain
   break to Stream A here.
 - `docs/design-incremental-execution.md` — the cache design of record; A7 adds

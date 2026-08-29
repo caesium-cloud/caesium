@@ -9,6 +9,7 @@ import (
 	asvc "github.com/caesium-cloud/caesium/api/rest/service/atom"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -27,6 +28,17 @@ type Config struct {
 	RunTimeout  time.Duration
 	Env         map[string]string // extra env vars injected into every task
 	OnPrepared  func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
+	// EngineFactory overrides EVERY engine kind (docker, kubernetes, podman)
+	// job.New dispatches steps through — a step's declared `engine:` picks
+	// which of job.WithDockerEngineFactory/WithKubernetesEngineFactory/
+	// WithPodmanEngineFactory job.New actually calls, and this field is wired
+	// into all three identically, so a test fixture is never silently routed
+	// to a real runtime just because a step used `engine: podman` or
+	// `engine: kubernetes` instead of the (default) docker. nil (the default)
+	// leaves job.New's own defaults in place, which drive real container
+	// runtimes. Tests that need a hermetic run inject a fake engine here (see
+	// internal/localrun/runner_test.go).
+	EngineFactory func(context.Context) atom.Engine
 }
 
 // Runner executes a job definition against an ephemeral in-memory database
@@ -114,6 +126,13 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 		job.WithAtomServiceFactory(dbAtomService(db)),
 		job.WithTaskEdgeServiceFactory(dbTaskEdgeService(db)),
 		job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+	}
+	if r.cfg.EngineFactory != nil {
+		opts = append(opts,
+			job.WithDockerEngineFactory(r.cfg.EngineFactory),
+			job.WithKubernetesEngineFactory(r.cfg.EngineFactory),
+			job.WithPodmanEngineFactory(r.cfg.EngineFactory),
+		)
 	}
 
 	if r.cfg.TaskTimeout > 0 {

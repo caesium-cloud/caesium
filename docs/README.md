@@ -45,7 +45,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 - [design-contract-enforcement.md](design-contract-enforcement.md): Cross-job contract enforcement — schema-compatibility checks across producer/consumer jobs at lint/diff/apply time, with named consumers, Console graph/diff surfaces, and an intentional-break path (shipped; completed plan `exec-plans/completed/contract-enforcement.md`).
 - [design-data-circuit-breaker.md](design-data-circuit-breaker.md): Data circuit breaker — statistical assertions on step outputs with dataset holds that stop bad data from propagating downstream (proposed; exec plan `exec-plans/active/data-circuit-breaker.md`).
 - [design-resource-right-sizing.md](design-resource-right-sizing.md): Learned resource right-sizing — per-step memory/CPU recommendations from run history plus OOM retry escalation (proposed; exec plan `exec-plans/active/resource-right-sizing.md`).
-- [design-dynamic-fanout.md](design-dynamic-fanout.md): Dynamic fan-out — runtime partition markers materialize data-proportional parallel task instances with per-partition caching (shipped; exec plan `exec-plans/active/dynamic-fanout.md`).
+- [design-dynamic-fanout.md](design-dynamic-fanout.md): Dynamic fan-out — runtime partition markers materialize data-proportional parallel task instances with per-partition caching (shipped; exec plan `exec-plans/completed/dynamic-fanout.md`).
 - [design-window-scheduling.md](design-window-scheduling.md): Deadline-window scheduling — run within a declared window, choosing the start via load/cost/carbon signals with a deadline-safe latest start (proposed; exec plan `exec-plans/active/window-scheduling.md`).
 
 ## Active Exec Plans

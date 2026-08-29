@@ -66,6 +66,11 @@ type fanOutTaskRunFixture struct {
 	taskRun *models.TaskRun
 	jobRun  *models.JobRun
 	task    *models.Task
+	// consumer and consumerAtom are set by seedProducerWithConsumer; nil
+	// otherwise. newProducerRunAttempt uses them to seed a fresh consumer
+	// template row per attempt.
+	consumer     *models.Task
+	consumerAtom *models.Atom
 }
 
 func seedFanOutTaskRun(t *testing.T, alias string, fanOutConfig string, part pkgtask.Partition, siblings int, cacheEnabled bool) fanOutTaskRunFixture {
@@ -292,6 +297,81 @@ func seedProducerTaskRun(t *testing.T, alias string) fanOutTaskRunFixture {
 	return fanOutTaskRunFixture{db: db, store: store, taskRun: taskRun, jobRun: jobRun, task: task}
 }
 
+// seedProducerWithConsumer extends seedProducerTaskRun with a downstream task
+// whose FanOutConfig names the producer, so store.HasFanOutSuccessor(producer)
+// is true — the precondition F7's stale-cache-entry guard checks for before
+// trusting a cache hit with no recorded partition list.
+func seedProducerWithConsumer(t *testing.T, alias string) fanOutTaskRunFixture {
+	t.Helper()
+	f := seedProducerTaskRun(t, alias)
+
+	foJSON, err := json.Marshal(jobdefschema.FanOut{From: f.task.Name, MaxPartitions: 16})
+	require.NoError(t, err)
+
+	consumerAtom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["sh","-c","true"]`}
+	require.NoError(t, f.db.Create(consumerAtom).Error)
+	consumer := &models.Task{
+		ID: uuid.New(), JobID: f.task.JobID, AtomID: consumerAtom.ID, Name: "process",
+		FanOutConfig: datatypes.JSON(foJSON),
+	}
+	require.NoError(t, f.db.Create(consumer).Error)
+	require.NoError(t, f.db.Create(&models.TaskEdge{
+		ID: uuid.New(), JobID: f.task.JobID, FromTaskID: f.task.ID, ToTaskID: consumer.ID,
+	}).Error)
+
+	// The producer's real completion expands the consumer's group in the SAME
+	// transaction, which requires an UNEXPANDED template TaskRun row to exist
+	// for it already (expandFanOutSuccessors: "fan-out template for %s").
+	// RegisterTasks would normally create this; seed it directly here to match
+	// what a real run's registration produces.
+	require.NoError(t, f.db.Create(&models.TaskRun{
+		ID: uuid.New(), JobRunID: f.jobRun.ID, TaskID: consumer.ID, AtomID: consumerAtom.ID,
+		Engine: consumerAtom.Engine, Image: consumerAtom.Image, Command: consumerAtom.Command,
+		Status: string(run.TaskStatusPending), OutstandingPredecessors: 1,
+	}).Error)
+
+	f.consumer = consumer
+	f.consumerAtom = consumerAtom
+	return f
+}
+
+// newProducerRunAttempt seeds a FRESH JobRun for the same job/task/atom
+// definitions (so the cache identity hash is unchanged) and returns a new,
+// running producer TaskRun for it — the worker-package equivalent of "run the
+// job again". A second completion attempt against the SAME run's consumer
+// template would find it already expanded into N instance rows and fail with
+// ErrAmbiguousTaskRun; a fresh run gives the group a fresh, unexpanded
+// template to expand into, exactly like a real second run would.
+func (f *fanOutTaskRunFixture) newProducerRunAttempt(t *testing.T) *models.TaskRun {
+	t.Helper()
+	now := time.Now().UTC()
+
+	jobRun := &models.JobRun{
+		ID: uuid.New(), JobID: f.task.JobID, TriggerID: f.jobRun.TriggerID, TriggerType: f.jobRun.TriggerType,
+		Status: string(run.StatusRunning), StartedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, f.db.Create(jobRun).Error)
+
+	taskRun := &models.TaskRun{
+		ID: uuid.New(), JobRunID: jobRun.ID, TaskID: f.task.ID, AtomID: f.taskRun.AtomID,
+		Engine: f.taskRun.Engine, Image: f.taskRun.Image, Command: f.taskRun.Command,
+		Status: string(run.TaskStatusRunning), ClaimedBy: "node-a", Attempt: 1, MaxAttempts: 1,
+		CacheEnabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, f.db.Create(taskRun).Error)
+
+	if f.consumer != nil {
+		require.NoError(t, f.db.Create(&models.TaskRun{
+			ID: uuid.New(), JobRunID: jobRun.ID, TaskID: f.consumer.ID, AtomID: f.consumerAtom.ID,
+			Engine: f.consumerAtom.Engine, Image: f.consumerAtom.Image, Command: f.consumerAtom.Command,
+			Status: string(run.TaskStatusPending), OutstandingPredecessors: 1,
+		}).Error)
+	}
+
+	f.jobRun = jobRun
+	return taskRun
+}
+
 const producerMarkerLog = `starting
 ##caesium::partitions [{"key":"a","fingerprint":"sha256:` +
 	`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},` +
@@ -370,6 +450,256 @@ func TestWorkerCacheHitPassesPartitionsToSink(t *testing.T) {
 	require.Equal(t, 1, rec.cachedCalls, "the second run must be a cache hit")
 	require.Equal(t, wantProducerPartitions(), rec.cachedPartitions,
 		"a cache-hit producer must hand its partitions to the completion route")
+}
+
+// TestWorkerStaleCacheEntryForcesProducerRerun pins F7 (dynamic-fanout
+// closeout) for the distributed pull-mode worker: a cache entry with no
+// RECORDED partition list (Partitions == nil, not merely empty — see
+// cache.Entry.Partitions) must never be trusted as a hit for a producer whose
+// downstream consumer fans out from it. The worker is the only place that can
+// still choose to run the container for real — once it reports "cached" to
+// the sink, the container is never coming back — so the guard must fire
+// there, before the sink is ever called, never after.
+func TestWorkerStaleCacheEntryForcesProducerRerun(t *testing.T) {
+	f := seedProducerWithConsumer(t, "producer-stale-cache-job")
+
+	engine := &partitionEmittingEngine{logs: producerMarkerLog}
+	newExecutor := func(sink CompletionSink) *runtimeExecutor {
+		return &runtimeExecutor{
+			store:     f.store,
+			localSink: sink,
+			engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+				return engine, nil
+			},
+		}
+	}
+
+	// Cold run populates the cache.
+	newExecutor(NewLocalSink(f.store)).Execute(context.Background(), f.taskRun)
+	entries, err := cache.NewStore(f.db).ListByJob(f.jobRun.JobID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.NotEmpty(t, entries[0].Partitions)
+	hash := entries[0].Hash
+
+	// Simulate a pre-fan-out cache entry: corrupt the column so it reads back
+	// nil, exactly what every entry written before it existed looks like.
+	require.NoError(t, f.db.Model(&models.TaskCache{}).
+		Where("hash = ?", hash).
+		Update("partitions", nil).Error)
+	corrupted, found, err := cache.NewStore(f.db).Get(hash)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Nil(t, corrupted.Partitions, "the corrupted entry must read back nil, not an empty slice")
+
+	// A fresh run of the same job/task (same cache identity hash, a NEW
+	// JobRun/TaskRun/consumer-template triple — a second completion against
+	// the FIRST run's consumer would find it already expanded and fail with
+	// ErrAmbiguousTaskRun, which is not what this test is about). Rewire the
+	// engine to a DIFFERENT partition list: if the corrupted entry were
+	// (wrongly) trusted, the producer would resolve "cached" and the group —
+	// if it expanded at all — would expand to nothing or the stale list, never
+	// to this one.
+	engine.logs = "##caesium::partitions [\"x\",\"y\"]\n"
+	second := f.newProducerRunAttempt(t)
+
+	rec := &recordingSink{inner: NewLocalSink(f.store)}
+	newExecutor(rec).Execute(context.Background(), second)
+
+	require.Equal(t, 0, rec.cachedCalls,
+		"the stale entry must never reach the completion seam as a cache hit")
+
+	var rerun models.TaskRun
+	require.NoError(t, f.db.First(&rerun, "id = ?", second.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), rerun.Status,
+		"a producer whose cache entry has no recorded partition list must re-run, not resolve as cached")
+	require.Equal(t, hash, rerun.Hash,
+		"the second run must compute the SAME cache identity hash as the first, or this test proves nothing about the stale entry")
+
+	var persisted []pkgtask.Partition
+	require.NoError(t, json.Unmarshal(rerun.Partitions, &persisted))
+	require.Equal(t, []pkgtask.Partition{{Key: "x"}, {Key: "y"}}, persisted,
+		"the producer row must carry the FRESH partition list, not the stale/corrupted one")
+}
+
+// TestWorkerHasFanOutSuccessorErrorForcesProducerMiss is the F7 review's P2-A
+// assertion for the worker lane: once a run is known to use fan-out
+// (HasAnyFanOutConsumerForRun == true), a TRANSIENT ERROR from
+// HasFanOutSuccessor itself must fail CLOSED — treated as a MISS — not fail
+// open and admit a cache entry with no recorded partition list as a hit. The
+// worker is the only place this decision can still be made: once it reports
+// "cached" to the sink, the container is never coming back.
+func TestWorkerHasFanOutSuccessorErrorForcesProducerMiss(t *testing.T) {
+	f := seedProducerWithConsumer(t, "producer-hasfanoutsuccessor-error-job")
+
+	engine := &partitionEmittingEngine{logs: producerMarkerLog}
+	newExecutor := func(sink CompletionSink) *runtimeExecutor {
+		return &runtimeExecutor{
+			store:     f.store,
+			localSink: sink,
+			engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+				return engine, nil
+			},
+		}
+	}
+
+	// Cold run populates the cache.
+	newExecutor(NewLocalSink(f.store)).Execute(context.Background(), f.taskRun)
+	entries, err := cache.NewStore(f.db).ListByJob(f.jobRun.JobID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	hash := entries[0].Hash
+
+	// Simulate a pre-fan-out cache entry, exactly like
+	// TestWorkerStaleCacheEntryForcesProducerRerun.
+	require.NoError(t, f.db.Model(&models.TaskCache{}).
+		Where("hash = ?", hash).
+		Update("partitions", nil).Error)
+
+	// Force HasFanOutSuccessor itself to error — not HasAnyFanOutConsumerForRun,
+	// which must stay healthy so the inner check is actually reached.
+	run.SetHasFanOutSuccessorErrForTest(errors.New("simulated transient dqlite read error"))
+	t.Cleanup(func() { run.SetHasFanOutSuccessorErrForTest(nil) })
+
+	second := f.newProducerRunAttempt(t)
+
+	rec := &recordingSink{inner: NewLocalSink(f.store)}
+	newExecutor(rec).Execute(context.Background(), second)
+
+	require.Equal(t, 0, rec.cachedCalls,
+		"a transient HasFanOutSuccessor error must never reach the completion seam as a cache hit")
+
+	var rerun models.TaskRun
+	require.NoError(t, f.db.First(&rerun, "id = ?", second.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), rerun.Status,
+		"a transient HasFanOutSuccessor error must fail CLOSED (re-run the producer), not resolve it cached")
+}
+
+// TestWorkerHasAnyFanOutConsumerErrorForcesProducerMiss is the F7 review's P2-A
+// assertion for the worker lane: once a run is known to use fan-out
+// (HasAnyFanOutConsumerForRun == true), a TRANSIENT ERROR from
+// HasFanOutSuccessor itself must fail CLOSED — treated as a MISS — not fail
+// open and admit a cache entry with no recorded partition list as a hit. The
+// worker is the only place this decision can still be made: once it reports
+// "cached" to the sink, the container is never coming back.
+func TestWorkerHasAnyFanOutConsumerErrorForcesProducerMiss(t *testing.T) {
+	f := seedProducerWithConsumer(t, "producer-hasanyfanoutconsumer-error-job")
+
+	engine := &partitionEmittingEngine{logs: producerMarkerLog}
+	newExecutor := func(sink CompletionSink) *runtimeExecutor {
+		return &runtimeExecutor{
+			store:     f.store,
+			localSink: sink,
+			engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+				return engine, nil
+			},
+		}
+	}
+
+	// Cold run populates the cache.
+	newExecutor(NewLocalSink(f.store)).Execute(context.Background(), f.taskRun)
+	entries, err := cache.NewStore(f.db).ListByJob(f.jobRun.JobID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	hash := entries[0].Hash
+
+	// Simulate a pre-fan-out cache entry, exactly like
+	// TestWorkerStaleCacheEntryForcesProducerRerun.
+	require.NoError(t, f.db.Model(&models.TaskCache{}).
+		Where("hash = ?", hash).
+		Update("partitions", nil).Error)
+
+	// Force the OUTER per-run pre-filter (HasAnyFanOutConsumerForRun) to
+	// error. This run does use fan-out, so admitting the partition-less entry
+	// here would collapse the group via onEmpty — the gate must fail closed
+	// on this lookup too, not only on HasFanOutSuccessor.
+	run.SetHasAnyFanOutConsumerErrForTest(errors.New("simulated transient dqlite read error"))
+	t.Cleanup(func() { run.SetHasAnyFanOutConsumerErrForTest(nil) })
+
+	second := f.newProducerRunAttempt(t)
+
+	rec := &recordingSink{inner: NewLocalSink(f.store)}
+	newExecutor(rec).Execute(context.Background(), second)
+
+	require.Equal(t, 0, rec.cachedCalls,
+		"a transient HasAnyFanOutConsumerForRun error must never reach the completion seam as a cache hit")
+
+	var rerun models.TaskRun
+	require.NoError(t, f.db.First(&rerun, "id = ?", second.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), rerun.Status,
+		"a transient HasAnyFanOutConsumerForRun error must fail CLOSED (re-run the producer), not resolve it cached")
+}
+
+// TestWorkerEmptyProducerCacheHitTakesOnEmptyWithoutRerunning is the F7
+// review's P1-1 assertion the implementation was missing, for the worker
+// lane: a producer that LEGITIMATELY emits zero partitions
+// (`##caesium::partitions []`, the documented way to declare an empty work
+// list — not a stale/legacy entry) must be cacheable exactly like any other
+// task. Run 1 executes it for real and the consumer takes onEmpty (skip);
+// run 2 must be a genuine cache HIT — the producer resolves "cached" without
+// its container running again, and the consumer takes onEmpty again, purely
+// from the replayed (non-nil, empty) partition list. Before the P1-1 fix,
+// pkg/task's parser returned nil (not a non-nil empty slice) for an
+// explicitly-empty array, so this producer was indistinguishable from a
+// legacy entry and re-executed on EVERY run.
+func TestWorkerEmptyProducerCacheHitTakesOnEmptyWithoutRerunning(t *testing.T) {
+	f := seedProducerWithConsumer(t, "producer-empty-cache-job")
+
+	engine := &partitionEmittingEngine{logs: "##caesium::partitions []\n"}
+	newExecutor := func(sink CompletionSink) *runtimeExecutor {
+		return &runtimeExecutor{
+			store:     f.store,
+			localSink: sink,
+			engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+				return engine, nil
+			},
+		}
+	}
+
+	// Cold run: the producer executes for real and its consumer takes onEmpty.
+	newExecutor(NewLocalSink(f.store)).Execute(context.Background(), f.taskRun)
+
+	var coldProducer models.TaskRun
+	require.NoError(t, f.db.First(&coldProducer, "id = ?", f.taskRun.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), coldProducer.Status,
+		"the cold run must actually execute the producer")
+
+	var coldConsumer models.TaskRun
+	require.NoError(t, f.db.
+		Where("job_run_id = ? AND task_id = ?", f.jobRun.ID, f.consumer.ID).
+		First(&coldConsumer).Error)
+	require.Equal(t, string(run.TaskStatusSkipped), coldConsumer.Status,
+		"an empty partition list must take onEmpty (skip) on the cold run")
+
+	entries, err := cache.NewStore(f.db).ListByJob(f.jobRun.JobID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.NotNil(t, entries[0].Partitions,
+		"a legitimately-empty producer must record a non-nil empty list, not nil")
+	require.Empty(t, entries[0].Partitions)
+
+	// A fresh run of the same job/task (same cache identity hash). If the
+	// producer re-executes, this malformed marker fails parsing outright — a
+	// silent re-run cannot masquerade as a pass.
+	engine.logs = "##caesium::partitions not-valid-json\n"
+	second := f.newProducerRunAttempt(t)
+
+	rec := &recordingSink{inner: NewLocalSink(f.store)}
+	newExecutor(rec).Execute(context.Background(), second)
+
+	require.Equal(t, 1, rec.cachedCalls, "the second run must be a genuine cache hit")
+
+	var rerun models.TaskRun
+	require.NoError(t, f.db.First(&rerun, "id = ?", second.ID).Error)
+	require.Equal(t, string(run.TaskStatusCached), rerun.Status,
+		"a legitimately-empty producer must resolve from cache on the second run, not re-execute")
+
+	var secondConsumer models.TaskRun
+	require.NoError(t, f.db.
+		Where("job_run_id = ? AND task_id = ?", f.jobRun.ID, f.consumer.ID).
+		First(&secondConsumer).Error)
+	require.Equal(t, string(run.TaskStatusSkipped), secondConsumer.Status,
+		"the cache-hit producer's replayed (empty) list must still take onEmpty")
 }
 
 // TestOwnerSink_CachedCarriesPartitions pins the owner half: a cached producer

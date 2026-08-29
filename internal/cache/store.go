@@ -33,7 +33,24 @@ type Entry struct {
 	// Partitions is the normalized partition list a fan-out producer emitted.
 	// It is what lets a CACHED producer still expand its group: the fan-out
 	// expansion needs the list, and a cache hit skips the container that would
-	// have printed it. nil for every task that is not a fan-out producer.
+	// have printed it.
+	//
+	// nil vs a non-nil empty slice is a meaningful distinction here, and it is
+	// established at the SOURCE, not invented at this layer: pkgtask.Markers
+	// (pkg/task/partition.go's partitionAccumulator.finish) returns a non-nil
+	// []Partition{} when a producer's log explicitly parsed a
+	// `##caesium::partitions [...]` line — even `[]`, the documented way to
+	// declare an empty work list — and nil when no such line was ever seen.
+	// Both writer sites (internal/job/job.go, internal/worker/runtime_executor.go)
+	// assign that value straight onto this field, and Put/Get preserve it end to
+	// end (see entryToModel/modelToEntry). So: nil means no partition list was
+	// ever RECORDED for this entry — every task that is not a fan-out producer,
+	// and every entry written before this field existed — while a non-nil
+	// (possibly zero-length) slice means the producer's execution genuinely
+	// determined the list, even if it came out empty. A cache-hit call site
+	// facing nil cannot tell "not a producer" from "a pre-fan-out entry for a
+	// producer whose consumer now expects a group", so it must check separately
+	// (run.Store.HasFanOutSuccessor) before trusting an empty read as onEmpty.
 	Partitions []pkgtask.Partition `json:"partitions,omitempty"`
 	CreatedAt  time.Time
 	ExpiresAt  *time.Time
@@ -284,7 +301,18 @@ func entryToModel(entry *Entry) (*models.TaskCache, error) {
 	// back into a Partition (whose Attributes field is a nested "attributes"
 	// object) silently drops them. This column exists to be read back, so the
 	// two directions must be symmetric.
-	if len(entry.Partitions) > 0 {
+	//
+	// Gated on != nil, NOT len() > 0: a producer that genuinely emitted zero
+	// partitions (pkgtask.Markers.Partitions is a non-nil []Partition{} for an
+	// explicit `##caesium::partitions []`, per entry.Partitions' doc above) must
+	// still write the column (as "[]") so a later Get can tell "recorded,
+	// empty" apart from "never recorded". Collapsing both to "leave the column
+	// unset" is exactly the bug a pre-fan-out cache entry has for free — do not
+	// reintroduce it here. This is the gate run.Store.HasFanOutSuccessor's
+	// cache-hit callers depend on; if the parser ever stops distinguishing the
+	// two (see pkg/task/partition.go's partitionAccumulator), this branch keeps
+	// compiling but silently stops meaning anything.
+	if entry.Partitions != nil {
 		encoded, err := json.Marshal(entry.Partitions)
 		if err != nil {
 			return nil, err

@@ -1,6 +1,6 @@
 # Dynamic Fan-Out — Data-Proportional Parallelism
 
-Last updated: 2026-08-26
+Last updated: 2026-08-28 · **Status: COMPLETE** — every stream (G, A–F, H-1, N-1) shipped on PR #349 (Wave 1); the evidence gaps that Wave 1 recorded as follow-ups were closed by the close-out wave (Wave 2, one squashed PR), so every acceptance criterion below now holds. Archived here from `active/`. The out-of-plan carve-outs (follow-ups 3, 10, 11, 13, 14, 15 and the design's Phase 5 items) are tracked as GitHub issues #353–#360, not here.
 
 This plan ships **dynamic fan-out**: a producer step emits a partition list on
 stdout (`##caesium::partitions [...]`), a downstream step declares `fanOut:` in
@@ -111,7 +111,7 @@ priority/status is tracked in
 on priority/status). The job-definition contract lives in
 [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go).
 
-## Progress (as of 2026-08-26)
+## Progress (as of 2026-08-28)
 
 **Wave 1 (2026-08-26) — an unverified first pass, an audit, then a gap-closing
 wave.** Wave 1 did not land in one clean pass, and the honest record matters more
@@ -129,6 +129,26 @@ wording now carry a `_Shipped 2026-08-26: …_` evidence line or an `_Open: …_
 note. The carve-outs that are genuinely not done are listed under
 [`### Follow-ups`](#follow-ups-open-after-wave-1) at the end of this section —
 they are real gaps, not paperwork.
+
+**Wave 2 (2026-08-28) — close-out.** Wave 1 left acceptance criterion 4 unmet in
+one clause: no test anywhere killed an owner mid-group or let a claim lapse
+mid-group. Wave 2 was two streams on one branch — an Opus stream for the
+failover / lease-expiry / checkpoint-cadence evidence (follow-ups 1, 2, 4;
+`internal/run/failover_fanout_test.go`, `fanout_lease_expiry_test.go`,
+`checkpoint_writer_test.go`, no runtime change) and a Sonnet stream for the
+hygiene and coverage bundle (follow-ups 5, 7, 8, 9, 12; one runtime change, the
+F7 stale-cache gate in `internal/job/job.go` and
+`internal/worker/runtime_executor.go`). Each stream was reviewed adversarially
+against its own claims (the Opus reviewer's two P2s were both over-claims —
+"fans in exactly once" asserted nowhere, an in-package test called
+"end-to-end" — fixed by *asserting* the first and rewording the second), and
+every test below that carries a mutation note was mutation-checked by its
+reviewer (the mutation the test claims to catch was applied and the test confirmed
+failing). The evidence sits under each
+follow-up in [`### Follow-ups`](#follow-ups-open-after-wave-1); the ones that
+remain open are out-of-plan and carry an explicit deferral note. Gate on the
+merged tree: `just lint`, `just unit-test`, `just integration-test`,
+`just integration-test-distributed`, `just integration-test-owner-memory`.
 
 The plan was published from
 [`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md) (then Status:
@@ -180,11 +200,11 @@ store code lives in files this plan predates: `internal/run/fanout.go`,
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| G | **Instance identity migration** — re-key the whole run lifecycle off `(run, task)` onto `TaskRun` identity: SQL advancement, the run-owner in-memory engine + checkpoint format + recovery replay, retry accounting, and the owner↔worker wire protocol. Behavior-neutral for unfanned runs; **gates A2 and everything downstream** | **P0 — gating** | **Shipped** — G6's audit table is recorded under G6 below; G3's failover-mid-group test is [open](#follow-ups-open-after-wave-1) |
+| G | **Instance identity migration** — re-key the whole run lifecycle off `(run, task)` onto `TaskRun` identity: SQL advancement, the run-owner in-memory engine + checkpoint format + recovery replay, retry accounting, and the owner↔worker wire protocol. Behavior-neutral for unfanned runs; **gates A2 and everything downstream** | **P0 — gating** | **Shipped** — G6's audit table is recorded under G6 below; G3's failover-mid-group test landed in Wave 2 (`TestFailoverMidGroup_*`, follow-up 1) |
 | A | Substrate — `TaskRun` partition + fingerprint/ordering columns + unique index, instance-keyed store rewrite, marker parsing (string **and** object form) + caps, server hard cap env | **P0** | **Shipped** — columns + explicit index migration (`pkg/db/migrations.go`), `pkg/task/partition{,_graph}.go`, `CAESIUM_FANOUT_MAX_PARTITIONS` |
 | B | Schema + lint contract — `FanOut` on `Step`, `validateSteps` rules, `FanOutConfig` on `models.Task`, runtime spec (**unchanged by the structured-partition amendment — no new YAML field**) | **P0** | **Shipped** — `validateFanOut` + `models.Task.FanOutConfig` + regenerated schema reference |
 | C | Local executor — expansion, per-partition cache identity (`key` + `fingerprint` + attributes), in-group ordering + skip cascade, group fan-in + output aggregation, metrics | **P0** | **Shipped** — `runFannedGroup` reads ordering from the store's `outstanding_predecessors`; both `caesium_fanout_*` series observed |
-| D | Distributed lane — expansion + cycle check + indegree seeding in the completion transaction, instance-keyed sibling decrement, `maxParallel` claim predicate, sibling-aware predecessor outputs | P1 | **Shipped** — SQL lane in `internal/run/fanout.go`, owner lane in `RunState.ApplyExpansion`/`ReadyTasks`; owner failover-mid-group scenario is [open](#follow-ups-open-after-wave-1) |
+| D | Distributed lane — expansion + cycle check + indegree seeding in the completion transaction, instance-keyed sibling decrement, `maxParallel` claim predicate, sibling-aware predecessor outputs | P1 | **Shipped** — SQL lane in `internal/run/fanout.go`, owner lane in `RunState.ApplyExpansion`/`ReadyTasks`; owner failover-mid-group and lease-expiry-mid-group scenarios landed in Wave 2 (follow-ups 1 and 4) |
 | E | Surfaces — REST partition endpoints + `caesium run partitions`/`retry --partition` + ordering-aware retry reset + `why`/`run diff`/replay alignment | P1 | **Shipped** — `ListPartitions`/`RetryPartition` + `caesium run partitions` / `retry --partition` / `why --partition`; replay fails closed with 409 |
 | F | UI — grouped DAG node, run-timeline group lane, virtualized partition table with per-row retry and ordering/fingerprint columns | P2 | **Shipped** — `fanout-status-strip`, `run-timeline-group-row`, `PartitionTable` (`@tanstack/react-virtual`), `ui/e2e/fanout.spec.ts` |
 | H-1 | Integration harness — fan-out caps + distributed lane + ordered-group fixtures wired on the live integration server | — | **Shipped** — three servers at `CAESIUM_FANOUT_MAX_PARTITIONS=8`, new `integration-test-owner-memory` lane + CI job, 21 `TestFanOut*` scenarios; **the distributed lane's pre-wave green history is not evidence** ([why](#follow-ups-open-after-wave-1)) |
@@ -192,8 +212,13 @@ store code lives in files this plan predates: `internal/run/fanout.go`,
 
 ### Follow-ups (open after Wave 1)
 
-These are the carve-outs Wave 1 did **not** close. Each is a real gap; none is
-blocked on a design decision.
+These are the carve-outs Wave 1 did **not** close, kept verbatim as the honest
+record. **Wave 2 (2026-08-28) closed items 1, 2, 4, 5, 7, 8, 9 and 12** — each
+carries a `_Closed 2026-08-28: …_` line naming the tests that are its evidence.
+Items 3, 10, 11, 13, 14 and 15 are pre-existing or structural gaps that no
+fan-out item owns; each carries a `_Deferred: …_` line and is tracked as a
+GitHub issue filed at close-out, so it outlives this archive. Item 6 is a
+historical note.
 
 1. **There is no failover-mid-group test, anywhere.** G3, D4, and D5 each ask for
    a scenario that kills an owner mid-group and asserts the takeover re-dispatches
@@ -204,17 +229,23 @@ blocked on a design decision.
    (`TestRehydrateInGroupEdges_RestoresMaxParallel` / `_RestoresPartitionKeys` /
    `_RestoresFailurePolicy`), the end-to-end takeover is not. This is the single
    largest evidence gap in the wave.
+   _Closed 2026-08-28: `TestFailoverMidGroup_ReDispatchesOnlyUnfinishedInstances` and `TestFailoverMidGroup_CheckpointPredatesExpansion` (`internal/run/failover_fanout_test.go`) drive a real lease takeover (`AcquireExpiredLeases` → `OwnerManager.Recover`) mid-fanned-group and assert only the unfinished instances are re-dispatched, the group is not re-expanded, `maxParallel` and in-group ordering survive the rebuild, and the run finalizes succeeded. Both are in-package tests, not `test/` scenarios, and no `test/` scenario is reachable: the lanes run a single node, `AcquireExpiredLeases` excludes the current owner, and nothing drops an owned run from the `OwnerManager` on lease loss, so a takeover cannot be provoked without a test-only server backdoor; and although a server *restart* does reach `Recover` on a single node, the integration lanes' test container joins the server's network namespace (`--network=container:…`), so restarting the server tears down the namespace the test itself runs in._
+
 2. **G3's checkpoint-cadence starvation is untouched.**
    `internal/run/checkpoint_writer.go` has no diff in this wave;
    `CheckpointWriter.due` still keys off `RunState.seq`. Because `seq` now
    advances per *instance* rather than per group, the behaviour moved in the
    right direction on its own — but nothing asserts it, and the item's stated
    concern was never closed deliberately.
+   _Closed 2026-08-28: `TestCheckpointWriter_CadenceAdvancesPerFanOutInstance` and `TestOwnerManager_CheckpointsOnceEveryNInstanceCompletions` (`internal/run/checkpoint_writer_test.go`) close the concern from both directions: the sequence cursor advances per instance (eight partitions at a four-event cadence write two checkpoints, at sequences 4 and 8, where one event per group would write none), and the writer is called per instance through `OwnerManager.CompleteInstance`, asserted on the durable `run_checkpoints` rows._
+
 3. **`caesium run retry <run>` without `--partition` still runs in-process.**
    `cmd/run/retry.go:75` opens `runstorage.Default()` directly; only the
    `--partition` path goes over `--server`. Pre-existing CLI design, not
    introduced here, but the two retry paths now use different transports and only
    one of them is exercised against the live server in CI.
+   _Deferred: pre-existing CLI transport split, not a fan-out defect; tracked as #353 (route whole-run retry over `--server`, `test/` scenario via `runCLIStdout`)._
+
 4. **The two lanes resolve a lost completion differently, by design — and only
    one of them is tested.** If an instance's completion *write* fails after its
    container is provably over, the **local** lane's post-group sweep
@@ -231,31 +262,43 @@ blocked on a design decision.
    behind it, and the code argues the state is unreachable locally anyway (both
    loop exits gate on `inFlight == 0`); nothing tests the distributed
    lease-expiry-mid-group path at all.
+   _Closed 2026-08-28: `TestFanOutLeaseExpiryMidGroupReDispatchesOnlyThatInstance` (`internal/run/fanout_lease_expiry_test.go`) covers the distributed lane's answer: the lapsed claim is reclaimed by `Store.ReclaimOwnerExpiredClaims`, only that instance returns to the dispatchable pool (finished and live-claimed siblings untouched), the freed `maxParallel` slot comes back, and the retried instance still lets the group fan in exactly once — assertable because the fan-in successor is given a second, independent predecessor, so a surplus group decrement would release it early. In-package store-level, not a `test/` scenario: a claim only lapses when a worker dies holding it, and the lanes cannot kill a worker mid-partition. The local sweep's coverage is unchanged._
+
 5. **Dead fields in the harness.** `test/fanout_helpers_test.go`'s
    `partitionSnapshot.At` and `.RunStatus` are populated and never read.
+   _Closed 2026-08-28: `partitionSnapshot.At` and `.RunStatus` removed from `test/fanout_helpers_test.go` (grep-verified unread)._
+
 6. **The distributed CI lane's pre-wave history is not evidence.** On `master`
    the lane ran `-run "TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault"`
    — un-suite-qualified, so under a testify suite it matched **nothing** and the
    lane was green because it ran zero tests. It is now
    `-run "TestIntegrationTestSuite/(…|TestFanOut)"`. Treat any distributed-lane
    green dated before 2026-08-26 as unproven.
+   _Historical: the lane's `-run` regex has been suite-qualified since #349; nothing further to do._
+
 7. **A one-time cache warm is needed for existing fan-out producers.**
    `cache.Entry.Partitions` is new. An entry written before this wave carries no
    partition list, so a cache hit on such a producer expands to zero partitions
    and takes the `onEmpty` branch (`internal/run/fanout.go`) rather than
    materializing the group. Any already-cached producer must be re-run once, or
    its entry invalidated, before its consumer fans out.
+   _Closed 2026-08-28: the cache-hit gates in `internal/job/job.go` and `internal/worker/runtime_executor.go` treat a cache entry with **no recorded** partition list as a miss for any producer with a fan-out consumer (`HasFanOutSuccessor`, honouring `fanOutTemplateExpandable`, behind the cheap per-run pre-filter `HasAnyFanOutConsumerForRun` so ordinary hits pay nothing; a transient read error on either lookup fails **closed** — the hit becomes a miss, exactly as a `cacheStore.Get` error already does, so an inconclusive answer costs one re-execution rather than a silently empty group; `TestFanOutLocal{HasAnyFanOutConsumer,HasFanOutSuccessor}ErrorForcesProducerMiss`, `TestWorker{HasAnyFanOutConsumer,HasFanOutSuccessor}ErrorForcesProducerMiss`), re-running the producer once to record a real entry. The distinction is recorded at the source: `pkg/task/partition.go`'s parser keeps an empty `##caesium::partitions []` as a non-nil list (`arrayMarkerSeen`), both writer sites propagate it, and `entryToModel` (`internal/cache/store.go`) persists `"[]"` — so a producer that legitimately emits zero partitions cache-hits normally and takes `onEmpty` without re-running. Covered by `TestFanOutLocalEmptyProducerCacheHitTakesOnEmptyWithoutRerunning`, `TestWorkerEmptyProducerCacheHitTakesOnEmptyWithoutRerunning`, `TestFanOutLocalStaleCacheEntryForcesProducerRerun`, `TestWorkerStaleCacheEntryForcesProducerRerun`, `TestHasFanOutSuccessor*`, `TestHasAnyFanOutConsumerForRun*`, `TestParseMarkers_{EmptyPartitionsArrayStillValid,NoPartitionsMarkerStaysNil}`, `TestCacheEntryRecordedEmptyPartitionsStaysNonNilEmpty`. No operator warm step is needed. (The reviewer's first pass caught that the original fix keyed on a nil-vs-empty distinction nothing in production wrote — a legitimately-empty producer would have re-run forever; the parse-layer fix is the answer.) Scoped out: `internal/replay/replay.go`'s cache-hit resolution does not thread partitions at all — harmless while `ErrFannedBaseline` refuses fanned baselines, and folded into the Phase 5 replay re-expansion follow-up._
+
 8. **The reproduce-descriptor fan-out guard is untested.** `assertUnfanned` /
    `ErrFannedTaskAmbiguous` (`api/rest/service/reproduce/descriptor.go`) has
    neither unit nor integration coverage — that package has no `_test.go` file at
    all. It is the one **assert-unfanned** answer in G6's table with no test behind
    it.
+   _Closed (already covered on #349; this note was stale): `TestDescriptor_SinglePartitionExpansionIsAmbiguous` / `TestDescriptor_MultiPartitionExpansionIsAmbiguous` in `api/rest/service/reproduce/descriptor_test.go` exercise `assertUnfanned` / `ErrFannedTaskAmbiguous`._
+
 9. **Three read surfaces are re-keyed but uncovered.** The agent context
    (`api/rest/service/agent/context.go`), the AI-agent notification sender
    (`internal/notification/sender_aiagent.go`), and the local runner
    (`internal/localrun/runner.go`) each learned to read a group in
    `partition_index` order and prefer the failed instance, and none of the three
    has a test asserting it. See the G6 table.
+   _Closed 2026-08-28: `TestFailingLogReadsGroupInPartitionOrderAndPrefersFailed` (`api/rest/service/agent/context_test.go`), `TestAIAgentSenderReadsFannedGroupAndPrefersFailedInstance` (`internal/notification/sender_aiagent_test.go`), `TestLocalRunFannedGroupOrderedByPartitionIndexEachInstanceDistinct` (`internal/localrun/runner_test.go`, via a new additive `Config.EngineFactory` seam that overrides every engine kind). The first two seed **two** failed instances at different `partition_index`, inserted out of order, and assert the lower index wins — the genuinely ambiguous case for `FailedOrLastTaskRunForTask`'s "first failed row wins" contract. Caveat recorded in both fixtures: on the sqlite test backend the unique index `idx_taskrun_jobrun_task` happens to return the equality scan partition-ordered even without the `Order("partition_index ASC")` clause, so dropping the clause would not fail them there; the clause stays because SQL row order is otherwise unspecified and dqlite is not obliged to preserve the coincidence._
+
 10. **The two lanes disagree about where a task's command comes from, so a
    `job apply` lands in one and not the other.** Pre-existing and **not
    fan-out specific**, recorded here because fan-out is what made it visible. The
@@ -271,6 +314,8 @@ blocked on a design decision.
    unchanged: instance rows are copies of the template row, so every sibling
    carries the same snapshot. No fan-out item owns a fix; it needs a decision
    about which source is authoritative before anything is changed.
+   _Deferred: needs a decision on which command source is authoritative on re-entry before any lane changes; tracked as #354._
+
 11. **Pull-mode workers claim before they have capacity — a pre-existing worker
    defect the now-real distributed lane exposes.** `Claimer.ClaimNext`
    (`internal/worker/claimer.go`) flips the row to `running` inside its single
@@ -294,6 +339,8 @@ blocked on a design decision.
    the right call for this branch: the premise, not the assertion, is what needs
    fixing, and the fix is a worker change nobody should smuggle into a fan-out
    wave. Un-skip it in the same PR that reorders claim and capacity.
+   _Deferred: a worker change (claim after acquiring capacity), not a fan-out item; tracked as #355 together with un-skipping the concurrency subtest._
+
 12. **`fail_fast` cancels only not-yet-started siblings, so which siblings get cancelled is
    scheduling-dependent.** Verified in all three lanes (see D3's note). On a
    one-slot worker a sibling that has already gone `running` is left to finish
@@ -318,6 +365,8 @@ blocked on a design decision.
    (`test/fanout_test.go:36`) decodes them — which is exactly what
    `assertFailFastGroup` now relies on. That helper's snapshot-based approach is
    also where follow-up 5's dead fields live.
+   _Closed 2026-08-28: the stale comment beside `observePartitionStates` is rewritten to describe the snapshot-based approach the helper actually takes; `assertFailFastGroup` and its non-vacuity clause were already correct and are unchanged._
+
 13. **Per-partition retry is refused outside distributed mode.**
    `POST …/partitions/:index/retry` now answers **409** unless
    `CAESIUM_EXECUTION_MODE=distributed` (`partitionRetryIsDispatchable`,
@@ -331,6 +380,8 @@ blocked on a design decision.
    (`internal/job/job.go:157`, `:461`) is feasible, but it could not be verified
    outside the integration lane, so it was **deliberately refused rather than
    guessed**. The 409 names the path that does work locally (retry the run).
+   _Deferred: local-lane single-partition resume through `job.New(...)` → `(*job).Run(ctx)`; tracked as #356._
+
 14. **The fan-in aggregate still bypasses the producer's `outputSchema`, by
    design.** `AggregateFanInOutputs` (`pkg/task/output.go`) no longer truncates on
    overflow — it fails typed, with `*FanInAggregateTooLargeError` carrying the
@@ -344,6 +395,8 @@ blocked on a design decision.
    `_FAILED` keys — and no item in this plan owns it. Do not paper over it by
    validating the aggregate against the per-instance schema; that would reject
    every correct fold.
+   _Deferred: design question (group-level schema vocabulary) for `docs/design-dynamic-fanout.md`; tracked as #357._
+
 15. **Rolling-upgrade capability gate — delete it once the fleet is on protocol
    2.** Fanned dispatch is routed only to peers advertising
    `CapabilityInstanceIdentity` (`"instance_identity"`) from the new
@@ -358,6 +411,7 @@ blocked on a design decision.
    it buys nothing but a probe and a branch, and leaving it indefinitely means the
    negotiation outlives the incompatibility it was written for. Remove the gate,
    not the 409.
+   _Deferred: remove once every deployed node is ≥ protocol 2; tracked as #358._
 
 ## Streams
 
@@ -495,12 +549,22 @@ answer**, and a review that finds one should block.
       (`TestRestore_RejectsOldCheckpointBlob`). `recovery.go` replays by **row id**
       for any row with partition state and by task id otherwise, after calling
       `RehydrateInGroupEdges(rows, catalog)`._
-      _Open: the failover test this item asks for does not exist.
-      `internal/run/failover_test.go` still holds only
-      `TestFailover_TakeoverAndResume` and mentions no partitions, and `test/` has
-      no failover scenario. `internal/run/checkpoint_writer.go` was not touched, so
-      the cadence-starvation concern was never closed deliberately — see follow-ups
-      1 and 2._
+      _Shipped 2026-08-28: the failover test this item asks for is
+      `TestFailoverMidGroup_ReDispatchesOnlyUnfinishedInstances`
+      (`internal/run/failover_fanout_test.go`) — an owner expands a fanned group,
+      finishes one partition, leaves two in flight and dies, and the takeover
+      re-dispatches only the unfinished instances. Both tests are in-package, not
+      `test/` scenarios — see D5 for why no `test/` failover scenario is
+      reachable. Replay-by-instance-identity is pinned by
+      `TestFailoverMidGroup_CheckpointPredatesExpansion`, which fails if recovery
+      keys the tail on `row.TaskID`. The cadence concern is closed deliberately by
+      `TestCheckpointWriter_CadenceAdvancesPerFanOutInstance` (the sequence
+      advances per instance) and
+      `TestOwnerManager_CheckpointsOnceEveryNInstanceCompletions` (the writer is
+      *called* per instance, through `OwnerManager.CompleteInstance`, asserted on
+      the durable `run_checkpoints` rows) in
+      `internal/run/checkpoint_writer_test.go`: eight partitions at a four-event
+      cadence write two checkpoints, where one event per group would write none._
       Files: `internal/run/owner_state.go`, `internal/run/recovery.go`,
       `internal/run/checkpoint_store.go`, `internal/run/checkpoint_writer.go`,
       `internal/models/run_checkpoint.go`.
@@ -1170,8 +1234,14 @@ which makes the substrate able to represent two siblings at all.
       branch-selection seam, `RunState.ApplyExpansion` creates the instance entries
       and raises `total` in one critical section, and `PlanFanOutExpansion` is the
       shared planner both lanes call — one copy of the validator, as required._
-      _Open: the failover-mid-group half of this item's coverage was never
-      written (follow-up 1)._
+      _Shipped 2026-08-28: the failover-mid-group half of this item's coverage is
+      `TestFailoverMidGroup_ReDispatchesOnlyUnfinishedInstances` and
+      `TestFailoverMidGroup_CheckpointPredatesExpansion`
+      (`internal/run/failover_fanout_test.go`) — a real lease takeover through
+      `AcquireExpiredLeases` + `OwnerManager.Recover`, driven to a finalized run,
+      asserting the finished sibling is never re-claimed or re-stamped and the
+      group is not re-expanded. In-package, not a `test/` scenario — see D5 for
+      why no `test/` failover scenario is reachable._
       _Lane result, as reported by the wave (not independently re-run here): the
       owner-memory lane now executes **21/21 `TestFanOut*` scenarios in ~2–3 min**.
       Standing that lane up is what surfaced the four owner completion-identity
@@ -1238,10 +1308,25 @@ which makes the substrate able to represent two siblings at all.
       `RehydrateInGroupEdges(rows, catalog)` from the instance rows' partition
       columns **before** replaying the terminal tail (D5d) — the edges are not
       snapshotted, exactly as this item required._
-      _Open: D5d's assertion — "a failover whose last checkpoint predates a
-      prerequisite's completion must still run the dependent" — is covered only at
-      the state-rebuild level (`TestRehydrateInGroupEdges_*`), never end to end
-      (follow-up 1)._
+      _Shipped 2026-08-28: D5d's assertion — "a failover whose last checkpoint
+      predates a prerequisite's completion must still run the dependent" — is now
+      asserted against the owner engine's real seams (`AcquireExpiredLeases` →
+      `OwnerManager.Recover`, driven to a finalized run) by
+      `TestFailoverMidGroup_CheckpointPredatesExpansion`
+      (`internal/run/failover_fanout_test.go`): the surviving checkpoint still
+      holds the UNEXPANDED catalog node, and the takeover must rebuild the group
+      from `partition_value`/`partition_depends_on` before replaying the tail.
+      Moving `RehydrateInGroupEdges` to after the replay loop fails this test
+      while all six `TestRehydrateInGroupEdges_*` state-rebuild tests still pass —
+      which is exactly the gap this note recorded. **It is an in-package test, not
+      a `test/` scenario, and no `test/` scenario is reachable:** the integration
+      lanes run a single node, `AcquireExpiredLeases` excludes the current owner
+      (`internal/run/lease.go:93`), and nothing drops an owned run from the
+      `OwnerManager` on lease loss, so a takeover cannot be provoked without a
+      test-only server backdoor; and although a server *restart* does reach
+      `Recover` on a single node, the lanes' test container joins the server's
+      network namespace (`--network=container:…`), so restarting the server
+      tears down the namespace the test itself runs in._
       Files: `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
       `internal/run/recovery.go`, `internal/run/store.go`.
       Depends on: D3, D4, G7.
@@ -1485,6 +1570,11 @@ the producer does — never a stale hit). The design's eight Open Questions
 aggregate contract granularity, `retry_partition` as an agent action, freshness
 interplay, in-group ordering visibility, an in-group depth guardrail) are
 cross-design questions, not items here.
+
+_Close-out note, 2026-08-28: both Phase 5 items are tracked as GitHub issues (#359 replay re-expansion, #360 per-partition skip).
+`cache.chain: values` shipped on #351 (`docs/exec-plans/completed/infra-deploy.md`),
+so value-verified per-partition skip is no longer blocked — it is unbuilt, not
+gated._
 
 ## Sequencing & Dependencies
 
