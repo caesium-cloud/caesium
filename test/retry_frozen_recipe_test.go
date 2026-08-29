@@ -205,9 +205,15 @@ steps:
 
 	retryRun := s.awaitRun(job.ID, runID, runTimeout)
 
-	s.Equal("failed", retryRun.Status,
+	s.Require().Equal("failed", retryRun.Status,
 		"the retry validated against the RELAXED live definition instead of the schema frozen when the run was registered")
-	s.Equal("failed", s.taskStatusesByName(job.ID, retryRun)["emit"])
+	emit := s.requireRunTaskByName(job.ID, retryRun, "emit")
+	s.Require().Equal("failed", emit.Status)
+	s.Contains(emit.Error, "violates declared schema",
+		"a generic container or dispatch failure would not prove that the retry used the registered schema")
+	s.Require().NotEmpty(emit.SchemaViolations,
+		"the failed retry must expose the registered schema's validation evidence")
+	s.Contains(emit.SchemaViolations[0].Message, "integer")
 }
 
 // jobTaskOutputSchema returns the CATALOG outputSchema for a step.

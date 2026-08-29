@@ -653,9 +653,10 @@ Frozen at registration, and therefore replayed as-registered by a retry:
 | Frozen | Effect on a retry |
 | --- | --- |
 | `engine`, `image`, `command` | the retry runs the original container and argv |
+| `nodeSelector` | the row retains the original selector; pull-claim workers continue filtering on it during retry |
 | attempt budget (`retries` + 1) | the retry gets the original number of attempts |
 | `outputSchema` and `metadata.schemaValidation` | the retry is judged against the original contract, in the original `warn`/`fail` mode |
-| resolved `cache` config (`enabled`, `ttl`, `version`, `chain`, `pinDigests`, `digestTTL`) | the retry keeps the original cache identity and publish decision |
+| resolved `cache` config (`enabled`, `ttl`, `version`, `chain`, `pinDigests`, `digestTTL`) | the retry keeps the original cache-policy inputs to identity and the original publish decision; live execution inputs can still produce a different hash |
 
 - To pick up an applied fix coherently, **trigger a new run** (`caesium run start --job-id <job-id>` / `POST /v1/jobs/:id/run`); a new run registers fresh rows from the current definition.
 - A retry is not an exact historical replay of the whole definition. Use the frozen-field table and the live-field notes below to determine which changes it can observe.
@@ -664,7 +665,10 @@ Receipts, `caesium why`, `run diff`, and cache identity key the registered task'
 
 Not everything is frozen. Task membership and DAG wiring are loaded from the current catalog when the run is re-entered; a newly applied step can be registered onto the older run, while removing a step can leave a failed registered task without a live atom to execute. The step's container **spec** (env, `workDir`, mounts, volume mounts, Kubernetes overrides), its `fanOut` configuration (including `fanOut.env`, the injected partition variable's name), its `retryDelay`/`retryBackoff`, and its `triggerRule` are also read from the current definition at execution time. An apply that changes any of those is therefore visible to a retry. Do not use retry across a topology change when you need a coherent version of the job; trigger a new run instead.
 
-One consequence of freezing the cache configuration is worth calling out for operators: the `CAESIUM_CACHE_*` environment defaults are folded into each row when the run is registered, so changing them (for example setting `CAESIUM_CACHE_ENABLED=false`) and restarting the scheduler does **not** reach runs that were already registered. Retrying one of those still uses the caching behaviour it was registered with. Runs triggered after the restart pick the new defaults up normally.
+Two consequences of the frozen fields are worth calling out for operators:
+
+- The `CAESIUM_CACHE_*` environment defaults are folded into each row when the run is registered, so changing them (for example setting `CAESIUM_CACHE_ENABLED=false`) and restarting the scheduler does **not** reach runs that were already registered. Retrying one of those still uses the caching behaviour it was registered with. The live container spec and predecessor inputs still participate in the hash, so changing them can produce a cache miss under that frozen policy. Runs triggered after the restart pick the new defaults up normally.
+- A `nodeSelector` change does not rewrite an already-registered row. In pull-claim mode, if its original labels no longer match any worker, trigger a new run after applying the placement fix; retrying the old run remains pinned to its registered selector. Owner-push dispatch currently does not apply the selector predicate, so do not rely on this retry behaviour as a placement guarantee in that mode.
 
 ## Operational Controls
 
