@@ -1290,7 +1290,7 @@ status question and belongs in `fanOut:`.
 
 ### When it runs — one fold, three advancement paths
 
-**Decision: the fold is computed once, at group resolution, and validated there
+**Decision: the fold is computed once per group resolution, and validated there
 — before any successor is released.** Not on the consumer's read path.
 
 That is not a free choice, because today the lanes disagree about when the
@@ -1317,9 +1317,31 @@ So the enabling change, a prerequisite of this section rather than a side effect
 of it: **the fold is persisted at group resolution** on the group's anchor row
 (a `FanInAggregate datatypes.JSON` column on `TaskRun`), and
 `predecessorGroupOutput` reads it, recomputing only for group rows written
-before this lands. The anchor row is the group's lowest partition index — the
-same deterministic row `lockGroupForTerminalDecisionTx` already singles out
-(`internal/run/fanout.go:741-772`, `ORDER BY partition_index ASC, id ASC LIMIT 1`).
+before this lands.
+
+The anchor row is the group's **lowest `partition_index`, ties broken by `id`**.
+That is the tuple `lockGroupForTerminalDecisionTx` uses, but only in its
+PostgreSQL branch (`internal/run/fanout.go:763-766`); dqlite and SQLite return
+an empty statement and select no row, and neither the local Kahn lane nor the
+owner engine calls the function at all. So this is a **rule each of the three
+lanes must implement**, not a row some existing code already hands them.
+
+**The freeze is write-always, not write-if-absent.** A group can resolve more
+than once: `caesium run retry <run-id> --task <fanned> --partition <value>` is a
+shipped surface (`cmd/run/retry.go:108-111`) that re-runs one instance, after
+which the group becomes fully terminal again and every fold point below fires
+again. Under write-if-absent the persisted aggregate would then still carry the
+pre-retry `FAILED` count and key set while the rows say otherwise — the exact
+staleness the freeze exists to remove, made durable instead of transient. So the
+`FanInAggregate` and `GroupContractFailed` columns are **rewritten on every
+group re-resolution**, and group validation runs **once per resolution, not once
+per run**: the retried group is re-folded and re-validated against the same
+declared schema, and a group that failed its contract before the retry can pass
+after it (or the reverse). `GroupContractFailed` must therefore be *cleared*, not
+merely re-evaluated, when an instance is reset — the natural site is
+`retryResetColumns` (`internal/run/store.go:5835-5860`), which already clears
+`schema_violations` to `nil` on exactly this path and is where the group-scoped
+violations and the stale fold belong too.
 
 Group resolution is a real, already-identified moment in all three advancement
 paths — the route-completeness rule in [`## Route
@@ -1337,7 +1359,7 @@ applies to this item like every other:
    one transaction observes the complete terminal set — that is what
    `lockGroupForTerminalDecisionTx` buys on PostgreSQL and what Raft
    serialization gives on dqlite — so the fold is computed and validated exactly
-   once even under concurrent sibling completions.
+   once per resolution even under concurrent sibling completions.
 3. **Run-owner in-memory engine** — `RunState.TakeResolvedGroups`
    (`internal/run/owner_state.go:638`), the owner's existing group-resolution
    observation point, already used to close
@@ -1354,17 +1376,46 @@ publish**. Coverage before the compiled schema so a missing key is reported as
 `metadata.schemaValidation` governs the group exactly as it governs an instance;
 there is no second dial.
 
-- **`warn`** — violations are persisted on the anchor row with `scope: "group"`,
+- **`warn`** — violations are persisted on the anchor row with `scope: "group"`
+  — a **new optional field** on `pkg/task.SchemaViolation`, which is `{Key,
+  Message}` today (`pkg/task/schema.go:14-17`) and is persisted as
+  `models.TaskRun.SchemaViolations` (`internal/models/run.go:131`) and surfaced
+  to REST as `schema_violations`. Violations written before the field exists
+  carry no `scope` and are read as instance-scoped —
   a `schema_violation_recorded` event is published so the leader-gated incident
   subscriber opens a `schema_violation` incident (the reason
   `publishSchemaViolationEvent` exists in warn mode at all,
   `internal/run/schema_validation.go`), the group's status is unchanged, and
   consumers receive the aggregate.
-- **`fail`** — the group resolves **`failed`**. The aggregate is not published:
+- **`fail`** — the group resolves **`failed`** *and its aggregate is suppressed*:
   successors are released to their trigger rules with a failed predecessor, so
   an `all_success` consumer skips and an `all_done` consumer runs with no
-  `CAESIUM_OUTPUT_<GROUP>_*` variables — the shape any failed predecessor
-  already has.
+  `CAESIUM_OUTPUT_<GROUP>_*` variables at all.
+
+**Suppressing the aggregate is new behavior, and it is deliberately narrow.**
+It is *not* "the shape a failed predecessor already has" — for a fanned
+predecessor that shape is the opposite. `predecessorGroupOutput`
+(`internal/run/store.go:5509-5551`) has **no group-status gate**: it counts
+terminal successes, counts failures, and folds whatever outputs exist. A group
+with one failed instance therefore publishes its *partial* aggregate today, and
+`internal/run/store_fanout_test.go:135-172` pins exactly that — three
+partitions, one failed, and the `all_done` consumer receives
+`{"east":"10","west":"20"}` with `FAILED=1`.
+
+So the two failure kinds are decided separately and must not be conflated:
+
+- **Instance-failed group** (one or more partitions failed): **unchanged.** It
+  keeps publishing its partial aggregate with `FAILED > 0`, exactly as today.
+  Backward compatibility is the whole reason: an `all_done` consumer that reads
+  a partially-successful group's outputs is an existing, working pattern, and
+  this design has no business breaking it. Such a group is also never
+  group-validated (see *Partial failure*, below), so there is no verdict to act
+  on.
+- **Contract-failed group** (every instance succeeded; the *fold* violated the
+  declared group schema): the aggregate is suppressed. There is no honest
+  partial to publish — the object a consumer would read is precisely the one
+  declared invalid, and publishing it while calling the group failed would be
+  the silent contract change this whole section exists to prevent.
 
 Two consequences are decisions, not details.
 
@@ -1381,13 +1432,39 @@ operator's fix is a definition change, or a producer fix plus a full re-run, and
 `caesium run retry` correctly finds no failed instance to reset.
 
 **Group status is derived from rows today, so the verdict needs one bit.** A
-`GroupContractFailed` flag on the anchor row, consulted at the three places that
-already derive a group's status: `groupStatusFromInstances`
-(`internal/run/why.go`), `predecessorGroupSatisfied` / `groupAllSucceededTx`
-(`internal/run/fanout.go:702-716`), and the local runner's group outcome. Three
-call sites, all already enumerated in the code as *the* places group status is
-decided; inventing a stored group row to hold one boolean would be a much larger
-change for the same effect.
+`GroupContractFailed` flag on the anchor row. Inventing a stored group row to
+hold one boolean would be a much larger change for the same effect — but the
+bit is worthless if a route forgets to read it, so enumerate the routes the way
+[`### Route completeness`](#route-completeness-state-this-once-check-every-item-against-it)
+demands. There are **two** kinds of reader:
+
+*Status derivation* — two functions, six non-test call sites. The bit is read
+once inside each function body and every caller inherits it:
+
+| Function | Defined | Called from |
+|---|---|---|
+| `groupStatusFromInstances` | `internal/run/taskrun_identity.go:99` | `internal/run/why.go:436`, `internal/run/owner_state.go:1038`, `internal/run/store.go:3208`, `internal/run/store.go:5131` |
+| `predecessorGroupSatisfied` | `internal/run/taskrun_identity.go:144` | `internal/run/fanout.go:715` (`groupAllSucceededTx`), `internal/run/store.go:5875` (`satisfiedPredecessorTaskIDsTx`) |
+
+plus the local Kahn runner's own group outcome, which derives status in memory
+rather than through either function.
+
+*Aggregate publication* — the **fourth site**, and the one most easily missed
+because it is a read path rather than a status path. Wiring the bit only into
+the status functions ships a `fail` mode in which `all_success` consumers
+correctly skip while `all_done` consumers still receive
+`CAESIUM_OUTPUT_<GROUP>_*` from a fold that was just declared invalid:
+
+- `predecessorGroupOutput` (`internal/run/store.go:5509`) — the single fold
+  reader, reached from `PredecessorOutputs` (`:5462`) and from
+  `PredecessorDescriptorInputs` (`:5563`, folding at `:5586`), so gating it
+  there covers the env-var path, the descriptor path, and the predecessor-hash
+  path together;
+- the local runner's `taskOutputs[taskID]` publication
+  (`internal/job/job.go:1935`), the same gate on the in-memory lane.
+
+A contract-failed group publishes no aggregate through any of them. An
+instance-failed group publishes exactly what it publishes today.
 
 ### Partial failure: a failed group is not schema-validated
 
@@ -1423,7 +1500,7 @@ dropped. The remedy is unchanged and now has a schema pointing at it:
 per-partition payloads belong behind `##caesium::output-ref`, and an aggregate
 of bounded references is what that mechanism is for.
 
-### Backward compatibility
+### Backward compatibility (group contracts)
 
 - **No `groupOutputSchema` declared ⇒ nothing changes.** No fold-time
   validation, no new violations, no new events, no status change; the aggregate
@@ -1466,13 +1543,22 @@ of bounded references is what that mechanism is for.
   (`internal/run/why.go:131-165`) is already the group-level answer for a fanned
   step, and its `Notes` field exists for exactly this class of qualifier — how
   this group's result was arrived at. A group whose schema was evaluated gains a
-  note naming the verdict and the violation count; the violations themselves are
-  the anchor row's, reachable with `--partition <anchor>`. `Baseline.Kind` stays
+  note naming the verdict and the violation count. The violations themselves live
+  on the anchor row, so the group note must **name that row's partition value**:
+  `why --partition` takes a partition *value*, and an operator has no way to
+  guess which one is the lowest-index instance. Naming it (or inlining the
+  group-scoped violations into the group form outright) is what makes the
+  pointer followable. `Baseline.Kind` stays
   `per_partition` and `Verdict` is untouched: a contract verdict is not a cache
   verdict, and conflating them would make a schema failure read as a cache miss.
 - **Receipts** record the frozen aggregate alongside the per-instance
   descriptors, so a reproduction compares the fold that was validated rather
-  than re-deriving one from rows that may since have been retried.
+  than re-deriving one from rows that may since have been retried. Because the
+  freeze is write-always, a receipt holds the fold of **the group resolution
+  that was current when the receipt was recorded** — a later per-partition retry
+  re-resolves the group and writes a new fold, and it does not rewrite receipts
+  already taken. Two receipts from the same run either side of a partition retry
+  legitimately differ, and the group's resolution is what distinguishes them.
 
 ### Scenario: the six silent partitions
 
@@ -1537,15 +1623,23 @@ feature, in four individually shippable steps:
    recompute fallback for older rows. Reconcile `PARTITION_COUNT`'s empty
    branch. Behavior-neutral for every existing job, and the step that removes
    the local/distributed asymmetry in the existing over-cap failure.
-2. **Declare.** `groupOutputSchema` on `Step` (the exported struct **and** the
-   inner `rawStep` in `UnmarshalYAML`), `derived` expansion at apply time, lint
-   rules (requires `fanOut`; reserved counter names; underivable
-   `outputSchema`), the `report.go` entry, persistence on `models.Task`.
+2. **Declare.** `groupOutputSchema` on `Step` — the exported struct **and both**
+   inner `rawStep` declarations, in `UnmarshalYAML`
+   (`pkg/jobdef/definition.go:609`) *and* in `UnmarshalJSON` (`:690`), each with
+   its own field entry and its own copy-out. Missing the JSON one is not a
+   cosmetic omission: the field would work through `caesium job apply` from YAML
+   and vanish silently on the JSON/REST apply path. Then `derived` expansion at
+   apply time, the lint rules (requires `fanOut`; reserved counter names;
+   underivable `outputSchema`) wired into **both** lint surfaces (see phase 4),
+   the `report.go` entry, and persistence on `models.Task`.
 3. **Enforce.** Coverage evaluation, compiled-schema validation, `warn`/`fail`
    semantics, `GroupContractFailed` at the three status-derivation points,
    `scope: "group"` on persisted violations.
 4. **Surface.** The `caesium why` group note, the group schema in `job lint`'s
-   contract summary, group violations in the REST partition and run payloads.
+   contract summary — in **both** copies of it, `cmd/job/lint.go:492` and its
+   server twin `api/rest/controller/jobdef/lint.go:113-117`, so `--server` lint
+   and offline lint do not disagree about a step's contracts — and group
+   violations in the REST partition and run payloads.
 
 Testing follows the repo gate — integration scenarios in `test/` driving the
 real server and CLI, not unit tests on the fold function:
@@ -1635,7 +1729,7 @@ caesium dev --once --path job.yaml     # local fan-out with live group progress
 | `fingerprint` shape | `sha256:<64 hex>` (`validSHA256Ref`) | parse-time |
 | In-group `dependsOn` graph | acyclic, no dangling keys | expansion-time; **fails the producer** |
 | Group in-flight | `fanOut.maxParallel` | claim predicate / dispatch loop |
-| Aggregate output size | `MaxOutputBytes` 64 KB | fan-in; degrade to counts, fail closed under `inputSchema` |
+| Aggregate output size | `MaxOutputBytes` 64 KB | fan-in; over-cap **fails the group** (typed `*FanInAggregateTooLargeError`), never truncates — see [`### The size cap comes first`](#the-size-cap-comes-first) |
 | No chained fan-out | — | lint |
 
 Metrics: new `caesium_fanout_partitions_total{job,task}` and
@@ -1698,6 +1792,12 @@ driving the real binary/server (no hand-seeded rows):
     `terminalSuccessIDs` defect and it fails silently without an explicit
     ordering assertion.
 
+Group output contracts add nine more scenarios — backward-compat byte-identity,
+`warn`/`fail`, `derived` equivalence, reserved names, cap precedence,
+partial-failure non-validation, all three lanes, and the CLI stdout assertion —
+listed with the rest of that work in [`### Phasing and
+testing`](#phasing-and-testing).
+
 ## Phasing
 
 1. **Substrate:** partition columns + unique index; instance-keyed store write
@@ -1725,6 +1825,13 @@ the in-group skip cascade land with expansion in phases 2–3; the ordering and
 fingerprint columns surface in phase 4. The one thing that stays a follow-up is
 the *benefit* of the fingerprint — per-unit skip needs the orthogonal chain break
 described above.
+
+Group output contracts are not a sixth phase either, and unlike structured
+partitions they are not yet implemented: they are an increment on the shipped
+feature, phased separately in [`### Phasing and
+testing`](#phasing-and-testing) (freeze the fold → declare → enforce → surface).
+Step 1 of that sequence — persisting the fan-in fold at group resolution — is
+behavior-neutral substrate work that stands on its own.
 
 ## Non-Goals
 
