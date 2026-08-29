@@ -1092,12 +1092,43 @@ correct group: a schema saying `row_count: {type: integer}` describes `"42"`,
 while the aggregate holds `{"a":"42","b":"17"}`. The fold needs its own
 vocabulary, or it gets no contract at all — which is today's state.
 
-The failure this leaves open is not exotic. A 400-partition group in which six
-partitions emit no `row_count` at all produces a 394-entry object, every
-instance succeeds, the group succeeds, the consumer writes 394 partitions of a
-400-partition day, and the run is green. Nothing in Caesium is in a position to
-notice, because the only declared contract was checked 400 times against the
-wrong value.
+#### What per-instance validation already catches — and where it stops
+
+Be precise about the residual gap, because per-instance validation covers more
+of it than "the aggregate is unvalidated" suggests. There is **no**
+empty-output short-circuit on the validation path: `ValidateTaskOutputSchemaInstance`
+returns early only for an absent schema or a disabled mode
+(`internal/run/store_instance.go:364-366`), and `ValidateOutput` only for an
+empty schema (`pkg/task/schema.go:27`). An instance that emitted nothing is
+validated as the empty object `{}`, so a `required` key is violated exactly as
+it is for a partial map (`pkg/task/schema_test.go:40-51` pins the partial case).
+In `fail` mode that instance therefore **fails on its own**, the group fails,
+and the fan-in consumer skips. A silent partition under `required` + `fail` is
+already caught, and a group schema is not what catches it.
+
+What per-instance validation structurally cannot see is a fold that is wrong
+while every instance is individually right:
+
+1. **Cache-hit instances are never validated at all.** The two call sites are
+   both post-execution — `internal/job/job.go:1501`, after `executeAtom`, and
+   `internal/worker/runtime_executor.go:836`, inside `executeTask`. A cache hit
+   returns before either (`internal/job/job.go:1461-1478` restores
+   `entry.Output` and hands it straight to the group runner). So a cached
+   instance replays a stored output past the current schema unchecked — and
+   cache hits are the *normal* case for this feature, whose headline retry story
+   is "unchanged partitions cache-hit".
+2. **A key that is optional per instance but mandatory across the group.** If
+   an empty input file legitimately must not fail its own partition, `row_count`
+   cannot be `required` — and then nothing anywhere asserts that the other 399
+   partitions reported it.
+3. **`warn` mode.** Violations are recorded per instance and the group publishes
+   regardless; there is no single group verdict and nothing gates the consumer.
+4. **The fold's own shape.** The reserved-name collision (vocabulary rule 3
+   below), the sparse per-key objects, `PARTITION_COUNT` against `SUCCEEDED`,
+   the size cap — all group-level facts no per-instance check can reach.
+
+That residue is what this section is for, and the scenario below is built on
+case 2 rather than on a silent partition that `required` already rejects.
 
 ### Decision: a separate `groupOutputSchema`, on the fanned step
 
@@ -1360,11 +1391,24 @@ applies to this item like every other:
    `lockGroupForTerminalDecisionTx` buys on PostgreSQL and what Raft
    serialization gives on dqlite — so the fold is computed and validated exactly
    once per resolution even under concurrent sibling completions.
-3. **Run-owner in-memory engine** — `RunState.TakeResolvedGroups`
-   (`internal/run/owner_state.go:638`), the owner's existing group-resolution
-   observation point, already used to close
-   `caesium_fanout_group_duration_seconds`. Same fold, same verdict, same
-   persistence.
+3. **Run-owner in-memory engine** — the group-terminal transition **inside**
+   `RunState.ApplyCompletion`, before its `advanceSuccessors(seeds)` call
+   (`internal/run/owner_state.go:383`) releases the group's cross-step
+   successors; persisted in the **same `CompleteTaskOwner` transaction** that
+   stamps the last instance's terminal row (`internal/run/owner_manager.go:439`).
+
+   **Not `TakeResolvedGroups`**, despite its name. By the time it runs
+   (`internal/run/owner_manager.go:465`) the DAG has already advanced:
+   `ApplyCompletion` made the successors ready (`:416`), `CompleteTaskOwner`
+   committed the terminal rows (`:439`), and `or.state = staged` published the
+   transition (`:449`). Worse, `TakeResolvedGroups` only *reports* — its result
+   is consumed after `or.mu.Unlock()` (`:466`), so a dispatcher taking the lock
+   in between can start a successor before the fold has been validated at all.
+   Freezing there would also open a crash window in which a group is durably
+   terminal with no persisted aggregate. `TakeResolvedGroups` is the right shape
+   for `caesium_fanout_group_duration_seconds`, which gates nothing; it is the
+   wrong shape for a gate. Riding the terminal-row transaction gives the owner
+   lane the same all-or-nothing property the SQL lane gets from `completeTask`.
 
 Ordering inside the fold point is fixed: **cap → coverage → compiled schema →
 publish**. Coverage before the compiled schema so a missing key is reported as
@@ -1567,19 +1611,29 @@ of bounded references is what that mechanism is for.
 rows, so `process-one.sh` exits 0 having emitted nothing — a real and common
 shape, not a contrived one.
 
-*Today.* 400 instances succeed. Each is validated against `outputSchema`; the
-six that emitted nothing produce an empty output map, which satisfies a schema
-whose `required: [row_count]` is never reached because there is nothing to
-validate. The fold publishes `row_count` with 394 entries,
+Crucially, `row_count` is declared in `properties` but **not** in `required`,
+and that is a deliberate authoring choice rather than an oversight: an empty
+input file is not a broken partition, and failing it would page someone about a
+file that was correctly processed as empty. What is broken is the *day* — and no
+single partition is in a position to say so. (Were `row_count` `required`, each
+silent instance would fail on its own in `fail` mode, per *What per-instance
+validation already catches* above; this scenario is the case that survives.)
+
+*Today.* 400 instances succeed and all 400 satisfy `outputSchema` — the six that
+emitted nothing are validated as `{}` against a schema that requires nothing, so
+they pass honestly. The fold publishes `row_count` with 394 entries,
 `PARTITION_COUNT=394`, `SUCCEEDED=400`, `FAILED=0`. `publish` reads 394 entries
-and writes a 394-partition day. The run is green. The discrepancy surfaces a
+and writes a 394-partition day. The run is green. Note the two counters already
+disagree — 394 against 400 — and nothing reads them. The discrepancy surfaces a
 week later in a reconciliation report.
 
-*With `groupOutputSchema: derived` and `metadata.schemaValidation: fail`.*
-`row_count` is required in `outputSchema`, so the derived group schema carries
-`x-caesium-coverage: all` for it. At group resolution — one transaction, after
-the 400th instance lands, before `publish` is released — the fold is computed,
-persisted on the anchor row, and evaluated. Coverage fails with one violation:
+*With a group schema and `metadata.schemaValidation: fail`.* Because
+`row_count` is optional per instance, `derived` would give it only
+`x-caesium-coverage: any`; this step declares the object form and asserts
+`x-caesium-coverage: all` on `row_count` — the group requires what the instance
+does not. At group resolution — one transaction, after the 400th instance lands,
+before `publish` is released — the fold is computed, persisted on the anchor
+row, and evaluated. Coverage fails with one violation:
 `row_count: 6 of 400 succeeded partitions contributed no value (2026-07-01,
 2026-07-04, 2026-07-11, … +3)`. The group resolves `failed` with no instance
 marked failed, `publish` (`all_success`) skips, a `cleanup` step (`all_done`)
@@ -1590,6 +1644,15 @@ group form with the note and the six partition keys.
 394-entry aggregate, the violation is on the anchor row, and a
 `schema_violation` incident is open with a row behind it. This is the mode to
 adopt a contract in — turn it on, watch a week of runs, then switch to `fail`.
+
+*And the `derived` case is not redundant.* When `row_count` **is** `required`
+per instance, `derived`'s `x-caesium-coverage: all` overlaps with per-instance
+validation in `fail` mode — deliberately, since the two agree — but it still
+covers what that mode cannot: an instance that **cache-hit** was never validated
+(neither call site is on the cache-hit path), and in `warn` mode nothing gates
+the consumer. `derived` is the cheap way to keep the group honest about
+already-required keys; the object form is for keys the instance contract
+deliberately leaves optional.
 
 ### Prerequisite: `PARTITION_COUNT` has two definitions today
 
@@ -1647,28 +1710,36 @@ real server and CLI, not unit tests on the fold function:
 1. **No group schema declared**: the aggregate, the events, and the consumer's
    env are byte-identical to a pre-change run. The backward-compatibility
    assertion, and it comes first.
-2. **`warn`, coverage miss**: 5 partitions, 2 emit no `row_count`; the group
+2. **`warn`, coverage miss**: 5 partitions, 2 emit no `row_count`, with
+   `row_count` **optional** in `outputSchema` so per-instance validation passes
+   honestly and the group verdict is the only one under test; the group
    succeeds, the consumer runs, violations with `scope: "group"` are on the
    anchor row, and a `schema_violation_recorded` event is observed.
 3. **`fail`, same fixture**: the group is `failed`, the `all_success` consumer
-   skipped, an `all_done` consumer ran, **no instance row is failed**, and
+   skipped, an `all_done` consumer ran, **no instance row is failed** (the
+   assertion that separates a group verdict from a per-instance one), and
    `caesium run retry` re-runs nothing and leaves the run failed.
-4. **`derived` equivalence**: `derived` and the hand-written schema it expands
+4. **Coverage sees a cache hit**: a group where some partitions cache-hit and
+   one cached output lacks the covered key — per-instance validation never runs
+   on that instance (neither call site is on the cache-hit path), and coverage
+   still fails the group. This is the case that makes `derived` non-redundant
+   for an already-`required` key.
+5. **`derived` equivalence**: `derived` and the hand-written schema it expands
    to produce identical verdicts on the same fixture — asserted against the
    persisted expansion, so the derivation rule itself is pinned.
-5. **Reserved names**: a fanned step whose `outputSchema` declares `FAILED`
+6. **Reserved names**: a fanned step whose `outputSchema` declares `FAILED`
    fails `caesium job lint`, with the key named.
-6. **Cap precedence**: an over-cap fold fails the group under
+7. **Cap precedence**: an over-cap fold fails the group under
    `schemaValidation: warn` with a satisfied group schema declared.
-7. **Partial failure**: a group with one failed instance records **no**
+8. **Partial failure**: a group with one failed instance records **no**
    `scope: "group"` violations, and `why`'s first failure is the failed
    partition rather than a schema note.
-8. **All three lanes**: local, distributed
+9. **All three lanes**: local, distributed
    (`CAESIUM_EXECUTION_MODE=distributed`), and run-owner in-memory
    (`CAESIUM_RUN_OWNER_IN_MEMORY=true`). The owner lane gets its own scenario
    for the reason the base design's test 13 gives — it is the path most likely
    to be forgotten.
-9. **CLI**: `caesium why --task <fanned> --json` is clean and parseable on
+10. **CLI**: `caesium why --task <fanned> --json` is clean and parseable on
    stdout via `runCLIStdout` (never the stream-merging capture) and carries the
    group note.
 
@@ -1792,9 +1863,10 @@ driving the real binary/server (no hand-seeded rows):
     `terminalSuccessIDs` defect and it fails silently without an explicit
     ordering assertion.
 
-Group output contracts add nine more scenarios — backward-compat byte-identity,
-`warn`/`fail`, `derived` equivalence, reserved names, cap precedence,
-partial-failure non-validation, all three lanes, and the CLI stdout assertion —
+Group output contracts add ten more scenarios — backward-compat byte-identity,
+`warn`/`fail`, coverage over a cache hit, `derived` equivalence, reserved names,
+cap precedence, partial-failure non-validation, all three lanes, and the CLI
+stdout assertion —
 listed with the rest of that work in [`### Phasing and
 testing`](#phasing-and-testing).
 
