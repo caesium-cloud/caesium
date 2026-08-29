@@ -156,8 +156,9 @@ func newContainer(id string, state *dockercontainer.State) dockercontainer.Inspe
 
 func (s *DockerTestSuite) SetupTest() {
 	s.engine = &dockerEngine{
-		backend: &mockDockerBackend{},
-		ctx:     context.Background(),
+		backend:            &mockDockerBackend{},
+		ctx:                context.Background(),
+		subpathHelperImage: subPathHelperImage,
 	}
 }
 

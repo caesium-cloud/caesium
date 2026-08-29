@@ -658,6 +658,34 @@ rule to hold onto is:
   first run. (This is what the integration lane does; it used to `chmod 0777`,
   which hid the problem rather than fixing it.)
 
+### `subPath` sub-directories: Caesium's own helper is the first toucher
+
+The rule above — *"the first container to mount a fresh named volume decides
+its ownership"* — has one exception, and it is Caesium's own doing. When a
+**docker** step mounts a named volume with `subPath` and that sub-directory
+does not already exist, `internal/atom/docker`'s engine creates it itself,
+before your step's container ever starts, using a short-lived helper
+container (`ensureVolumeSubPath`). That helper always runs stock
+`alpine:3.23` as root — it has no way to know your step's declared user — so
+a **newly created** subPath sub-directory would otherwise come up
+`root:root 0755`, denying any non-root step that does not already bake the
+mount target with its own ownership, exactly the way a fresh `src` volume
+denies `checkout` above.
+
+To close that gap the helper `chmod 0777`s a sub-directory **only when it
+creates it**; a sub-directory an earlier ordinary mount already materialized
+(and possibly `chown`ed) is left completely untouched. This is a narrower
+trade than the bind-mount `chmod 0777` warned against two bullets up: it
+applies to exactly one Caesium-managed leaf directory the engine itself
+provisions — never to an operator's own bind-mounted tree — and the engine
+has no way to know the step's declared UID to `chown` to instead (`pkg/jobdef`
+exposes no `runAsUser` equivalent for docker steps, the same gap the
+Kubernetes PVC bullet above notes for pod security contexts). Ownership stays
+`root:root`; only the permission bits open up. This caveat is specific to the
+docker engine's implementation in this repo — Caesium interposes its own
+helper container only there (`internal/atom/docker`); it does not run one for
+kubernetes or podman steps.
+
 ### One logical volume per physical store
 
 Give each physical store exactly one entry under `volumes:`. Declaring the
@@ -679,15 +707,22 @@ the default:
 > Kubernetes (`v1.VolumeMount.SubPath`) and Podman
 > (`specgen.NamedVolume.SubPath`) already honoured it; `internal/atom/docker`'s
 > mount conversion now maps `SubPath` onto `mount.VolumeOptions.Subpath` for
-> named-volume mounts (creating the sub-directory on the volume first) and
-> onto the joined host path for bind mounts. This requires Docker Engine API
-> >= 1.45 — Caesium fails the run loudly if the negotiated API is older,
-> rather than silently mounting the whole volume. **`caesium job lint`'s
-> multi-writer check has not caught up yet**: it still treats every docker
-> mount as covering the volume root ([below](#the-multi-writer-lint-design-8)),
-> so it keeps flagging disjoint `subPath` writers on docker as a conflict even
-> though the isolation is now real — a known false positive tracked as a
-> follow-up.
+> named-volume mounts (creating the sub-directory on the volume first, via a
+> short-lived helper container — `CAESIUM_DOCKER_SUBPATH_HELPER_IMAGE`,
+> default `alpine:3.23`, controls its image for air-gapped/private-registry
+> installs) and onto the joined host path for bind mounts. `subPath` values
+> are validated as a relative path within the mount (`filepath.IsLocal`) —
+> `subPath: ../../etc` is rejected outright, on both mount kinds, rather than
+> silently resolved. This requires Docker Engine API >= 1.45 — Caesium fails
+> the run loudly if the negotiated API is older, rather than silently
+> mounting the whole volume. **Ownership caveat**: a *newly created* subPath
+> sub-directory is `root:root` (only its permission bits are opened to
+> `0777`) — see [Volume ownership](#volume-ownership-the-reagent-images-run-as-uid-10001).
+> **`caesium job lint`'s multi-writer check has not caught up yet**: it still
+> treats every docker mount as covering the volume root
+> ([below](#the-multi-writer-lint-design-8)), so it keeps flagging disjoint
+> `subPath` writers on docker as a conflict even though the isolation is now
+> real — a known false positive tracked as a follow-up.
 
 With one volume per stack the backend path can stay identical across stacks
 (`path=/state/terraform.tfstate`), the isolation is real on every engine, and
@@ -931,6 +966,7 @@ Ordered by damage:
 | **RWX unavailable** | Runtime mount failure with a clear message; RWO remains unsupported until node affinity lands. |
 | **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8), which flags writers that can run CONCURRENTLY — a pair cooperating through a `dependsOn` edge, like this pattern's own `prepare`/`checkout` and `plan`/`apply` handoffs, is legitimate and stays silent. See [Volumes](#the-multi-writer-lint-design-8). |
 | **`subPath` relied on for isolation** | Docker now honours `VolumeMount.SubPath` (#361; before the fix a "partitioned" shared volume was actually one shared directory there). The multi-writer lint still reads docker mounts as root mounts and (over-)flags them as a known false positive; the manifests use one volume per stack regardless — simpler, no API-version dependency, and free of the lint false positive ([Volumes](#one-logical-volume-per-physical-store)). |
+| **A newly created `subPath` sub-directory unwritable by a non-root docker step** | On docker only: Caesium's own root-running helper container creates the sub-directory, so — unlike the reagent-image row above — no step image's baked ownership reaches it. The helper `chmod 0777`s it, but only when it actually creates it; a pre-existing sub-directory is untouched. See [`subPath` sub-directories](#subpath-sub-directories-caesiums-own-helper-is-the-first-toucher). |
 | **Two jobs sharing one physical store** | Invisible to the multi-writer lint, which runs per definition. Mitigated in the manifests: a `metadata.concurrency` block on each job, distinct `ARTIFACT_DIR`s so two `terraform init -reconfigure` data directories cannot collide, and a provider mirror whose warms are idempotent ([Sharing stores across jobs](#sharing-stores-across-jobs)). |
 | **`terraform init` rewriting a read-only `src`** | `tf-runner` passes `-lockfile=readonly`, so a drifted `.terraform.lock.hcl` fails with Terraform's own dependency-change diagnostic instead of an opaque permission error ([`src` is mounted read-only](#src-is-mounted-read-only-for-discover-plan-and-apply)). |
 | **Concurrent applies of one stack** | Terraform's backend state lock errors out; `metadata.concurrency: {maxRuns: 1, strategy: queue}` prevents the race at the job level before it reaches Terraform. |

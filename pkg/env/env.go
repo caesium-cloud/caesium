@@ -100,6 +100,14 @@ type Environment struct {
 	LogConsoleEnabled              bool          `default:"true" split_words:"true"`
 	Port                           int           `default:"8080"`
 	DockerHost                     string        `default:"" split_words:"true"`
+	// DockerSubpathHelperImage is the image the docker engine uses for the
+	// short-lived helper container that creates a VolumeMount.SubPath
+	// sub-directory before a step mounts it (internal/atom/docker's
+	// ensureVolumeSubPath). Defaults to the repo's pinned alpine:3.23 reference
+	// (internal/guardrails/guardrails_test.go); override it for an
+	// air-gapped or private-registry-only install so the helper never needs
+	// to reach Docker Hub.
+	DockerSubpathHelperImage       string        `envconfig:"DOCKER_SUBPATH_HELPER_IMAGE" default:"alpine:3.23"`
 	KubernetesConfig               string        `default:"" split_words:"true"`
 	KubernetesNamespace            string        `default:"default" split_words:"true"`
 	PodmanURI                      string        `default:"" split_words:"true"`

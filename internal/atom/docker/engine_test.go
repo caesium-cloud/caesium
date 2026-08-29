@@ -284,10 +284,12 @@ func (s *DockerTestSuite) TestCreateAppliesVolumeSubPath() {
 
 	helperCfgMatcher := mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
 		return cfg.Image == subPathHelperImage &&
-			len(cfg.Cmd) == 3 &&
-			cfg.Cmd[0] == "mkdir" &&
-			cfg.Cmd[1] == "-p" &&
-			cfg.Cmd[2] == subPathHelperMountDir+"/stack-a"
+			len(cfg.Cmd) == 5 &&
+			cfg.Cmd[0] == "sh" &&
+			cfg.Cmd[1] == "-c" &&
+			cfg.Cmd[2] == subPathHelperScript &&
+			cfg.Cmd[3] == "sh" &&
+			cfg.Cmd[4] == subPathHelperMountDir+"/stack-a"
 	})
 	helperHostMatcher := mock.MatchedBy(func(host *dockercontainer.HostConfig) bool {
 		return host != nil && len(host.Mounts) == 1 &&
@@ -746,4 +748,172 @@ func TestConvertMountsBindNoSubPathUnchanged(t *testing.T) {
 	if assert.Len(t, mounts, 1) {
 		assert.Equal(t, "/data", mounts[0].Source)
 	}
+}
+
+// TestValidatedSubPath exercises the guard directly (I-2 / greptile P1
+// 3885580438): path.Join and Docker's own VolumeOptions.Subpath both RESOLVE
+// ".." rather than rejecting it, so validatedSubPath is the only thing
+// standing between a manifest's subPath and a host/volume escape.
+func TestValidatedSubPath(t *testing.T) {
+	cases := []struct {
+		name        string
+		subPath     string
+		wantCleaned string
+		wantErr     bool
+	}{
+		{name: "empty is unset", subPath: "", wantCleaned: ""},
+		{name: "simple relative", subPath: "a", wantCleaned: "a"},
+		{name: "nested relative", subPath: "stack-a/nested", wantCleaned: "stack-a/nested"},
+		{name: "dot is the mount root", subPath: ".", wantCleaned: ""},
+		{name: "redundant dot segment cleaned", subPath: "a/./b", wantCleaned: "a/b"},
+		{name: "internal traversal that cancels out is safe", subPath: "a/../b", wantCleaned: "b"},
+		{name: "leading traversal rejected", subPath: "../etc", wantErr: true},
+		{name: "reviewer's exact escape rejected", subPath: "../../etc", wantErr: true},
+		{name: "traversal past an internal segment rejected", subPath: "a/../../etc", wantErr: true},
+		{name: "bare dotdot rejected", subPath: "..", wantErr: true},
+		{name: "absolute path rejected", subPath: "/etc", wantErr: true},
+		{name: "volume root itself rejected", subPath: "/", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validatedSubPath("/state", tc.subPath)
+			if tc.wantErr {
+				assert.Error(t, err)
+				assert.Empty(t, got)
+				assert.Contains(t, err.Error(), "/state")
+				assert.Contains(t, err.Error(), tc.subPath)
+				assert.Contains(t, err.Error(), "relative path within the volume")
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantCleaned, got)
+		})
+	}
+}
+
+func TestConvertMountsVolumeSubPathTraversalRejected(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: "../../etc",
+	}}, true)
+
+	assert.Error(t, err)
+	assert.Nil(t, mounts)
+	assert.Contains(t, err.Error(), "/state")
+	assert.Contains(t, err.Error(), "../../etc")
+	assert.Contains(t, err.Error(), "relative path within the volume")
+}
+
+func TestConvertMountsVolumeSubPathAbsoluteRejected(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: "/etc",
+	}}, true)
+
+	assert.Error(t, err)
+	assert.Nil(t, mounts)
+	assert.Contains(t, err.Error(), "relative path within the volume")
+}
+
+func TestConvertMountsVolumeSubPathCleanRelativeAccepted(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: "stack-a/./nested",
+	}}, true)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) && assert.NotNil(t, mounts[0].VolumeOptions) {
+		assert.Equal(t, "stack-a/nested", mounts[0].VolumeOptions.Subpath)
+	}
+}
+
+// TestConvertMountsBindSubPathTraversalRejected is the direct regression for
+// greptile's P1 (inline comment 3885580438 on engine.go:374): before this
+// fix, path.Join("/srv/caesium/data", "../../etc") silently resolved to a
+// path outside the declared bind source instead of being rejected.
+func TestConvertMountsBindSubPathTraversalRejected(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeBind,
+		Source:  "/srv/caesium/data",
+		Target:  "/state",
+		SubPath: "../../etc",
+	}}, false)
+
+	assert.Error(t, err)
+	assert.Nil(t, mounts)
+	assert.Contains(t, err.Error(), "/state")
+	assert.Contains(t, err.Error(), "../../etc")
+	assert.Contains(t, err.Error(), "relative path within the volume")
+}
+
+func TestConvertMountsBindSubPathAbsoluteRejected(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeBind,
+		Source:  "/srv/caesium/data",
+		Target:  "/state",
+		SubPath: "/etc",
+	}}, false)
+
+	assert.Error(t, err)
+	assert.Nil(t, mounts)
+	assert.Contains(t, err.Error(), "relative path within the volume")
+}
+
+func TestConvertMountsBindSubPathCleanRelativeAccepted(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeBind,
+		Source:  "/srv/caesium/data",
+		Target:  "/state",
+		SubPath: "stack-a/./nested",
+	}}, false)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) {
+		assert.Equal(t, "/srv/caesium/data/stack-a/nested", mounts[0].Source)
+	}
+}
+
+// TestConvertMountsSubPathDotTreatedAsMountRoot pins down M-4's resolution:
+// a subPath of "." addresses the mount root itself, so it must behave
+// identically to no subPath at all on both mount kinds — no
+// VolumeOptions.Subpath, no path join.
+func TestConvertMountsSubPathDotTreatedAsMountRoot(t *testing.T) {
+	volumeMounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: ".",
+	}}, false) // subpathSupported: false — "." must not even trigger the API-version gate.
+
+	assert.NoError(t, err)
+	if assert.Len(t, volumeMounts, 1) {
+		assert.Nil(t, volumeMounts[0].VolumeOptions)
+	}
+
+	bindMounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeBind,
+		Source:  "/data",
+		Target:  "/state",
+		SubPath: ".",
+	}}, false)
+
+	assert.NoError(t, err)
+	if assert.Len(t, bindMounts, 1) {
+		assert.Equal(t, "/data", bindMounts[0].Source)
+	}
+}
+
+func TestSubPathHelperScriptChmodsOnlyOnCreate(t *testing.T) {
+	assert.Contains(t, subPathHelperScript, `test -d "$1"`,
+		"must check for a pre-existing sub-directory before creating one")
+	assert.Contains(t, subPathHelperScript, `mkdir -p "$1"`)
+	assert.Contains(t, subPathHelperScript, `chmod 0777 "$1"`,
+		"a newly created sub-directory must be world-writable so a non-root step image can write into it (I-1)")
 }
