@@ -103,15 +103,18 @@ func TestDispatchRunInMemory_FannedInstancesDispatchWithoutCapabilityProbe(t *te
 			if addr == peerNodeID {
 				return peer1.server.URL
 			}
-			// selfNodeID resolves to nothing reachable, so every instance must
-			// route to peer1 via round-robin — proving self is not required to
-			// answer a capability probe for the instance to go out.
+			// selfNodeID maps to "", and buildPeers's add() drops any address
+			// whose base URL is empty — so self is absent from the rotation
+			// (not merely unreachable), leaving peers = [peer1] and every
+			// instance deterministically routed there with no round-robin to
+			// exercise. What that proves: self is not required to answer a
+			// capability probe for the instance to go out.
 			return ""
 		},
 		OwnerManager: mgr,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	t.Cleanup(cancel)
 	loop.Run(ctx)
 
@@ -129,4 +132,51 @@ func TestDispatchRunInMemory_FannedInstancesDispatchWithoutCapabilityProbe(t *te
 	for _, id := range instanceIDs {
 		require.True(t, seen[id], "instance %s was never dispatched", id)
 	}
+}
+
+// TestDispatchRunInMemory_UnfannedWorkDispatchesWithoutCapabilityProbe covers
+// the in-memory lane's only other shape of ready work: an unfanned task
+// (no TaskRunID). It never went through the removed gate — instanceCapablePeers
+// only ever ran for dt.TaskRunID != uuid.Nil — but the deleted
+// capability_gate_test.go was the in-memory lane's only unfanned coverage, so
+// this replaces it: dispatch still happens, still carries no TaskRunID, and
+// still costs zero /internal/capabilities probes.
+func TestDispatchRunInMemory_UnfannedWorkDispatchesWithoutCapabilityProbe(t *testing.T) {
+	const nodeID = "10.0.0.2:9001"
+	peer1 := newPeerStub(t)
+
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ls := run.NewLeaseStore(db)
+	store := run.NewStore(db).WithLeaseStore(ls)
+
+	runID, taskID := seedPendingTaskRun(t, store)
+	_, err := ls.AcquireLease(context.Background(), runID, nodeID, 30*time.Second)
+	require.NoError(t, err)
+
+	mgr := run.NewOwnerManager(store, run.CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	loop := NewDispatchLoop(DispatchLoopConfig{
+		NodeID:       nodeID,
+		Token:        loopToken,
+		Interval:     40 * time.Millisecond,
+		BatchSize:    64,
+		Deadline:     5 * time.Minute,
+		LeaseTTL:     30 * time.Second,
+		LeaseStore:   &testOwnerReader{ls},
+		Store:        &testTaskReader{store},
+		Peers:        &testPeerLister{},
+		PeerBaseURL:  func(string) string { return peer1.server.URL },
+		OwnerManager: mgr,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	t.Cleanup(cancel)
+	loop.Run(ctx)
+
+	got := peer1.requests()
+	require.NotEmpty(t, got, "the pending unfanned task must still be dispatched")
+	require.Equal(t, taskID, got[0].TaskID)
+	require.Equal(t, uuid.Nil, got[0].TaskRunID, "unfanned work carries no TaskRunID")
+	require.Zero(t, peer1.probeCount(),
+		"unfanned work must dispatch without any /internal/capabilities probe")
 }

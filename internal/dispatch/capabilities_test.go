@@ -73,8 +73,10 @@ func TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing(t *testing.T) {
 	require.Empty(t, got.Capabilities)
 }
 
-// TestHandleCapabilities_RequiresTheBearerToken keeps the probe on the same
-// footing as the traffic it gates.
+// TestHandleCapabilities_RequiresTheBearerToken pins the bearer-token
+// requirement on GET /internal/capabilities itself: nothing gates dispatch on
+// the probe's answer any more (#358), but the endpoint is still guarded by
+// the same auth check as every other internal endpoint.
 func TestHandleCapabilities_RequiresTheBearerToken(t *testing.T) {
 	_, _, h := setupHandler(t)
 	h = h.WithWorkerSubmitter(&capableSubmitter{})
@@ -85,9 +87,12 @@ func TestHandleCapabilities_RequiresTheBearerToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-// TestGetCapabilities_ReadsALegacyPeerAsIncapable: an older build serves no such
-// route.  The probe must report that as "supports nothing", never as a
-// transient error the caller might optimistically ignore.
+// TestGetCapabilities_ReadsALegacyPeerAsIncapable pins GetCapabilities's own
+// error taxonomy on the kept endpoint: an older build serving no such route
+// (404) must be reported as an error ("supports nothing"), never as a
+// zero-value success. GetCapabilities has no production caller today (the
+// dispatch loop's capability-gated use of it was removed in #358); this pins
+// the exported helper's contract for whatever calls it next.
 func TestGetCapabilities_ReadsALegacyPeerAsIncapable(t *testing.T) {
 	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -169,9 +174,13 @@ func TestHandleDispatch_UnfannedTaskWithoutTaskRunIDStillWorks(t *testing.T) {
 	require.Len(t, sub.accepted, 1)
 }
 
-// TestGetCapabilities_DistinguishesUnreachableFromLegacy: the dispatch loop
-// benches a peer it cannot reach but must NOT bench one that merely answers 404
-// — that peer is a healthy older node and still takes unfanned work.
+// TestGetCapabilities_DistinguishesUnreachableFromLegacy pins another piece of
+// GetCapabilities's error taxonomy for the kept endpoint: a 404 (a peer that
+// answered "no such route") must be reported as a plain error, distinct from
+// ErrPeerUnreachable, which wraps only a transport failure. No production
+// caller of GetCapabilities tells them apart today — the dispatch loop's own
+// bench-on-capability-probe was removed along with the gate in #358 — but the
+// exported contract stays correct for whatever calls GetCapabilities next.
 func TestGetCapabilities_DistinguishesUnreachableFromLegacy(t *testing.T) {
 	legacy := httptest.NewServer(http.HandlerFunc(http.NotFound))
 	t.Cleanup(legacy.Close)

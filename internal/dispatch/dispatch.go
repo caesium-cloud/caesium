@@ -62,13 +62,19 @@ const (
 
 // Internal dispatch protocol versioning.
 //
-// The owner and the worker are separate processes that are upgraded separately,
-// so a rolling deploy can have a window where a new owner dispatches to an old
-// peer.  An old peer ignores the JSON field it does not know
-// (DispatchRequest.TaskRunID) and would silently process the catalog id instead
-// — which for an expanded fan-out group is ambiguous.  HandleDispatch fails that
-// case closed with 409 ReasonAmbiguousTask rather than resolving it to an
-// arbitrary sibling; see ClaimTaskForDispatch / ErrAmbiguousTaskRun.
+// The owner and the worker are separate processes upgraded separately.  Two
+// mixed-version directions matter, and only one is still guarded:
+//
+//   - An OLD owner dispatching to this build omits TaskRunID; for a fan-out
+//     group that is already expanded its catalog id names N rows.
+//     HandleDispatch fails that closed with 409 ReasonAmbiguousTask rather
+//     than resolving it to an arbitrary sibling — see ClaimTaskForDispatch /
+//     ErrAmbiguousTaskRun.
+//   - A NEW owner dispatching to a PRE-v2 peer is NOT guarded: that peer
+//     ignores the TaskRunID it does not understand and processes the catalog
+//     id.  The pre-flight capability probe that prevented this was removed in
+//     #358 on the premise that every deployed node speaks v2; a fleet that
+//     re-introduces a v1 node re-opens it.
 const (
 	// InternalProtocolVersion is the internal coordination protocol this build
 	// speaks.  Bumped when the wire contract gains a field a peer must
