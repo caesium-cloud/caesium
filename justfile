@@ -695,6 +695,7 @@ ui-e2e: build-release
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
+            -e CAESIUM_CACHE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
@@ -735,6 +736,7 @@ ui-e2e-auth: build-release
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
     tries=0
