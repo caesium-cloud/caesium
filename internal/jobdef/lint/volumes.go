@@ -19,10 +19,11 @@ type writeEntry struct {
 }
 
 // CheckVolumeWriters returns a warning for every named volume (per
-// definition) that is mounted read-write — i.e. without readOnly: true — by
-// two or more steps that can run CONCURRENTLY and whose write regions
-// overlap. This is the "two read-write mounts on one volume" check from spec
-// §8; it is a lint *warning*, not an error (spec §11 Open Question 2).
+// definition) that can have two or more CONCURRENT writers touching
+// overlapping regions. The writers may be distinct DAG steps or partition
+// instances of one fanOut step. This is the "two read-write mounts on one
+// volume" check from spec §8; it is a lint *warning*, not an error (spec §11
+// Open Question 2).
 //
 // The hazard is concurrent writers, so two conditions must both hold before
 // a pair is flagged:
@@ -43,16 +44,15 @@ type writeEntry struct {
 //     subPaths are clear of each other only when neither is a path-segment
 //     prefix of the other ("a" vs "b").
 //
-// **subPath is engine-dependent.** Kubernetes and Podman apply
-// `VolumeMount.SubPath` (internal/atom/kubernetes/engine.go,
-// internal/atom/podman/engine.go), so on those engines a subPath really does
-// narrow what the container can reach. The **Docker engine does not**: its
-// convertMounts builds a mount.Mount with no VolumeOptions.Subpath
-// (internal/atom/docker/engine.go), so a docker mount always exposes the
-// whole volume and two docker steps declaring different subPaths still
-// contend for the same bytes. This check therefore treats every mount on the
-// docker engine — and on an unset engine, which pkg/jobdef defaults to
-// docker on decode — as a root mount.
+// **subPath follows the resolved source.** Kubernetes applies
+// `VolumeMount.SubPath`; Docker applies it to both bind and named-volume
+// sources since #370 (`Honour VolumeMount.SubPath on the Docker engine`,
+// closes #361); and Podman applies it to named volumes. Podman's bind-mount
+// conversion does not apply SubPath, so this check conservatively treats a
+// Podman bind as exposing the whole source. Per-instance sources (Docker or
+// Podman tmpfs, Kubernetes claimTemplate, emptyDir, and generic ephemeral
+// volumes) cannot share bytes between steps or fan-out instances and are
+// omitted entirely.
 //
 // Two mechanisms write to a named volume and both are covered:
 //   - the job-level `volumes:` / step `volumeMounts:` abstraction, keyed on
@@ -63,8 +63,23 @@ type writeEntry struct {
 //     Docker/Podman named volume directly. That form has no subPath at all,
 //     so any two write mounts of the same source name always overlap.
 //
-// Known gaps, all of them false NEGATIVES (the check never invents a
-// conflict it cannot see):
+// **Fan-out self-conflict.** A `fanOut:` step materializes N task instances
+// from ONE step definition, and instances may run concurrently up to the
+// step's within-run fan-out bound. Every instance shares that step's
+// `ResolvedVolumeMounts` configuration verbatim — subPath is fixed at
+// step-definition time, and a fanned instance's per-partition customization
+// is limited to the injected partition env vars
+// (`CAESIUM_PARTITION`/`CAESIUM_PARTITION_JSON`, internal/job/job.go); mounts
+// are never touched per-instance. For a potentially shared source there is
+// therefore no way today to give two instances disjoint subPaths, so this
+// check flags the step against ITSELF regardless of subPath. Sources whose
+// runtime lifecycle proves they are private to one container/pod are skipped.
+// A shared source is also skipped when the step's own concurrency bound
+// (`maxPartitions`, capped by a positive `maxParallel`; see
+// fanOutWriterBound) is <= 1, because a second instance from that run can
+// never be in flight. See docs/infrastructure-deployment.md's fan-out section.
+//
+// Known limits:
 //   - The two mechanisms are not cross-referenced against each other: a
 //     job-level volume whose resolved per-engine source happens to name the
 //     same physical Docker/Podman volume as an unrelated raw
@@ -74,18 +89,18 @@ type writeEntry struct {
 //   - `Volume.AccessMode: ReadOnlyMany` is not consulted: it makes
 //     step-level `readOnly: true` redundant, but its absence is still what
 //     this check reads.
-//   - A step is never checked against ITSELF, so a `fanOut:` step whose N
-//     partitions all write one volume is not flagged even though those
-//     instances really do run concurrently. Per-unit isolation in the
-//     fan-out form has to come from the container (a per-partition path or
-//     backend key), not from the mount — see
-//     docs/infrastructure-deployment.md's fan-out section.
-//   - **Ordering is evaluated within a SINGLE run.** These volumes are
-//     persistent (named volumes, pre-provisioned PVCs), and a job with no
+//   - An arbitrary Kubernetes `volumeSource` is treated as potentially shared
+//     unless it is the single known per-pod kind `emptyDir` or `ephemeral`.
+//     That fails closed for storage plugins, but source-enforced read-only
+//     kinds can consequently produce a conservative warning when the mount
+//     itself omits `readOnly: true`.
+//   - **Ordering and fan-out bounds are evaluated within a SINGLE run.** These
+//     volumes are persistent (named volumes, pre-provisioned PVCs), and a job with no
 //     `metadata.concurrency` block admits unlimited overlapping runs
 //     (internal/run/store.go admits everything when MaxRuns <= 0) — so run
 //     2's `prepare` can genuinely race run 1's `checkout` on one volume, and
-//     the ordering exemption above says nothing about it. Constrain
+//     the ordering and serialized-fan-out exemptions above say nothing about
+//     it. Constrain
 //     overlapping runs with `metadata.concurrency`; the reference manifests
 //     do, and that block is load-bearing for this check's silence rather
 //     than mere hygiene.
@@ -105,21 +120,26 @@ func CheckVolumeWriters(defs []schema.Definition) []string {
 		ordering := newDAGOrdering(def.Steps)
 		warnings = append(warnings, checkNamedVolumeWriters(def, ordering)...)
 		warnings = append(warnings, checkRawMountVolumeWriters(def, ordering)...)
+		warnings = append(warnings, checkFanOutSelfWriters(def)...)
 	}
 
 	return warnings
 }
 
 // checkNamedVolumeWriters covers the job-level volumes:/volumeMounts:
-// abstraction, grouping write mounts by volume name and clustering them by
-// engine-effective subPath overlap within each volume.
+// abstraction, grouping shared write mounts by volume name and clustering
+// them by their effective subPath overlap. effectiveNamedWriteMount resolves
+// source-specific behavior, including per-instance scratch storage and the
+// Podman bind-mount case where subPath is not applied.
 func checkNamedVolumeWriters(def schema.Definition, ordering dagOrdering) []string {
 	byVolume := make(map[string][]writeEntry)
 	var volumeOrder []string
 
 	for _, step := range def.Steps {
-		for _, mount := range step.VolumeMounts {
-			if mount.ReadOnly {
+		resolvedMounts, resolved := resolvedNamedVolumeMounts(def, step)
+		for i, mount := range step.VolumeMounts {
+			entry, sharedWriter := effectiveNamedWriteMount(step, mount, resolvedMounts, resolved, i)
+			if !sharedWriter {
 				continue
 			}
 			volumeName := strings.TrimSpace(mount.Volume)
@@ -129,10 +149,7 @@ func checkNamedVolumeWriters(def schema.Definition, ordering dagOrdering) []stri
 			if _, ok := byVolume[volumeName]; !ok {
 				volumeOrder = append(volumeOrder, volumeName)
 			}
-			byVolume[volumeName] = append(byVolume[volumeName], writeEntry{
-				step:    step.Name,
-				subPath: effectiveSubPath(step.Engine, mount.SubPath),
-			})
+			byVolume[volumeName] = append(byVolume[volumeName], entry)
 		}
 	}
 
@@ -142,8 +159,7 @@ func checkNamedVolumeWriters(def schema.Definition, ordering dagOrdering) []stri
 			msg := fmt.Sprintf(
 				"volume %q is mounted read-write by steps that are not all pairwise ordered by the DAG and write overlapping regions: %s; "+
 					"add readOnly: true to steps that only read, order the writers with dependsOn, or give each writer a "+
-					"non-overlapping subPath (kubernetes/podman only — the docker engine ignores subPath, so every docker "+
-					"mount covers the whole volume)",
+					"non-overlapping subPath",
 				volumeName, strings.Join(steps, ", "))
 			warnings = append(warnings, withAliasPrefix(def, msg))
 		}
@@ -188,26 +204,222 @@ func checkRawMountVolumeWriters(def schema.Definition, ordering dagOrdering) []s
 	return warnings
 }
 
+// checkFanOutSelfWriters flags a `fanOut:` step's own partition instances as
+// concurrent writers of a shared volume WHEN more than one of them can be
+// in flight at once. checkNamedVolumeWriters and checkRawMountVolumeWriters
+// compare DIFFERENT steps and explicitly skip a step against itself
+// (conflictingStepGroups requires >= 2 distinct step names per group), so
+// without this pass a fanned step's own partitions — which may run
+// concurrently whenever more than one is allowed in flight — are invisible.
+//
+// A fanOut step whose own concurrency bound (fanOutWriterBound) is <= 1 can
+// never have two of its own instances holding the mount at once, so it is
+// NOT flagged — the check must not turn "maxParallel: 1" or
+// "maxPartitions: 1" into false positives, since neither can ever put a
+// second writer in flight.
+//
+// subPath cannot rescue a shared-source step that IS flagged (see the fan-out
+// self-conflict doc above): no subPath value or containment check can clear
+// it, because subPath is fixed per step definition regardless of engine.
+func checkFanOutSelfWriters(def schema.Definition) []string {
+	warnings := make([]string, 0)
+
+	for _, step := range def.Steps {
+		if step.FanOut == nil {
+			continue
+		}
+		if n, ok := fanOutWriterBound(step.FanOut); ok && n <= 1 {
+			continue
+		}
+		count := fanOutWriterCountText(step.FanOut)
+
+		for _, volumeName := range writableVolumeNames(def, step) {
+			msg := fmt.Sprintf(
+				"volume %q is mounted read-write by fanned step %q: fanOut allows %s partition instances of this one step to run concurrently, "+
+					"all sharing the identical mount (subPath is fixed per step definition, so it cannot isolate one partition's writes from "+
+					"another's); add readOnly: true if the step only reads, set fanOut.maxParallel: 1 to serialize this step's partition "+
+					"instances within a run (and constrain metadata.concurrency to one run if the persistent volume must also be exclusive "+
+					"across runs), or give each partition instance its own storage location or backend key from inside the container "+
+					"(e.g. a sanitized or hash-derived key from the configured fanOut env or CAESIUM_PARTITION_JSON)",
+				volumeName, step.Name, count)
+			warnings = append(warnings, withAliasPrefix(def, msg))
+		}
+
+		for _, source := range writableRawMountSources(step) {
+			msg := fmt.Sprintf(
+				"volume %q (mounts: type: volume) is mounted read-write by fanned step %q: fanOut allows %s partition instances "+
+					"of this one step, all sharing the identical mount (this raw mount form has no subPath at all); add readOnly: true if the "+
+					"step only reads, set fanOut.maxParallel: 1 to serialize this step's partition instances within a run (and constrain "+
+					"metadata.concurrency to one run if the persistent volume must also be exclusive across runs), or give each "+
+					"partition instance its own storage location or backend key from inside the container (e.g. a sanitized or hash-derived "+
+					"key from the configured fanOut env or CAESIUM_PARTITION_JSON)",
+				source, step.Name, count)
+			warnings = append(warnings, withAliasPrefix(def, msg))
+		}
+	}
+
+	return warnings
+}
+
+// fanOutWriterBound returns the maximum number of a fanOut step's own
+// partition instances that can be in flight at once within one run, so
+// checkFanOutSelfWriters can skip a step whose own fan-out can never exceed a
+// single concurrent writer. fanOut.maxPartitions is required and > 0 on a valid definition
+// (pkg/jobdef/definition.go's validateFanOut), so the group's instance count
+// is always finite — never truly unbounded — and fanOut.maxParallel
+// additionally caps concurrency below that when it is set (> 0) and tighter
+// (internal/run/fanout.go's claim predicate, internal/worker/claimer.go's
+// mirror of it, and internal/job/job.go's local worker-pool cap all enforce
+// exactly this bound). The CLI and REST lint surfaces validate definitions
+// before calling this check, but the helper stays conservative for direct
+// callers: malformed maxPartitions <= 0 has no knowable bound, so ok reports
+// false and the caller flags it rather than trusting an invalid value.
+func fanOutWriterBound(fo *schema.FanOut) (n int, ok bool) {
+	if fo.MaxPartitions <= 0 {
+		return 0, false
+	}
+	n = fo.MaxPartitions
+	if fo.MaxParallel > 0 && fo.MaxParallel < n {
+		n = fo.MaxParallel
+	}
+	return n, true
+}
+
+// fanOutWriterCountText renders the maximum writer multiplicity a fanOut
+// step's own partitions can introduce. It names the tighter configured bound
+// as an upper bound because the producer may emit fewer partitions. An
+// unknowable bound (maxPartitions <= 0 on an unvalidated definition) is
+// rendered conservatively as unbounded, matching fanOutWriterBound's
+// fail-flagged behavior for the same input.
+func fanOutWriterCountText(fo *schema.FanOut) string {
+	n, ok := fanOutWriterBound(fo)
+	if !ok {
+		return "N>1 (fanOut.maxPartitions is invalid; treated as unbounded)"
+	}
+	return fmt.Sprintf("N≤%d", n)
+}
+
+// writableVolumeNames returns the deduped, first-seen-order set of shared
+// job-level volume names a step mounts read-write via volumeMounts:.
+func writableVolumeNames(def schema.Definition, step schema.Step) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	resolvedMounts, resolved := resolvedNamedVolumeMounts(def, step)
+	for i, mount := range step.VolumeMounts {
+		if _, sharedWriter := effectiveNamedWriteMount(step, mount, resolvedMounts, resolved, i); !sharedWriter {
+			continue
+		}
+		name := strings.TrimSpace(mount.Volume)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+// resolvedNamedVolumeMounts asks the job-definition resolver for the same
+// runtime-neutral sources the engines receive. Lint normally runs after
+// definition validation, so resolution succeeds. Direct unit callers may
+// supply intentionally incomplete definitions; those fail closed to a shared
+// volume root in effectiveNamedWriteMount.
+func resolvedNamedVolumeMounts(def schema.Definition, step schema.Step) ([]container.VolumeMount, bool) {
+	if step.Engine == "" {
+		step.Engine = schema.EngineDocker
+	}
+	spec, err := def.RuntimeSpecForStep(&step)
+	if err != nil || len(spec.ResolvedVolumeMounts) != len(step.VolumeMounts) {
+		return nil, false
+	}
+	return spec.ResolvedVolumeMounts, true
+}
+
+// effectiveNamedWriteMount returns the shared write region exposed by one
+// named mount. Per-instance scratch sources return false because different
+// tasks cannot touch the same bytes. Podman bind mounts return the volume root
+// because that engine currently drops SubPath for binds. If source resolution
+// is unavailable, treat the mount as the shared volume root; valid CLI and
+// REST inputs always resolve before reaching this point.
+func effectiveNamedWriteMount(
+	step schema.Step,
+	mount schema.VolumeMount,
+	resolvedMounts []container.VolumeMount,
+	resolved bool,
+	index int,
+) (writeEntry, bool) {
+	if mount.ReadOnly {
+		return writeEntry{}, false
+	}
+
+	effectiveSubPath := ""
+	if resolved {
+		resolvedMount := resolvedMounts[index]
+		if isPerInstanceVolumeMount(resolvedMount) {
+			return writeEntry{}, false
+		}
+		if step.Engine == schema.EnginePodman && resolvedMount.Type == container.VolumeMountTypeBind {
+			effectiveSubPath = ""
+		} else {
+			effectiveSubPath = mount.SubPath
+		}
+	}
+
+	return writeEntry{step: step.Name, subPath: effectiveSubPath}, true
+}
+
+// isPerInstanceVolumeMount identifies sources whose lifecycle is scoped to
+// one container or pod. A raw Kubernetes VolumeSource is skipped only for a
+// single, unambiguous per-pod source kind; unknown and potentially shared
+// sources remain included so lint fails closed.
+func isPerInstanceVolumeMount(mount container.VolumeMount) bool {
+	switch mount.Type {
+	case container.VolumeMountTypeTmpfs, container.VolumeMountTypeClaimTemplate:
+		return true
+	case container.VolumeMountTypeVolumeSource:
+		if len(mount.VolumeSource) != 1 {
+			return false
+		}
+		if _, emptyDir := mount.VolumeSource["emptyDir"]; emptyDir {
+			return true
+		}
+		_, ephemeral := mount.VolumeSource["ephemeral"]
+		return ephemeral
+	default:
+		return false
+	}
+}
+
+// writableRawMountSources returns the deduped, first-seen-order set of raw
+// `mounts: type: volume` source names a step mounts read-write.
+func writableRawMountSources(step schema.Step) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, mount := range step.Mounts {
+		if mount.Type != container.MountTypeVolume || mount.ReadOnly {
+			continue
+		}
+		source := strings.TrimSpace(mount.Source)
+		if source == "" {
+			continue
+		}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		names = append(names, source)
+	}
+	return names
+}
+
 func withAliasPrefix(def schema.Definition, msg string) string {
 	if alias := strings.TrimSpace(def.Metadata.Alias); alias != "" {
 		return fmt.Sprintf("%s: %s", alias, msg)
 	}
 	return msg
-}
-
-// effectiveSubPath is the region of a volume a mount actually exposes on the
-// step's engine. Kubernetes and Podman honour VolumeMount.SubPath; the docker
-// engine drops it, so a docker mount always covers the volume root no matter
-// what the manifest declares. An empty engine is docker — pkg/jobdef defaults
-// it on decode, and a hand-built Definition that leaves it unset gets the
-// same, safer reading.
-func effectiveSubPath(engine, subPath string) string {
-	switch strings.TrimSpace(engine) {
-	case schema.EngineKubernetes, schema.EnginePodman:
-		return subPath
-	default:
-		return ""
-	}
 }
 
 // dagOrdering answers "can these two steps ever run at the same time?" from
@@ -225,9 +437,9 @@ type dagOrdering struct {
 // DeriveStepSuccessors validates whole steps because it is also the
 // definition's own edge builder, but only the name and the edge fields decide
 // adjacency — so an edge-only copy fills the unrelated required fields in.
-// That keeps the ordering exemption working on a definition the caller has
-// not validated yet (`caesium job lint` runs this check over parse output)
-// without re-implementing any edge parsing here.
+// That keeps the ordering exemption working for direct callers that supply a
+// definition they have not validated, without re-implementing edge parsing
+// here. The CLI and REST lint surfaces validate before reaching this helper.
 func newDAGOrdering(steps []schema.Step) dagOrdering {
 	edgeOnly := make([]schema.Step, len(steps))
 	for i, step := range steps {

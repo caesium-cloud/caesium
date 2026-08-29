@@ -110,25 +110,79 @@ func (s *IntegrationTestSuite) TestLintVolumesSilentOnDisjointSiblingSubPaths() 
 	s.NotContains(stdout, "Warnings:")
 }
 
-// TestLintVolumesWarnsOnDockerSubPathWriters is the docker caveat driven
-// through the real CLI: internal/atom/docker's convertMounts never sets
-// VolumeOptions.Subpath, so two parallel docker steps declaring different
-// subPaths of one named volume both see the whole volume and genuinely
-// contend. The same fixture is silent on kubernetes (the test above), which
-// is what makes this an engine-awareness assertion rather than a restatement
-// of the containment rule.
-func (s *IntegrationTestSuite) TestLintVolumesWarnsOnDockerSubPathWriters() {
-	alias := fmt.Sprintf("integration-lint-volumes-docker-subpath-%d", time.Now().UnixNano())
-	dir := s.writeLintVolumesManifestVerbatim(alias, dockerSubPathVolumeManifest(alias))
+// TestLintVolumesDockerHonoursSubPath is the post-#370 contract driven
+// through the real CLI (issue #366 fix round 1): internal/atom/docker's
+// convertMounts now maps VolumeMount.SubPath onto
+// mount.VolumeOptions.Subpath (PR #370, closes #361), so
+// internal/jobdef/lint/volumes.go no longer special-cases the docker engine
+// — subPath containment now follows Docker's actual adapter behavior. Two docker
+// steps declaring genuinely disjoint sibling subPaths ("a" vs "b") do not
+// overlap and stay silent, mirroring
+// TestLintVolumesSilentOnDisjointSiblingSubPaths; two docker steps sharing
+// the SAME subPath still contend and are flagged, proving this is real
+// containment on docker now, not merely "docker ignores subPath" going
+// silent for the wrong reason. This test replaces
+// TestLintVolumesWarnsOnDockerSubPathWriters, which pinned the pre-#370
+// behavior this fix removes.
+func (s *IntegrationTestSuite) TestLintVolumesDockerHonoursSubPath() {
+	disjointAlias := fmt.Sprintf("integration-lint-volumes-docker-subpath-disjoint-%d", time.Now().UnixNano())
+	disjointDir := s.writeLintVolumesManifestVerbatim(disjointAlias, dockerSubPathVolumeManifest(disjointAlias))
+	defer os.RemoveAll(disjointDir)
+
+	disjointStdout, err := s.runCLIStdout("job", "lint", "--path", disjointDir)
+	s.Require().NoError(err)
+	s.NotContains(disjointStdout, "Warnings:")
+
+	sameAlias := fmt.Sprintf("integration-lint-volumes-docker-subpath-same-%d", time.Now().UnixNano())
+	sameDir := s.writeLintVolumesManifestVerbatim(sameAlias, dockerSameSubPathVolumeManifest(sameAlias))
+	defer os.RemoveAll(sameDir)
+
+	sameStdout, err := s.runCLIStdout("job", "lint", "--path", sameDir)
+	s.Require().NoError(err)
+	s.Contains(sameStdout, "Warnings:")
+	s.Contains(sameStdout, `"shared"`)
+	s.Contains(sameStdout, "writer-a")
+	s.Contains(sameStdout, "writer-b")
+}
+
+// TestLintVolumesPodmanNamedVolumeHonoursSubPath drives the Podman
+// named-volume branch through both lint surfaces. Podman's runtime adapter
+// passes SubPath to specgen.NamedVolume, so sibling regions stay disjoint.
+func (s *IntegrationTestSuite) TestLintVolumesPodmanNamedVolumeHonoursSubPath() {
+	alias := fmt.Sprintf("integration-lint-volumes-podman-volume-subpath-%d", time.Now().UnixNano())
+	dir := s.writeLintVolumesManifestVerbatim(alias, subPathSiblingVolumeManifest(alias, "podman"))
 	defer os.RemoveAll(dir)
 
-	stdout, err := s.runCLIStdout("job", "lint", "--path", dir)
+	localStdout, err := s.runCLIStdout("job", "lint", "--path", dir)
 	s.Require().NoError(err)
-	s.Contains(stdout, "Warnings:")
-	s.Contains(stdout, `"shared"`)
-	s.Contains(stdout, "writer-a")
-	s.Contains(stdout, "writer-b")
-	s.Contains(stdout, "docker engine ignores subPath")
+	s.NotContains(localStdout, volumeWarningMarker)
+
+	serverStdout, err := s.runCLIStdout("job", "lint", "--path", dir, "--server", s.caesiumURL)
+	s.Require().NoError(err, serverStdout)
+	s.NotContains(serverStdout, volumeWarningMarker)
+}
+
+// TestLintVolumesPodmanBindSubPathsStillWarn covers the source-sensitive
+// negative case. Podman's bind adapter mounts the entire source and does not
+// apply VolumeMount.SubPath, so two declared sibling regions still overlap.
+func (s *IntegrationTestSuite) TestLintVolumesPodmanBindSubPathsStillWarn() {
+	alias := fmt.Sprintf("integration-lint-volumes-podman-bind-subpath-%d", time.Now().UnixNano())
+	dir := s.writeLintVolumesManifestVerbatim(alias, podmanBindSubPathVolumeManifest(alias))
+	defer os.RemoveAll(dir)
+
+	localStdout, err := s.runCLIStdout("job", "lint", "--path", dir)
+	s.Require().NoError(err)
+	s.Contains(localStdout, volumeWarningMarker)
+	s.Contains(localStdout, `"shared"`)
+	s.Contains(localStdout, "writer-a")
+	s.Contains(localStdout, "writer-b")
+
+	serverStdout, err := s.runCLIStdout("job", "lint", "--path", dir, "--server", s.caesiumURL)
+	s.Require().NoError(err, serverStdout)
+	s.Contains(serverStdout, volumeWarningMarker)
+	s.Contains(serverStdout, `"shared"`)
+	s.Contains(serverStdout, "writer-a")
+	s.Contains(serverStdout, "writer-b")
 }
 
 // TestLintVolumesWarnsOnRawMountTypeVolume covers the low-level mounts:
@@ -165,10 +219,9 @@ func (s *IntegrationTestSuite) writeLintVolumesManifest(alias, manifest string) 
 }
 
 // writeLintVolumesManifestVerbatim writes a fixture exactly as given, skipping
-// the suite's engine injection. Fixtures whose expected outcome depends on the
-// engine (subPath is applied by kubernetes/podman and dropped by docker) pin
-// their own `engine:` and must not have a second one spliced in — duplicate
-// mapping keys are a YAML decode error.
+// the suite's engine injection. Fixtures that explicitly pin an engine must
+// not have a second `engine:` spliced in — duplicate mapping keys are a YAML
+// decode error.
 func (s *IntegrationTestSuite) writeLintVolumesManifestVerbatim(alias, manifest string) string {
 	s.T().Helper()
 
@@ -299,9 +352,9 @@ steps:
 `, alias)
 }
 
-// kubernetesSubPathVolumeManifest and dockerSubPathVolumeManifest are the same
-// two parallel writers of two sibling subPaths, differing only in `engine:` —
-// which is exactly the difference the check has to see.
+// kubernetesSubPathVolumeManifest and dockerSubPathVolumeManifest pin the two
+// engines independently to prove sibling subPaths use the same non-overlap
+// semantics on both.
 func kubernetesSubPathVolumeManifest(alias string) string {
 	return subPathSiblingVolumeManifest(alias, "kubernetes")
 }
@@ -354,6 +407,98 @@ steps:
         path: /data
         subPath: b
 `, alias, engine, engine, engine)
+}
+
+// dockerSameSubPathVolumeManifest is dockerSubPathVolumeManifest's
+// same-region counterpart: both writers declare the identical subPath, so
+// they still contend on any engine that honours subPath — proving docker's
+// post-#370 subPath containment is real containment, not merely silence.
+func dockerSameSubPathVolumeManifest(alias string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 * * * *"
+volumes:
+  - name: shared
+    sources:
+      docker:
+        volume: caesium-lint-volumes-test
+      podman:
+        volume: caesium-lint-volumes-test
+      kubernetes:
+        pvc: caesium-lint-volumes-test-rwx
+steps:
+  - name: seed
+    image: alpine:3.23
+    engine: docker
+    command: ["sh", "-c", "true"]
+    next: [writer-a, writer-b]
+  - name: writer-a
+    image: alpine:3.23
+    engine: docker
+    command: ["sh", "-c", "true"]
+    dependsOn: [seed]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: shared-region
+  - name: writer-b
+    image: alpine:3.23
+    engine: docker
+    command: ["sh", "-c", "true"]
+    dependsOn: [seed]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: shared-region
+`, alias)
+}
+
+func podmanBindSubPathVolumeManifest(alias string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 * * * *"
+volumes:
+  - name: shared
+    sources:
+      podman:
+        bind: /tmp/caesium-lint-volumes-podman-bind
+steps:
+  - name: seed
+    image: alpine:3.23
+    engine: podman
+    command: ["sh", "-c", "true"]
+    next: [writer-a, writer-b]
+  - name: writer-a
+    image: alpine:3.23
+    engine: podman
+    command: ["sh", "-c", "true"]
+    dependsOn: [seed]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: a
+  - name: writer-b
+    image: alpine:3.23
+    engine: podman
+    command: ["sh", "-c", "true"]
+    dependsOn: [seed]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: b
+`, alias)
 }
 
 func rawMountTypeVolumeManifest(alias string) string {
