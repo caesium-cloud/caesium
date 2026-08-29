@@ -86,8 +86,14 @@ func Lint(c *echo.Context) error {
 			if err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to derive contract graph").Wrap(err)
 			}
-			contractsvc.RecordFindings(*graph)
-			summary := contractsvc.SummaryFromGraph(*graph)
+			// The derived graph unions these definitions with every job
+			// already applied on the server, so it carries breaking pairs
+			// between jobs this request never mentioned. Lint gates on
+			// resp.Contracts.Breaking, so scope the graph to the linted job
+			// set (and its direct producers/consumers) before reporting.
+			scoped := contractsvc.ScopeGraphToDefinitions(*graph, req.Definitions)
+			contractsvc.RecordFindings(scoped)
+			summary := contractsvc.SummaryFromGraph(scoped)
 			resp.Contracts = &summary
 		}
 

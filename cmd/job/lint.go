@@ -138,7 +138,7 @@ func init() {
 	lintCmd.Flags().StringVar(&lintVaultNamespace, "vault-namespace", os.Getenv("VAULT_NAMESPACE"), "Vault namespace for secret resolution")
 	lintCmd.Flags().StringVar(&lintVaultCACert, "vault-ca-cert", os.Getenv("VAULT_CACERT"), "Vault CA certificate path")
 	lintCmd.Flags().BoolVar(&lintVaultSkipVerify, "vault-skip-verify", envBool("VAULT_SKIP_VERIFY", false), "Disable TLS verification when connecting to Vault")
-	lintCmd.Flags().StringVar(&lintServer, "server", "http://localhost:8080", "POST definitions to the Caesium server for persisted-world linting; pass without a value to use http://localhost:8080")
+	lintCmd.Flags().StringVar(&lintServer, "server", "http://localhost:8080", "POST definitions to the Caesium server for persisted-world linting (contract findings are scoped to the linted jobs and their direct producers/consumers); pass without a value to use http://localhost:8080")
 	if flag := lintCmd.Flags().Lookup("server"); flag != nil {
 		flag.NoOptDefVal = "http://localhost:8080"
 	}
@@ -198,6 +198,12 @@ type ServerDatasetRef struct {
 	Name      string `json:"name"`
 }
 
+// runServerLint POSTs the linted definitions to /v1/jobdefs/lint and gates on
+// the contract findings the server reports. The server derives the contract
+// graph over the incoming definitions unioned with every persisted job, but
+// scopes the reported findings to edges touching a linted alias — so a breaking
+// producer/consumer pair elsewhere on a shared server no longer fails this lint
+// (issue #362), while a break the linted job set participates in still does.
 func runServerLint(cmd *cobra.Command, defs []jobdef.Definition) error {
 	server := strings.TrimSuffix(lintServer, "/")
 	apiKey := cliutil.ResolveAPIKey(cmd, lintAPIKey, cliutil.APIKeyEnvVar)
@@ -224,7 +230,7 @@ func runServerLint(cmd *cobra.Command, defs []jobdef.Definition) error {
 		return fmt.Errorf("server lint did not include contract findings; set CAESIUM_CONTRACT_ENFORCEMENT=fail (or warn) on the server")
 	}
 	if len(resp.Contracts.Breaking) > 0 {
-		return fmt.Errorf("server lint found %d breaking contract finding(s)", len(resp.Contracts.Breaking))
+		return fmt.Errorf("server lint found %d breaking contract finding(s) involving the linted job(s)", len(resp.Contracts.Breaking))
 	}
 	return nil
 }
@@ -343,7 +349,7 @@ func renderServerContractSummary(cmd *cobra.Command, summary *ServerContractSumm
 	if summary == nil {
 		return writeCmdOut(cmd, "Contracts: not reported; set CAESIUM_CONTRACT_ENFORCEMENT=fail (or warn) on the server.\n")
 	}
-	if err := writeCmdOut(cmd, "Contracts: %d edge(s), %d breaking, %d warning(s)\n", summary.Edges, len(summary.Breaking), len(summary.Warnings)); err != nil {
+	if err := writeCmdOut(cmd, "Contracts (scoped to the linted job(s)): %d edge(s), %d breaking, %d warning(s)\n", summary.Edges, len(summary.Breaking), len(summary.Warnings)); err != nil {
 		return err
 	}
 	if len(summary.Breaking) > 0 {

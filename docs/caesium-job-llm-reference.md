@@ -319,7 +319,7 @@ Set `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `fail` on the server; the empty defau
 
 Operator loop:
 
-- `caesium job lint --server` and `caesium contract check --path jobs/ [--json]` check local manifests against persisted jobs.
+- `caesium job lint --server` and `caesium contract check --path jobs/ [--json]` check local manifests against persisted jobs. Both scope their findings to the linted job set plus its direct producers and consumers, so an unrelated break elsewhere on a shared server does not fail them.
 - `caesium contract graph [--dataset ns/name] [--json]`, `GET /v1/contracts/graph`, and the Console `/contracts` route show the derived graph.
 - `POST /v1/jobdefs/diff` returns per-job `contractFindings`; the Console JobDefs diff tab shows compatible/unknown/breaking badges with named consumers and teams.
 - Intentional breaks use `caesium job apply --allow-breaking dataset=<name> --reason ...`. The acknowledgement is digest-scoped; producer and consumer applies warn during the deprecation window, then re-block after expiry because the window is evaluated at check time. The Console apply flow requires an ack reason before sending that request.

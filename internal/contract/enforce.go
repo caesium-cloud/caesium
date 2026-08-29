@@ -171,7 +171,7 @@ func EnforceApplyWithOptions(ctx context.Context, db *gorm.DB, incoming []schema
 		now = time.Now().UTC()
 	}
 	if opts.IncomingAliases == nil {
-		opts.IncomingAliases = incomingAliasSet(incoming)
+		opts.IncomingAliases = AliasSet(incoming)
 	}
 
 	graph, err := NewGORMDeriver(db).DeriveGraph(ctx, incoming)
@@ -732,17 +732,6 @@ func allowBreakingMatches(allow *AllowBreaking, group breakingGroup) bool {
 		}
 	}
 	return false
-}
-
-func incomingAliasSet(incoming []schema.Definition) map[string]struct{} {
-	aliases := make(map[string]struct{}, len(incoming))
-	for _, def := range incoming {
-		alias := strings.TrimSpace(def.Metadata.Alias)
-		if alias != "" {
-			aliases[alias] = struct{}{}
-		}
-	}
-	return aliases
 }
 
 func contractBreakMessage(findings []ContractFinding) string {
