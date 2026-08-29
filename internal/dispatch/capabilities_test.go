@@ -13,14 +13,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// capableSubmitter is a submitter that advertises instance identity, mirroring
-// what *worker.Worker does once it is accepting dispatched tasks.
+// testCapability is a placeholder capability string used only to exercise the
+// generic CapabilityAdvertiser plumbing.  No production type advertises a real
+// capability today (the last one, instance_identity, was removed in #358 once
+// every deployed node was guaranteed to speak instance-addressed dispatch).
+const testCapability = "test_capability"
+
+// capableSubmitter is a submitter that advertises a capability, mirroring the
+// shape a future *worker.Worker feature could take once it implements
+// CapabilityAdvertiser.
 type capableSubmitter struct {
 	fakeSubmitter
 }
 
 func (c *capableSubmitter) Capabilities() []string {
-	return []string{CapabilityInstanceIdentity}
+	return []string{testCapability}
 }
 
 func getCapabilities(t *testing.T, h *Handler) *httptest.ResponseRecorder {
@@ -33,8 +40,8 @@ func getCapabilities(t *testing.T, h *Handler) *httptest.ResponseRecorder {
 }
 
 // TestHandleCapabilities_AdvertisesTheWorkersCapabilities pins the advertisement
-// contract an owner's rolling-deploy gate reads: the node reports its protocol
-// version and the capability set of the worker actually wired into it.
+// contract: the node reports its protocol version and the capability set of
+// whatever CapabilityAdvertiser is wired into it as the submitter.
 func TestHandleCapabilities_AdvertisesTheWorkersCapabilities(t *testing.T) {
 	_, _, h := setupHandler(t)
 	h = h.WithWorkerSubmitter(&capableSubmitter{})
@@ -46,14 +53,14 @@ func TestHandleCapabilities_AdvertisesTheWorkersCapabilities(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	require.Equal(t, ownerNodeAddr, got.NodeID)
 	require.Equal(t, InternalProtocolVersion, got.ProtocolVersion)
-	require.True(t, got.Supports(CapabilityInstanceIdentity),
-		"a node with an instance-capable worker must advertise it")
+	require.True(t, got.Supports(testCapability),
+		"a node whose submitter advertises a capability must report it")
 }
 
-// TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing: a node that cannot
-// execute anything must not be picked for a fan-out instance.  It would reject
-// the dispatch anyway, and saying so up front keeps the owner from burning a
-// tick on it.
+// TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing: a node with no
+// worker attached — and, today, every real *worker.Worker, since it advertises
+// no capability — reports an empty capability set alongside its protocol
+// version.
 func TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing(t *testing.T) {
 	_, _, h := setupHandler(t)
 
@@ -62,7 +69,7 @@ func TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing(t *testing.T) {
 
 	var got CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	require.False(t, got.Supports(CapabilityInstanceIdentity))
+	require.False(t, got.Supports(testCapability))
 	require.Empty(t, got.Capabilities)
 }
 
@@ -89,7 +96,7 @@ func TestGetCapabilities_ReadsALegacyPeerAsIncapable(t *testing.T) {
 
 	caps, err := GetCapabilities(t.Context(), legacy.URL+"/internal/capabilities", testToken)
 	require.Error(t, err, "a 404 from a pre-capability build must be an error, not a silent yes")
-	require.False(t, caps.Supports(CapabilityInstanceIdentity))
+	require.False(t, caps.Supports(testCapability))
 }
 
 // TestHandleDispatch_RejectsInstanceBlindDispatchForAnExpandedGroup pins the

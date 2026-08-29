@@ -63,23 +63,18 @@ const (
 // Internal dispatch protocol versioning.
 //
 // The owner and the worker are separate processes that are upgraded separately,
-// so a rolling deploy always has a window where a new owner is dispatching to an
-// old peer.  An old peer ignores the JSON field it does not know
-// (DispatchRequest.TaskRunID) and silently processes the catalog id instead —
-// which for an expanded fan-out group is ambiguous.  The owner therefore asks a
-// peer what it supports before it entrusts an INSTANCE to it.
+// so a rolling deploy can have a window where a new owner dispatches to an old
+// peer.  An old peer ignores the JSON field it does not know
+// (DispatchRequest.TaskRunID) and would silently process the catalog id instead
+// — which for an expanded fan-out group is ambiguous.  HandleDispatch fails that
+// case closed with 409 ReasonAmbiguousTask rather than resolving it to an
+// arbitrary sibling; see ClaimTaskForDispatch / ErrAmbiguousTaskRun.
 const (
 	// InternalProtocolVersion is the internal coordination protocol this build
 	// speaks.  Bumped when the wire contract gains a field a peer must
 	// understand rather than merely tolerate.  v1 was catalog-addressed
 	// dispatch; v2 added instance-addressed dispatch.
 	InternalProtocolVersion = 2
-
-	// CapabilityInstanceIdentity names the ability to execute a dispatch
-	// addressed by TaskRun id (a fan-out instance) rather than by catalog task
-	// id.  A node advertising it honours DispatchRequest.TaskRunID end to end:
-	// claim, load, rollback, and the completion envelope it posts back.
-	CapabilityInstanceIdentity = "instance_identity"
 )
 
 // CapabilitiesResponse is the body of GET /internal/capabilities: what this node
@@ -105,12 +100,13 @@ func (c *CapabilitiesResponse) Supports(name string) bool {
 	return false
 }
 
-// CapabilityAdvertiser is implemented by a worker that can name the internal
-// protocol features it supports.  The WORKER is the honest source: the handler
-// only routes, while the worker is what actually executes an instance-addressed
-// dispatch and posts an instance-addressed completion back.  A node with no
-// worker attached advertises nothing, which is exactly right — it would reject
-// the dispatch anyway.
+// CapabilityAdvertiser is implemented by a worker that can name the optional
+// internal-protocol features it supports, surfaced via GET
+// /internal/capabilities.  The WORKER is meant to be the honest source: the
+// handler only routes, while the worker is what would actually execute
+// whatever the capability describes.  No production type implements this
+// today — it exists so a future protocol feature that needs a peer's
+// pre-flight assent has somewhere to plug in without adding a new endpoint.
 type CapabilityAdvertiser interface {
 	Capabilities() []string
 }
@@ -122,11 +118,11 @@ type CapabilityAdvertiser interface {
 // retry on ErrOwnerBusy and give up on any other error.
 var ErrOwnerBusy = errors.New("owner busy: retryable")
 
-// ErrPeerUnreachable wraps a TRANSPORT failure talking to a peer, as distinct
-// from a peer that answered with an unwelcome status.  The dispatch loop needs
-// the difference: an unreachable peer should be benched from the whole rotation,
-// while a peer that answers 404 to the capability probe is a perfectly healthy
-// older node that must keep receiving unfanned work.
+// ErrPeerUnreachable wraps a TRANSPORT failure talking to a peer probed via
+// GetCapabilities, as distinct from a peer that answered with an unwelcome
+// status (e.g. 404 from a build with no such route).  A caller that needs to
+// tell "peer is down" apart from "peer answered and supports nothing" can
+// check for this with errors.Is.
 var ErrPeerUnreachable = errors.New("peer unreachable")
 
 // internalClient is the shared HTTP client used for both PostDispatch and
@@ -336,10 +332,11 @@ func (h *Handler) capabilities() []string {
 	return nil
 }
 
-// HandleCapabilities handles GET /internal/capabilities: the peer-capability
-// probe an owner issues before dispatching a fan-out INSTANCE to a node.  It is
-// deliberately a plain read with no side effects, guarded by the same bearer
-// token as the other internal endpoints.
+// HandleCapabilities handles GET /internal/capabilities: reports this node's
+// internal-protocol version and the optional feature set it advertises via
+// CapabilityAdvertiser (empty today — no capability currently gates on it).
+// It is deliberately a plain read with no side effects, guarded by the same
+// bearer token as the other internal endpoints.
 func (h *Handler) HandleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -847,9 +844,10 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 // GetCapabilities probes a peer's GET /internal/capabilities.
 //
 // Every failure mode — an old build with no such route (404), an unreachable
-// node, a malformed body — is reported as an error, and the caller reads that as
-// "supports nothing beyond v1".  Failing closed is the whole point: guessing
-// that a silent peer understands instance identity is what strands a claim.
+// node, a malformed body — is reported as an error rather than a zero-value
+// success, so a caller can tell "peer answered: supports nothing" (see
+// CapabilitiesResponse.Supports) apart from "could not reach the peer at all"
+// (see ErrPeerUnreachable).
 func GetCapabilities(ctx context.Context, targetURL, token string) (*CapabilitiesResponse, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, dispatchPostTimeout)
 	defer cancel()
