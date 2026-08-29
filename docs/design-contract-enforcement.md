@@ -259,6 +259,11 @@ equivalent full scan on every apply). The only new persisted model is
   the existing `Validate()` + `ValidateTriggerChains` steps, run the check;
   the response gains `contracts: {breaking: [...], warnings: [...], edges:
   n}`, and the within-job `contractSummary` folds into the same section.
+  Graph derivation unions the posted definitions with every persisted job,
+  so the reported section is **scoped** to edges touching one of the posted
+  aliases (`ScopeGraphToDefinitions`) — same rule apply enforcement uses.
+  Without that scope a single breaking pair anywhere on a shared server
+  fails every later `--server` lint (issue #362).
 - **`POST /v1/jobdefs/diff`**: per-job diff entries gain `contractFindings`
   so the UI/PR comment can badge edges.
 - **`POST /v1/jobdefs/apply`**: the check runs **inside the importer's apply
@@ -279,7 +284,10 @@ validated at apply" note (`cmd/job/lint.go`). Contract lint keeps that
 honesty: **offline** (default) checks only edges derivable inside the linted
 file set and appends the same style of scope note; **`--server`** (new flag)
 POSTs to `/v1/jobdefs/lint` and reports findings against the persisted
-world. The §2.1 PR flow always uses server mode.
+world, narrowed to the linted job set plus its direct producers and
+consumers. The §2.1 PR flow always uses server mode. That narrowing is what
+makes the exit code usable in CI on a shared server: a breaking pair between
+two jobs the PR does not touch is somebody else's build to fix.
 
 ### Config
 

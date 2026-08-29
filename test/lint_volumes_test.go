@@ -12,10 +12,10 @@ import (
 
 // volumeWarningMarker is the volume-specific half of the multi-writer warning
 // message. Asserting on it (rather than on the bare "Warnings:" header) keeps
-// the silent-case assertions immune to the shared server's CONTRACT warnings
-// block, which reuses the same header (cmd/job/lint.go's
-// renderServerLintResponse) and can be non-empty because of jobs other suites
-// applied to this same server.
+// the silent-case assertions immune to the CONTRACT warnings block, which
+// reuses the same header (cmd/job/lint.go's renderServerContractSummary) and
+// can be non-empty for any non-breaking contract finding the linted job
+// participates in.
 const volumeWarningMarker = "is mounted read-write by steps"
 
 // TestLintVolumesWarnsOnParallelWriters drives the "two read-write mounts on
@@ -43,22 +43,15 @@ func (s *IntegrationTestSuite) TestLintVolumesWarnsOnParallelWriters() {
 	s.Contains(localStdout, "writer-one")
 	s.Contains(localStdout, "writer-two")
 
-	// The server-side contract-enforcement gate (internal/contract/derive.go
-	// ListContractJobs) unions this lint request's definitions with EVERY job
-	// already applied on the server and can report a "breaking" finding for
-	// any of them, unrelated to this fixture — other integration suites
-	// intentionally exercise breaking-contract scenarios against this same
-	// shared server. `job lint --server` therefore may legitimately exit
-	// non-zero here for a reason that has nothing to do with the volume
-	// warning under test. The rendered response (including our warning) is
-	// still written to stdout before that unrelated gate runs, so assert on
-	// stdout content directly and only tolerate that one documented failure
-	// mode — anything else (e.g. the server being unreachable) still fails
-	// the test loudly.
+	// Server lint must exit clean here. Graph derivation
+	// (internal/contract/derive.go ListContractJobs) still unions this
+	// request's definitions with EVERY job already applied on the shared
+	// server — other suites intentionally leave breaking pairs behind — but
+	// the findings are now scoped to contracts the linted jobs participate in
+	// (#362), so an unrelated pair can no longer fail this lint. A non-zero
+	// exit is a real failure, not something to tolerate.
 	serverStdout, err := s.runCLIStdout("job", "lint", "--path", dir, "--server", s.caesiumURL)
-	if err != nil {
-		s.Require().Contains(err.Error(), "breaking contract finding", "unexpected server lint failure: %v", err)
-	}
+	s.Require().NoError(err, serverStdout)
 	s.Contains(serverStdout, "Warnings:")
 	s.Contains(serverStdout, `"shared"`)
 	s.Contains(serverStdout, "writer-one")
@@ -80,9 +73,7 @@ func (s *IntegrationTestSuite) TestLintVolumesSilentOnDAGOrderedWriters() {
 	s.NotContains(localStdout, "Warnings:")
 
 	serverStdout, err := s.runCLIStdout("job", "lint", "--path", dir, "--server", s.caesiumURL)
-	if err != nil {
-		s.Require().Contains(err.Error(), "breaking contract finding", "unexpected server lint failure: %v", err)
-	}
+	s.Require().NoError(err, serverStdout)
 	s.NotContains(serverStdout, volumeWarningMarker)
 }
 

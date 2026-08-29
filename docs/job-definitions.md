@@ -350,13 +350,13 @@ Enable server-side checks with `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `CAESIUM_C
 
 Operator surfaces:
 
-- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs.
+- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs. Findings are scoped to the linted job set — the linted jobs plus their direct producers and consumers on the server — so an unrelated breaking pair elsewhere on a shared server does not fail the lint, while a break the linted jobs participate in does.
 - `caesium contract check --path jobs/ [--json]` runs the contract-only server check.
 - `caesium contract graph [--dataset ns/name] [--json]` and `GET /v1/contracts/graph` expose the derived graph; the Console `/contracts` view renders the same graph.
 - `POST /v1/jobdefs/diff` includes per-job `contractFindings`; the Console JobDefs diff tab renders compatible/unknown/breaking badges with named consumers and teams.
 - In fail mode, `POST /v1/jobdefs/apply` returns HTTP 409 for breaking findings. The CLI escape hatch is explicit: `caesium job apply --allow-breaking dataset=<name> --reason ...`. The Console apply flow requires the ack reason before sending that intentional-break request.
 
-Enforcement is scoped to the incoming apply. A pre-existing broken contract between other jobs does not block an unrelated manifest apply, and a coordinated producer plus consumer migration applied in the same batch passes without an acknowledgement because the new consumer schema is the comparison target.
+Enforcement is scoped to the incoming apply. A pre-existing broken contract between other jobs does not block an unrelated manifest apply, and a coordinated producer plus consumer migration applied in the same batch passes without an acknowledgement because the new consumer schema is the comparison target. The read surfaces (`caesium job lint --server`, `caesium contract check`, `POST /v1/jobdefs/lint`) apply the same scope: graph derivation still unions the posted definitions with every persisted job, but the reported `contracts` section only covers edges touching one of the posted aliases.
 
 ## Agent-in-the-Loop Remediation
 

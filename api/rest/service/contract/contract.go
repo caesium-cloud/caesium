@@ -92,6 +92,17 @@ func (s *Service) Graph(dataset string, incoming []schema.Definition) (*internal
 	return &graph, nil
 }
 
+// ScopeGraphToDefinitions narrows a derived contract graph to the contracts the
+// given definition batch actually participates in. Graph derivation unions the
+// incoming definitions with every job persisted on the server, so the raw graph
+// carries breaking producer/consumer pairs between jobs the caller never
+// mentioned. Lint and check surfaces gate on breaking findings, so they must
+// report the scoped subgraph: the batch's own jobs plus their direct producers
+// and consumers on the server.
+func ScopeGraphToDefinitions(graph internalcontract.Graph, defs []schema.Definition) internalcontract.Graph {
+	return internalcontract.ScopeGraphToAliases(graph, internalcontract.AliasSet(defs))
+}
+
 func SummaryFromGraph(graph internalcontract.Graph) FindingsSummary {
 	summary := FindingsSummary{
 		Breaking: []Finding{},
