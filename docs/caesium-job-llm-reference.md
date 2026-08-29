@@ -403,7 +403,7 @@ Causal tooling is fan-out aware — each verb answers about the group or names o
 - `GET .../runs/:run_id/logs?task_id=<uuid>` on a fanned task with no selector → `400` `{message, partition_count, instances:[{task_run_id,partition,partition_index,status}]}`; select with `&task_run_id=<uuid>` or `&partition=<value>`; responses carry `X-Caesium-Task-Run-ID`/`X-Caesium-Partition` headers.
 - `caesium receipt get` attests one entry per instance (`partition` key, label `step[value]`); no partition filter by design (it would change what the digest covers).
 - `caesium run diff` aligns instances by partition value (never index): `Partitions added:`/`Partitions removed:` lines, a `PARTITION` column when any row has one, per-row `step[value] changes` blocks; `--json` carries `partition`, `partitionsAdded`, `partitionsRemoved`.
-- `caesium run replay` refuses a fanned baseline (`409` — its instance set is a runtime property of the producer's output) and points at `caesium run partitions` instead.
+- `caesium run replay` replays a fanned baseline by re-expanding the group from the partition list recorded on the producer's execution descriptor (keys, fingerprints, attributes, `dependsOn` order preserved); the producer is never re-run to rediscover the list. It still `409`s when no list was recorded (a pre-capture baseline), when the recorded list disagrees with the baseline's instances, or when a reused producer cache entry recorded a different list; the error names the step and points at `caesium run partitions`.
 
 ### Declaring Schemas
 

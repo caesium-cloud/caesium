@@ -263,6 +263,115 @@ func TestExpandFanOutSuccessorsIgnoresUnrelatedSuccessor(t *testing.T) {
 	assert.Len(t, f.instances(t), 1)
 }
 
+// --- producer descriptor capture -----------------------------------------
+//
+// A group's partition list is a runtime property of the producer's output, so
+// the only durable record quarantined replay can rebuild from is the one frozen
+// on the producer's execution descriptor. These pin that capture; without it
+// internal/replay has nothing to re-expand a fanned baseline from and refuses
+// it (ErrFannedBaseline).
+
+func (f *fanOutFixture) producerFanOut(t *testing.T) *models.TaskExecutionFanOut {
+	t.Helper()
+	row := f.producerRow(t)
+	require.NotEmpty(t, row.ExecutionDescriptor, "precondition: the producer has a descriptor")
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	return desc.FanOut
+}
+
+func TestExpandFanOutRecordsPartitionListOnProducerDescriptor(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	parts := []pkgtask.Partition{
+		{Key: "alpha", Fingerprint: "sha256:aa"},
+		{Key: "bravo", DependsOn: []string{"alpha"}, Attributes: map[string]string{"region": "eu"}},
+	}
+	_, err := f.expand(t, parts)
+	require.NoError(t, err)
+
+	fanOut := f.producerFanOut(t)
+	require.NotNil(t, fanOut, "the producer's descriptor records the list it emitted")
+	assert.True(t, fanOut.PartitionsRecorded)
+	require.Len(t, fanOut.Partitions, 2)
+	assert.Equal(t, "alpha", fanOut.Partitions[0].Key)
+	assert.Equal(t, "sha256:aa", fanOut.Partitions[0].Fingerprint)
+	assert.Equal(t, []string{"alpha"}, fanOut.Partitions[1].DependsOn)
+	assert.Equal(t, map[string]string{"region": "eu"}, fanOut.Partitions[1].Attributes,
+		"attributes must survive the round trip; the canonical wire form would flatten them away")
+	require.Len(t, fanOut.Groups, 1)
+	assert.Equal(t, f.consumer.ID, fanOut.Groups[0].TaskID)
+	assert.Equal(t, "process", fanOut.Groups[0].TaskName)
+	assert.False(t, fanOut.Groups[0].Skipped)
+}
+
+func TestExpandFanOutRecordsSkippedGroupWithEmptyList(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16, OnEmpty: jobdefschema.FanOutOnEmptySkip})
+
+	_, err := f.expand(t, nil)
+	require.NoError(t, err)
+
+	fanOut := f.producerFanOut(t)
+	require.NotNil(t, fanOut)
+	assert.True(t, fanOut.PartitionsRecorded,
+		"an explicitly empty list is RECORDED-and-empty, which is not the same claim as never recorded")
+	assert.Empty(t, fanOut.Partitions)
+	require.Len(t, fanOut.Groups, 1)
+	assert.True(t, fanOut.Groups[0].Skipped)
+}
+
+func TestExpandFanOutLeavesNonProducerDescriptorAlone(t *testing.T) {
+	// No fanOut config on the successor, so this producer drives no group.
+	f := newFanOutFixture(t, nil)
+
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	assert.Nil(t, f.producerFanOut(t), "a task that is not a fan-out producer grows no fanOut section")
+}
+
+// TestReplayTopologyCollapsesFannedGroupToOneNode guards the owner lane's view
+// of a quarantined replay that materialized a fanned group: replayTopologyNodes
+// enumerates ROWS, and a group is N of them under one catalog task id. Counting
+// them as N DAG nodes would give the group's successors N incoming edges from
+// one predecessor, so they would wait forever on decrements that never all
+// arrive.
+func TestReplayTopologyCollapsesFannedGroupToOneNode(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).Update("quarantine", true).Error)
+
+	_, err := f.expand(t, strParts("a", "b", "c"))
+	require.NoError(t, err)
+	require.Len(t, f.instances(t), 3, "precondition: the group is materialized as three rows")
+
+	topo, err := f.store.LoadRunTopology(f.runID)
+	require.NoError(t, err)
+	assert.Len(t, topo.Order, 2, "two catalog tasks, not four rows")
+	assert.Equal(t, []uuid.UUID{f.consumer.ID}, topo.Adjacency[f.producer.ID])
+	assert.Equal(t, []uuid.UUID{f.producer.ID}, topo.Predecessors[f.consumer.ID],
+		"the fanned group presents exactly one incoming edge, as it does on the live path")
+}
+
+func TestExpandFanOutSkipsAlreadyExpandedGroup(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	require.Len(t, f.instances(t), 2)
+
+	// A second completion of the same producer — the shape a quarantined replay
+	// creates when it pre-materializes the group from the recorded list and the
+	// producer then re-executes. The group must be left exactly as it is, and the
+	// producer must NOT fail on the now-ambiguous template lookup.
+	expansion, err := f.expand(t, strParts("c", "d", "e"))
+	require.NoError(t, err, "an already-expanded group is a skip, not a failed producer")
+	assert.Empty(t, expansion.Groups, "no group is re-planned")
+
+	after := f.instances(t)
+	require.Len(t, after, 2, "re-expansion never widens an existing group")
+	assert.Equal(t, "a", after[0].PartitionValue)
+	assert.Equal(t, "b", after[1].PartitionValue)
+}
+
 // --- PlanFanOutExpansion --------------------------------------------------
 
 func TestPlanFanOutExpansionAssignsIDsWithoutWriting(t *testing.T) {

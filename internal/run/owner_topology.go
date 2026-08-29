@@ -113,12 +113,20 @@ func (s *Store) catalogTopologyNodes(jobID uuid.UUID) ([]topologyNode, error) {
 // replayTopologyNodes enumerates a quarantined run's frozen descriptors, ordered
 // by the captured DAG position so replay dispatch order cannot drift with the
 // live catalog.
+//
+// One node per CATALOG TASK, not per row. A quarantined replay of a fanned
+// baseline materializes N sibling rows under one task id, and they are one DAG
+// node — the same "a fanned predecessor is one edge" contract the live path
+// holds. Emitting N would make buildRunTopology count the group's single
+// incoming edge N times, so its successors would wait on predecessors that can
+// never all arrive. The siblings share a descriptor's DAG section, so the first
+// row seen speaks for the group.
 func (s *Store) replayTopologyNodes(runID uuid.UUID) ([]topologyNode, error) {
 	var taskRuns []models.TaskRun
 	if err := s.db.
-		Select("task_id", "execution_descriptor", "created_at").
+		Select("task_id", "execution_descriptor", "created_at", "partition_index").
 		Where("job_run_id = ?", runID).
-		Order("created_at asc").
+		Order("created_at asc, partition_index asc").
 		Find(&taskRuns).Error; err != nil {
 		return nil, err
 	}
@@ -128,8 +136,12 @@ func (s *Store) replayTopologyNodes(runID uuid.UUID) ([]topologyNode, error) {
 		descriptor models.TaskExecutionDescriptor
 	}
 	tasks := make([]descriptorTask, 0, len(taskRuns))
+	seen := make(map[uuid.UUID]struct{}, len(taskRuns))
 	for idx := range taskRuns {
 		row := &taskRuns[idx]
+		if _, dup := seen[row.TaskID]; dup {
+			continue
+		}
 		if len(row.ExecutionDescriptor) == 0 {
 			return nil, fmt.Errorf("run topology: replay task %s missing execution descriptor", row.TaskID)
 		}
@@ -140,6 +152,7 @@ func (s *Store) replayTopologyNodes(runID uuid.UUID) ([]topologyNode, error) {
 		if descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion {
 			return nil, fmt.Errorf("run topology: unsupported replay descriptor version %d for task %s", descriptor.SchemaVersion, row.TaskID)
 		}
+		seen[row.TaskID] = struct{}{}
 		tasks = append(tasks, descriptorTask{taskID: row.TaskID, createdAt: idx, descriptor: descriptor})
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {

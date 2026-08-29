@@ -22,11 +22,18 @@ import (
 var ErrDescriptorUnavailable = errors.New("reproduce: descriptor unavailable")
 
 // ErrFannedTaskAmbiguous is returned when a task reference names a fan-out group
-// rather than one instance. The quarantined-replay surface is fail-closed by
-// design: a `(job_run_id, task_id)` `.Take` would have silently returned an
-// arbitrary sibling's descriptor, and reproducing the wrong partition's
-// container is worse than refusing. `caesium run replay` already refuses fanned
-// baselines; this closes the descriptor path the same way.
+// rather than one instance. This surface is fail-closed by design: a
+// `(job_run_id, task_id)` `.Take` would have silently returned an arbitrary
+// sibling's descriptor, and reproducing the wrong partition's container is worse
+// than refusing.
+//
+// This is an ADDRESSING refusal, and it is unrelated to `caesium run replay`,
+// which does replay fanned baselines by re-expanding the group from the
+// partition list recorded on its producer's descriptor. Replay reconstructs the
+// WHOLE run, so it never has to choose a sibling; this endpoint returns exactly
+// one descriptor and has no selector to choose one with. Giving it a
+// `?partition=` selector would lift the refusal, and is deliberately not part of
+// the replay work.
 var ErrFannedTaskAmbiguous = errors.New("reproduce: task is a fan-out group; descriptors are per-partition and this surface does not select one")
 
 // Service loads task execution descriptors for the REST controller.

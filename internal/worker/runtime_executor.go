@@ -123,7 +123,11 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			}
 			return
 		}
-		loaded, descErr := e.store.TaskExecutionDescriptor(ctx, taskRun.JobRunID, taskRun.TaskID)
+		// Addressed by the TaskRun PRIMARY KEY, not the catalog task id: a
+		// quarantined replay of a fanned baseline materializes N sibling rows
+		// under one task id, each carrying its own frozen descriptor, and the
+		// task-id form resolved that to an arbitrary sibling.
+		loaded, descErr := e.store.TaskExecutionDescriptor(ctx, taskRun.JobRunID, taskRun.ID)
 		if descErr != nil {
 			err := fmt.Errorf("replay descriptor unavailable for quarantined task: %w", descErr)
 			log.Error("failed to load replay descriptor for worker task", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)

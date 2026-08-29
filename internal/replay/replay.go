@@ -31,7 +31,13 @@ var (
 	ErrUnavailableBaselineProof = errors.New("replay: unchanged baseline result unavailable")
 	ErrSecretIdentity           = errors.New("replay: baseline secret identity cannot be verified")
 	ErrQuarantinedBaseline      = errors.New("replay: baseline run is quarantined")
-	ErrFannedBaseline           = errors.New("replay: quarantined replay refuses baselines containing fanned groups")
+	// ErrFannedBaseline is the fail-closed refusal of a baseline whose fan-out
+	// groups cannot be reconstructed. It no longer means "the baseline is
+	// fanned": replay re-expands a group from the partition list frozen on its
+	// producer's descriptor, so this fires only when that list is absent (a
+	// baseline recorded before descriptors captured it), disagrees with the
+	// instances the baseline actually materialized, or is not a valid group.
+	ErrFannedBaseline = errors.New("replay: fan-out group cannot be re-expanded from the recorded baseline")
 )
 
 // Dispatcher is the narrow B3 seam B4/B5 use to hand a durable replay run to
@@ -103,9 +109,13 @@ func (p *PreparedReplay) RequiresDispatch() bool {
 	return hasPending(p.plans)
 }
 
+// TaskDecision is one planned row's outcome. A fanned group contributes ONE
+// decision per instance, all sharing a TaskID — Partition is what tells them
+// apart, and it is empty for an ordinary task.
 type TaskDecision struct {
 	TaskID       uuid.UUID
 	TaskName     string
+	Partition    string
 	BaselineHash string
 	ReplayHash   string
 	CacheHit     bool
@@ -120,6 +130,49 @@ type baselineTask struct {
 	branches     []string
 	computedHash string
 	effective    string
+
+	// fanned reports that this baseline row is one instance of a fan-out group.
+	fanned bool
+	// partition is the instance's identity, taken from the list RECORDED on the
+	// producer's descriptor rather than re-read off the row, because that
+	// recorded list is what the replay group is re-expanded from. The two are
+	// cross-checked in groupBaselineTasks before either is trusted.
+	partition      pkgtask.Partition
+	partitionIndex int
+	partitionCount int
+}
+
+// baselineGroup is one catalog task's baseline rows: exactly one row for an
+// ordinary task, N (ordered by partition index) for a fan-out group.
+//
+// The planner works in groups rather than rows because that is the unit the DAG
+// is wired in: a fanned predecessor presents ONE aggregate output and ONE
+// aggregate identity downstream, and contributes exactly one outstanding
+// predecessor — never N. Only within a group does planning descend to rows.
+type baselineGroup struct {
+	taskID   uuid.UUID
+	taskName string
+	tasks    []*baselineTask
+	fanned   bool
+
+	// partitions is the list recorded on the PRODUCER's descriptor, which this
+	// group is re-expanded from. nil for an unfanned group.
+	partitions []pkgtask.Partition
+	// dependents is the in-group reverse adjacency (key → keys that wait on it),
+	// derived from partitions by the same pkgtask.ValidatePartitionGraph the live
+	// expansion uses.
+	dependents map[string][]string
+	// order lists indices into tasks in in-group TOPOLOGICAL order, so a
+	// sibling's cache-hit-or-re-execute decision is known before the decision of
+	// anything that waits on it.
+	order []int
+	// producerFanOut is this group's own producer record — set when this task is
+	// a fan-out producer, nil otherwise.
+	producerFanOut *models.TaskExecutionFanOut
+}
+
+func (g *baselineGroup) descriptor() models.TaskExecutionDescriptor {
+	return g.tasks[0].descriptor
 }
 
 type plannedTask struct {
@@ -131,6 +184,10 @@ type plannedTask struct {
 	source        cacheSource
 	outstanding   int
 	descriptor    models.TaskExecutionDescriptor
+	// producerPartitions is the list this task emitted as a fan-out PRODUCER,
+	// mirrored onto the replay row's partitions column exactly as the live
+	// completion and cache-hit paths do. Nil for every non-producer.
+	producerPartitions []pkgtask.Partition
 }
 
 type cacheSource struct {
@@ -140,6 +197,12 @@ type cacheSource struct {
 	result    string
 	output    map[string]string
 	branches  []string
+	// partitions is the list recorded on the reused cache ENTRY (F7). nil and
+	// partitionsRecorded=false when the source is not a cache entry, or is one
+	// written before the column existed; see cache.Entry.Partitions for why the
+	// two states must stay distinguishable.
+	partitions         []pkgtask.Partition
+	partitionsRecorded bool
 }
 
 func (c *Constructor) Replay(ctx context.Context, req Request) (*Result, error) {
@@ -164,7 +227,7 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 		return nil, errors.New("replay: run store is required")
 	}
 
-	baseline, tasks, err := c.loadBaseline(ctx, req.BaselineRunID)
+	baseline, groups, err := c.loadBaseline(ctx, req.BaselineRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +251,7 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 		replayParams[k] = v
 	}
 
-	plans, err := c.planTasks(ctx, tasks, replayParams, paramsChanged)
+	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +295,7 @@ func (c *Constructor) Materialize(ctx context.Context, prepared *PreparedReplay)
 	return &Result{Run: created, Decisions: decisions(prepared.plans)}, nil
 }
 
-func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models.JobRun, []*baselineTask, error) {
+func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models.JobRun, []*baselineGroup, error) {
 	var baseline models.JobRun
 	if err := c.store.DB().WithContext(ctx).First(&baseline, "id = ?", runID).Error; err != nil {
 		return models.JobRun{}, nil, err
@@ -244,17 +307,12 @@ func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models
 	var rows []models.TaskRun
 	if err := c.store.DB().WithContext(ctx).
 		Where("job_run_id = ?", runID).
-		Order("created_at ASC").
+		Order("created_at ASC, partition_index ASC").
 		Find(&rows).Error; err != nil {
 		return models.JobRun{}, nil, err
 	}
 	if len(rows) == 0 {
 		return models.JobRun{}, nil, fmt.Errorf("%w: baseline run %s has no task runs", ErrUnavailableBaselineProof, runID)
-	}
-	for i := range rows {
-		if rows[i].PartitionCount > 1 || rows[i].PartitionValue != "" {
-			return models.JobRun{}, nil, fmt.Errorf("%w: run %s", ErrFannedBaseline, runID)
-		}
 	}
 
 	tasks := make([]*baselineTask, 0, len(rows))
@@ -265,11 +323,202 @@ func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models
 		}
 		tasks = append(tasks, task)
 	}
-	ordered, err := topologicalBaselineTasks(runID, tasks)
+	groups, err := groupBaselineTasks(runID, tasks)
+	if err != nil {
+		return models.JobRun{}, nil, err
+	}
+	ordered, err := topologicalBaselineGroups(runID, groups)
 	if err != nil {
 		return models.JobRun{}, nil, err
 	}
 	return baseline, ordered, nil
+}
+
+// groupBaselineTasks collapses baseline rows into one group per catalog task and
+// re-expands every fan-out group from the partition list recorded on its
+// PRODUCER's descriptor.
+//
+// The recorded list — not the instance rows — is the authority, because that is
+// the artifact replay is contractually built from: an instance row is live state
+// that a retry or a per-partition reset can rewrite, while the descriptor is
+// frozen at the moment the producer determined the group. The rows are still
+// read, but only to CHECK the recorded list against what the baseline actually
+// materialized; any disagreement is a refusal, never a merge.
+//
+// Everything here fails closed onto ErrFannedBaseline (409). A baseline whose
+// descriptors predate fan-out capture is refused exactly as it was before this
+// existed, which is what keeps the change backward-compatible for descriptors
+// already on disk.
+func groupBaselineTasks(runID uuid.UUID, tasks []*baselineTask) ([]*baselineGroup, error) {
+	groups := make([]*baselineGroup, 0, len(tasks))
+	byTaskID := make(map[uuid.UUID]*baselineGroup, len(tasks))
+	for _, task := range tasks {
+		taskID := task.row.TaskID
+		if taskID == uuid.Nil {
+			return nil, fmt.Errorf("%w: step %q has empty task id", ErrUnsupportedDescriptor, task.taskName)
+		}
+		g, ok := byTaskID[taskID]
+		if !ok {
+			g = &baselineGroup{taskID: taskID, taskName: task.taskName}
+			byTaskID[taskID] = g
+			groups = append(groups, g)
+		}
+		g.tasks = append(g.tasks, task)
+		if run.IsFanOutInstance(&task.row) {
+			g.fanned = true
+		}
+	}
+
+	// Producer records first: a group can only be re-expanded once the producer
+	// that emitted its list has been seen, and emission order says nothing about
+	// which of the two rows the query returned first.
+	producerOf := make(map[uuid.UUID]*baselineGroup, len(groups))
+	for _, g := range groups {
+		fanOut := g.descriptor().FanOut
+		if fanOut == nil || !fanOut.PartitionsRecorded {
+			continue
+		}
+		if len(g.tasks) != 1 {
+			// Chained fan-out is rejected at job validation
+			// (pkg/jobdef/definition.go), so a producer is always exactly one row.
+			// N rows here means the descriptor and the materialized run disagree
+			// about what this task is.
+			return nil, fmt.Errorf("%w: run %s: step %q records a fan-out partition list but materialized %d instances",
+				ErrFannedBaseline, runID, g.taskName, len(g.tasks))
+		}
+		g.producerFanOut = fanOut
+		for _, ref := range fanOut.Groups {
+			if ref.Skipped {
+				continue
+			}
+			if prior, exists := producerOf[ref.TaskID]; exists {
+				return nil, fmt.Errorf("%w: run %s: step %q is claimed as a fan-out group by both %q and %q",
+					ErrFannedBaseline, runID, ref.TaskName, prior.taskName, g.taskName)
+			}
+			producerOf[ref.TaskID] = g
+		}
+	}
+
+	for _, g := range groups {
+		if !g.fanned {
+			if len(g.tasks) != 1 {
+				return nil, fmt.Errorf("%w: duplicate task %s in baseline run %s", ErrUnsupportedDescriptor, g.taskID, runID)
+			}
+			g.order = []int{0}
+			continue
+		}
+		producer, ok := producerOf[g.taskID]
+		if !ok {
+			return nil, fmt.Errorf("%w: run %s: step %q is a fan-out group with no partition list recorded on its producer's descriptor "+
+				"(the baseline predates descriptor fan-out capture)", ErrFannedBaseline, runID, g.taskName)
+		}
+		if err := g.adoptRecordedPartitions(runID, producer); err != nil {
+			return nil, err
+		}
+	}
+	return groups, nil
+}
+
+// adoptRecordedPartitions binds one fanned group to its producer's recorded
+// list, refusing unless the two describe the same group instance for instance.
+func (g *baselineGroup) adoptRecordedPartitions(runID uuid.UUID, producer *baselineGroup) error {
+	partitions := producer.producerFanOut.Partitions
+	if len(partitions) != len(g.tasks) {
+		return fmt.Errorf("%w: run %s: step %q materialized %d instances but its producer %q recorded %d partitions",
+			ErrFannedBaseline, runID, g.taskName, len(g.tasks), producer.taskName, len(partitions))
+	}
+	sort.SliceStable(g.tasks, func(i, j int) bool {
+		return g.tasks[i].row.PartitionIndex < g.tasks[j].row.PartitionIndex
+	})
+	for i, task := range g.tasks {
+		part := partitions[i]
+		switch {
+		case task.row.PartitionIndex != i:
+			return fmt.Errorf("%w: run %s: step %q instance %d has partition index %d",
+				ErrFannedBaseline, runID, g.taskName, i, task.row.PartitionIndex)
+		case task.row.PartitionValue != part.Key:
+			return fmt.Errorf("%w: run %s: step %q instance %d is partition %q but the recorded list has %q",
+				ErrFannedBaseline, runID, g.taskName, i, task.row.PartitionValue, part.Key)
+		case task.row.PartitionFingerprint != part.Fingerprint:
+			return fmt.Errorf("%w: run %s: step %q partition %q has fingerprint %q but the recorded list has %q",
+				ErrFannedBaseline, runID, g.taskName, part.Key, task.row.PartitionFingerprint, part.Fingerprint)
+		case task.row.PartitionCount != len(partitions):
+			return fmt.Errorf("%w: run %s: step %q partition %q records partition count %d in a group of %d",
+				ErrFannedBaseline, runID, g.taskName, part.Key, task.row.PartitionCount, len(partitions))
+		}
+		task.fanned = true
+		task.partition = part
+		task.partitionIndex = i
+		task.partitionCount = len(partitions)
+	}
+
+	// The same graph the live expansion builds, from the same normalized list, so
+	// the replayed group carries the baseline's in-group ordering rather than a
+	// re-derivation of it.
+	graph, err := pkgtask.ValidatePartitionGraph(partitions)
+	if err != nil {
+		return fmt.Errorf("%w: run %s: step %q recorded partition list is not a valid group: %v",
+			ErrFannedBaseline, runID, g.taskName, err)
+	}
+	g.partitions = partitions
+	if graph != nil {
+		g.dependents = graph.Dependents
+		g.order, err = inGroupPlanOrder(runID, g, graph.Indegree)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	g.order = make([]int, len(g.tasks))
+	for i := range g.order {
+		g.order[i] = i
+	}
+	return nil
+}
+
+// inGroupPlanOrder returns instance indices in in-group topological order,
+// breaking ties by partition index so the plan is deterministic.
+func inGroupPlanOrder(runID uuid.UUID, g *baselineGroup, indegree map[string]int) ([]int, error) {
+	remaining := make(map[string]int, len(indegree))
+	maps.Copy(remaining, indegree)
+	indexByKey := make(map[string]int, len(g.tasks))
+	for i, task := range g.tasks {
+		indexByKey[task.partition.Key] = i
+	}
+
+	ready := make([]int, 0, len(g.tasks))
+	for i, task := range g.tasks {
+		if remaining[task.partition.Key] == 0 {
+			ready = append(ready, i)
+		}
+	}
+	sort.Ints(ready)
+
+	order := make([]int, 0, len(g.tasks))
+	for len(ready) > 0 {
+		idx := ready[0]
+		ready = ready[1:]
+		order = append(order, idx)
+		for _, dep := range g.dependents[g.tasks[idx].partition.Key] {
+			depIdx, ok := indexByKey[dep]
+			if !ok {
+				continue
+			}
+			remaining[dep]--
+			if remaining[dep] == 0 {
+				ready = append(ready, depIdx)
+			}
+		}
+		sort.Ints(ready)
+	}
+	if len(order) != len(g.tasks) {
+		// ValidatePartitionGraph rejects cycles, so this is unreachable unless the
+		// recorded list and the graph disagree; refuse rather than plan a
+		// partial group.
+		return nil, fmt.Errorf("%w: run %s: step %q recorded partition list has an unresolvable in-group ordering",
+			ErrFannedBaseline, runID, g.taskName)
+	}
+	return order, nil
 }
 
 func decodeBaselineTask(row models.TaskRun) (*baselineTask, error) {
@@ -315,24 +564,24 @@ func decodeBaselineTask(row models.TaskRun) (*baselineTask, error) {
 	}, nil
 }
 
-func topologicalBaselineTasks(runID uuid.UUID, tasks []*baselineTask) ([]*baselineTask, error) {
-	byID := make(map[uuid.UUID]*baselineTask, len(tasks))
-	indegree := make(map[uuid.UUID]int, len(tasks))
-	successors := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
-	edges := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
+func topologicalBaselineGroups(runID uuid.UUID, groups []*baselineGroup) ([]*baselineGroup, error) {
+	byID := make(map[uuid.UUID]*baselineGroup, len(groups))
+	indegree := make(map[uuid.UUID]int, len(groups))
+	successors := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(groups))
+	edges := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(groups))
 
-	for _, task := range tasks {
-		if task == nil {
+	for _, group := range groups {
+		if group == nil || len(group.tasks) == 0 {
 			return nil, fmt.Errorf("%w: nil baseline task in run %s", ErrUnsupportedDescriptor, runID)
 		}
-		taskID := task.row.TaskID
+		taskID := group.taskID
 		if taskID == uuid.Nil {
-			return nil, fmt.Errorf("%w: step %q has empty task id", ErrUnsupportedDescriptor, task.taskName)
+			return nil, fmt.Errorf("%w: step %q has empty task id", ErrUnsupportedDescriptor, group.taskName)
 		}
 		if _, exists := byID[taskID]; exists {
 			return nil, fmt.Errorf("%w: duplicate task %s in baseline run %s", ErrUnsupportedDescriptor, taskID, runID)
 		}
-		byID[taskID] = task
+		byID[taskID] = group
 		indegree[taskID] = 0
 	}
 
@@ -361,34 +610,35 @@ func topologicalBaselineTasks(runID uuid.UUID, tasks []*baselineTask) ([]*baseli
 		return nil
 	}
 
-	for _, task := range tasks {
-		taskID := task.row.TaskID
-		for _, pred := range task.descriptor.DAG.Predecessors {
-			if err := addEdge(pred.TaskID, taskID, task.taskName, "predecessor"); err != nil {
+	for _, group := range groups {
+		taskID := group.taskID
+		desc := group.descriptor()
+		for _, pred := range desc.DAG.Predecessors {
+			if err := addEdge(pred.TaskID, taskID, group.taskName, "predecessor"); err != nil {
 				return nil, err
 			}
 		}
-		for _, succ := range task.descriptor.DAG.Successors {
-			if err := addEdge(taskID, succ.TaskID, task.taskName, "successor"); err != nil {
+		for _, succ := range desc.DAG.Successors {
+			if err := addEdge(taskID, succ.TaskID, group.taskName, "successor"); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	ready := make([]*baselineTask, 0, len(tasks))
-	for _, task := range tasks {
-		if indegree[task.row.TaskID] == 0 {
-			ready = append(ready, task)
+	ready := make([]*baselineGroup, 0, len(groups))
+	for _, group := range groups {
+		if indegree[group.taskID] == 0 {
+			ready = append(ready, group)
 		}
 	}
 	sortBaselineReady(ready)
 
-	ordered := make([]*baselineTask, 0, len(tasks))
+	ordered := make([]*baselineGroup, 0, len(groups))
 	for len(ready) > 0 {
-		task := ready[0]
+		group := ready[0]
 		ready = ready[1:]
-		ordered = append(ordered, task)
-		for successorID := range successors[task.row.TaskID] {
+		ordered = append(ordered, group)
+		for successorID := range successors[group.taskID] {
 			indegree[successorID]--
 			if indegree[successorID] == 0 {
 				ready = append(ready, byID[successorID])
@@ -397,87 +647,238 @@ func topologicalBaselineTasks(runID uuid.UUID, tasks []*baselineTask) ([]*baseli
 		sortBaselineReady(ready)
 	}
 
-	if len(ordered) != len(tasks) {
+	if len(ordered) != len(groups) {
 		return nil, fmt.Errorf("%w: descriptor DAG cycle while ordering baseline run %s", ErrUnsupportedDescriptor, runID)
 	}
 	return ordered, nil
 }
 
-func sortBaselineReady(tasks []*baselineTask) {
-	sort.SliceStable(tasks, func(i, j int) bool {
-		if tasks[i].descriptor.DAG.TaskPosition != tasks[j].descriptor.DAG.TaskPosition {
-			return tasks[i].descriptor.DAG.TaskPosition < tasks[j].descriptor.DAG.TaskPosition
+func sortBaselineReady(groups []*baselineGroup) {
+	sort.SliceStable(groups, func(i, j int) bool {
+		li, lj := groups[i].tasks[0], groups[j].tasks[0]
+		if li.descriptor.DAG.TaskPosition != lj.descriptor.DAG.TaskPosition {
+			return li.descriptor.DAG.TaskPosition < lj.descriptor.DAG.TaskPosition
 		}
-		if !tasks[i].row.CreatedAt.Equal(tasks[j].row.CreatedAt) {
-			return tasks[i].row.CreatedAt.Before(tasks[j].row.CreatedAt)
+		if !li.row.CreatedAt.Equal(lj.row.CreatedAt) {
+			return li.row.CreatedAt.Before(lj.row.CreatedAt)
 		}
-		if tasks[i].taskName != tasks[j].taskName {
-			return tasks[i].taskName < tasks[j].taskName
+		if groups[i].taskName != groups[j].taskName {
+			return groups[i].taskName < groups[j].taskName
 		}
-		return tasks[i].row.TaskID.String() < tasks[j].row.TaskID.String()
+		return groups[i].taskID.String() < groups[j].taskID.String()
 	})
 }
 
-func (c *Constructor) planTasks(ctx context.Context, tasks []*baselineTask, params map[string]string, forceReexecute bool) ([]plannedTask, error) {
-	plannedByID := make(map[uuid.UUID]int, len(tasks))
+func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, params map[string]string, forceReexecute bool) ([]plannedTask, error) {
+	// One entry per catalog task, listing every plan for it in partition-index
+	// order. A fanned predecessor is resolved from the whole slice, never from
+	// one sibling: the DAG wires the GROUP, so it presents one aggregate output
+	// and one aggregate identity downstream, and contributes exactly one
+	// outstanding predecessor.
+	plannedByID := make(map[uuid.UUID][]int, len(groups))
 
-	plans := make([]plannedTask, 0, len(tasks))
-	for _, task := range tasks {
+	plans := make([]plannedTask, 0, len(groups))
+	for _, group := range groups {
 		predOutputsByName := make(map[string]map[string]string)
-		predHashes := make([]string, 0, len(task.descriptor.DAG.Predecessors))
+		desc := group.descriptor()
+		predHashes := make([]string, 0, len(desc.DAG.Predecessors))
 		pendingPredecessors := 0
-		for _, pred := range task.descriptor.DAG.Predecessors {
-			plannedIdx, ok := plannedByID[pred.TaskID]
+		for _, pred := range desc.DAG.Predecessors {
+			plannedIdxs, ok := plannedByID[pred.TaskID]
 			if !ok {
-				return nil, fmt.Errorf("%w: step %q references missing predecessor %s", ErrUnsupportedDescriptor, task.taskName, pred.TaskID)
+				return nil, fmt.Errorf("%w: step %q references missing predecessor %s", ErrUnsupportedDescriptor, group.taskName, pred.TaskID)
 			}
-			plannedPred := &plans[plannedIdx]
-			if plannedPred.reexecute {
+			// Copied by value, not pointed into `plans`: the instance loop below
+			// appends to that slice, and a re-allocation would leave any retained
+			// pointer aliasing the old backing array.
+			predPlans := make([]plannedTask, 0, len(plannedIdxs))
+			pending := false
+			for _, idx := range plannedIdxs {
+				predPlans = append(predPlans, plans[idx])
+				if plans[idx].reexecute {
+					pending = true
+				}
+			}
+			if pending {
+				// Group-level fan-in: the whole predecessor group is one edge, so
+				// one pending instance makes the edge pending and contributes one,
+				// not N. The live run releases it once, on the transition that makes
+				// every instance terminal (run.Store's group-terminal gate).
 				pendingPredecessors++
 				continue
 			}
-			if len(plannedPred.source.output) > 0 {
-				predName := firstNonEmpty(pred.TaskName, plannedPred.base.taskName, pred.TaskID.String())
-				predOutputsByName[predName] = maps.Clone(plannedPred.source.output)
-			}
-			if plannedPred.effectiveHash != "" {
-				predHashes = append(predHashes, plannedPred.effectiveHash)
-			}
-		}
-
-		replayHash := computeDescriptorHash(task.descriptor, params, predOutputsByName, predHashes)
-		unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
-		plan := plannedTask{
-			base:          task,
-			replayHash:    replayHash,
-			effectiveHash: replayHash,
-			// The replay TaskRun stores the baseline descriptor unchanged; its
-			// Baseline fields are the audit reference for what was replayed.
-			descriptor: task.descriptor,
-		}
-
-		if unchanged && pendingPredecessors == 0 {
-			source, err := c.cacheSourceForUnchanged(ctx, task, replayHash)
+			predName := firstNonEmpty(pred.TaskName, predPlans[0].base.taskName, pred.TaskID.String())
+			output, err := plannedGroupOutput(predName, predPlans)
 			if err != nil {
 				return nil, err
 			}
-			plan.cacheHit = true
-			plan.source = source
-			plan.effectiveHash = firstNonEmpty(task.effective, replayHash)
-		} else {
-			if err := c.authorizeReexecution(ctx, task); err != nil {
-				return nil, err
+			if len(output) > 0 {
+				predOutputsByName[predName] = output
 			}
-			plan.reexecute = true
-			plan.outstanding = pendingPredecessors
+			if hash := plannedGroupHash(predPlans); hash != "" {
+				predHashes = append(predHashes, hash)
+			}
 		}
-		plans = append(plans, plan)
-		plannedByID[task.row.TaskID] = len(plans) - 1
+
+		// pendingSiblings counts, per partition key, how many of the in-group
+		// dependencies it waits on will actually re-execute. A sibling resolved
+		// from cache is written terminal at materialization and never completes,
+		// so it never decrements anything downstream of it — counting it would
+		// strand its dependents forever.
+		pendingSiblings := make(map[string]int, len(group.tasks))
+		groupIdxs := make([]int, len(group.tasks))
+		for _, i := range group.order {
+			task := group.tasks[i]
+			pending := pendingPredecessors + pendingSiblings[task.partition.Key]
+			replayHash := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
+			unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
+			plan := plannedTask{
+				base:          task,
+				replayHash:    replayHash,
+				effectiveHash: replayHash,
+				// The replay TaskRun stores the baseline descriptor unchanged; its
+				// Baseline fields are the audit reference for what was replayed.
+				descriptor: task.descriptor,
+			}
+
+			if unchanged && pending == 0 {
+				source, err := c.cacheSourceForUnchanged(ctx, task, replayHash)
+				if err != nil {
+					return nil, err
+				}
+				plan.cacheHit = true
+				plan.source = source
+				plan.effectiveHash = firstNonEmpty(task.effective, replayHash)
+			} else {
+				if err := c.authorizeReexecution(ctx, task); err != nil {
+					return nil, err
+				}
+				plan.reexecute = true
+				plan.outstanding = pending
+				// An in-group edge exists because the units genuinely affect each
+				// other's external state (a dimension before a fact, a VPC before the
+				// stacks in it). If this one re-runs, everything ordered after it
+				// waits for it — and, further down, re-runs too, since a dependent
+				// whose dependency is pending cannot take the cache path above.
+				for _, dep := range group.dependents[task.partition.Key] {
+					pendingSiblings[dep]++
+				}
+			}
+			plans = append(plans, plan)
+			groupIdxs[i] = len(plans) - 1
+		}
+		plannedByID[group.taskID] = groupIdxs
+	}
+
+	// The producer's own replay row records the list its group was expanded from,
+	// mirroring what the live completion and cache-hit paths write onto a
+	// producer's partitions column.
+	for _, group := range groups {
+		if group.producerFanOut == nil {
+			continue
+		}
+		idxs := plannedByID[group.taskID]
+		if len(idxs) != 1 {
+			continue
+		}
+		plan := &plans[idxs[0]]
+		if err := assertReusedProducerListMatches(group, plan); err != nil {
+			return nil, err
+		}
+		plan.producerPartitions = group.producerFanOut.Partitions
 	}
 	return plans, nil
 }
 
+// assertReusedProducerListMatches refuses a producer whose reused cache entry
+// recorded a DIFFERENT partition list than the baseline's descriptor.
+//
+// Same hash, different list means the producer is nondeterministic: the entry
+// being reused proves some other execution of these exact inputs discovered
+// other work. Expanding the baseline's group against that result would attach a
+// group to a result that never produced it — the same "arbitrary sibling"
+// mistake the reproduce surface's assertUnfanned exists to prevent, one level
+// up. An entry with no recorded list (nil, not empty) is a pre-fan-out entry and
+// makes no claim, so it is not evidence of disagreement.
+func assertReusedProducerListMatches(group *baselineGroup, plan *plannedTask) error {
+	if !plan.cacheHit || !plan.source.partitionsRecorded {
+		return nil
+	}
+	recorded := group.producerFanOut.Partitions
+	reused := plan.source.partitions
+	mismatch := len(recorded) != len(reused)
+	if !mismatch {
+		for i := range recorded {
+			if !recorded[i].EqualPayload(reused[i]) {
+				mismatch = true
+				break
+			}
+		}
+	}
+	if !mismatch {
+		return nil
+	}
+	return fmt.Errorf("%w: step %q reuses a cache entry from run %s whose recorded partition list (%d) differs from the baseline's (%d); the producer is not deterministic",
+		ErrFannedBaseline, group.taskName, plan.source.runID, len(reused), len(recorded))
+}
+
+// plannedGroupOutput is the ONE output map a resolved predecessor presents
+// downstream: the single row's output when unfanned, and otherwise the same
+// pkgtask.AggregateFanInOutputs shape both execution lanes build
+// (run.Store's predecessorGroupOutput). Replay must agree with them or a
+// fan-in consumer's replayed hash misses every entry it should hit.
+//
+// Every plan here is a resolved cache hit — the caller returns early when any
+// instance is pending — and cacheSourceForUnchanged admits only successful
+// results, so the aggregate's counts are all-succeeded, none-failed.
+func plannedGroupOutput(producer string, predPlans []plannedTask) (map[string]string, error) {
+	if len(predPlans) == 1 && !predPlans[0].base.fanned {
+		return maps.Clone(predPlans[0].source.output), nil
+	}
+	byPartition := make(map[string]map[string]string, len(predPlans))
+	for _, plan := range predPlans {
+		if len(plan.source.output) > 0 {
+			byPartition[plan.base.partition.Key] = plan.source.output
+		}
+	}
+	return pkgtask.AggregateFanInOutputs(producer, byPartition, len(predPlans), 0)
+}
+
+// plannedGroupHash is run.Store's predecessorGroupHash over planned instances:
+// the single effective hash when unfanned, and otherwise the group identity over
+// every instance's effective hash in partition order.
+func plannedGroupHash(predPlans []plannedTask) string {
+	if len(predPlans) == 1 && !predPlans[0].base.fanned {
+		return predPlans[0].effectiveHash
+	}
+	hashes := make([]string, 0, len(predPlans))
+	for _, plan := range predPlans {
+		hashes = append(hashes, plan.effectiveHash)
+	}
+	return run.GroupIdentityHash(hashes)
+}
+
+// computeDescriptorHash rebuilds an UNFANNED task's identity from its
+// descriptor. A fanned instance goes through computeDescriptorInstanceHash,
+// which folds in the partition the baseline instance actually ran.
 func computeDescriptorHash(desc models.TaskExecutionDescriptor, params map[string]string, predOutputs map[string]map[string]string, predHashes []string) string {
+	return computeDescriptorInstanceHash(desc, params, predOutputs, predHashes, pkgtask.Partition{})
+}
+
+// computeDescriptorInstanceHash is computeDescriptorHash with the instance's
+// partition identity folded in exactly as both execution lanes fold it
+// (internal/job's buildTaskHashInput and internal/worker's runtime executor):
+// key, fingerprint and attributes, never dependsOn — in-group ordering is a
+// scheduling instruction, not a data input. A zero Partition leaves the digest
+// byte-identical to the unfanned form, which is what keeps every existing
+// baseline's replay hash unchanged.
+func computeDescriptorInstanceHash(
+	desc models.TaskExecutionDescriptor,
+	params map[string]string,
+	predOutputs map[string]map[string]string,
+	predHashes []string,
+	partition pkgtask.Partition,
+) string {
 	spec := desc.ContainerSpec
 	env := maps.Clone(spec.Env)
 	if env == nil {
@@ -513,8 +914,11 @@ func computeDescriptorHash(desc models.TaskExecutionDescriptor, params map[strin
 		// values-mode step re-hashed as transitive would miss every entry it
 		// should hit. An absent field (a descriptor written before this) is
 		// transitive, which is what those baselines were.
-		Chain:        desc.Cache.Chain,
-		CacheVersion: desc.Cache.Version,
+		Chain:                desc.Cache.Chain,
+		Partition:            partition.Key,
+		PartitionFingerprint: partition.Fingerprint,
+		PartitionAttributes:  partition.Attributes,
+		CacheVersion:         desc.Cache.Version,
 	}.Compute()
 }
 
@@ -530,15 +934,16 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 		return cacheSource{}, fmt.Errorf("%w: step %q baseline result %q is not successful", ErrUnavailableBaselineProof, task.taskName, task.row.Result)
 	}
 
-	// entry.Partitions (F7, see cache.Entry's own doc comment) is deliberately
-	// not read or threaded onto cacheSource here: Replay refuses any baseline
-	// containing a fanned group before it ever reaches this function
-	// (ErrFannedBaseline, checked earlier in this file), so a resolved "cache
-	// hit" step here is never a fan-out producer with a group to expand — this
-	// is the one remaining cacheStore.Get in the tree with no F7 gate, and it
-	// needs none. If replay ever learns to replay fanned baselines, this site
-	// needs the same treatment as internal/job/job.go and
-	// internal/worker/runtime_executor.go.
+	// entry.Partitions (F7, see cache.Entry's own doc comment) is threaded onto
+	// cacheSource rather than dropped, because replay now re-materializes fanned
+	// groups and a producer resolved here is exactly the case that gate exists
+	// for. Replay's use of it is narrower than internal/job's and
+	// internal/worker's, though, and deliberately so: those two must decide
+	// whether a hit is usable at all, because a hit with no recorded list leaves
+	// them with nothing to expand. Replay always expands from the list frozen on
+	// the BASELINE producer's descriptor — reproducing this run, not whichever
+	// run happened to write the entry — so the entry's copy is used to CHECK
+	// that authority, not to replace it.
 	cacheStore := cache.NewStore(c.store.DB())
 	if entry, found, err := cacheStore.Get(replayHash); err != nil {
 		return cacheSource{}, fmt.Errorf("replay: cache lookup for unchanged step %q hash %s: %w", task.taskName, shortHash(replayHash), err)
@@ -553,6 +958,11 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 			result:    entry.Result,
 			output:    maps.Clone(entry.Output),
 			branches:  append([]string(nil), entry.BranchSelections...),
+			// nil vs a non-nil empty slice is meaningful and is preserved end to
+			// end by cache.Put/Get: nil means no list was ever recorded on this
+			// entry, which is not the same claim as "recorded, and empty".
+			partitions:         entry.Partitions,
+			partitionsRecorded: entry.Partitions != nil,
 		}, nil
 	}
 
@@ -881,6 +1291,37 @@ func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
+	// The re-expanded group. Written from the partition RECORDED on the
+	// baseline producer's descriptor, in exactly the shape
+	// run.Store.expandFanOutSuccessors writes at live expansion — including
+	// marshalling a nil DependsOn to JSON `null`, which every reader guards with
+	// len() > 0 — so the two kinds of fanned instance row are indistinguishable
+	// downstream. The worker's partition env injection, the per-instance cache
+	// identity, `run partitions`, `why --partition` and receipts all read these
+	// columns and nothing else.
+	if plan.base.fanned {
+		attrs, err := encodePartitionAttributes(plan.base.partition.Attributes)
+		if err != nil {
+			return models.TaskRun{}, fmt.Errorf("replay: encode partition attributes for step %q partition %q: %w", plan.base.taskName, plan.base.partition.Key, err)
+		}
+		deps, err := json.Marshal(plan.base.partition.DependsOn)
+		if err != nil {
+			return models.TaskRun{}, fmt.Errorf("replay: encode partition dependsOn for step %q partition %q: %w", plan.base.taskName, plan.base.partition.Key, err)
+		}
+		record.PartitionValue = plan.base.partition.Key
+		record.PartitionIndex = plan.base.partitionIndex
+		record.PartitionCount = plan.base.partitionCount
+		record.PartitionFingerprint = plan.base.partition.Fingerprint
+		record.PartitionAttributes = attrs
+		record.PartitionDependsOn = datatypes.JSON(deps)
+	}
+	if len(plan.producerPartitions) > 0 {
+		encoded, err := pkgtask.EncodePartitions(plan.producerPartitions)
+		if err != nil {
+			return models.TaskRun{}, fmt.Errorf("replay: encode producer partitions for step %q: %w", plan.base.taskName, err)
+		}
+		record.Partitions = datatypes.JSON(encoded)
+	}
 	if plan.cacheHit {
 		if !run.IsSuccessfulTaskResult(plan.source.result) {
 			return models.TaskRun{}, fmt.Errorf("%w: step %q cache hit result %q is not successful", ErrUnavailableBaselineProof, plan.base.taskName, plan.source.result)
@@ -961,6 +1402,7 @@ func decisions(plans []plannedTask) []TaskDecision {
 		out = append(out, TaskDecision{
 			TaskID:       plan.base.row.TaskID,
 			TaskName:     plan.base.taskName,
+			Partition:    plan.base.partition.Key,
 			BaselineHash: plan.base.computedHash,
 			ReplayHash:   plan.replayHash,
 			CacheHit:     plan.cacheHit,
@@ -1096,6 +1538,19 @@ func decodeStringMap(raw datatypes.JSON) (map[string]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// encodePartitionAttributes mirrors run.encodePartitionMap: an empty map leaves
+// the column NULL rather than writing `{}`.
+func encodePartitionAttributes(attrs map[string]string) (datatypes.JSON, error) {
+	if len(attrs) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(attrs)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(encoded), nil
 }
 
 func decodeStringSlice(raw datatypes.JSON) ([]string, error) {

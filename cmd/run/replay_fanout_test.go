@@ -12,9 +12,12 @@ import (
 )
 
 // replay_fanout_test.go pins the CLI's rendering of the server's fail-closed
-// refusal of a fanned baseline (internal/replay.ErrFannedBaseline → 409).
-// The refusal is correct but opaque on its own: an operator who reads only
-// "replay refused (409)" learns nothing about what to do instead.
+// refusal of a fanned baseline it cannot reconstruct
+// (internal/replay.ErrFannedBaseline → 409). Replay re-expands a fanned group
+// from the partition list recorded on its producer's descriptor; this 409 is
+// what remains when no usable list was recorded. The refusal is correct but
+// opaque on its own: an operator who reads only "replay refused (409)" learns
+// nothing about what to do instead.
 
 func TestReplay_FannedBaselineRefusalIsActionable(t *testing.T) {
 	restoreReplayTestGlobals(t)
@@ -22,7 +25,9 @@ func TestReplay_FannedBaselineRefusalIsActionable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"message":"quarantined replay refuses baselines containing fanned groups"}`))
+		_, _ = w.Write([]byte(`{"message":"replay: fan-out group cannot be re-expanded from the recorded baseline: ` +
+			`run 6f1c0d64-6f4e-4a1e-9a0e-2f6d5a1e7b31: step \"process-file\" is a fan-out group with no partition ` +
+			`list recorded on its producer's descriptor (the baseline predates descriptor fan-out capture)"}`))
 	}))
 	defer server.Close()
 
@@ -47,8 +52,8 @@ func TestReplay_FannedBaselineRefusalIsActionable(t *testing.T) {
 
 	msg := err.Error()
 	require.Contains(t, msg, "replay refused (409)")
-	require.Contains(t, msg, "fanned groups", "the server's own words must survive")
-	require.Contains(t, msg, "fail-closed", "say WHY it is refused, not just that it was")
+	require.Contains(t, msg, `step "process-file"`, "the server's own words must survive, offending step included")
+	require.Contains(t, msg, "producer's descriptor", "say WHY it is refused, not just that it was")
 	require.Contains(t, msg, "caesium run partitions", "name the command that inspects the group")
 	require.Empty(t, stdout.String(), "a refusal writes nothing to stdout")
 }
