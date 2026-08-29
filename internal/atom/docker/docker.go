@@ -44,4 +44,9 @@ type dockerBackend interface {
 	ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error)
 	ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error)
 	ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error)
+	// ClientVersion returns the negotiated Docker Engine API version. It is
+	// only meaningful after at least one request has been made against the
+	// backend (API version negotiation happens lazily on the first call), so
+	// callers that need it before any other request should trigger one first.
+	ClientVersion() string
 }

@@ -122,6 +122,16 @@ func (m *mockDockerBackend) ImageInspect(ctx context.Context, imageRef string, o
 	return image.InspectResponse{}, args.Error(0)
 }
 
+func (m *mockDockerBackend) ClientVersion() string {
+	args := m.Called()
+	if len(args) > 0 {
+		if v, ok := args.Get(0).(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 func (m *mockDockerBackend) ImagePull(ctx context.Context, imageRef string, options image.PullOptions) (io.ReadCloser, error) {
 	args := m.Called(imageRef)
 	var err error
@@ -146,8 +156,9 @@ func newContainer(id string, state *dockercontainer.State) dockercontainer.Inspe
 
 func (s *DockerTestSuite) SetupTest() {
 	s.engine = &dockerEngine{
-		backend: &mockDockerBackend{},
-		ctx:     context.Background(),
+		backend:            &mockDockerBackend{},
+		ctx:                context.Background(),
+		subpathHelperImage: subPathHelperImage,
 	}
 }
 
