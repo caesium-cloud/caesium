@@ -1369,10 +1369,19 @@ group re-resolution**, and group validation runs **once per resolution, not once
 per run**: the retried group is re-folded and re-validated against the same
 declared schema, and a group that failed its contract before the retry can pass
 after it (or the reverse). `GroupContractFailed` must therefore be *cleared*, not
-merely re-evaluated, when an instance is reset — the natural site is
-`retryResetColumns` (`internal/run/store.go:5835-5860`), which already clears
-`schema_violations` to `nil` on exactly this path and is where the group-scoped
-violations and the stale fold belong too.
+merely re-evaluated, when an instance is reset. The *moment* is the one
+`retryResetColumns` (`internal/run/store.go:5835-5860`) already handles — it
+clears `schema_violations` to `nil` on exactly this path — but not the same
+*row*: that map is applied to the reset instance's own row by id
+(`internal/run/store.go:4206,4211`, `:6169`, `internal/run/store_instance.go:63,138`),
+while the frozen fold and the bit live on the group's **anchor** row, a
+different row whenever the retried partition is not the lowest-index one — the
+common case for `run retry --partition <value>`. So the anchor's
+`FanInAggregate`, `GroupContractFailed`, and group-scoped violations are cleared
+by a **separate update on the anchor row**, in the same transaction as the
+instance reset. Doing it in one transaction matters: `predecessorGroupOutput`
+has no terminality gate either, so a consumer reading in a reset →
+re-resolution window would otherwise be served the pre-retry fold.
 
 Group resolution is a real, already-identified moment in all three advancement
 paths — the route-completeness rule in [`## Route
@@ -1443,8 +1452,11 @@ predecessor that shape is the opposite. `predecessorGroupOutput`
 terminal successes, counts failures, and folds whatever outputs exist. A group
 with one failed instance therefore publishes its *partial* aggregate today, and
 `internal/run/store_fanout_test.go:135-172` pins exactly that — three
-partitions, one failed, and the `all_done` consumer receives
-`{"east":"10","west":"20"}` with `FAILED=1`.
+partitions, one failed, and `PredecessorOutputs` still returns
+`{"east":"10","west":"20"}` with `FAILED=1` to the consumer. (The test calls
+`PredecessorOutputs` directly and evaluates no trigger rule — its fixture step is
+`TriggerRuleAllSuccess` (`:139`). An `all_done` consumer is the one that would
+actually run and read that aggregate in production.)
 
 So the two failure kinds are decided separately and must not be conflated:
 
@@ -1501,9 +1513,14 @@ correctly skip while `all_done` consumers still receive
 
 - `predecessorGroupOutput` (`internal/run/store.go:5509`) — the single fold
   reader, reached from `PredecessorOutputs` (`:5462`) and from
-  `PredecessorDescriptorInputs` (`:5563`, folding at `:5586`), so gating it
-  there covers the env-var path, the descriptor path, and the predecessor-hash
-  path together;
+  `PredecessorDescriptorInputs` (`:5563`, folding at `:5586`), so one gate there
+  covers the env-var path and the *outputs* half of the descriptor path.
+  Predecessor **hashes** are deliberately unaffected: they are derived from row
+  statuses, not from the fold — `predecessorGroupHash(successes)`
+  (`internal/run/store.go:5599`) for the descriptor's hash half, and
+  `PredecessorHashes` (`:5619`), which never calls `predecessorGroupOutput` at
+  all and returns `predecessorHashList(taskRuns)` (`:5641`). A suppressed
+  aggregate must not silently re-key a downstream step;
 - the local runner's `taskOutputs[taskID]` publication
   (`internal/job/job.go:1935`), the same gate on the in-memory lane.
 
@@ -1696,11 +1713,12 @@ feature, in four individually shippable steps:
    underivable `outputSchema`) wired into **both** lint surfaces (see phase 4),
    the `report.go` entry, and persistence on `models.Task`.
 3. **Enforce.** Coverage evaluation, compiled-schema validation, `warn`/`fail`
-   semantics, `GroupContractFailed` at the three status-derivation points,
-   `scope: "group"` on persisted violations.
+   semantics, `GroupContractFailed` at the status-derivation points **and the
+   aggregate-publication gate** (the fourth site, and the one the body calls
+   easiest to miss), `scope: "group"` on persisted violations.
 4. **Surface.** The `caesium why` group note, the group schema in `job lint`'s
    contract summary — in **both** copies of it, `cmd/job/lint.go:492` and its
-   server twin `api/rest/controller/jobdef/lint.go:113-117`, so `--server` lint
+   server twin `api/rest/controller/jobdef/lint.go:105`, so `--server` lint
    and offline lint do not disagree about a step's contracts — and group
    violations in the REST partition and run payloads.
 
@@ -1942,7 +1960,7 @@ behavior-neutral substrate work that stands on its own.
    per-partition violations?~~ **Resolved (#357)** — see [`## Group Output
    Contracts`](#group-output-contracts-groupoutputschema). `outputSchema` stays
    strictly per instance; the fold gets its own `groupOutputSchema` with its own
-   vocabulary, validated once at group resolution. Contract enforcement keeps
+   vocabulary, validated once per group resolution. Contract enforcement keeps
    deriving cross-job edges from `outputSchema` only, and per-partition
    violations stay on their own instance rows. Three questions the section could
    not close are listed at its end.
