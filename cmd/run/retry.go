@@ -33,7 +33,9 @@ var (
 var retryCmd = &cobra.Command{
 	Use:   "retry",
 	Short: "Retry a failed run, preserving succeeded/cached tasks",
-	Long:  "Retry a failed or completed run. Tasks that previously succeeded or were served from cache are preserved; only failed, skipped, and pending tasks are re-executed.",
+	Long: "Retry a failed or completed run. Tasks that previously succeeded or were served from cache are preserved; only failed, skipped, and pending tasks are re-executed.\n\n" +
+		"For a task that was already registered, a retry reuses the engine, image, command, attempt budget, output schema (and its warn/fail mode), and resolved cache config frozen onto that task's run row, in local and distributed mode alike. " +
+		"This is not a snapshot of the whole job definition: task membership and DAG wiring, the container spec, fan-out settings, retry timing, and trigger rules are read from the current catalog. Trigger a new run to adopt an applied definition coherently.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if retryFromFailureJobID == "" {
 			return fmt.Errorf("--job-id is required")
