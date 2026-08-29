@@ -642,6 +642,19 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
 
+## Retrying a Run
+
+`caesium run retry --job-id <job-id> --run-id <run-id>` (REST: `POST /v1/jobs/:id/runs/:run_id/retry`) re-opens a terminal run: succeeded and cache-hit tasks are preserved, and failed, skipped, and pending tasks are re-executed.
+
+**A retry reproduces the run as it was registered.** When a run starts, each task's engine, image, command, and attempt budget (`retries` + 1) are frozen onto its `task_runs` row, and a retry resets only scheduling state and the previous attempt's evidence — never that recipe. So if you `caesium job apply` a changed step and then retry an older run, the retry re-executes the **original** command, not the newly applied one. This holds identically in local and distributed execution mode.
+
+- To pick up an applied fix, **trigger a new run** (`caesium run start --job-id <job-id>` / `POST /v1/jobs/:id/run`); a new run registers fresh rows from the current definition.
+- To reproduce exactly what a past run did, retry it.
+
+Receipts, `caesium why`, `run diff`, and cache identity all key off the frozen row, so a retry that silently swapped in a new command would make a run's own evidence describe work it never did.
+
+Not everything is frozen. The step's container **spec** (env, `workDir`, mounts, volume mounts, Kubernetes overrides), its `retryDelay`/`retryBackoff`, and its `triggerRule` are read from the current definition at execution time — in both execution modes, so the two agree with each other. An apply that changes only those is therefore visible to a retry.
+
 ## Operational Controls
 
 - Pause a job without changing its definition via `PUT /v1/jobs/:id/pause`.

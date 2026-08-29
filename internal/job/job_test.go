@@ -617,6 +617,27 @@ type fakeEngine struct {
 	inFlight      int
 	maxInFlight   int
 	stopForceByID map[string]bool
+
+	// createRequests records every EngineCreateRequest in call order, so a test
+	// can assert on the recipe the executor actually handed the engine (image,
+	// command) rather than only on the resulting status.
+	createRequests []atom.EngineCreateRequest
+}
+
+// createRequestsForTask returns, in call order, the create requests whose atom
+// name belongs to the given catalog task. Names are "{taskID}-{runID}[-…]", so
+// the task ID is the name's prefix.
+func (e *fakeEngine) createRequestsForTask(taskID uuid.UUID) []atom.EngineCreateRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	out := make([]atom.EngineCreateRequest, 0, len(e.createRequests))
+	for _, req := range e.createRequests {
+		if strings.HasPrefix(req.Name, taskID.String()) {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 type fakeEngineAtomState struct {
@@ -696,6 +717,8 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 
 	name := req.Name
 	key := atomLookupKey(name)
+
+	e.createRequests = append(e.createRequests, *req)
 
 	partition := ""
 	if req.Spec.Env != nil {

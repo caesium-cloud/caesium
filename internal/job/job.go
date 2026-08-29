@@ -191,11 +191,18 @@ func New(m *models.Job, opts ...JobOption) Job {
 	return j
 }
 
+// atomRunner is one local-lane task's execution recipe. Every field that the
+// TaskRun row freezes (engineKind, image, command, maxAttempts) is read FROM
+// that row, not from a live catalog read, so a re-entered run — `caesium run
+// retry` after a `job apply` — executes what the run was registered with. See
+// buildLocalRunners.
 type atomRunner struct {
-	image   string
-	command []string
-	spec    container.Spec
-	engine  atom.Engine
+	engineKind  models.AtomEngine
+	image       string
+	command     []string
+	maxAttempts int
+	spec        container.Spec
+	engine      atom.Engine
 }
 
 const (
@@ -328,6 +335,99 @@ func WithSecretResolver(resolver secret.Resolver) JobOption {
 	return func(j *job) {
 		j.secretResolver = resolver
 	}
+}
+
+// buildLocalRunners populates runners (keyed by catalog task ID) from the
+// task_runs rows the run was REGISTERED with, so the local lane and the
+// distributed worker agree on where a task's execution recipe comes from.
+//
+// Which fields the row freezes is the whole contract here. RegisterTasks
+// (internal/run/store.go) snapshots engine, image, command and max_attempts onto
+// the row and never rewrites them — retryFromFailure resets scheduling and
+// evidence columns only — so those four come from currentRun.Tasks, which is
+// the same set the distributed worker reads off taskRun.
+//
+// The container spec (env, workDir, mounts, kubernetes) is NOT on the row; the
+// distributed worker resolves it live via loadAtomSpec(taskRun.AtomID), and so
+// does this, keyed on the row's FROZEN AtomID rather than the live task's.
+// atomsByTask supplies the atom already read for RegisterTasks whenever it is
+// the same one, so the common path issues no extra query.
+//
+// currentRun.Tasks is the collapsed view (one entry per catalog task, carrying
+// the first instance's frozen columns), which is what the runner map wants:
+// fan-out siblings copy the template row's recipe.
+func buildLocalRunners(
+	ctx context.Context,
+	j *job,
+	svc asvc.Atom,
+	currentRun *run.JobRun,
+	atomsByTask map[uuid.UUID]*models.Atom,
+	runners map[uuid.UUID]*atomRunner,
+) error {
+	specByAtom := make(map[uuid.UUID]container.Spec, len(currentRun.Tasks))
+	for _, taskState := range currentRun.Tasks {
+		if taskState == nil {
+			continue
+		}
+		taskID := taskState.TaskID
+
+		spec, ok := specByAtom[taskState.AtomID]
+		if !ok {
+			if cached := atomsByTask[taskID]; cached != nil && cached.ID == taskState.AtomID {
+				spec = cached.ContainerSpec()
+			} else {
+				// A row whose atom the catalog no longer resolves — a run being
+				// retried after its step was retired, whose atom `job apply`
+				// soft-deleted. Leaving the runner unbuilt keeps the failure
+				// exactly where it was before this map was built from the rows:
+				// scheduling THAT task reports "missing runner", while a retry
+				// whose retired task already succeeded still completes.
+				var frozenAtom *models.Atom
+				if err := retryOnContention(ctx, func() error {
+					var e error
+					frozenAtom, e = svc.Get(taskState.AtomID)
+					return e
+				}); err != nil {
+					if !errors.Is(err, gorm.ErrRecordNotFound) {
+						return err
+					}
+					log.Warn("no catalog atom for registered task; task is not runnable",
+						"job_id", j.id, "task_id", taskID, "atom_id", taskState.AtomID, "error", err)
+					continue
+				}
+				spec = frozenAtom.ContainerSpec()
+			}
+			specByAtom[taskState.AtomID] = spec
+		}
+
+		runner := &atomRunner{
+			engineKind:  taskState.Engine,
+			image:       taskState.Image,
+			command:     slices.Clone(taskState.Command),
+			maxAttempts: taskState.MaxAttempts,
+			spec:        spec,
+		}
+		if runner.maxAttempts < 1 {
+			runner.maxAttempts = 1
+		}
+
+		log.Info("evaluating task atom", "job_id", j.id, "task_id", taskID, "engine", taskState.Engine, "atom_id", taskState.AtomID)
+
+		switch taskState.Engine {
+		case models.AtomEngineDocker:
+			runner.engine = j.newDockerEngine(ctx)
+		case models.AtomEngineKubernetes:
+			runner.engine = j.newKubernetesEngine(ctx)
+		case models.AtomEnginePodman:
+			runner.engine = j.newPodmanEngine(ctx)
+		default:
+			return fmt.Errorf("unable to run atom with engine: %v", taskState.Engine)
+		}
+
+		runners[taskID] = runner
+	}
+
+	return nil
 }
 
 // buildParamEnv returns a map of environment variables derived from params.
@@ -644,32 +744,6 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		atomsByTask[t.ID] = modelAtom
-
-		if executionMode == executionModeDistributed {
-			continue
-		}
-
-		runner := &atomRunner{
-			image:   modelAtom.Image,
-			command: modelAtom.Cmd(),
-			spec:    modelAtom.ContainerSpec(),
-		}
-
-		log.Info("evaluating task atom", "job_id", j.id, "task_id", t.ID, "engine", modelAtom.Engine, "atom_id", modelAtom.ID)
-
-		switch modelAtom.Engine {
-		case models.AtomEngineDocker:
-			runner.engine = j.newDockerEngine(ctx)
-		case models.AtomEngineKubernetes:
-			runner.engine = j.newKubernetesEngine(ctx)
-		case models.AtomEnginePodman:
-			runner.engine = j.newPodmanEngine(ctx)
-		default:
-			runErr = fmt.Errorf("unable to run atom with engine: %v", modelAtom.Engine)
-			return runErr
-		}
-
-		runners[t.ID] = runner
 	}
 
 	var edges models.TaskEdges
@@ -757,6 +831,21 @@ func (j *job) Run(ctx context.Context) error {
 	if executionMode == executionModeDistributed {
 		runErr = waitForRunCompletion(ctx, store, runID, len(tasks), continueOnFailure, vars.WorkerPollInterval)
 		return runErr
+	}
+
+	// The local lane executes from the FROZEN task_runs rows, exactly as the
+	// distributed worker does. RegisterTasks snapshots engine/image/command onto
+	// each row when the run is registered and skips rows that already exist, so
+	// on RE-ENTRY (`caesium run retry`, an owner takeover) the recipe is whatever
+	// the run was registered with — not whatever the catalog says now. Building
+	// the runners from a live `svc.Get(t.AtomID)` here meant a retry after a
+	// `job apply` ran the NEW command locally while a distributed worker
+	// (internal/worker/runtime_executor.go, which reads taskRun.Engine,
+	// taskRun.Image and parseTaskCommand(taskRun.Command)) replayed the OLD one.
+	// To pick up a definition change, trigger a new run.
+	if err := buildLocalRunners(ctx, j, svc, currentRun, atomsByTask, runners); err != nil {
+		runErr = err
+		return err
 	}
 
 	queue := make([]uuid.UUID, 0, len(tasks))
@@ -1189,9 +1278,14 @@ func (j *job) Run(ctx context.Context) error {
 		// cost on every task.
 		var resolvedImageDigest string
 		if cacheCfg.Enabled && cacheCfg.PinDigests {
-			engineKind := models.AtomEngineDocker
-			if a := atomsByTask[taskID]; a != nil {
-				engineKind = a.Engine
+			// The engine the ROW froze, matching the distributed lane's
+			// imagecheck.Resolve(ctx, taskRun.Engine, taskRun.Image, ...) — the
+			// digest is folded into the cache key, so the two lanes must resolve
+			// it against the same engine or one unit of work hashes differently
+			// depending on which executor ran it.
+			engineKind := runner.engineKind
+			if engineKind == "" {
+				engineKind = models.AtomEngineDocker
 			}
 			if digest, derr := imagecheck.Default().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
 				resolvedImageDigest = digest
@@ -1334,9 +1428,13 @@ func (j *job) Run(ctx context.Context) error {
 			partition  pkgtask.Partition
 			maxAttempt int
 		}
-		maxAttempts := 1
-		if taskModel != nil && taskModel.Retries > 0 {
-			maxAttempts = taskModel.Retries + 1
+		// The attempt budget the ROW froze (task.Retries+1 at RegisterTasks),
+		// which is what the distributed worker runs on (taskRun.MaxAttempts).
+		// Reading taskModel.Retries here would give a retried run a different
+		// budget per lane after a `job apply` changed `retries:`.
+		maxAttempts := runner.maxAttempts
+		if maxAttempts < 1 {
+			maxAttempts = 1
 		}
 		meta := make(map[uuid.UUID]instanceMeta, len(group.Instances))
 		for _, inst := range group.Instances {
@@ -2115,9 +2213,11 @@ func (j *job) Run(ctx context.Context) error {
 			}
 		}
 
-		maxAttempts := 1
-		if taskModel != nil && taskModel.Retries > 0 {
-			maxAttempts = taskModel.Retries + 1
+		// Frozen on the row, exactly as the distributed worker reads it — see
+		// the identical note in runFannedGroup.
+		maxAttempts := runner.maxAttempts
+		if maxAttempts < 1 {
+			maxAttempts = 1
 		}
 
 		var lastErr error
