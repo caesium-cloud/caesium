@@ -71,10 +71,10 @@
 # volume lint (design §8) stays quiet without any volume aliasing; every
 # other step mounts `src` `readOnly: true`.
 #
-# State is one volume PER STACK, exactly as in infra-deploy.job.yaml, and for
-# the same reason: the three `drift-<stack>` steps run in parallel, and
-# carving a single shared volume up with `subPath:` would not isolate them on
-# the Docker engine, which does not apply `VolumeMount.SubPath` at all.
+# State is one volume PER STACK, exactly as in infra-deploy.job.yaml. The
+# named-volume/PVC sources used here honour `subPath` on Docker, Podman, and
+# Kubernetes, but separate volumes are the proven pattern and avoid coupling
+# the job to Docker Engine API >= 1.45.
 # `accessMode: ReadWriteMany` is declared on every volume more than one step
 # mounts.
 $schema: https://yourorg.io/schemas/job.v1.json

@@ -519,14 +519,16 @@ ordering edge to `plan` — which is exactly the shape that lands in Gap 1.
 **Gap 3 — per-unit state isolation is not expressible.** One step definition
 serves every unit, so the per-stack `tfstate-<stack>` volumes of the
 hand-written form ([Volumes](#volumes)) cannot be written down; a single
-`tfstate` volume would take up to `maxParallel` concurrent writers, and the
-multi-writer lint does not flag a step against itself
-([Known gaps](#the-multi-writer-lint-design-8)). `subPath` cannot stand in —
-it is fixed per step definition, so every fanned-out instance of that one step
-would resolve to the identical value regardless of which engine runs it — and
-`tf-runner` takes `BACKEND_CONFIG` verbatim from its environment with no
-partition substitution, so a per-unit state path cannot be interpolated into
-the manifest either. Isolation has to come from a backend that derives its own
+`tfstate` volume could have up to `maxPartitions` concurrent writers, capped
+by a positive `maxParallel` when set. [The multi-writer
+lint](#the-multi-writer-lint-design-8) now flags whenever that bound exceeds
+one — a `fanOut:` step is checked against itself — but the lint warning is not
+a fix. `subPath` cannot stand in: it is fixed per step
+definition, so every fanned-out instance of that one step would resolve to
+the identical value regardless of which engine runs it. And `tf-runner` takes
+`BACKEND_CONFIG` verbatim from its environment with no partition
+substitution, so a per-unit state path cannot be interpolated into the
+manifest either. Isolation has to come from a backend that derives its own
 per-unit key.
 
 Until all three are closed — and proven by a runner end-to-end scenario for a
@@ -694,12 +696,12 @@ look like it has fewer writers does not make it have fewer writers — it only
 hides them from the lint below, which keys on the logical name.
 
 The per-stack state volumes are the sharp version of this. `subPath`
-isolation is now real on every engine (below), so a single `tfstate` volume
-carved up by `subPath: <stack>` would no longer silently corrupt state the
-way it once did on docker — but this guide still recommends one
+isolation is now real on every named-volume/PVC source used by this pattern
+(below), so a single `tfstate` volume carved up by `subPath: <stack>` would no
+longer silently corrupt state the way it once did on docker — but this guide
+still recommends one
 `tfstate-<stack>` volume per stack: it needs no Docker Engine API version
-check, it does not trip the multi-writer lint's stale docker false positive
-(below), and it is what `test/infra_deploy_test.go` proves end-to-end. Treat
+check, and it is what `test/infra_deploy_test.go` proves end-to-end. Treat
 `subPath` on a shared volume as viable but unproven for this pattern, not as
 the default:
 
@@ -718,16 +720,10 @@ the default:
 > mounting the whole volume. **Ownership caveat**: a *newly created* subPath
 > sub-directory is `root:root` (only its permission bits are opened to
 > `0777`) — see [Volume ownership](#volume-ownership-the-reagent-images-run-as-uid-10001).
-> **`caesium job lint`'s multi-writer check has not caught up yet**: it still
-> treats every docker mount as covering the volume root
-> ([below](#the-multi-writer-lint-design-8)), so it keeps flagging disjoint
-> `subPath` writers on docker as a conflict even though the isolation is now
-> real — a known false positive tracked as a follow-up.
 
 With one volume per stack the backend path can stay identical across stacks
-(`path=/state/terraform.tfstate`), the isolation is real on every engine, and
-`caesium job lint` stays silent — no false-positive multi-writer warning to
-explain away.
+(`path=/state/terraform.tfstate`), the physical sources stay isolated on every
+engine, and `caesium job lint` stays silent.
 
 ### Sharing stores across jobs
 
@@ -830,10 +826,11 @@ Only `prepare` and `checkout` write `src`. Everything downstream mounts it
 
 ### The multi-writer lint (design §8)
 
-`caesium job lint` warns when a named volume is mounted read-write by two or
-more steps **that can run concurrently and write overlapping regions**. It is a
-warning, never an error (spec §11 Open Question 2), and it prints on both the
-local path and `--server`.
+`caesium job lint` warns when a named volume can have two or more concurrent
+writers touching overlapping regions. Those writers may be distinct DAG
+steps or multiple partition instances of one `fanOut:` step. It is a warning,
+never an error (spec §11 Open Question 2), and it prints on both the local
+path and `--server`.
 
 What it does *not* flag, and why:
 
@@ -844,42 +841,51 @@ What it does *not* flag, and why:
   manifests are silent without any aliasing. A definition that declares no
   explicit edges at all is auto-linked into a sequential chain, and the lint
   reads that the same way the scheduler does.
-- **Genuinely disjoint subPaths on kubernetes/podman.** `subPath: a` and
-  `subPath: b` address different subtrees. Containment still counts: a mount
-  with no `subPath` exposes the whole volume and overlaps everything, and
-  `reports` overlaps `reports/2026`.
+- **Genuinely disjoint subPaths on a source whose runtime adapter applies
+  them.** `subPath: a` and `subPath: b` address different subtrees for
+  Kubernetes mounts, Docker bind/named-volume mounts, and Podman named
+  volumes. Podman bind mounts currently ignore `subPath`, so lint treats each
+  as exposing the whole source. Containment still counts: a mount with no
+  effective `subPath` overlaps everything, and `reports` overlaps
+  `reports/2026`.
 
 What it *will* flag, and should:
 
 - Two steps on parallel branches writing the same volume.
-- Two **docker** steps with different `subPath`s of one volume — the check
-  still treats every docker mount as covering the volume root, regardless of
-  the step's actual `subPath`. This is now a **false positive**: the docker
-  engine honours `subPath` since #361, so two docker steps with genuinely
-  disjoint `subPath`s no longer overlap at runtime, but the check has not been
-  updated to match (tracked as a follow-up). A step with no `engine:` is a
-  docker step.
 - Two steps sharing a raw `mounts: [{type: volume, source: …}]` volume without
   an ordering edge (that form has no `subPath` at all).
+- A `fanOut:` step whose partition instances write one volume — a step *is*
+  checked against itself for this case. Every fanned instance shares that
+  step's `ResolvedVolumeMounts` verbatim (subPath is fixed at step-definition
+  time, and a fanned instance's per-instance customization is limited to the
+  injected partition env vars, never mounts), so `subPath` can never opt a
+  fanned writer out for a potentially shared source. The finding is
+  unconditional on subPath, but source- and concurrency-aware: tmpfs,
+  `claimTemplate`, `emptyDir`, and generic ephemeral volumes are private to
+  one container/pod and are omitted. A shared-source step whose own bound
+  (`maxPartitions`, capped by a positive `maxParallel` when set) is 1 —
+  `fanOut.maxParallel: 1`, or `fanOut.maxPartitions: 1` — also cannot have two
+  instances from one run writing at once and is not flagged. Cross-run
+  exclusion still requires `metadata.concurrency` with `maxRuns: 1`.
 
-**Known gaps: mostly false negatives, plus the one false positive above.**
-Two of the false negatives are about what the check compares:
+**Known limits.** Two false-negative boundaries concern what the check
+compares:
 
 - Two `volumes:` entries resolving to one physical store are treated as two
   volumes, and the job-level `volumes:` form is not cross-referenced against
   the raw `mounts:` form.
 - `accessMode: ReadOnlyMany` is not read as making step-level `readOnly: true`
   redundant.
-- A step is never checked against itself, so a `fanOut:` step whose partitions
-  all write one volume is not flagged even though those instances do run
-  concurrently — the open edge noted in
-  [the fan-out form](#the-fan-out-form-not-yet-supported).
+- A free-form Kubernetes `volumeSource` fails closed as potentially shared
+  unless its sole top-level kind is `emptyDir` or `ephemeral`. That avoids
+  missing plugin-backed shared storage, but a source-enforced read-only kind
+  can still produce a conservative warning if its mount omits `readOnly: true`.
 
 The other two are about the **scope** the ordering exemption reasons in, and
 they matter more because the reference manifests depend on facts outside it:
 
-- **Ordering holds within a single run.** These volumes are persistent, and a
-  job with no `metadata.concurrency` block admits unlimited overlapping runs —
+- **Ordering and fan-out bounds hold within a single run.** These volumes are
+  persistent, and a job with no `metadata.concurrency` block admits unlimited overlapping runs —
   so run 2's `prepare` can delete a tree run 1's `plan` is still reading, on a
   pair the lint is silent about by design. **`metadata.concurrency` is
   load-bearing for that silence**, not hygiene; `infra-deploy-demo` carries
@@ -965,7 +971,7 @@ Ordered by damage:
 | **Warm volume recreated** | `tf-warm` always runs and self-checks its marker — self-healing by construction. |
 | **RWX unavailable** | Runtime mount failure with a clear message; RWO remains unsupported until node affinity lands. |
 | **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8), which flags writers that can run CONCURRENTLY — a pair cooperating through a `dependsOn` edge, like this pattern's own `prepare`/`checkout` and `plan`/`apply` handoffs, is legitimate and stays silent. See [Volumes](#the-multi-writer-lint-design-8). |
-| **`subPath` relied on for isolation** | Docker now honours `VolumeMount.SubPath` (#361; before the fix a "partitioned" shared volume was actually one shared directory there). The multi-writer lint still reads docker mounts as root mounts and (over-)flags them as a known false positive; the manifests use one volume per stack regardless — simpler, no API-version dependency, and free of the lint false positive ([Volumes](#one-logical-volume-per-physical-store)). |
+| **`subPath` relied on for isolation** | Docker now honours `VolumeMount.SubPath` (#361; before the fix a "partitioned" shared volume was actually one shared directory there), and the multi-writer lint follows each resolved source's adapter behavior. The reference named volumes/PVCs apply `subPath`; Podman binds do not and are treated as whole-source mounts. The manifests still use one volume per stack — simpler, with no Docker API-version dependency ([Volumes](#one-logical-volume-per-physical-store)). |
 | **A newly created `subPath` sub-directory unwritable by a non-root docker step** | On docker only: Caesium's own root-running helper container creates the sub-directory, so — unlike the reagent-image row above — no step image's baked ownership reaches it. The helper `chmod 0777`s it, but only when it actually creates it; a pre-existing sub-directory is untouched. See [`subPath` sub-directories](#subpath-sub-directories-caesiums-own-helper-is-the-first-toucher). |
 | **Two jobs sharing one physical store** | Invisible to the multi-writer lint, which runs per definition. Mitigated in the manifests: a `metadata.concurrency` block on each job, distinct `ARTIFACT_DIR`s so two `terraform init -reconfigure` data directories cannot collide, and a provider mirror whose warms are idempotent ([Sharing stores across jobs](#sharing-stores-across-jobs)). |
 | **`terraform init` rewriting a read-only `src`** | `tf-runner` passes `-lockfile=readonly`, so a drifted `.terraform.lock.hcl` fails with Terraform's own dependency-change diagnostic instead of an opaque permission error ([`src` is mounted read-only](#src-is-mounted-read-only-for-discover-plan-and-apply)). |
