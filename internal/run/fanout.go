@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -64,6 +65,73 @@ func (s *Store) persistProducerPartitionsTx(tx *gorm.DB, producerID uuid.UUID, p
 		return fmt.Errorf("run: encode partitions: %w", err)
 	}
 	return tx.Model(&models.TaskRun{}).Where("id = ?", producerID).Update("partitions", datatypes.JSON(encoded)).Error
+}
+
+// recordProducerFanOutDescriptorTx freezes the emitted partition list, and the
+// fanned steps it expanded, into the PRODUCER's execution descriptor.
+//
+// The `partitions` column written just above is live run state; this is the
+// immutable copy. Quarantined replay rebuilds a run from descriptors and
+// nothing else, so without this record a fanned baseline is unreplayable by
+// construction — which is exactly why replay v1 refused one
+// (internal/replay.ErrFannedBaseline). Written once per expansion, on one row,
+// and only for a producer that actually drove at least one fanned group, so a
+// task that is not a producer never grows a fanOut section.
+//
+// A missing or undecodable descriptor is not an error here: descriptor capture
+// is best-effort observability for a run that is otherwise executing normally,
+// and failing the producer's completion transaction over it would trade a
+// replayability nicety for a dead run.
+//
+// Size: this duplicates the list already in the `partitions` column, on the
+// same row. The marker parser caps a list at MaxPartitionListBytes (256 KiB)
+// and the server caps its length (CAESIUM_FANOUT_MAX_PARTITIONS, default 1024),
+// so the worst case is one producer row carrying two copies of a bounded blob —
+// not per instance, and not per run.
+func (s *Store) recordProducerFanOutDescriptorTx(tx *gorm.DB, producerRowID uuid.UUID, expansion *FanOutExpansion) error {
+	if expansion == nil || len(expansion.Groups) == 0 || producerRowID == uuid.Nil {
+		return nil
+	}
+	var row models.TaskRun
+	if err := tx.Select("id", "execution_descriptor").First(&row, "id = ?", producerRowID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if len(row.ExecutionDescriptor) == 0 {
+		return nil
+	}
+	var desc models.TaskExecutionDescriptor
+	if err := json.Unmarshal(row.ExecutionDescriptor, &desc); err != nil {
+		log.Warn("failed to decode producer descriptor for fan-out capture", "task_run_id", producerRowID, "error", err)
+		return nil
+	}
+
+	fanOut := &models.TaskExecutionFanOut{
+		// expansion.Partitions is post-NormalizePartitions, so the recorded list
+		// is the same one the instance rows and the in-group graph were built
+		// from — a replay re-expanding from it lands on identical keys.
+		Partitions: expansion.Partitions,
+		// True even for an empty list: reaching here means this producer's
+		// execution DETERMINED the list. That is the distinction replay fails
+		// closed on, so it is recorded rather than inferred from nil-ness.
+		PartitionsRecorded: true,
+	}
+	for _, g := range expansion.Groups {
+		fanOut.Groups = append(fanOut.Groups, models.TaskExecutionFanOutGroup{
+			TaskID:   g.TaskID,
+			TaskName: g.TaskName,
+			Skipped:  g.Skipped,
+		})
+	}
+	desc.FanOut = fanOut
+
+	encoded, err := json.Marshal(&desc)
+	if err != nil {
+		return fmt.Errorf("run: encode producer fan-out descriptor: %w", err)
+	}
+	return tx.Model(&models.TaskRun{}).Where("id = ?", producerRowID).Update("execution_descriptor", datatypes.JSON(encoded)).Error
 }
 
 func (s *Store) expandFanOutSuccessorsTx(
@@ -339,6 +407,28 @@ func (s *Store) expandFanOutSuccessors(
 
 		template, err := loadUniqueTaskRun(tx, runID, succID)
 		if err != nil {
+			// N sibling rows means this group is ALREADY expanded, which is the
+			// same answer fanOutTemplateExpandable gives below for any single one
+			// of them — so on the WRITING path it is a skip, not a failure, and
+			// HasFanOutSuccessor already reads ErrAmbiguousTaskRun that way.
+			//
+			// A quarantined replay is what makes this reachable in the SQL lane: it
+			// pre-materializes the group from the partition list recorded on the
+			// producer's descriptor, so if that producer then re-executes, its
+			// completion transaction arrives at an already-expanded successor.
+			// Skipping is the required behavior there, not merely a tolerable one —
+			// replay must re-expand from the RECORDED list, never from a
+			// re-executed producer, or it reproduces a different run than the one
+			// under investigation.
+			//
+			// The planning path (persist=false, PlanFanOutExpansionForRow) must
+			// still surface it: OwnerManager.CompleteInstance catches exactly this
+			// error to rebuild the group's in-memory nodes from the durable rows
+			// (adoptPersistedExpansion). Swallowing it there would leave the owner
+			// with no group at all rather than an adopted one.
+			if persist && errors.Is(err, ErrAmbiguousTaskRun) {
+				continue
+			}
 			return nil, fmt.Errorf("run: fan-out template for %s: %w", succTask.Name, err)
 		}
 
@@ -432,6 +522,12 @@ func (s *Store) expandFanOutSuccessors(
 		expansion.Groups = append(expansion.Groups, group)
 	}
 
+	if persist {
+		if err := s.recordProducerFanOutDescriptorTx(tx, producerRow.ID, expansion); err != nil {
+			return nil, err
+		}
+	}
+
 	return expansion, nil
 }
 
@@ -455,6 +551,12 @@ func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanO
 		if err := s.persistProducerPartitionsTx(tx, producer.ID, expansion.Partitions); err != nil {
 			return err
 		}
+		// Same immutable record the SQL lane writes at the end of
+		// expandFanOutSuccessors — the owner lane must not leave a baseline
+		// unreplayable just because its expansion was planned in memory first.
+		if err := s.recordProducerFanOutDescriptorTx(tx, producer.ID, expansion); err != nil {
+			return err
+		}
 	}
 	for _, g := range expansion.Groups {
 		if g.Skipped || len(g.Instances) == 0 {
@@ -462,6 +564,10 @@ func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanO
 		}
 		template, err := loadUniqueTaskRun(tx, runID, g.TaskID)
 		if err != nil {
+			// Already expanded — see the matching arm in expandFanOutSuccessors.
+			if errors.Is(err, ErrAmbiguousTaskRun) {
+				continue
+			}
 			return err
 		}
 		rows := make([]models.TaskRun, 0, len(g.Instances))

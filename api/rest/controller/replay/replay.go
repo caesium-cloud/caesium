@@ -82,11 +82,13 @@ func Post(c *echo.Context) error {
 	if baseline.JobID != jobID {
 		return echo.ErrNotFound
 	}
-	for _, t := range baseline.Tasks {
-		if t != nil && t.PartitionCount > 0 {
-			return echo.NewHTTPError(http.StatusConflict, "quarantined replay refuses baselines containing fanned groups")
-		}
-	}
+	// A blanket `PartitionCount > 0 → 409` used to sit here. It is gone because
+	// replay now re-expands a fanned group from the partition list frozen on its
+	// producer's descriptor. The refusal itself is NOT gone — it moved to the one
+	// layer that can tell a replayable fanned baseline from an unreplayable one
+	// (internal/replay's groupBaselineTasks, still ErrFannedBaseline → 409
+	// below). Re-introducing a pre-check here would silently shadow that
+	// decision, since this collapsed view carries no descriptors.
 
 	result, err := replaysvc.New(ctx).Replay(replaysvc.Request{
 		JobID:          jobID,

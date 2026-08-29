@@ -678,24 +678,29 @@ func (s *Store) TaskQuarantine(ctx context.Context, runID, taskID uuid.UUID) (bo
 	return row.TaskQuarantine || row.RunQuarantine, nil
 }
 
-func (s *Store) TaskExecutionDescriptor(ctx context.Context, runID, taskID uuid.UUID) (*models.TaskExecutionDescriptor, error) {
-	var taskRun models.TaskRun
-	err := s.db.WithContext(ctx).
-		Select("execution_descriptor").
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		Take(&taskRun).Error
+// TaskExecutionDescriptor returns the frozen descriptor for one TaskRun.
+//
+// taskRef takes the usual TaskRun-primary-key-or-catalog-task-id contract, and
+// callers holding a row MUST pass its primary key. The previous `(job_run_id,
+// task_id) … Take` form silently picked an arbitrary sibling once a step could
+// be fanned, and the one caller is the worker's quarantined-replay path — which
+// executes the container the descriptor describes. Now that quarantined replay
+// re-materializes fanned groups, that lookup would hand instance `bravo`'s
+// container the descriptor recorded for `alpha`.
+func (s *Store) TaskExecutionDescriptor(ctx context.Context, runID, taskRef uuid.UUID) (*models.TaskExecutionDescriptor, error) {
+	taskRun, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx), runID, taskRef)
 	if err != nil {
 		return nil, err
 	}
 	if len(taskRun.ExecutionDescriptor) == 0 {
-		return nil, fmt.Errorf("run: task execution descriptor missing for run %s task %s", runID, taskID)
+		return nil, fmt.Errorf("run: task execution descriptor missing for run %s task %s", runID, taskRef)
 	}
 	var descriptor models.TaskExecutionDescriptor
 	if err := json.Unmarshal(taskRun.ExecutionDescriptor, &descriptor); err != nil {
-		return nil, fmt.Errorf("run: decode task execution descriptor for run %s task %s: %w", runID, taskID, err)
+		return nil, fmt.Errorf("run: decode task execution descriptor for run %s task %s: %w", runID, taskRef, err)
 	}
 	if descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion {
-		return nil, fmt.Errorf("run: unsupported task execution descriptor version %d for run %s task %s", descriptor.SchemaVersion, runID, taskID)
+		return nil, fmt.Errorf("run: unsupported task execution descriptor version %d for run %s task %s", descriptor.SchemaVersion, runID, taskRef)
 	}
 	return &descriptor, nil
 }

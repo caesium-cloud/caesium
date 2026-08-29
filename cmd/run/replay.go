@@ -291,13 +291,21 @@ func isReplayTerminalStatus(status string) bool {
 }
 
 // fannedBaselineMarker matches the server's fail-closed refusal of a baseline
-// containing a fan-out group (internal/replay.ErrFannedBaseline, surfaced as a
-// 409). Quarantined replay reconstructs a run from per-TaskRun descriptors, and
-// a fanned group's instance set is a RUNTIME property of the producer's output —
-// replaying it would either re-expand (a different run) or silently replay one
-// arbitrary instance. Refusing is the design posture; the CLI's job is to say so
-// in words an operator can act on rather than echoing a bare 409.
-const fannedBaselineMarker = "fanned group"
+// whose fan-out group cannot be reconstructed (internal/replay.ErrFannedBaseline,
+// surfaced as a 409).
+//
+// Replay DOES replay fanned baselines: it re-expands the group from the
+// partition list frozen on the producer's descriptor, never from a re-executed
+// producer. This 409 is the narrower remaining case — no list was recorded (a
+// baseline from before that capture existed), or the recorded list disagrees
+// with the instances the baseline materialized. Both are unfixable by retrying,
+// so the CLI's job is to say which one it is in words an operator can act on
+// rather than echoing a bare 409.
+//
+// Matched on "fan-out group" rather than the older "fanned group": every
+// wrapped message names the offending step and carries the sentinel's own
+// prefix, which is where that phrase lives.
+const fannedBaselineMarker = "fan-out group"
 
 func replayStatusError(status int, body []byte) error {
 	msg := replayErrorMessage(body)
@@ -309,10 +317,10 @@ func replayStatusError(status int, body []byte) error {
 	case http.StatusConflict:
 		if strings.Contains(strings.ToLower(msg), fannedBaselineMarker) {
 			return fmt.Errorf("replay refused (409): %s\n"+
-				"  quarantined replay is fail-closed on dynamic fan-out: the baseline's partition set was "+
-				"produced at runtime, so it cannot be reproduced from the recorded descriptors\n"+
+				"  quarantined replay re-expands a fanned group from the partition list recorded on its "+
+				"producer's descriptor; this baseline has no usable list, so its group cannot be reconstructed\n"+
 				"  inspect the group with `caesium run partitions <run-id> --task <name>`, "+
-				"or re-run the job normally to re-expand it", msg)
+				"or re-run the job normally to record one", msg)
 		}
 		return fmt.Errorf("replay refused (409): %s", msg)
 	case http.StatusUnprocessableEntity:

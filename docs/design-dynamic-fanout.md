@@ -364,10 +364,18 @@ partition set.
   `caesium run diff` aligns instances across runs by partition **value** (never
   index — ordering is producer-dependent); added/removed partitions report as
   such.
-- Quarantined replay: **v1 refuses baselines containing fanned groups**
-  (fail-closed, consistent with that design's posture). Follow-up: re-expand
-  from the recorded partition list in descriptors, never from a re-executed
-  producer.
+- Quarantined replay: **shipped** (v1 refused baselines containing fanned
+  groups; the follow-up below landed on #359). Each fan-out producer's
+  descriptor carries a `fanOut` section — the normalized partition list
+  (key + fingerprint + `dependsOn` + attributes) and the fanned successor steps
+  it expanded — and replay re-materializes the group from that recorded list,
+  never from a re-executed producer. A producer that does re-execute under a
+  param override runs and is reproduced, but its freshly emitted list is
+  ignored: its completion finds an already-expanded successor and leaves it
+  alone. The fail-closed refusal narrows to the cases that genuinely cannot be
+  reconstructed — no list recorded (a baseline predating this capture), a list
+  that disagrees with the instances the baseline materialized, or a reused cache
+  entry whose own recorded list disagrees with the baseline's.
 
 ### REST
 
@@ -1166,7 +1174,9 @@ driving the real binary/server (no hand-seeded rows):
 3. **Distributed:** expansion in the completion tx, `maxParallel` claim
    predicate, distributed integration lane.
 4. **Surfaces:** REST + CLI + UI group rendering; `why`/`run diff` alignment.
-5. **Follow-ups:** replay re-expansion, value-verified per-partition skip.
+5. **Follow-ups:** replay re-expansion (**shipped**, #359 — see
+   [`### Receipts, replay, why, run-diff`](#receipts-replay-why-run-diff)),
+   value-verified per-partition skip.
 
 Phase 1's scope is wider than "the store's write paths": it is the whole
 task-ID-identity migration described in

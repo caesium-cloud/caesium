@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 )
@@ -219,6 +220,61 @@ type TaskExecutionDescriptor struct {
 	ContainerSpec  container.Spec            `json:"containerSpec"`
 	KubernetesSpec *container.KubernetesSpec `json:"kubernetesSpec,omitempty"`
 	SecretRefs     []TaskExecutionSecretRef  `json:"secretRefs,omitempty"`
+
+	// FanOut is present only on a fan-out PRODUCER's descriptor, and only once
+	// that producer's execution has determined its partition list. Absent
+	// everywhere else, so every descriptor written before this field existed
+	// stays byte-identical.
+	FanOut *TaskExecutionFanOut `json:"fanOut,omitempty"`
+}
+
+// TaskExecutionFanOut is the producer-side fan-out record: the normalized
+// partition list one producer emitted, plus the fanned successor steps that
+// list expanded.
+//
+// It exists so quarantined replay can re-materialize a fanned group WITHOUT
+// re-running the producer. A group's instance set is a runtime property of the
+// producer's output, and replay reconstructs a run from frozen per-TaskRun
+// descriptors — so with nothing recorded there, replay had exactly two options,
+// both wrong (re-expand from a re-executed producer, which reproduces a
+// DIFFERENT run; or resolve one arbitrary sibling), and took the third:
+// refusing fanned baselines outright. This field is the recorded list that
+// refusal was waiting on.
+//
+// It duplicates TaskRun.Partitions on purpose. That column is live run state,
+// rewritten whenever the producer's row is re-completed; the descriptor is the
+// immutable envelope replay is contractually built from, and is the only one of
+// the two that travels with a descriptor served standalone over
+// /tasks/:task/descriptor.
+type TaskExecutionFanOut struct {
+	// Partitions is the normalized list (key + fingerprint + dependsOn +
+	// scalar attributes), in emission order. Encoded with the struct's own JSON
+	// tags rather than pkgtask.EncodePartitions, because this field exists to be
+	// read back: the canonical wire form flattens attributes to top-level keys,
+	// and unmarshalling that back into a Partition silently drops them (the same
+	// asymmetry cache.entryToModel documents).
+	Partitions []pkgtask.Partition `json:"partitions,omitempty"`
+	// PartitionsRecorded distinguishes "this producer ran and determined an
+	// EMPTY list" from "no list was ever recorded here" — a descriptor written
+	// before this field existed, or a task that is not a producer at all. A nil
+	// slice cannot carry that distinction through JSON (omitempty erases the
+	// difference between nil and []), and replay must fail closed on the second
+	// case while accepting the first, so the discriminator is explicit.
+	PartitionsRecorded bool `json:"partitionsRecorded,omitempty"`
+	// Groups names the fanned successor steps this producer expanded, by catalog
+	// task id. It is what lets replay attribute a group of N instance rows back
+	// to the one producer whose list it must re-expand from, without re-deriving
+	// fanOut.from against a job definition that may have changed since.
+	Groups []TaskExecutionFanOutGroup `json:"groups,omitempty"`
+}
+
+// TaskExecutionFanOutGroup is one fanned successor step a producer expanded.
+type TaskExecutionFanOutGroup struct {
+	TaskID   uuid.UUID `json:"taskId"`
+	TaskName string    `json:"taskName,omitempty"`
+	// Skipped records that the group resolved as skipped instead of expanding,
+	// which is what `onEmpty: skip` does for an empty partition list.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type TaskExecutionBaseline struct {
