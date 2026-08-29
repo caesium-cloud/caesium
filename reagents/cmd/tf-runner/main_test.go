@@ -1139,6 +1139,74 @@ func TestLoadConfigDefaultsTheArtifactAndDataDirectories(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDerivesCLIConfigFileFromCacheKey(t *testing.T) {
+	env := map[string]string{"STACK_ROOT": "/src/stacks/network", "TF_CLI_PATH": "/usr/local/bin/terraform"}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.CLIConfigFile != "" {
+		t.Fatalf("CLIConfigFile = %q (unset CACHE_KEY must leave TF_CLI_CONFIG_FILE to the manifest)", cfg.CLIConfigFile)
+	}
+
+	env["CACHE_KEY"] = "deploy"
+	cfg, err = loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	want := tf.CLIConfigFile(tf.DefaultCacheDir, "deploy")
+	if cfg.CLIConfigFile != want {
+		t.Fatalf("CLIConfigFile = %q, want %q", cfg.CLIConfigFile, want)
+	}
+
+	env["TF_CLI_CONFIG_FILE"] = want
+	cfg, err = loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("matching TF_CLI_CONFIG_FILE should be accepted: %v", err)
+	}
+	if cfg.CLIConfigFile != want {
+		t.Fatalf("CLIConfigFile = %q", cfg.CLIConfigFile)
+	}
+
+	env["TF_CLI_CONFIG_FILE"] = "/cache/terraformrc"
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("loadConfig accepted CACHE_KEY and TF_CLI_CONFIG_FILE pointing at different files")
+	}
+
+	env["TF_CLI_CONFIG_FILE"] = want
+	env["CACHE_DIR"] = "relative"
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("loadConfig accepted a relative CACHE_DIR with CACHE_KEY set")
+	}
+
+	delete(env, "CACHE_DIR")
+	env["CACHE_KEY"] = "../escape"
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("loadConfig accepted a path-like CACHE_KEY")
+	}
+}
+
+func TestPinCLIConfigExportsTheKeyedPath(t *testing.T) {
+	t.Setenv("TF_CLI_CONFIG_FILE", "sentinel")
+	os.Unsetenv("TF_CLI_CONFIG_FILE")
+
+	path := tf.CLIConfigFile(t.TempDir(), "deploy")
+	if err := pinCLIConfig(config{CLIConfigFile: path}); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("TF_CLI_CONFIG_FILE"); got != path {
+		t.Fatalf("TF_CLI_CONFIG_FILE = %q, want %q", got, path)
+	}
+
+	t.Setenv("TF_CLI_CONFIG_FILE", "/already/set")
+	if err := pinCLIConfig(config{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("TF_CLI_CONFIG_FILE"); got != "/already/set" {
+		t.Fatalf("an unkeyed runner overwrote TF_CLI_CONFIG_FILE: %q", got)
+	}
+}
+
 func TestSubcommandsCoverEveryDocumentedPhase(t *testing.T) {
 	for _, name := range []string{"tf-plan", "tf-apply", "tf-drift"} {
 		if _, ok := subcommands[name]; !ok {

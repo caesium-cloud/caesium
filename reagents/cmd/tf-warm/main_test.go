@@ -368,7 +368,7 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.CacheDir != "/cache" || cfg.MountPath != "/cache" {
+	if cfg.CacheDir != tf.DefaultCacheDir || cfg.MountPath != tf.DefaultCacheDir {
 		t.Fatalf("cache defaults = %q/%q", cfg.CacheDir, cfg.MountPath)
 	}
 	if len(cfg.Platforms) != 1 || !strings.Contains(cfg.Platforms[0], "_") {
@@ -574,4 +574,110 @@ func TestWarmFastPathRepairsATerraformRCPointingElsewhere(t *testing.T) {
 	if !strings.Contains(log.String(), "re-pointing") {
 		t.Fatalf("the repair was not reported: %q", log.String())
 	}
+}
+
+func TestLoadConfigAcceptsAndRejectsCacheKey(t *testing.T) {
+	src := t.TempDir()
+	env := map[string]string{"SRC": src, "TF_CLI_PATH": "/usr/bin/terraform"}
+	cfg, err := loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.CacheKey != "" {
+		t.Fatalf("CacheKey = %q (unset CACHE_KEY is the unkeyed slot)", cfg.CacheKey)
+	}
+
+	env["CACHE_KEY"] = "deploy"
+	cfg, err = loadConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.CacheKey != "deploy" {
+		t.Fatalf("CacheKey = %q", cfg.CacheKey)
+	}
+
+	env["CACHE_KEY"] = "../escape"
+	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("loadConfig accepted a path-like CACHE_KEY")
+	}
+}
+
+// Two jobs whose lock files resolve to different provider sets can share one
+// tfcache volume when each names a CACHE_KEY: the CLI configuration is a file
+// per slot, so the second warm cannot flip the first's terraformrc. That is
+// the whole of #364.
+func TestWarmTwoCacheKeysOnOneVolumeDoNotClobber(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcA := writeLockTree(t, filepath.Join(root, "src-a"), fixtureLock)
+	bumped := strings.Replace(fixtureLock, `version     = "3.3.1"`, `version     = "3.4.0"`, 1)
+	srcB := writeLockTree(t, filepath.Join(root, "src-b"), bumped)
+	execPath, record := fakeTerraform(t, 0)
+
+	cfgA := warmConfig(t, srcA, cache, execPath)
+	cfgA.CacheKey = "set-a"
+	cfgB := warmConfig(t, srcB, cache, execPath)
+	cfgB.CacheKey = "set-b"
+
+	if err := warm(context.Background(), cfgA, io.Discard); err != nil {
+		t.Fatalf("warm set-a: %v", err)
+	}
+	if err := warm(context.Background(), cfgB, io.Discard); err != nil {
+		t.Fatalf("warm set-b: %v", err)
+	}
+	if got := invocations(t, record); len(got) != 2 {
+		t.Fatalf("want one mirror pass per provider set, got %v", got)
+	}
+
+	rcA := readTerraformRC(t, cache, "set-a")
+	rcB := readTerraformRC(t, cache, "set-b")
+	if rcA == rcB {
+		t.Fatalf("both slots point at the same mirror:\n%s", rcA)
+	}
+	if _, err := os.Stat(tf.CLIConfigFile(cache, "")); !os.IsNotExist(err) {
+		t.Fatalf("keyed warms must not write the unkeyed terraformrc: %v", err)
+	}
+
+	// Re-warming A repairs its own slot (the fast-path property) without
+	// touching B — the clobber the unkeyed filename could not prevent.
+	if err := os.WriteFile(tf.CLIConfigFile(cache, "set-a"), []byte(tf.TerraformRC("/cache/providers/clobbered")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := warm(context.Background(), cfgA, io.Discard); err != nil {
+		t.Fatalf("re-warm set-a: %v", err)
+	}
+	if after := invocations(t, record); len(after) != 2 {
+		t.Fatalf("re-warming an already-warm slot re-ran terraform: %v", after)
+	}
+	if strings.Contains(readTerraformRC(t, cache, "set-a"), "clobbered") {
+		t.Fatal("set-a's fast path left terraformrc pointing at another mirror")
+	}
+	if got := readTerraformRC(t, cache, "set-b"); got != rcB {
+		t.Fatalf("re-warming set-a clobbered set-b:\n%s", got)
+	}
+}
+
+func writeLockTree(t *testing.T, src, lock string) string {
+	t.Helper()
+	dir := filepath.Join(src, "stacks", "network")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, tf.LockFileName), []byte(lock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return src
+}
+
+func readTerraformRC(t *testing.T, cache, key string) string {
+	t.Helper()
+	path := tf.CLIConfigFile(cache, key)
+	data, err := os.ReadFile(path) //nolint:gosec // test-local path.
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }

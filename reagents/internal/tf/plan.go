@@ -91,7 +91,9 @@ func (r *Runner) Root() string { return r.root }
 
 // Init runs `terraform init -input=false`, offline against the warm step's
 // filesystem mirror (the mirror is selected by TF_CLI_CONFIG_FILE, which the
-// manifest points at the generated /cache/terraformrc).
+// manifest points at the generated terraformrc — `/cache/terraformrc`, or
+// `/cache/<CACHE_KEY>/terraformrc` when the warm and runner steps share a
+// slot).
 //
 // backendConfig carries `-backend-config=key=value` settings, which is how a
 // pipeline keeps Terraform state on a volume that survives the source tree

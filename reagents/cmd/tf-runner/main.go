@@ -14,7 +14,15 @@
 //	                     definition serves every stack.
 //	SCAN_ROOT            base for the partition's relative root (fan-out form)
 //	TF_WORKSPACE         workspace to select (default "default")
-//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform
+//	CACHE_DIR            the cache volume mount (default /cache); used with
+//	                     CACHE_KEY to derive TF_CLI_CONFIG_FILE
+//	CACHE_KEY            terraformrc slot matching the warm step. Unset leaves
+//	                     TF_CLI_CONFIG_FILE to the manifest (historical
+//	                     /cache/terraformrc). Set exports
+//	                     /cache/<key>/terraformrc unless TF_CLI_CONFIG_FILE is
+//	                     already that path; a mismatch fails closed.
+//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform.
+//	                     Optional when CACHE_KEY is set.
 //	TF_DATA_DIR          Terraform's working directory (default <ARTIFACT_DIR>/tfdata)
 //	ARTIFACT_DIR         where the plan artifact is written (default <root>/.caesium)
 //	BACKEND_CONFIG       comma-separated `-backend-config` key=value settings
@@ -112,6 +120,7 @@ type config struct {
 	DataDir           string
 	ArtifactDir       string
 	ExecPath          string
+	CLIConfigFile     string
 	BackendConfig     []string
 	ImportOutputsFrom []string
 	ApplyStep         string
@@ -124,12 +133,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
+	cliConfig, err := resolveCLIConfig(getenv)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
 		Root:              root,
 		Workspace:         strings.TrimSpace(getenv("TF_WORKSPACE")),
 		DataDir:           strings.TrimSpace(getenv("TF_DATA_DIR")),
 		ArtifactDir:       strings.TrimSpace(getenv("ARTIFACT_DIR")),
 		ExecPath:          strings.TrimSpace(getenv("TF_CLI_PATH")),
+		CLIConfigFile:     cliConfig,
 		BackendConfig:     splitList(getenv("BACKEND_CONFIG")),
 		ImportOutputsFrom: splitList(getenv("IMPORT_OUTPUTS_FROM")),
 		ApplyStep:         strings.TrimSpace(getenv("APPLY_STEP")),
@@ -164,6 +179,41 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.ExecPath = path
 	}
 	return cfg, nil
+}
+
+// resolveCLIConfig is the terraformrc path this process should export.
+//
+// CACHE_KEY unset: leave TF_CLI_CONFIG_FILE to the manifest (or unset). That is
+// the historical `/cache/terraformrc` shape, so existing jobs keep working.
+// CACHE_KEY set: the slot is `{CACHE_DIR}/{key}/terraformrc`. If the manifest
+// also set TF_CLI_CONFIG_FILE, it must already be that path — a warm writing
+// one file and a runner reading another is the single-slot clobber #364
+// exists to close, reached by a mismatched pair of env vars.
+func resolveCLIConfig(getenv func(string) string) (string, error) {
+	key, err := tf.SanitizeCacheKey(getenv("CACHE_KEY"))
+	if err != nil {
+		return "", err
+	}
+	explicit := strings.TrimSpace(getenv("TF_CLI_CONFIG_FILE"))
+	if key == "" {
+		return "", nil
+	}
+
+	cacheDir := strings.TrimSpace(getenv("CACHE_DIR"))
+	if cacheDir == "" {
+		cacheDir = tf.DefaultCacheDir
+	}
+	if !filepath.IsAbs(cacheDir) {
+		return "", fmt.Errorf("CACHE_DIR %q must be an absolute path", cacheDir)
+	}
+	derived := tf.CLIConfigFile(cacheDir, key)
+	if explicit != "" && filepath.Clean(explicit) != filepath.Clean(derived) {
+		return "", fmt.Errorf(
+			"CACHE_KEY %q selects %s, but TF_CLI_CONFIG_FILE is %s; "+
+				"omit TF_CLI_CONFIG_FILE (tf-runner will export the keyed path) or point it at the same file",
+			key, derived, explicit)
+	}
+	return derived, nil
 }
 
 // resolveRoot finds the root module this instance operates on.
@@ -293,6 +343,9 @@ func splitList(raw string) []string {
 // ready Runner. It is shared by all three phases so none of them can drift into
 // a different data directory or a different mirror.
 func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
+	if err := pinCLIConfig(cfg); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.ArtifactDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create artifact directory %s: %w", cfg.ArtifactDir, err)
 	}
@@ -310,6 +363,19 @@ func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
 		return nil, err
 	}
 	return tf.NewRunner(cfg.Root, cfg.ExecPath, log)
+}
+
+// pinCLIConfig exports TF_CLI_CONFIG_FILE when CACHE_KEY selected a slot.
+// terraform-exec copies os.Environ() at each invocation (see tf.NewRunner), so
+// the process environment is how the mirror actually gets selected.
+func pinCLIConfig(cfg config) error {
+	if cfg.CLIConfigFile == "" {
+		return nil
+	}
+	if err := os.Setenv("TF_CLI_CONFIG_FILE", cfg.CLIConfigFile); err != nil {
+		return fmt.Errorf("set TF_CLI_CONFIG_FILE: %w", err)
+	}
+	return nil
 }
 
 // pinGitIdentity installs an inert git identity if the environment has none.

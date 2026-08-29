@@ -23,6 +23,11 @@
 //	SRC              source tree to scan for .terraform.lock.hcl (default /src)
 //	CACHE_DIR        the cache volume mount (default /cache)
 //	CACHE_MOUNT_PATH the cache path CONSUMERS see, if it differs from CACHE_DIR
+//	CACHE_KEY        terraformrc slot on the cache volume. Unset keeps the
+//	                 historical /cache/terraformrc; set (and matched on every
+//	                 consuming tf-runner step) writes /cache/<key>/terraformrc
+//	                 so two provider sets can share one volume without
+//	                 clobbering the CLI config.
 //	TARGET_PLATFORM  os_arch to mirror for, space/comma separated
 //	                 (default: this container's own platform)
 //	TF_CLI_PATH      terraform binary to use (default: `terraform` on PATH)
@@ -68,15 +73,21 @@ type config struct {
 	Src       string
 	CacheDir  string
 	MountPath string
+	CacheKey  string
 	Platforms []string
 	ExecPath  string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
+	key, err := tf.SanitizeCacheKey(getenv("CACHE_KEY"))
+	if err != nil {
+		return config{}, err
+	}
 	cfg := config{
 		Src:       strings.TrimSpace(getenv("SRC")),
 		CacheDir:  strings.TrimSpace(getenv("CACHE_DIR")),
 		MountPath: strings.TrimSpace(getenv("CACHE_MOUNT_PATH")),
+		CacheKey:  key,
 		Platforms: splitPlatforms(getenv("TARGET_PLATFORM")),
 		ExecPath:  strings.TrimSpace(getenv("TF_CLI_PATH")),
 	}
@@ -84,7 +95,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.Src = "/src"
 	}
 	if cfg.CacheDir == "" {
-		cfg.CacheDir = "/cache"
+		cfg.CacheDir = tf.DefaultCacheDir
 	}
 	if cfg.MountPath == "" {
 		// The generated terraformrc names absolute paths that CONSUMING
@@ -185,14 +196,18 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	if _, err := os.Stat(marker); err == nil {
 		_, _ = fmt.Fprintf(logOut, "%s: mirror %s already warm (%d lock files, %d providers)\n",
 			roleName, key, len(lockPaths), len(providers))
-		// The mirror is content-addressed per key, but the CLI configuration
-		// that POINTS at one is a single fixed filename. Two jobs sharing a
-		// cache volume with different provider sets -- the deploy + drift
-		// topology design §6.6 prescribes, whose sparse checkouts need not
-		// match -- each rewrite it. Returning here without re-asserting the file
-		// would leave a warm that found its own marker pointing consumers at
-		// another key's mirror, so every init fails offline with a diagnosis
-		// that points nowhere near the cause. Re-asserting is idempotent.
+		// The mirror is content-addressed per provider set, but the CLI
+		// configuration that POINTS at one is a filename — `{cache}/terraformrc`
+		// by default, or `{cache}/{CACHE_KEY}/terraformrc` when a slot is
+		// named. Two jobs sharing a cache volume with the SAME slot and
+		// different provider sets (the deploy + drift topology design §6.6
+		// prescribes, whose sparse checkouts need not match) each rewrite it.
+		// Returning here without re-asserting the file would leave a warm that
+		// found its own marker pointing consumers at another provider set's
+		// mirror, so every init fails offline with a diagnosis that points
+		// nowhere near the cause. Re-asserting is idempotent. Distinct CACHE_KEY
+		// values give those jobs distinct files, which is how one volume serves
+		// more than one provider set.
 		return ensureTerraformRC(cfg, key, logOut)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("check warm marker %s: %w", marker, err)
@@ -276,19 +291,30 @@ func consumerMirrorPath(cfg config, key string) string {
 // ensureTerraformRC writes the CLI configuration unless it already names exactly
 // this mirror.
 //
-// KNOWN LIMITATION: the file is a single global slot. A cache volume shared by
-// two jobs whose provider sets differ serves whichever warm ran last; this
-// function guarantees only that a warm which RUNS leaves the file pointing at
-// its own key, including on the marker fast path. Making it robust needs a
-// per-key path (`providers/<key>/terraformrc`) that a manifest's
-// TF_CLI_CONFIG_FILE addresses, which is a manifest-facing change rather than a
-// role-internal one. Until then the supported topology is one cache volume per
-// provider set.
+// The file lives at CLIConfigFile(CACHE_DIR, CACHE_KEY): the unkeyed historical
+// slot, or a per-key path so two provider sets can share one volume. This
+// function guarantees only that a warm which RUNS leaves ITS slot pointing at
+// its own mirror, including on the marker fast path. Jobs that share a slot
+// still last-writer-wins on that file; distinct CACHE_KEY values are what
+// keeps them from clobbering each other.
 func ensureTerraformRC(cfg config, key string, logOut io.Writer) error {
-	path := filepath.Join(cfg.CacheDir, "terraformrc")
+	path := tf.CLIConfigFile(cfg.CacheDir, cfg.CacheKey)
 	want := tf.TerraformRC(consumerMirrorPath(cfg, key))
 
-	current, err := os.ReadFile(path) //nolint:gosec // path derived from CACHE_DIR.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	// The directory is traversed by every consuming container as it opens
+	// terraformrc. MkdirAll honours umask, and a 0700 slot is readable only
+	// by the warm step's uid — the same "provider not available" diagnosis
+	// the staging chmod exists to prevent.
+	if cfg.CacheKey != "" {
+		if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("make %s world-readable: %w", filepath.Dir(path), err)
+		}
+	}
+
+	current, err := os.ReadFile(path) //nolint:gosec // path derived from CACHE_DIR + CACHE_KEY.
 	switch {
 	case err == nil && string(current) == want:
 		return nil
