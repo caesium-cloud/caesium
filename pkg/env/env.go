@@ -95,11 +95,11 @@ func Variables() Environment {
 // Environment defines the environment variables used
 // by caesium.
 type Environment struct {
-	LogLevel                       string        `default:"info" split_words:"true"`
-	LogFormat                      string        `default:"json" split_words:"true"`
-	LogConsoleEnabled              bool          `default:"true" split_words:"true"`
-	Port                           int           `default:"8080"`
-	DockerHost                     string        `default:"" split_words:"true"`
+	LogLevel          string `default:"info" split_words:"true"`
+	LogFormat         string `default:"json" split_words:"true"`
+	LogConsoleEnabled bool   `default:"true" split_words:"true"`
+	Port              int    `default:"8080"`
+	DockerHost        string `default:"" split_words:"true"`
 	// DockerSubpathHelperImage is the image the docker engine uses for the
 	// short-lived helper container that creates a VolumeMount.SubPath
 	// sub-directory before a step mounts it (internal/atom/docker's
