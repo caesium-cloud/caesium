@@ -285,9 +285,9 @@ func executeRunCommand(t *testing.T, args ...string) (stdout, stderr string, err
 func TestRetrySinglePartitionServerErrorPrintsNoUsageBlock(t *testing.T) {
 	restoreRetryTestGlobals(t)
 
-	const conflict = "per-partition retry requires distributed execution mode " +
-		"(CAESIUM_EXECUTION_MODE=distributed); in local mode nothing dispatches the reset " +
-		"instance — retry the run instead"
+	const conflict = "only a failed partition can be retried; a succeeded or cached instance would discard a result " +
+		"downstream steps already consumed, and a skipped or cancelled one was resolved deliberately " +
+		"(retry the run to re-run skipped work)"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -311,8 +311,8 @@ func TestRetrySinglePartitionServerErrorPrintsNoUsageBlock(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, stderr, "409 Conflict")
-	require.Contains(t, stderr, "distributed execution mode")
-	require.Equal(t, 1, strings.Count(stderr, "distributed execution mode"),
+	require.Contains(t, stderr, "only a failed partition can be retried")
+	require.Equal(t, 1, strings.Count(stderr, "only a failed partition can be retried"),
 		"the server's message must be printed exactly once:\n%s", stderr)
 
 	// Neither stream may carry the usage block: cobra would write it to the out

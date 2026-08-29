@@ -380,7 +380,7 @@ historical note.
    (`internal/job/job.go:157`, `:461`) is feasible, but it could not be verified
    outside the integration lane, so it was **deliberately refused rather than
    guessed**. The 409 names the path that does work locally (retry the run).
-   _Deferred: local-lane single-partition resume through `job.New(...)` → `(*job).Run(ctx)`; tracked as #356._
+   _Closed 2026-08-29: local-lane single-partition resume through `job.New(...)` → `(*job).Run(ctx)` on a terminal run (issue #356). The mode gate is gone; a finished local run kicks off a new engine that rehydrates existing TaskRun rows and executes only the reset pending instance._
 
 14. **The fan-in aggregate still bypasses the producer's `outputSchema`, by
    design.** `AggregateFanInOutputs` (`pkg/task/output.go`) no longer truncates on

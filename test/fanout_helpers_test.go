@@ -143,11 +143,10 @@ func shellCommandBlock(script string, indent int) string {
 // distributed execution mode (the plain distributed lane and the run-owner
 // in-memory lane both set it; the local lane leaves it empty).
 //
-// Some surfaces are deliberately lane-dependent — per-partition retry requires
-// a dispatcher to re-execute the instance, so the local server refuses it with
-// 409 rather than resetting a row nothing will pick up. A test for such a
-// surface must assert the RIGHT answer for its lane; branching on whichever
-// answer arrived would pass just as happily if the two lanes swapped behavior.
+// Some surfaces are still lane-dependent (quarantined replay that would
+// re-execute is refused in local mode). A test for such a surface must assert
+// the RIGHT answer for its lane; branching on whichever answer arrived would
+// pass just as happily if the two lanes swapped behavior.
 func distributedLane() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("CAESIUM_EXECUTION_MODE")), "distributed")
 }

@@ -1232,3 +1232,58 @@ func TestFanOutRehydratesGroupOnRetriedRun(t *testing.T) {
 	require.Less(t, pos["a"], pos["b"], "the retried chain must still run a before b")
 	require.Less(t, pos["b"], pos["c"], "the retried chain must still run b before c")
 }
+
+// TestFanOutPartitionRetryResumesOnlyTheResetInstance pins the local-lane
+// resume for POST …/partitions/:index/retry. RetryPartition resets one FAILED
+// instance and reopens the run; the original (*job).Run has already returned,
+// so a new job.New(...).Run against that run id must notice the existing
+// TaskRun rows (including the pending instance) and execute only that
+// instance — not rematerialize the DAG, not re-run succeeded siblings.
+func TestFanOutPartitionRetryResumesOnlyTheResetInstance(t *testing.T) {
+	f := newFanOutFixture(t, `["keep","fail"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["fail"] = fmt.Errorf("boom")
+
+	require.Error(t, f.run(t, defaultFanOutVars()))
+
+	before := statusByPartition(f.instanceRows(t))
+	require.Equal(t, string(run.TaskStatusFailed), before["fail"])
+	require.Equal(t, string(run.TaskStatusSucceeded), before["keep"])
+
+	idsBefore := map[string]uuid.UUID{}
+	for _, r := range f.instanceRows(t) {
+		idsBefore[r.PartitionValue] = r.ID
+	}
+	keepCreatesBefore := f.engine.createCount("keep")
+	require.Equal(t, 1, keepCreatesBefore)
+
+	var jobRun models.JobRun
+	require.NoError(t, f.db.Where("job_id = ?", f.jobID).Order("created_at DESC").First(&jobRun).Error)
+
+	delete(f.engine.createErrByPartition, "fail")
+	_, err := f.store.RetryPartition(context.Background(), jobRun.ID, idsBefore["fail"])
+	require.NoError(t, err)
+
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	ctx := run.WithContext(context.Background(), jobRun.ID)
+	require.NoError(t, New(&models.Job{ID: f.jobID}, opts...).Run(ctx),
+		"local resume must execute the reset instance through job.New → Run")
+
+	after := f.instanceRows(t)
+	require.Len(t, after, 2, "a partition retry reuses the recorded instances; it must not re-expand")
+	status := statusByPartition(after)
+	require.Equal(t, string(run.TaskStatusSucceeded), status["fail"],
+		"the reset instance must actually run again, not stay pending")
+	require.Equal(t, string(run.TaskStatusSucceeded), status["keep"])
+	for _, r := range after {
+		require.Equal(t, idsBefore[r.PartitionValue], r.ID,
+			"partition %s must keep its task_run_id across the retry", r.PartitionValue)
+	}
+
+	require.Equal(t, keepCreatesBefore, f.engine.createCount("keep"),
+		"retrying `fail` must not re-run the succeeded sibling")
+	require.Equal(t, 2, f.engine.createCount("fail"), "the failed instance re-executes exactly once more")
+}

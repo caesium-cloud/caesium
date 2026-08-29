@@ -388,7 +388,10 @@ partition set.
 - `GET /v1/jobs/:id/runs/:run_id/tasks/:task_id/partitions` — paginated
   instance list: value, index, status, attempt, cache_hit, duration, error.
 - `POST …/tasks/:task_id/partitions/:index/retry` — reset one failed instance
-  (terminal runs only; re-evaluates fan-in on completion).
+  (instance must be failed; a finished run is re-opened and resumed through
+  `job.New` → `Run` in local mode, or the dispatcher in distributed mode;
+  re-evaluates fan-in on completion). Does not cascade to dependents that
+  already succeeded.
 - Run detail payloads collapse fanned groups to one entry with
   `partition_count` + a status histogram; a 10k-instance run must not bloat
   every run list response.

@@ -12,9 +12,10 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -23,32 +24,30 @@ import (
 // Injectable dependency seams.
 //
 // The handlers' real dependencies are process-wide singletons resolved from the
-// environment (runstorage.Default, jsvc.Service, runsvc.New, env.Variables), so
-// a unit test cannot point them at a scratch database and the handler itself
-// goes untested — which is exactly how a silently truncating page and a
-// 200-that-never-executes both shipped green. These vars keep the HANDLER under
-// test; production wiring is unchanged. Mirrors logInstanceLoader in logs.go.
+// environment (runstorage.Default, jsvc.Service, runsvc.New), so a unit test
+// cannot point them at a scratch database and the handler itself goes untested
+// — which is exactly how a silently truncating page and a 200-that-never-executes
+// both shipped green. These vars keep the HANDLER under test; production wiring
+// is unchanged. Mirrors logInstanceLoader in logs.go.
 var (
 	partitionDB = func() *gorm.DB { return runstorage.Default().DB() }
 
-	partitionJobExists = func(ctx context.Context, jobID uuid.UUID) error {
-		_, err := jsvc.Service(ctx).Get(jobID)
-		return err
+	partitionGetJob = func(ctx context.Context, jobID uuid.UUID) (*models.Job, error) {
+		return jsvc.Service(ctx).Get(jobID)
 	}
 
-	partitionRunJobID = func(ctx context.Context, runID uuid.UUID) (uuid.UUID, error) {
-		entry, err := runsvc.New(ctx).Get(runID)
-		if err != nil {
-			return uuid.Nil, err
-		}
-		return entry.JobID, nil
+	partitionGetRun = func(ctx context.Context, runID uuid.UUID) (*runstorage.JobRun, error) {
+		return runsvc.New(ctx).Get(runID)
 	}
 
 	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
 		return runstorage.Default().RetryPartition(ctx, runID, taskRunID)
 	}
 
-	partitionExecutionMode = func() string { return env.Variables().ExecutionMode }
+	// partitionKickoff starts the in-process engine against a reopened run so a
+	// local-mode server actually executes the reset instance. Stubbed in handler
+	// tests; production wiring is kickoffPartitionRetryRun.
+	partitionKickoff = kickoffPartitionRetryRun
 )
 
 const (
@@ -104,11 +103,11 @@ func ListPartitions(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 	taskParam := c.Param("task_id")
-	if err := partitionJobExists(ctx, jobID); err != nil {
+	if _, err := partitionGetJob(ctx, jobID); err != nil {
 		return echo.ErrNotFound
 	}
-	runJobID, err := partitionRunJobID(ctx, runID)
-	if err != nil || runJobID != jobID {
+	runEntry, err := partitionGetRun(ctx, runID)
+	if err != nil || runEntry == nil || runEntry.JobID != jobID {
 		return echo.ErrNotFound
 	}
 	taskID, err := resolveTaskRef(jobID, taskParam)
@@ -228,30 +227,17 @@ func RetryPartition(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
-	if err := partitionJobExists(ctx, jobID); err != nil {
+	j, err := partitionGetJob(ctx, jobID)
+	if err != nil {
 		return echo.ErrNotFound
 	}
-	runJobID, err := partitionRunJobID(ctx, runID)
-	if err != nil || runJobID != jobID {
+	runEntry, err := partitionGetRun(ctx, runID)
+	if err != nil || runEntry == nil || runEntry.JobID != jobID {
 		return echo.ErrNotFound
 	}
 	taskID, err := resolveTaskRef(jobID, taskParam)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
-	}
-
-	// A per-partition retry only means something when SOMETHING will pick the
-	// reset row back up. In local execution mode nothing does: the in-process
-	// job engine drives its own DAG and exits when the run finishes, and there
-	// is no dispatcher poll and no worker claim loop behind it. Resetting an
-	// instance there returned 200 and left it PENDING forever — with the run
-	// re-opened to `running`, so the run never completed again either. Refuse,
-	// and name the path that does work locally.
-	if !partitionRetryIsDispatchable() {
-		return echo.NewHTTPError(http.StatusConflict,
-			"per-partition retry requires distributed execution mode "+
-				"(CAESIUM_EXECUTION_MODE=distributed); in local mode nothing dispatches the reset "+
-				"instance — retry the run instead")
 	}
 
 	db := partitionDB()
@@ -271,6 +257,16 @@ func RetryPartition(c *echo.Context) error {
 		return retryPartitionHTTPError(err)
 	}
 
+	// A terminal run's original (*job).Run has already returned: local mode has
+	// no dispatcher to pick the reset pending instance up, so start a new
+	// job.New(...).Run against the reopened run (the same kickoff whole-run
+	// retry uses). While the run is still in flight the in-process loop — or
+	// the distributed claimer — will see the pending row; a second Run() would
+	// race it.
+	if partitionRetryNeedsKickoff(runEntry.Status) {
+		partitionKickoff(j, runID, runEntry.Params)
+	}
+
 	return c.JSON(http.StatusOK, map[string]any{
 		"retried":     true,
 		"index":       index,
@@ -280,12 +276,28 @@ func RetryPartition(c *echo.Context) error {
 	})
 }
 
-// partitionRetryIsDispatchable reports whether this server has a lane that will
-// actually dispatch a reset instance. Mirrors the replay service's
-// isDistributedExecutionMode: the same "nothing polls in local mode" constraint,
-// resolved from the same env var.
-func partitionRetryIsDispatchable() bool {
-	return strings.EqualFold(strings.TrimSpace(partitionExecutionMode()), "distributed")
+// partitionRetryNeedsKickoff reports whether a new in-process engine must be
+// started after the store reset. Only a run that had already finished has no
+// live driver; RetryPartition reopens those so this kickoff has something to
+// resume.
+func partitionRetryNeedsKickoff(status runstorage.Status) bool {
+	return status == runstorage.StatusFailed || status == runstorage.StatusSucceeded
+}
+
+// kickoffPartitionRetryRun resumes a reopened run through job.New → Run so the
+// reset pending instance actually executes. In local mode that is the DAG loop
+// (rehydrating existing TaskRun rows, including the reset instance); in
+// distributed mode Run waits for workers, matching POST .../retry.
+func kickoffPartitionRetryRun(j *models.Job, runID uuid.UUID, params map[string]string) {
+	if j == nil {
+		return
+	}
+	go func() {
+		runCtx := runstorage.WithContext(context.Background(), runID)
+		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(runCtx); err != nil {
+			log.Error("partition retry run failure", "id", j.ID, "run_id", runID, "error", err)
+		}
+	}()
 }
 
 // partitionStatusCounts is the per-status histogram of a fan-out group, computed

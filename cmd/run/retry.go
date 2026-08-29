@@ -62,11 +62,11 @@ var retryCmd = &cobra.Command{
 		// Past argument validation. Everything below talks to the server or the
 		// store, and those failures are not usage errors: cobra prints the whole
 		// usage block after ANY error from RunE, which buried the actionable
-		// line — a per-partition retry against a local-mode server answers 409
-		// with "requires distributed execution mode", and that message was
-		// followed by forty lines of flag help. Same convention as cmd/verify:
-		// flipped here rather than declared on the command, so a missing or
-		// malformed flag above still gets its usage block.
+		// line — retrying a succeeded partition answers 409 with "only a failed
+		// partition can be retried", and that message was followed by forty
+		// lines of flag help. Same convention as cmd/verify: flipped here
+		// rather than declared on the command, so a missing or malformed flag
+		// above still gets its usage block.
 		cmd.SilenceUsage = true
 
 		if retryFromFailurePartition != "" {
