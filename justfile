@@ -407,6 +407,7 @@ integration-test-podman: build
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
@@ -451,6 +452,7 @@ integration-up: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
         -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
@@ -548,12 +550,16 @@ integration-up-owner-memory: build-test
 # test/infra_fixture_test.go): the podman, helm and kubernetes lanes bring up
 # their own servers without the reagent images and would drift red otherwise.
 #
-# CAESIUM_CACHE_ENABLED is set here because the whole point of this feature is
-# change-gating: without it every "must not be cached" assertion passes
-# vacuously and the cache-behaviour scenarios would measure nothing. It is NOT
-# added to integration-up, because every scenario there sets `metadata.cache:
-# true`, which pkg/jobdef.applyCache layers over the env default — so the
-# default lane genuinely does not depend on it.
+# CAESIUM_CACHE_ENABLED is set here (and, since #368, on integration-up too)
+# because the whole point of this feature is change-gating: without it every
+# "must not be cached" assertion passes vacuously and the cache-behaviour
+# scenarios would measure nothing. Every cache scenario in test/ pins its own
+# behavior via `metadata.cache: true` / `cache: false` (pkg/jobdef.applyCache
+# layers a job/step declaration over the env default, so an explicit
+# declaration always wins), so turning this on here does not change what any
+# existing scenario asserts — it just makes the server-wide default itself
+# exercised too, on every lane that starts its own server (this one, the
+# default lane, podman, and the ui-e2e/ui-e2e-auth blocks in ci.yml).
 
 # Start the infra lane's server (own container, reagent images built).
 integration-up-infra: build-test build-reagents
