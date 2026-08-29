@@ -1073,10 +1073,12 @@ by partition *value*, never by index.
 ### The gap, precisely
 
 A fanned step's `outputSchema` is validated **per instance**, on that instance's
-own row, before it is marked terminal — `ValidateTaskOutputSchemaInstance`
+own row, before it is marked terminal — on the *execution* path; a cache hit
+skips it entirely (see below) — via `ValidateTaskOutputSchemaInstance`
 (`internal/run/store_instance.go:358`), called from the local group runner
 (`internal/job/job.go:1501`) and from the worker
-(`internal/worker/runtime_executor.go:904`). That is correct and it stays.
+(`internal/worker/runtime_executor.go:836`, inside `executeTask`). That is
+correct and it stays.
 
 The **fold** is a different value with a different shape, and nothing validates
 it. `AggregateFanInOutputs` (`pkg/task/output.go:660`) turns N per-instance
@@ -1103,8 +1105,9 @@ empty schema (`pkg/task/schema.go:27`). An instance that emitted nothing is
 validated as the empty object `{}`, so a `required` key is violated exactly as
 it is for a partial map (`pkg/task/schema_test.go:40-51` pins the partial case).
 In `fail` mode that instance therefore **fails on its own**, the group fails,
-and the fan-in consumer skips. A silent partition under `required` + `fail` is
-already caught, and a group schema is not what catches it.
+and an `all_success` consumer skips (an `all_done` consumer still runs — the
+distinction this doc insists on below). A silent partition under `required` +
+`fail` is already caught, and a group schema is not what catches it.
 
 What per-instance validation structurally cannot see is a fold that is wrong
 while every instance is individually right:
@@ -1400,11 +1403,47 @@ applies to this item like every other:
    `lockGroupForTerminalDecisionTx` buys on PostgreSQL and what Raft
    serialization gives on dqlite — so the fold is computed and validated exactly
    once per resolution even under concurrent sibling completions.
-3. **Run-owner in-memory engine** — the group-terminal transition **inside**
-   `RunState.ApplyCompletion`, before its `advanceSuccessors(seeds)` call
-   (`internal/run/owner_state.go:383`) releases the group's cross-step
-   successors; persisted in the **same `CompleteTaskOwner` transaction** that
-   stamps the last instance's terminal row (`internal/run/owner_manager.go:439`).
+3. **Run-owner in-memory engine** — in `OwnerManager.CompleteInstance`
+   (`internal/run/owner_manager.go:314`), **between `ApplyCompletion` returning
+   (`:416`) and `CompleteTaskOwner` (`:439`)**, with the aggregate passed into
+   that call so it is written in the same transaction that stamps the last
+   instance's terminal row.
+
+   That seam is where the two halves of the fold actually meet, and neither half
+   can move to the other:
+
+   - **Detection lives in `RunState`.** It already knows a group resolved —
+     `groupResolved` (`internal/run/owner_state.go:1006`) — so
+     `ApplyCompletion` reports "this completion resolved group G" through
+     `CompletionResult` (`:59-65`), which today carries
+     `{TerminalSequence, Ready, Skipped, Complete, Applied}` and gains that
+     signal.
+   - **The data does not.** `RunState` (`:102-141`) holds topology, statuses,
+     and the fan-out maps but **no outputs** — `OwnerTaskState` (`:18-31`) is
+     `{Status, Attempt, ClaimedBy, LeaseExpiresAtMs, Started}`, and the string
+     `output` does not appear in `owner_state.go` at all. `ApplyCompletion`
+     (`:269`) is not passed the completing instance's output either, and
+     `RunState` holds no store handle, so it cannot read the siblings'. Folding
+     *inside* `ApplyCompletion` is therefore not merely awkward — it is not
+     expressible.
+   - **The manager has both.** `CompleteInstance` holds the completing
+     instance's `output` as a parameter, and it already reads this exact group's
+     rows a few lines earlier — `m.store.TaskRunsForTask(runID, catalogID)`
+     (`:406-407`, guarded by `staged.CatalogTaskID(identity)`). The fold is
+     those sibling rows plus the in-hand output.
+   - **`CompleteTaskOwner` has no group logic to hook into.** Unlike
+     `completeTask`, `Store.CompleteTaskOwner` (`internal/run/store.go:3688-3891`)
+     contains no `isFanOutInstance`, `groupAllTerminalTx`, or
+     `decrementInGroupDependentsTx` — in this lane the group decision lives
+     entirely in the owner's memory. So the aggregate is handed to it as an
+     argument rather than derived inside it.
+
+   **This is still "before release."** Publication is `or.state = staged`
+   (`:449`), not `advanceSuccessors`: the latter runs on `staged`, a
+   `Clone()` taken at `:345`, so nothing a dispatcher can observe changes until
+   the assignment. Every safety property this section wants is satisfied by
+   folding anywhere before `:439`, and the seam above is the last point that
+   still rides the terminal-row write.
 
    **Not `TakeResolvedGroups`**, despite its name. By the time it runs
    (`internal/run/owner_manager.go:465`) the DAG has already advanced:
