@@ -123,44 +123,64 @@ type CallbackRun struct {
 }
 
 type TaskRun struct {
-	ID                      uuid.UUID                 `json:"id"`
-	JobRunID                uuid.UUID                 `json:"job_run_id"`
-	TaskID                  uuid.UUID                 `json:"task_id"`
-	JobAlias                string                    `json:"job_alias,omitempty"`
-	JobLabels               map[string]string         `json:"job_labels,omitempty"`
-	AtomID                  uuid.UUID                 `json:"atom_id"`
-	Engine                  models.AtomEngine         `json:"engine"`
-	Image                   string                    `json:"image"`
-	Command                 []string                  `json:"command"`
-	RuntimeID               string                    `json:"runtime_id,omitempty"`
-	Status                  TaskStatus                `json:"status"`
-	Priority                int                       `json:"priority"`
-	NodeSelector            map[string]string         `json:"node_selector,omitempty"`
-	ClaimedBy               string                    `json:"claimed_by,omitempty"`
-	ClaimExpiresAt          *time.Time                `json:"claim_expires_at,omitempty"`
-	ClaimAttempt            int                       `json:"claim_attempt"`
-	Attempt                 int                       `json:"attempt"`
-	MaxAttempts             int                       `json:"max_attempts"`
-	Result                  string                    `json:"result,omitempty"`
-	Output                  map[string]string         `json:"output,omitempty"`
-	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
-	BranchSelections        []string                  `json:"branch_selections,omitempty"`
-	Quarantine              bool                      `json:"quarantine"`
-	CacheHit                bool                      `json:"cache_hit"`
-	ReplaySafe              bool                      `json:"replay_safe"`
-	CacheOriginRunID        *uuid.UUID                `json:"cache_origin_run_id,omitempty"`
-	CacheCreatedAt          *time.Time                `json:"cache_created_at,omitempty"`
-	CacheExpiresAt          *time.Time                `json:"cache_expires_at,omitempty"`
-	RateLimitRetryAfter     *time.Time                `json:"rate_limit_retry_after,omitempty"`
-	StartedAt               *time.Time                `json:"started_at,omitempty"`
-	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
-	Error                   string                    `json:"error,omitempty"`
-	OutstandingPredecessors int                       `json:"outstanding_predecessors"`
-	PartitionValue          string                    `json:"partition_value,omitempty"`
-	PartitionIndex          int                       `json:"partition_index,omitempty"`
-	PartitionCount          int                       `json:"partition_count,omitempty"`
-	PartitionFingerprint    string                    `json:"partition_fingerprint,omitempty"`
-	PartitionDependsOn      []string                  `json:"partition_depends_on,omitempty"`
+	ID               uuid.UUID                 `json:"id"`
+	JobRunID         uuid.UUID                 `json:"job_run_id"`
+	TaskID           uuid.UUID                 `json:"task_id"`
+	JobAlias         string                    `json:"job_alias,omitempty"`
+	JobLabels        map[string]string         `json:"job_labels,omitempty"`
+	AtomID           uuid.UUID                 `json:"atom_id"`
+	Engine           models.AtomEngine         `json:"engine"`
+	Image            string                    `json:"image"`
+	Command          []string                  `json:"command"`
+	RuntimeID        string                    `json:"runtime_id,omitempty"`
+	Status           TaskStatus                `json:"status"`
+	Priority         int                       `json:"priority"`
+	NodeSelector     map[string]string         `json:"node_selector,omitempty"`
+	ClaimedBy        string                    `json:"claimed_by,omitempty"`
+	ClaimExpiresAt   *time.Time                `json:"claim_expires_at,omitempty"`
+	ClaimAttempt     int                       `json:"claim_attempt"`
+	Attempt          int                       `json:"attempt"`
+	MaxAttempts      int                       `json:"max_attempts"`
+	Result           string                    `json:"result,omitempty"`
+	Output           map[string]string         `json:"output,omitempty"`
+	SchemaViolations []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
+	BranchSelections []string                  `json:"branch_selections,omitempty"`
+	Quarantine       bool                      `json:"quarantine"`
+	CacheHit         bool                      `json:"cache_hit"`
+	ReplaySafe       bool                      `json:"replay_safe"`
+	// The remaining frozen execution inputs. They are `json:"-"` because they
+	// are not API surface — they exist so the LOCAL executor can run a task from
+	// the same row the distributed worker runs it from (issue #354). The
+	// scheduler resolves them once at RegisterTasks; both lanes must then read
+	// them here rather than re-deriving them from a live catalog that a
+	// `job apply` may have moved since the run was registered.
+	//
+	// CacheEnabled..CacheTTLNever are the seven columns the worker rebuilds
+	// jobdefschema.CacheConfig from (internal/worker/runtime_executor.go).
+	CacheEnabled    bool          `json:"-"`
+	CacheTTL        time.Duration `json:"-"`
+	CacheVersion    int           `json:"-"`
+	CachePinDigests bool          `json:"-"`
+	CacheDigestTTL  time.Duration `json:"-"`
+	CacheChain      string        `json:"-"`
+	CacheTTLNever   bool          `json:"-"`
+	// OutputSchema / SchemaValidation are what the worker validates a task's
+	// output against (runtimeExecutor.runSchemaValidation).
+	OutputSchema            []byte     `json:"-"`
+	SchemaValidation        string     `json:"-"`
+	CacheOriginRunID        *uuid.UUID `json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt          *time.Time `json:"cache_created_at,omitempty"`
+	CacheExpiresAt          *time.Time `json:"cache_expires_at,omitempty"`
+	RateLimitRetryAfter     *time.Time `json:"rate_limit_retry_after,omitempty"`
+	StartedAt               *time.Time `json:"started_at,omitempty"`
+	CompletedAt             *time.Time `json:"completed_at,omitempty"`
+	Error                   string     `json:"error,omitempty"`
+	OutstandingPredecessors int        `json:"outstanding_predecessors"`
+	PartitionValue          string     `json:"partition_value,omitempty"`
+	PartitionIndex          int        `json:"partition_index,omitempty"`
+	PartitionCount          int        `json:"partition_count,omitempty"`
+	PartitionFingerprint    string     `json:"partition_fingerprint,omitempty"`
+	PartitionDependsOn      []string   `json:"partition_depends_on,omitempty"`
 	// PartitionStatusCounts is the per-status histogram of a COLLAPSED fan-out
 	// group: {"succeeded":2,"failed":1,…}. Set only on the collapsed group entry
 	// that run-detail payloads return in place of N instance rows (see
@@ -5031,6 +5051,15 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
 		Quarantine:              model.Quarantine,
 		ReplaySafe:              model.ReplaySafe,
+		CacheEnabled:            model.CacheEnabled,
+		CacheTTL:                model.CacheTTL,
+		CacheVersion:            model.CacheVersion,
+		CachePinDigests:         model.CachePinDigests,
+		CacheDigestTTL:          model.CacheDigestTTL,
+		CacheChain:              model.CacheChain,
+		CacheTTLNever:           model.CacheTTLNever,
+		OutputSchema:            append([]byte(nil), model.OutputSchema...),
+		SchemaValidation:        model.SchemaValidation,
 	}
 
 	if len(model.Output) > 0 {

@@ -34,7 +34,7 @@ var retryCmd = &cobra.Command{
 	Use:   "retry",
 	Short: "Retry a failed run, preserving succeeded/cached tasks",
 	Long: "Retry a failed or completed run. Tasks that previously succeeded or were served from cache are preserved; only failed, skipped, and pending tasks are re-executed.\n\n" +
-		"A retry reproduces the run as it was REGISTERED: each task re-executes the engine, image, command, and attempt budget frozen onto its row when the run started, in local and distributed mode alike. " +
+		"A retry reproduces the run as it was REGISTERED: each task re-executes the engine, image, command, attempt budget, output schema (and its warn/fail mode) and resolved cache config frozen onto its row when the run started, in local and distributed mode alike. " +
 		"Retrying an older run after `caesium job apply` therefore re-runs the ORIGINAL command — trigger a new run to pick up an applied change.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if retryFromFailureJobID == "" {

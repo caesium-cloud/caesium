@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
@@ -40,6 +41,22 @@ func declareFanOutOutputSchema(t *testing.T, f *fanOutFixture) {
 		Update("output_schema", datatypes.JSON(schemaBytes)).Error)
 }
 
+// persistJobSchemaValidation writes the job row RegisterTasks reads
+// metadata.schemaValidation from when it FREEZES a task's enforcement mode onto
+// its task_runs row (internal/run/store.go: the freeze is gated on the job row
+// being found). Both executors now read that frozen value rather than the live
+// job, so an in-memory models.Job alone no longer configures validation - the
+// same requirement the distributed lane has always had.
+func persistJobSchemaValidation(t *testing.T, f *fanOutFixture, mode string) {
+	t.Helper()
+	require.NoError(t, f.db.Create(&models.Job{
+		ID:               f.jobID,
+		Alias:            "fanout-schema-" + f.jobID.String(),
+		TriggerID:        uuid.New(),
+		SchemaValidation: mode,
+	}).Error)
+}
+
 func schemaViolationsByPartition(t *testing.T, rows []models.TaskRun) map[string][]pkgtask.SchemaViolation {
 	t.Helper()
 	out := make(map[string][]pkgtask.SchemaViolation, len(rows))
@@ -67,6 +84,8 @@ func TestFanOutLocalSchemaViolationsLandOnTheOffendingInstance(t *testing.T) {
 	f.engine.logsByPartition["a"] = "##caesium::output {\"rows\":\"1\"}\n"
 	f.engine.logsByPartition["b"] = "##caesium::output {\"rows\":\"not-a-number\"}\n"
 	f.engine.logsByPartition["c"] = "##caesium::output {\"rows\":\"3\"}\n"
+
+	persistJobSchemaValidation(t, f, schema.SchemaValidationWarn)
 
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
 	// warn mode: the offending partition still succeeds, so the ONLY durable
@@ -103,6 +122,8 @@ func TestFanOutLocalSchemaFailModeRecordsEvidenceOnTheFailedInstance(t *testing.
 	f.engine.logsByPartition["a"] = "##caesium::output {\"rows\":\"1\"}\n"
 	f.engine.logsByPartition["b"] = "##caesium::output {\"rows\":\"not-a-number\"}\n"
 	f.engine.logsByPartition["c"] = "##caesium::output {\"rows\":\"3\"}\n"
+
+	persistJobSchemaValidation(t, f, schema.SchemaValidationFail)
 
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
 	require.Error(t, New(&models.Job{ID: f.jobID, SchemaValidation: schema.SchemaValidationFail}, opts...).

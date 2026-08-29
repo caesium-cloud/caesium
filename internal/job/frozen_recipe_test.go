@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -10,8 +11,10 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // TestRetryExecutesRecipeFrozenOnTheRow is the local-lane half of the
@@ -188,4 +191,171 @@ func TestRetryUsesTheAttemptBudgetFrozenOnTheRow(t *testing.T) {
 
 	require.Len(t, engine.createRequestsForTask(taskID), 4,
 		"the retry ran the applied retry budget instead of the 2 attempts the row froze")
+}
+
+// buildFrozenFieldFixture wires a one-task job whose row therefore freezes the
+// job-level schemaValidation and the resolved cache config, and returns the
+// pieces a test mutates to simulate `caesium job apply`.
+func buildFrozenFieldFixture(t *testing.T, jobAlias string, opts ...func(*models.Job, *models.Task)) (
+	*run.Store, *fakeEngine, *models.Job, *models.Task, []JobOption,
+) {
+	t.Helper()
+
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	jobModel := &models.Job{ID: jobID, Alias: jobAlias, TriggerID: uuid.New()}
+	taskModel := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID, Name: "subject"}
+	for _, apply := range opts {
+		apply(jobModel, taskModel)
+	}
+	require.NoError(t, db.Create(jobModel).Error)
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{taskModel}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{atomID: fakeModelAtom(atomID)}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	jobOpts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+	return store, engine, jobModel, taskModel, jobOpts
+}
+
+// TestRetryValidatesAgainstTheFrozenOutputSchema covers `output_schema` and
+// `schema_validation`, the two remaining columns RegisterTasks freezes and the
+// distributed worker validates from (runtimeExecutor.runSchemaValidation reads
+// taskRun.OutputSchema / taskRun.SchemaValidation).
+//
+// The local lane used to read them live - taskModel.OutputSchema and the live
+// job's schemaValidation - so after a `job apply` edited the schema or flipped
+// warn/fail, a retried run's PASS/FAIL outcome depended on which lane executed
+// it. Here the run is registered under `fail` with a schema the output violates;
+// the apply then relaxes both. The retry must still fail.
+func TestRetryValidatesAgainstTheFrozenOutputSchema(t *testing.T) {
+	strictSchema, err := json.Marshal(map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"rows": map[string]any{"type": "integer"}},
+		"required":   []string{"rows"},
+	})
+	require.NoError(t, err)
+
+	store, engine, _, taskModel, opts := buildFrozenFieldFixture(t, "frozen-schema",
+		func(j *models.Job, task *models.Task) {
+			j.SchemaValidation = jobdefschema.SchemaValidationFail
+			task.OutputSchema = datatypes.JSON(strictSchema)
+		})
+
+	jobID := taskModel.JobID
+	taskID := taskModel.ID
+
+	// The container emits a string where the schema demands an integer.
+	engine.logsByName[taskID.String()] = "##caesium::output {\"rows\":\"not-a-number\"}\n"
+
+	require.Error(t, New(&models.Job{ID: jobID}, opts...).Run(context.Background()),
+		"fail-mode validation must fail the run")
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.TaskStatusFailed, taskStatusByID(snapshot)[taskID])
+	frozen := taskRunByID(snapshot, taskID)
+	require.Equal(t, jobdefschema.SchemaValidationFail, frozen.SchemaValidation,
+		"the row must carry the enforcement mode the run was registered under")
+	require.NotEmpty(t, frozen.OutputSchema, "the row must carry the registered schema")
+
+	// `job apply` relaxes the contract: schema dropped AND enforcement disabled.
+	// Neither may reach the already-registered run.
+	taskModel.OutputSchema = nil
+	require.NoError(t, store.DB().Model(&models.Job{}).
+		Where("id = ?", jobID).Update("schema_validation", "").Error)
+	require.NoError(t, store.DB().Model(&models.Task{}).
+		Where("id = ?", taskID).Update("output_schema", nil).Error)
+
+	_, err = store.RetryFromFailure(snapshot.ID)
+	require.NoError(t, err)
+
+	require.Error(t, New(&models.Job{ID: jobID}, opts...).
+		Run(run.WithContext(context.Background(), snapshot.ID)),
+		"the retry validated against the relaxed live definition instead of the schema frozen on the row")
+
+	final := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.TaskStatusFailed, taskStatusByID(final)[taskID])
+}
+
+// TestRetryUsesTheCacheConfigFrozenOnTheRow covers the seven cache columns.
+// cacheCfg.Version and cacheCfg.Chain are folded into the identity hash and
+// cacheCfg.Enabled gates publication, so recomputing them from the live
+// definition gave a retried task a different cache key - and a different publish
+// decision - than the worker, which builds cacheCfg straight off the row.
+//
+// The mutation is a `cache.version` BUMP rather than a disable, deliberately:
+// the hash is only computed and persisted while caching is on
+// (internal/job/job.go gates it on cacheCfg.Enabled), so disabling the cache
+// would make a pre-fix retry write no hash at all and leave the first run's
+// value in place - the assertion would then pass without the fix. Bumping the
+// version keeps caching on down both paths, so the hash is genuinely rewritten
+// and the only question is WHICH version went into it.
+//
+// The task also has to FAIL in the first run, or the retry would preserve it as
+// succeeded and never re-execute (nor re-hash) it.
+func TestRetryUsesTheCacheConfigFrozenOnTheRow(t *testing.T) {
+	cacheV1, err := json.Marshal(map[string]any{"ttl": "1h", "version": 1})
+	require.NoError(t, err)
+
+	store, engine, _, taskModel, opts := buildFrozenFieldFixture(t, "frozen-cache",
+		func(j *models.Job, task *models.Task) {
+			task.CacheConfig = datatypes.JSON(cacheV1)
+		})
+
+	jobID := taskModel.JobID
+	taskID := taskModel.ID
+
+	// Fails on every attempt so the retry genuinely re-executes and re-hashes.
+	engine.resultByName[taskID.String()] = atom.Failure
+
+	require.Error(t, New(&models.Job{ID: jobID}, opts...).Run(context.Background()))
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.TaskStatusFailed, taskStatusByID(snapshot)[taskID])
+
+	frozen := taskRunByID(snapshot, taskID)
+	require.True(t, frozen.CacheEnabled, "the row must freeze the resolved cache config")
+	require.Equal(t, 1, frozen.CacheVersion, "the row must freeze the registered cache version")
+
+	registeredHash := taskHashFromDB(t, store, snapshot.ID, taskID)
+	require.NotEmpty(t, registeredHash, "an enabled-cache task must record its identity hash")
+
+	// `job apply` bumps the step's cache version - a deliberate key rotation.
+	// A NEW run must honour it; this already-registered run must not.
+	cacheV2, err := json.Marshal(map[string]any{"ttl": "1h", "version": 2})
+	require.NoError(t, err)
+	taskModel.CacheConfig = datatypes.JSON(cacheV2)
+	require.NoError(t, store.DB().Model(&models.Task{}).
+		Where("id = ?", taskID).Update("cache_config", datatypes.JSON(cacheV2)).Error)
+
+	_, err = store.RetryFromFailure(snapshot.ID)
+	require.NoError(t, err)
+	require.Error(t, New(&models.Job{ID: jobID}, opts...).
+		Run(run.WithContext(context.Background(), snapshot.ID)))
+
+	require.Equal(t, registeredHash, taskHashFromDB(t, store, snapshot.ID, taskID),
+		"the retry rebuilt cache identity from the live cache.version instead of the one frozen on the row")
+}
+
+// taskHashFromDB reads the identity hash the executor persisted for a task run.
+func taskHashFromDB(t *testing.T, store *run.Store, runID, taskID uuid.UUID) string {
+	t.Helper()
+	var row models.TaskRun
+	require.NoError(t, store.DB().
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		First(&row).Error)
+	return row.Hash
 }

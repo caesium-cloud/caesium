@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -111,6 +112,127 @@ steps:
 	s.Equal("failed", s.taskStatusesByName(job.ID, retryRun)["subject"])
 	s.Equal("succeeded", s.taskStatusesByName(job.ID, retryRun)["seed"],
 		"a retry must preserve the already-succeeded predecessor")
+}
+
+// TestRetryValidatesAgainstTheRegisteredOutputSchema proves the freeze covers a
+// field BEYOND `command`: the output schema and its enforcement mode, which
+// RegisterTasks pins onto the row and the distributed worker validates from
+// (runtimeExecutor.runSchemaValidation). The local lane used to read both live,
+// so a retry after a `job apply` that relaxed the contract passed on one lane
+// and failed on the other.
+//
+// The step's command never changes here - only `outputSchema` and
+// `metadata.schemaValidation` - so a pass can only come from the frozen
+// validation inputs, not from the command freeze the sibling scenario covers.
+// Like that scenario this is deliberately lane-INDEPENDENT and runs in both.
+func (s *IntegrationTestSuite) TestRetryValidatesAgainstTheRegisteredOutputSchema() {
+	alias := fmt.Sprintf("integration-retry-frozen-schema-%d", time.Now().UnixNano())
+
+	// v1: schemaValidation=fail plus a schema demanding an integer `rows`. The
+	// step emits a string, so the task fails validation and the run is
+	// retryable. The command is byte-identical in both manifests.
+	const command = `["sh", "-c", "echo '##caesium::output {\"rows\": \"not-a-number\"}'"]`
+
+	manifestV1 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  schemaValidation: fail
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: emit
+    image: alpine:3.23
+    command: %s
+    outputSchema:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: integer
+`, alias, command)
+
+	// v2: the contract is relaxed away entirely - enforcement disabled AND the
+	// schema dropped. A NEW run would pass; this registered one must not.
+	manifestV2 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: emit
+    image: alpine:3.23
+    command: %s
+`, alias, command)
+
+	dirV1 := s.writeJobManifest(manifestV1)
+	defer os.RemoveAll(dirV1)
+	s.runCLI("job", "apply", "--path", dirV1, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	firstRun := s.awaitRun(job.ID, runID, runTimeout)
+	s.Require().Equal("failed", firstRun.Status,
+		"fail-mode validation of a string against an integer schema must fail the run: %s", firstRun.Error)
+
+	dirV2 := s.writeJobManifest(manifestV2)
+	defer os.RemoveAll(dirV2)
+	s.runCLI("job", "apply", "--path", dirV2, "--server", s.caesiumURL)
+
+	// Fixture guard: without a real catalog change this scenario proves nothing.
+	s.Require().Empty(s.jobTaskOutputSchema(job.ID, "emit"),
+		"the second apply did not drop the outputSchema from the catalog")
+
+	resp, err := s.doJSONRequest(http.MethodPost,
+		fmt.Sprintf("%s/v1/jobs/%s/runs/%s/retry", s.caesiumURL, job.ID, runID), nil)
+	s.Require().NoError(err)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	s.Require().Equal(http.StatusAccepted, resp.StatusCode, "retry should return 202: %s", body)
+	var reopened runResponse
+	s.Require().NoError(json.Unmarshal(body, &reopened))
+	s.Require().NotEqual("failed", reopened.Status,
+		"the retry response must show the run re-opened, or the wait below races the previous terminal state: %s", body)
+
+	retryRun := s.awaitRun(job.ID, runID, runTimeout)
+
+	s.Equal("failed", retryRun.Status,
+		"the retry validated against the RELAXED live definition instead of the schema frozen when the run was registered")
+	s.Equal("failed", s.taskStatusesByName(job.ID, retryRun)["emit"])
+}
+
+// jobTaskOutputSchema returns the CATALOG outputSchema for a step.
+func (s *IntegrationTestSuite) jobTaskOutputSchema(jobID, name string) string {
+	s.T().Helper()
+
+	var tasks []struct {
+		Name         string          `json:"Name"`
+		OutputSchema json.RawMessage `json:"output_schema"`
+	}
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
+
+	for _, t := range tasks {
+		if t.Name != name {
+			continue
+		}
+		trimmed := strings.TrimSpace(string(t.OutputSchema))
+		if trimmed == "null" {
+			return ""
+		}
+		return trimmed
+	}
+
+	s.T().Fatalf("task %q not found on job %s", name, jobID)
+	return ""
 }
 
 // jobTaskCommand returns the CATALOG command for a step, as the job's task /

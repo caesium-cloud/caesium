@@ -135,8 +135,6 @@ type job struct {
 	priorityOverride       string
 	concurrency            *jobdefschema.Concurrency
 	rateLimits             []jobdefschema.RateLimit
-	schemaValidation       string
-	jobCacheConfig         interface{}
 	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
@@ -165,8 +163,6 @@ func New(m *models.Job, opts ...JobOption) Job {
 		priority:               m.Priority,
 		concurrency:            unmarshalConcurrency(m.Concurrency),
 		rateLimits:             unmarshalRateLimits(m.RateLimits),
-		schemaValidation:       m.SchemaValidation,
-		jobCacheConfig:         unmarshalCacheConfig(m.CacheConfig),
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -191,18 +187,33 @@ func New(m *models.Job, opts ...JobOption) Job {
 	return j
 }
 
-// atomRunner is one local-lane task's execution recipe. Every field that the
-// TaskRun row freezes (engineKind, image, command, maxAttempts) is read FROM
-// that row, not from a live catalog read, so a re-entered run — `caesium run
-// retry` after a `job apply` — executes what the run was registered with. See
-// buildLocalRunners.
+// atomRunner is one local-lane task's execution recipe. Every field the TaskRun
+// row freezes is read FROM that row, not from a live catalog read, so a
+// re-entered run — `caesium run retry` after a `job apply` — executes what the
+// run was registered with, exactly as the distributed worker does. See
+// buildLocalRunners for the field-by-field correspondence.
 type atomRunner struct {
 	engineKind  models.AtomEngine
 	image       string
 	command     []string
 	maxAttempts int
-	spec        container.Spec
-	engine      atom.Engine
+	// cacheCfg is the cache configuration the SCHEDULER resolved at
+	// RegisterTasks, rebuilt from the row's seven cache columns the way
+	// runtimeExecutor.Execute rebuilds it. It must not be re-resolved from the
+	// live step/job/env config: cacheCfg.Version and cacheCfg.Chain are folded
+	// into the identity hash and cacheCfg.Enabled gates publication, so
+	// re-resolving would give a retried task a different cache key — and a
+	// different publish decision — depending on which lane ran it.
+	cacheCfg jobdefschema.CacheConfig
+	// outputSchema / schemaValidation are the frozen contract this task's output
+	// is judged against, matching runtimeExecutor.runSchemaValidation. Reading
+	// them live meant a retry after an apply that edited `outputSchema` or
+	// flipped `metadata.schemaValidation` passed on one lane and failed on the
+	// other.
+	outputSchema     []byte
+	schemaValidation string
+	spec             container.Spec
+	engine           atom.Engine
 }
 
 const (
@@ -405,7 +416,22 @@ func buildLocalRunners(
 			image:       taskState.Image,
 			command:     slices.Clone(taskState.Command),
 			maxAttempts: taskState.MaxAttempts,
-			spec:        spec,
+			// Rebuilt field-for-field from the row, identical to the worker's
+			// construction in runtimeExecutor.Execute. An empty CacheChain —
+			// every row written before that column existed — means transitive,
+			// whose hash is byte-identical to the pre-chain era.
+			cacheCfg: jobdefschema.CacheConfig{
+				Enabled:    taskState.CacheEnabled,
+				TTL:        taskState.CacheTTL,
+				Version:    taskState.CacheVersion,
+				PinDigests: taskState.CachePinDigests,
+				DigestTTL:  taskState.CacheDigestTTL,
+				Chain:      taskState.CacheChain,
+				TTLNever:   taskState.CacheTTLNever,
+			},
+			outputSchema:     slices.Clone(taskState.OutputSchema),
+			schemaValidation: taskState.SchemaValidation,
+			spec:             spec,
 		}
 		if runner.maxAttempts < 1 {
 			runner.maxAttempts = 1
@@ -526,19 +552,6 @@ func applyCacheHit(
 	return store.CacheHitTask(runID, taskID, source, result, output, branchSelections)
 }
 
-// unmarshalCacheConfig decodes a JSON-encoded cache config from a DB column
-// back into the interface{} form expected by ResolveCacheConfig.
-func unmarshalCacheConfig(raw []byte) interface{} {
-	if len(raw) == 0 {
-		return nil
-	}
-	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil
-	}
-	return v
-}
-
 func unmarshalConcurrency(raw []byte) *jobdefschema.Concurrency {
 	if len(raw) == 0 {
 		return nil
@@ -575,7 +588,11 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}
 
-	cacheConfig := cache.ConfigFromEnv()
+	// NOTE: the env cache defaults are deliberately NOT read here any more. The
+	// scheduler folds them into each row at RegisterTasks (cache.ConfigFromEnv
+	// there), and the executor reads the frozen result off the row so a
+	// re-entered run keeps the configuration it was registered with.
+	//
 	// Lazily built, but fanned instances resolve their cache identity from
 	// concurrent goroutines, so the initialization must be once-only rather
 	// than a racy nil check.
@@ -1233,14 +1250,15 @@ func (j *job) Run(ctx context.Context) error {
 		outputEnv map[string]string,
 		predOutputs map[string]map[string]string,
 	) (jobdefschema.CacheConfig, taskHashInputArgs, map[uuid.UUID]string) {
-		var stepCache interface{}
-		if taskModel != nil {
-			stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
-		}
-		cacheCfg := jobdefschema.ResolveCacheConfig(
-			stepCache, j.jobCacheConfig,
-			cacheConfig.Enabled, cacheConfig.TTL, cacheConfig.PinDigests, cacheConfig.DigestTTL,
-		)
+		// The cache configuration the SCHEDULER resolved onto this run's rows,
+		// not a fresh resolution of the live step/job/env config. RegisterTasks
+		// calls ResolveCacheConfig once and freezes all seven fields; the
+		// distributed worker rebuilds them straight off the row. Re-resolving
+		// here made a retried run's cache identity lane-dependent: a `job apply`
+		// that bumped `cache.version`, switched `cache.chain`, or toggled
+		// `cache.enabled` changed the local key and the local publish decision
+		// while the worker kept replaying the registered one.
+		cacheCfg := runner.cacheCfg
 		predHashByID := make(map[uuid.UUID]string)
 
 		taskName := ""
@@ -1590,13 +1608,21 @@ func (j *job) Run(ctx context.Context) error {
 			result, output, branches, _, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
 			cancel()
 
-			if execErr == nil && taskModel != nil {
+			if execErr == nil {
 				// Record violations on THIS INSTANCE's row. SaveSchemaViolations
 				// refuses a catalog task id that resolves to N siblings and only
-				// logs the refusal, so keying on taskModel.ID meant a fanned step
-				// recorded nothing: fail mode lost the evidence for the failure
-				// it was reporting, and warn mode opened an incident with no row.
-				if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskModel.ID, taskRunID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
+				// logs the refusal, so keying on the catalog task meant a fanned
+				// step recorded nothing: fail mode lost the evidence for the
+				// failure it was reporting, and warn mode opened an incident with
+				// no row.
+				//
+				// The schema and its enforcement mode come from the FROZEN row
+				// (runner), not from the live catalog task, matching
+				// runtimeExecutor.runSchemaValidation. taskID is the catalog id
+				// the row itself names, so no live-task lookup is needed and a
+				// vanished catalog task can no longer skip validation the run was
+				// registered to perform.
+				if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output, runner.outputSchema, runner.schemaValidation); err != nil {
 					execErr = err
 				}
 			}
@@ -2232,7 +2258,14 @@ func (j *job) Run(ctx context.Context) error {
 			cancel()
 
 			if execErr == nil {
-				if err := run.ValidateTaskOutputSchema(store, runID, taskModel.ID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
+				// Frozen row, not the live catalog - see the fanned twin above.
+				// This also removes the nil dereference the row-built runner
+				// exposed: taskModel is tasksByID[taskID], previously guaranteed
+				// non-nil only because the runner map was itself built from the
+				// live catalog. Keying on taskID keeps validation running for a
+				// row whose catalog task has vanished, which a nil-taskModel
+				// guard would instead silently skip.
+				if err := run.ValidateTaskOutputSchema(store, runID, taskID, output, runner.outputSchema, runner.schemaValidation); err != nil {
 					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}
