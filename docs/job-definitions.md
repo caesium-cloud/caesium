@@ -646,7 +646,7 @@ The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automatio
 
 `caesium run retry --job-id <job-id> --run-id <run-id>` (REST: `POST /v1/jobs/:id/runs/:run_id/retry`) re-opens a terminal run: succeeded and cache-hit tasks are preserved, and failed, skipped, and pending tasks are re-executed.
 
-**A retry reproduces the run as it was registered.** When a run starts, the scheduler freezes each task's execution inputs onto its `task_runs` row, and a retry resets only scheduling state and the previous attempt's evidence — never those inputs. So if you `caesium job apply` a changed step and then retry an older run, the retry re-executes the **original** definition, not the newly applied one. This holds identically in local and distributed execution mode.
+**A retry preserves the execution fields frozen for tasks that were already registered.** When a run starts, the scheduler copies the fields in the table below onto each task's `task_runs` row. A retry resets scheduling state and the previous attempt's evidence, but it does not rewrite those fields. For an existing step, an apply that changes its image or command therefore does not change what that older run executes. This holds identically in local and distributed execution mode.
 
 Frozen at registration, and therefore replayed as-registered by a retry:
 
@@ -657,12 +657,14 @@ Frozen at registration, and therefore replayed as-registered by a retry:
 | `outputSchema` and `metadata.schemaValidation` | the retry is judged against the original contract, in the original `warn`/`fail` mode |
 | resolved `cache` config (`enabled`, `ttl`, `version`, `chain`, `pinDigests`, `digestTTL`) | the retry keeps the original cache identity and publish decision |
 
-- To pick up an applied fix, **trigger a new run** (`caesium run start --job-id <job-id>` / `POST /v1/jobs/:id/run`); a new run registers fresh rows from the current definition.
-- To reproduce exactly what a past run did, retry it.
+- To pick up an applied fix coherently, **trigger a new run** (`caesium run start --job-id <job-id>` / `POST /v1/jobs/:id/run`); a new run registers fresh rows from the current definition.
+- A retry is not an exact historical replay of the whole definition. Use the frozen-field table and the live-field notes below to determine which changes it can observe.
 
-Receipts, `caesium why`, `run diff`, and cache identity all key off the frozen row, so a retry that silently swapped in a new definition would make a run's own evidence describe work it never did.
+Receipts, `caesium why`, `run diff`, and cache identity key the registered task's persisted execution fields off its row, so silently swapping one of those fields during a retry would make the run's evidence describe different work.
 
-Not everything is frozen. The step's container **spec** (env, `workDir`, mounts, volume mounts, Kubernetes overrides), its `retryDelay`/`retryBackoff`, and its `triggerRule` are read from the current definition at execution time — in both execution modes, so the two agree with each other. An apply that changes only those is therefore visible to a retry.
+Not everything is frozen. Task membership and DAG wiring are loaded from the current catalog when the run is re-entered; a newly applied step can be registered onto the older run, while removing a step can leave a failed registered task without a live atom to execute. The step's container **spec** (env, `workDir`, mounts, volume mounts, Kubernetes overrides), its `fanOut` configuration (including `fanOut.env`, the injected partition variable's name), its `retryDelay`/`retryBackoff`, and its `triggerRule` are also read from the current definition at execution time. An apply that changes any of those is therefore visible to a retry. Do not use retry across a topology change when you need a coherent version of the job; trigger a new run instead.
+
+One consequence of freezing the cache configuration is worth calling out for operators: the `CAESIUM_CACHE_*` environment defaults are folded into each row when the run is registered, so changing them (for example setting `CAESIUM_CACHE_ENABLED=false`) and restarting the scheduler does **not** reach runs that were already registered. Retrying one of those still uses the caching behaviour it was registered with. Runs triggered after the restart pick the new defaults up normally.
 
 ## Operational Controls
 

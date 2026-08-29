@@ -340,6 +340,19 @@ func TestRetryStillPrintsUsageForArgumentErrors(t *testing.T) {
 		"an argument error must still show usage:\nstdout=%s\nstderr=%s", stdout, stderr)
 }
 
+// TestRetryHelpScopesTheFreezeToRegisteredTaskFields guards the user-facing
+// boundary of issue #354. The retry command preserves selected columns on an
+// already-registered task row; it does not snapshot task membership or the DAG.
+// Calling that a whole-run reproduction sends operators toward retry exactly
+// when a new run is required to adopt one coherent applied definition.
+func TestRetryHelpScopesTheFreezeToRegisteredTaskFields(t *testing.T) {
+	require.Contains(t, retryCmd.Long, "For a task that was already registered")
+	require.Contains(t, retryCmd.Long, "not a snapshot of the whole job definition")
+	require.Contains(t, retryCmd.Long, "task membership and DAG wiring")
+	require.NotContains(t, retryCmd.Long, "reproduces the run as it was REGISTERED")
+	require.NotContains(t, retryCmd.Long, "re-runs the ORIGINAL command")
+}
+
 // TestRetryWholeRunRoutesOverServerWhenServerFlagIsExplicit is the regression
 // for #353: `caesium run retry` without --partition used to open
 // runstorage.Default() directly regardless of --server, so it was the only

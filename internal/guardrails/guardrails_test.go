@@ -46,8 +46,8 @@ var scanDirs = []string{
 var exemptPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`this-image-definitely-does-not-exist`),
 	regexp.MustCompile(`caesiumcloud/`),
-	regexp.MustCompile(`golang:`),      // golang:X.Y-alpineZ
-	regexp.MustCompile(`docker:`),      // docker:X.Y.Z-alpineZ
+	regexp.MustCompile(`golang:`), // golang:X.Y-alpineZ
+	regexp.MustCompile(`docker:`), // docker:X.Y.Z-alpineZ
 	regexp.MustCompile(`mcr\.microsoft`),
 	regexp.MustCompile(`BUILDER_TAG`),
 	regexp.MustCompile(`VARIANT`),
@@ -227,6 +227,35 @@ func TestJobDefinitionsDocReferencesEveryExampleManifest(t *testing.T) {
 			missing,
 			extra,
 		)
+	}
+}
+
+func TestRetryDocumentationDisclosesLiveTopology(t *testing.T) {
+	root := repoRoot(t)
+	docBytes, err := os.ReadFile(filepath.Join(root, "docs", "job-definitions.md"))
+	if err != nil {
+		t.Fatalf("read job definitions doc: %v", err)
+	}
+	doc := string(docBytes)
+
+	for _, required := range []string{
+		"A retry preserves the execution fields frozen for tasks that were already registered.",
+		"Task membership and DAG wiring are loaded from the current catalog",
+		"a newly applied step can be registered onto the older run",
+		"removing a step can leave a failed registered task without a live atom to execute",
+	} {
+		if !strings.Contains(doc, required) {
+			t.Errorf("docs/job-definitions.md must disclose retry topology behavior; missing %q", required)
+		}
+	}
+
+	for _, overclaim := range []string{
+		"A retry reproduces the run as it was registered.",
+		"To reproduce exactly what a past run did, retry it.",
+	} {
+		if strings.Contains(doc, overclaim) {
+			t.Errorf("docs/job-definitions.md overclaims whole-run retry reproducibility: %q", overclaim)
+		}
 	}
 }
 
