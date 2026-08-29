@@ -46,6 +46,11 @@ config:
     # registry failure, so this cannot fail runs).
     - name: CAESIUM_CACHE_PIN_DIGESTS
       value: "true"
+    # Enable the server-wide cache default so scenarios that rely on it
+    # (rather than per-job metadata.cache) are exercised on this lane too
+    # (mirrors the justfile/ci.yml server blocks; see justfile:553).
+    - name: CAESIUM_CACHE_ENABLED
+      value: "true"
 
 kubernetes:
   engine:
