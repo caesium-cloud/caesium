@@ -1003,6 +1003,11 @@ func (j *job) Run(ctx context.Context) error {
 		if taskQuarantined {
 			return "", nil, nil, nil, nil, ErrLocalQuarantinedReplayUnsupported
 		}
+		interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
+		if err != nil {
+			return "", nil, nil, nil, nil, err
+		}
+		spec.Env = interpolated
 		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
 			return "", nil, nil, nil, nil, err
@@ -1249,7 +1254,7 @@ func (j *job) Run(ctx context.Context) error {
 		runner *atomRunner,
 		outputEnv map[string]string,
 		predOutputs map[string]map[string]string,
-	) (jobdefschema.CacheConfig, taskHashInputArgs, map[uuid.UUID]string) {
+	) (jobdefschema.CacheConfig, taskHashInputArgs, map[uuid.UUID]string, error) {
 		// The cache configuration the SCHEDULER resolved onto this run's rows,
 		// not a fresh resolution of the live step/job/env config. RegisterTasks
 		// calls ResolveCacheConfig once and freezes all seven fields; the
@@ -1267,10 +1272,16 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		// Volatile per-run env (CAESIUM_RUN_ID, the injected partition, …) is
-		// deliberately excluded: only the step's declared env and the resolved
-		// predecessor outputs are identity.
-		mergedEnv := make(map[string]string, len(runner.spec.Env)+len(outputEnv))
-		for k, v := range runner.spec.Env {
+		// deliberately excluded: only the step's declared env (after
+		// ${CAESIUM_PARAM_*} substitution) and the resolved predecessor outputs
+		// are identity. Interpolation happens here, before Compute, so two runs
+		// with different params cannot cache-hit on a shared token.
+		interpolatedEnv, err := jobdefruntime.InterpolateParamRefs(runner.spec.Env, snapshot.Params)
+		if err != nil {
+			return cacheCfg, taskHashInputArgs{}, nil, err
+		}
+		mergedEnv := make(map[string]string, len(interpolatedEnv)+len(outputEnv))
+		for k, v := range interpolatedEnv {
 			mergedEnv[k] = v
 		}
 		for k, v := range outputEnv {
@@ -1326,7 +1337,7 @@ func (j *job) Run(ctx context.Context) error {
 			RunParams:            snapshot.Params,
 			CacheVersion:         cacheCfg.Version,
 			Chain:                cacheCfg.Chain,
-		}, predHashByID
+		}, predHashByID, nil
 	}
 
 	rateLimiter := ratelimit.NewLimiter(store.DB())
@@ -1459,7 +1470,10 @@ func (j *job) Run(ctx context.Context) error {
 			meta[inst.TaskRunID] = instanceMeta{partition: inst.Partition, maxAttempt: maxAttempts}
 		}
 
-		cacheCfg, hashArgs, predHashByID := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
+		cacheCfg, hashArgs, predHashByID, err := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
+		if err != nil {
+			return nil, err
+		}
 		taskQuarantined := taskQuarantine[taskID] || runQuarantined
 		taskName := ""
 		if taskModel != nil {
@@ -2120,7 +2134,10 @@ func (j *job) Run(ctx context.Context) error {
 
 		// The same resolver every fan-out instance uses, so the two paths cannot
 		// drift on which fields are folded into the cache key.
-		cacheCfg, hashArgs, predHashByID := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
+		cacheCfg, hashArgs, predHashByID, err := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
+		if err != nil {
+			return nil, err
+		}
 		// resolvedImageDigest is the content digest folded into inputHash when
 		// pinning is on; empty otherwise. Reused when the result is cached so
 		// the cache Entry records which image content the hash covers.

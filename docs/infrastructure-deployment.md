@@ -98,7 +98,7 @@ names the binary.
 | Env | Meaning |
 |---|---|
 | `GIT_URL` | repository to clone (`https://`, `ssh://`, `git@host:path`, `file://`) |
-| `GIT_REF` | branch, tag, or full commit sha (required) — a **literal** value; see the interpolation note below |
+| `GIT_REF` | branch, tag, or full commit sha (required). A trigger-supplied run param reaches this field via scheduler interpolation: `GIT_REF: "${CAESIUM_PARAM_SHA}"` |
 | `GIT_SPARSE` | space-separated, repo-root-relative path patterns (e.g. `stacks/** modules/**`); each must contain a `/` and is used both as the sparse-checkout pattern and, with `:(glob)` magic, as the tree-digest pathspec — an unanchored pattern would stage more than it digests, so `GIT_SPARSE` rejects `!` negation, a leading `/`, and unanchored (no-`/`) patterns |
 | `GIT_SSH_KEY` | private key, already resolved from a `secret://` URI by Caesium |
 | `GIT_SSH_KNOWN_HOSTS` | known_hosts content for the forge — supplying it turns on strict host-key checking; the role never disables checking on its own |
@@ -115,16 +115,16 @@ holds the previous run's tree, so a hand-written pipeline needs an explicit
 `cache: false` step ahead of checkout that clears the destination — see
 `docs/examples/infra-deploy.job.yaml`'s `prepare` step.
 
-**Known limitation: env values are literal — there is no `${…}`
-interpolation.** Caesium passes a step's `env:` values through unchanged. Run
-parameters arrive as their own `CAESIUM_PARAM_<KEY>` variables inside the
-container, and the reagent roles are Go binaries with no shell, so a manifest
-writing `GIT_REF: "${CAESIUM_PARAM_SHA}"` — as the design spec's illustrative
-§5.5 snippet does — hands `git-source` that literal string and the checkout
-fails. The reference manifest therefore pins a literal `GIT_REF: "main"`, and
-deploying a specific commit means editing and re-applying the manifest. **A
-`GIT_REF`-from-run-param mechanism is a follow-up**, and it is the one piece of
-this pattern that a per-commit deploy trigger genuinely wants.
+**Per-commit deploys: interpolate `${CAESIUM_PARAM_SHA}` into `GIT_REF`.**
+`git-source` is a Go binary with no shell, so it cannot expand `$CAESIUM_PARAM_*`
+itself. The scheduler substitutes `${CAESIUM_PARAM_<NAME>}` in step `env:`
+values from the run's parameters **before** hashing and **before** the container
+starts. The reference manifest therefore writes `GIT_REF: "${CAESIUM_PARAM_SHA}"`
+with `trigger.defaultParams.SHA: main` so an unparameterized fire still checks
+out `main`, and an HTTP trigger can map a payload field onto `SHA` to deploy a
+specific commit. A referenced param that is not set fails the task rather than
+passing the token through. Only the braced `${CAESIUM_PARAM_*}` form is
+expanded; see [job-definitions.md](job-definitions.md).
 
 ### `tf-discover`
 

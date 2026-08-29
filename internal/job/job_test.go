@@ -3,6 +3,7 @@ package job
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1014,6 +1015,99 @@ func TestRunLocalInjectsParamEnvVars(t *testing.T) {
 	require.Equal(t, "staging", taskEnv["CAESIUM_PARAM_ENV"], "CAESIUM_PARAM_ENV should be injected")
 	require.Equal(t, "test-job", taskEnv["CAESIUM_JOB_ALIAS"], "CAESIUM_JOB_ALIAS should be injected")
 	require.NotEmpty(t, taskEnv["CAESIUM_RUN_ID"], "CAESIUM_RUN_ID should be injected")
+}
+
+func fakeModelAtomWithEnv(t *testing.T, id uuid.UUID, env map[string]string) *models.Atom {
+	t.Helper()
+	atom := fakeModelAtom(id)
+	spec, err := json.Marshal(container.Spec{Env: env})
+	require.NoError(t, err)
+	atom.Spec = datatypes.JSON(spec)
+	return atom
+}
+
+// TestRunLocalInterpolatesParamRefsInStepEnv verifies scheduler-side
+// ${CAESIUM_PARAM_*} substitution on step env before the container starts.
+func TestRunLocalInterpolatesParamRefsInStepEnv(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newSpecCaptureEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtomWithEnv(t, atomID, map[string]string{
+			"GIT_REF": "${CAESIUM_PARAM_SHA}",
+			"PATH":    "refs/heads/${CAESIUM_PARAM_BRANCH}",
+			"LITERAL": "keep-me",
+		}),
+	}}
+
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	opts := append(
+		withTestDeps(store, env.Environment{
+			MaxParallelTasks:  1,
+			TaskFailurePolicy: taskFailurePolicyHalt,
+			ExecutionMode:     executionModeLocal,
+		}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine),
+		WithParams(map[string]string{"sha": "abc123", "branch": "main"}),
+	)
+
+	err := New(&models.Job{ID: jobID, Alias: "test-job"}, opts...).Run(context.Background())
+	require.NoError(t, err)
+
+	envs := engine.capturedEnvs()
+	require.Len(t, envs, 1)
+	require.Equal(t, "abc123", envs[0]["GIT_REF"])
+	require.Equal(t, "refs/heads/main", envs[0]["PATH"])
+	require.Equal(t, "keep-me", envs[0]["LITERAL"])
+	require.Equal(t, "abc123", envs[0]["CAESIUM_PARAM_SHA"])
+	require.NotContains(t, envs[0]["GIT_REF"], "${CAESIUM_PARAM_")
+}
+
+func TestRunLocalMissingParamRefFailsClosed(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newSpecCaptureEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtomWithEnv(t, atomID, map[string]string{
+			"GIT_REF": "${CAESIUM_PARAM_SHA}",
+		}),
+	}}
+
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	opts := append(
+		withTestDeps(store, env.Environment{
+			MaxParallelTasks:  1,
+			TaskFailurePolicy: taskFailurePolicyHalt,
+			ExecutionMode:     executionModeLocal,
+		}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine),
+		WithParams(map[string]string{"other": "x"}),
+	)
+
+	err := New(&models.Job{ID: jobID, Alias: "test-job"}, opts...).Run(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "${CAESIUM_PARAM_SHA}")
+	require.Empty(t, engine.capturedEnvs(), "container must not start when a param ref is unresolved")
 }
 
 // TestRunLocalCronDefaultParamsUsedWhenNoHTTPParams verifies that params set via

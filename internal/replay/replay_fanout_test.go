@@ -102,7 +102,8 @@ func (f replayFixture) seedFanOutGroup(t *testing.T, cfg fanOutSeedConfig) fanOu
 
 	seed := fanOutSeed{producerTaskID: producerTaskID, groupTaskID: groupTaskID}
 	for i, part := range cfg.partitions {
-		hash := computeDescriptorInstanceHash(groupDesc, map[string]string{"mode": "baseline"}, predOutputs, predHashes, part)
+		hash, err := computeDescriptorInstanceHash(groupDesc, map[string]string{"mode": "baseline"}, predOutputs, predHashes, part)
+		require.NoError(t, err)
 		desc := groupDesc
 		desc.Cache.ComputedHash = hash
 		desc.Baseline.ComputedHash = hash
