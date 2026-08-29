@@ -21,7 +21,6 @@ package dispatch
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/url"
 	"strconv"
@@ -45,21 +44,6 @@ const (
 	DispatchReasonWorkerRejected     = "worker_rejected"
 	DispatchReasonNoPeers            = "no_peers"             // peer discovery returned empty list (bootstrap)
 	DispatchReasonPeerDiscoveryError = "peer_discovery_error" // peer discovery RPC failed
-	// DispatchReasonNoCapablePeer counts fan-out INSTANCES that could not be
-	// dispatched because no peer in the rotation advertises
-	// CapabilityInstanceIdentity — the rolling-deploy window where every live
-	// peer still predates instance-addressed dispatch.  The instance is left on
-	// the ready queue and retried next tick, so this is a stall signal, not a
-	// loss signal.
-	DispatchReasonNoCapablePeer = "no_instance_capable_peer"
-)
-
-// Peer-capability cache TTLs.  A positive answer is stable for the life of a
-// process, so it is cached long; a negative answer is re-probed quickly because
-// it is exactly what a rolling deploy is in the middle of changing.
-const (
-	peerCapPositiveTTL = 5 * time.Minute
-	peerCapNegativeTTL = 10 * time.Second
 )
 
 // PeerLister provides the current set of dispatch-eligible peer node addresses.
@@ -201,11 +185,6 @@ type DispatchLoop struct {
 	rateLimitDelayMu sync.Mutex
 	rateLimitDelays  map[uuid.UUID]map[uuid.UUID]time.Time
 
-	// peerCaps caches each peer's advertised capability set so the gate costs one
-	// probe per peer per TTL rather than one per dispatch.
-	capsMu   sync.Mutex
-	peerCaps map[string]peerCapEntry
-
 	// lastReclaim throttles the SQL lane's expired-claim sweep to one query per
 	// run per ownerReclaimInterval.  The in-memory lane keeps this per-run clock
 	// on the OwnerManager, where it can also consult the owner's own lease
@@ -219,12 +198,6 @@ type DispatchLoop struct {
 // the SQL lane.  It mirrors the OwnerManager's default so both lanes recover a
 // dead worker's task on the same timescale.
 const ownerReclaimInterval = 15 * time.Second
-
-// peerCapEntry is one peer's cached capability answer and when it goes stale.
-type peerCapEntry struct {
-	instanceIdentity bool
-	expiresAt        time.Time
-}
 
 // peerBenchCooldown is how long a peer stays benched after a network-error
 // dispatch failure.  Comfortably larger than the dispatch tick interval (so a
@@ -250,7 +223,6 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 		cfg:             cfg,
 		benchedPeers:    make(map[string]time.Time),
 		rateLimitDelays: make(map[uuid.UUID]map[uuid.UUID]time.Time),
-		peerCaps:        make(map[string]peerCapEntry),
 		lastReclaim:     make(map[uuid.UUID]time.Time),
 	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
@@ -494,36 +466,12 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	// A FANNED instance may only go to a peer that advertises instance identity.
-	// An older peer ignores the task_run_id field it does not know and processes
-	// the catalog id instead — which for an expanded group names N rows, so it
-	// either strands a claim or drives the legacy group-wide write.  Resolved
-	// lazily so an all-unfanned run pays nothing, and only once per tick.
-	var capablePeers []peer
-	capableResolved := false
-
 	for _, dt := range ready {
 		if ctx.Err() != nil {
 			break
 		}
-		target := peers
-		if dt.TaskRunID != uuid.Nil {
-			if !capableResolved {
-				capablePeers = l.instanceCapablePeers(ctx, peers)
-				capableResolved = true
-			}
-			if len(capablePeers) == 0 {
-				// Leave the instance on the ready queue: the next tick retries,
-				// and a rolling deploy resolves this within one peer-cap TTL.
-				log.Warn("dispatch loop: no peer advertises fan-out instance identity; deferring instance dispatch",
-					"run_id", runID, "task_id", dt.TaskID, "task_run_id", dt.TaskRunID, "peers", len(peers))
-				metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoCapablePeer).Inc()
-				continue
-			}
-			target = capablePeers
-		}
 		idx := l.counter.Add(1) - 1
-		p := target[idx%uint64(len(target))]
+		p := peers[idx%uint64(len(peers))]
 		// Carry both identities: the catalog task id (what every catalog lookup,
 		// including the rate-limit rule, is keyed by) and the instance TaskRun id
 		// (what the worker executes and fences its completion against).
@@ -748,87 +696,6 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		"task_id", req.TaskID,
 		"peer", p.nodeID,
 	)
-}
-
-// instanceCapablePeers filters the rotation down to peers that advertise
-// CapabilityInstanceIdentity, probing (and caching) any peer whose answer is
-// missing or stale.
-//
-// Self is probed like any other peer, because "capable" means more than "runs a
-// new enough build": a node with no worker attached advertises nothing and would
-// reject the dispatch anyway.  What self gets is a different reading of a FAILED
-// probe — see peerSupportsInstanceIdentity.
-func (l *DispatchLoop) instanceCapablePeers(ctx context.Context, peers []peer) []peer {
-	l.sweepPeerCaps(time.Now())
-	out := make([]peer, 0, len(peers))
-	for _, p := range peers {
-		if l.peerSupportsInstanceIdentity(ctx, p) {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// peerSupportsInstanceIdentity answers from the cache when fresh, else probes
-// the peer's /internal/capabilities and caches the answer.  Every failure —
-// 404 from a build with no such route, an unreachable node, a malformed body —
-// is cached as NOT capable: the gate fails closed, because guessing that a
-// silent peer understands instance identity is exactly the bug it exists to
-// prevent.
-func (l *DispatchLoop) peerSupportsInstanceIdentity(ctx context.Context, p peer) bool {
-	now := time.Now()
-	l.capsMu.Lock()
-	entry, cached := l.peerCaps[p.nodeID]
-	l.capsMu.Unlock()
-	if cached && now.Before(entry.expiresAt) {
-		return entry.instanceIdentity
-	}
-
-	caps, err := GetCapabilities(ctx, p.baseURL+"/internal/capabilities", l.cfg.Token)
-	if errors.Is(err, ErrPeerUnreachable) {
-		// A peer we cannot reach at all costs a full probe timeout every negative
-		// TTL otherwise.  Bench it on the same circuit breaker a failed dispatch
-		// uses, so one dead node costs one timeout per cooldown rather than one
-		// per tick.  A peer that ANSWERS 404 is not benched: it is a healthy older
-		// node that must keep receiving unfanned work.
-		l.benchPeer(p.nodeID)
-	}
-	supported := err == nil && caps.Supports(CapabilityInstanceIdentity)
-	if err != nil && p.nodeID == l.cfg.NodeID {
-		// A probe that could not reach OURSELVES says nothing about the
-		// protocol — this node is running this build by definition.  Excluding
-		// self on a transport blip would strand every fan-out on a single-node
-		// install, the common case, for a mismatch that cannot exist there.  A
-		// self-probe that ANSWERS is still taken at face value: a node with no
-		// worker attached genuinely cannot execute an instance.
-		supported = true
-	}
-	ttl := peerCapNegativeTTL
-	if supported {
-		ttl = peerCapPositiveTTL
-	}
-	l.capsMu.Lock()
-	l.peerCaps[p.nodeID] = peerCapEntry{instanceIdentity: supported, expiresAt: now.Add(ttl)}
-	l.capsMu.Unlock()
-
-	if !supported && ctx.Err() == nil {
-		log.Warn("dispatch loop: peer does not advertise fan-out instance identity; excluded from instance dispatch",
-			"peer", p.nodeID, "error", err)
-	}
-	return supported
-}
-
-// sweepPeerCaps drops expired capability entries so a peer that left the cluster
-// does not leak one forever (the per-peer path below only ever reaches peers
-// still in the rotation).
-func (l *DispatchLoop) sweepPeerCaps(now time.Time) {
-	l.capsMu.Lock()
-	defer l.capsMu.Unlock()
-	for nodeID, entry := range l.peerCaps {
-		if !now.Before(entry.expiresAt) {
-			delete(l.peerCaps, nodeID)
-		}
-	}
 }
 
 // benchPeer marks a peer unreachable for peerBenchCooldown.  Self is never

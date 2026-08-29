@@ -13,14 +13,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// capableSubmitter is a submitter that advertises instance identity, mirroring
-// what *worker.Worker does once it is accepting dispatched tasks.
+// testCapability is a placeholder capability string used only to exercise the
+// generic CapabilityAdvertiser plumbing.  No production type advertises a real
+// capability today (the last one, instance_identity, was removed in #358 once
+// every deployed node was guaranteed to speak instance-addressed dispatch).
+const testCapability = "test_capability"
+
+// capableSubmitter is a submitter that advertises a capability, mirroring the
+// shape a future *worker.Worker feature could take once it implements
+// CapabilityAdvertiser.
 type capableSubmitter struct {
 	fakeSubmitter
 }
 
 func (c *capableSubmitter) Capabilities() []string {
-	return []string{CapabilityInstanceIdentity}
+	return []string{testCapability}
 }
 
 func getCapabilities(t *testing.T, h *Handler) *httptest.ResponseRecorder {
@@ -33,8 +40,8 @@ func getCapabilities(t *testing.T, h *Handler) *httptest.ResponseRecorder {
 }
 
 // TestHandleCapabilities_AdvertisesTheWorkersCapabilities pins the advertisement
-// contract an owner's rolling-deploy gate reads: the node reports its protocol
-// version and the capability set of the worker actually wired into it.
+// contract: the node reports its protocol version and the capability set of
+// whatever CapabilityAdvertiser is wired into it as the submitter.
 func TestHandleCapabilities_AdvertisesTheWorkersCapabilities(t *testing.T) {
 	_, _, h := setupHandler(t)
 	h = h.WithWorkerSubmitter(&capableSubmitter{})
@@ -46,14 +53,14 @@ func TestHandleCapabilities_AdvertisesTheWorkersCapabilities(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	require.Equal(t, ownerNodeAddr, got.NodeID)
 	require.Equal(t, InternalProtocolVersion, got.ProtocolVersion)
-	require.True(t, got.Supports(CapabilityInstanceIdentity),
-		"a node with an instance-capable worker must advertise it")
+	require.True(t, got.Supports(testCapability),
+		"a node whose submitter advertises a capability must report it")
 }
 
-// TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing: a node that cannot
-// execute anything must not be picked for a fan-out instance.  It would reject
-// the dispatch anyway, and saying so up front keeps the owner from burning a
-// tick on it.
+// TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing: a node with no
+// worker attached — and, today, every real *worker.Worker, since it advertises
+// no capability — reports an empty capability set alongside its protocol
+// version.
 func TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing(t *testing.T) {
 	_, _, h := setupHandler(t)
 
@@ -62,12 +69,14 @@ func TestHandleCapabilities_NodeWithNoWorkerAdvertisesNothing(t *testing.T) {
 
 	var got CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	require.False(t, got.Supports(CapabilityInstanceIdentity))
+	require.False(t, got.Supports(testCapability))
 	require.Empty(t, got.Capabilities)
 }
 
-// TestHandleCapabilities_RequiresTheBearerToken keeps the probe on the same
-// footing as the traffic it gates.
+// TestHandleCapabilities_RequiresTheBearerToken pins the bearer-token
+// requirement on GET /internal/capabilities itself: nothing gates dispatch on
+// the probe's answer any more (#358), but the endpoint is still guarded by
+// the same auth check as every other internal endpoint.
 func TestHandleCapabilities_RequiresTheBearerToken(t *testing.T) {
 	_, _, h := setupHandler(t)
 	h = h.WithWorkerSubmitter(&capableSubmitter{})
@@ -78,9 +87,12 @@ func TestHandleCapabilities_RequiresTheBearerToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-// TestGetCapabilities_ReadsALegacyPeerAsIncapable: an older build serves no such
-// route.  The probe must report that as "supports nothing", never as a
-// transient error the caller might optimistically ignore.
+// TestGetCapabilities_ReadsALegacyPeerAsIncapable pins GetCapabilities's own
+// error taxonomy on the kept endpoint: an older build serving no such route
+// (404) must be reported as an error ("supports nothing"), never as a
+// zero-value success. GetCapabilities has no production caller today (the
+// dispatch loop's capability-gated use of it was removed in #358); this pins
+// the exported helper's contract for whatever calls it next.
 func TestGetCapabilities_ReadsALegacyPeerAsIncapable(t *testing.T) {
 	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -89,7 +101,7 @@ func TestGetCapabilities_ReadsALegacyPeerAsIncapable(t *testing.T) {
 
 	caps, err := GetCapabilities(t.Context(), legacy.URL+"/internal/capabilities", testToken)
 	require.Error(t, err, "a 404 from a pre-capability build must be an error, not a silent yes")
-	require.False(t, caps.Supports(CapabilityInstanceIdentity))
+	require.False(t, caps.Supports(testCapability))
 }
 
 // TestHandleDispatch_RejectsInstanceBlindDispatchForAnExpandedGroup pins the
@@ -162,9 +174,13 @@ func TestHandleDispatch_UnfannedTaskWithoutTaskRunIDStillWorks(t *testing.T) {
 	require.Len(t, sub.accepted, 1)
 }
 
-// TestGetCapabilities_DistinguishesUnreachableFromLegacy: the dispatch loop
-// benches a peer it cannot reach but must NOT bench one that merely answers 404
-// — that peer is a healthy older node and still takes unfanned work.
+// TestGetCapabilities_DistinguishesUnreachableFromLegacy pins another piece of
+// GetCapabilities's error taxonomy for the kept endpoint: a 404 (a peer that
+// answered "no such route") must be reported as a plain error, distinct from
+// ErrPeerUnreachable, which wraps only a transport failure. No production
+// caller of GetCapabilities tells them apart today — the dispatch loop's own
+// bench-on-capability-probe was removed along with the gate in #358 — but the
+// exported contract stays correct for whatever calls GetCapabilities next.
 func TestGetCapabilities_DistinguishesUnreachableFromLegacy(t *testing.T) {
 	legacy := httptest.NewServer(http.HandlerFunc(http.NotFound))
 	t.Cleanup(legacy.Close)
