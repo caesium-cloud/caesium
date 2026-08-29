@@ -165,6 +165,18 @@ func branches(lines []string) []string {
 	return out
 }
 
+// applyOutputsEnviron renders a published output row the way Caesium (and an
+// older server that merely copies stored keys) injects it: folded
+// CAESIUM_OUTPUT_<STEP>_<KEY> names, including the name index when present.
+func applyOutputsEnviron(step string, values map[string]string) []string {
+	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	environ := make([]string, 0, len(values))
+	for k, v := range values {
+		environ = append(environ, prefix+normalizeStepName(k)+"="+v)
+	}
+	return environ
+}
+
 // plannedEnv makes the proposal a plan phase produced visible to a subsequent
 // apply phase exactly the way Caesium does: as CAESIUM_OUTPUT_<STEP>_<KEY>,
 // with an output reference exposed as its path plus a companion _DIGEST.
@@ -446,6 +458,9 @@ func TestApplyAppliesTheProposedArtifactAndPublishesOutputs(t *testing.T) {
 	// object would have it silently dropped by pkg/task.ParseOutput.
 	if values["structured"] != `{"a":1,"b":"two"}` {
 		t.Fatalf("structured = %q", values["structured"])
+	}
+	if _, present := values[tf.OutputNamesIndexKey]; present {
+		t.Fatal("a snake_case output row grew a name index; that would churn consumer cache keys")
 	}
 	if _, present := values["token"]; present {
 		t.Fatal("the sensitive output was published")
@@ -1261,14 +1276,11 @@ output "token" {
 	}
 }
 
-// The cross-stack transport is lossy, so a stack whose outputs cannot survive
-// it must fail at apply — while the operator is looking at the stack that owns
-// the name — rather than deploying a green consumer against variable defaults.
-//
-// And it must fail BEFORE terraform apply mutates anything: the saved plan
-// already names the outputs it would publish, so there is no reason to deploy
-// the stack first and only then discover that its outputs are unreadable.
-func TestApplyFailsClosedOnAnOutputNameTheTransportMangles(t *testing.T) {
+// Mixed-case Terraform output names used to be refused because the env fold
+// was lossy. The name index makes the round-trip exact, so apply must publish
+// vpcId under its original key plus caesium_output_names, and IMPORT_OUTPUTS_FROM
+// must restore TF_VAR_vpcId — not TF_VAR_vpcid.
+func TestApplyPublishesCamelCaseOutputAndNameIndex(t *testing.T) {
 	cfg := newStack(t)
 	mangled := `terraform {
   required_version = ">= 1.10.0"
@@ -1284,6 +1296,10 @@ resource "terraform_data" "canary" {
 output "vpcId" {
   value = "vpc-1"
 }
+
+output "db-url" {
+  value = "postgres://db"
+}
 `
 	if err := os.WriteFile(filepath.Join(cfg.Root, "main.tf"), []byte(mangled), 0o600); err != nil {
 		t.Fatal(err)
@@ -1296,35 +1312,103 @@ output "vpcId" {
 	plannedEnv(t, "plan-offline", planLines)
 	cfg.PlanStep = "plan-offline"
 
+	lines, err := emit(t, runApply, cfg)
+	if err != nil {
+		t.Fatalf("tf-apply refused names the index recovers: %v", err)
+	}
+	values := outputs(t, lines)
+	if values["vpcId"] != "vpc-1" {
+		t.Fatalf("vpcId = %q", values["vpcId"])
+	}
+	if values["db-url"] != "postgres://db" {
+		t.Fatalf("db-url = %q", values["db-url"])
+	}
+	if values["caesium_outputs_published"] != "2" {
+		t.Fatalf("caesium_outputs_published = %q (the index is protocol, not a stack output)", values["caesium_outputs_published"])
+	}
+	var index map[string]string
+	if err := json.Unmarshal([]byte(values[tf.OutputNamesIndexKey]), &index); err != nil {
+		t.Fatalf("name index is not JSON: %v (%q)", err, values[tf.OutputNamesIndexKey])
+	}
+	if index["VPCID"] != "vpcId" || index["DB_URL"] != "db-url" {
+		t.Fatalf("name index = %v", index)
+	}
+
+	// The published row, injected the way Caesium (or an older server that
+	// merely copies stored keys) exposes it, must import as the original names.
+	t.Setenv("TF_VAR_vpcId", "")
+	t.Setenv("TF_VAR_db-url", "")
+	t.Setenv("TF_VAR_vpcid", "")
+	t.Setenv("TF_VAR_db_url", "")
+	environ := applyOutputsEnviron("apply-offline", values)
+	names, err := exportImportedOutputs([]string{"apply-offline"}, environ, io.Discard)
+	if err != nil {
+		t.Fatalf("exportImportedOutputs: %v", err)
+	}
+	if strings.Join(names, ",") != "db-url,vpcId" {
+		t.Fatalf("exported %v, want db-url,vpcId", names)
+	}
+	if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
+		t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
+	}
+	if os.Getenv("TF_VAR_db-url") != "postgres://db" {
+		t.Fatalf("TF_VAR_db-url = %q", os.Getenv("TF_VAR_db-url"))
+	}
+	if os.Getenv("TF_VAR_vpcid") != "" || os.Getenv("TF_VAR_db_url") != "" {
+		t.Fatal("the lossy lowercase recovery ran even though the index was present")
+	}
+}
+
+// Two names that fold onto one env suffix still cannot be published: the index
+// cannot split one variable into two. And that refusal still happens BEFORE
+// terraform apply mutates anything.
+func TestApplyFailsClosedOnFoldingOutputNameCollision(t *testing.T) {
+	cfg := newStack(t)
+	colliding := `terraform {
+  required_version = ">= 1.10.0"
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}
+
+resource "terraform_data" "canary" {
+  input = "hello"
+}
+
+output "vpc-id" {
+  value = "from-dash"
+}
+
+output "vpc_id" {
+  value = "from-underscore"
+}
+`
+	if err := os.WriteFile(filepath.Join(cfg.Root, "main.tf"), []byte(colliding), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	planLines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	plannedEnv(t, "plan-offline", planLines)
+	cfg.PlanStep = "plan-offline"
+
 	lines, log, err := emitWithLog(t, runApply, cfg)
 	if err == nil {
-		t.Fatal("tf-apply published an output name a consumer would read under a different name")
+		t.Fatal("tf-apply published two outputs that fold onto one env var")
 	}
-	if !strings.Contains(err.Error(), "TF_VAR_vpcid") {
-		t.Fatalf("the failure does not say what the consumer would actually read: %v", err)
+	if !strings.Contains(err.Error(), "VPC_ID") {
+		t.Fatalf("the failure does not name the folded suffix: %v", err)
 	}
 	if len(lines) != 0 {
 		t.Fatalf("a refused apply emitted markers: %v", lines)
 	}
-
-	// Nothing was deployed. This is the half that makes the failure cheap: the
-	// name is read out of the reviewed plan, so the stack is refused before
-	// terraform touches it rather than after.
 	if strings.Contains(log, "Apply complete") {
 		t.Fatalf("the stack was applied before its output names were checked:\n%s", log)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.Root, "terraform.tfstate")); !os.IsNotExist(err) {
 		t.Fatalf("terraform apply ran and wrote state (%v); the check came too late", err)
-	}
-	// No receipt either — there is nothing to recover, because nothing happened.
-	entries, err := os.ReadDir(cfg.ArtifactDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "applied.") {
-			t.Fatalf("an apply that never ran left the receipt %s", entry.Name())
-		}
 	}
 }
 
@@ -1449,6 +1533,108 @@ func TestImportedOutputsAreStepExactAndFailClosedOnAmbiguity(t *testing.T) {
 		}
 		if got := os.Getenv("TF_VAR_caesium_outputs_published"); got != "" {
 			t.Fatalf("the protocol sentinel was exported as a Terraform variable (%q)", got)
+		}
+	})
+
+	t.Run("the name index never becomes a variable", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpcId", "")
+		t.Setenv("TF_VAR_accountId", "")
+		t.Setenv("TF_VAR_caesium_output_names", "")
+		networkIndex := `{"VPCID":"vpcId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published"}`
+		accountIndex := `{"ACCOUNTID":"accountId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published"}`
+		names, err := exportImportedOutputs([]string{"apply-network", "apply-account"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + networkIndex,
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNTID=acct-1",
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUT_NAMES=" + accountIndex,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("importing mixed-case outputs from two applies must work; got %v", err)
+		}
+		if strings.Join(names, ",") != "accountId,vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if got := os.Getenv("TF_VAR_caesium_output_names"); got != "" {
+			t.Fatalf("the name index was exported as a Terraform variable (%q)", got)
+		}
+	})
+}
+
+// Dashed, dotted and mixed-case output names round-trip through the folded env
+// key plus the JSON name index to TF_VAR_<original>. Without the index the
+// historical lowercase recovery still applies, so a snake_case producer that
+// never emitted one keeps working.
+func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
+	index := `{"VPCID":"vpcId","DB_URL":"db-url","DOT_KEY":"dot.key","GREETING":"greeting"}`
+
+	t.Run("mixed case and dashes restore the original TF_VAR_", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpcId", "")
+		t.Setenv("TF_VAR_db-url", "")
+		t.Setenv("TF_VAR_greeting", "")
+		t.Setenv("TF_VAR_vpcid", "")
+		t.Setenv("TF_VAR_db_url", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL=postgres://db",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_GREETING=hello",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=3",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "db-url,greeting,vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
+			t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
+		}
+		if os.Getenv("TF_VAR_db-url") != "postgres://db" {
+			t.Fatalf("TF_VAR_db-url = %q", os.Getenv("TF_VAR_db-url"))
+		}
+		if os.Getenv("TF_VAR_greeting") != "hello" {
+			t.Fatalf("TF_VAR_greeting = %q", os.Getenv("TF_VAR_greeting"))
+		}
+		if os.Getenv("TF_VAR_vpcid") != "" || os.Getenv("TF_VAR_db_url") != "" {
+			t.Fatal("lossy lowercase names were exported alongside the originals")
+		}
+	})
+
+	t.Run("a dotted original name fails closed as not a Terraform variable", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_DOT_KEY=v",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "dot.key") {
+			t.Fatalf("want a refusal naming the original dotted key, got %v", err)
+		}
+	})
+
+	t.Run("without an index the suffix is still lowercased", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpc_id", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "vpc_id" {
+			t.Fatalf("exported %v", names)
+		}
+	})
+
+	t.Run("a malformed index fails closed rather than falling back", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=not-json",
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
+			t.Fatalf("want a malformed-index refusal, got %v", err)
 		}
 	})
 }

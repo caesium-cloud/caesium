@@ -24,13 +24,16 @@
 //
 //	IMPORT_OUTPUTS_FROM  comma-separated upstream apply step names. Every
 //	                     CAESIUM_OUTPUT_<STEP>_<KEY> of those steps is exported as
-//	                     TF_VAR_<key>. This is the cross-stack wiring, and it is
-//	                     deliberately NOT terraform_remote_state: reading an
-//	                     upstream stack's state would mean granting every
-//	                     application stack credentials on the network stack's
-//	                     state (design §6.5). EVERY named step must actually be
-//	                     present — a name that imports nothing fails the phase
-//	                     rather than planning against variable defaults.
+//	                     TF_VAR_<original>. Original names come from the JSON
+//	                     name index (caesium_output_names) when present, otherwise
+//	                     from lowercasing the folded suffix. This is the
+//	                     cross-stack wiring, and it is deliberately NOT
+//	                     terraform_remote_state: reading an upstream stack's
+//	                     state would mean granting every application stack
+//	                     credentials on the network stack's state (design §6.5).
+//	                     EVERY named step must actually be present — a name that
+//	                     imports nothing fails the phase rather than planning
+//	                     against variable defaults.
 //	APPLY_STEP           when set, emit ##caesium::branch <APPLY_STEP> only if the
 //	                     plan has changes — the leaf-stack branch form (§6.4).
 //
@@ -427,7 +430,13 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 }
 
 // exportImportedOutputs turns every CAESIUM_OUTPUT_<STEP>_<KEY> of the named
-// upstream steps into TF_VAR_<key>, and returns the variable names it set.
+// upstream steps into TF_VAR_<original>, and returns the variable names it set.
+//
+// Original names come from the JSON name index Caesium (or tf-apply) publishes
+// as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES. Without an index the suffix
+// is lowercased, which is lossless only for [a-z0-9_]+ — the historical
+// recovery, kept so a snake_case producer that never emitted an index still
+// imports.
 //
 // A companion _DIGEST variable is skipped: it belongs to an output reference,
 // whose base key already carries the path, and a digest is not a value any
@@ -460,12 +469,18 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 	}
 
 	present := make(map[string]struct{}, len(environ))
+	envValues := make(map[string]string, len(environ))
 	for _, kv := range environ {
-		if key, _, ok := strings.Cut(kv, "="); ok {
+		if key, value, ok := strings.Cut(kv, "="); ok {
 			present[key] = struct{}{}
+			envValues[key] = value
 		}
 	}
 	if err := requireProducers(named, present); err != nil {
+		return nil, err
+	}
+	indexes, err := outputNamesIndexes(named, envValues)
+	if err != nil {
 		return nil, err
 	}
 	// Every OTHER step whose outputs are in this environment, identified
@@ -502,16 +517,15 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 					break
 				}
 			}
-			name := strings.ToLower(rest)
-			// The published-count sentinel is protocol, never a Terraform
-			// variable. Every tf-apply emits it, so without this skip a stack
-			// importing from two upstream applies — the diamond form the
-			// contract explicitly allows — collides with ITSELF on
-			// TF_VAR_caesium_outputs_published and fails at plan time, naming a
-			// key the operator never wrote.
-			if name == publishedCountKey {
+			// Protocol keys are never Terraform variables. Every tf-apply emits
+			// the published-count sentinel, and a mixed-case producer also
+			// emits the name index; without this skip a diamond import of two
+			// upstream applies collides with ITSELF on those keys and fails at
+			// plan time, naming something the operator never wrote.
+			if isProtocolOutputSuffix(rest) {
 				break
 			}
+			name := importedOutputName(rest, indexes[prefix])
 			if prior, dup := exported[name]; dup {
 				// Last-write-wins here would resolve a real ambiguity by
 				// os.Environ() ordering — an implementation detail of whichever
@@ -536,14 +550,10 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 	// planned against a default. The log is the one place an operator can see
 	// what actually crossed the boundary.
 	//
-	// The round trip through Caesium's environment naming is lossy —
-	// pkg/task.BuildOutputEnv uppercases the output key and maps "-" and "." to
-	// "_", so only lowercase [a-z0-9_] names survive it. That is enforced at the
-	// PRODUCING end, where the operator can still act on it: tf.PublishableOutputs
-	// refuses to publish a name that would arrive under a different one (or that
-	// would collide with a sibling after folding). By the time a value reaches
-	// this side it has already round-tripped, so there is nothing left to check
-	// here — only to log what actually crossed.
+	// Original names are recovered from the JSON index when one was published;
+	// otherwise the suffix is lowercased. The log is the one place an operator
+	// can see which TF_VAR_ actually crossed, including that vpcId did not
+	// become vpcid.
 	for _, name := range names {
 		_, _ = fmt.Fprintf(log, "tf-runner: TF_VAR_%s <- %s (step %q)\n", name, exported[name].envKey, exported[name].step)
 	}
@@ -734,7 +744,20 @@ func runApply(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 	if _, taken := values[publishedCountKey]; taken {
 		return fmt.Errorf("output %q is reserved by tf-apply; rename it", publishedCountKey)
 	}
+	if _, taken := values[tf.OutputNamesIndexKey]; taken {
+		return fmt.Errorf("output %q is reserved by tf-apply; rename it", tf.OutputNamesIndexKey)
+	}
 	values[publishedCountKey] = strconv.Itoa(len(values))
+	// The name index is protocol, not a stack output: it is added after the
+	// count so caesium_outputs_published still reports how many of THIS
+	// stack's outputs were published. Snake_case-only maps omit it.
+	encoded, err := tf.EncodeOutputNamesIndex(values)
+	if err != nil {
+		return err
+	}
+	if encoded != "" {
+		values[tf.OutputNamesIndexKey] = encoded
+	}
 	return e.Output(values)
 }
 
@@ -743,6 +766,52 @@ func runApply(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 // runApply) and so a stack that stops publishing a value moves its consumers'
 // cache keys instead of silently starving them.
 const publishedCountKey = "caesium_outputs_published"
+
+// isProtocolOutputSuffix reports whether rest (the folded env suffix after
+// CAESIUM_OUTPUT_<STEP>_) is a tf-apply protocol key, never a Terraform
+// variable.
+func isProtocolOutputSuffix(rest string) bool {
+	switch rest {
+	case normalizeStepName(publishedCountKey), normalizeStepName(tf.OutputNamesIndexKey):
+		return true
+	default:
+		return false
+	}
+}
+
+// outputNamesIndexes reads each named step's JSON name index, if any.
+//
+// A malformed index is a hard failure: falling back to lowercasing the suffix
+// would silently import vpcId as vpcid, which is the lossy round-trip this
+// index exists to prevent.
+func outputNamesIndexes(named map[string]string, envValues map[string]string) (map[string]map[string]string, error) {
+	out := make(map[string]map[string]string, len(named))
+	suffix := normalizeStepName(tf.OutputNamesIndexKey)
+	for prefix, step := range named {
+		raw, ok := envValues[prefix+suffix]
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		var index map[string]string
+		if err := json.Unmarshal([]byte(raw), &index); err != nil {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q published %s that is not a JSON object of original output names: %w",
+				step, prefix+suffix, err)
+		}
+		out[prefix] = index
+	}
+	return out, nil
+}
+
+// importedOutputName restores the original Terraform output name from the
+// folded env suffix. The index is authoritative when it names the suffix;
+// otherwise the historical lowercase recovery is used.
+func importedOutputName(rest string, index map[string]string) string {
+	if orig := strings.TrimSpace(index[rest]); orig != "" {
+		return orig
+	}
+	return strings.ToLower(rest)
+}
 
 // proposal is what a plan step told this apply step.
 type proposal struct {
@@ -864,8 +933,8 @@ func applyProposal(ctx context.Context, cfg config, runner *tf.Runner, p proposa
 	return writeApplyReceipt(receipt, p)
 }
 
-// checkPlannedOutputNames rejects an output name that could not reach a
-// consumer, BEFORE terraform apply mutates anything.
+// checkPlannedOutputNames rejects an output name a consumer could not import
+// exactly, BEFORE terraform apply mutates anything.
 //
 // The naming rule was previously enforced only after the apply, against
 // `terraform output`. That is late in the one way that matters: the stack has

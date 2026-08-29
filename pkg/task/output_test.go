@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -315,6 +316,90 @@ func TestBuildOutputEnv_KeyNormalization(t *testing.T) {
 	env := BuildOutputEnv(predOutputs)
 	assert.Equal(t, "val", env["CAESIUM_OUTPUT_STEP_ONE_SOME_KEY"])
 	assert.Equal(t, "val2", env["CAESIUM_OUTPUT_STEP_ONE_DOT_KEY"])
+	// Dashed and dotted keys do not survive lowercasing the folded suffix, so
+	// the name index has to carry the originals.
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_STEP_ONE_CAESIUM_OUTPUT_NAMES"]), &index))
+	assert.Equal(t, map[string]string{
+		"SOME_KEY": "some-key",
+		"DOT_KEY":  "dot.key",
+	}, index)
+}
+
+func TestEncodeOutputNamesIndex_OmitsIdentityMaps(t *testing.T) {
+	encoded, err := EncodeOutputNamesIndex(map[string]string{
+		"row_count": "42",
+		"path":      "/data/out.parquet",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, encoded, "snake_case keys already survive the fold; emitting an index would churn cache keys")
+}
+
+func TestEncodeOutputNamesIndex_MapsFoldedKeys(t *testing.T) {
+	encoded, err := EncodeOutputNamesIndex(map[string]string{
+		"vpcId":                "vpc-1",
+		"db-url":               "postgres://db",
+		"dot.key":              "v",
+		"greeting":             "hello",
+		"caesium_output_names": `{"stale":"index"}`,
+	})
+	require.NoError(t, err)
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(encoded), &index))
+	assert.Equal(t, map[string]string{
+		"VPCID":    "vpcId",
+		"DB_URL":   "db-url",
+		"DOT_KEY":  "dot.key",
+		"GREETING": "greeting",
+	}, index)
+	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES", "the index must not describe itself")
+}
+
+func TestBuildOutputEnv_OutputNamesIndexRoundTrip(t *testing.T) {
+	predOutputs := map[string]map[string]string{
+		"apply-network": {
+			"vpcId":    "vpc-1",
+			"db-url":   "postgres://db",
+			"dot.key":  "v",
+			"greeting": "hello",
+		},
+		"apply-account": {
+			"account_id": "acct-1",
+		},
+	}
+	env := BuildOutputEnv(predOutputs)
+
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	assert.Equal(t, "postgres://db", env["CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL"])
+	assert.Equal(t, "v", env["CAESIUM_OUTPUT_APPLY_NETWORK_DOT_KEY"])
+	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_APPLY_NETWORK_GREETING"])
+	assert.Equal(t, "acct-1", env["CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID"])
+
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, "db-url", index["DB_URL"])
+	assert.Equal(t, "dot.key", index["DOT_KEY"])
+	assert.Equal(t, "greeting", index["GREETING"])
+
+	_, hasAccountIndex := env["CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasAccountIndex, "an identity map must not grow an extra env var (cache key churn)")
+}
+
+func TestBuildOutputEnv_ReplacesStoredNameIndex(t *testing.T) {
+	env := BuildOutputEnv(map[string]map[string]string{
+		"apply-network": {
+			"vpcId":                     "vpc-1",
+			OutputNamesIndexKey:         `{"VPCID":"stale"}`,
+			"caesium_outputs_published": "1",
+		},
+	})
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, "1", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED"])
+	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES")
 }
 
 // ── ParseBranches tests ─────────────────────────────────────────────

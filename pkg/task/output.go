@@ -574,6 +574,52 @@ func NormalizeStepName(name string) string {
 	return strings.ToUpper(name)
 }
 
+// OutputNamesIndexKey is the reserved output key / env suffix carrying a JSON
+// object that maps NormalizeStepName(original) → original for each of a step's
+// outputs. BuildOutputEnv emits it as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES
+// whenever at least one key would not survive lowercasing the folded env
+// suffix, so a consumer (tf-runner's IMPORT_OUTPUTS_FROM) can recover vpcId,
+// vpc-id and dot.key exactly. Snake_case-only maps omit it, so existing cache
+// keys stay byte-identical.
+//
+// The reagents duplicate this spelling (they cannot import this package; the
+// contract between them is the marker protocol). Keep the two in lockstep.
+const OutputNamesIndexKey = "caesium_output_names"
+
+// EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
+// back to their original output keys. An empty string means every key already
+// survives the fold (ToLower(NormalizeStepName(k)) == k) and the sidecar must
+// be omitted.
+func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
+	index := make(map[string]string, len(outputs))
+	needed := false
+	for k := range outputs {
+		if k == OutputNamesIndexKey {
+			continue
+		}
+		index[NormalizeStepName(k)] = k
+		if !outputNameSurvivesEnvFold(k) {
+			needed = true
+		}
+	}
+	if !needed {
+		return "", nil
+	}
+	data, err := json.Marshal(index)
+	if err != nil {
+		return "", fmt.Errorf("encoding output name index: %w", err)
+	}
+	return string(data), nil
+}
+
+// outputNameSurvivesEnvFold reports whether name comes back intact after
+// Caesium spells it into an environment variable and a consumer lowercases the
+// suffix — the historical IMPORT_OUTPUTS_FROM recovery. Names that fail this
+// (mixed case, dashes, dots) need the JSON index to round-trip.
+func outputNameSurvivesEnvFold(name string) bool {
+	return strings.ToLower(NormalizeStepName(name)) == name
+}
+
 // BuildOutputEnv constructs CAESIUM_OUTPUT_<STEP>_<KEY>=<VALUE> environment
 // variables from a map of predecessor step names to their output key-value
 // pairs.
@@ -586,6 +632,15 @@ func NormalizeStepName(name string) string {
 // can re-verify the bytes it reads. The container contract stays string-only
 // env vars: a large payload never enters the environment, only its location and
 // digest do.
+//
+// When any output key would not survive lowercasing the folded suffix,
+// BuildOutputEnv also emits CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES as a
+// JSON object of folded-suffix → original-key. That is the lossless half of
+// the round trip: the folded env vars stay valid identifiers, and the index
+// carries the names a consumer has to restore. A stored caesium_output_names
+// value (tf-apply writes one into the output row so an older server still
+// injects it) is replaced by this generated index rather than treated as a
+// user output.
 func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]string {
 	if len(predecessorOutputs) == 0 {
 		return nil
@@ -595,6 +650,9 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 	for stepName, outputs := range predecessorOutputs {
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
 		for k, v := range outputs {
+			if k == OutputNamesIndexKey {
+				continue
+			}
 			envKey := prefix + NormalizeStepName(k)
 			if ref, ok := DecodeOutputRef(v); ok {
 				// Reference: hand the consumer the path to read and the digest
@@ -604,6 +662,10 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 				continue
 			}
 			env[envKey] = v
+		}
+		encoded, err := EncodeOutputNamesIndex(outputs)
+		if err == nil && encoded != "" {
+			env[prefix+NormalizeStepName(OutputNamesIndexKey)] = encoded
 		}
 	}
 

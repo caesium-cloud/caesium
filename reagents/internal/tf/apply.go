@@ -1,6 +1,7 @@
 package tf
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,10 +25,11 @@ import (
 // from parsing `terraform output` text, which is what makes this a property of
 // the type system instead of a convention someone can forget (design §6.7).
 //
-// It also refuses to publish a name that cannot survive the environment
-// transport a consumer reads it through — see CheckOutputNames. That check is
-// here, at the producing end, because it is the only place the operator is
-// looking at the output whose name has to change.
+// It also refuses to publish a name a consumer could not import exactly — see
+// CheckOutputNames. That check is here, at the producing end, because a
+// collision or an illegal identifier is a wrong deployment waiting to happen,
+// and this is the only place the operator is looking at the output whose name
+// has to change.
 func PublishableOutputs(outputs map[string]tfexec.OutputMeta) (values map[string]string, withheld []string, err error) {
 	values = make(map[string]string, len(outputs))
 	names := make([]string, 0, len(outputs))
@@ -44,9 +46,9 @@ func PublishableOutputs(outputs map[string]tfexec.OutputMeta) (values map[string
 		}
 		publishable = append(publishable, name)
 	}
-	// Before any of them is published: a name that cannot survive the transport
-	// is a wrong deployment waiting to happen, and it must be rejected while the
-	// operator can still rename it.
+	// Before any of them is published: two names that fold onto one env var, or
+	// a name that is not a Terraform identifier, cannot be imported exactly,
+	// and must be rejected while the operator can still rename them.
 	if err := CheckOutputNames(publishable); err != nil {
 		return nil, nil, err
 	}
@@ -96,56 +98,93 @@ func PlannedPublishableOutputNames(plan *tfjson.Plan) []string {
 	return names
 }
 
-// CheckOutputNames refuses output names that do not survive the environment
-// transport intact.
+// OutputNamesIndexKey is the reserved output key carrying a JSON object that
+// maps the folded environment suffix (Caesium uppercases the key and maps
+// "-"/"." to "_") back to the original Terraform output name. tf-apply emits
+// it alongside the values so IMPORT_OUTPUTS_FROM can restore TF_VAR_vpcId
+// exactly, even through an older Caesium that does not yet generate the same
+// sidecar from BuildOutputEnv. The spelling is locked to pkg/task.OutputNamesIndexKey
+// — the reagents cannot import Caesium, so the contract is this string.
+const OutputNamesIndexKey = "caesium_output_names"
+
+// EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
+// back to original output names. An empty string means every name already
+// survives lowercasing the folded suffix, and the sidecar must be omitted so
+// snake_case stacks keep the same output row (and cache key) as before.
 //
-// The cross-stack wiring travels as environment variables, and that trip is
-// LOSSY. Caesium spells an output key as CAESIUM_OUTPUT_<STEP>_<KEY> by
-// uppercasing it and mapping "-" and "." to "_" (pkg/task.BuildOutputEnv), and
-// the importing side lowercases the suffix back to a Terraform variable name
-// (tf-runner's exportImportedOutputs). So:
+// Mirrors pkg/task.EncodeOutputNamesIndex. Keep the two in lockstep.
+func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
+	index := make(map[string]string, len(outputs))
+	needed := false
+	for k := range outputs {
+		if k == OutputNamesIndexKey {
+			continue
+		}
+		index[foldOutputKey(k)] = k
+		if !outputNameSurvivesFold(k) {
+			needed = true
+		}
+	}
+	if !needed {
+		return "", nil
+	}
+	data, err := json.Marshal(index)
+	if err != nil {
+		return "", fmt.Errorf("encoding output name index: %w", err)
+	}
+	return string(data), nil
+}
+
+func outputNameSurvivesFold(name string) bool {
+	return strings.ToLower(foldOutputKey(name)) == name
+}
+
+// foldOutputKey is what Caesium spells an output key as inside an environment
+// variable (pkg/task.NormalizeStepName). The reagents restate it rather than
+// import Caesium; test/infra_deploy_test.go drives the real server.
+func foldOutputKey(name string) string {
+	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name))
+}
+
+// CheckOutputNames refuses output names a consumer could not import exactly.
 //
-//	vpc_id  -> VPC_ID  -> vpc_id   round-trips
-//	vpcId   -> VPCID   -> vpcid    arrives under a DIFFERENT name
-//	vpc-id  -> VPC_ID  -> vpc_id   arrives under a different name, and collides
-//	                               with a sibling output actually named vpc_id
+// The cross-stack wiring travels as environment variables. Caesium spells an
+// output key as CAESIUM_OUTPUT_<STEP>_<KEY> by uppercasing it and mapping "-"
+// and "." to "_" (pkg/task.BuildOutputEnv). That fold is not injective:
 //
-// None of those failures is visible at runtime: an undeclared TF_VAR_ is
-// silently ignored by Terraform (see ExportVariable), so the consumer plans
-// against the variable's default and the run is green with the wrong inputs. A
-// collision is worse still — which of the two values wins is decided by
-// os.Environ() ordering.
+//	vpc_id  -> VPC_ID   unique
+//	vpcId   -> VPCID    unique, but the historical lowercase recovery would
+//	                    have arrived as vpcid
+//	vpc-id  -> VPC_ID   collides with a sibling actually named vpc_id
 //
-// The transport cannot be made lossless from this side (the naming rule belongs
-// to Caesium, and the reagents must not grow a second copy of it), so the contract
-// is stated as a restriction instead: a published output name is lowercase
-// [a-z0-9_]. That is exactly the fixed set of the round trip, and it is a
-// subset of what Terraform already allows an output to be called, so complying
-// is always a rename rather than a redesign.
+// The JSON name index (EncodeOutputNamesIndex) makes the unique cases lossless
+// — IMPORT_OUTPUTS_FROM restores the original name — so mixed case and dashes
+// are allowed. What this still refuses:
+//
+//   - two names that fold onto the same env suffix: the index cannot
+//     disambiguate two values in one variable, and which one wins would be
+//     os.Environ() ordering
+//   - a name that is not a Terraform identifier (dots, non-ASCII, a leading
+//     digit): it cannot be exported as TF_VAR_<name> (see ExportVariable)
+//
+// An undeclared TF_VAR_ is silently ignored by Terraform, so either failure
+// would otherwise be a green consumer planned against variable defaults.
 func CheckOutputNames(names []string) error {
 	// Collisions first: two names that fold together produce the more useful
 	// error, because it names both outputs rather than one of them twice.
 	folded := make(map[string]string, len(names))
 	for _, name := range names {
-		key := envRoundTrip(name)
+		key := foldOutputKey(name)
 		if prior, dup := folded[key]; dup {
 			return fmt.Errorf(
-				"outputs %q and %q both reach a consumer as TF_VAR_%s: Caesium uppercases an output key and maps "+
-					"\"-\" and \".\" to \"_\", so their names are indistinguishable after the trip through the "+
-					"environment and which value wins is undefined. Rename one of them",
+				"outputs %q and %q both fold to the environment suffix %s: Caesium uppercases an output key and maps "+
+					"\"-\" and \".\" to \"_\", so their values cannot both reach a consumer and which one wins is "+
+					"undefined. Rename one of them",
 				prior, name, key)
 		}
 		folded[key] = name
 	}
 	for _, name := range names {
-		if got := envRoundTrip(name); got != name {
-			return fmt.Errorf(
-				"output %q reaches a consumer as TF_VAR_%s, not TF_VAR_%s: Caesium uppercases an output key and "+
-					"maps \"-\" and \".\" to \"_\" on the way out, and the importing step lowercases it on the way "+
-					"in. Rename the output using only lowercase letters, digits and underscores so it survives "+
-					"the trip",
-				name, got, name)
-		}
 		if err := publishableName(name); err != nil {
 			return err
 		}
@@ -153,29 +192,18 @@ func CheckOutputNames(names []string) error {
 	return nil
 }
 
-// envRoundTrip is what an output name becomes after Caesium spells it into an
-// environment variable and the importing step spells it back out.
-func envRoundTrip(name string) string {
-	replaced := strings.NewReplacer("-", "_", ".", "_").Replace(name)
-	return strings.ToLower(strings.ToUpper(replaced))
-}
-
-// publishableName rejects anything the round trip leaves alone but that is not
-// a legal environment variable name — non-ASCII being the obvious one, since
-// upper/lower of a rune outside [a-zA-Z] can be the identity.
+// publishableName requires a Terraform identifier. Mixed case and hyphens are
+// allowed — the name index carries them through the environment fold. Dots,
+// spaces and non-ASCII are not, because they cannot appear in TF_VAR_<name>.
 func publishableName(name string) error {
 	if name == "" {
 		return fmt.Errorf("an output with an empty name cannot be published")
 	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
-		default:
-			return fmt.Errorf(
-				"output %q contains %q, which cannot appear in the environment variable a consumer reads it from; "+
-					"rename it using lowercase letters, digits and underscores",
-				name, r)
-		}
+	if validVariableName(name) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf(
+		"output %q is not a Terraform identifier, so it cannot be imported as TF_VAR_%s; "+
+			"rename it using letters, digits, underscores and hyphens (not starting with a digit or hyphen)",
+		name, name)
 }
