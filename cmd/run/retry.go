@@ -71,6 +71,16 @@ var retryCmd = &cobra.Command{
 			return retrySinglePartition(ctx, cmd, retryFromFailureJobID, retryFromFailureRunID, retryFromFailureTask, retryFromFailurePartition)
 		}
 
+		// `--server` decides transport for the whole-run path the same way
+		// `caesium job lint` decides it (cmd/job/lint.go: serverMode :=
+		// cmd.Flags().Changed("server")): an explicit --server routes the request
+		// through the REST API; leaving it at its default keeps today's in-process
+		// runstorage.Default() behavior so `caesium run retry` with no flags is
+		// unchanged for local-mode callers.
+		if cmd.Flags().Changed("server") {
+			return retryWholeRunOverServer(ctx, cmd, retryFromFailureJobID, retryFromFailureRunID)
+		}
+
 		j, err := jsvc.Service(ctx).Get(jobID)
 		if err != nil {
 			return fmt.Errorf("failed to get job: %w", err)
@@ -107,8 +117,8 @@ func init() {
 	retryCmd.Flags().StringVar(&retryFromFailureRunID, "run-id", "", "Run ID to retry (required)")
 	retryCmd.Flags().StringVar(&retryFromFailurePartition, "partition", "", "Retry a single fan-out instance by partition value (does not re-run succeeded siblings)")
 	retryCmd.Flags().StringVar(&retryFromFailureTask, "task", "", "Task name or ID (required with --partition)")
-	retryCmd.Flags().StringVar(&retryFromFailureServer, "server", "http://localhost:8080", "Caesium server base URL (used only with --partition)")
-	retryCmd.Flags().StringVar(&retryFromFailureAPIKey, "api-key", "", "API key for authentication (prefer "+runDiffAPIKeyEnvVar+"; --api-key is visible in process listings; used only with --partition)")
+	retryCmd.Flags().StringVar(&retryFromFailureServer, "server", "http://localhost:8080", "Caesium server base URL; --partition always requires it, and passing --server explicitly also routes a whole-run retry through the REST API instead of the in-process store")
+	retryCmd.Flags().StringVar(&retryFromFailureAPIKey, "api-key", "", "API key for authentication (prefer "+runDiffAPIKeyEnvVar+"; --api-key is visible in process listings; used only with --partition or an explicit --server)")
 	retryCmd.MarkFlagRequired("job-id") //nolint:errcheck
 	retryCmd.MarkFlagRequired("run-id") //nolint:errcheck
 
@@ -181,6 +191,45 @@ func lookupPartitionByValue(ctx context.Context, cmd *cobra.Command, server, job
 		return nil, fmt.Errorf("partition %q not found in task %q of run %s", value, task, runID)
 	}
 	return &bare, nil
+}
+
+// retryWholeRunOverServer retries a whole run through the existing
+// POST /v1/jobs/:id/runs/:run_id/retry endpoint (api/rest/controller/job/run/retry.go),
+// the same endpoint `caesium run retry --partition` already reuses for the
+// keyed lookup/retry pair. It is selected when --server is passed explicitly
+// (see the Changed("server") check in retryCmd.RunE); output is kept
+// byte-for-byte identical to the in-process path's success line so scripts
+// that scrape it do not need to branch on transport.
+func retryWholeRunOverServer(ctx context.Context, cmd *cobra.Command, jobID, runID string) error {
+	server := strings.TrimSuffix(retryFromFailureServer, "/")
+	if server == "" {
+		server = "http://localhost:8080"
+	}
+	retryURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/retry", server, jobID, runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, retryURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey := resolveRunDiffAPIKey(cmd, retryFromFailureAPIKey); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := retryPartitionHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading retry response: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("retry run failed (%d): %s", resp.StatusCode, replayErrorMessage(body))
+	}
+
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Retrying run %s (job %s)\n", runID, jobID)
+	return err
 }
 
 func retrySinglePartition(ctx context.Context, cmd *cobra.Command, jobID, runID, task, value string) error {
