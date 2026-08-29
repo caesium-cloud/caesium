@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
+	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -248,6 +250,201 @@ func (s *DockerTestSuite) TestCreateAppliesResolvedVolumeMounts() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+func (s *DockerTestSuite) TestCreateAppliesVolumeSubPath() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Name:    "tfstate",
+				Type:    container.VolumeMountTypeVolume,
+				Source:  "tfstate-vol",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ClientVersion").
+		Return("1.47")
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", subPathHelperImage).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", subPathHelperImage).
+		Return()
+
+	helperCfgMatcher := mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+		return cfg.Image == subPathHelperImage &&
+			len(cfg.Cmd) == 3 &&
+			cfg.Cmd[0] == "mkdir" &&
+			cfg.Cmd[1] == "-p" &&
+			cfg.Cmd[2] == subPathHelperMountDir+"/stack-a"
+	})
+	helperHostMatcher := mock.MatchedBy(func(host *dockercontainer.HostConfig) bool {
+		return host != nil && len(host.Mounts) == 1 &&
+			host.Mounts[0].Type == mount.TypeVolume &&
+			host.Mounts[0].Source == "tfstate-vol" &&
+			host.Mounts[0].Target == subPathHelperMountDir
+	})
+	helperNameMatcher := mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, "caesium-subpath-init-")
+	})
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", helperCfgMatcher, helperHostMatcher, helperNameMatcher).
+		Return()
+
+	mainHostMatcher := mock.MatchedBy(func(host *dockercontainer.HostConfig) bool {
+		if host == nil || len(host.Mounts) != 1 {
+			return false
+		}
+		m := host.Mounts[0]
+		return m.Type == mount.TypeVolume &&
+			m.Source == "tfstate-vol" &&
+			m.Target == "/state" &&
+			m.VolumeOptions != nil &&
+			m.VolumeOptions.Subpath == "stack-a"
+	})
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mainHostMatcher, req.Name).
+		Return()
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerWait", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerRemove", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateAppliesBindSubPath() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Name:    "tfstate",
+				Type:    container.VolumeMountTypeBind,
+				Source:  "/host/tfstate",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
+		Return()
+
+	hostMatcher := mock.MatchedBy(func(host *dockercontainer.HostConfig) bool {
+		if host == nil || len(host.Mounts) != 1 {
+			return false
+		}
+		m := host.Mounts[0]
+		return m.Type == mount.TypeBind && m.Source == "/host/tfstate/stack-a" && m.Target == "/state"
+	})
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), hostMatcher, req.Name).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ClientVersion")
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateVolumeSubPathUnsupportedAPIVersion() {
+	req := &atom.EngineCreateRequest{
+		Name:  testContainerName,
+		Image: testImage,
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Type:    container.VolumeMountTypeVolume,
+				Source:  "tfstate-vol",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ClientVersion").
+		Return("1.40")
+
+	c, err := s.engine.Create(req)
+	s.Require().Error(err)
+	s.Assert().Nil(c)
+	s.Assert().Contains(err.Error(), "1.45")
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ContainerCreate", mock.Anything, mock.Anything, mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", subPathHelperImage)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateVolumeSubPathHelperImagePullError() {
+	req := &atom.EngineCreateRequest{
+		Name:  testContainerName,
+		Image: testImage,
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Type:    container.VolumeMountTypeVolume,
+				Source:  "tfstate-vol",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ClientVersion").
+		Return("1.47")
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", subPathHelperImage).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", subPathHelperImage).
+		Return(fmt.Errorf("pull failed"))
+
+	c, err := s.engine.Create(req)
+	s.Require().Error(err)
+	s.Assert().Nil(c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ContainerCreate", mock.Anything, mock.Anything, mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
@@ -466,4 +663,87 @@ func (s *DockerTestSuite) TestLogs() {
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), "logs", string(buf))
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func TestHasVolumeSubPath(t *testing.T) {
+	assert.False(t, hasVolumeSubPath(nil))
+	assert.False(t, hasVolumeSubPath([]container.VolumeMount{{Type: container.VolumeMountTypeVolume}}))
+	assert.False(t, hasVolumeSubPath([]container.VolumeMount{{Type: container.VolumeMountTypeBind, SubPath: "x"}}))
+	assert.False(t, hasVolumeSubPath([]container.VolumeMount{{Type: container.VolumeMountTypeTmpfs, SubPath: "x"}}))
+	assert.True(t, hasVolumeSubPath([]container.VolumeMount{{Type: container.VolumeMountTypeVolume, SubPath: "x"}}))
+}
+
+func TestConvertMountsVolumeSubPathSupported(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: "stack-a",
+	}}, true)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) {
+		assert.Equal(t, mount.TypeVolume, mounts[0].Type)
+		assert.Equal(t, "tfstate", mounts[0].Source)
+		assert.Equal(t, "/state", mounts[0].Target)
+		if assert.NotNil(t, mounts[0].VolumeOptions) {
+			assert.Equal(t, "stack-a", mounts[0].VolumeOptions.Subpath)
+		}
+	}
+}
+
+func TestConvertMountsVolumeSubPathUnsupportedAPIVersion(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeVolume,
+		Source:  "tfstate",
+		Target:  "/state",
+		SubPath: "stack-a",
+	}}, false)
+
+	assert.Error(t, err)
+	assert.Nil(t, mounts)
+	assert.Contains(t, err.Error(), "subPath")
+	assert.Contains(t, err.Error(), "1.45")
+}
+
+func TestConvertMountsVolumeNoSubPathUnaffectedByAPIVersion(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:   container.VolumeMountTypeVolume,
+		Source: "cache",
+		Target: "/cache",
+	}}, false)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) {
+		assert.Nil(t, mounts[0].VolumeOptions)
+	}
+}
+
+func TestConvertMountsBindSubPathJoinsSource(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:    container.VolumeMountTypeBind,
+		Source:  "/data",
+		Target:  "/state",
+		SubPath: "stack-a/nested",
+	}}, false)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) {
+		assert.Equal(t, mount.TypeBind, mounts[0].Type)
+		assert.Equal(t, "/data/stack-a/nested", mounts[0].Source)
+		assert.Nil(t, mounts[0].VolumeOptions)
+	}
+}
+
+func TestConvertMountsBindNoSubPathUnchanged(t *testing.T) {
+	mounts, err := convertMounts(nil, []container.VolumeMount{{
+		Type:   container.VolumeMountTypeBind,
+		Source: "/data",
+		Target: "/state",
+	}}, false)
+
+	assert.NoError(t, err)
+	if assert.Len(t, mounts, 1) {
+		assert.Equal(t, "/data", mounts[0].Source)
+	}
 }

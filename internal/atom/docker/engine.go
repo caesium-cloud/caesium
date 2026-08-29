@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -16,9 +18,28 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/google/uuid"
 )
+
+// subPathMinAPIVersion is the first Docker Engine API version that supports
+// mount.VolumeOptions.Subpath (a named-volume mount scoped to a
+// sub-directory of the volume rather than its root).
+const subPathMinAPIVersion = "1.45"
+
+// subPathHelperImage is the minimal image used to create the sub-directory a
+// VolumeMount.SubPath addresses before the real container mounts it with
+// VolumeOptions.Subpath: Docker refuses to start a container whose subpath
+// does not already exist on the volume, and the target step's own image is
+// not guaranteed to carry a shell or mkdir. Pinned per the repo's image-pin
+// guardrail (internal/guardrails/guardrails_test.go).
+const subPathHelperImage = "alpine:3.23"
+
+// subPathHelperMountDir is where the helper container mounts the volume
+// (whole, unscoped) so it can create the sub-directory beneath it.
+const subPathHelperMountDir = "/caesium-subpath"
 
 // Engine defines the interface for treating the
 // Docker API as a atom.Engine.
@@ -109,8 +130,22 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		cfg.WorkingDir = req.Spec.WorkDir
 	}
 
+	var subpathSupported bool
+	if hasVolumeSubPath(req.Spec.ResolvedVolumeMounts) {
+		subpathSupported = versions.GreaterThanOrEqualTo(e.backend.ClientVersion(), subPathMinAPIVersion)
+	}
+
+	mounts, err := convertMounts(req.Spec.Mounts, req.Spec.ResolvedVolumeMounts, subpathSupported)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := e.ensureVolumeSubPaths(req.Spec.ResolvedVolumeMounts); err != nil {
+		return nil, err
+	}
+
 	var hostCfg *dockercontainer.HostConfig
-	if mounts := convertMounts(req.Spec.Mounts, req.Spec.ResolvedVolumeMounts); len(mounts) > 0 {
+	if len(mounts) > 0 {
 		hostCfg = &dockercontainer.HostConfig{Mounts: mounts}
 	}
 
@@ -265,9 +300,31 @@ func formatEnv(values map[string]string) []string {
 	return env
 }
 
-func convertMounts(specMounts []container.Mount, resolvedMounts []container.VolumeMount) []mount.Mount {
+// hasVolumeSubPath reports whether any resolved named-volume mount declares a
+// SubPath. Bind-mount SubPath is a pure client-side path join and never needs
+// the Docker Engine API version check below.
+func hasVolumeSubPath(resolvedMounts []container.VolumeMount) bool {
+	for _, mnt := range resolvedMounts {
+		if mnt.Type == container.VolumeMountTypeVolume && mnt.SubPath != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// convertMounts maps Caesium's runtime-neutral mount types onto Docker's
+// mount.Mount. VolumeMount.SubPath is honoured for both mount kinds it can
+// apply to:
+//   - bind: SubPath is joined onto the host source path directly (Docker
+//     bind mounts have no separate subpath option).
+//   - volume: SubPath is mapped onto mount.VolumeOptions.Subpath, which
+//     requires Docker Engine API >= 1.45 and the sub-directory to already
+//     exist on the volume (see ensureVolumeSubPath). If the negotiated API
+//     is older, an error is returned rather than silently mounting the whole
+//     volume — Docker never gets to see (and ignore) the field.
+func convertMounts(specMounts []container.Mount, resolvedMounts []container.VolumeMount, subpathSupported bool) ([]mount.Mount, error) {
 	if len(specMounts) == 0 && len(resolvedMounts) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make([]mount.Mount, 0, len(specMounts)+len(resolvedMounts))
 	for _, mnt := range specMounts {
@@ -312,9 +369,13 @@ func convertMounts(specMounts []container.Mount, resolvedMounts []container.Volu
 			if mnt.Source == "" {
 				continue
 			}
+			source := mnt.Source
+			if mnt.SubPath != "" {
+				source = path.Join(mnt.Source, mnt.SubPath)
+			}
 			result = append(result, mount.Mount{
 				Type:     mount.TypeBind,
-				Source:   mnt.Source,
+				Source:   source,
 				Target:   mnt.Target,
 				ReadOnly: mnt.ReadOnly,
 			})
@@ -322,12 +383,22 @@ func convertMounts(specMounts []container.Mount, resolvedMounts []container.Volu
 			if mnt.Source == "" {
 				continue
 			}
-			result = append(result, mount.Mount{
+			dockerMount := mount.Mount{
 				Type:     mount.TypeVolume,
 				Source:   mnt.Source,
 				Target:   mnt.Target,
 				ReadOnly: mnt.ReadOnly,
-			})
+			}
+			if mnt.SubPath != "" {
+				if !subpathSupported {
+					return nil, fmt.Errorf(
+						"docker mount %q on volume %q: subPath %q requires Docker Engine API >= %s "+
+							"(VolumeOptions.Subpath); refusing to silently mount the whole volume instead",
+						mnt.Target, mnt.Source, mnt.SubPath, subPathMinAPIVersion)
+				}
+				dockerMount.VolumeOptions = &mount.VolumeOptions{Subpath: mnt.SubPath}
+			}
+			result = append(result, dockerMount)
 		case container.VolumeMountTypeTmpfs:
 			dockerMount := mount.Mount{
 				Type:     mount.TypeTmpfs,
@@ -344,5 +415,95 @@ func convertMounts(specMounts []container.Mount, resolvedMounts []container.Volu
 			result = append(result, dockerMount)
 		}
 	}
-	return result
+	return result, nil
+}
+
+// ensureVolumeSubPaths creates the sub-directory of every SubPath-scoped
+// named-volume mount before the real container is created. Docker requires a
+// VolumeOptions.Subpath directory to already exist; it never creates one on
+// its own, unlike Kubernetes' kubelet or Podman's runtime.
+func (e *dockerEngine) ensureVolumeSubPaths(resolvedMounts []container.VolumeMount) error {
+	seen := make(map[string]struct{}, len(resolvedMounts))
+	for _, mnt := range resolvedMounts {
+		if mnt.Type != container.VolumeMountTypeVolume || mnt.SubPath == "" || mnt.Source == "" {
+			continue
+		}
+		key := mnt.Source + "\x00" + mnt.SubPath
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if err := e.ensureVolumeSubPath(mnt.Source, mnt.SubPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureVolumeSubPath creates subPath's directory on the named volume
+// volumeName using a short-lived helper container: it mounts the volume in
+// full (no Subpath) at subPathHelperMountDir, runs `mkdir -p` for the
+// cleaned sub-path, and is removed once it exits. subPath is cleaned as an
+// absolute path before use so a value like "../../etc" collapses to the
+// volume root rather than escaping the mount — the real container's own
+// mount.VolumeOptions.Subpath still receives the caller's original,
+// unmodified subPath (see convertMounts), matching how the podman and
+// kubernetes engines pass it straight through.
+func (e *dockerEngine) ensureVolumeSubPath(volumeName, subPath string) error {
+	cleaned := strings.TrimPrefix(path.Clean("/"+subPath), "/")
+	if cleaned == "" || cleaned == "." {
+		return nil
+	}
+
+	if err := e.ensureImagePresent(subPathHelperImage); err != nil {
+		return fmt.Errorf("pull subPath helper image for volume %q: %w", volumeName, err)
+	}
+
+	cfg := &dockercontainer.Config{
+		Image: subPathHelperImage,
+		Cmd:   []string{"mkdir", "-p", path.Join(subPathHelperMountDir, cleaned)},
+	}
+	hostCfg := &dockercontainer.HostConfig{
+		Mounts: []mount.Mount{{
+			Type:   mount.TypeVolume,
+			Source: volumeName,
+			Target: subPathHelperMountDir,
+		}},
+	}
+	name := fmt.Sprintf("caesium-subpath-init-%s", uuid.NewString())
+
+	log.Info("creating docker subPath helper container", "volume", volumeName, "subPath", subPath)
+
+	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, name)
+	if err != nil {
+		return fmt.Errorf("create subPath helper container for volume %q: %w", volumeName, err)
+	}
+
+	defer func() {
+		// Detached context: cleanup must not be short-circuited by the
+		// caller's context the way Stop() already avoids it.
+		if rmErr := e.backend.ContainerRemove(context.Background(), created.ID, dockercontainer.RemoveOptions{Force: true}); rmErr != nil {
+			log.Error("remove subPath helper container", "volume", volumeName, "error", rmErr)
+		}
+	}()
+
+	if err := e.backend.ContainerStart(e.ctx, created.ID, dockercontainer.StartOptions{}); err != nil {
+		return fmt.Errorf("start subPath helper container for volume %q: %w", volumeName, err)
+	}
+
+	resultC, errC := e.backend.ContainerWait(e.ctx, created.ID, dockercontainer.WaitConditionNotRunning)
+	select {
+	case waitErr := <-errC:
+		if waitErr != nil {
+			return fmt.Errorf("wait for subPath helper container for volume %q: %w", volumeName, waitErr)
+		}
+	case res := <-resultC:
+		if res.StatusCode != 0 {
+			return fmt.Errorf("subPath helper container for volume %q exited %d creating %q", volumeName, res.StatusCode, cleaned)
+		}
+	case <-e.ctx.Done():
+		return e.ctx.Err()
+	}
+
+	return nil
 }
