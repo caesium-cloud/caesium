@@ -339,3 +339,101 @@ func TestRetryStillPrintsUsageForArgumentErrors(t *testing.T) {
 	require.Contains(t, stdout+stderr, "Usage:",
 		"an argument error must still show usage:\nstdout=%s\nstderr=%s", stdout, stderr)
 }
+
+// TestRetryWholeRunRoutesOverServerWhenServerFlagIsExplicit is the regression
+// for #353: `caesium run retry` without --partition used to open
+// runstorage.Default() directly regardless of --server, so it was the only
+// retry path never exercised against a live server. Driving the REAL command
+// tree (executeRunCommand, not calling retryWholeRunOverServer directly) pins
+// that the cmd.Flags().Changed("server") branch in retryCmd.RunE actually wires
+// up: passing --server must POST /v1/jobs/:id/runs/:run_id/retry rather than
+// falling through to the local-store code path below it (which has no DB to
+// talk to in this test binary and would fail differently).
+func TestRetryWholeRunRoutesOverServerWhenServerFlagIsExplicit(t *testing.T) {
+	restoreRetryTestGlobals(t)
+
+	const (
+		jobID = "6f1c9d6e-0000-4000-8000-000000000003"
+		runID = "6f1c9d6e-0000-4000-8000-000000000004"
+	)
+	var sawMethod, sawPath, sawAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawMethod = r.Method
+		sawPath = r.URL.Path
+		sawAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"` + runID + `","job_id":"` + jobID + `","status":"pending"}`))
+	}))
+	defer server.Close()
+
+	stdout, stderr, err := executeRunCommand(t, "retry",
+		"--job-id", jobID, "--run-id", runID,
+		"--server", server.URL, "--api-key", "secret-key")
+
+	require.NoError(t, err, "stderr=%s", stderr)
+	require.Equal(t, http.MethodPost, sawMethod)
+	require.Equal(t, "/v1/jobs/"+jobID+"/runs/"+runID+"/retry", sawPath)
+	require.Equal(t, "Bearer secret-key", sawAuth)
+	require.Contains(t, stdout, fmt.Sprintf("Retrying run %s (job %s)", runID, jobID),
+		"the server path's success line must match the in-process path's so scripts parsing it do not need to branch on transport")
+}
+
+// TestRetryWholeRunOverServerSurfacesServerErrorNoUsageBlock mirrors
+// TestRetrySinglePartitionServerErrorPrintsNoUsageBlock for the whole-run
+// path: a non-2xx response from the retry endpoint (e.g. retrying a
+// non-terminal run, which the controller answers 409) is a transport/server
+// failure, not a usage error, and must not be followed by cobra's usage block
+// on either stream.
+func TestRetryWholeRunOverServerSurfacesServerErrorNoUsageBlock(t *testing.T) {
+	restoreRetryTestGlobals(t)
+
+	const conflictMsg = "run is not in a terminal state"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = fmt.Fprintf(w, `{"message":%q}`, conflictMsg)
+	}))
+	defer server.Close()
+
+	stdout, stderr, err := executeRunCommand(t, "retry",
+		"--job-id", "6f1c9d6e-0000-4000-8000-000000000005",
+		"--run-id", "6f1c9d6e-0000-4000-8000-000000000006",
+		"--server", server.URL)
+
+	require.Error(t, err)
+	require.Contains(t, stderr, conflictMsg)
+	require.NotContains(t, stderr, "Usage:", "usage must not follow a server error:\n%s", stderr)
+	require.NotContains(t, stdout, "Usage:", "usage must never reach stdout:\n%s", stdout)
+	require.Empty(t, stdout, "a failed retry writes nothing to stdout:\n%s", stdout)
+}
+
+// TestRetryWholeRunOverServerReadsAPIKeyFromEnv pins the same
+// CAESIUM_API_KEY env-var fallback the --partition path already relies on
+// (resolveRunDiffAPIKey), so a scripted whole-run retry does not have to pass
+// --api-key on the command line (which is visible in process listings).
+func TestRetryWholeRunOverServerReadsAPIKeyFromEnv(t *testing.T) {
+	restoreRetryTestGlobals(t)
+	t.Setenv(runDiffAPIKeyEnvVar, "env-key")
+
+	var sawAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"r","job_id":"j","status":"pending"}`))
+	}))
+	defer server.Close()
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	retryFromFailureServer = server.URL
+	retryFromFailureAPIKey = ""
+
+	err := retryWholeRunOverServer(context.Background(), cmd, "job-1", "run-1")
+	require.NoError(t, err)
+	require.Equal(t, "Bearer env-key", sawAuth)
+	require.Contains(t, stdout.String(), "Retrying run run-1 (job job-1)")
+}
