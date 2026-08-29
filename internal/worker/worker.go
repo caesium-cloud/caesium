@@ -187,16 +187,17 @@ func (w *Worker) WithRunLeaseRenewal(renewer RunLeaseRenewer, leaseTTL time.Dura
 // worker presents when reporting a dispatched task's completion back to the
 // owner's /internal/complete (the CAESIUM_INTERNAL_WAKEUP_TOKEN).
 //
-// The buffer is sized to the pool size (floored at 1): it holds at most one
-// pool's worth of tasks waiting for a slot, which lets the worker absorb a
-// dispatch burst without blocking the Run loop's drain, while bounding memory
-// and keeping backpressure unified with the pool — when the buffer fills,
-// SubmitDispatched rejects and the owner re-dispatches.  Without an explicit
-// call this stays nil and the worker behaves byte-identically to Phase 1.
+// The buffer is sized to the pool size (floored at 1) because every buffered
+// task already holds a reserved pool slot (SubmitDispatched reserves before it
+// enqueues), so at most one pool's worth of tasks can ever be in the buffer.
+// It is a hand-off queue between the HTTP goroutine and the Run loop, not a
+// backlog: capacity — not buffer space — is what admits a dispatch.  Without an
+// explicit call this stays nil and the worker behaves byte-identically to
+// Phase 1.
 func (w *Worker) WithInboundDispatch(completionToken string) *Worker {
 	size := 1
-	if w.pool != nil && cap(w.pool.sem) > size {
-		size = cap(w.pool.sem)
+	if w.pool != nil && w.pool.Size() > size {
+		size = w.pool.Size()
 	}
 	w.inbound = make(chan inboundTask, size)
 	w.inboundNotify = make(chan struct{}, 1)
@@ -204,24 +205,34 @@ func (w *Worker) WithInboundDispatch(completionToken string) *Worker {
 	return w
 }
 
-// ErrInboundFull is returned by SubmitDispatched when the inbound buffer is at
-// capacity (the worker is saturated).  The dispatch handler treats this as a
-// rejectable condition and rolls the claim back so the owner re-dispatches.
-var ErrInboundFull = errors.New("worker: inbound dispatch buffer full")
+// ErrInboundFull is returned by SubmitDispatched when the worker has no free
+// pool slot to run the task on (it is saturated).  The dispatch handler treats
+// this as a rejectable condition and rolls the claim back so the owner
+// re-dispatches — which is exactly right, because the owner has already flipped
+// the row to `running` by the time it asks the worker to take it.
+var ErrInboundFull = errors.New("worker: no execution capacity for dispatched task")
 
 // ErrWorkerNotAccepting is returned by SubmitDispatched when the worker is not
 // configured to accept dispatched tasks (WithInboundDispatch was never called).
 var ErrWorkerNotAccepting = errors.New("worker: not accepting dispatched tasks")
 
 // SubmitDispatched enqueues a dispatched task for execution on the worker's
-// shared pool.  It is non-blocking: it returns ErrInboundFull when the inbound
-// buffer is full and ErrWorkerNotAccepting when the inbound path is disabled.
-// *Worker implements dispatch.WorkerSubmitter via this method, so the dispatch
-// handler can hand it accepted tasks directly (no adapter needed).
+// shared pool.  It is non-blocking: it returns ErrInboundFull when the worker
+// has no free pool slot and ErrWorkerNotAccepting when the inbound path is
+// disabled.  *Worker implements dispatch.WorkerSubmitter via this method, so
+// the dispatch handler can hand it accepted tasks directly (no adapter needed).
 //
 // The non-blocking contract is deliberate: HandleDispatch runs on an HTTP
-// request goroutine and must not block on a full pool.  A full buffer surfaces
-// as a 409 the owner retries, rather than holding the dispatch RPC open.
+// request goroutine and must not block on a full pool.  Saturation surfaces as
+// a 409 the owner retries, rather than holding the dispatch RPC open.
+//
+// A pool slot is RESERVED here, before the task is accepted, so acceptance and
+// capacity are the same decision.  The owner flips the row to `running` before
+// it POSTs the dispatch and rolls that claim back when this method errors —
+// so accepting a task the worker cannot start would leave the catalog claiming
+// work is running while it sits parked behind another task's execution.  The
+// reservation travels with the task through the inbound channel and is consumed
+// by drainInbound (Pool.Go), or handed back if the enqueue itself fails.
 func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
 	if w.inbound == nil {
 		return ErrWorkerNotAccepting
@@ -239,6 +250,9 @@ func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
 		OwnerGeneration: d.OwnerGeneration,
 		Attempt:         d.Attempt,
 	}
+	if !w.pool.TryAcquire() {
+		return ErrInboundFull
+	}
 	select {
 	case w.inbound <- inboundTask{task: d.Task, meta: meta}:
 		// Poke the wake signal (non-blocking; a full notify buffer means the
@@ -249,6 +263,10 @@ func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
 		}
 		return nil
 	default:
+		// Unreachable while the buffer is sized to the pool (every buffered task
+		// holds a reservation, so a successful TryAcquire implies buffer room);
+		// kept so a future resize can never silently leak a slot.
+		w.pool.Release()
 		return ErrInboundFull
 	}
 }
@@ -300,9 +318,29 @@ func (w *Worker) Run(ctx context.Context) error {
 
 		w.reclaimIfDue(ctx)
 
+		// Reserve execution capacity BEFORE claiming.  Claimer.ClaimNext flips
+		// the row to `running` inside its atomic claim UPDATE, so claiming
+		// without a slot advertises a task as running while the goroutine parks
+		// waiting for one — a one-slot worker could not hold siblings `pending`,
+		// and the catalog (plus every read surface built on it) reported more
+		// work in flight than the node could possibly be executing.
+		//
+		// A failed reservation is not "no work": it is "no capacity", so wait for
+		// a slot to free — Pool.Free wakes us the moment one does, instead of
+		// idling out a full poll interval — and re-enter the loop, which drains
+		// the push path first.
+		if !w.pool.TryAcquire() {
+			if sleepErr := waitForWork(ctx, w.wakeups, w.inboundNotify, w.pool.Free(), w.pollInterval); sleepErr != nil {
+				w.pool.Wait()
+				return nil
+			}
+			continue
+		}
+
 		task, err := w.claimer.ClaimNext(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
+				w.pool.Release()
 				w.pool.Wait()
 				return nil
 			}
@@ -310,35 +348,45 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		if err != nil || task == nil {
+			// Nothing claimed: hand the reservation back before idling so the
+			// push path (and other workers on this pool) can use it.
+			w.pool.Release()
 			// No pull-path work: wait for a wakeup, a dispatched-task arrival, or
 			// the poll interval — whichever comes first.  The inboundNotify wake
 			// means a dispatched task is picked up promptly instead of after a
 			// full poll interval.
-			if sleepErr := waitForWork(ctx, w.wakeups, w.inboundNotify, w.pollInterval); sleepErr != nil {
+			if sleepErr := waitForWork(ctx, w.wakeups, w.inboundNotify, nil, w.pollInterval); sleepErr != nil {
 				w.pool.Wait()
 				return nil
 			}
 			continue
 		}
 
-		// ClaimNext'd task: execute with the plain context (local sink path).
-		if err := w.submitToPool(ctx, ctx, task); err != nil {
-			if ctx.Err() != nil {
-				w.pool.Wait()
-				return nil
-			}
-			return err
+		// Shutting down between the claim and the hand-off: don't start the
+		// executor on a dead context.  The claim's lease expires and
+		// ReclaimExpired returns the row to `pending`, exactly as it did when
+		// pool.Submit refused a cancelled context.
+		if ctx.Err() != nil {
+			w.pool.Release()
+			w.pool.Wait()
+			return nil
 		}
+
+		// ClaimNext'd task: execute with the plain context (local sink path) on
+		// the slot reserved above.
+		w.startOnReservedSlot(ctx, task)
 	}
 }
 
-// drainInbound submits every currently-buffered dispatched task onto the shared
+// drainInbound starts every currently-buffered dispatched task on the shared
 // pool.  It pulls non-blocking until the channel is momentarily empty so a
 // burst of dispatches is absorbed in one pass.  Each dispatched task executes
 // with a context carrying its owner metadata so the executor selects the
-// owner-routed completion sink.  Returns a non-nil error only when the context
-// was cancelled mid-submit (pool.Submit blocks on a full pool until a slot
-// frees or ctx is done).
+// owner-routed completion sink.
+//
+// It never blocks on capacity: SubmitDispatched already reserved a slot for
+// every buffered task, so the drain only has to consume that reservation.
+// Returns a non-nil error only when the context was cancelled.
 func (w *Worker) drainInbound(ctx context.Context) error {
 	if w.inbound == nil {
 		return nil
@@ -349,33 +397,26 @@ func (w *Worker) drainInbound(ctx context.Context) error {
 			return ctx.Err()
 		case in := <-w.inbound:
 			execCtx := withDispatchMeta(ctx, in.meta)
-			if err := w.submitToPool(execCtx, ctx, in.task); err != nil {
-				return err
-			}
+			w.startOnReservedSlot(execCtx, in.task)
 		default:
 			return nil
 		}
 	}
 }
 
-// submitToPool registers a task as in-flight and submits its execution onto the
-// pool.  execCtx is the context passed to the executor (carries dispatch
-// metadata for push-path tasks); submitCtx governs the pool.Submit blocking
-// (the worker's lifecycle context).  On a failed submit the in-flight
-// registration is undone so the lease-renewal ticker doesn't track a task that
-// never ran.
-func (w *Worker) submitToPool(execCtx, submitCtx context.Context, task *models.TaskRun) error {
-	// Register the claim before submitting so the renewal ticker can see it as
+// startOnReservedSlot registers a task as in-flight and starts its execution on
+// a pool slot the caller has ALREADY reserved (Pool.TryAcquire/Acquire).  The
+// reservation is consumed by Pool.Go and released when the executor returns.
+// execCtx is the context passed to the executor (it carries dispatch metadata
+// for push-path tasks).
+func (w *Worker) startOnReservedSlot(execCtx context.Context, task *models.TaskRun) {
+	// Register the claim before starting so the renewal ticker can see it as
 	// soon as the goroutine is alive, even before execution starts.
 	w.trackInFlight(task)
-	if err := w.pool.Submit(submitCtx, func() {
+	w.pool.Go(func() {
 		defer w.untrackInFlight(task.ID)
 		w.executor(execCtx, task)
-	}); err != nil {
-		w.untrackInFlight(task.ID)
-		return err
-	}
-	return nil
+	})
 }
 
 // trackInFlight registers a task run as in-flight for lease renewal purposes.
@@ -576,14 +617,15 @@ func randomReclaimOffset(interval time.Duration) time.Duration {
 }
 
 // waitForWork blocks until there is plausibly work to do: a pull-path wakeup
-// signal, a dispatched-task arrival notification, or the poll interval
-// elapsing.  notify is a wake-only signal (buffered size 1, poked by
-// SubmitDispatched); consuming it is harmless because the actual task sits
-// safely in the inbound buffer and is drained by the next loop iteration.  A
-// nil wakeups and nil notify (owner mode off, no wakeups) collapses to the
-// pre-Phase-2 sleep behavior.
-func waitForWork(ctx context.Context, wakeups <-chan struct{}, notify <-chan struct{}, d time.Duration) error {
-	if wakeups == nil && notify == nil {
+// signal, a dispatched-task arrival notification, a freed pool slot, or the
+// poll interval elapsing.  notify is a wake-only signal (buffered size 1, poked
+// by SubmitDispatched); consuming it is harmless because the actual task sits
+// safely in the inbound buffer and is drained by the next loop iteration.  freed
+// is Pool.Free — pass it only when the wait is FOR capacity, so the ordinary
+// idle wait keeps its jittered sleep.  A nil wakeups, notify and freed (owner
+// mode off, no wakeups) collapses to the pre-Phase-2 sleep behavior.
+func waitForWork(ctx context.Context, wakeups, notify, freed <-chan struct{}, d time.Duration) error {
+	if wakeups == nil && notify == nil && freed == nil {
 		return sleepWithContext(ctx, d)
 	}
 
@@ -596,6 +638,8 @@ func waitForWork(ctx context.Context, wakeups <-chan struct{}, notify <-chan str
 	case <-wakeups:
 		return nil
 	case <-notify:
+		return nil
+	case <-freed:
 		return nil
 	case <-timer.C:
 		return nil
