@@ -733,8 +733,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	// engine.Create both creates AND starts the container, so this is the last
 	// moment a task that was resolved out from under this worker can still be
-	// prevented from running. The pool may have held the claimed task for a long
-	// time — one free slot and a queue of fan-out siblings is all it takes — and
+	// prevented from running. Real time passes between the claim and this point
+	// — image pulls, secret and output resolution, and for a dispatched task the
+	// hop through the inbound hand-off — and
 	// fail_fast cancelling a sibling of an already-failed group revokes its claim
 	// (internal/run: markInstanceCancelledBeforeStartTx). Without this check the
 	// cancelled instance's container starts, and only the StartTaskClaimed below

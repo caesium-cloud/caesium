@@ -406,11 +406,11 @@ func TestSubmitDispatched_NilTask(t *testing.T) {
 	}
 }
 
-// TestSubmitDispatched_BufferFull verifies that once the inbound buffer is full
-// (pool-size-bounded), further submits are rejected with ErrInboundFull so the
-// owner can re-dispatch — backpressure is unified with the pool.
+// TestSubmitDispatched_BufferFull verifies that once every pool slot is spoken
+// for, further submits are rejected with ErrInboundFull so the owner can roll
+// the claim back and re-dispatch — admission is capacity, not buffer space.
 func TestSubmitDispatched_BufferFull(t *testing.T) {
-	// Pool size 2 → inbound buffer cap 2. Don't run the worker so nothing drains.
+	// Pool size 2 → two reservations available. Don't run the worker so nothing drains.
 	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Millisecond, nil).
 		WithInboundDispatch("tok")
 
@@ -507,4 +507,162 @@ func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
 	if got := atomic.LoadInt32(&executed); got != 2 {
 		t.Fatalf("expected 2 executed tasks (1 dispatched + 1 ClaimNext'd), got %d", got)
 	}
+}
+
+// --- #355: capacity is acquired before a task is claimed ---
+
+// countingClaimer hands out an unlimited supply of tasks and records how many
+// times it was asked.  The count is the observable that matters for #355:
+// ClaimNext flips a row to `running`, so every call is a task the catalog now
+// reports as in flight.
+type countingClaimer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingClaimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()}, nil
+}
+
+func (c *countingClaimer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestWorkerDoesNotClaimWithoutPoolCapacity is the regression guard for #355.
+// Claimer.ClaimNext marks the row `running` inside its claim UPDATE, so the
+// worker must hold a pool slot BEFORE it claims.  With a one-slot pool occupied
+// by a running task, no further claim may be issued — that is exactly what lets
+// a one-slot worker hold siblings `pending` instead of parking them `running`
+// behind a full pool.
+func TestWorkerDoesNotClaimWithoutPoolCapacity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	claimer := &countingClaimer{}
+	release := make(chan struct{})
+	var starts int32
+
+	w := NewWorker(claimer, NewPool(1), time.Millisecond, func(context.Context, *models.TaskRun) {
+		atomic.AddInt32(&starts, 1)
+		<-release
+	})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+
+	waitFor(t, 2*time.Second, "first task to start", func() bool {
+		return atomic.LoadInt32(&starts) == 1
+	})
+
+	// The single slot is now occupied for as long as we hold `release`. The
+	// 1ms poll interval gives the loop ~100 chances to misbehave.
+	time.Sleep(100 * time.Millisecond)
+	if got := claimer.count(); got != 1 {
+		t.Fatalf("worker issued %d claims while its only pool slot was busy; a claim must never outrun capacity", got)
+	}
+	if got := atomic.LoadInt32(&starts); got != 1 {
+		t.Fatalf("expected exactly 1 running task on a one-slot pool, got %d", got)
+	}
+
+	// Freeing the slot must resume claiming promptly (Pool.Free wake, not a
+	// poll-interval stall).
+	close(release)
+	waitFor(t, 2*time.Second, "claiming to resume once the slot frees", func() bool {
+		return claimer.count() >= 3
+	})
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("worker run failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not shut down")
+	}
+}
+
+// TestSubmitDispatchedRejectsWithoutPoolCapacity covers the push half of the
+// same invariant: the owner has already flipped the row to `running` by the
+// time it POSTs the dispatch, so a worker with no free slot must refuse (the
+// handler then rolls the claim back to `pending`) rather than buffer the task.
+func TestSubmitDispatchedRejectsWithoutPoolCapacity(t *testing.T) {
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithInboundDispatch("tok")
+
+	if !w.pool.TryAcquire() {
+		t.Fatal("could not reserve the only slot")
+	}
+
+	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
+	if !errors.Is(err, ErrInboundFull) {
+		t.Fatalf("expected ErrInboundFull with no free pool slot, got %v", err)
+	}
+
+	w.pool.Release()
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
+		t.Fatalf("expected the dispatch to be accepted once a slot freed, got %v", err)
+	}
+}
+
+// TestWorkerReleasesCapacityWhenNothingToClaim verifies the reservation the Run
+// loop takes before each claim is handed back when the claim comes up empty.
+// Without that release a pull worker would permanently hold a slot it is not
+// using, and on a one-slot node the push path could never be admitted.
+func TestWorkerReleasesCapacityWhenNothingToClaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	executed := make(chan struct{}, 1)
+	// sequenceClaimer with no responses never yields pull-path work.
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), 20*time.Millisecond,
+		func(context.Context, *models.TaskRun) {
+			executed <- struct{}{}
+		}).WithInboundDispatch("tok")
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx) }()
+
+	// The loop holds its reservation only for the duration of one ClaimNext, so
+	// a submit can lose that narrow race; retry briefly rather than assert on a
+	// single attempt.
+	var submitErr error
+	waitFor(t, 2*time.Second, "an idle worker to admit a dispatched task", func() bool {
+		submitErr = w.SubmitDispatched(dispatch.InboundDispatch{
+			Task: &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()},
+		})
+		return submitErr == nil
+	})
+
+	select {
+	case <-executed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatched task was never executed")
+	}
+
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+}
+
+// waitFor polls cond until it holds or the timeout elapses.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", timeout, what)
 }

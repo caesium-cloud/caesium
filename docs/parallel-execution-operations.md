@@ -34,6 +34,15 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
 
+## Worker Capacity
+
+`CAESIUM_WORKER_POOL_SIZE` is an admission limit, not merely an execution limit: a node never marks a task `running` unless it already holds a free pool slot for it. A node therefore reports at most `CAESIUM_WORKER_POOL_SIZE` tasks in `running`.
+
+- **Pull path** — the worker reserves a slot before it calls the claimer, so a saturated node issues no claim at all. Ready tasks stay `pending` (and claimable by another node) instead of being parked `running` behind a busy pool.
+- **Push path (run-owner mode)** — a dispatch that reaches a saturated node is rejected with `409 worker busy; task returned to dispatch pool`. The owner rolls the claim back to `pending` and re-dispatches on a later tick, here or to another peer.
+
+Expect `caesium_dispatch_rejected_total{reason="worker_rejected"}` to be non-zero whenever workers are the bottleneck; that is normal backpressure, not an error. Sustained growth alongside a flat `caesium_dispatch_sent_total` means the cluster is under-provisioned — raise `CAESIUM_WORKER_POOL_SIZE` or add worker nodes.
+
 ## Run-Owner Mode (Phase 2 Phase A, experimental)
 
 Run-owner mode assigns each in-flight job run to a single owner node. The owner writes a `run_leases` row in the catalog DB on run creation and pushes ready tasks to worker nodes via `POST /internal/dispatch` instead of relying on workers to poll via `ClaimNext`. Workers POST results back to the owner via `POST /internal/complete`.
