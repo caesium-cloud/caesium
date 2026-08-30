@@ -236,7 +236,7 @@ func TestRetryPartitionLeavesNoStaleExecutionEvidence(t *testing.T) {
 		"rate_limit_retry_after": now.Add(time.Hour),
 	}).Error)
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
 
 	var row models.TaskRun
@@ -283,7 +283,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 			rows := f.instances(t)
 			setInstanceOutcome(t, f.db, rows[0].ID, status, nil)
 
-			_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+			_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 			require.ErrorIs(t, err, ErrPartitionNotRetryable)
 
 			var row models.TaskRun
@@ -299,7 +299,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 		rows := f.instances(t)
 		setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
 
-		updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+		updated, _, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 		require.NoError(t, err)
 		assert.Equal(t, TaskStatusPending, updated.Status)
 	})

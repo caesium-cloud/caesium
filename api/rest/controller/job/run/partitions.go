@@ -40,7 +40,7 @@ var (
 		return runsvc.New(ctx).Get(runID)
 	}
 
-	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
+	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return runstorage.Default().RetryPartition(ctx, runID, taskRunID)
 	}
 
@@ -252,18 +252,18 @@ func RetryPartition(c *echo.Context) error {
 	// in-group indegree over non-terminal dependencies, re-open a finished run,
 	// and invalidate the owner checkpoints. Doing it here with a bare Updates()
 	// did none of that.
-	updated, err := partitionRetryInstance(ctx, runID, row.ID)
+	updated, reopened, err := partitionRetryInstance(ctx, runID, row.ID)
 	if err != nil {
 		return retryPartitionHTTPError(err)
 	}
 
-	// A terminal run's original (*job).Run has already returned: local mode has
-	// no dispatcher to pick the reset pending instance up, so start a new
-	// job.New(...).Run against the reopened run (the same kickoff whole-run
-	// retry uses). While the run is still in flight the in-process loop — or
-	// the distributed claimer — will see the pending row; a second Run() would
-	// race it.
-	if partitionRetryNeedsKickoff(runEntry.Status) {
+	// Kickoff follows the transactional reopened flag, not the pre-tx
+	// runEntry.Status snapshot. A running local run can finish after
+	// partitionGetRun and be reopened inside RetryPartition; using the stale
+	// "running" status would skip kickoff and leave the reset instance pending
+	// forever. If the tx still saw the run running it does not reopen — the
+	// in-process loop / dispatcher is alive — and a second Run() would race it.
+	if reopened {
 		partitionKickoff(j, runID, runEntry.Params)
 	}
 
@@ -274,14 +274,6 @@ func RetryPartition(c *echo.Context) error {
 		"task_run_id": updated.ID,
 		"status":      string(updated.Status),
 	})
-}
-
-// partitionRetryNeedsKickoff reports whether a new in-process engine must be
-// started after the store reset. Only a run that had already finished has no
-// live driver; RetryPartition reopens those so this kickoff has something to
-// resume.
-func partitionRetryNeedsKickoff(status runstorage.Status) bool {
-	return status == runstorage.StatusFailed || status == runstorage.StatusSucceeded
 }
 
 // kickoffPartitionRetryRun resumes a reopened run through job.New → Run so the

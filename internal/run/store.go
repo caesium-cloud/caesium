@@ -6003,7 +6003,15 @@ func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
 // recorded instances are reused), and dependents that already succeeded are NOT
 // cascaded — E2 requires the CLI to say so rather than silently re-running a
 // subtree.
-func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, error) {
+//
+// The bool is true iff this transaction reopened a terminal run. Callers that
+// start an in-process engine (the HTTP handler) MUST use this flag rather than
+// a pre-tx status snapshot: a running local run can complete after that read
+// and be reopened here, and kicking off from the stale "running" status would
+// leave the reset instance pending forever. If the tx still saw the run
+// running it does not reopen — the in-process loop is alive — and a second
+// Run() would race it.
+func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
 	var (
 		pendingEvents []event.Event
 		counts        dbWriteCounts
@@ -6117,7 +6125,7 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		return txErr
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	counts.commit()
@@ -6136,9 +6144,9 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 
 	var refreshed models.TaskRun
 	if err := s.db.WithContext(ctx).Where("id = ?", taskRunID).First(&refreshed).Error; err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return convertRunTaskModel(&refreshed), nil
+	return convertRunTaskModel(&refreshed), reopened, nil
 }
 
 func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {

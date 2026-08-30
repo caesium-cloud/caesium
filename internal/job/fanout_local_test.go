@@ -1264,7 +1264,7 @@ func TestFanOutPartitionRetryResumesOnlyTheResetInstance(t *testing.T) {
 	require.NoError(t, f.db.Where("job_id = ?", f.jobID).Order("created_at DESC").First(&jobRun).Error)
 
 	delete(f.engine.createErrByPartition, "fail")
-	_, err := f.store.RetryPartition(context.Background(), jobRun.ID, idsBefore["fail"])
+	_, _, err := f.store.RetryPartition(context.Background(), jobRun.ID, idsBefore["fail"])
 	require.NoError(t, err)
 
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)

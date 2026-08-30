@@ -208,11 +208,69 @@ func TestRetryPartitionStillRejectsSucceededInstance(t *testing.T) {
 	assert.Equal(t, 0, kickCount, "a refused retry must not start an engine")
 }
 
-func TestPartitionRetryNeedsKickoff(t *testing.T) {
-	assert.True(t, partitionRetryNeedsKickoff(runstorage.StatusFailed))
-	assert.True(t, partitionRetryNeedsKickoff(runstorage.StatusSucceeded))
-	assert.False(t, partitionRetryNeedsKickoff(runstorage.StatusRunning))
-	assert.False(t, partitionRetryNeedsKickoff(runstorage.StatusCancelled))
+// TestRetryPartitionKicksOffWhenStoreReopenedDespiteStaleRunningSnapshot pins
+// the race: partitionGetRun can still report running after the run finished
+// and RetryPartition reopened it inside the transaction. Kickoff must follow
+// the transactional reopened flag, not that snapshot, or the reset instance
+// stays pending forever with the reopened run sitting idle.
+func TestRetryPartitionKicksOffWhenStoreReopenedDespiteStaleRunningSnapshot(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+	// Fixture job run stays StatusRunning — the stale snapshot.
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, true, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 1, kickCount,
+		"reopened=true must kick off even when partitionGetRun still says running")
+}
+
+// TestRetryPartitionDoesNotKickOffWhenStoreDidNotReopen pins the other half of
+// the transactional flag: if RetryPartition did not reopen, the in-process
+// loop is still alive. A second Run() would race it, even if some other
+// snapshot looked terminal.
+func TestRetryPartitionDoesNotKickOffWhenStoreDidNotReopen(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, false, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 0, kickCount,
+		"reopened=false means the tx still saw a live driver; a second Run() would race it")
+}
+
+// TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun pins the existing
+// terminal path through the same flag: snapshot failed + reopened=true still
+// starts an engine, now because the store said so rather than because of the
+// pre-tx status.
+func TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+	f.finishRun(t, string(runstorage.StatusFailed))
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, true, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 1, kickCount, "a terminal snapshot with reopened=true must kick off")
 }
 
 // --- fixture --------------------------------------------------------------
@@ -352,7 +410,7 @@ func usePartitionTestDB(t *testing.T, db *gorm.DB) {
 		}
 		return &runstorage.JobRun{ID: r.ID, JobID: r.JobID, Status: runstorage.Status(r.Status)}, nil
 	}
-	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
+	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return store.RetryPartition(ctx, runID, taskRunID)
 	}
 	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) {}

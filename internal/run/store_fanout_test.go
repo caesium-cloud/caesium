@@ -331,13 +331,13 @@ func TestRetryPartitionRejectsNonTerminalInstance(t *testing.T) {
 	rows := f.instances(t)
 
 	// pending
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.ErrorIs(t, err, ErrTaskRunNotTerminal)
 
 	// running — the dangerous case: resetting here orphans a live container.
 	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", rows[0].ID).
 		Update("status", string(TaskStatusRunning)).Error)
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.ErrorIs(t, err, ErrTaskRunNotTerminal)
 
 	after := f.instances(t)
@@ -376,9 +376,10 @@ func TestRetryPartitionResetsEveryExecutionColumn(t *testing.T) {
 		"cache_expires_at":    now.Add(time.Hour),
 	}).Error)
 
-	updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, TaskStatusPending, updated.Status)
+	assert.False(t, reopened, "a still-running run must not report reopened")
 
 	var row models.TaskRun
 	require.NoError(t, f.db.Where("id = ?", rows[0].ID).First(&row).Error)
@@ -426,7 +427,7 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusSucceeded, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	var b models.TaskRun
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
@@ -440,7 +441,7 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	// from.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusFailed, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
-	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 1, b.OutstandingPredecessors,
@@ -459,8 +460,9 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 		Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
 	require.NoError(t, f.store.WriteCheckpoint(f.runID, 5, 1, []byte(`{"v":1}`), false))
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
+	assert.True(t, reopened, "retrying a partition of a finished run must report that the run was reopened")
 
 	var jobRun models.JobRun
 	require.NoError(t, f.db.Where("id = ?", f.runID).First(&jobRun).Error)
