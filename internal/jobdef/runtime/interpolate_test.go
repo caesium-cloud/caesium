@@ -94,3 +94,52 @@ func TestInterpolateParamRefs_MixedMissingAndPresent(t *testing.T) {
 	assert.Contains(t, err.Error(), "MISSING")
 	assert.True(t, strings.Contains(err.Error(), "unresolved"), err.Error())
 }
+
+func TestInterpolateParamRefs_RejectsSecretURIChangeInsideTemplate(t *testing.T) {
+	got, err := InterpolateParamRefs(map[string]string{
+		"TOKEN":   "secret://vault/${CAESIUM_PARAM_PATH}",
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+	}, map[string]string{
+		"PATH": "other",
+		"SHA":  "abc123",
+	})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "TOKEN")
+	assert.Contains(t, err.Error(), "secret://")
+	assert.NotContains(t, err.Error(), "GIT_REF")
+}
+
+func TestInterpolateParamRefs_RejectsParamValueThatIsSecretURI(t *testing.T) {
+	got, err := InterpolateParamRefs(map[string]string{
+		"TOKEN": "${CAESIUM_PARAM_TOKEN}",
+	}, map[string]string{"TOKEN": "secret://vault/other"})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "TOKEN")
+	assert.Contains(t, err.Error(), "secret://")
+}
+
+func TestInterpolateParamRefs_StaticSecretURIUnchanged(t *testing.T) {
+	got, err := InterpolateParamRefs(map[string]string{
+		"TOKEN":   "secret://vault/fixed",
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+	}, map[string]string{"SHA": "abc123"})
+	require.NoError(t, err)
+	assert.Equal(t, "secret://vault/fixed", got["TOKEN"])
+	assert.Equal(t, "abc123", got["GIT_REF"])
+}
+
+func TestInterpolateParamRefs_CaseCollidingParamKeysFailClosed(t *testing.T) {
+	got, err := InterpolateParamRefs(map[string]string{
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+	}, map[string]string{
+		"SHA": "abc123",
+		"sha": "deadbeef",
+	})
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "SHA")
+	assert.Contains(t, err.Error(), "sha")
+	assert.Contains(t, err.Error(), "colliding")
+}

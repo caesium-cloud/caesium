@@ -22,13 +22,22 @@ var paramRefPattern = regexp.MustCompile(`\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9
 //
 // Unresolved references fail closed: the token is never left in place and never
 // replaced with an empty string. An explicitly empty param value is present and
-// is substituted as empty. The returned map is a copy; env is never mutated.
+// is substituted as empty. Param keys that fold to the same strings.ToUpper
+// name (SHA vs sha) fail closed so the selected value cannot depend on map
+// iteration order. After substitution, a value that is a secret:// URI and
+// differs from the job-definition original is rejected: secret identifiers
+// must stay static so a trigger caller cannot select which secret is resolved.
+// The returned map is a copy; env is never mutated. Command/args are not
+// interpolated.
 func InterpolateParamRefs(env map[string]string, params map[string]string) (map[string]string, error) {
+	lookup, err := paramLookup(params)
+	if err != nil {
+		return nil, err
+	}
 	if len(env) == 0 {
 		return env, nil
 	}
 
-	lookup := paramLookup(params)
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -38,8 +47,10 @@ func InterpolateParamRefs(env map[string]string, params map[string]string) (map[
 	out := make(map[string]string, len(env))
 	var missing []string
 	seenMissing := make(map[string]struct{})
+	var secretChanged []string
 	for _, key := range keys {
-		interpolated, unresolved := interpolateParamRefsInValue(env[key], lookup)
+		original := env[key]
+		interpolated, unresolved := interpolateParamRefsInValue(original, lookup)
 		out[key] = interpolated
 		for _, name := range unresolved {
 			report := fmt.Sprintf("env %s: unresolved ${CAESIUM_PARAM_%s}", key, name)
@@ -49,22 +60,54 @@ func InterpolateParamRefs(env map[string]string, params map[string]string) (map[
 			seenMissing[report] = struct{}{}
 			missing = append(missing, report)
 		}
+		if len(unresolved) == 0 && interpolated != original && strings.HasPrefix(interpolated, "secret://") {
+			secretChanged = append(secretChanged, fmt.Sprintf("env %s: interpolation must not produce or modify a secret:// URI", key))
+		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("interpolate run params: %s", strings.Join(missing, "; "))
 	}
+	if len(secretChanged) > 0 {
+		return nil, fmt.Errorf("interpolate run params: %s", strings.Join(secretChanged, "; "))
+	}
 	return out, nil
 }
 
-func paramLookup(params map[string]string) map[string]string {
+func paramLookup(params map[string]string) (map[string]string, error) {
 	if len(params) == 0 {
-		return nil
+		return nil, nil
 	}
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	lookup := make(map[string]string, len(params))
-	for k, v := range params {
-		lookup[strings.ToUpper(k)] = v
+	folded := make(map[string][]string, len(params))
+	for _, k := range keys {
+		upper := strings.ToUpper(k)
+		folded[upper] = append(folded[upper], k)
+		lookup[upper] = params[k]
 	}
-	return lookup
+
+	var collisions []string
+	uppers := make([]string, 0, len(folded))
+	for upper := range folded {
+		uppers = append(uppers, upper)
+	}
+	sort.Strings(uppers)
+	for _, upper := range uppers {
+		group := folded[upper]
+		if len(group) < 2 {
+			continue
+		}
+		collisions = append(collisions, fmt.Sprintf("colliding param keys %s", strings.Join(group, " and ")))
+	}
+	if len(collisions) > 0 {
+		return nil, fmt.Errorf("interpolate run params: %s", strings.Join(collisions, "; "))
+	}
+	return lookup, nil
 }
 
 func interpolateParamRefsInValue(value string, lookup map[string]string) (string, []string) {

@@ -164,7 +164,7 @@ steps:
 | `image` | string | yes | Container image reference |
 | `engine` | string | no | `docker` (default), `podman`, `kubernetes` |
 | `command` | array[string] | no | Container command |
-| `env` | map | no | Environment variables (values may be `secret://` URIs). `${CAESIUM_PARAM_<NAME>}` is interpolated from run parameters **before** the cache hash and container start so a trigger param can reach a non-shell reagent (`GIT_REF: "${CAESIUM_PARAM_SHA}"`). Missing params fail the task. Only the braced form is expanded — not `$CAESIUM_PARAM_*`, `${CAESIUM_OUTPUT_*}`, or shell defaults. |
+| `env` | map | no | Environment variables (values may be `secret://` URIs). `${CAESIUM_PARAM_<NAME>}` is interpolated from run parameters **before** the cache hash and container start so a trigger param can reach a non-shell reagent (`GIT_REF: "${CAESIUM_PARAM_SHA}"`). Missing params fail the task. Only the braced form is expanded — not `$CAESIUM_PARAM_*`, `${CAESIUM_OUTPUT_*}`, or shell defaults. Param keys are case-insensitive and collisions (`SHA` vs `sha`) are rejected. `secret://` env values are not interpolatable: a substitution that produces or changes a `secret://` URI fails the task. |
 | `next` / `dependsOn` | string or array | no | DAG edges — fan-out / fan-in (see [DAG Wiring](#dag-wiring-rules)) |
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
