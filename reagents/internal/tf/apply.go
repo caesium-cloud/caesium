@@ -98,14 +98,27 @@ func PlannedPublishableOutputNames(plan *tfjson.Plan) []string {
 	return names
 }
 
-// OutputNamesIndexKey is the reserved output key carrying a JSON object that
-// maps the folded environment suffix (Caesium uppercases the key and maps
-// "-"/"." to "_") back to the original Terraform output name. tf-apply emits
-// it alongside the values so IMPORT_OUTPUTS_FROM can restore TF_VAR_vpcId
-// exactly, even through an older Caesium that does not yet generate the same
-// sidecar from BuildOutputEnv. The spelling is locked to pkg/task.OutputNamesIndexKey
-// — the reagents cannot import Caesium, so the contract is this string.
+// OutputNamesIndexKey is the tf-apply protocol output key carrying a JSON
+// object that maps the folded environment suffix (Caesium uppercases the key
+// and maps "-"/"." to "_") back to the original Terraform output name.
+// tf-apply dual-writes it into the output row so an older server that only
+// copies stored keys still injects CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES.
+// New servers also emit CAESIUM_OUTPUT_NAME_INDEX_<STEP> from BuildOutputEnv.
+// This spelling is reserved as a Terraform stack output, not as a generic
+// task key. Locked to pkg/task.OutputNamesIndexKey — the reagents cannot
+// import Caesium, so the contract is this string.
 const OutputNamesIndexKey = "caesium_output_names"
+
+// OutputNamesIndexEnvPrefix is the dedicated environment prefix Caesium uses
+// for the generated name index: CAESIUM_OUTPUT_NAME_INDEX_<STEP>. Locked to
+// pkg/task.OutputNamesIndexEnvPrefix.
+const OutputNamesIndexEnvPrefix = "CAESIUM_OUTPUT_NAME_INDEX_"
+
+// OutputNamesIndexEnv is the dedicated env var carrying the generated JSON
+// name index for step.
+func OutputNamesIndexEnv(step string) string {
+	return OutputNamesIndexEnvPrefix + foldOutputKey(step)
+}
 
 // EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
 // back to original output names. An empty string means every name already

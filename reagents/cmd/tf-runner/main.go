@@ -25,15 +25,16 @@
 //	IMPORT_OUTPUTS_FROM  comma-separated upstream apply step names. Every
 //	                     CAESIUM_OUTPUT_<STEP>_<KEY> of those steps is exported as
 //	                     TF_VAR_<original>. Original names come from the JSON
-//	                     name index (caesium_output_names) when present, otherwise
-//	                     from lowercasing the folded suffix. This is the
-//	                     cross-stack wiring, and it is deliberately NOT
-//	                     terraform_remote_state: reading an upstream stack's
-//	                     state would mean granting every application stack
-//	                     credentials on the network stack's state (design §6.5).
-//	                     EVERY named step must actually be present — a name that
-//	                     imports nothing fails the phase rather than planning
-//	                     against variable defaults.
+//	                     name index (CAESIUM_OUTPUT_NAME_INDEX_<STEP>, falling
+//	                     back to CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES)
+//	                     when present, otherwise from lowercasing the folded
+//	                     suffix. This is the cross-stack wiring, and it is
+//	                     deliberately NOT terraform_remote_state: reading an
+//	                     upstream stack's state would mean granting every
+//	                     application stack credentials on the network stack's
+//	                     state (design §6.5). EVERY named step must actually be
+//	                     present — a name that imports nothing fails the phase
+//	                     rather than planning against variable defaults.
 //	APPLY_STEP           when set, emit ##caesium::branch <APPLY_STEP> only if the
 //	                     plan has changes — the leaf-stack branch form (§6.4).
 //
@@ -432,11 +433,12 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 // exportImportedOutputs turns every CAESIUM_OUTPUT_<STEP>_<KEY> of the named
 // upstream steps into TF_VAR_<original>, and returns the variable names it set.
 //
-// Original names come from the JSON name index Caesium (or tf-apply) publishes
-// as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES. Without an index the suffix
-// is lowercased, which is lossless only for [a-z0-9_]+ — the historical
-// recovery, kept so a snake_case producer that never emitted an index still
-// imports.
+// Original names come from the JSON name index Caesium publishes as
+// CAESIUM_OUTPUT_NAME_INDEX_<STEP>, falling back to tf-apply's dual-written
+// CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES so an older server still works.
+// Without an index the suffix is lowercased, which is lossless only for
+// [a-z0-9_]+ — the historical recovery, kept so a snake_case producer that
+// never emitted an index still imports.
 //
 // A companion _DIGEST variable is skipped: it belongs to an output reference,
 // whose base key already carries the path, and a digest is not a value any
@@ -518,10 +520,12 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 				}
 			}
 			// Protocol keys are never Terraform variables. Every tf-apply emits
-			// the published-count sentinel, and a mixed-case producer also
-			// emits the name index; without this skip a diamond import of two
-			// upstream applies collides with ITSELF on those keys and fails at
-			// plan time, naming something the operator never wrote.
+			// the published-count sentinel, and a mixed-case producer may also
+			// dual-write the name index into the output map; without this skip
+			// a diamond import of two upstream applies collides with ITSELF on
+			// those keys and fails at plan time, naming something the operator
+			// never wrote. The generated index lives on
+			// CAESIUM_OUTPUT_NAME_INDEX_<STEP>, outside this suffix space.
 			if isProtocolOutputSuffix(rest) {
 				break
 			}
@@ -781,22 +785,30 @@ func isProtocolOutputSuffix(rest string) bool {
 
 // outputNamesIndexes reads each named step's JSON name index, if any.
 //
-// A malformed index is a hard failure: falling back to lowercasing the suffix
-// would silently import vpcId as vpcid, which is the lossy round-trip this
-// index exists to prevent.
+// The dedicated CAESIUM_OUTPUT_NAME_INDEX_<STEP> env is preferred. The folded
+// CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES suffix is the fallback so a
+// tf-apply that still dual-writes the sidecar (or an older server that only
+// copies stored keys) still round-trips. A malformed index is a hard failure:
+// falling back to lowercasing the suffix would silently import vpcId as vpcid,
+// which is the lossy round-trip this index exists to prevent.
 func outputNamesIndexes(named map[string]string, envValues map[string]string) (map[string]map[string]string, error) {
 	out := make(map[string]map[string]string, len(named))
-	suffix := normalizeStepName(tf.OutputNamesIndexKey)
+	foldedSuffix := normalizeStepName(tf.OutputNamesIndexKey)
 	for prefix, step := range named {
-		raw, ok := envValues[prefix+suffix]
+		key := tf.OutputNamesIndexEnv(step)
+		raw, ok := envValues[key]
 		if !ok || strings.TrimSpace(raw) == "" {
-			continue
+			key = prefix + foldedSuffix
+			raw, ok = envValues[key]
+			if !ok || strings.TrimSpace(raw) == "" {
+				continue
+			}
 		}
 		var index map[string]string
 		if err := json.Unmarshal([]byte(raw), &index); err != nil {
 			return nil, fmt.Errorf(
 				"IMPORT_OUTPUTS_FROM: step %q published %s that is not a JSON object of original output names: %w",
-				step, prefix+suffix, err)
+				step, key, err)
 		}
 		out[prefix] = index
 	}

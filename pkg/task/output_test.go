@@ -324,13 +324,21 @@ func TestBuildOutputEnv_KeyNormalization(t *testing.T) {
 	assert.Equal(t, "val", env["CAESIUM_OUTPUT_STEP_ONE_SOME_KEY"])
 	assert.Equal(t, "val2", env["CAESIUM_OUTPUT_STEP_ONE_DOT_KEY"])
 	// Dashed and dotted keys do not survive lowercasing the folded suffix, so
-	// the name index has to carry the originals.
+	// the name index has to carry the originals — on the dedicated env, not
+	// the per-key suffix space.
 	var index map[string]string
-	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_STEP_ONE_CAESIUM_OUTPUT_NAMES"]), &index))
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("step-one")]), &index))
 	assert.Equal(t, map[string]string{
 		"SOME_KEY": "some-key",
 		"DOT_KEY":  "dot.key",
 	}, index)
+	_, hasFolded := env["CAESIUM_OUTPUT_STEP_ONE_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded, "generated index must not occupy the per-key suffix space")
+}
+
+func TestOutputNamesIndexEnv(t *testing.T) {
+	assert.Equal(t, "CAESIUM_OUTPUT_NAME_INDEX_APPLY_NETWORK", OutputNamesIndexEnv("apply-network"))
+	assert.Equal(t, "CAESIUM_OUTPUT_NAME_INDEX_STEP_ONE", OutputNamesIndexEnv("step.one"))
 }
 
 func TestEncodeOutputNamesIndex_OmitsIdentityMaps(t *testing.T) {
@@ -383,17 +391,19 @@ func TestBuildOutputEnv_OutputNamesIndexRoundTrip(t *testing.T) {
 	assert.Equal(t, "acct-1", env["CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID"])
 
 	var index map[string]string
-	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]), &index))
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
 	assert.Equal(t, "vpcId", index["VPCID"])
 	assert.Equal(t, "db-url", index["DB_URL"])
 	assert.Equal(t, "dot.key", index["DOT_KEY"])
 	assert.Equal(t, "greeting", index["GREETING"])
 
-	_, hasAccountIndex := env["CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUT_NAMES"]
+	_, hasFolded := env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded, "generated index must not occupy CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES")
+	_, hasAccountIndex := env[OutputNamesIndexEnv("apply-account")]
 	assert.False(t, hasAccountIndex, "an identity map must not grow an extra env var (cache key churn)")
 }
 
-func TestBuildOutputEnv_ReplacesStoredNameIndex(t *testing.T) {
+func TestBuildOutputEnv_ForwardsStoredDualWriteAndEmitsDedicatedIndex(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"apply-network": {
 			"vpcId":                     "vpc-1",
@@ -402,61 +412,56 @@ func TestBuildOutputEnv_ReplacesStoredNameIndex(t *testing.T) {
 		},
 	})
 	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
-	var index map[string]string
-	require.NoError(t, json.Unmarshal([]byte(env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]), &index))
-	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, `{"VPCID":"stale"}`, env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
+		"tf-apply's dual-written sidecar is a stored key and must be forwarded")
 	assert.Equal(t, "1", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED"])
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
 	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES")
 }
 
-func TestParseOutput_ReservedOutputNamesScalarFails(t *testing.T) {
-	_, err := ParseOutput(strings.NewReader(`##caesium::output {"caesium_output_names":"hello"}` + "\n"))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrReservedOutputNamesKey)
-	assert.Contains(t, err.Error(), OutputNamesIndexKey)
+func TestParseOutput_OutputNamesScalarAccepted(t *testing.T) {
+	result, err := ParseOutput(strings.NewReader(`##caesium::output {"caesium_output_names":"hello"}` + "\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{OutputNamesIndexKey: "hello"}, result)
 }
 
-func TestParseMarkers_ReservedOutputNamesScalarFails(t *testing.T) {
-	_, err := ParseMarkers(strings.NewReader(`##caesium::output {"caesium_output_names":"hello","ok":"kept"}` + "\n"))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrReservedOutputNamesKey)
-	assert.Contains(t, err.Error(), OutputNamesIndexKey)
+func TestParseMarkers_OutputNamesScalarAccepted(t *testing.T) {
+	m, err := ParseMarkers(strings.NewReader(`##caesium::output {"caesium_output_names":"hello","ok":"kept"}` + "\n"))
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, "hello", m.Output[OutputNamesIndexKey])
+	assert.Equal(t, "kept", m.Output["ok"])
 }
 
-func TestParseOutput_ReservedOutputNamesIndexStringAccepted(t *testing.T) {
+func TestParseOutput_OutputNamesIndexStringStored(t *testing.T) {
 	logs := strings.NewReader(`##caesium::output {"vpcId":"vpc-1","caesium_output_names":"{\"VPCID\":\"vpcId\"}"}` + "\n")
 	result, err := ParseOutput(logs)
 	require.NoError(t, err)
 	assert.Equal(t, "vpc-1", result["vpcId"])
-	index, ok := DecodeOutputNamesIndex(result[OutputNamesIndexKey])
-	require.True(t, ok)
-	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, `{"VPCID":"vpcId"}`, result[OutputNamesIndexKey])
 }
 
-func TestParseOutput_ReservedOutputNamesIndexObjectAccepted(t *testing.T) {
+func TestParseOutput_OutputNamesNestedObjectDropped(t *testing.T) {
 	logs := strings.NewReader(`##caesium::output {"vpcId":"vpc-1","caesium_output_names":{"VPCID":"vpcId"}}` + "\n")
 	result, err := ParseOutput(logs)
 	require.NoError(t, err)
-	assert.Equal(t, "vpc-1", result["vpcId"])
-	index, ok := DecodeOutputNamesIndex(result[OutputNamesIndexKey])
-	require.True(t, ok)
-	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, map[string]string{"vpcId": "vpc-1"}, result)
+	assert.NotContains(t, result, OutputNamesIndexKey)
 }
 
-func TestParseOutput_ReservedOutputNamesNonIndexObjectFails(t *testing.T) {
-	_, err := ParseOutput(strings.NewReader(`##caesium::output {"caesium_output_names":{"VPCID":1}}` + "\n"))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrReservedOutputNamesKey)
-}
-
-func TestParseOutput_ReservedOutputNamesRefFails(t *testing.T) {
+func TestParseOutput_OutputNamesRefAccepted(t *testing.T) {
 	line := `##caesium::output-ref {"key":"caesium_output_names","path":"/p","digest":"` + testDigest + `"}` + "\n"
-	_, err := ParseOutput(strings.NewReader(line))
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrReservedOutputNamesKey)
+	result, err := ParseOutput(strings.NewReader(line))
+	require.NoError(t, err)
+	ref, ok := DecodeOutputRef(result[OutputNamesIndexKey])
+	require.True(t, ok)
+	assert.Equal(t, "/p", ref.Path)
+	assert.Equal(t, testDigest, ref.Digest)
 }
 
-func TestBuildOutputEnv_ForwardsNonIndexReservedKeyWhenNoGeneratedIndex(t *testing.T) {
+func TestBuildOutputEnv_ForwardsUserOutputNamesScalar(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"extract": {
 			"row_count":         "42",
@@ -465,28 +470,35 @@ func TestBuildOutputEnv_ForwardsNonIndexReservedKeyWhenNoGeneratedIndex(t *testi
 	})
 	assert.Equal(t, "42", env["CAESIUM_OUTPUT_EXTRACT_ROW_COUNT"])
 	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_EXTRACT_CAESIUM_OUTPUT_NAMES"],
-		"a non-index user value must not be omitted when no sidecar is generated")
+		"a user scalar at caesium_output_names must be forwarded")
+	_, hasIndex := env[OutputNamesIndexEnv("extract")]
+	assert.False(t, hasIndex, "snake_case-only maps must omit the dedicated index")
 }
 
-func TestBuildOutputEnv_RefusesToOverwriteNonIndexReservedKey(t *testing.T) {
-	_, err := BuildOutputEnv(map[string]map[string]string{
+func TestBuildOutputEnv_UserOutputNamesPlusMixedCasePreservesBoth(t *testing.T) {
+	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"apply-network": {
 			"vpcId":             "vpc-1",
 			OutputNamesIndexKey: "hello",
 		},
 	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrReservedOutputNamesKey)
-	assert.Contains(t, err.Error(), "apply-network")
-	assert.Contains(t, err.Error(), OutputNamesIndexKey)
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
+		"user scalar must not be overwritten by the generated index")
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES")
 }
 
 func TestBuildOutputEnv_SnakeCaseOmitsSidecar(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"extract": {"row_count": "42", "path": "/data/out.parquet"},
 	})
-	_, hasIndex := env["CAESIUM_OUTPUT_EXTRACT_CAESIUM_OUTPUT_NAMES"]
-	assert.False(t, hasIndex, "snake_case-only maps must omit the sidecar so cache keys stay stable")
+	_, hasDedicated := env[OutputNamesIndexEnv("extract")]
+	assert.False(t, hasDedicated, "snake_case-only maps must omit the sidecar so cache keys stay stable")
+	_, hasFolded := env["CAESIUM_OUTPUT_EXTRACT_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded)
 }
 
 func TestIsOutputNamesIndex(t *testing.T) {

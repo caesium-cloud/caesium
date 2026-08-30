@@ -253,43 +253,19 @@ func scalarOutputValue(v any) (string, bool) {
 }
 
 // ingestOutputPayload merges one ##caesium::output JSON object into dst.
-// Malformed JSON is skipped (the same lenient posture as a bad log line). A
-// reserved caesium_output_names value that is not a well-formed names index
-// fails the producing task — it must not be dropped or stored as a scalar.
-func ingestOutputPayload(dst map[string]string, payload string) error {
+// Malformed JSON is skipped (the same lenient posture as a bad log line).
+// Every key is a user key, including caesium_output_names: the generated
+// name index does not occupy the per-key suffix space.
+func ingestOutputPayload(dst map[string]string, payload string) {
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
-		return nil
+		return
 	}
 	for k, v := range raw {
-		if err := ingestOutputValue(dst, k, v); err != nil {
-			return err
+		if s, ok := scalarOutputValue(v); ok {
+			dst[k] = s
 		}
 	}
-	return nil
-}
-
-func ingestOutputValue(dst map[string]string, k string, v any) error {
-	if k == OutputNamesIndexKey {
-		encoded, ok := decodeOutputNamesIndexValue(v)
-		if !ok {
-			return reservedOutputNamesKeyError()
-		}
-		dst[k] = encoded
-		return nil
-	}
-	if s, ok := scalarOutputValue(v); ok {
-		dst[k] = s
-	}
-	return nil
-}
-
-func storeOutputRef(dst map[string]string, key, encoded string) error {
-	if key == OutputNamesIndexKey {
-		return reservedOutputNamesKeyError()
-	}
-	dst[key] = encoded
-	return nil
 }
 
 // ParseOutput reads container log output and extracts structured key-value
@@ -298,10 +274,6 @@ func storeOutputRef(dst map[string]string, key, encoded string) error {
 // Multiple marker lines are merged with last-write-wins semantics per key.
 // All values are coerced to strings.  If the total serialised output exceeds
 // MaxOutputBytes an error is returned.
-//
-// A user key named caesium_output_names is reserved for the names-index
-// sidecar; the producing task fails unless the value is a JSON object of
-// folded suffix → original name.
 //
 // Lines that do not match the marker prefix are silently ignored (they are
 // normal log output).
@@ -321,9 +293,7 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 		if idx := strings.Index(line, outputRefMarker); idx >= 0 {
 			payload := strings.TrimSpace(line[idx+len(outputRefMarker):])
 			if key, encoded, ok := parseOutputRefLine(payload, 0); ok {
-				if err := storeOutputRef(result, key, encoded); err != nil {
-					return nil, err
-				}
+				result[key] = encoded
 			}
 			continue
 		}
@@ -337,9 +307,7 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 		if payload == "" {
 			continue
 		}
-		if err := ingestOutputPayload(result, payload); err != nil {
-			return nil, err
-		}
+		ingestOutputPayload(result, payload)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -482,18 +450,14 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 		if idx := strings.Index(line, outputRefMarker); idx >= 0 {
 			payload := strings.TrimSpace(line[idx+len(outputRefMarker):])
 			if key, encoded, ok := parseOutputRefLine(payload, maxRefBytes); ok {
-				if err := storeOutputRef(output, key, encoded); err != nil {
-					return nil, err
-				}
+				output[key] = encoded
 			}
 		} else if idx := strings.Index(line, outputMarker); idx >= 0 {
 			// Check for the scalar output marker (only when the line was not a
 			// reference; the two markers are mutually exclusive per line).
 			payload := strings.TrimSpace(line[idx+len(outputMarker):])
 			if payload != "" {
-				if err := ingestOutputPayload(output, payload); err != nil {
-					return nil, err
-				}
+				ingestOutputPayload(output, payload)
 			}
 		}
 
@@ -606,20 +570,32 @@ func NormalizeStepName(name string) string {
 	return strings.ToUpper(name)
 }
 
-// OutputNamesIndexKey is the reserved output key / env suffix carrying a JSON
-// object that maps NormalizeStepName(original) → original for each of a step's
-// outputs. BuildOutputEnv emits it as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES
-// whenever at least one key would not survive lowercasing the folded env
-// suffix, so a consumer (tf-runner's IMPORT_OUTPUTS_FROM) can recover vpcId,
-// vpc-id and dot.key exactly. Snake_case-only maps omit it, so existing cache
-// keys stay byte-identical.
-//
-// It is reserved metadata, not a user output key: generic ##caesium::output
-// parsing rejects an ordinary scalar at this name.
+// OutputNamesIndexKey is the tf-apply protocol output key carrying a JSON
+// object that maps NormalizeStepName(original) → original for each of a
+// stack's published outputs. tf-apply dual-writes it into the output row so
+// an older server that only copies stored keys still injects
+// CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES. Generic tasks may use this
+// spelling as an ordinary output; the generated index does not occupy it.
 //
 // The reagents duplicate this spelling (they cannot import this package; the
 // contract between them is the marker protocol). Keep the two in lockstep.
 const OutputNamesIndexKey = "caesium_output_names"
+
+// OutputNamesIndexEnvPrefix is the dedicated environment prefix for the
+// generated name index. The full name is
+// CAESIUM_OUTPUT_NAME_INDEX_<NormalizeStepName(step)>. It sits outside
+// CAESIUM_OUTPUT_<STEP>_<KEY> so a user key named caesium_output_names is
+// forwarded as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES without colliding
+// with the sidecar.
+//
+// Locked to reagents/internal/tf.OutputNamesIndexEnvPrefix.
+const OutputNamesIndexEnvPrefix = "CAESIUM_OUTPUT_NAME_INDEX_"
+
+// OutputNamesIndexEnv is the dedicated env var carrying the generated JSON
+// name index for stepName.
+func OutputNamesIndexEnv(stepName string) string {
+	return OutputNamesIndexEnvPrefix + NormalizeStepName(stepName)
+}
 
 // EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
 // back to their original output keys. An empty string means every key already
@@ -655,16 +631,7 @@ func outputNameSurvivesEnvFold(name string) bool {
 	return strings.ToLower(NormalizeStepName(name)) == name
 }
 
-// ErrReservedOutputNamesKey is returned when a task emits an ordinary value at
-// the reserved names-index key, or when BuildOutputEnv would overwrite such a
-// value with generated metadata.
-var ErrReservedOutputNamesKey = errors.New(`output key "caesium_output_names" is reserved for the name-index sidecar`)
-
-func reservedOutputNamesKeyError() error {
-	return fmt.Errorf("%w: an ordinary value is not allowed", ErrReservedOutputNamesKey)
-}
-
-// DecodeOutputNamesIndex parses a stored names-index sidecar. ok is false for
+// DecodeOutputNamesIndex parses a names-index sidecar. ok is false for
 // anything that is not a JSON object of string → string (the tf-apply shape).
 func DecodeOutputNamesIndex(value string) (map[string]string, bool) {
 	trimmed := strings.TrimSpace(value)
@@ -679,39 +646,10 @@ func DecodeOutputNamesIndex(value string) (map[string]string, bool) {
 }
 
 // IsOutputNamesIndex reports whether value is a well-formed names-index JSON
-// object. BuildOutputEnv may skip a stored caesium_output_names entry only
-// when this is true.
+// object.
 func IsOutputNamesIndex(value string) bool {
 	_, ok := DecodeOutputNamesIndex(value)
 	return ok
-}
-
-// decodeOutputNamesIndexValue accepts the JSON types a ##caesium::output
-// payload can carry for the reserved key: a string holding index JSON, or the
-// nested object itself. Anything else is rejected so an ordinary scalar is
-// never stored under the reserved name.
-func decodeOutputNamesIndexValue(v any) (string, bool) {
-	switch val := v.(type) {
-	case string:
-		if IsOutputNamesIndex(val) {
-			return val, true
-		}
-	case map[string]any:
-		index := make(map[string]string, len(val))
-		for k, raw := range val {
-			s, ok := raw.(string)
-			if !ok {
-				return "", false
-			}
-			index[k] = s
-		}
-		data, err := json.Marshal(index)
-		if err != nil {
-			return "", false
-		}
-		return string(data), true
-	}
-	return "", false
 }
 
 // BuildOutputEnv constructs CAESIUM_OUTPUT_<STEP>_<KEY>=<VALUE> environment
@@ -727,17 +665,13 @@ func decodeOutputNamesIndexValue(v any) (string, bool) {
 // env vars: a large payload never enters the environment, only its location and
 // digest do.
 //
-// When any output key would not survive lowercasing the folded suffix,
-// BuildOutputEnv also emits CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES as a
-// JSON object of folded-suffix → original-key. That is the lossless half of
-// the round trip: the folded env vars stay valid identifiers, and the index
-// carries the names a consumer has to restore.
-//
-// A stored caesium_output_names value is skipped only when it is a well-formed
-// names index (tf-apply writes one so an older server still injects it). An
-// ordinary scalar at that key is never dropped: it is forwarded as a user
-// output when no generated index is needed, and BuildOutputEnv returns an
-// error when a generated index would overwrite it.
+// Every stored key is forwarded, including caesium_output_names. The generated
+// name index is emitted separately as CAESIUM_OUTPUT_NAME_INDEX_<STEP> whenever
+// any output key would not survive lowercasing the folded suffix, so it cannot
+// collide with a user value at CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES.
+// Snake_case-only maps omit the dedicated env, so existing cache keys stay
+// byte-identical. tf-apply still dual-writes the sidecar into the output row;
+// that value is forwarded as the folded suffix for older consumers.
 func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string]string, error) {
 	if len(predecessorOutputs) == 0 {
 		return nil, nil
@@ -747,9 +681,6 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string
 	for stepName, outputs := range predecessorOutputs {
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
 		for k, v := range outputs {
-			if k == OutputNamesIndexKey && IsOutputNamesIndex(v) {
-				continue
-			}
 			envKey := prefix + NormalizeStepName(k)
 			if ref, ok := DecodeOutputRef(v); ok {
 				// Reference: hand the consumer the path to read and the digest
@@ -767,11 +698,7 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string
 		if encoded == "" {
 			continue
 		}
-		envKey := prefix + NormalizeStepName(OutputNamesIndexKey)
-		if existing, taken := env[envKey]; taken && !IsOutputNamesIndex(existing) {
-			return nil, fmt.Errorf("%w: refusing to overwrite step %q stored application value with generated index metadata", ErrReservedOutputNamesKey, stepName)
-		}
-		env[envKey] = encoded
+		env[OutputNamesIndexEnv(stepName)] = encoded
 	}
 
 	if len(env) == 0 {

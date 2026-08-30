@@ -294,10 +294,11 @@ steps:
 
   # ── PROPOSE + APPLY: network ─────────────────────────────────────────
   # A stack consumed through IMPORT_OUTPUTS_FROM publishes a JSON name index
-  # (`caesium_output_names`) so mixed-case and dashed outputs round-trip as
-  # TF_VAR_vpcId / TF_VAR_vpc-id. Two names that fold onto one env suffix
-  # (`vpc-id` and `vpc_id`) are still refused — the index cannot split one
-  # variable into two — as are names that are not Terraform identifiers.
+  # (CAESIUM_OUTPUT_NAME_INDEX_<STEP>, dual-written as caesium_output_names)
+  # so mixed-case and dashed outputs round-trip as TF_VAR_vpcId / TF_VAR_vpc-id.
+  # Two names that fold onto one env suffix (`vpc-id` and `vpc_id`) are still
+  # refused — the index cannot split one variable into two — as are names that
+  # are not Terraform identifiers.
   # Sensitive outputs are exempt — they are never published, so they never
   # make the trip.
   # Not a leaf (app-web consumes its `vpc_id` output), so it uses the

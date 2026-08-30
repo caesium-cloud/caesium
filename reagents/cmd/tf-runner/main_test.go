@@ -165,9 +165,11 @@ func branches(lines []string) []string {
 	return out
 }
 
-// applyOutputsEnviron renders a published output row the way Caesium (and an
-// older server that merely copies stored keys) injects it: folded
-// CAESIUM_OUTPUT_<STEP>_<KEY> names, including the name index when present.
+// applyOutputsEnviron renders a published output row the way an older server
+// that merely copies stored keys injects it: folded CAESIUM_OUTPUT_<STEP>_<KEY>
+// names, including tf-apply's dual-written name index when present. New
+// servers also emit CAESIUM_OUTPUT_NAME_INDEX_<STEP>; tests that need that
+// path add it explicitly.
 func applyOutputsEnviron(step string, values map[string]string) []string {
 	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
 	environ := make([]string, 0, len(values))
@@ -1635,6 +1637,69 @@ func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
 		}, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
 			t.Fatalf("want a malformed-index refusal, got %v", err)
+		}
+	})
+
+	t.Run("the dedicated env restores mixed-case names", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpcId", "")
+		t.Setenv("TF_VAR_db-url", "")
+		t.Setenv("TF_VAR_vpcid", "")
+		t.Setenv("TF_VAR_db_url", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL=postgres://db",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
+			tf.OutputNamesIndexEnv("apply-network") + "=" + index,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "db-url,vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
+			t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
+		}
+		if os.Getenv("TF_VAR_db-url") != "postgres://db" {
+			t.Fatalf("TF_VAR_db-url = %q", os.Getenv("TF_VAR_db-url"))
+		}
+		if os.Getenv("TF_VAR_vpcid") != "" || os.Getenv("TF_VAR_db_url") != "" {
+			t.Fatal("lossy lowercase names were exported alongside the originals")
+		}
+	})
+
+	t.Run("the dedicated env wins over a folded user scalar", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpcId", "")
+		t.Setenv("TF_VAR_vpcid", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=hello",
+			tf.OutputNamesIndexEnv("apply-network") + `={"VPCID":"vpcId"}`,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
+			t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
+		}
+	})
+
+	t.Run("a malformed dedicated index fails closed even if the folded suffix is valid", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
+			tf.OutputNamesIndexEnv("apply-network") + "=not-json",
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
+			t.Fatalf("want a malformed-index refusal naming the dedicated env, got %v", err)
+		}
+		if !strings.Contains(err.Error(), tf.OutputNamesIndexEnv("apply-network")) {
+			t.Fatalf("the failure does not name the dedicated env: %v", err)
 		}
 	})
 }

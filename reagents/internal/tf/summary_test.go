@@ -522,6 +522,12 @@ func TestExportVariableAcceptsMixedCaseAndHyphens(t *testing.T) {
 	}
 }
 
+func TestOutputNamesIndexEnv(t *testing.T) {
+	if got := OutputNamesIndexEnv("apply-network"); got != "CAESIUM_OUTPUT_NAME_INDEX_APPLY_NETWORK" {
+		t.Fatalf("OutputNamesIndexEnv = %q", got)
+	}
+}
+
 func TestEncodeOutputNamesIndexOmitsIdentityMaps(t *testing.T) {
 	encoded, err := EncodeOutputNamesIndex(map[string]string{
 		"vpc_id":                    "vpc-1",
