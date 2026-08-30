@@ -730,7 +730,10 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 		for _, i := range group.order {
 			task := group.tasks[i]
 			pending := pendingPredecessors + pendingSiblings[task.partition.Key]
-			replayHash := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
+			replayHash, err := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
+			if err != nil {
+				return nil, err
+			}
 			unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
 			plan := plannedTask{
 				base:          task,
@@ -861,7 +864,7 @@ func plannedGroupHash(predPlans []plannedTask) string {
 // computeDescriptorHash rebuilds an UNFANNED task's identity from its
 // descriptor. A fanned instance goes through computeDescriptorInstanceHash,
 // which folds in the partition the baseline instance actually ran.
-func computeDescriptorHash(desc models.TaskExecutionDescriptor, params map[string]string, predOutputs map[string]map[string]string, predHashes []string) string {
+func computeDescriptorHash(desc models.TaskExecutionDescriptor, params map[string]string, predOutputs map[string]map[string]string, predHashes []string) (string, error) {
 	return computeDescriptorInstanceHash(desc, params, predOutputs, predHashes, pkgtask.Partition{})
 }
 
@@ -878,13 +881,17 @@ func computeDescriptorInstanceHash(
 	predOutputs map[string]map[string]string,
 	predHashes []string,
 	partition pkgtask.Partition,
-) string {
+) (string, error) {
 	spec := desc.ContainerSpec
 	env := maps.Clone(spec.Env)
 	if env == nil {
 		env = make(map[string]string)
 	}
-	for k, v := range pkgtask.BuildOutputEnv(predOutputs) {
+	outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
+	if err != nil {
+		return "", err
+	}
+	for k, v := range outputEnv {
 		env[k] = v
 	}
 	command := append([]string(nil), desc.Runtime.Command...)
@@ -919,7 +926,7 @@ func computeDescriptorInstanceHash(
 		PartitionFingerprint: partition.Fingerprint,
 		PartitionAttributes:  partition.Attributes,
 		CacheVersion:         desc.Cache.Version,
-	}.Compute()
+	}.Compute(), nil
 }
 
 func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselineTask, replayHash string) (cacheSource, error) {

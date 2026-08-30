@@ -255,7 +255,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		for k, v := range atomSpec.Env {
 			mergedEnv[k] = v
 		}
-		if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
+		outputEnv, outputEnvErr := pkgtask.BuildOutputEnv(predOutputs)
+		if outputEnvErr != nil {
+			log.Error("failed to build predecessor output env for cache identity", "task_id", taskRun.TaskID, "error", outputEnvErr)
+			if persistErr := sink.Failed(ctx, taskRun, outputEnvErr); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+				log.Error("failed to persist output env build failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+			}
+			return
+		}
+		if len(outputEnv) > 0 {
 			for k, v := range outputEnv {
 				mergedEnv[k] = v
 			}
@@ -713,7 +721,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		log.Warn("failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
 	}
 	paramEnv := buildRunParamEnv(taskRun.JobRunID, jobAlias, runParams)
-	outputEnv := pkgtask.BuildOutputEnv(predOutputs)
+	outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
+	if err != nil {
+		return nil, err
+	}
 	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 || taskRun.PartitionValue != "" {
 		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv)+2)
 		for k, v := range spec.Env {

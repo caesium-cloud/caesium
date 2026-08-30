@@ -314,7 +314,9 @@ mapping each folded env suffix back to the original output name. `tf-plan`
 reads it and exports `TF_VAR_vpcId` / `TF_VAR_vpc-id` exactly. The index is
 omitted when every published name already survives the fold (lowercase
 `[a-z0-9_]+`), so existing snake_case stacks keep the same output row and
-cache keys.
+cache keys. `caesium_output_names` is reserved metadata, not a user output
+key: generic `##caesium::output` parsing rejects an ordinary scalar at that
+name.
 
 What is still refused, **before** `terraform apply` mutates anything:
 

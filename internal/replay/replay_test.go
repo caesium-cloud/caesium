@@ -661,7 +661,8 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		KubernetesSpec: cfg.spec.Kubernetes,
 		SecretRefs:     cfg.secretRefs,
 	}
-	hash := computeDescriptorHash(desc, map[string]string{"mode": "baseline"}, nil, nil)
+	hash, err := computeDescriptorHash(desc, map[string]string{"mode": "baseline"}, nil, nil)
+	require.NoError(t, err)
 	desc.Cache.ComputedHash = hash
 	desc.Baseline.ComputedHash = hash
 
@@ -733,12 +734,13 @@ func (f replayFixture) linkDescriptors(t *testing.T, from, to uuid.UUID) {
 
 	var fromOutput map[string]string
 	require.NoError(t, json.Unmarshal(fromRun.Output, &fromOutput))
-	toHash := computeDescriptorHash(
+	toHash, err := computeDescriptorHash(
 		toDesc,
 		map[string]string{"mode": "baseline"},
 		map[string]map[string]string{fromDesc.Baseline.TaskName: fromOutput},
 		[]string{fromRun.Hash},
 	)
+	require.NoError(t, err)
 	toDesc.Cache.ComputedHash = toHash
 	toDesc.Baseline.ComputedHash = toHash
 
