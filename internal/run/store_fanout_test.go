@@ -475,6 +475,30 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 	assert.Nil(t, cp, "the pre-retry checkpoint must be invalidated or a recovering owner re-adopts the stale state")
 }
 
+// TestRetryPartitionReturnsReopenedFromTransaction pins that reopened and the
+// reset TaskRun come from the committed transaction, not a post-commit
+// refresh. A refresh error after commit used to return (nil, false, err) and
+// the handler skipped kickoff on a durable reopen.
+func TestRetryPartitionReturnsReopenedFromTransaction(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
+
+	updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated, "the reset row must be returned from the transaction, not a post-commit refresh")
+	assert.True(t, reopened, "reopened is the tx flag the handler kickoff follows")
+	assert.Equal(t, TaskStatusPending, updated.Status,
+		"returning the pre-update row would leave status failed and hide that the reset committed")
+	assert.Equal(t, rows[0].ID, updated.ID)
+}
+
 // --- G1/item 4: CompleteTaskOwner skip loop ------------------------------
 
 // TestCompleteTaskOwnerSkipDoesNotFanAcrossSiblings pins the removal of the

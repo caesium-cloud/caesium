@@ -567,6 +567,59 @@ func TestCompleteRetriesTransientContention(t *testing.T) {
 	require.Equal(t, StatusSucceeded, finalRun.Status)
 }
 
+// TestCompleteRefusesWhileTaskRunIsPending pins the shutdown-window guard: a
+// partition retry can commit a pending TaskRun after runFannedGroup's last
+// all-terminal snapshot and before this status write. Finalizing anyway would
+// freeze the retried instance in a terminal run with no executor.
+func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+
+	err = store.Complete(runRecord.ID, nil)
+	require.ErrorIs(t, err, ErrRunHasPendingWork)
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status, "Complete must not mark the run terminal while a TaskRun is pending")
+	require.Nil(t, got.CompletedAt)
+}
+
+func TestCompleteFinalizesWhenAllTaskRunsAreTerminal(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", nil, nil))
+
+	require.NoError(t, store.Complete(runRecord.ID, nil))
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusSucceeded, got.Status)
+	require.NotNil(t, got.CompletedAt)
+}
+
 func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

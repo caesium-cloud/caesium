@@ -377,6 +377,14 @@ var (
 	// overwrite the fresh attempt, so a per-partition retry is terminal-only.
 	// The REST layer maps this to 409.
 	ErrTaskRunNotTerminal = errors.New("run: task instance is not terminal")
+
+	// ErrRunHasPendingWork is returned by Complete when a TaskRun for the run is
+	// not terminal. Marking the JobRun terminal in that state freezes the
+	// pending row forever: RetryPartition of a still-running local run reports
+	// reopened=false (no HTTP kickoff), and the in-process engine may already
+	// have left runFannedGroup. The same transaction as the status write must
+	// refuse so this cannot TOCTOU with the retry.
+	ErrRunHasPendingWork = errors.New("run: cannot complete while task work is pending")
 )
 
 type admissionDecision int
@@ -4367,6 +4375,21 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 				return errRunAlreadyTerminal
 			}
 
+			// Observe TaskRuns after the JobRun write so this transaction holds
+			// the SQLite write lock before looking at instance rows. Checking
+			// first (a deferred read) would let RetryPartition commit a pending
+			// row between COUNT and UPDATE. Returning the sentinel rolls the
+			// status write back; (*job).Run then starts a replacement engine.
+			var pending int64
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+				Count(&pending).Error; err != nil {
+				return err
+			}
+			if pending > 0 {
+				return ErrRunHasPendingWork
+			}
+
 			// Read jobID + startedAt inside the same retried transaction so the
 			// post-commit metrics/gauge bookkeeping always has them.
 			var jr models.JobRun
@@ -6011,6 +6034,11 @@ func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
 // leave the reset instance pending forever. If the tx still saw the run
 // running it does not reopen — the in-process loop is alive — and a second
 // Run() would race it.
+//
+// The returned TaskRun is loaded inside that same transaction after the reset.
+// A post-commit refresh must not be the source of the kickoff signal: if it
+// failed, returning (nil, false, err) would discard a committed reopen and the
+// handler would skip kickoff.
 func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
 	var (
 		pendingEvents []event.Event
@@ -6018,12 +6046,14 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		reopened      bool
 		jobID         uuid.UUID
 		quarantine    bool
+		refreshed     models.TaskRun
 	)
 
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 2)
 		reopened = false
+		var attemptRow models.TaskRun
 
 		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			var jobRun models.JobRun
@@ -6117,10 +6147,17 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				}
 				attemptEvents = append(attemptEvents, evt)
 			}
+
+			// Load the reset row inside this transaction so a committed reopen
+			// cannot be discarded by a post-commit refresh failure.
+			if err := tx.Where("id = ?", row.ID).First(&attemptRow).Error; err != nil {
+				return err
+			}
 			return nil
 		})
 		if txErr == nil {
 			pendingEvents = attemptEvents
+			refreshed = attemptRow
 		}
 		return txErr
 	})
@@ -6142,10 +6179,6 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	}
 
-	var refreshed models.TaskRun
-	if err := s.db.WithContext(ctx).Where("id = ?", taskRunID).First(&refreshed).Error; err != nil {
-		return nil, false, err
-	}
 	return convertRunTaskModel(&refreshed), reopened, nil
 }
 

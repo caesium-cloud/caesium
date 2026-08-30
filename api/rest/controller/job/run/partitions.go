@@ -253,27 +253,38 @@ func RetryPartition(c *echo.Context) error {
 	// and invalidate the owner checkpoints. Doing it here with a bare Updates()
 	// did none of that.
 	updated, reopened, err := partitionRetryInstance(ctx, runID, row.ID)
-	if err != nil {
-		return retryPartitionHTTPError(err)
-	}
-
 	// Kickoff follows the transactional reopened flag, not the pre-tx
 	// runEntry.Status snapshot. A running local run can finish after
 	// partitionGetRun and be reopened inside RetryPartition; using the stale
 	// "running" status would skip kickoff and leave the reset instance pending
 	// forever. If the tx still saw the run running it does not reopen — the
 	// in-process loop / dispatcher is alive — and a second Run() would race it.
+	//
+	// Kick off before inspecting err / the TaskRun payload: a committed reopen
+	// already made the durable retry succeed. A missing payload must not skip
+	// the executor. Do not also kick off on reopened=false — that races a live
+	// Run(); Store.Complete refusing pending work covers the shutdown window.
 	if reopened {
 		partitionKickoff(j, runID, runEntry.Params)
 	}
+	if err != nil {
+		return retryPartitionHTTPError(err)
+	}
 
-	return c.JSON(http.StatusOK, map[string]any{
-		"retried":     true,
-		"index":       index,
-		"value":       updated.PartitionValue,
-		"task_run_id": updated.ID,
-		"status":      string(updated.Status),
-	})
+	resp := map[string]any{
+		"retried": true,
+		"index":   index,
+	}
+	if updated != nil {
+		resp["value"] = updated.PartitionValue
+		resp["task_run_id"] = updated.ID
+		resp["status"] = string(updated.Status)
+	} else {
+		resp["task_run_id"] = row.ID
+		resp["value"] = row.PartitionValue
+		resp["status"] = string(runstorage.TaskStatusPending)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // kickoffPartitionRetryRun resumes a reopened run through job.New → Run so the

@@ -348,6 +348,42 @@ func WithSecretResolver(resolver secret.Resolver) JobOption {
 	}
 }
 
+// startReplacementRun kicks off a new in-process engine against an existing
+// run, matching HTTP partition-retry kickoff: job.New → Run with the run id
+// in context so the DAG rehydrates existing TaskRun rows (including a
+// partition that RetryPartition reset after this engine left runFannedGroup).
+func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string) {
+	go func() {
+		runCtx := run.WithContext(context.Background(), runID)
+		err := New(&models.Job{
+			ID:               j.id,
+			Alias:            j.alias,
+			MaxParallelTasks: j.maxParallelTasks,
+			TaskTimeout:      j.taskTimeout,
+			RunTimeout:       j.runTimeout,
+			Priority:         j.priority,
+		},
+			WithTriggerID(nil),
+			WithParams(params),
+			WithPriorityOverride(j.priorityOverride),
+			WithRunStoreFactory(j.runStoreFactory),
+			WithEnvVariables(j.envVariables),
+			WithTaskServiceFactory(j.taskServiceFactory),
+			WithAtomServiceFactory(j.atomServiceFactory),
+			WithTaskEdgeServiceFactory(j.taskEdgeServiceFactory),
+			WithDispatchRunCallbacks(j.dispatchRunCallbacks),
+			WithDockerEngineFactory(j.newDockerEngine),
+			WithKubernetesEngineFactory(j.newKubernetesEngine),
+			WithPodmanEngineFactory(j.newPodmanEngine),
+			WithAtomPollInterval(j.atomPollInterval),
+			WithSecretResolver(j.secretResolver),
+		).Run(runCtx)
+		if err != nil {
+			log.Error("partition retry replacement run failure", "id", j.id, "run_id", runID, "error", err)
+		}
+	}()
+}
+
 // buildLocalRunners populates runners (keyed by catalog task ID) from the
 // task_runs rows the run was REGISTERED with, so the local lane and the
 // distributed worker agree on where a task's execution recipe comes from.
@@ -695,9 +731,45 @@ func (j *job) Run(ctx context.Context) error {
 	ctx = run.WithContext(ctx, runID)
 
 	var runErr error
+	// processed / catalogTaskIDs are filled once the DAG is materialized.
+	// The completion defer reads their final values: halt leftovers are
+	// catalog tasks this engine never dispatched, while a partition retry
+	// resets an already-processed group.
+	var (
+		processed      map[uuid.UUID]bool
+		catalogTaskIDs []uuid.UUID
+	)
 	defer func() {
-		if err := store.Complete(runID, runErr); err != nil {
-			log.Error("run completion persistence failure", "run_id", runID, "error", err)
+		completeErr := store.Complete(runID, runErr)
+		if errors.Is(completeErr, run.ErrRunHasPendingWork) && processed != nil {
+			// Fail-fast / halt leaves unstarted successors pending. Skip those
+			// so this engine can still finalize. SkipTask is pending-only and
+			// keyed by catalog id; a partition retry of a processed group is
+			// not in this set.
+			for _, id := range catalogTaskIDs {
+				if processed[id] {
+					continue
+				}
+				if skipErr := store.SkipTask(runID, id, "run ended before dispatch"); skipErr != nil {
+					log.Error("failed to skip undispatched task before completion",
+						"run_id", runID, "task_id", id, "error", skipErr)
+				}
+			}
+			completeErr = store.Complete(runID, runErr)
+		}
+		if errors.Is(completeErr, run.ErrRunHasPendingWork) {
+			// Retry landed after the DAG finished and before this status write.
+			// HTTP kickoff only fires when reopened=true; the run was still
+			// running so the handler will not start an engine. Do not fire
+			// completion callbacks — the replacement will, when it actually
+			// finishes.
+			log.Info("partition retry landed after the DAG finished; starting replacement engine",
+				"job_id", j.id, "run_id", runID)
+			j.startReplacementRun(runID, snapshot.Params)
+			return
+		}
+		if completeErr != nil {
+			log.Error("run completion persistence failure", "run_id", runID, "error", completeErr)
 		}
 		if runQuarantined {
 			return
@@ -728,6 +800,11 @@ func (j *job) Run(ctx context.Context) error {
 	if len(tasks) == 0 {
 		runErr = fmt.Errorf("job %s has no tasks", j.id)
 		return runErr
+	}
+
+	catalogTaskIDs = make([]uuid.UUID, len(tasks))
+	for i, t := range tasks {
+		catalogTaskIDs[i] = t.ID
 	}
 
 	log.Info("running job tasks", "job_id", j.id, "count", len(tasks))
@@ -867,7 +944,7 @@ func (j *job) Run(ctx context.Context) error {
 
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
-	processed := make(map[uuid.UUID]bool, len(tasks))
+	processed = make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
 	taskHashes := make(map[uuid.UUID]string, len(tasks))

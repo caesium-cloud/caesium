@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -271,6 +272,27 @@ func TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun(t *testing.T) {
 
 	require.NoError(t, f.retry(t, 1))
 	assert.Equal(t, 1, kickCount, "a terminal snapshot with reopened=true must kick off")
+}
+
+// TestRetryPartitionKicksOffWhenReopenedEvenIfTaskRunPayloadIsIncomplete pins
+// that a committed reopen starts an engine even when the store returns an
+// error or a nil TaskRun. The durable retry already succeeded; dropping
+// kickoff because a payload refresh failed leaves the run running with no
+// local executor.
+func TestRetryPartitionKicksOffWhenReopenedEvenIfTaskRunPayloadIsIncomplete(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, _ uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return nil, true, errors.New("post-commit refresh failed")
+	}
+
+	err := f.retry(t, 1)
+	require.Error(t, err)
+	assert.Equal(t, 1, kickCount,
+		"reopened=true must kick off even when the TaskRun payload is missing")
 }
 
 // --- fixture --------------------------------------------------------------
