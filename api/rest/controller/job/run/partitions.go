@@ -263,7 +263,8 @@ func RetryPartition(c *echo.Context) error {
 	// Kick off before inspecting err / the TaskRun payload: a committed reopen
 	// already made the durable retry succeed. A missing payload must not skip
 	// the executor. Do not also kick off on reopened=false — that races a live
-	// Run(); Store.Complete refusing pending work covers the shutdown window.
+	// Run(); Store.Complete refusing a retry-reset pending partition covers
+	// the shutdown window.
 	if reopened {
 		partitionKickoff(j, runID, runEntry.Params)
 	}

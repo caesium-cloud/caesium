@@ -570,8 +570,40 @@ func TestCompleteRetriesTransientContention(t *testing.T) {
 // TestCompleteRefusesWhileTaskRunIsPending pins the shutdown-window guard: a
 // partition retry can commit a pending TaskRun after runFannedGroup's last
 // all-terminal snapshot and before this status write. Finalizing anyway would
-// freeze the retried instance in a terminal run with no executor.
+// freeze the retried instance in a terminal run with no executor. The refuse
+// is retry-shaped only — a terminal sibling plus a dispatchable pending
+// instance of the same (job_run_id, task_id).
 func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 2)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
+
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.False(t, reopened, "run is still running; retry must not reopen")
+
+	err = f.store.Complete(f.runID, nil)
+	require.ErrorIs(t, err, ErrRunHasPendingWork)
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status, "Complete must not mark the run terminal while a retry-reset partition is pending")
+	require.Nil(t, got.CompletedAt)
+}
+
+// TestCompleteSucceedsWithRunningTaskRun is the timeout analogue: the sleeping
+// task is still running when the run timeout fires. Complete must mark the
+// JobRun failed anyway rather than freeze the run as running forever.
+func TestCompleteSucceedsWithRunningTaskRun(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
@@ -585,14 +617,44 @@ func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
 	require.NoError(t, db.Create(atom).Error)
 	require.NoError(t, db.Create(task).Error)
 	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
 
-	err = store.Complete(runRecord.ID, nil)
-	require.ErrorIs(t, err, ErrRunHasPendingWork)
+	err = store.Complete(runRecord.ID, errors.New("run timed out after 15s"))
+	require.NoError(t, err)
 
 	got, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
-	require.Equal(t, StatusRunning, got.Status, "Complete must not mark the run terminal while a TaskRun is pending")
-	require.Nil(t, got.CompletedAt)
+	require.Equal(t, StatusFailed, got.Status)
+	require.NotNil(t, got.CompletedAt)
+	require.Equal(t, "run timed out after 15s", got.Error)
+}
+
+// TestCompleteSucceedsWithPendingOutstandingPredecessors is the producer-fail
+// analogue: leftover consumers still wait on a failed predecessor
+// (outstanding_predecessors > 0) and have no terminal sibling. Complete must
+// still finalize the JobRun.
+func TestCompleteSucceedsWithPendingOutstandingPredecessors(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 1))
+
+	err = store.Complete(runRecord.ID, errors.New("producer failed"))
+	require.NoError(t, err)
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, got.Status)
+	require.NotNil(t, got.CompletedAt)
 }
 
 func TestCompleteFinalizesWhenAllTaskRunsAreTerminal(t *testing.T) {

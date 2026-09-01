@@ -378,12 +378,17 @@ var (
 	// The REST layer maps this to 409.
 	ErrTaskRunNotTerminal = errors.New("run: task instance is not terminal")
 
-	// ErrRunHasPendingWork is returned by Complete when a TaskRun for the run is
-	// not terminal. Marking the JobRun terminal in that state freezes the
-	// pending row forever: RetryPartition of a still-running local run reports
-	// reopened=false (no HTTP kickoff), and the in-process engine may already
-	// have left runFannedGroup. The same transaction as the status write must
-	// refuse so this cannot TOCTOU with the retry.
+	// ErrRunHasPendingWork is returned by Complete when a dispatchable
+	// retry-reset TaskRun is still pending: status=pending, started_at IS NULL,
+	// outstanding_predecessors=0, and another TaskRun with the same
+	// (job_run_id, task_id) is already terminal. That is RetryPartition of a
+	// failed partition after runFannedGroup returned. Marking the JobRun
+	// terminal then freezes the retried instance: RetryPartition of a
+	// still-running local run reports reopened=false (no HTTP kickoff), and the
+	// in-process engine may already have left the group. The same transaction
+	// as the status write must refuse so this cannot TOCTOU with the retry.
+	// Running/claimed tasks, blocked successors (outstanding_predecessors > 0),
+	// and never-started catalog tasks without a terminal sibling do not match.
 	ErrRunHasPendingWork = errors.New("run: cannot complete while task work is pending")
 )
 
@@ -4375,14 +4380,30 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 				return errRunAlreadyTerminal
 			}
 
-			// Observe TaskRuns after the JobRun write so this transaction holds
-			// the SQLite write lock before looking at instance rows. Checking
-			// first (a deferred read) would let RetryPartition commit a pending
-			// row between COUNT and UPDATE. Returning the sentinel rolls the
-			// status write back; (*job).Run then starts a replacement engine.
+			// Observe retry-reset TaskRuns after the JobRun write so this
+			// transaction holds the SQLite write lock before looking at
+			// instance rows. Checking first (a deferred read) would let
+			// RetryPartition commit a pending row between COUNT and UPDATE.
+			// Returning the sentinel rolls the status write back; (*job).Run
+			// then starts a replacement engine.
+			//
+			// Match partition-retry shape only, not any in-flight work:
+			// a pending instance that is immediately dispatchable
+			// (started_at IS NULL, outstanding_predecessors = 0) with a
+			// terminal sibling in the same (job_run_id, task_id) group.
+			// Running/claimed tasks (timeout), blocked successors, and
+			// never-started catalog tasks must not refuse.
 			var pending int64
 			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND outstanding_predecessors = 0",
+					runID, string(TaskStatusPending)).
+				Where(`EXISTS (
+					SELECT 1 FROM task_runs AS siblings
+					WHERE siblings.job_run_id = task_runs.job_run_id
+					  AND siblings.task_id = task_runs.task_id
+					  AND siblings.id <> task_runs.id
+					  AND siblings.status IN ?
+				)`, terminalTaskStatuses()).
 				Count(&pending).Error; err != nil {
 				return err
 			}
