@@ -883,14 +883,16 @@ func computeDescriptorInstanceHash(
 	partition pkgtask.Partition,
 ) (string, error) {
 	spec := desc.ContainerSpec
-	env, err := jobdefruntime.InterpolateParamRefs(spec.Env, params)
-	if err != nil {
-		return "", err
+	env := maps.Clone(spec.Env)
+	if desc.Runtime.ParamEnvInterpolation {
+		var err error
+		env, err = jobdefruntime.InterpolateParamRefs(spec.Env, params)
+		if err != nil {
+			return "", err
+		}
 	}
 	if env == nil {
 		env = make(map[string]string)
-	} else {
-		env = maps.Clone(env)
 	}
 	for k, v := range pkgtask.BuildOutputEnv(predOutputs) {
 		env[k] = v

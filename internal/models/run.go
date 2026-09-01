@@ -316,17 +316,23 @@ type TaskExecutionRun struct {
 }
 
 type TaskExecutionRuntime struct {
-	Engine              AtomEngine        `json:"engine"`
-	Image               string            `json:"image"`
-	ResolvedImageDigest string            `json:"resolvedImageDigest,omitempty"`
-	Command             []string          `json:"command,omitempty"`
-	CommandRaw          string            `json:"commandRaw,omitempty"`
-	WorkDir             string            `json:"workdir,omitempty"`
-	TaskType            string            `json:"taskType,omitempty"`
-	NodeSelector        map[string]string `json:"nodeSelector,omitempty"`
-	RetryCount          int               `json:"retryCount"`
-	RetryDelay          time.Duration     `json:"retryDelay"`
-	RetryBackoff        bool              `json:"retryBackoff"`
+	Engine              AtomEngine `json:"engine"`
+	Image               string     `json:"image"`
+	ResolvedImageDigest string     `json:"resolvedImageDigest,omitempty"`
+	// ParamEnvInterpolation records whether ${CAESIUM_PARAM_*} references in
+	// ContainerSpec.Env were expanded for this execution. It is an additive
+	// schema-v1 capability bit: descriptors captured before interpolation was
+	// introduced omit it and therefore retain their historical literal-env
+	// semantics during replay and reproduce.
+	ParamEnvInterpolation bool              `json:"paramEnvInterpolation,omitempty"`
+	Command               []string          `json:"command,omitempty"`
+	CommandRaw            string            `json:"commandRaw,omitempty"`
+	WorkDir               string            `json:"workdir,omitempty"`
+	TaskType              string            `json:"taskType,omitempty"`
+	NodeSelector          map[string]string `json:"nodeSelector,omitempty"`
+	RetryCount            int               `json:"retryCount"`
+	RetryDelay            time.Duration     `json:"retryDelay"`
+	RetryBackoff          bool              `json:"retryBackoff"`
 }
 
 type TaskExecutionTiming struct {

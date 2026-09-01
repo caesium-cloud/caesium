@@ -187,17 +187,18 @@ type Descriptor struct {
 		Params map[string]string `json:"params,omitempty"`
 	} `json:"run"`
 	Runtime struct {
-		Engine              string            `json:"engine"`
-		Image               string            `json:"image"`
-		ResolvedImageDigest string            `json:"resolvedImageDigest,omitempty"`
-		Command             []string          `json:"command,omitempty"`
-		CommandRaw          string            `json:"commandRaw,omitempty"`
-		WorkDir             string            `json:"workdir,omitempty"`
-		TaskType            string            `json:"taskType,omitempty"`
-		NodeSelector        map[string]string `json:"nodeSelector,omitempty"`
-		RetryCount          int               `json:"retryCount"`
-		RetryDelay          time.Duration     `json:"retryDelay"`
-		RetryBackoff        bool              `json:"retryBackoff"`
+		Engine                string            `json:"engine"`
+		Image                 string            `json:"image"`
+		ResolvedImageDigest   string            `json:"resolvedImageDigest,omitempty"`
+		ParamEnvInterpolation bool              `json:"paramEnvInterpolation,omitempty"`
+		Command               []string          `json:"command,omitempty"`
+		CommandRaw            string            `json:"commandRaw,omitempty"`
+		WorkDir               string            `json:"workdir,omitempty"`
+		TaskType              string            `json:"taskType,omitempty"`
+		NodeSelector          map[string]string `json:"nodeSelector,omitempty"`
+		RetryCount            int               `json:"retryCount"`
+		RetryDelay            time.Duration     `json:"retryDelay"`
+		RetryBackoff          bool              `json:"retryBackoff"`
 	} `json:"runtime"`
 	Timing struct {
 		TaskTimeout time.Duration `json:"taskTimeout"`
@@ -281,9 +282,13 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 		mergedParams[assignment.Key] = assignment.Value
 	}
 
-	interpolatedEnv, err := jobdefruntime.InterpolateParamRefs(desc.ContainerSpec.Env, mergedParams)
-	if err != nil {
-		return nil, err
+	interpolatedEnv := desc.ContainerSpec.Env
+	if desc.Runtime.ParamEnvInterpolation {
+		var err error
+		interpolatedEnv, err = jobdefruntime.InterpolateParamRefs(desc.ContainerSpec.Env, mergedParams)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	for _, key := range sortedKeys(interpolatedEnv) {

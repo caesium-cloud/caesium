@@ -3,6 +3,8 @@ package job
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1040,7 +1042,7 @@ func TestRunLocalInterpolatesParamRefsInStepEnv(t *testing.T) {
 	atomID := uuid.New()
 
 	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskID, JobID: jobID, AtomID: atomID},
+		{ID: taskID, JobID: jobID, AtomID: atomID, CacheConfig: datatypes.JSON(`true`)},
 	}}
 	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
 		atomID: fakeModelAtomWithEnv(t, atomID, map[string]string{
@@ -1071,6 +1073,15 @@ func TestRunLocalInterpolatesParamRefsInStepEnv(t *testing.T) {
 	require.Equal(t, "keep-me", envs[0]["LITERAL"])
 	require.Equal(t, "abc123", envs[0]["CAESIUM_PARAM_SHA"])
 	require.NotContains(t, envs[0]["GIT_REF"], "${CAESIUM_PARAM_")
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "task_id = ?", taskID).Error)
+	require.NotEmpty(t, persisted.HashInputBlob)
+	substituted := sha256.Sum256([]byte("abc123"))
+	token := sha256.Sum256([]byte("${CAESIUM_PARAM_SHA}"))
+	blob := string(persisted.HashInputBlob)
+	require.Contains(t, blob, "sha256:"+hex.EncodeToString(substituted[:]))
+	require.NotContains(t, blob, "sha256:"+hex.EncodeToString(token[:]))
 }
 
 func TestRunLocalMissingParamRefFailsClosed(t *testing.T) {

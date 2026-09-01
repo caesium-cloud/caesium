@@ -470,7 +470,23 @@ func TestRuntimeExecutorMissingParamRefFailsClosed(t *testing.T) {
 	require.Contains(t, persisted.Error, "${CAESIUM_PARAM_SHA}")
 }
 
-func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
+func TestRuntimeExecutorQuarantinedDescriptorHonorsParamEnvInterpolationCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		interpolation bool
+		wantRef       string
+	}{
+		{name: "new descriptor interpolates", interpolation: true, wantRef: "deadbeef"},
+		{name: "legacy descriptor keeps literal", interpolation: false, wantRef: "${CAESIUM_PARAM_SHA}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRuntimeExecutorQuarantinedDescriptorParamEnv(t, tc.interpolation, tc.wantRef)
+		})
+	}
+}
+
+func testRuntimeExecutorQuarantinedDescriptorParamEnv(t *testing.T, interpolation bool, wantRef string) {
+	t.Helper()
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() {
 		jobdeftestutil.CloseDB(db)
@@ -482,17 +498,24 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 	require.NoError(t, db.Create(trigger).Error)
 	job := &models.Job{ID: uuid.New(), Alias: "worker-quarantine-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
 	require.NoError(t, db.Create(job).Error)
+	specBytes, err := json.Marshal(container.Spec{Env: map[string]string{
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+	}})
+	require.NoError(t, err)
 	atomModel := &models.Atom{
 		ID:        uuid.New(),
 		Engine:    models.AtomEngineDocker,
 		Image:     "alpine:3.23",
 		Command:   `["sh","-c","true"]`,
+		Spec:      datatypes.JSON(specBytes),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	require.NoError(t, db.Create(atomModel).Error)
 	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "deploy", ReplaySafe: true, CreatedAt: now, UpdatedAt: now}
 	require.NoError(t, db.Create(task).Error)
+	paramsBytes, err := json.Marshal(map[string]string{"sha": "deadbeef"})
+	require.NoError(t, err)
 	jobRun := &models.JobRun{
 		ID:          uuid.New(),
 		JobID:       job.ID,
@@ -500,6 +523,7 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		TriggerType: string(trigger.Type),
 		Status:      string(run.StatusRunning),
 		Quarantine:  true,
+		Params:      datatypes.JSON(paramsBytes),
 		StartedAt:   now,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -510,6 +534,18 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		Atom:                    atomModel,
 		OutstandingPredecessors: 0,
 	}}))
+	if !interpolation {
+		var registered models.TaskRun
+		require.NoError(t, db.First(&registered, "job_run_id = ? AND task_id = ?", jobRun.ID, task.ID).Error)
+		var descriptor models.TaskExecutionDescriptor
+		require.NoError(t, json.Unmarshal(registered.ExecutionDescriptor, &descriptor))
+		descriptor.Runtime.ParamEnvInterpolation = false
+		legacyDescriptor, marshalErr := json.Marshal(&descriptor)
+		require.NoError(t, marshalErr)
+		require.NoError(t, db.Model(&models.TaskRun{}).
+			Where("id = ?", registered.ID).
+			Update("execution_descriptor", datatypes.JSON(legacyDescriptor)).Error)
+	}
 	require.NoError(t, db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", jobRun.ID, task.ID).
 		Updates(map[string]any{
@@ -530,6 +566,9 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		},
 	}
 	executor.Execute(context.Background(), &taskRun)
+	require.NotNil(t, engine.createReq)
+	require.Equal(t, wantRef, engine.createReq.Spec.Env["GIT_REF"])
+	require.Equal(t, "deadbeef", engine.createReq.Spec.Env["CAESIUM_PARAM_SHA"])
 
 	var cacheRows int64
 	require.NoError(t, db.Model(&models.TaskCache{}).Count(&cacheRows).Error)

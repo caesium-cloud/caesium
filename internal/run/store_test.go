@@ -331,6 +331,7 @@ func TestRegisterTaskPersistsInitialExecutionDescriptorEnvelope(t *testing.T) {
 
 	require.Equal(t, models.AtomEngineKubernetes, descriptor.Runtime.Engine)
 	require.Equal(t, atom.Image, descriptor.Runtime.Image)
+	require.True(t, descriptor.Runtime.ParamEnvInterpolation)
 	require.Equal(t, []string{"sh", "-c", "echo hi"}, descriptor.Runtime.Command)
 	require.Equal(t, atom.Command, descriptor.Runtime.CommandRaw)
 	require.Equal(t, "/workspace", descriptor.Runtime.WorkDir)
