@@ -38,12 +38,12 @@
 #      `MkdirTemp` directory, promotes it with an atomic rename, adopts the
 #      winner if it loses the race, and writes its marker last. Two warms of
 #      the same key are therefore idempotent, which is why no named lock is
-#      needed. This holds only while both jobs resolve to the SAME provider
-#      set: if their `.terraform.lock.hcl` unions ever diverge, they derive
-#      different keys and would flip the shared `/cache/terraformrc` back and
-#      forth between two mirrors — that is the pre-existing "one `tfcache`
-#      volume serves one provider set" limitation, and the two jobs must then
-#      be given separate cache volumes.
+#      needed. Concurrent warms of different provider sets on this shared
+#      volume are also safe if each job sets a distinct CACHE_KEY: tf-warm
+#      then writes `/cache/<key>/terraformrc` instead of flipping the shared
+#      `/cache/terraformrc` slot. Without CACHE_KEY, diverging
+#      `.terraform.lock.hcl` unions still last-writer-wins on that single
+#      file; give those jobs distinct keys (or distinct cache volumes).
 #
 # Volume ownership: every reagent image runs as UID 10001. `tfcache` and the
 # `tfstate-<stack>` volumes are this job's SHARED view of the deploy job's
@@ -174,6 +174,9 @@ steps:
       - {volume: src, path: /src}
     next: [warm-cache]
 
+  # Unset CACHE_KEY keeps `/cache/terraformrc`, matching infra-deploy-demo.
+  # If this job's lock-file union ever diverges, set a distinct CACHE_KEY
+  # here and on every drift step so the two jobs can keep sharing `tfcache`.
   - name: warm-cache
     image: caesiumcloud/tf-warm:latest
     cache: false

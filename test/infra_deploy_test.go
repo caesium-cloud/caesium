@@ -1099,6 +1099,267 @@ func (s *IntegrationTestSuite) TestInfraFreshNamedVolumesAreWritableByTheReagent
 }
 
 // ---------------------------------------------------------------------------
+// One provider cache volume, two keyed CLI configurations
+// ---------------------------------------------------------------------------
+
+// keyedCacheManifest runs two deliberately incompatible provider sets through
+// every tf-runner phase. network needs null+random; canary needs local. The
+// warms are serialized so the second config is definitely present before
+// either plan starts: if it clobbers the first slot, plan-network fails offline
+// instead of letting this scenario pass on scheduling luck.
+func (s *IntegrationTestSuite) keyedCacheManifest(
+	f *infraDeployFixture,
+	alias, hostNetworkState, hostCanaryState string,
+) string {
+	s.T().Helper()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+volumes:
+  - name: fixture
+    source:
+      bind: %q
+  - name: src
+    source:
+      bind: %q
+  - name: tfstate-network
+    source:
+      bind: %q
+  - name: tfstate-canary
+    source:
+      bind: %q
+  - name: tfcache
+    source:
+      bind: %q
+steps:
+  - name: prepare
+    image: alpine:3.23
+    cache: false
+    command: ["sh", "-c", "find /src -mindepth 1 -delete && echo cleared"]
+    volumeMounts:
+      - {volume: src, path: /src}
+    next: [checkout]
+
+  - name: checkout
+    image: %s
+    cache: false
+    dependsOn: [prepare]
+    env:
+      GIT_URL: "file:///fixture"
+      GIT_REF: "main"
+      GIT_SPARSE: "stacks/network/** modules/** drift/canary/**"
+      DEST: "/src"
+    volumeMounts:
+      - {volume: fixture, path: /fixture, readOnly: true}
+      - {volume: src, path: /src}
+    next: [warm-network]
+
+  - name: warm-network
+    image: %s
+    cache: false
+    dependsOn: [checkout]
+    env:
+      SRC: "/src/stacks/network"
+      CACHE_DIR: "/cache"
+      CACHE_KEY: "network"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfcache, path: /cache}
+    next: [warm-canary]
+
+  - name: warm-canary
+    image: %s
+    cache: false
+    dependsOn: [warm-network]
+    env:
+      SRC: "/src/drift/canary"
+      CACHE_DIR: "/cache"
+      CACHE_KEY: "canary"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfcache, path: /cache}
+    next: [plan-network, plan-canary]
+`, alias, f.hostRepo, f.hostSrc, hostNetworkState, hostCanaryState, f.hostCache,
+		s.reagentImage("git-source"), s.reagentImage("tf-warm"), s.reagentImage("tf-warm"))
+
+	type chain struct {
+		name, root, stateVolume, variable string
+	}
+	for _, stack := range []chain{
+		{name: "network", root: "stacks/network", stateVolume: "tfstate-network"},
+		{name: "canary", root: "drift/canary", stateVolume: "tfstate-canary", variable: `      TF_VAR_canary_path: "/state/canary.txt"`},
+	} {
+		fmt.Fprintf(&b, `
+  - name: plan-%[1]s
+    image: %[2]s
+    command: ["tf-plan"]
+    cache: false
+    dependsOn: [warm-canary]
+    env:
+      STACK_ROOT: "/src/%[3]s"
+      TF_WORKSPACE: "default"
+      CACHE_KEY: "%[1]s"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+      CHECKPOINT_DISABLE: "1"
+      HTTP_PROXY: "http://127.0.0.1:1"
+      HTTPS_PROXY: "http://127.0.0.1:1"
+%[5]s
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: %[4]s, path: /state}
+      - {volume: tfcache, path: /cache, readOnly: true}
+    next: [apply-%[1]s]
+
+  - name: apply-%[1]s
+    image: %[2]s
+    command: ["tf-apply"]
+    cache: false
+    dependsOn: [plan-%[1]s]
+    env:
+      PLAN_STEP: "plan-%[1]s"
+      STACK_ROOT: "/src/%[3]s"
+      TF_WORKSPACE: "default"
+      CACHE_KEY: "%[1]s"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+      CHECKPOINT_DISABLE: "1"
+      HTTP_PROXY: "http://127.0.0.1:1"
+      HTTPS_PROXY: "http://127.0.0.1:1"
+%[5]s
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: %[4]s, path: /state}
+      - {volume: tfcache, path: /cache, readOnly: true}
+    next: [drift-%[1]s]
+
+  - name: drift-%[1]s
+    image: %[2]s
+    command: ["tf-drift"]
+    cache: false
+    dependsOn: [apply-%[1]s]
+    env:
+      STACK_ROOT: "/src/%[3]s"
+      TF_WORKSPACE: "default"
+      CACHE_KEY: "%[1]s"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+      CHECKPOINT_DISABLE: "1"
+      HTTP_PROXY: "http://127.0.0.1:1"
+      HTTPS_PROXY: "http://127.0.0.1:1"
+%[5]s
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: %[4]s, path: /state}
+      - {volume: tfcache, path: /cache, readOnly: true}
+`, stack.name, s.reagentImage("tf-runner"), stack.root, stack.stateVolume, stack.variable)
+	}
+	return b.String()
+}
+
+func mirrorKeyFromTerraformRC(rc string) (string, error) {
+	const prefix = `path    = "/cache/providers/`
+	start := strings.Index(rc, prefix)
+	if start < 0 {
+		return "", fmt.Errorf("terraformrc names no /cache/providers mirror")
+	}
+	rest := rc[start+len(prefix):]
+	key, _, ok := strings.Cut(rest, `"`)
+	if !ok || key == "" || strings.Contains(key, "/") {
+		return "", fmt.Errorf("terraformrc carries an invalid mirror key %q", key)
+	}
+	return key, nil
+}
+
+// TestInfraKeyedProviderSetsShareOneCacheEndToEnd is #364's real-surface gate:
+// a live server schedules the real tf-warm and tf-runner images, the second
+// provider set lands on the same physical cache volume, and plan/apply/drift
+// for both stacks initialize offline through their selected keyed config.
+func (s *IntegrationTestSuite) TestInfraKeyedProviderSetsShareOneCacheEndToEnd() {
+	s.requireInfraLane()
+
+	f := s.newInfraDeployFixture("keyed-provider-cache")
+	networkState := filepath.Join(f.state, "keyed-network")
+	canaryState := filepath.Join(f.state, "keyed-canary")
+	hostNetworkState := filepath.Join(f.hostState, "keyed-network")
+	hostCanaryState := filepath.Join(f.hostState, "keyed-canary")
+	for _, dir := range []string{networkState, canaryState} {
+		s.Require().NoError(os.MkdirAll(dir, 0o755))
+		s.Require().NoError(os.Chown(dir, reagentImageUID, reagentImageGID))
+		s.Require().NoError(os.Chmod(dir, 0o775))
+	}
+
+	alias := fmt.Sprintf("infra-keyed-cache-%d", time.Now().UnixNano())
+	dir := s.writeJobManifest(s.keyedCacheManifest(f, alias, hostNetworkState, hostCanaryState))
+	defer func() { _ = os.RemoveAll(dir) }()
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	run := s.runDeploy(job, "two keyed provider sets")
+	s.requireGreen(run, "two keyed provider sets")
+
+	for _, stack := range []string{"network", "canary"} {
+		path := "/cache/" + stack + "/terraformrc"
+		for _, phase := range []string{"plan", "apply", "drift"} {
+			step := phase + "-" + stack
+			s.Equal("succeeded", run.statuses[step], "%s did not execute successfully", step)
+			log := s.taskLog(job.ID, run.run.ID, s.jobTaskIDByName(job.ID, step))
+			s.Contains(log, "TF_CLI_CONFIG_FILE <- "+path,
+				"%s did not inherit the CACHE_KEY-selected terraformrc", step)
+			if phase == "plan" {
+				// Fresh state directories force provider installation here. The
+				// deliberately dead proxy above makes a direct registry fallback fail;
+				// Terraform labels packages installed from the selected filesystem
+				// mirror as unauthenticated.
+				s.Contains(log, "(unauthenticated)",
+					"%s did not install its providers from the selected filesystem mirror", step)
+			}
+		}
+		s.Equal("terraform.plan.v1", run.outputs["plan-"+stack]["proposal_kind"],
+			"%s never completed a real plan", stack)
+		s.Equal("false", run.outputs["drift-"+stack]["drift"],
+			"%s did not complete a clean refresh through its mirror", stack)
+	}
+	s.NotEmpty(run.outputs["apply-network"]["vpc_id"], "network apply published no output")
+	s.Equal("/state/canary.txt", run.outputs["apply-canary"]["canary_path"])
+	s.Require().FileExists(filepath.Join(canaryState, "canary.txt"))
+
+	rcs := map[string]string{}
+	mirrorKeys := map[string]string{}
+	for _, slot := range []string{"network", "canary"} {
+		data, err := os.ReadFile(filepath.Join(f.cache, slot, "terraformrc")) //nolint:gosec // fixture path.
+		s.Require().NoError(err, "read %s terraformrc", slot)
+		rcs[slot] = string(data)
+		mirrorKeys[slot], err = mirrorKeyFromTerraformRC(string(data))
+		s.Require().NoError(err, "%s terraformrc: %s", slot, data)
+	}
+	s.NotEqual(rcs["network"], rcs["canary"], "the second warm clobbered the first slot")
+	s.NotEqual(mirrorKeys["network"], mirrorKeys["canary"], "the incompatible provider sets resolved to one mirror")
+	if _, err := os.Stat(filepath.Join(f.cache, "terraformrc")); !os.IsNotExist(err) {
+		s.Fail("keyed warms wrote the historical unkeyed config", "stat error: %v", err)
+	}
+
+	networkMirror := filepath.Join(f.cache, "providers", mirrorKeys["network"], "registry.terraform.io", "hashicorp")
+	canaryMirror := filepath.Join(f.cache, "providers", mirrorKeys["canary"], "registry.terraform.io", "hashicorp")
+	s.Require().DirExists(filepath.Join(networkMirror, "null"), "network mirror contains no null provider")
+	s.Require().DirExists(filepath.Join(networkMirror, "random"), "network mirror contains no random provider")
+	s.Require().DirExists(filepath.Join(canaryMirror, "local"), "canary mirror contains no local provider")
+	if _, err := os.Stat(filepath.Join(networkMirror, "local")); !os.IsNotExist(err) {
+		s.Fail("network slot was not provider-set-specific", "local provider stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(canaryMirror, "null")); !os.IsNotExist(err) {
+		s.Fail("canary slot was not provider-set-specific", "null provider stat error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // §9 #11: a module nested two levels deep
 // ---------------------------------------------------------------------------
 

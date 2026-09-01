@@ -14,7 +14,15 @@
 //	                     definition serves every stack.
 //	SCAN_ROOT            base for the partition's relative root (fan-out form)
 //	TF_WORKSPACE         workspace to select (default "default")
-//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform
+//	CACHE_DIR            the cache volume mount (default /cache); used with
+//	                     CACHE_KEY to derive TF_CLI_CONFIG_FILE
+//	CACHE_KEY            terraformrc slot matching the warm step. Unset leaves
+//	                     TF_CLI_CONFIG_FILE to the manifest (historical
+//	                     /cache/terraformrc). Set exports
+//	                     /cache/<key>/terraformrc unless TF_CLI_CONFIG_FILE is
+//	                     already that path; a mismatch fails closed.
+//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform.
+//	                     Optional when CACHE_KEY is set.
 //	TF_DATA_DIR          Terraform's working directory (default <ARTIFACT_DIR>/tfdata)
 //	ARTIFACT_DIR         where the plan artifact is written (default <root>/.caesium)
 //	BACKEND_CONFIG       comma-separated `-backend-config` key=value settings
@@ -117,6 +125,7 @@ type config struct {
 	DataDir           string
 	ArtifactDir       string
 	ExecPath          string
+	CLIConfigFile     string
 	BackendConfig     []string
 	ImportOutputsFrom []string
 	ApplyStep         string
@@ -129,12 +138,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
+	cliConfig, err := resolveCLIConfig(getenv)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
 		Root:              root,
 		Workspace:         strings.TrimSpace(getenv("TF_WORKSPACE")),
 		DataDir:           strings.TrimSpace(getenv("TF_DATA_DIR")),
 		ArtifactDir:       strings.TrimSpace(getenv("ARTIFACT_DIR")),
 		ExecPath:          strings.TrimSpace(getenv("TF_CLI_PATH")),
+		CLIConfigFile:     cliConfig,
 		BackendConfig:     splitList(getenv("BACKEND_CONFIG")),
 		ImportOutputsFrom: splitList(getenv("IMPORT_OUTPUTS_FROM")),
 		ApplyStep:         strings.TrimSpace(getenv("APPLY_STEP")),
@@ -169,6 +184,41 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.ExecPath = path
 	}
 	return cfg, nil
+}
+
+// resolveCLIConfig is the terraformrc path this process should export.
+//
+// CACHE_KEY unset: leave TF_CLI_CONFIG_FILE to the manifest (or unset). That is
+// the historical `/cache/terraformrc` shape, so existing jobs keep working.
+// CACHE_KEY set: the slot is `{CACHE_DIR}/{key}/terraformrc`. If the manifest
+// also set TF_CLI_CONFIG_FILE, it must already be that path — a warm writing
+// one file and a runner reading another is the single-slot clobber #364
+// exists to close, reached by a mismatched pair of env vars.
+func resolveCLIConfig(getenv func(string) string) (string, error) {
+	key, err := tf.SanitizeCacheKey(getenv("CACHE_KEY"))
+	if err != nil {
+		return "", err
+	}
+	explicit := strings.TrimSpace(getenv("TF_CLI_CONFIG_FILE"))
+	if key == "" {
+		return "", nil
+	}
+
+	cacheDir := strings.TrimSpace(getenv("CACHE_DIR"))
+	if cacheDir == "" {
+		cacheDir = tf.DefaultCacheDir
+	}
+	if !filepath.IsAbs(cacheDir) {
+		return "", fmt.Errorf("CACHE_DIR %q must be an absolute path", cacheDir)
+	}
+	derived := tf.CLIConfigFile(cacheDir, key)
+	if explicit != "" && filepath.Clean(explicit) != filepath.Clean(derived) {
+		return "", fmt.Errorf(
+			"CACHE_KEY %q selects %s, but TF_CLI_CONFIG_FILE is %s; "+
+				"omit TF_CLI_CONFIG_FILE (tf-runner will export the keyed path) or point it at the same file",
+			key, derived, explicit)
+	}
+	return derived, nil
 }
 
 // resolveRoot finds the root module this instance operates on.
@@ -298,6 +348,9 @@ func splitList(raw string) []string {
 // ready Runner. It is shared by all three phases so none of them can drift into
 // a different data directory or a different mirror.
 func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
+	if err := pinCLIConfig(cfg, log); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.ArtifactDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create artifact directory %s: %w", cfg.ArtifactDir, err)
 	}
@@ -315,6 +368,59 @@ func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
 		return nil, err
 	}
 	return tf.NewRunner(cfg.Root, cfg.ExecPath, log)
+}
+
+// pinCLIConfig validates and exports TF_CLI_CONFIG_FILE when CACHE_KEY selected
+// a slot. terraform-exec copies os.Environ() at each invocation (see
+// tf.NewRunner), so the process environment is how every phase actually selects
+// its mirror.
+func pinCLIConfig(cfg config, log io.Writer) error {
+	if cfg.CLIConfigFile == "" {
+		return nil
+	}
+	if err := validateKeyedCLIConfig(cfg.CLIConfigFile); err != nil {
+		return err
+	}
+	if err := os.Setenv("TF_CLI_CONFIG_FILE", cfg.CLIConfigFile); err != nil {
+		return fmt.Errorf("set TF_CLI_CONFIG_FILE: %w", err)
+	}
+	_, _ = fmt.Fprintf(log, "tf-runner: TF_CLI_CONFIG_FILE <- %s (CACHE_KEY slot)\n", cfg.CLIConfigFile)
+	return nil
+}
+
+// validateKeyedCLIConfig fails before Terraform starts if the named slot was
+// never warmed or was replaced by a cache alias. The warm and runner containers
+// can use different uids, so opening the file here also proves this process can
+// actually read it; Lstat alone would let a 0600 config produce a much less
+// useful Terraform diagnostic later.
+func validateKeyedCLIConfig(path string) error {
+	dir := filepath.Dir(path)
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect CACHE_KEY slot %s: %w", dir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("CACHE_KEY slot %s is a symbolic link; refusing a cache alias or escape", dir)
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("CACHE_KEY slot %s is not a directory", dir)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect keyed Terraform CLI config %s: %w (did the matching tf-warm step complete?)", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("keyed Terraform CLI config %s is not a regular file", path)
+	}
+	f, err := os.Open(path) //nolint:gosec // path is the validated CACHE_KEY-derived CLI config.
+	if err != nil {
+		return fmt.Errorf("open keyed Terraform CLI config %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close keyed Terraform CLI config %s: %w", path, err)
+	}
+	return nil
 }
 
 // pinGitIdentity installs an inert git identity if the environment has none.
