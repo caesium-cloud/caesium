@@ -1571,10 +1571,13 @@ aggregate contract granularity, `retry_partition` as an agent action, freshness
 interplay, in-group ordering visibility, an in-group depth guardrail) are
 cross-design questions, not items here.
 
-_Close-out note, 2026-08-28: both Phase 5 items are tracked as GitHub issues (#359 replay re-expansion, #360 per-partition skip).
-`cache.chain: values` shipped on #351 (`docs/exec-plans/completed/infra-deploy.md`),
-so value-verified per-partition skip is no longer blocked — it is unbuilt, not
-gated._
+_Close-out note, updated 2026-09-01: quarantined-replay re-expansion remains
+tracked as #359. Value-verified per-partition skip shipped on #382 after
+`cache.chain: values` landed on #351
+(`docs/exec-plans/completed/infra-deploy.md`): the live integration gate proves
+unchanged instances do not launch containers across producer identity churn,
+while fingerprint, attribute, and consumed-output changes remain authoritative
+in the local, distributed, and run-owner lanes._
 
 ## Sequencing & Dependencies
 

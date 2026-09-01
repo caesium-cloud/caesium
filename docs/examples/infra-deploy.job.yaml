@@ -40,6 +40,11 @@
 #                 (`terraform providers lock -platform=...`).
 #   * `tfcache` — the shared provider mirror. `warm-cache` holds the only
 #                 read-write mount; every consumer mounts it `readOnly: true`.
+#                 The CLI config lives at `/cache/terraformrc` unless `CACHE_KEY`
+#                 is set on `warm-cache` and every consuming tf-runner step,
+#                 which writes `/cache/<key>/terraformrc` so a second job with
+#                 a different provider pin can share this volume. These
+#                 examples leave `CACHE_KEY` unset (one provider set).
 #   * `tfstate-<stack>` — ONE state volume per stack, each written only by that
 #                 stack's own `plan` → `apply` pair, which are DAG-ordered. A
 #                 single shared `tfstate` volume carved up with `subPath:` would
@@ -218,6 +223,9 @@ steps:
   # inside the volume, and a recreated PVC would then fail every offline
   # `terraform init` with no warning. Always running and self-checking the
   # `.warm/<key>` marker makes a recreated volume self-healing.
+  # Unset CACHE_KEY keeps `/cache/terraformrc`. Set the same CACHE_KEY here
+  # and on every tf-runner step to share this volume with a job that pins a
+  # different provider set (`/cache/<key>/terraformrc`).
   - name: warm-cache
     image: caesiumcloud/tf-warm:latest
     cache: false
@@ -294,13 +302,15 @@ steps:
     next: [plan-app-web]
 
   # ── PROPOSE + APPLY: network ─────────────────────────────────────────
-  # A stack consumed through IMPORT_OUTPUTS_FROM must name its non-sensitive
-  # outputs in `[a-z0-9_]+`: Caesium exports them uppercased with `-`/`.`
-  # folded to `_`, and tf-plan lowercases the suffix again, so `vpcId` reaches
-  # a consumer as TF_VAR_vpcid and `vpc-id`/`vpc_id` collapse onto one another.
-  # tf-apply fails closed on either rather than letting Terraform fall back to
-  # a variable default. Sensitive outputs are exempt — they are never
-  # published, so they never make the trip.
+  # Caesium generates CAESIUM_OUTPUT_NAME_INDEX_<STEP> from an apply step's
+  # persisted outputs so mixed-case and dashed names round-trip as
+  # TF_VAR_vpcId / TF_VAR_vpc-id. tf-apply persists an index-required sentinel
+  # so an old server fails explicitly instead of silently lowercasing a name.
+  # Two names that fold onto one env suffix (`vpc-id` and `vpc_id`) are still
+  # refused — the index cannot split one variable into two — as are names that
+  # are not Terraform identifiers.
+  # Sensitive outputs are exempt — they are never published, so they never
+  # make the trip.
   # Not a leaf (app-web consumes its `vpc_id` output), so it uses the
   # container no-op form: apply always runs and always publishes outputs,
   # applying Terraform only when the proposal has non-zero counts. A
@@ -316,6 +326,9 @@ steps:
     env:
       STACK_ROOT: "/src/stacks/network"
       TF_WORKSPACE: "default"
+      # Historical unkeyed slot. Set CACHE_KEY (same value as warm-cache) and
+      # omit this, or point it at /cache/<key>/terraformrc, to share tfcache
+      # with a job that pins a different provider set.
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
       ARTIFACT_DIR: "/state/artifacts"
       BACKEND_CONFIG: "path=/state/terraform.tfstate"

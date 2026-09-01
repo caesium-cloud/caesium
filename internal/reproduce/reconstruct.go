@@ -345,7 +345,10 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 		env[paramEnvKey(key)] = mergedParams[key]
 	}
 
-	outputEnv, outputWarnings := predecessorOutputEnv(desc)
+	outputEnv, outputWarnings, err := predecessorOutputEnv(desc)
+	if err != nil {
+		return nil, err
+	}
 	warnings = append(warnings, outputWarnings...)
 	for _, key := range sortedKeys(outputEnv) {
 		env[key] = outputEnv[key]
@@ -462,7 +465,7 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 	}
 }
 
-func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning) {
+func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error) {
 	byName := make(map[string]map[string]string)
 	used := make(map[string]struct{})
 	warnings := make([]Warning, 0)
@@ -489,7 +492,10 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning) {
 		})
 	}
 
-	env := pkgtask.BuildOutputEnv(byName)
+	env, err := pkgtask.BuildOutputEnv(byName)
+	if err != nil {
+		return nil, warnings, err
+	}
 	for stepName, outputs := range byName {
 		for key, value := range outputs {
 			if ref, ok := pkgtask.DecodeOutputRef(value); ok {
@@ -502,7 +508,7 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning) {
 		}
 	}
 	sortWarnings(warnings)
-	return env, warnings
+	return env, warnings, nil
 }
 
 func reconstructMounts(spec container.Spec, remaps []MountRemap) ([]container.Mount, []Warning) {

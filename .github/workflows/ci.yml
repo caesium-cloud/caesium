@@ -271,13 +271,57 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  # Twin of build-and-integration-test-infra. Arm64 reagent artifacts for
+  # publish come from this job (same split as amd64).
+  build-and-integration-test-infra-arm64:
+    needs: builder-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: docker/setup-docker-action@v5
+        id: setup-docker
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-arm64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
+      # docker/setup-docker-action provisions its own daemon and switches the
+      # active docker context to it, so everything built/loaded in this job
+      # (including the git-source/tf-discover/tf-warm/tf-runner reagent images
+      # `integration-test-infra` builds via `build-reagents`) lands there rather
+      # than on the runner's stock /var/run/docker.sock. The infra server
+      # container bind-mounts CAESIUM_SOCK as its own docker socket to launch
+      # step containers, so it must point at that same daemon — otherwise it
+      # falls back to the stock socket, which has never seen the reagent images
+      # and tries (and fails) to pull caesiumcloud/<role> from the registry.
+      # Other lanes don't hit this because their fixture images (alpine,
+      # busybox, curl) are public and pull fine from either daemon.
+      - name: Infra reagent integration tests (arm64)
+        run: |
+          sock="${{ steps.setup-docker.outputs.sock }}"
+          CAESIUM_SOCK="${sock#unix://}" CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-arm64 integration-test-infra
+      - name: Save reagent images
+        run: |
+          docker save \
+            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-arm64 \
+            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-arm64 \
+            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-arm64 \
+            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-arm64 \
+            | gzip > /tmp/release-reagents-arm64.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-reagents-arm64
+          path: /tmp/release-reagents-arm64.tar.gz
+          retention-days: 1
+          compression-level: 0
+
   build-and-integration-test-arm64:
     needs: builder-arm64
     runs-on: ubuntu-24.04-arm
-    # 60, matching build-and-integration-test-infra: this job also now runs
-    # `just build-reagents` (4 Docker targets incl. a Terraform download+checksum
-    # stage) on top of the release build + integration-test suite.
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
@@ -292,8 +336,6 @@ jobs:
         run: just tag=${{ env.IMAGE_TAG }}-arm64 build
       - name: Integration tests (arm64)
         run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-arm64 integration-test
-      - name: Build reagent images (arm64)
-        run: just tag=${{ env.IMAGE_TAG }}-arm64 build-reagents
       - name: Save release image
         run: |
           docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64 \
@@ -302,20 +344,6 @@ jobs:
         with:
           name: release-arm64
           path: /tmp/release-arm64.tar.gz
-          retention-days: 1
-          compression-level: 0
-      - name: Save reagent images
-        run: |
-          docker save \
-            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-arm64 \
-            | gzip > /tmp/release-reagents-arm64.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-reagents-arm64
-          path: /tmp/release-reagents-arm64.tar.gz
           retention-days: 1
           compression-level: 0
 
@@ -649,6 +677,7 @@ jobs:
       - build-and-integration-test-owner-memory
       - build-and-integration-test-agent-auth
       - build-and-integration-test-infra
+      - build-and-integration-test-infra-arm64
       - build-and-integration-test-arm64
       - helm-lint
       - helm-integration-test

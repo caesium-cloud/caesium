@@ -175,8 +175,8 @@ historical design term.
   output-only changes) and two review rounds (concurrent-warm race, sentinel
   collision on diamond imports) are all fixed and regression-tested.
 - **W2-β — H-2, Sonnet.** `publish` builds and pushes multi-arch manifests for
-  the four reagent images with the caesium tag scheme; arm64 reagent images are
-  build-verified only (known gap recorded in the H-2 note).
+  the four reagent images with the caesium tag scheme; arm64 reagent images
+  were build-verified only at ship (gap closed by #367; see H-2 note).
 - **W2-γ — E2, Sonnet.** `RunProposalSummary` on `RunDetailPage` aggregating
   proposal counts across a run, rows opening the task panel.
 
@@ -228,9 +228,11 @@ historical design term.
   output names survive `IMPORT_OUTPUTS_FROM` exactly (#365).
 - Fan-out partitions of one step writing one volume are not modelled as
   separate writers by the lint (documented; #366).
-- arm64 reagent images are build-verified only until the infra lane has an
-  arm64 twin; the infra lane needs `registry.terraform.io` egress for the
-  first warm (#367).
+- arm64 reagent images were build-verified only until the infra lane gained
+  an arm64 twin (`build-and-integration-test-infra-arm64` on `ubuntu-24.04-arm`,
+  same sock trick and `just integration-test-infra` as amd64; the first warm
+  still needs `registry.terraform.io` egress, which GitHub-hosted runners
+  typically have) (#367).
 - `CAESIUM_CACHE_ENABLED` is unset on the default `integration-up` lane
   (scenarios there rely on `metadata.cache: true`; #368).
 
@@ -981,13 +983,12 @@ renders the summary and shows the reference.
       > Could not be exercised locally (no Docker Hub credentials / tag push in
       > this environment); validated via YAML parse + `actionlint` (zero new
       > findings) and `just build-reagents` for the host arch.
-      > Known gap: arm64 reagent images are build-verified only until the infra
-      > lane gains an arm64 twin — `build-and-integration-test-arm64` runs the
-      > general `integration-test` suite, not TestInfra (that suite is
-      > amd64-only per H-1's deferred-harness note above), so the arm64
-      > `git-source`/`tf-discover`/`tf-warm`/`tf-runner` images pushed by this
-      > job are `docker build`-verified only, never exercised by TestInfra the
-      > way the amd64 images are.
+      > Known gap (closed by #367): arm64 reagent images were build-verified
+      > only until the infra lane gained `build-and-integration-test-infra-arm64`
+      > (`ubuntu-24.04-arm`, same sock trick and `just integration-test-infra`
+      > as amd64). Arm64 reagent artifacts for publish now come from that twin,
+      > not from `build-and-integration-test-arm64` (which still runs the
+      > general `integration-test` suite and publishes `caesium` arm64).
 
 #### Deferred (harness)
 

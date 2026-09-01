@@ -2,6 +2,17 @@ output "vpc_id" {
   value = module.vpc.vpc_id
 }
 
+# These two outputs exercise Caesium's lossless output-name index through the
+# real server integration lane. They intentionally do not survive the
+# CAESIUM_OUTPUT_* fold on their own.
+output "vpcId" {
+  value = module.vpc.vpc_id
+}
+
+output "db-url" {
+  value = "postgres://${module.vpc.vpc_id}"
+}
+
 output "tags" {
   value = module.tags.tags
 }

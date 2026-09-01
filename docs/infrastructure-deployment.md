@@ -194,16 +194,21 @@ than silently stale.
 |---|---|
 | `SRC` | source tree to scan for `.terraform.lock.hcl` (default `/src`) |
 | `CACHE_DIR` | the cache volume mount (default `/cache`) |
-| `CACHE_MOUNT_PATH` | the cache path *consumers* see, if it differs from `CACHE_DIR` |
+| `CACHE_MOUNT_PATH` | the cache path *consumers* see, if it differs from `CACHE_DIR`. Set the runners' `CACHE_DIR` to this consumer-side mount path |
+| `CACHE_KEY` | terraformrc slot on the cache volume. Unset keeps the historical `/cache/terraformrc`. Set (and matched on every consuming `tf-runner` step) writes `/cache/<key>/terraformrc` so two provider sets can share one volume without clobbering the CLI config. A single lower-case path element: letters, digits, `.`, `_`, `-`, starting with alphanumeric, at most 63 characters; not `providers` or `terraformrc`. Surrounding whitespace and case variants are rejected, not normalized, so two manifest values cannot alias one slot on a case-insensitive bind mount |
 | `TARGET_PLATFORM` | `os_arch` to mirror for, space/comma separated (default: this container's own platform) |
 | `TF_CLI_PATH` | terraform binary to use |
 
 Reads every `.terraform.lock.hcl` under `SRC`, derives a mirror key from the
-sorted provider/version/hash/**platform** union, checks `/cache/.warm/<key>`.
-If present, exits in about a second. Otherwise mirrors providers into
+sorted provider/version/hash/**platform** union, checks `/cache/.warm/<key>`,
+and verifies every provider/platform artifact promised by that union still
+exists in the corresponding mirror. If both are complete, exits in about a
+second. A stale marker over a missing or partially deleted mirror repairs it.
+Otherwise mirrors providers into
 `/cache/providers.tmp.<key>`, atomically renames to `/cache/providers/<key>`,
-writes `/cache/terraformrc` (a `provider_installation { filesystem_mirror {…}
-direct {exclude = ["*"]} }` block), and drops the marker. Emits no markers at
+writes the CLI config (a `provider_installation { filesystem_mirror {…}
+direct {exclude = ["*"]} }` block) at `/cache/terraformrc` or
+`/cache/<CACHE_KEY>/terraformrc`, and drops the marker. Emits no markers at
 all — a role whose whole purpose is to be invisible to consumers must not make
 their cache keys depend on it.
 
@@ -218,14 +223,20 @@ integration lane), an *omitted* `cache` block is cacheable, not "no cache" —
 so both example manifests set `cache: false` on `warm-cache` explicitly, not
 just on every drift step (see [The drift job](#the-drift-job-mandatory)).
 
-**Known limitation: one `tfcache` volume serves one provider set.** `tf-warm`
-writes a single `/cache/terraformrc` naming one `filesystem_mirror` directory,
-so two jobs (or two stacks) whose `.terraform.lock.hcl` files resolve to
-different provider/version unions must not share the same `tfcache` volume —
-the second job's `init` would either miss the mirror for a provider the first
-job never needed, or silently reuse a stale mirror. Give each independent
-provider set its own `tfcache` volume (physical name), even if you reuse the
-same `tfstate-<stack>` volume convention across jobs.
+**Sharing a `tfcache` volume across provider sets.** The provider *packages*
+are already content-addressed under `/cache/providers/<mirror-key>/`. The CLI
+config that *points* at one used to be a single file, so two jobs whose
+`.terraform.lock.hcl` files resolve to different unions would flip
+`/cache/terraformrc` between mirrors. Set `CACHE_KEY` to a distinct slot on
+each job's `warm-cache` and every `tf-plan` / `tf-apply` / `tf-drift` step
+that consumes it; `tf-warm` then writes `/cache/<key>/terraformrc` and
+`tf-runner` exports that path as `TF_CLI_CONFIG_FILE` (omit the latter, or
+point it at the same file — a mismatch fails closed). The runner also refuses
+a missing config or a symlinked slot/config before invoking Terraform. Unset `CACHE_KEY`
+keeps the historical `/cache/terraformrc` so existing manifests keep
+working. Jobs that share a slot still last-writer-wins on that file; the
+key is what keeps them from clobbering each other. Use a distinct, stable key
+for every independently evolving lock-file union.
 
 **First warm needs outbound network; every later run is offline.**
 `terraform providers mirror` needs to reach `registry.terraform.io` (or your
@@ -234,9 +245,12 @@ configured provider registry) the first time a given provider set is warmed.
 `init` fails closed against the registry rather than silently reaching it, so
 a provider missing from the mirror is a loud error, not a quiet egress call.
 For an air-gapped runner, seed the mirror out of band at the `/cache/.warm/<key>`
-marker seam before the first real run. The CI infra integration lane
-(`integration-test-infra`) relies on the runner having outbound access for
-this first warm — the rest of the fixture is otherwise fully hermetic
+marker seam before the first real run. The CI infra integration lanes
+(`build-and-integration-test-infra` on amd64 and
+`build-and-integration-test-infra-arm64` on `ubuntu-24.04-arm`, both running
+`just integration-test-infra`) rely on the runner having outbound access for
+this first warm — GitHub-hosted runners typically have `registry.terraform.io`
+egress. The rest of the fixture is otherwise fully hermetic
 (`--network none`-verified for `reagents-test`).
 
 ### `tf-runner` (`tf-plan`, `tf-apply`, `tf-drift`)
@@ -250,7 +264,9 @@ Shared env:
 | `STACK_ROOT` | the root module to operate on. When absent, taken from `CAESIUM_PARTITION_JSON`'s `root` attribute joined onto `SCAN_ROOT` — the fan-out form, where one step definition serves every stack |
 | `SCAN_ROOT` | base for the partition's relative root (fan-out form only) |
 | `TF_WORKSPACE` | workspace to select (default `default`) |
-| `TF_CLI_CONFIG_FILE` | the warm step's generated `terraformrc`; point every plan/apply/drift step at it |
+| `CACHE_DIR` | this runner's cache volume mount (default `/cache`); used with `CACHE_KEY` to derive `TF_CLI_CONFIG_FILE`. If tf-warm used a different `CACHE_DIR` plus `CACHE_MOUNT_PATH`, this must equal the consumer-side `CACHE_MOUNT_PATH` |
+| `CACHE_KEY` | lower-case terraformrc slot matching the warm step. Unset leaves `TF_CLI_CONFIG_FILE` to the manifest. Set exports `<CACHE_DIR>/<key>/terraformrc` unless `TF_CLI_CONFIG_FILE` is already that path |
+| `TF_CLI_CONFIG_FILE` | the warm step's generated `terraformrc`; point every plan/apply/drift step at it. Optional when `CACHE_KEY` is set |
 | `TF_DATA_DIR` | Terraform's working directory (default `<ARTIFACT_DIR>/tfdata`) |
 | `ARTIFACT_DIR` | where the plan artifact and the apply receipt are written (default `<root>/.caesium`). **Point it at the state volume.** The [apply receipt](#a-successful-apply-is-recoverable) is what makes a failed post-apply step retryable, and a receipt on an ephemeral mount silently loses that property |
 | `BACKEND_CONFIG` | comma-separated `-backend-config` key=value settings — how a pipeline keeps Terraform state on a volume that survives the source tree being re-materialized on every run |
@@ -260,7 +276,7 @@ Shared env:
 
 | Env | Meaning |
 |---|---|
-| `IMPORT_OUTPUTS_FROM` | comma-separated upstream **apply** step names. Every `CAESIUM_OUTPUT_<STEP>_<KEY>` of those steps is exported as `TF_VAR_<key>` — the cross-stack wiring, deliberately not `terraform_remote_state` (which would grant every consuming stack read credentials on the producing stack's state). **Every named step must actually be an upstream `tf-apply` that published its `caesium_outputs_published` sentinel**; a typo, a non-predecessor or a skipped producer fails the phase naming the missing step, rather than importing zero variables and letting Terraform plan against variable defaults |
+| `IMPORT_OUTPUTS_FROM` | comma-separated upstream **apply** step names. Every `CAESIUM_OUTPUT_<STEP>_<KEY>` of those steps is exported as `TF_VAR_<original>` — original names come from the server-generated JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`) when present, otherwise from lowercasing the folded suffix for the historical snake_case contract. A mixed-case/dashed producer publishes `caesium_output_name_index_required=1`; seeing that sentinel without the dedicated index fails explicitly as an old/incompatible server rather than guessing a name. The cross-stack wiring is deliberately not `terraform_remote_state` (which would grant every consuming stack read credentials on the producing stack's state). **Every named step must actually be an upstream `tf-apply` that published its `caesium_outputs_published` sentinel**; a typo, a non-predecessor or a skipped producer fails the phase naming the missing step, rather than importing zero variables and letting Terraform plan against variable defaults |
 | `APPLY_STEP` | when set, emit `##caesium::branch <APPLY_STEP>` only if the plan has changes — the leaf-stack branch form |
 
 `tf-apply` additionally reads:
@@ -302,18 +318,40 @@ re-runs (their `chain: values` cache keys are independent, but the apply
 step's declared inputs include the plan artifact's digest); it is expected,
 not a bug to chase.
 
-#### Published output names must survive the environment transport
+#### Published output names round-trip through a JSON index
 
 Caesium exports a step's outputs as `CAESIUM_OUTPUT_<STEP>_<KEY>` — uppercased,
-with `-` and `.` folded to `_` — and `tf-plan` lowercases the suffix again to
-build `TF_VAR_<key>`. That trip is lossy, so `tf-apply` **fails closed** on any
-published output name that would not come back intact:
+with `-` and `.` folded to `_`. That fold is not injective (`vpcId` becomes
+`VPCID`; `vpc-id` and `vpc_id` both become `VPC_ID`), so `IMPORT_OUTPUTS_FROM`
+cannot recover the original Terraform name from the env key alone.
 
-- **Allowed**: `[a-z0-9_]+` — lowercase letters, digits, underscores.
-- **Rejected**: `vpcId` (a consumer would read `TF_VAR_vpcid`, and Terraform
-  would quietly fall back to `vpcId`'s default), `VPC_ID`, anything non-ASCII,
-  and any *pair* that folds together — `vpc-id` and `vpc_id` in one stack both
-  become `TF_VAR_vpc_id`, and which one wins depends on map order.
+Caesium therefore derives a JSON **name index** from the persisted output keys
+and injects it as `CAESIUM_OUTPUT_NAME_INDEX_<STEP>` — outside the
+`CAESIUM_OUTPUT_<STEP>_<KEY>` suffix space, so it cannot collide with a user
+key. `tf-plan` uses that authoritative map to export `TF_VAR_vpcId` /
+`TF_VAR_vpc-id` exactly. The index must cover every transported suffix, contain
+no extras or duplicate targets, and map every original name back to its actual
+folded suffix; malformed or partial indexes fail the import without a
+per-entry lowercase fallback.
+
+The index is omitted when every published name already survives the fold
+(lowercase `[a-z0-9_]+`), so existing snake_case stacks keep the same env and
+cache keys. When an index is needed, `tf-apply` persists the protocol sentinel
+`caesium_output_name_index_required=1`. An old server copies that sentinel but
+cannot generate the dedicated env, so a new `tf-runner` reports the incompatible
+server instead of silently turning `vpcId` into `vpcid`.
+
+`caesium_output_names` has no protocol meaning and remains an ordinary generic
+or Terraform output. The reserved Terraform output keys are
+`caesium_outputs_published` and `caesium_output_name_index_required`.
+
+What is still refused, **before** `terraform apply` mutates anything:
+
+- **A pair that folds together** — `vpc-id` and `vpc_id` in one stack both
+  become one env var, and the index cannot split them. Which value would win
+  depends on map order.
+- **A name that is not a Terraform identifier** — dots, non-ASCII, a leading
+  digit — because it cannot be exported as `TF_VAR_<name>`.
 - **Sensitive outputs are exempt.** They are never published, so they never
   make the trip; `sensitive = true` output names are unconstrained.
 
@@ -753,12 +791,13 @@ Three things make it safe, and all three are load-bearing:
 3. **Warms of one key are idempotent.** `tf-warm` stages into its own
    `MkdirTemp` directory, promotes it with an atomic rename, adopts the winner
    if it loses the race, and writes its marker last — which is why design
-   §3.5/§6.3 needs no named lock for the shared mirror. This holds only while
-   both jobs resolve to the **same provider set**: diverging
-   `.terraform.lock.hcl` unions derive different keys and would flip the
-   shared `/cache/terraformrc` between two mirrors, which is the
-   one-provider-set-per-`tfcache` limitation above. Give them separate cache
-   volumes if that day comes.
+   §3.5/§6.3 needs no named lock for the shared mirror. Concurrent warms of
+   *different* provider sets on one volume are also safe **if each job sets a
+   distinct `CACHE_KEY`**: `tf-warm` then writes `/cache/<key>/terraformrc`
+   instead of flipping the shared `/cache/terraformrc` slot. Without
+   `CACHE_KEY`, diverging `.terraform.lock.hcl` unions still last-writer-wins
+   on that single file; give those jobs distinct keys (or distinct cache
+   volumes).
 
 ### RWX requirement and RWO deferral
 
@@ -960,7 +999,7 @@ Ordered by damage:
 | **A cached `discover` replaying a stale remote-module identity** — the checkout is unchanged, but a registry range, Git branch, or re-pointed tag has moved, so `terraform get` would resolve different bytes | Every discover step in both reference manifests sets `cache: false` explicitly; an omitted block is cacheable under `CAESIUM_CACHE_ENABLED=true`. Pin remote modules to immutable revisions as well — that is what keeps plan/apply on the revision discover fingerprinted. |
 | **A fingerprint blind to non-`.tf` assets** — a `templatefile` template, a `file()` asset or an `archive_file` source changes, the fingerprint does not, and plan/apply cache-hit | `tf-discover` hashes every regular file the stack root and its resolved modules own, at any depth, excluding only generated Terraform/state data ([`tf-discover`](#tf-discover)). |
 | **Plan installing a different module revision than discover fingerprinted** | `tf-runner` clears `<TF_DATA_DIR>/modules` before every `init`, so a persistent data directory cannot pin a stale revision ([module re-resolution](#modules-are-re-resolved-on-every-init)). |
-| **A published output name that does not survive the environment transport** — `vpcId` reaching a consumer as `TF_VAR_vpcid`, or `vpc-id`/`vpc_id` folding together, so Terraform uses a default and the run is green with wrong inputs | `tf-apply` fails closed on any published name outside `[a-z0-9_]+` or on any pair that folds ([Published output names](#published-output-names-must-survive-the-environment-transport)). |
+| **A published output name that does not survive the environment transport** — `vpcId` reaching a consumer as `TF_VAR_vpcid`, or `vpc-id`/`vpc_id` folding together, so Terraform uses a default and the run is green with wrong inputs | The server-generated JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`) restores mixed-case and dashed names as `TF_VAR_<original>`, and its mapping is verified as exact before any variable is exported. `caesium_output_name_index_required=1` makes an old/incompatible server fail explicitly. `tf-apply` still refuses a pair that folds onto one env suffix and names that are not Terraform identifiers ([Published output names](#published-output-names-round-trip-through-a-json-index)). |
 | **`IMPORT_OUTPUTS_FROM` naming a producer that never ran** — a typo or a non-predecessor imports zero variables and the stack plans against defaults | Every named step must have published its `caesium_outputs_published` sentinel, or the phase fails naming the missing step. |
 | **A retry re-applying a stale saved plan** after an apply succeeded but a post-apply step failed | `tf-apply` writes a durable apply receipt before its post-apply work; a matching receipt makes the retry republish outputs instead of re-applying ([A successful apply is recoverable](#a-successful-apply-is-recoverable)). Requires `ARTIFACT_DIR` on the state volume. |
 | **A fresh volume unwritable by the reagent images** (they run as UID 10001) | The images own `/src`, `/cache`, `/state` as `10001:10001` 0775, which covers any named volume a reagent image mounts first — `tfcache` and every `tfstate-<stack>` in the reference manifests. `src` is mounted first by the `alpine:3.23` `prepare` step, which hands it over with `chown 10001:10001 /src && chmod 0775 /src`. A PVC needs `fsGroup: 10001` cluster-side; a bind mount needs a host `chown`. All of it in [Volume ownership](#volume-ownership-the-reagent-images-run-as-uid-10001). |

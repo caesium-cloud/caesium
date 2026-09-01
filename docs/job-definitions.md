@@ -172,7 +172,7 @@ echo '##caesium::partition alpha'
 ```
 
 - `key` (required): the partition identity. Trimmed, must be non-empty valid UTF-8, and capped at 256 bytes.
-- `fingerprint` (optional): a content digest — `sha256:` followed by exactly 64 lowercase hex characters. It enters the instance's cache identity, so an unchanged `key` plus an unchanged `fingerprint` is a cache hit on retry even if unrelated attributes moved.
+- `fingerprint` (optional): a content digest — `sha256:` followed by exactly 64 lowercase hex characters. It enters the instance's cache identity. Combined with `cache.chain: values` on the fanned step, an instance whose `key`, `fingerprint`, partition attributes, and consumed predecessor outputs are unchanged cache-hits across a producer re-run — only partitions whose fingerprint, attributes, or consumed outputs moved re-execute. Fingerprints stay authoritative: a changed fingerprint is always a miss. The default `chain: transitive` still re-runs every instance when the producer's own identity moves.
 - `dependsOn` (optional): sibling `key`s from the same emitted list that must reach terminal success before this instance becomes ready. It is a **scheduling instruction only** — a container must not derive data behavior from it — and is excluded from the cache identity hash. A dangling reference (a key not in the emitted set), a self-reference, or a cycle across the group fails the producer.
 - Any other object key is a free-form scalar attribute (string/number/bool), capped at 16 attributes per partition; attributes enter the cache identity like `key`.
 - Duplicate `key`s are deduplicated when byte-identical; a duplicate `key` emitted with a **different** payload fails the producer.
@@ -486,6 +486,18 @@ steps:
       chain: values                # do not inherit checkout's churn
       ttl: never                   # keyed on a fingerprint, not a clock
 ```
+
+On a **fanned** step the same knob is per-instance: each partition's `key`, `fingerprint`, and scalar attributes are already in its cache identity (`dependsOn` is scheduling-only and excluded), and `chain: values` stops the producer's own hash churn from re-keying units whose fingerprint and attributes did not move. Set it on the fanned consumer (not the producer):
+
+```yaml
+  - name: process-file
+    cache:
+      chain: values
+      ttl: never
+    fanOut: {from: list-files, maxPartitions: 64}
+```
+
+Per-unit data belongs in the fingerprint or in partition attributes, not in the producer's scalar outputs — a listing step that emits `##caesium::output {"unit_count":"41"}` still re-keys every instance when the count moves.
 
 `chain` layers job -> step exactly like `pinDigests`, so `metadata.cache.chain: values` is a job-wide default for every step that omits it.
 

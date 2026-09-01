@@ -2115,7 +2115,10 @@ func (j *job) Run(ctx context.Context) error {
 				predOutputs[stepName] = outputs
 			}
 		}
-		outputEnv := pkgtask.BuildOutputEnv(predOutputs)
+		outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
+		if err != nil {
+			return nil, err
+		}
 
 		taskModel := tasksByID[taskID]
 		taskQuarantined := taskQuarantine[taskID] || runQuarantined

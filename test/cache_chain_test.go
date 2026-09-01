@@ -283,7 +283,19 @@ func (s *IntegrationTestSuite) TestCacheTTLNeverWritesNullExpiry() {
 // merged capture cannot detect log lines corrupting machine output).
 func (s *IntegrationTestSuite) parseChainWhy(jobID, runID, task string) chainWhyExplanation {
 	s.T().Helper()
-	out, err := s.runCLIStdout("why", runID, "--job-id", jobID, "--task", task, "--json", "--server", s.caesiumURL)
+	return s.parseChainWhyPartition(jobID, runID, task, "")
+}
+
+// parseChainWhyPartition is parseChainWhy plus `--partition` for a fanned
+// instance. stdout is captured separately from stderr so log lines cannot
+// masquerade as JSON.
+func (s *IntegrationTestSuite) parseChainWhyPartition(jobID, runID, task, partition string) chainWhyExplanation {
+	s.T().Helper()
+	args := []string{"why", runID, "--job-id", jobID, "--task", task, "--json", "--server", s.caesiumURL}
+	if partition != "" {
+		args = append(args, "--partition", partition)
+	}
+	out, err := s.runCLIStdout(args...)
 	s.Require().NoError(err, "caesium why failed:\n%s", out)
 	s.Require().True(json.Valid([]byte(out)),
 		"caesium why --json stdout was not valid JSON (log contamination?):\n%s", out)

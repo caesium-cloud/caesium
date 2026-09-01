@@ -894,7 +894,11 @@ func computeDescriptorInstanceHash(
 	if env == nil {
 		env = make(map[string]string)
 	}
-	for k, v := range pkgtask.BuildOutputEnv(predOutputs) {
+	outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
+	if err != nil {
+		return "", err
+	}
+	for k, v := range outputEnv {
 		env[k] = v
 	}
 	command := append([]string(nil), desc.Runtime.Command...)

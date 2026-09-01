@@ -8,6 +8,19 @@ variable "vpc_id" {
   description = "VPC id exported by the network stack."
 }
 
+# These required variables prove IMPORT_OUTPUTS_FROM restores names that the
+# environment fold cannot recover by lowercasing. Defaults would make a lossy
+# import green, so both deliberately have none.
+variable "vpcId" {
+  type        = string
+  description = "Mixed-case VPC id exported by the network stack."
+}
+
+variable "db-url" {
+  type        = string
+  description = "Dashed database URL exported by the network stack."
+}
+
 module "tags" {
   source = "../../modules/tags"
   stack  = "app-web"
@@ -32,14 +45,16 @@ locals {
 
 resource "null_resource" "app_web" {
   triggers = {
-    vpc_id   = var.vpc_id
-    replica  = var.replica_count
-    userdata = local.userdata
+    vpc_id    = var.vpc_id
+    vpcId     = var.vpcId
+    db_url    = var.db-url
+    replica   = var.replica_count
+    userdata  = local.userdata
   }
 }
 
 output "endpoint" {
-  value = "https://app-web.${var.vpc_id}.example.internal"
+  value = "https://app-web.${var.vpc_id}.${var.vpcId}.${var.db-url}.example.internal"
 }
 
 output "tags" {
