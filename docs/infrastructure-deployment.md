@@ -194,14 +194,17 @@ than silently stale.
 |---|---|
 | `SRC` | source tree to scan for `.terraform.lock.hcl` (default `/src`) |
 | `CACHE_DIR` | the cache volume mount (default `/cache`) |
-| `CACHE_MOUNT_PATH` | the cache path *consumers* see, if it differs from `CACHE_DIR` |
-| `CACHE_KEY` | terraformrc slot on the cache volume. Unset keeps the historical `/cache/terraformrc`. Set (and matched on every consuming `tf-runner` step) writes `/cache/<key>/terraformrc` so two provider sets can share one volume without clobbering the CLI config. A single path element: letters, digits, `.`, `_`, `-`, starting with alphanumeric, at most 63 characters; not `providers` or `terraformrc` |
+| `CACHE_MOUNT_PATH` | the cache path *consumers* see, if it differs from `CACHE_DIR`. Set the runners' `CACHE_DIR` to this consumer-side mount path |
+| `CACHE_KEY` | terraformrc slot on the cache volume. Unset keeps the historical `/cache/terraformrc`. Set (and matched on every consuming `tf-runner` step) writes `/cache/<key>/terraformrc` so two provider sets can share one volume without clobbering the CLI config. A single lower-case path element: letters, digits, `.`, `_`, `-`, starting with alphanumeric, at most 63 characters; not `providers` or `terraformrc`. Surrounding whitespace and case variants are rejected, not normalized, so two manifest values cannot alias one slot on a case-insensitive bind mount |
 | `TARGET_PLATFORM` | `os_arch` to mirror for, space/comma separated (default: this container's own platform) |
 | `TF_CLI_PATH` | terraform binary to use |
 
 Reads every `.terraform.lock.hcl` under `SRC`, derives a mirror key from the
-sorted provider/version/hash/**platform** union, checks `/cache/.warm/<key>`.
-If present, exits in about a second. Otherwise mirrors providers into
+sorted provider/version/hash/**platform** union, checks `/cache/.warm/<key>`,
+and verifies every provider/platform artifact promised by that union still
+exists in the corresponding mirror. If both are complete, exits in about a
+second. A stale marker over a missing or partially deleted mirror repairs it.
+Otherwise mirrors providers into
 `/cache/providers.tmp.<key>`, atomically renames to `/cache/providers/<key>`,
 writes the CLI config (a `provider_installation { filesystem_mirror {…}
 direct {exclude = ["*"]} }` block) at `/cache/terraformrc` or
@@ -228,10 +231,12 @@ config that *points* at one used to be a single file, so two jobs whose
 each job's `warm-cache` and every `tf-plan` / `tf-apply` / `tf-drift` step
 that consumes it; `tf-warm` then writes `/cache/<key>/terraformrc` and
 `tf-runner` exports that path as `TF_CLI_CONFIG_FILE` (omit the latter, or
-point it at the same file — a mismatch fails closed). Unset `CACHE_KEY`
+point it at the same file — a mismatch fails closed). The runner also refuses
+a missing config or a symlinked slot/config before invoking Terraform. Unset `CACHE_KEY`
 keeps the historical `/cache/terraformrc` so existing manifests keep
 working. Jobs that share a slot still last-writer-wins on that file; the
-key is what keeps them from clobbering each other.
+key is what keeps them from clobbering each other. Use a distinct, stable key
+for every independently evolving lock-file union.
 
 **First warm needs outbound network; every later run is offline.**
 `terraform providers mirror` needs to reach `registry.terraform.io` (or your
@@ -256,8 +261,8 @@ Shared env:
 | `STACK_ROOT` | the root module to operate on. When absent, taken from `CAESIUM_PARTITION_JSON`'s `root` attribute joined onto `SCAN_ROOT` — the fan-out form, where one step definition serves every stack |
 | `SCAN_ROOT` | base for the partition's relative root (fan-out form only) |
 | `TF_WORKSPACE` | workspace to select (default `default`) |
-| `CACHE_DIR` | the cache volume mount (default `/cache`); used with `CACHE_KEY` to derive `TF_CLI_CONFIG_FILE` |
-| `CACHE_KEY` | terraformrc slot matching the warm step. Unset leaves `TF_CLI_CONFIG_FILE` to the manifest. Set exports `/cache/<key>/terraformrc` unless `TF_CLI_CONFIG_FILE` is already that path |
+| `CACHE_DIR` | this runner's cache volume mount (default `/cache`); used with `CACHE_KEY` to derive `TF_CLI_CONFIG_FILE`. If tf-warm used a different `CACHE_DIR` plus `CACHE_MOUNT_PATH`, this must equal the consumer-side `CACHE_MOUNT_PATH` |
+| `CACHE_KEY` | lower-case terraformrc slot matching the warm step. Unset leaves `TF_CLI_CONFIG_FILE` to the manifest. Set exports `<CACHE_DIR>/<key>/terraformrc` unless `TF_CLI_CONFIG_FILE` is already that path |
 | `TF_CLI_CONFIG_FILE` | the warm step's generated `terraformrc`; point every plan/apply/drift step at it. Optional when `CACHE_KEY` is set |
 | `TF_DATA_DIR` | Terraform's working directory (default `<ARTIFACT_DIR>/tfdata`) |
 | `ARTIFACT_DIR` | where the plan artifact and the apply receipt are written (default `<root>/.caesium`). **Point it at the state volume.** The [apply receipt](#a-successful-apply-is-recoverable) is what makes a failed post-apply step retryable, and a receipt on an ephemeral mount silently loses that property |

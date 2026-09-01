@@ -55,14 +55,29 @@ if [ "$1" = "version" ]; then
   exit 0
 fi
 echo "$*" >> "` + recordPath + `"
-for a in "$@"; do target="$a"; done
-mkdir -p "$target/registry.terraform.io/hashicorp/null"
-echo mirrored > "$target/registry.terraform.io/hashicorp/null/index.json"
-# A real mirror writes one package at a time. Pausing between them is what makes
-# a concurrent warm able to observe — or destroy — a half-populated directory.
-[ -n "${CAESIUM_FAKE_MIRROR_DELAY:-}" ] && sleep "$CAESIUM_FAKE_MIRROR_DELAY"
-mkdir -p "$target/registry.terraform.io/hashicorp/random"
-echo mirrored > "$target/registry.terraform.io/hashicorp/random/index.json"
+platforms=""
+for a in "$@"; do
+  case "$a" in
+    -platform=*) platforms="$platforms ${a#-platform=}" ;;
+    *) target="$a" ;;
+  esac
+done
+awk '
+$1 == "provider" { gsub(/"/, "", $2); source = $2 }
+$1 == "version" { gsub(/"/, "", $3); print source, $3 }
+' .terraform.lock.hcl | while read -r source version; do
+  provider_type="${source##*/}"
+  dir="$target/$source"
+  mkdir -p "$dir"
+  echo '{}' > "$dir/index.json"
+  echo '{}' > "$dir/$version.json"
+  for platform in $platforms; do
+    echo mirrored > "$dir/terraform-provider-${provider_type}_${version}_${platform}.zip"
+  done
+  # A real mirror writes one package at a time. Pausing between providers is
+  # what makes a concurrent warm able to observe — or destroy — a partial tree.
+  [ -n "${CAESIUM_FAKE_MIRROR_DELAY:-}" ] && sleep "$CAESIUM_FAKE_MIRROR_DELAY"
+done
 cp providers.tf "$target/providers.tf.seen" 2>/dev/null || true
 exit ` + strconv.Itoa(exitCode) + `
 `
@@ -576,6 +591,154 @@ func TestWarmFastPathRepairsATerraformRCPointingElsewhere(t *testing.T) {
 	}
 }
 
+// A marker is a promise about the mirror, not a substitute for it. If the
+// mirror directory disappeared while the marker survived, the next always-run
+// warm must rebuild it rather than returning green with terraformrc pointing at
+// a path every offline init will fail to open.
+func TestWarmStaleMarkerRebuildsAMissingMirror(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	execPath, record := fakeTerraform(t, 0)
+	cfg := warmConfig(t, src, cache, execPath)
+
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("first warm: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(cache, ".warm"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("find mirror key: entries=%v err=%v", entries, err)
+	}
+	key := entries[0].Name()
+	mirror := filepath.Join(cache, "providers", key)
+	if err := os.RemoveAll(mirror); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("repair warm: %v", err)
+	}
+	if got := len(invocations(t, record)); got != 2 {
+		t.Fatalf("a stale marker over a missing mirror must re-run terraform; got %d invocations", got)
+	}
+	if _, err := os.Stat(filepath.Join(mirror, "registry.terraform.io", "hashicorp", "null", "index.json")); err != nil {
+		t.Fatalf("the stale marker's mirror was not rebuilt: %v", err)
+	}
+}
+
+func TestWarmStaleMarkerRepairsAPartiallyDeletedMirror(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	execPath, record := fakeTerraform(t, 0)
+	cfg := warmConfig(t, src, cache, execPath)
+
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("first warm: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(cache, ".warm"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("find mirror key: entries=%v err=%v", entries, err)
+	}
+	key := entries[0].Name()
+	missing := filepath.Join(cache, "providers", key, "registry.terraform.io", "hashicorp", "null",
+		"terraform-provider-null_3.3.1_linux_amd64.zip")
+	if err := os.Remove(missing); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("repair warm: %v", err)
+	}
+	if got := len(invocations(t, record)); got != 2 {
+		t.Fatalf("a marker over a partial mirror must re-run terraform; got %d invocations", got)
+	}
+	if _, err := os.Stat(missing); err != nil {
+		t.Fatalf("the missing provider package was not repaired: %v", err)
+	}
+	if leftovers := stagingDirs(t, cache); len(leftovers) != 0 {
+		t.Fatalf("incomplete-mirror repair left quarantine/staging directories: %v", leftovers)
+	}
+}
+
+func TestWarmKeyedSlotFailsClosedOnDirectoryAlias(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	out := t.TempDir()
+	if err := os.Symlink(out, filepath.Join(cache, "deploy")); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+	execPath, record := fakeTerraform(t, 0)
+	cfg := warmConfig(t, src, cache, execPath)
+	cfg.CacheKey = "deploy"
+
+	err := warm(context.Background(), cfg, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("warm followed a CACHE_KEY directory alias: %v", err)
+	}
+	if got := invocations(t, record); len(got) != 0 {
+		t.Fatalf("terraform ran before the unsafe slot was refused: %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(out, tf.TerraformRCName)); !os.IsNotExist(err) {
+		t.Fatalf("warm wrote through the slot alias: %v", err)
+	}
+}
+
+func TestWarmAtomicallyReplacesTerraformRCSymlinkAndRepairsModes(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	key := "deploy"
+	slot := filepath.Join(cache, key)
+	if err := os.Mkdir(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-terraformrc")
+	const outside = "must stay untouched\n"
+	if err := os.WriteFile(target, []byte(outside), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rcPath := tf.CLIConfigFile(cache, key)
+	if err := os.Symlink(target, rcPath); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+
+	execPath, record := fakeTerraform(t, 0)
+	cfg := warmConfig(t, src, cache, execPath)
+	cfg.CacheKey = key
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	info, err := os.Lstat(rcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		t.Fatalf("terraformrc was not replaced with a regular file: %v", info.Mode())
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != outside {
+		t.Fatalf("warm wrote through the old symlink: data=%q err=%v", data, err)
+	}
+
+	// Fast-path repair must also restore traversal/read modes without another
+	// provider download. A different consumer uid otherwise sees a green warm
+	// followed by a permission-denied init.
+	if err := os.Chmod(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rcPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("mode repair warm: %v", err)
+	}
+	if got := len(invocations(t, record)); got != 1 {
+		t.Fatalf("mode repair re-downloaded providers: %d invocations", got)
+	}
+	for path, want := range map[string]os.FileMode{slot: 0o755, rcPath: 0o644} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %o, want %o", path, got, want)
+		}
+	}
+}
+
 func TestLoadConfigAcceptsAndRejectsCacheKey(t *testing.T) {
 	src := t.TempDir()
 	env := map[string]string{"SRC": src, "TF_CLI_PATH": "/usr/bin/terraform"}
@@ -657,6 +820,59 @@ func TestWarmTwoCacheKeysOnOneVolumeDoNotClobber(t *testing.T) {
 	}
 	if got := readTerraformRC(t, cache, "set-b"); got != rcB {
 		t.Fatalf("re-warming set-a clobbered set-b:\n%s", got)
+	}
+}
+
+func TestConcurrentWarmsOfDifferentSlotsDoNotClobber(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcA := writeLockTree(t, filepath.Join(root, "src-a"), fixtureLock)
+	bumped := strings.Replace(fixtureLock, `version     = "3.3.1"`, `version     = "3.4.0"`, 1)
+	srcB := writeLockTree(t, filepath.Join(root, "src-b"), bumped)
+	execPath, _ := fakeTerraform(t, 0)
+	t.Setenv("CAESIUM_FAKE_MIRROR_DELAY", "0.2")
+
+	cfgs := []config{
+		warmConfig(t, srcA, cache, execPath),
+		warmConfig(t, srcB, cache, execPath),
+	}
+	cfgs[0].CacheKey = "set-a"
+	cfgs[1].CacheKey = "set-b"
+
+	errCh := make(chan error, len(cfgs))
+	var wg sync.WaitGroup
+	for _, cfg := range cfgs {
+		cfg := cfg
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- warm(context.Background(), cfg, io.Discard)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent warm: %v", err)
+		}
+	}
+
+	rcA := readTerraformRC(t, cache, "set-a")
+	rcB := readTerraformRC(t, cache, "set-b")
+	if rcA == rcB {
+		t.Fatalf("concurrent warms left both slots pointing at one mirror:\n%s", rcA)
+	}
+	for _, key := range []string{"set-a", "set-b"} {
+		info, err := os.Stat(filepath.Join(cache, key))
+		if err != nil {
+			t.Fatalf("stat slot %s: %v", key, err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Fatalf("slot %s mode = %o, want 755", key, info.Mode().Perm())
+		}
 	}
 }
 

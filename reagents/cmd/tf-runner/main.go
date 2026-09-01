@@ -343,7 +343,7 @@ func splitList(raw string) []string {
 // ready Runner. It is shared by all three phases so none of them can drift into
 // a different data directory or a different mirror.
 func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
-	if err := pinCLIConfig(cfg); err != nil {
+	if err := pinCLIConfig(cfg, log); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(cfg.ArtifactDir, 0o755); err != nil {
@@ -365,15 +365,55 @@ func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
 	return tf.NewRunner(cfg.Root, cfg.ExecPath, log)
 }
 
-// pinCLIConfig exports TF_CLI_CONFIG_FILE when CACHE_KEY selected a slot.
-// terraform-exec copies os.Environ() at each invocation (see tf.NewRunner), so
-// the process environment is how the mirror actually gets selected.
-func pinCLIConfig(cfg config) error {
+// pinCLIConfig validates and exports TF_CLI_CONFIG_FILE when CACHE_KEY selected
+// a slot. terraform-exec copies os.Environ() at each invocation (see
+// tf.NewRunner), so the process environment is how every phase actually selects
+// its mirror.
+func pinCLIConfig(cfg config, log io.Writer) error {
 	if cfg.CLIConfigFile == "" {
 		return nil
 	}
+	if err := validateKeyedCLIConfig(cfg.CLIConfigFile); err != nil {
+		return err
+	}
 	if err := os.Setenv("TF_CLI_CONFIG_FILE", cfg.CLIConfigFile); err != nil {
 		return fmt.Errorf("set TF_CLI_CONFIG_FILE: %w", err)
+	}
+	_, _ = fmt.Fprintf(log, "tf-runner: TF_CLI_CONFIG_FILE <- %s (CACHE_KEY slot)\n", cfg.CLIConfigFile)
+	return nil
+}
+
+// validateKeyedCLIConfig fails before Terraform starts if the named slot was
+// never warmed or was replaced by a cache alias. The warm and runner containers
+// can use different uids, so opening the file here also proves this process can
+// actually read it; Lstat alone would let a 0600 config produce a much less
+// useful Terraform diagnostic later.
+func validateKeyedCLIConfig(path string) error {
+	dir := filepath.Dir(path)
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect CACHE_KEY slot %s: %w", dir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("CACHE_KEY slot %s is a symbolic link; refusing a cache alias or escape", dir)
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("CACHE_KEY slot %s is not a directory", dir)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect keyed Terraform CLI config %s: %w (did the matching tf-warm step complete?)", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("keyed Terraform CLI config %s is not a regular file", path)
+	}
+	f, err := os.Open(path) //nolint:gosec // path is the validated CACHE_KEY-derived CLI config.
+	if err != nil {
+		return fmt.Errorf("open keyed Terraform CLI config %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close keyed Terraform CLI config %s: %w", path, err)
 	}
 	return nil
 }

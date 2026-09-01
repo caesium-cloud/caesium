@@ -1190,21 +1190,77 @@ func TestPinCLIConfigExportsTheKeyedPath(t *testing.T) {
 	t.Setenv("TF_CLI_CONFIG_FILE", "sentinel")
 	os.Unsetenv("TF_CLI_CONFIG_FILE")
 
-	path := tf.CLIConfigFile(t.TempDir(), "deploy")
-	if err := pinCLIConfig(config{CLIConfigFile: path}); err != nil {
+	cache := t.TempDir()
+	path := tf.CLIConfigFile(cache, "deploy")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(tf.TerraformRC("/cache/providers/abc")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	if err := pinCLIConfig(config{CLIConfigFile: path}, &log); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("TF_CLI_CONFIG_FILE"); got != path {
 		t.Fatalf("TF_CLI_CONFIG_FILE = %q, want %q", got, path)
 	}
+	if !strings.Contains(log.String(), path) {
+		t.Fatalf("the selected keyed config was not logged: %q", log.String())
+	}
 
 	t.Setenv("TF_CLI_CONFIG_FILE", "/already/set")
-	if err := pinCLIConfig(config{}); err != nil {
+	if err := pinCLIConfig(config{}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("TF_CLI_CONFIG_FILE"); got != "/already/set" {
 		t.Fatalf("an unkeyed runner overwrote TF_CLI_CONFIG_FILE: %q", got)
 	}
+}
+
+func TestPinCLIConfigRejectsMissingAndAliasedKeyedFiles(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
+		path := tf.CLIConfigFile(t.TempDir(), "deploy")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := pinCLIConfig(config{CLIConfigFile: path}, io.Discard); err == nil || !strings.Contains(err.Error(), "matching tf-warm") {
+			t.Fatalf("pinCLIConfig accepted a slot that was never warmed: %v", err)
+		}
+	})
+
+	t.Run("symlinked slot", func(t *testing.T) {
+		cache := t.TempDir()
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, tf.TerraformRCName), []byte("outside"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(cache, "deploy")); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		path := tf.CLIConfigFile(cache, "deploy")
+		if err := pinCLIConfig(config{CLIConfigFile: path}, io.Discard); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Fatalf("pinCLIConfig followed a slot alias: %v", err)
+		}
+	})
+
+	t.Run("symlinked terraformrc", func(t *testing.T) {
+		cache := t.TempDir()
+		path := tf.CLIConfigFile(cache, "deploy")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "outside-terraformrc")
+		if err := os.WriteFile(target, []byte("outside"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		if err := pinCLIConfig(config{CLIConfigFile: path}, io.Discard); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("pinCLIConfig followed a terraformrc alias: %v", err)
+		}
+	})
 }
 
 func TestSubcommandsCoverEveryDocumentedPhase(t *testing.T) {

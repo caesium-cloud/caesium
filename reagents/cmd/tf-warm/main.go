@@ -192,8 +192,15 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	markerDir := filepath.Join(cfg.CacheDir, ".warm")
 	marker := filepath.Join(markerDir, key)
 	mirrorDir := filepath.Join(cfg.CacheDir, "providers", key)
+	if err := ensureCacheLayout(cfg); err != nil {
+		return err
+	}
 
-	if _, err := os.Stat(marker); err == nil {
+	ready, err := warmArtifactsReady(marker, mirrorDir, key, providers, cfg.Platforms)
+	if err != nil {
+		return err
+	}
+	if ready {
 		_, _ = fmt.Fprintf(logOut, "%s: mirror %s already warm (%d lock files, %d providers)\n",
 			roleName, key, len(lockPaths), len(providers))
 		// The mirror is content-addressed per provider set, but the CLI
@@ -209,8 +216,6 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 		// values give those jobs distinct files, which is how one volume serves
 		// more than one provider set.
 		return ensureTerraformRC(cfg, key, logOut)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("check warm marker %s: %w", marker, err)
 	}
 
 	_, _ = fmt.Fprintf(logOut, "%s: mirroring %d providers for %v into %s (key %s)\n",
@@ -252,17 +257,8 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(mirrorDir), 0o755); err != nil {
-		return fmt.Errorf("create mirror root %s: %w", filepath.Dir(mirrorDir), err)
-	}
-	if err := os.Rename(staging, mirrorDir); err != nil {
-		// A concurrent warm of the same key populated the same content first.
-		// The mirror is content-addressed, so its directory is interchangeable
-		// with ours: adopt it rather than failing.
-		if _, statErr := os.Stat(mirrorDir); statErr != nil {
-			return fmt.Errorf("promote mirror %s: %w", mirrorDir, err)
-		}
-		_, _ = fmt.Fprintf(logOut, "%s: mirror %s was populated concurrently; adopting it\n", roleName, key)
+	if err := promoteMirror(staging, mirrorDir, cfg.CacheDir, key, providers, cfg.Platforms, logOut); err != nil {
+		return err
 	}
 
 	if err := ensureTerraformRC(cfg, key, logOut); err != nil {
@@ -272,15 +268,273 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	// The marker is written LAST. Every consumer-visible artifact — the mirror
 	// directory and the CLI configuration — must exist before anything is
 	// allowed to exit fast on its behalf.
-	if err := os.MkdirAll(markerDir, 0o755); err != nil {
-		return fmt.Errorf("create marker directory %s: %w", markerDir, err)
-	}
 	if err := writeFileAtomic(marker, []byte(key+"\n"), 0o644); err != nil {
 		return err
 	}
 
 	_, _ = fmt.Fprintf(logOut, "%s: mirror %s ready at %s\n", roleName, key, consumerMirrorPath(cfg, key))
 	return nil
+}
+
+// ensureCacheLayout creates the tf-warm-owned directory entries and proves
+// that none is a symlink. CACHE_KEY is meant to select an independent child of
+// the cache root; following `/cache/a -> /cache/b` (or out of the volume) would
+// silently turn two keys into one slot and let one warm clobber the other.
+func ensureCacheLayout(cfg config) error {
+	for _, item := range []struct {
+		path, purpose string
+	}{
+		{filepath.Join(cfg.CacheDir, "providers"), "provider mirror root"},
+		{filepath.Join(cfg.CacheDir, ".warm"), "warm marker root"},
+	} {
+		if err := ensureCacheDirectory(item.path, item.purpose); err != nil {
+			return err
+		}
+	}
+	if cfg.CacheKey != "" {
+		if err := ensureCacheDirectory(filepath.Join(cfg.CacheDir, cfg.CacheKey), "CACHE_KEY slot"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureCacheDirectory is race-safe for concurrent warms creating the same
+// layout. Every consumer may run under a different uid/fsGroup, so the
+// directories are re-asserted as traversable rather than trusting an old mode.
+func ensureCacheDirectory(path, purpose string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil && !errors.Is(mkdirErr, fs.ErrExist) {
+			return fmt.Errorf("create %s %s: %w", purpose, path, mkdirErr)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect %s %s: %w", purpose, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %s is a symbolic link; refusing a cache alias or escape", purpose, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s %s is not a directory", purpose, path)
+	}
+	if info.Mode().Perm() != 0o755 {
+		if err := os.Chmod(path, 0o755); err != nil {
+			return fmt.Errorf("make %s %s traversable by cache consumers: %w", purpose, path, err)
+		}
+	}
+	return nil
+}
+
+// warmArtifactsReady validates the marker promise before taking the fast path.
+// A marker whose mirror was removed must trigger a re-mirror; returning green
+// and merely repairing terraformrc would point every consumer at a path that
+// does not exist. Symlinks and non-regular markers fail closed instead of being
+// followed out of tf-warm's owned layout.
+func warmArtifactsReady(
+	marker, mirrorDir, key string,
+	providers []tf.LockedProvider,
+	platforms []string,
+) (bool, error) {
+	info, err := os.Lstat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect warm marker %s: %w", marker, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, fmt.Errorf("warm marker %s is not a regular file", marker)
+	}
+	data, err := os.ReadFile(marker) //nolint:gosec // marker is a verified regular file under CACHE_DIR.
+	if err != nil {
+		return false, fmt.Errorf("read warm marker %s: %w", marker, err)
+	}
+	if string(data) != key+"\n" {
+		return false, nil
+	}
+	return mirrorDirectoryReady(mirrorDir, providers, platforms)
+}
+
+// mirrorDirectoryReady proves every provider/platform artifact selected by the
+// committed lock files still exists. Merely finding one root entry is not
+// enough: deleting one provider subtree from a multi-provider mirror used to
+// leave the marker fast path green while the corresponding init failed offline.
+func mirrorDirectoryReady(path string, providers []tf.LockedProvider, platforms []string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect provider mirror %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("provider mirror %s is a symbolic link; refusing a cache alias or escape", path)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("provider mirror %s is not a directory", path)
+	}
+	wanted := make(map[string]struct{})
+	for _, provider := range providers {
+		source := provider.Source
+		if strings.Count(source, "/") == 1 {
+			source = "registry.terraform.io/" + source
+		}
+		providerDir := filepath.FromSlash(source)
+		wanted[filepath.Join(providerDir, "index.json")] = struct{}{}
+		wanted[filepath.Join(providerDir, provider.Version+".json")] = struct{}{}
+		for _, platform := range platforms {
+			name := fmt.Sprintf("terraform-provider-%s_%s_%s.zip", provider.Type(), provider.Version, platform)
+			wanted[filepath.Join(providerDir, name)] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(wanted))
+	for rel := range wanted {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	for _, rel := range paths {
+		present, err := regularMirrorFile(path, rel)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, nil
+		}
+	}
+	return len(paths) > 0, nil
+}
+
+// regularMirrorFile checks every directory component with Lstat before the
+// file, so a tampered provider subtree cannot redirect readiness outside the
+// promoted mirror through a symlink.
+func regularMirrorFile(root, rel string) (bool, error) {
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	current := root
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("inspect provider mirror directory %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return false, fmt.Errorf("provider mirror directory %s is not a real directory", current)
+		}
+	}
+	path := filepath.Join(root, rel)
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect provider mirror artifact %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, fmt.Errorf("provider mirror artifact %s is not a regular file", path)
+	}
+	return true, nil
+}
+
+// promoteMirror installs a complete staging mirror, adopting a complete winner
+// of a same-key race. If an existing content-addressed directory is incomplete,
+// it is first renamed to a sweepable quarantine and then replaced. That keeps
+// the repair crash-safe: a killed repair leaves either the old directory, a
+// complete new directory, or a quarantine the next always-run warm can ignore
+// while promoting its own complete staging tree.
+func promoteMirror(
+	staging, mirrorDir, cacheDir, key string,
+	providers []tf.LockedProvider,
+	platforms []string,
+	logOut io.Writer,
+) error {
+	if err := os.Rename(staging, mirrorDir); err == nil {
+		complete, checkErr := mirrorDirectoryReady(mirrorDir, providers, platforms)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !complete {
+			return fmt.Errorf("promoted mirror %s is incomplete", mirrorDir)
+		}
+		return nil
+	} else {
+		complete, checkErr := mirrorDirectoryReady(mirrorDir, providers, platforms)
+		if checkErr != nil {
+			return checkErr
+		}
+		if complete {
+			_, _ = fmt.Fprintf(logOut, "%s: mirror %s was populated concurrently; adopting it\n", roleName, key)
+			return nil
+		}
+
+		// Reserve a unique name without leaving an empty directory for Rename to
+		// reject. The providers.tmp prefix makes a crash leftover eligible for the
+		// existing age-based sweep.
+		quarantine, reserveErr := os.MkdirTemp(cacheDir, "providers.tmp."+key+".incomplete.")
+		if reserveErr != nil {
+			return fmt.Errorf("reserve quarantine for incomplete mirror %s: %w", mirrorDir, reserveErr)
+		}
+		if removeErr := os.Remove(quarantine); removeErr != nil {
+			return fmt.Errorf("prepare quarantine %s: %w", quarantine, removeErr)
+		}
+
+		if quarantineErr := os.Rename(mirrorDir, quarantine); quarantineErr != nil {
+			// Another repair may have moved the incomplete directory. Compete at
+			// the atomic promotion seam instead; exactly one complete staging tree
+			// wins and every loser can adopt it.
+			if promoteErr := os.Rename(staging, mirrorDir); promoteErr == nil {
+				complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
+				if checkErr != nil {
+					return checkErr
+				}
+				if !complete {
+					return fmt.Errorf("concurrently replaced mirror %s is incomplete", mirrorDir)
+				}
+				_, _ = fmt.Fprintf(logOut, "%s: replaced incomplete mirror %s concurrently\n", roleName, key)
+				return nil
+			}
+			complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
+			if checkErr != nil {
+				return checkErr
+			}
+			if complete {
+				_, _ = fmt.Fprintf(logOut, "%s: incomplete mirror %s was repaired concurrently; adopting it\n", roleName, key)
+				return nil
+			}
+			return fmt.Errorf("quarantine incomplete mirror %s: %w", mirrorDir, quarantineErr)
+		}
+
+		if promoteErr := os.Rename(staging, mirrorDir); promoteErr != nil {
+			complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
+			if checkErr == nil && complete {
+				_ = os.RemoveAll(quarantine)
+				_, _ = fmt.Fprintf(logOut, "%s: incomplete mirror %s was repaired concurrently; adopting it\n", roleName, key)
+				return nil
+			}
+			// Best-effort rollback only when nobody else installed a winner.
+			if _, statErr := os.Lstat(mirrorDir); errors.Is(statErr, fs.ErrNotExist) {
+				if restoreErr := os.Rename(quarantine, mirrorDir); restoreErr != nil {
+					return fmt.Errorf("promote repaired mirror %s: %v (also could not restore quarantine %s: %w)",
+						mirrorDir, promoteErr, quarantine, restoreErr)
+				}
+			}
+			return fmt.Errorf("promote repaired mirror %s: %w", mirrorDir, promoteErr)
+		}
+
+		_ = os.RemoveAll(quarantine)
+		complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !complete {
+			return fmt.Errorf("repaired mirror %s is incomplete", mirrorDir)
+		}
+		_, _ = fmt.Fprintf(logOut, "%s: replaced incomplete mirror %s\n", roleName, key)
+		return nil
+	}
 }
 
 // consumerMirrorPath is the mirror directory as CONSUMING containers resolve it.
@@ -301,28 +555,33 @@ func ensureTerraformRC(cfg config, key string, logOut io.Writer) error {
 	path := tf.CLIConfigFile(cfg.CacheDir, cfg.CacheKey)
 	want := tf.TerraformRC(consumerMirrorPath(cfg, key))
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
-	}
-	// The directory is traversed by every consuming container as it opens
-	// terraformrc. MkdirAll honours umask, and a 0700 slot is readable only
-	// by the warm step's uid — the same "provider not available" diagnosis
-	// the staging chmod exists to prevent.
-	if cfg.CacheKey != "" {
-		if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
-			return fmt.Errorf("make %s world-readable: %w", filepath.Dir(path), err)
-		}
-	}
-
-	current, err := os.ReadFile(path) //nolint:gosec // path derived from CACHE_DIR + CACHE_KEY.
+	info, err := os.Lstat(path)
 	switch {
-	case err == nil && string(current) == want:
-		return nil
-	case err == nil:
+	case errors.Is(err, fs.ErrNotExist):
+		// Written below.
+	case err != nil:
+		return fmt.Errorf("inspect %s: %w", path, err)
+	case info.Mode()&os.ModeSymlink != 0:
+		// The parent slot was already proven to be a real directory, so an atomic
+		// rename replaces this link itself and cannot follow it out of the cache.
+		_, _ = fmt.Fprintf(logOut, "%s: %s was a symbolic link; replacing it with a regular file\n", roleName, path)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("terraform CLI config %s is not a regular file", path)
+	default:
+		current, readErr := os.ReadFile(path) //nolint:gosec // Lstat proved this path is a regular file.
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", path, readErr)
+		}
+		if string(current) == want {
+			if info.Mode().Perm() != 0o644 {
+				if err := os.Chmod(path, 0o644); err != nil {
+					return fmt.Errorf("make %s readable by cache consumers: %w", path, err)
+				}
+			}
+			return nil
+		}
 		_, _ = fmt.Fprintf(logOut, "%s: %s named a different mirror; re-pointing it at %s\n",
 			roleName, path, consumerMirrorPath(cfg, key))
-	case !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("read %s: %w", path, err)
 	}
 	return writeFileAtomic(path, []byte(want), 0o644)
 }

@@ -16,7 +16,7 @@ func TestSanitizeCacheKeyAcceptsTheEmptyDefault(t *testing.T) {
 }
 
 func TestSanitizeCacheKeyAcceptsSlotNames(t *testing.T) {
-	for _, raw := range []string{"deploy", "legacy-providers", "v1.2", "A", "a_b.c-9"} {
+	for _, raw := range []string{"deploy", "legacy-providers", "v1.2", "a", "a_b.c-9"} {
 		got, err := SanitizeCacheKey(raw)
 		if err != nil {
 			t.Fatalf("SanitizeCacheKey(%q): %v", raw, err)
@@ -32,12 +32,18 @@ func TestSanitizeCacheKeyRejectsUnsafeOrReservedNames(t *testing.T) {
 		"foo/bar":               "single path element",
 		`foo\bar`:               "single path element",
 		"../etc":                "single path element",
+		" deploy ":              "leading or trailing whitespace",
+		"deploy\n":              "leading or trailing whitespace",
 		"..":                    "must not start with '.'",
 		".":                     "must not start with '.'",
 		".warm":                 "must not start with '.'",
 		"providers":             "reserved",
+		"Providers":             "reserved",
 		"terraformrc":           "reserved",
+		"TerraformRC":           "reserved",
 		"providers.tmp.dead":    "staging",
+		"Providers.tmp.dead":    "staging",
+		"Deploy":                "lower-case letters",
 		"-leading-dash":         "not a valid slot name",
 		"foo bar":               "not a valid slot name",
 		"has$dollar":            "not a valid slot name",
