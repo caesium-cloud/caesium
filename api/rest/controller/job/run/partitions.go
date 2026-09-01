@@ -368,6 +368,10 @@ func retryPartitionHTTPError(err error) error {
 	case errors.Is(err, runstorage.ErrPartitionRunNotRetryable):
 		return echo.NewHTTPError(http.StatusConflict,
 			"the run is not executable; only a running, failed, or succeeded run can accept a partition retry")
+	case errors.Is(err, runstorage.ErrPartitionRetryBlocked):
+		return echo.NewHTTPError(http.StatusConflict,
+			fmt.Sprintf("partition retry is blocked: nothing in this run can make the instance ready again (%s); "+
+				"retry the run, which resets failed and skipped work as a set", err))
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return echo.ErrNotFound
 	default:

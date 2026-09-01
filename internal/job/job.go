@@ -152,6 +152,11 @@ type job struct {
 	// nil; keeping the hook before the store transaction lets race regressions
 	// interleave RetryPartition deterministically without database locks/sleeps.
 	beforeComplete func(uuid.UUID)
+	// partitionRetryReplacement marks an engine started by startReplacementRun.
+	// It bounds the completion fence: a replacement that still cannot drive
+	// the retry-reset instance abandons it explicitly instead of spawning yet
+	// another replacement.
+	partitionRetryReplacement bool
 }
 
 // JobOption configures a job before execution.
@@ -353,6 +358,14 @@ func WithSecretResolver(resolver secret.Resolver) JobOption {
 	}
 }
 
+// withPartitionRetryReplacement flags an engine as the replacement started
+// for a retry that landed in the previous engine's shutdown window.
+func withPartitionRetryReplacement() JobOption {
+	return func(j *job) {
+		j.partitionRetryReplacement = true
+	}
+}
+
 // startReplacementRun kicks off a new in-process engine against an existing
 // run, matching HTTP partition-retry kickoff: job.New → Run with the run id
 // in context so the DAG rehydrates existing TaskRun rows (including a
@@ -382,11 +395,39 @@ func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string) {
 			WithPodmanEngineFactory(j.newPodmanEngine),
 			WithAtomPollInterval(j.atomPollInterval),
 			WithSecretResolver(j.secretResolver),
+			withPartitionRetryReplacement(),
 		).Run(runCtx)
 		if err != nil {
 			log.Error("partition retry replacement run failure", "id", j.id, "run_id", runID, "error", err)
 		}
 	}()
+}
+
+// pendingGroupIndegree returns the smallest outstanding_predecessors among a
+// fanned step's still-pending instances, which is the node's true cross-step
+// indegree: every instance shares the step's cross-step predecessors, and a
+// pending row whose in-group dependencies are all satisfied — a retried root,
+// or the first retried link of a chain — carries exactly that count. ok is
+// false when the step has no pending instance to read.
+func pendingGroupIndegree(store *run.Store, runID, taskID uuid.UUID) (int, bool) {
+	var rows []models.TaskRun
+	if err := store.DB().Select("outstanding_predecessors").
+		Where("job_run_id = ? AND task_id = ? AND status = ? AND partition_count > 0",
+			runID, taskID, string(run.TaskStatusPending)).
+		Find(&rows).Error; err != nil {
+		log.Warn("failed to read pending fan-out instances for re-entry", "run_id", runID, "task_id", taskID, "error", err)
+		return 0, false
+	}
+	if len(rows) == 0 {
+		return 0, false
+	}
+	minOutstanding := rows[0].OutstandingPredecessors
+	for _, row := range rows[1:] {
+		if row.OutstandingPredecessors < minOutstanding {
+			minOutstanding = row.OutstandingPredecessors
+		}
+	}
+	return minOutstanding, true
 }
 
 // buildLocalRunners populates runners (keyed by catalog task ID) from the
@@ -742,16 +783,33 @@ func (j *job) Run(ctx context.Context) error {
 		}
 		completeErr := store.Complete(runID, runErr)
 		if errors.Is(completeErr, run.ErrRunHasPendingWork) {
-			// Retry landed after the DAG finished and before this status write.
-			// HTTP kickoff only fires when reopened=true; the run was still
-			// running so the handler will not start an engine. Preserve every
-			// undispatched successor: the replacement must be allowed to release
-			// it if the retried partition succeeds. Do not fire completion
-			// callbacks — the replacement will, when it actually finishes.
-			log.Info("partition retry landed after the DAG finished; starting replacement engine",
-				"job_id", j.id, "run_id", runID)
-			j.startReplacementRun(runID, snapshot.Params)
-			return
+			if j.partitionRetryReplacement {
+				// This engine IS the replacement and still left the retry-reset
+				// instance pending: nothing about a third engine would differ.
+				// Resolve the row explicitly (skipped, with the reason on the
+				// row) so the run can finalize, rather than stranding it or
+				// spawning replacements forever.
+				reason := "partition retry abandoned: the replacement engine could not dispatch the reset instance; retry the run"
+				abandoned, abandonErr := store.AbandonPendingPartitionRetries(runID, reason)
+				log.Error("partition retry could not be dispatched by the replacement engine; abandoning it",
+					"job_id", j.id, "run_id", runID, "abandoned", abandoned, "error", abandonErr)
+				if runErr == nil {
+					runErr = errors.New(reason)
+				}
+				completeErr = store.Complete(runID, runErr)
+			} else {
+				// Retry landed after the DAG finished and before this status
+				// write. HTTP kickoff only fires when reopened=true; the run was
+				// still running so the handler will not start an engine.
+				// Preserve every undispatched successor: the replacement must be
+				// allowed to release it if the retried partition succeeds. Do
+				// not fire completion callbacks — the replacement will, when it
+				// actually finishes.
+				log.Info("partition retry landed after the DAG finished; starting replacement engine",
+					"job_id", j.id, "run_id", runID)
+				j.startReplacementRun(runID, snapshot.Params)
+				return
+			}
 		}
 		if completeErr != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", completeErr)
@@ -934,6 +992,15 @@ func (j *job) Run(ctx context.Context) error {
 	for _, taskState := range currentRun.Tasks {
 		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
 		indegree[taskState.ID] = taskState.OutstandingPredecessors
+		if taskState.PartitionCount > 0 && !run.IsTerminal(taskState.Status) {
+			// The collapsed view carries the FIRST instance's indegree. On
+			// re-entry that instance can be a dependent the sweep already
+			// skipped with its in-group indegree still recorded, which would
+			// park the whole node behind a dependency that no longer matters.
+			if minIndegree, ok := pendingGroupIndegree(store, runID, taskState.ID); ok {
+				indegree[taskState.ID] = minIndegree
+			}
+		}
 		switch taskState.Status {
 		case run.TaskStatusSucceeded, run.TaskStatusCached:
 			processed[taskState.ID] = true
@@ -947,8 +1014,20 @@ func (j *job) Run(ctx context.Context) error {
 			taskOutcomes[taskState.ID] = run.TaskStatusSkipped
 			terminalTasks++
 		case run.TaskStatusFailed:
-			runErr = fmt.Errorf("task %s previously failed", taskState.ID)
-			return runErr
+			// A failure this re-entry does not reset is a settled outcome, not
+			// a reason to abandon the run: whole-run retry never leaves one
+			// behind, and a per-partition retry deliberately does — the reset
+			// instance (and whatever its success releases) still has to
+			// execute, with the run finishing failed on this preserved
+			// failure. Bailing here left the accepted retry pending on a
+			// terminal run, or — with the completion fence — spawned
+			// replacement engines that bailed the same way.
+			processed[taskState.ID] = true
+			taskOutcomes[taskState.ID] = run.TaskStatusFailed
+			terminalTasks++
+			if runErr == nil {
+				runErr = fmt.Errorf("task %s previously failed", taskState.ID)
+			}
 		}
 	}
 

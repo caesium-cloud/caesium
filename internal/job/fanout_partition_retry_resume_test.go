@@ -1,0 +1,238 @@
+package job
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+)
+
+// addSideTask wires an independent root task (no edges) into the job so a test
+// can leave a terminal failure in the run that no partition retry resets and
+// that is not a predecessor of the fanned step.
+func (f *fanOutFixture) addSideTask(t *testing.T, name string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	atomID := uuid.New()
+	task := &models.Task{ID: id, JobID: f.jobID, AtomID: atomID, Name: name, Position: 0, TriggerRule: string(schema.TriggerRuleAllSuccess)}
+	f.taskSvc.tasks = append(f.taskSvc.tasks, task)
+	f.atomSvc.atoms[atomID] = fakeModelAtom(atomID)
+	require.NoError(t, f.db.Create(task).Error)
+	return id
+}
+
+func (f *fanOutFixture) latestJobRun(t *testing.T) models.JobRun {
+	t.Helper()
+	var jobRun models.JobRun
+	require.NoError(t, f.db.Where("job_id = ?", f.jobID).Order("created_at DESC").First(&jobRun).Error)
+	return jobRun
+}
+
+func (f *fanOutFixture) resume(t *testing.T, runID uuid.UUID) error {
+	t.Helper()
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	return New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), runID))
+}
+
+func (f *fanOutFixture) awaitRunStatus(t *testing.T, runID uuid.UUID, want run.Status) models.JobRun {
+	t.Helper()
+	return f.awaitRun(t, runID, func(status string) bool { return status == string(want) }, string(want))
+}
+
+func (f *fanOutFixture) awaitRunTerminal(t *testing.T, runID uuid.UUID) models.JobRun {
+	t.Helper()
+	return f.awaitRun(t, runID, func(status string) bool {
+		switch run.Status(status) {
+		case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled:
+			return true
+		}
+		return false
+	}, "terminal")
+}
+
+func (f *fanOutFixture) awaitRun(t *testing.T, runID uuid.UUID, done func(string) bool, want string) models.JobRun {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var jobRun models.JobRun
+		require.NoError(t, f.db.First(&jobRun, "id = ?", runID).Error)
+		if done(jobRun.Status) {
+			return jobRun
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not reach %s (status=%q)", runID, want, jobRun.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestFanOutPartitionRetryResumesPastPreservedSiblingFailure drives the
+// preserved-failure topology through the real local Run surface. Under the
+// continue failure policy an independent `side` task fails and is never reset;
+// `process` runs normally and one of its partitions fails. Retrying that
+// partition reopens the run, and the resumed engine must treat the preserved
+// `side` failure as a settled outcome — executing the reset instance and
+// finishing the run failed — instead of bailing on "previously failed",
+// tripping the completion fence, and spawning replacement engines forever.
+func TestFanOutPartitionRetryResumesPastPreservedSiblingFailure(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	side := f.addSideTask(t, "side")
+	f.engine.resultByName[side.String()] = atom.Failure
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom")
+
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	require.Equal(t, string(run.StatusFailed), jobRun.Status)
+	before := statusByPartition(f.instanceRows(t))
+	require.Equal(t, string(run.TaskStatusFailed), before["flaky"])
+	require.Equal(t, string(run.TaskStatusSucceeded), before["ok"])
+	var flakyID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "flaky" {
+			flakyID = r.ID
+		}
+	}
+
+	f.engine.mu.Lock()
+	delete(f.engine.createErrByPartition, "flaky")
+	f.engine.mu.Unlock()
+	reset, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, flakyID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+	require.Equal(t, 0, reset.OutstandingPredecessors)
+
+	err = f.resume(t, jobRun.ID)
+	require.Error(t, err, "the preserved sibling failure still fails the resumed run")
+	require.NotContains(t, err.Error(), "no runnable tasks")
+
+	after := statusByPartition(f.instanceRows(t))
+	require.Equal(t, string(run.TaskStatusSucceeded), after["flaky"],
+		"the reset instance must execute on resume, not stay pending behind the preserved failure")
+	require.Equal(t, string(run.TaskStatusSucceeded), after["ok"])
+	require.Equal(t, 1, f.engine.createCount("ok"), "resume must not re-run the succeeded sibling")
+	require.Equal(t, 2, f.engine.createCount("flaky"))
+	require.Len(t, f.engine.createRequestsForTask(side), 1, "resume must not re-run the preserved failure")
+
+	final := f.awaitRunStatus(t, jobRun.ID, run.StatusFailed)
+	require.NotNil(t, final.CompletedAt)
+	var retried models.TaskRun
+	require.NoError(t, f.db.First(&retried, "id = ?", flakyID).Error)
+	require.False(t, retried.PartitionRetryPending)
+
+	// A resumed engine that bailed would have tripped the fence and spawned a
+	// replacement; give one a moment to show itself.
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 2, f.engine.createCount("flaky"), "the reset instance must execute exactly once more")
+	again := f.latestJobRun(t)
+	require.Equal(t, final.CompletedAt.UnixNano(), again.CompletedAt.UnixNano(), "the run must be finalized exactly once")
+}
+
+// TestFanOutPartitionRetryResumesRootBehindSkippedDependentInEmissionOrder pins
+// the group-level indegree the resumed engine seeds from. The run view
+// collapses a fanned group onto its first instance in emission order; when
+// that instance is a dependent the sweep skipped with its in-group indegree
+// still outstanding, seeding from it parks the whole group and the retried
+// root never runs.
+func TestFanOutPartitionRetryResumesRootBehindSkippedDependentInEmissionOrder(t *testing.T) {
+	f := newFanOutFixture(t, `[{"key":"b","dependsOn":["a"]},{"key":"a"}]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["a"] = fmt.Errorf("boom")
+
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	before := statusByPartition(f.instanceRows(t))
+	require.Equal(t, string(run.TaskStatusFailed), before["a"])
+	require.Equal(t, string(run.TaskStatusSkipped), before["b"],
+		"precondition: the dependent must have been resolved by the straggler sweep")
+	var aID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "a" {
+			aID = r.ID
+		}
+	}
+
+	f.engine.mu.Lock()
+	delete(f.engine.createErrByPartition, "a")
+	f.engine.mu.Unlock()
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, aID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+
+	_ = f.resume(t, jobRun.ID)
+
+	after := statusByPartition(f.instanceRows(t))
+	require.Equal(t, string(run.TaskStatusSucceeded), after["a"],
+		"the retried root must execute even though the group's first emitted instance is a skipped dependent")
+	require.Equal(t, string(run.TaskStatusSkipped), after["b"], "a partition retry must not cascade to a resolved dependent")
+	require.Equal(t, 2, f.engine.createCount("a"))
+	// Which terminal status the run reaches is the DAG's own accounting (a
+	// skipped dependent is not a failure to the engine); what matters here is
+	// that the run finalizes instead of looping on a parked group.
+	final := f.awaitRunTerminal(t, jobRun.ID)
+	require.NotNil(t, final.CompletedAt)
+}
+
+// TestFanOutPartitionRetryReplacementAbandonsUndispatchableRetry bounds the
+// completion fence. When a resumed engine cannot drive the reset instance at
+// all, Complete refuses, a replacement is started, and if the replacement
+// cannot drive it either the retry must be abandoned explicitly (skipped with
+// a reason, provenance cleared) so the run finalizes — never a third engine.
+func TestFanOutPartitionRetryReplacementAbandonsUndispatchableRetry(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom")
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	var flakyID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "flaky" {
+			flakyID = r.ID
+		}
+	}
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, flakyID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+	// Wedge the group: no instance can ever become ready, so no engine can
+	// make progress on the accepted retry.
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", jobRun.ID, f.fanned).
+		Update("outstanding_predecessors", 99).Error)
+	createsBefore := f.engine.createCount("flaky")
+
+	require.Error(t, f.resume(t, jobRun.ID))
+
+	final := f.awaitRunStatus(t, jobRun.ID, run.StatusFailed)
+	require.NotNil(t, final.CompletedAt)
+	var retried models.TaskRun
+	require.NoError(t, f.db.First(&retried, "id = ?", flakyID).Error)
+	require.Equal(t, string(run.TaskStatusSkipped), retried.Status,
+		"an undispatchable retry must be resolved explicitly, not left pending on a terminal run")
+	require.False(t, retried.PartitionRetryPending)
+	require.True(t, strings.Contains(retried.Error, "partition retry"), "the skip reason must say why: %q", retried.Error)
+	require.Equal(t, createsBefore, f.engine.createCount("flaky"))
+
+	// A third engine would reopen nothing (the marker is gone) but would still
+	// be a bug; give one a moment to show itself.
+	time.Sleep(50 * time.Millisecond)
+	again := f.latestJobRun(t)
+	require.Equal(t, string(run.StatusFailed), again.Status)
+	require.Equal(t, final.CompletedAt.UnixNano(), again.CompletedAt.UnixNano(), "the run must be finalized exactly once")
+}

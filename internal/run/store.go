@@ -375,6 +375,14 @@ var (
 	// to their live engine; succeeded/failed runs can be reopened. Cancelled,
 	// queued, and unknown states must fail closed before any row/event mutation.
 	ErrPartitionRunNotRetryable = errors.New("run: partition retry requires a running or completed run")
+	// ErrPartitionRetryBlocked is returned by RetryPartition when the addressed
+	// instance is FAILED but nothing in this run can ever make it ready again:
+	// every cross-step predecessor group is terminal and the step's trigger
+	// rule is not satisfied by them, or an in-group dependsOn sibling is
+	// terminal without succeeding. Accepting such a retry would reset a row no
+	// engine can dispatch. Controllers surface this as 409 and point at
+	// whole-run retry, which resets failed and skipped work as a set.
+	ErrPartitionRetryBlocked = errors.New("run: partition retry is blocked by an unsatisfied dependency")
 
 	// ErrTaskRunNotTerminal is returned by RetryPartition when the addressed
 	// fan-out instance is still pending or running. Resetting a RUNNING instance
@@ -391,7 +399,9 @@ var (
 	// still-running local run reports reopened=false (no HTTP kickoff), and the
 	// in-process engine may already have left the group. The same transaction as
 	// the status write must refuse so this cannot TOCTOU with the retry.
-	// Running/claimed retries and retries blocked on predecessors do not match.
+	// Running/claimed retries do not match; a retry still waiting on a live
+	// dependency does — it is exactly as stranded by a terminal JobRun as a
+	// ready one, and the replacement engine is what releases it.
 	ErrRunHasPendingWork = errors.New("run: cannot complete while task work is pending")
 )
 
@@ -4400,10 +4410,14 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			// shape. A terminal-sibling heuristic misses N=1 fan-out groups;
 			// partition_count alone misclassifies ordinary never-started
 			// instances. RetryPartition is the sole writer of the marker, and
-			// terminal task transitions clear it.
+			// terminal task transitions clear it. The predicate deliberately
+			// does not require outstanding_predecessors = 0: a retry that still
+			// waits on a dependency the engine has not resolved is stranded by
+			// a terminal run just the same, and RetryPartition already refuses
+			// the retries no engine could ever release.
 			var pending int64
 			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND outstanding_predecessors = 0 AND partition_retry_pending = ?",
+				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
 					runID, string(TaskStatusPending), true).
 				Count(&pending).Error; err != nil {
 				return err
@@ -6167,6 +6181,15 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				return fmt.Errorf("%w: instance %s is %s, not failed", ErrPartitionNotRetryable, taskRunID, row.Status)
 			}
 
+			// Decide dispatchability BEFORE any mutation. A retry nothing in
+			// this run can ever release (ErrPartitionRetryBlocked) must be
+			// refused outright rather than reset into a pending row the engine
+			// will only ever sweep as "never dispatched".
+			outstanding, err := s.partitionRetryOutstandingTx(tx, runID, &row)
+			if err != nil {
+				return err
+			}
+
 			// Re-open a finished run so the reset instance can actually be
 			// dispatched. readmitRetryTx with admit=false is the manual-retry
 			// path: unconditional, no concurrency re-admission (this is a human
@@ -6178,24 +6201,15 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				reopened = true
 			}
 
-			satisfied, err := satisfiedPredecessorTaskIDsTx(tx, runID)
-			if err != nil {
-				return err
-			}
-
 			updates := retryResetColumns()
 			updates["partition_retry_pending"] = true
+			updates["outstanding_predecessors"] = outstanding
 			if err := tx.Model(&models.TaskRun{}).
 				Where("id = ?", row.ID).
 				Updates(updates).Error; err != nil {
 				return err
 			}
 			counts.addTaskRunStatus(1)
-
-			outstanding, err := s.resetInstanceOutstandingTx(tx, runID, row.ID, row.TaskID, satisfied)
-			if err != nil {
-				return err
-			}
 
 			if err := invalidateCheckpointsForRetryTx(tx, runID); err != nil {
 				return err
@@ -6261,6 +6275,116 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 	}
 
 	return convertRunTaskModel(&refreshed), reopened, nil
+}
+
+// partitionRetryOutstandingTx computes the outstanding_predecessors a retried
+// instance is re-seeded with, or ErrPartitionRetryBlocked when nothing in this
+// run can ever release it.
+//
+// Cross-step predecessors are judged by the STEP's trigger rule, exactly as
+// the dispatch path judges them (shouldRunTaskTx): a consumer that ran under
+// all_done after an upstream failure is released by that failure, not
+// stranded behind it. When every predecessor group is terminal the rule is
+// decisive — satisfied means nothing outstanding, unsatisfied means the retry
+// is refused. While any predecessor group is still live the conservative
+// per-edge count is kept, and the engine that finishes those groups releases
+// the row.
+//
+// In-group dependsOn siblings carry no trigger rule: a terminal sibling that
+// did not succeed blocks the retry for good (refused), a non-terminal one
+// (pending again because it was retried first) is counted and released when
+// it finishes, and a sibling the run never recorded can never be satisfied.
+func (s *Store) partitionRetryOutstandingTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun) (int, error) {
+	outstanding := 0
+
+	refs, err := s.resolvePredecessorsTx(tx, runID, row.TaskID)
+	if err != nil {
+		return 0, err
+	}
+	if len(refs) > 0 {
+		predRows, err := predecessorTaskRunsTx(tx, runID, refs, "task_id", "status")
+		if err != nil {
+			return 0, err
+		}
+		statuses := aggregatePredecessorStatuses(predecessorTaskIDs(refs), predRows)
+		allTerminal := true
+		for _, status := range statuses {
+			if !IsTerminal(status) {
+				allTerminal = false
+				break
+			}
+		}
+		if allTerminal {
+			rawRule, rule, err := s.resolveTriggerRuleTx(tx, runID, row.TaskID)
+			if err != nil {
+				return 0, err
+			}
+			if !satisfiesTriggerRule(rawRule, statuses) {
+				return 0, fmt.Errorf("%w: trigger rule %q is not satisfied by the step's predecessors", ErrPartitionRetryBlocked, rule)
+			}
+		} else {
+			byTask := groupTaskRunsByTaskID(predRows)
+			for _, ref := range refs {
+				if !predecessorGroupSatisfied(byTask[ref.TaskID]) {
+					outstanding++
+				}
+			}
+		}
+	}
+
+	if len(row.PartitionDependsOn) > 0 {
+		var deps []string
+		_ = json.Unmarshal(row.PartitionDependsOn, &deps)
+		var siblings []models.TaskRun
+		if err := tx.Where("job_run_id = ? AND task_id = ?", runID, row.TaskID).Find(&siblings).Error; err != nil {
+			return 0, err
+		}
+		byKey := make(map[string]models.TaskRun, len(siblings))
+		for i := range siblings {
+			byKey[siblings[i].PartitionValue] = siblings[i]
+		}
+		for _, dep := range deps {
+			sib, ok := byKey[dep]
+			switch {
+			case !ok:
+				return 0, fmt.Errorf("%w: in-group dependency %q is not recorded in this run", ErrPartitionRetryBlocked, dep)
+			case IsTerminalSuccess(TaskStatus(sib.Status)):
+				// Released.
+			case IsTerminal(TaskStatus(sib.Status)):
+				return 0, fmt.Errorf("%w: in-group dependency %q is %s", ErrPartitionRetryBlocked, dep, sib.Status)
+			default:
+				outstanding++
+			}
+		}
+	}
+
+	return outstanding, nil
+}
+
+// AbandonPendingPartitionRetries resolves every retry-reset instance of a run
+// that is still pending as skipped, with the given reason, and clears its
+// retry provenance. It is the bounded end of the completion fence: a
+// replacement engine that could not dispatch the accepted retry must not spawn
+// yet another engine. The row is resolved explicitly so the run can finalize
+// and the operator can see why. Returns the number of instances resolved.
+func (s *Store) AbandonPendingPartitionRetries(runID uuid.UUID, reason string) (int, error) {
+	var rows []models.TaskRun
+	if err := s.db.Select("id").
+		Where("job_run_id = ? AND status = ? AND partition_retry_pending = ?", runID, string(TaskStatusPending), true).
+		Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	resolved := 0
+	for i := range rows {
+		if err := s.SkipTaskInstance(runID, rows[i].ID, reason); err != nil {
+			return resolved, err
+		}
+		resolved++
+	}
+	if resolved > 0 {
+		s.invalidateRunState(runID)
+	}
+	return resolved, nil
 }
 
 func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {

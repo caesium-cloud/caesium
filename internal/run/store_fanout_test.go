@@ -433,19 +433,25 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 0, b.OutstandingPredecessors)
 
-	// Now fail a too and retry b again; b must NOT be dragged along, and retrying
-	// b while a is non-terminal must leave b waiting on a. b is put back into the
-	// FAILED state for the second retry because failed is the retryable set
-	// (RetryPartition rejects skipped with ErrPartitionNotRetryable); the
-	// indegree re-seed under test is unaffected by which terminal state b came
-	// from.
+	// Now fail a too, retry a (so it is pending again), and retry b again; b
+	// must NOT be dragged along, and retrying b while a is non-terminal must
+	// leave b waiting on a. b is put back into the FAILED state for the second
+	// retry because failed is the retryable set (RetryPartition rejects skipped
+	// with ErrPartitionNotRetryable); the indegree re-seed under test is
+	// unaffected by which terminal state b came from. Retrying b while a is
+	// still terminal-FAILED is refused instead (ErrPartitionRetryBlocked):
+	// nothing in the run would ever release it.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusFailed, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	require.ErrorIs(t, err, ErrPartitionRetryBlocked)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["a"].ID)
+	require.NoError(t, err)
 	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 1, b.OutstandingPredecessors,
-		"b waits on a, which is not a terminal success")
+		"b waits on a, which is pending again and not a terminal success")
 }
 
 func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T) {

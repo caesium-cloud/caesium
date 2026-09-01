@@ -563,6 +563,90 @@ steps:
 		"the reopened run must complete again, not stay running with a pending instance")
 }
 
+// TestFanOutHTTPRetryPartitionResumesRootBehindSkippedDependent drives the
+// resume for an ordered group whose FIRST emitted partition is a dependent.
+// `a` fails and the sweep skips `b` (dependsOn a) with its in-group indegree
+// still recorded; the collapsed run view then reports the group through `b`.
+// Retrying `a` over HTTP reopens the run and the replacement engine must still
+// dispatch it — before the fix it seeded the group from `b`'s indegree, found
+// no runnable task, tripped the completion fence, and spawned replacement
+// engines forever while `a` stayed pending.
+func (s *IntegrationTestSuite) TestFanOutHTTPRetryPartitionResumesRootBehindSkippedDependent() {
+	alias := fmt.Sprintf("fanout-retry-ordered-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: list
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::partitions [{\"key\":\"b\",\"dependsOn\":[\"a\"]},{\"key\":\"a\"}]'"]
+    next: [process]
+  - name: process
+    image: alpine:3.23
+    command: ["sh", "-c", "if [ \"$CAESIUM_PARTITION\" = a ]; then exit 1; fi; echo ok"]
+    dependsOn: [list]
+    fanOut:
+      from: list
+      maxPartitions: 8
+      failurePolicy: continue
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	processID := s.jobTaskIDByName(job.ID, "process")
+	before := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.Require().Len(before, 2, "both partitions must materialize: %v", before)
+	s.Require().Equal("failed", before["a"].Status, "the root must fail so it can be retried: %v", before)
+	s.Require().Equal("skipped", before["b"].Status,
+		"the dependent must be resolved by the sweep, which is what leaves its indegree recorded: %v", before)
+	s.Require().Less(before["b"].Index, before["a"].Index, "the fixture must emit the dependent first")
+
+	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry", s.caesiumURL, job.ID, run.ID, processID, before["a"].Index), nil)
+	s.Require().NoError(err)
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	s.Require().NoError(readErr)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "retrying the failed root must be accepted: %s", body)
+
+	redispatchDeadline := time.Now().Add(60 * time.Second)
+	for {
+		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+		if isTerminalPartitionStatus(current["a"].Status) {
+			s.Equal("failed", current["a"].Status,
+				"the fixture's command still fails for `a`, so a re-execution must land on failed — not on the sweep's skipped")
+			s.Equal(before["a"].TaskRunID, current["a"].TaskRunID)
+			s.Equal("skipped", current["b"].Status, "a partition retry must not cascade to the resolved dependent")
+			s.Equal(before["b"].TaskRunID, current["b"].TaskRunID)
+			break
+		}
+		if time.Now().After(redispatchDeadline) {
+			s.Failf("a reset root never ran again",
+				"partition `a` is still %q 60s after a 200 retry: the reopened run is parked behind the skipped dependent's indegree", current["a"].Status)
+			return
+		}
+		time.Sleep(fanOutPollInterval)
+	}
+
+	retried := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Contains([]string{"failed", "succeeded"}, retried.Status,
+		"the reopened run must finalize again, not stay running or loop on replacement engines")
+	// A run that finalized once must stay finalized: a replacement loop would
+	// keep flipping it back to running.
+	time.Sleep(2 * time.Second)
+	settled := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Equal(retried.Status, settled.Status, "the run must be finalized exactly once")
+}
+
 // ---------------------------------------------------------------------------
 // Read surfaces over a fanned group (Stream E3 / G6): why, receipt, and logs.
 //
