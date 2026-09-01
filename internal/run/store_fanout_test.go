@@ -475,6 +475,54 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 	assert.Nil(t, cp, "the pre-retry checkpoint must be invalidated or a recovering owner re-adopts the stale state")
 }
 
+func TestRetryPartitionRejectsNonRunnableRunWithoutMutation(t *testing.T) {
+	for _, runStatus := range []string{string(StatusCancelled), "queued", "skipped", "unknown"} {
+		t.Run(runStatus, func(t *testing.T) {
+			f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+			_, err := f.expand(t, strParts("a"))
+			require.NoError(t, err)
+			rows := f.instances(t)
+			require.Len(t, rows, 1)
+
+			failedAt := time.Now().UTC().Truncate(time.Millisecond)
+			require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", rows[0].ID).Updates(map[string]any{
+				"status":       string(TaskStatusFailed),
+				"completed_at": failedAt,
+				"error":        "boom",
+			}).Error)
+			require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).Updates(map[string]any{
+				"status":       runStatus,
+				"completed_at": failedAt,
+				"error":        "not runnable",
+			}).Error)
+
+			var eventsBefore int64
+			require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsBefore).Error)
+
+			updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+			require.ErrorIs(t, err, ErrPartitionRunNotRetryable)
+			assert.Nil(t, updated)
+			assert.False(t, reopened)
+
+			var taskAfter models.TaskRun
+			require.NoError(t, f.db.First(&taskAfter, "id = ?", rows[0].ID).Error)
+			assert.Equal(t, string(TaskStatusFailed), taskAfter.Status)
+			assert.Equal(t, "boom", taskAfter.Error)
+			assert.False(t, taskAfter.PartitionRetryPending)
+			assert.NotNil(t, taskAfter.CompletedAt)
+
+			var runAfter models.JobRun
+			require.NoError(t, f.db.First(&runAfter, "id = ?", f.runID).Error)
+			assert.Equal(t, runStatus, runAfter.Status)
+			assert.Equal(t, "not runnable", runAfter.Error)
+
+			var eventsAfter int64
+			require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsAfter).Error)
+			assert.Equal(t, eventsBefore, eventsAfter, "a refused retry must not append ready/retried events")
+		})
+	}
+}
+
 // TestRetryPartitionReturnsReopenedFromTransaction pins that reopened and the
 // reset TaskRun come from the committed transaction, not a post-commit
 // refresh. A refresh error after commit used to return (nil, false, err) and

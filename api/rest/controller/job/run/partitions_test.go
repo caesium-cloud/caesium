@@ -107,6 +107,13 @@ func TestRetryPartitionHTTPErrorMapsNonTerminalToConflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, httpErr.Code)
 }
 
+func TestRetryPartitionHTTPErrorMapsNonRunnableRunToConflict(t *testing.T) {
+	err := retryPartitionHTTPError(runstorage.ErrPartitionRunNotRetryable)
+	var httpErr *echo.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, http.StatusConflict, httpErr.Code)
+}
+
 func TestRetryPartitionHTTPErrorMapsMissingRowToNotFound(t *testing.T) {
 	assert.Equal(t, echo.ErrNotFound, retryPartitionHTTPError(gorm.ErrRecordNotFound))
 }

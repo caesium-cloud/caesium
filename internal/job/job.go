@@ -147,6 +147,11 @@ type job struct {
 	newPodmanEngine        func(context.Context) atom.Engine
 	atomPollInterval       time.Duration
 	secretResolver         secret.Resolver
+	// beforeComplete is an unexported test seam for the shutdown window between
+	// the DAG loop returning and Store.Complete beginning. Production leaves it
+	// nil; keeping the hook before the store transaction lets race regressions
+	// interleave RetryPartition deterministically without database locks/sleeps.
+	beforeComplete func(uuid.UUID)
 }
 
 // JobOption configures a job before execution.
@@ -731,38 +736,18 @@ func (j *job) Run(ctx context.Context) error {
 	ctx = run.WithContext(ctx, runID)
 
 	var runErr error
-	// processed / catalogTaskIDs are filled once the DAG is materialized.
-	// The completion defer reads their final values: halt leftovers are
-	// catalog tasks this engine never dispatched, while a partition retry
-	// resets an already-processed group.
-	var (
-		processed      map[uuid.UUID]bool
-		catalogTaskIDs []uuid.UUID
-	)
 	defer func() {
-		completeErr := store.Complete(runID, runErr)
-		if errors.Is(completeErr, run.ErrRunHasPendingWork) && processed != nil {
-			// Fail-fast / halt leaves unstarted successors pending. Skip those
-			// so this engine can still finalize. SkipTask is pending-only and
-			// keyed by catalog id; a partition retry of a processed group is
-			// not in this set.
-			for _, id := range catalogTaskIDs {
-				if processed[id] {
-					continue
-				}
-				if skipErr := store.SkipTask(runID, id, "run ended before dispatch"); skipErr != nil {
-					log.Error("failed to skip undispatched task before completion",
-						"run_id", runID, "task_id", id, "error", skipErr)
-				}
-			}
-			completeErr = store.Complete(runID, runErr)
+		if j.beforeComplete != nil {
+			j.beforeComplete(runID)
 		}
+		completeErr := store.Complete(runID, runErr)
 		if errors.Is(completeErr, run.ErrRunHasPendingWork) {
 			// Retry landed after the DAG finished and before this status write.
 			// HTTP kickoff only fires when reopened=true; the run was still
-			// running so the handler will not start an engine. Do not fire
-			// completion callbacks — the replacement will, when it actually
-			// finishes.
+			// running so the handler will not start an engine. Preserve every
+			// undispatched successor: the replacement must be allowed to release
+			// it if the retried partition succeeds. Do not fire completion
+			// callbacks — the replacement will, when it actually finishes.
 			log.Info("partition retry landed after the DAG finished; starting replacement engine",
 				"job_id", j.id, "run_id", runID)
 			j.startReplacementRun(runID, snapshot.Params)
@@ -800,11 +785,6 @@ func (j *job) Run(ctx context.Context) error {
 	if len(tasks) == 0 {
 		runErr = fmt.Errorf("job %s has no tasks", j.id)
 		return runErr
-	}
-
-	catalogTaskIDs = make([]uuid.UUID, len(tasks))
-	for i, t := range tasks {
-		catalogTaskIDs[i] = t.ID
 	}
 
 	log.Info("running job tasks", "job_id", j.id, "count", len(tasks))
@@ -944,7 +924,7 @@ func (j *job) Run(ctx context.Context) error {
 
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
-	processed = make(map[uuid.UUID]bool, len(tasks))
+	processed := make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
 	taskHashes := make(map[uuid.UUID]string, len(tasks))

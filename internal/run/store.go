@@ -370,6 +370,11 @@ var (
 	// the guard in RetryPartition; controllers surface this as 409 with the
 	// reason, distinguishable from ErrTaskRunNotTerminal (still running).
 	ErrPartitionNotRetryable = errors.New("run: only a failed partition can be retried")
+	// ErrPartitionRunNotRetryable is returned when the partition is failed but
+	// its JobRun cannot execute a reset instance. Running runs can hand the work
+	// to their live engine; succeeded/failed runs can be reopened. Cancelled,
+	// queued, and unknown states must fail closed before any row/event mutation.
+	ErrPartitionRunNotRetryable = errors.New("run: partition retry requires a running or completed run")
 
 	// ErrTaskRunNotTerminal is returned by RetryPartition when the addressed
 	// fan-out instance is still pending or running. Resetting a RUNNING instance
@@ -379,16 +384,14 @@ var (
 	ErrTaskRunNotTerminal = errors.New("run: task instance is not terminal")
 
 	// ErrRunHasPendingWork is returned by Complete when a dispatchable
-	// retry-reset TaskRun is still pending: status=pending, started_at IS NULL,
-	// outstanding_predecessors=0, and another TaskRun with the same
-	// (job_run_id, task_id) is already terminal. That is RetryPartition of a
-	// failed partition after runFannedGroup returned. Marking the JobRun
-	// terminal then freezes the retried instance: RetryPartition of a
+	// per-partition retry is still pending. RetryPartition sets the durable
+	// partition_retry_pending marker in the same transaction as the reset; every
+	// terminal transition clears it. Marking the JobRun terminal while that
+	// marker is pending freezes the retried instance: RetryPartition of a
 	// still-running local run reports reopened=false (no HTTP kickoff), and the
-	// in-process engine may already have left the group. The same transaction
-	// as the status write must refuse so this cannot TOCTOU with the retry.
-	// Running/claimed tasks, blocked successors (outstanding_predecessors > 0),
-	// and never-started catalog tasks without a terminal sibling do not match.
+	// in-process engine may already have left the group. The same transaction as
+	// the status write must refuse so this cannot TOCTOU with the retry.
+	// Running/claimed retries and retries blocked on predecessors do not match.
 	ErrRunHasPendingWork = errors.New("run: cannot complete while task work is pending")
 )
 
@@ -2350,13 +2353,14 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 			}
 
 			updates := map[string]interface{}{
-				"status":              string(TaskStatusCached),
-				"completed_at":        now,
-				"result":              result,
-				"cache_hit":           true,
-				"cache_origin_run_id": source.RunID,
-				"cache_created_at":    source.CreatedAt,
-				"cache_expires_at":    source.ExpiresAt,
+				"status":                  string(TaskStatusCached),
+				"completed_at":            now,
+				"result":                  result,
+				"cache_hit":               true,
+				"cache_origin_run_id":     source.RunID,
+				"cache_created_at":        source.CreatedAt,
+				"cache_expires_at":        source.ExpiresAt,
+				"partition_retry_pending": false,
 			}
 			if len(output) > 0 {
 				encoded, marshalErr := json.Marshal(output)
@@ -3044,14 +3048,15 @@ func (s *Store) markInstanceSkippedWhereTx(
 		return false, err
 	}
 	updates := map[string]interface{}{
-		"status":              string(TaskStatusSkipped),
-		"completed_at":        time.Now().UTC(),
-		"error":               reason,
-		"terminal_sequence":   seq,
-		"cache_hit":           false,
-		"cache_origin_run_id": nil,
-		"cache_created_at":    nil,
-		"cache_expires_at":    nil,
+		"status":                  string(TaskStatusSkipped),
+		"completed_at":            time.Now().UTC(),
+		"error":                   reason,
+		"terminal_sequence":       seq,
+		"cache_hit":               false,
+		"cache_origin_run_id":     nil,
+		"cache_created_at":        nil,
+		"cache_expires_at":        nil,
+		"partition_retry_pending": false,
 	}
 	for k, v := range extraUpdates {
 		updates[k] = v
@@ -3429,13 +3434,14 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			}
 
 			updates := map[string]interface{}{
-				"status":              string(status),
-				"completed_at":        now,
-				"result":              result,
-				"cache_hit":           false,
-				"cache_origin_run_id": nil,
-				"cache_created_at":    nil,
-				"cache_expires_at":    nil,
+				"status":                  string(status),
+				"completed_at":            now,
+				"result":                  result,
+				"cache_hit":               false,
+				"cache_origin_run_id":     nil,
+				"cache_created_at":        nil,
+				"cache_expires_at":        nil,
+				"partition_retry_pending": false,
 			}
 			if len(output) > 0 {
 				encoded, marshalErr := json.Marshal(output)
@@ -3778,12 +3784,13 @@ func (s *Store) CompleteTaskOwner(
 			}
 
 			updates := map[string]interface{}{
-				"status":            string(status),
-				"completed_at":      now,
-				"result":            result,
-				"terminal_sequence": completedSeq,
-				"owner_generation":  ownerGen,
-				"cache_hit":         status == TaskStatusCached,
+				"status":                  string(status),
+				"completed_at":            now,
+				"result":                  result,
+				"terminal_sequence":       completedSeq,
+				"owner_generation":        ownerGen,
+				"cache_hit":               status == TaskStatusCached,
+				"partition_retry_pending": false,
 			}
 			if len(output) > 0 {
 				encoded, mErr := json.Marshal(output)
@@ -3865,11 +3872,12 @@ func (s *Store) CompleteTaskOwner(
 						seq = allocated
 					}
 					skipUpdates := map[string]interface{}{
-						"status":            string(TaskStatusSkipped),
-						"completed_at":      now,
-						"error":             sk.Reason,
-						"terminal_sequence": seq,
-						"owner_generation":  ownerGen,
+						"status":                  string(TaskStatusSkipped),
+						"completed_at":            now,
+						"error":                   sk.Reason,
+						"terminal_sequence":       seq,
+						"owner_generation":        ownerGen,
+						"partition_retry_pending": false,
 					}
 					skipQuery := tx.Model(&models.TaskRun{}).Where("id = ?", skipRows[i].ID)
 					if skipRows[i].Status == string(TaskStatusRunning) {
@@ -4163,13 +4171,14 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 			}
 			resultUpdate := updateQuery.
 				Updates(map[string]interface{}{
-					"status":              string(TaskStatusFailed),
-					"completed_at":        now,
-					"error":               errMsg,
-					"cache_hit":           false,
-					"cache_origin_run_id": nil,
-					"cache_created_at":    nil,
-					"cache_expires_at":    nil,
+					"status":                  string(TaskStatusFailed),
+					"completed_at":            now,
+					"error":                   errMsg,
+					"cache_hit":               false,
+					"cache_origin_run_id":     nil,
+					"cache_created_at":        nil,
+					"cache_expires_at":        nil,
+					"partition_retry_pending": false,
 				})
 			if resultUpdate.Error != nil {
 				return resultUpdate.Error
@@ -4387,23 +4396,15 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			// Returning the sentinel rolls the status write back; (*job).Run
 			// then starts a replacement engine.
 			//
-			// Match partition-retry shape only, not any in-flight work:
-			// a pending instance that is immediately dispatchable
-			// (started_at IS NULL, outstanding_predecessors = 0) with a
-			// terminal sibling in the same (job_run_id, task_id) group.
-			// Running/claimed tasks (timeout), blocked successors, and
-			// never-started catalog tasks must not refuse.
+			// Match explicit partition-retry provenance, not an inferred row
+			// shape. A terminal-sibling heuristic misses N=1 fan-out groups;
+			// partition_count alone misclassifies ordinary never-started
+			// instances. RetryPartition is the sole writer of the marker, and
+			// terminal task transitions clear it.
 			var pending int64
 			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND outstanding_predecessors = 0",
-					runID, string(TaskStatusPending)).
-				Where(`EXISTS (
-					SELECT 1 FROM task_runs AS siblings
-					WHERE siblings.job_run_id = task_runs.job_run_id
-					  AND siblings.task_id = task_runs.task_id
-					  AND siblings.id <> task_runs.id
-					  AND siblings.status IN ?
-				)`, terminalTaskStatuses()).
+				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND outstanding_predecessors = 0 AND partition_retry_pending = ?",
+					runID, string(TaskStatusPending), true).
 				Count(&pending).Error; err != nil {
 				return err
 			}
@@ -4574,13 +4575,14 @@ func (s *Store) cancelRunTx(tx *gorm.DB, runID uuid.UUID, reason string) (*cance
 	taskRes := tx.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
 		Updates(map[string]interface{}{
-			"status":                 string(TaskStatusCancelled),
-			"completed_at":           now,
-			"error":                  reason,
-			"claimed_by":             "",
-			"claim_expires_at":       nil,
-			"runtime_id":             "",
-			"rate_limit_retry_after": nil,
+			"status":                  string(TaskStatusCancelled),
+			"completed_at":            now,
+			"error":                   reason,
+			"claimed_by":              "",
+			"claim_expires_at":        nil,
+			"runtime_id":              "",
+			"rate_limit_retry_after":  nil,
+			"partition_retry_pending": false,
 		})
 	if taskRes.Error != nil {
 		return nil, nil, taskRes.Error
@@ -5928,13 +5930,14 @@ func retryResetColumns() map[string]interface{} {
 		"cache_created_at":    nil,
 		"cache_expires_at":    nil,
 		// Execution evidence from the previous attempt.
-		"output":                 nil,
-		"branch_selections":      nil,
-		"log_text":               "",
-		"log_truncated":          false,
-		"schema_violations":      nil,
-		"exit_code":              nil,
-		"rate_limit_retry_after": nil,
+		"output":                  nil,
+		"branch_selections":       nil,
+		"log_text":                "",
+		"log_truncated":           false,
+		"schema_violations":       nil,
+		"exit_code":               nil,
+		"rate_limit_retry_after":  nil,
+		"partition_retry_pending": false,
 	}
 }
 
@@ -6023,6 +6026,47 @@ func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
 	return tx.Where("run_id = ?", runID.String()).Delete(&models.RunCheckpoint{}).Error
 }
 
+// lockJobRunForPartitionRetryTx serializes RetryPartition with Complete on the
+// JobRun row before either path examines or mutates TaskRuns. Complete takes the
+// same lock implicitly with its status UPDATE. Without this explicit lock,
+// PostgreSQL READ COMMITTED permits this ordering:
+//
+//  1. RetryPartition reads JobRun=running.
+//  2. Complete updates and locks the JobRun, then sees no retry marker.
+//  3. RetryPartition resets the TaskRun after Complete commits.
+//
+// The reset then belongs to a terminal run and reopened=false prevents HTTP
+// kickoff. With the shared lock, RetryPartition either commits its marker first
+// (so Complete refuses) or reads the newly-terminal run and reopens it.
+// SQLite and dqlite serialize writers already and cannot parse FOR UPDATE.
+func lockJobRunForPartitionRetryTx(tx *gorm.DB, runID uuid.UUID) error {
+	if tx == nil || tx.Dialector == nil {
+		return fmt.Errorf("run: partition retry requires a database dialect")
+	}
+	stmt, err := partitionRetryRunLockSQL(tx.Name())
+	if err != nil {
+		return err
+	}
+	if stmt == "" {
+		return nil
+	}
+	var locked struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	return tx.Raw(stmt, runID).Scan(&locked).Error
+}
+
+func partitionRetryRunLockSQL(dialect string) (string, error) {
+	switch dialect {
+	case "postgres":
+		return "SELECT id FROM job_runs WHERE id = ? FOR UPDATE", nil
+	case "dqlite", "sqlite", "sqlite3":
+		return "", nil
+	default:
+		return "", fmt.Errorf("run: unsupported dialect %q for partition retry run lock", dialect)
+	}
+}
+
 // RetryPartition resets ONE fan-out instance of a run for re-execution.
 //
 // It is the store half of `POST …/tasks/:task_id/partitions/:index/retry`. The
@@ -6077,12 +6121,26 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		var attemptRow models.TaskRun
 
 		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Lock order is JobRun then TaskRun, matching Complete. On PostgreSQL
+			// this closes the cross-row READ COMMITTED race described above; on
+			// SQLite/dqlite the helper is intentionally a no-op.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			var jobRun models.JobRun
 			if err := tx.First(&jobRun, "id = ?", runID).Error; err != nil {
 				return err
 			}
 			jobID = jobRun.JobID
 			quarantine = jobRun.Quarantine
+
+			switch jobRun.Status {
+			case string(StatusRunning), string(StatusFailed), string(StatusSucceeded):
+				// Running has a live executor. Failed/succeeded can be reopened
+				// below after the target instance is validated.
+			default:
+				return fmt.Errorf("%w: run %s is %s", ErrPartitionRunNotRetryable, runID, jobRun.Status)
+			}
 
 			var row models.TaskRun
 			if err := tx.Where("id = ? AND job_run_id = ?", taskRunID, runID).First(&row).Error; err != nil {
@@ -6125,9 +6183,11 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				return err
 			}
 
+			updates := retryResetColumns()
+			updates["partition_retry_pending"] = true
 			if err := tx.Model(&models.TaskRun{}).
 				Where("id = ?", row.ID).
-				Updates(retryResetColumns()).Error; err != nil {
+				Updates(updates).Error; err != nil {
 				return err
 			}
 			counts.addTaskRunStatus(1)

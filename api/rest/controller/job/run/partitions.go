@@ -365,6 +365,9 @@ func retryPartitionHTTPError(err error) error {
 			"only a failed partition can be retried; a succeeded or cached instance would discard a result "+
 				"downstream steps already consumed, and a skipped or cancelled one was resolved deliberately "+
 				"(retry the run to re-run skipped work)")
+	case errors.Is(err, runstorage.ErrPartitionRunNotRetryable):
+		return echo.NewHTTPError(http.StatusConflict,
+			"the run is not executable; only a running, failed, or succeeded run can accept a partition retry")
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return echo.ErrNotFound
 	default:

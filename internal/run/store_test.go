@@ -590,6 +590,10 @@ func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
 	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
 	require.False(t, reopened, "run is still running; retry must not reopen")
+	var reset models.TaskRun
+	require.NoError(t, f.db.First(&reset, "id = ?", rows[0].ID).Error)
+	require.True(t, reset.PartitionRetryPending,
+		"RetryPartition must persist the provenance Complete uses to distinguish this row from ordinary pending work")
 
 	err = f.store.Complete(f.runID, nil)
 	require.ErrorIs(t, err, ErrRunHasPendingWork)
@@ -598,6 +602,68 @@ func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, got.Status, "Complete must not mark the run terminal while a retry-reset partition is pending")
 	require.Nil(t, got.CompletedAt)
+}
+
+// TestCompleteRefusesSinglePartitionRetry closes the N=1 form of the shutdown
+// race. A terminal-sibling heuristic cannot recognize a one-instance group,
+// so the explicit retry marker is the only durable proof that this pending row
+// was reset after the engine's terminal snapshot.
+func TestCompleteRefusesSinglePartitionRetry(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("only"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 1)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", rows[0].ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.False(t, reopened)
+
+	err = f.store.Complete(f.runID, nil)
+	require.ErrorIs(t, err, ErrRunHasPendingWork,
+		"N=1 fan-out retries have no terminal sibling but must still fence completion")
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status)
+}
+
+// TestCompleteDoesNotMistakeOrdinaryPendingFanOutForRetry is the false-positive
+// control. A never-started fan-out row can be ready beside a terminal sibling
+// after fail-fast/halt; partition_count or sibling shape alone does not prove a
+// retry. Without RetryPartition's explicit marker, Complete keeps the
+// repository's established halt semantics and finalizes the failed run.
+func TestCompleteDoesNotMistakeOrdinaryPendingFanOutForRetry(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("failed", "never-started"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 2)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+
+	var pending models.TaskRun
+	require.NoError(t, f.db.First(&pending, "id = ?", rows[1].ID).Error)
+	require.Equal(t, string(TaskStatusPending), pending.Status)
+	require.False(t, pending.PartitionRetryPending,
+		"precondition: ordinary pending work must not carry retry provenance")
+
+	require.NoError(t, f.store.Complete(f.runID, errors.New("fan-out failed")))
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, got.Status,
+		"ordinary pending fan-out work must not spuriously refuse completion or spawn retry recovery")
 }
 
 // TestCompleteSucceedsWithRunningTaskRun is the timeout analogue: the sleeping

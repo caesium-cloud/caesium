@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1286,4 +1287,159 @@ func TestFanOutPartitionRetryResumesOnlyTheResetInstance(t *testing.T) {
 	require.Equal(t, keepCreatesBefore, f.engine.createCount("keep"),
 		"retrying `fail` must not re-run the succeeded sibling")
 	require.Equal(t, 2, f.engine.createCount("fail"), "the failed instance re-executes exactly once more")
+}
+
+// TestFanOutPartitionRetryInShutdownWindowPreservesPendingSuccessor drives the
+// race the completion fence exists for through the real local Run surface.
+// The first engine has left runFannedGroup and halted, but its deferred
+// Store.Complete is paused before the status write. RetryPartition then resets
+// the failed instance while the JobRun still says running, so the HTTP handler
+// would not start another engine. Complete must refuse, and the old engine must
+// launch a replacement WITHOUT first skipping the pending successor.
+func TestFanOutPartitionRetryInShutdownWindowPreservesPendingSuccessor(t *testing.T) {
+	testFanOutPartitionRetryInShutdownWindow(t, true)
+}
+
+// TestFanOutPartitionRetryReplacementFailureTerminatesOnce pins the failure
+// side of the same recovery. A replacement that fails the partition again must
+// leave the run terminal-failed, preserve ordinary halt semantics for the
+// never-dispatched successor, clear retry provenance, and dispatch completion
+// callbacks exactly once (from the replacement, never the superseded engine).
+func TestFanOutPartitionRetryReplacementFailureTerminatesOnce(t *testing.T) {
+	testFanOutPartitionRetryInShutdownWindow(t, false)
+}
+
+func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) {
+	t.Helper()
+
+	f := newFanOutFixture(t, `["retry","fail-fast-sibling"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		MaxParallel:   1,
+		FailurePolicy: schema.FanOutFailureFailFast,
+	}, 0)
+	f.addDownstream(t)
+	// `always` makes the successor ready when the failed group first resolves,
+	// but the job-level halt policy leaves it undispatched. That is the pending
+	// catalog task the pre-fix completion sweep destroyed.
+	for _, taskModel := range f.taskSvc.tasks {
+		if taskModel.ID == f.downstream {
+			taskModel.TriggerRule = string(schema.TriggerRuleAlways)
+		}
+	}
+	require.NoError(t, f.db.Model(&models.Task{}).
+		Where("id = ?", f.downstream).
+		Update("trigger_rule", string(schema.TriggerRuleAlways)).Error)
+
+	f.engine.createErrByPartition["retry"] = fmt.Errorf("boom")
+	completionEntered := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+	releaseCompletionFn := func() {
+		select {
+		case <-releaseCompletion:
+		default:
+			close(releaseCompletion)
+		}
+	}
+	t.Cleanup(releaseCompletionFn)
+
+	var callbackCount atomic.Int32
+	vars := defaultFanOutVars()
+	vars.MaxParallelTasks = 1
+	vars.TaskFailurePolicy = taskFailurePolicyHalt
+	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbackCount.Add(1)
+		return nil
+	}))
+
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	runner.beforeComplete = func(uuid.UUID) {
+		close(completionEntered)
+		<-releaseCompletion
+	}
+	runErrs := make(chan error, 1)
+	go func() {
+		runErrs <- runner.Run(context.Background())
+	}()
+
+	select {
+	case <-completionEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first engine did not reach deferred completion")
+	}
+
+	var jobRun models.JobRun
+	require.NoError(t, f.db.Where("job_id = ?", f.jobID).First(&jobRun).Error)
+	rows := f.instanceRowsFor(t, jobRun.ID)
+	require.Len(t, rows, 2)
+	byPartition := make(map[string]models.TaskRun, len(rows))
+	for i := range rows {
+		byPartition[rows[i].PartitionValue] = rows[i]
+	}
+	require.Equal(t, string(run.TaskStatusFailed), byPartition["retry"].Status)
+	require.Equal(t, string(run.TaskStatusSkipped), byPartition["fail-fast-sibling"].Status)
+
+	var successorBefore models.TaskRun
+	require.NoError(t, f.db.
+		Where("job_run_id = ? AND task_id = ?", jobRun.ID, f.downstream).
+		First(&successorBefore).Error)
+	require.Equal(t, string(run.TaskStatusPending), successorBefore.Status,
+		"precondition: job-level halt must leave the ready successor undispatched")
+
+	if retrySucceeds {
+		f.engine.mu.Lock()
+		delete(f.engine.createErrByPartition, "retry")
+		f.engine.mu.Unlock()
+	}
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, byPartition["retry"].ID)
+	require.NoError(t, err)
+	require.False(t, reopened,
+		"the run is paused inside Complete and still reports running; shutdown recovery must own kickoff")
+
+	releaseCompletionFn()
+	require.Error(t, <-runErrs, "the superseded engine still returns its original failure")
+
+	wantRunStatus := string(run.StatusFailed)
+	wantPartitionStatus := string(run.TaskStatusFailed)
+	wantSuccessorStatus := string(run.TaskStatusPending)
+	wantSuccessorCreates := 0
+	if retrySucceeds {
+		wantRunStatus = string(run.StatusSucceeded)
+		wantPartitionStatus = string(run.TaskStatusSucceeded)
+		wantSuccessorStatus = string(run.TaskStatusSucceeded)
+		wantSuccessorCreates = 1
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		require.NoError(t, f.db.First(&jobRun, "id = ?", jobRun.ID).Error)
+		if jobRun.Status == wantRunStatus && callbackCount.Load() == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement did not settle: run_status=%q callbacks=%d", jobRun.Status, callbackCount.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var retried models.TaskRun
+	require.NoError(t, f.db.First(&retried, "id = ?", byPartition["retry"].ID).Error)
+	require.Equal(t, wantPartitionStatus, retried.Status)
+	require.False(t, retried.PartitionRetryPending,
+		"terminal replacement outcome must clear durable retry provenance")
+
+	var successorAfter models.TaskRun
+	require.NoError(t, f.db.First(&successorAfter, "id = ?", successorBefore.ID).Error)
+	require.Equal(t, wantSuccessorStatus, successorAfter.Status)
+	require.Len(t, f.engine.createRequestsForTask(f.downstream), wantSuccessorCreates,
+		"the successor must run only when recovery succeeds")
+	require.Equal(t, int32(1), callbackCount.Load(),
+		"only the replacement engine may dispatch terminal callbacks")
+
+	// Give a mistakenly spawned second replacement/callback a chance to expose
+	// itself instead of ending the test immediately after the first terminal
+	// write.
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), callbackCount.Load())
 }
