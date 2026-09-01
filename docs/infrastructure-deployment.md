@@ -234,9 +234,12 @@ configured provider registry) the first time a given provider set is warmed.
 `init` fails closed against the registry rather than silently reaching it, so
 a provider missing from the mirror is a loud error, not a quiet egress call.
 For an air-gapped runner, seed the mirror out of band at the `/cache/.warm/<key>`
-marker seam before the first real run. The CI infra integration lane
-(`integration-test-infra`) relies on the runner having outbound access for
-this first warm — the rest of the fixture is otherwise fully hermetic
+marker seam before the first real run. The CI infra integration lanes
+(`build-and-integration-test-infra` on amd64 and
+`build-and-integration-test-infra-arm64` on `ubuntu-24.04-arm`, both running
+`just integration-test-infra`) rely on the runner having outbound access for
+this first warm — GitHub-hosted runners typically have `registry.terraform.io`
+egress. The rest of the fixture is otherwise fully hermetic
 (`--network none`-verified for `reagents-test`).
 
 ### `tf-runner` (`tf-plan`, `tf-apply`, `tf-drift`)
