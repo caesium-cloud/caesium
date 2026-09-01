@@ -496,9 +496,22 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		}
 		if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
 			// A per-partition retry was accepted into this run after the owner
-			// saw it drain. The owner has no engine to hand the reset instance
-			// to; say so explicitly rather than burying it in a generic error.
-			log.Error("owner manager: run left running for a pending partition retry the owner cannot execute", "run_id", runID, "error", cErr)
+			// saw it drain. RetryPartition dropped the run's checkpoints so a
+			// recovering owner replays the rows from scratch and finds the
+			// reset instance; every snapshot THIS owner holds predates the
+			// retry and says the run is complete. Dropping with a forced
+			// checkpoint (or keeping the one written on cadence moments ago)
+			// would hand recovery exactly that stale state: it would replay
+			// only the terminal rows after it, never see the pending retry,
+			// and leave the run running forever. Release without a checkpoint
+			// and discard any written since the retry, so recovery rebuilds
+			// from the post-retry truth.
+			log.Error("owner manager: run left running for a pending partition retry the owner cannot execute; releasing it for recovery", "run_id", runID, "error", cErr)
+			m.Release(runID)
+			if iErr := m.store.InvalidateRunCheckpoints(runID); iErr != nil {
+				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", iErr)
+			}
+			return CompleteResult{Ready: res.Ready, Complete: complete, Owned: true}, nil
 		} else if cErr != nil {
 			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
 		}
@@ -667,4 +680,14 @@ func (m *OwnerManager) Drop(runID uuid.UUID) {
 	or.mu.Lock()
 	_ = or.writer.Force(or.state, or.gen)
 	or.mu.Unlock()
+}
+
+// Release forgets a run WITHOUT checkpointing its in-memory state. It is for
+// the case where that state is known to be stale — the store refused the
+// owner's completion because a per-partition retry reopened work the state
+// never saw — and a recovering owner must rebuild from the rows instead.
+func (m *OwnerManager) Release(runID uuid.UUID) {
+	m.mu.Lock()
+	delete(m.runs, runID)
+	m.mu.Unlock()
 }

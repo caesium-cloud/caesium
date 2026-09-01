@@ -6051,6 +6051,15 @@ func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
 	return tx.Where("run_id = ?", runID.String()).Delete(&models.RunCheckpoint{}).Error
 }
 
+// InvalidateRunCheckpoints drops every owner checkpoint of a run outside a
+// retry transaction. The in-memory owner uses it when the store refused its
+// completion for a pending per-partition retry: the snapshots it wrote since
+// that retry committed describe a run with nothing left to do, and a recovery
+// that restored one would never discover the reset instance.
+func (s *Store) InvalidateRunCheckpoints(runID uuid.UUID) error {
+	return invalidateCheckpointsForRetryTx(s.db, runID)
+}
+
 // lockJobRunForPartitionRetryTx serializes RetryPartition with Complete on the
 // JobRun row before either path examines or mutates TaskRuns. Complete takes the
 // same lock implicitly with its status UPDATE. Without this explicit lock,
