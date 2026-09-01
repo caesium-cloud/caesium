@@ -293,13 +293,15 @@ steps:
     next: [plan-app-web]
 
   # ── PROPOSE + APPLY: network ─────────────────────────────────────────
-  # A stack consumed through IMPORT_OUTPUTS_FROM must name its non-sensitive
-  # outputs in `[a-z0-9_]+`: Caesium exports them uppercased with `-`/`.`
-  # folded to `_`, and tf-plan lowercases the suffix again, so `vpcId` reaches
-  # a consumer as TF_VAR_vpcid and `vpc-id`/`vpc_id` collapse onto one another.
-  # tf-apply fails closed on either rather than letting Terraform fall back to
-  # a variable default. Sensitive outputs are exempt — they are never
-  # published, so they never make the trip.
+  # Caesium generates CAESIUM_OUTPUT_NAME_INDEX_<STEP> from an apply step's
+  # persisted outputs so mixed-case and dashed names round-trip as
+  # TF_VAR_vpcId / TF_VAR_vpc-id. tf-apply persists an index-required sentinel
+  # so an old server fails explicitly instead of silently lowercasing a name.
+  # Two names that fold onto one env suffix (`vpc-id` and `vpc_id`) are still
+  # refused — the index cannot split one variable into two — as are names that
+  # are not Terraform identifiers.
+  # Sensitive outputs are exempt — they are never published, so they never
+  # make the trip.
   # Not a leaf (app-web consumes its `vpc_id` output), so it uses the
   # container no-op form: apply always runs and always publishes outputs,
   # applying Terraform only when the proposal has non-zero counts. A

@@ -552,12 +552,24 @@ func (s *IntegrationTestSuite) TestInfraDeployReAppliesOnlyWhatChanged() {
 	s.True(strings.HasPrefix(artifact.Digest, "sha256:"), "artifact digest = %q", artifact.Digest)
 	s.Positive(artifact.Size, "the artifact reference reported no size")
 
-	// The cross-stack wiring: app-web's endpoint embeds the vpc_id network
-	// exported, which can only have arrived through IMPORT_OUTPUTS_FROM.
+	// The cross-stack wiring: app-web's endpoint embeds all three spellings the
+	// network exported. vpcId and db-url cannot be recovered by lowercasing the
+	// folded env suffix; only the real server-generated name index can put them
+	// under the Terraform variables this required-variable stack declares.
 	vpcID := first.outputs["apply-network"]["vpc_id"]
+	vpcCamel := first.outputs["apply-network"]["vpcId"]
+	dbURL := first.outputs["apply-network"]["db-url"]
 	s.Require().NotEmpty(vpcID, "apply-network published no vpc_id")
+	s.Require().NotEmpty(vpcCamel, "apply-network published no vpcId")
+	s.Require().NotEmpty(dbURL, "apply-network published no db-url")
 	s.Contains(first.outputs["apply-app-web"]["endpoint"], vpcID,
 		"app-web did not receive network's vpc_id as TF_VAR_vpc_id")
+	s.Contains(first.outputs["apply-app-web"]["endpoint"], vpcCamel,
+		"app-web did not receive network's vpcId as TF_VAR_vpcId")
+	s.Contains(first.outputs["apply-app-web"]["endpoint"], dbURL,
+		"app-web did not receive network's db-url as TF_VAR_db-url")
+	s.Equal("1", first.outputs["apply-network"]["caesium_output_name_index_required"],
+		"tf-apply did not persist the old-server compatibility sentinel")
 
 	// The diamond import, end to end: both upstream applies' outputs arrive as
 	// TF_VAR_*, and the protocol sentinel every apply publishes does NOT — it
@@ -566,10 +578,16 @@ func (s *IntegrationTestSuite) TestInfraDeployReAppliesOnlyWhatChanged() {
 	planLog := s.taskLog(job.ID, first.run.ID, s.jobTaskIDByName(job.ID, "plan-app-web"))
 	s.Contains(planLog, "TF_VAR_vpc_id <- CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID",
 		"plan-app-web did not import network's output")
+	s.Contains(planLog, "TF_VAR_vpcId <- CAESIUM_OUTPUT_APPLY_NETWORK_VPCID",
+		"plan-app-web lowercased network's mixed-case output")
+	s.Contains(planLog, "TF_VAR_db-url <- CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL",
+		"plan-app-web replaced network's dashed output with an underscore")
 	s.Contains(planLog, "TF_VAR_account_id <- CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID",
 		"plan-app-web did not import account's output; the multi-step import is unexercised")
 	s.NotContains(planLog, "TF_VAR_caesium_outputs_published",
 		"the protocol sentinel was exported as a Terraform variable")
+	s.NotContains(planLog, "TF_VAR_caesium_output_name_index_required",
+		"the index-required sentinel was exported as a Terraform variable")
 
 	// §9 #9: the sensitive output must not have escaped anywhere.
 	s.assertSensitiveOutputNeverEscaped(f, job, first)
@@ -838,10 +856,14 @@ func driftDeployStacks(canaryPath string) []deployStack {
 // which is what TF_VAR_vpc_id does here. Without app-web the drift job would
 // ship covering only the stacks that happen to have no cross-stack inputs, and
 // an operator would meet the gap as a red drift run.
-func driftJobStacks(canaryPath, vpcID string) []deployStack {
+func driftJobStacks(canaryPath, vpcID, vpcCamel, dbURL string) []deployStack {
 	return []deployStack{
 		{Name: "network"},
-		{Name: "app-web", Env: map[string]string{"TF_VAR_vpc_id": vpcID}},
+		{Name: "app-web", Env: map[string]string{
+			"TF_VAR_vpc_id": vpcID,
+			"TF_VAR_vpcId":  vpcCamel,
+			"TF_VAR_db-url": dbURL,
+		}},
 		{
 			Name: "canary",
 			Root: "drift/canary",
@@ -875,8 +897,12 @@ func (s *IntegrationTestSuite) TestInfraDriftJobGoesRedOnAnOutOfBandChange() {
 	// The drift job pins app-web's cross-stack variable itself, because it has
 	// no apply step to import it from.
 	vpcID := deployed.outputs["apply-network"]["vpc_id"]
+	vpcCamel := deployed.outputs["apply-network"]["vpcId"]
+	dbURL := deployed.outputs["apply-network"]["db-url"]
 	s.Require().NotEmpty(vpcID, "apply-network published no vpc_id to pin")
-	stacks := driftJobStacks("/state/canary.txt", vpcID)
+	s.Require().NotEmpty(vpcCamel, "apply-network published no vpcId to pin")
+	s.Require().NotEmpty(dbURL, "apply-network published no db-url to pin")
+	stacks := driftJobStacks("/state/canary.txt", vpcID, vpcCamel, dbURL)
 
 	driftAlias := fmt.Sprintf("infra-drift-%d", time.Now().UnixNano())
 	dir := s.writeJobManifest(s.driftManifest(f, driftAlias, "stacks/** modules/** drift/**", stacks))

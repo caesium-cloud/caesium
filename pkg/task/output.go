@@ -252,6 +252,22 @@ func scalarOutputValue(v any) (string, bool) {
 	}
 }
 
+// ingestOutputPayload merges one ##caesium::output JSON object into dst.
+// Malformed JSON is skipped (the same lenient posture as a bad log line).
+// Every key is a user key, including caesium_output_names: the generated
+// name index does not occupy the per-key suffix space.
+func ingestOutputPayload(dst map[string]string, payload string) {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		return
+	}
+	for k, v := range raw {
+		if s, ok := scalarOutputValue(v); ok {
+			dst[k] = s
+		}
+	}
+}
+
 // ParseOutput reads container log output and extracts structured key-value
 // pairs from lines matching the ##caesium::output marker protocol.
 //
@@ -287,24 +303,11 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 			continue
 		}
 
-		payload := line[idx+len(outputMarker):]
-		payload = strings.TrimSpace(payload)
+		payload := strings.TrimSpace(line[idx+len(outputMarker):])
 		if payload == "" {
 			continue
 		}
-
-		var raw map[string]any
-		if err := json.Unmarshal([]byte(payload), &raw); err != nil {
-			// Malformed JSON on an output line — skip rather than failing
-			// the entire task.
-			continue
-		}
-
-		for k, v := range raw {
-			if s, ok := scalarOutputValue(v); ok {
-				result[k] = s
-			}
-		}
+		ingestOutputPayload(result, payload)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -454,14 +457,7 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 			// reference; the two markers are mutually exclusive per line).
 			payload := strings.TrimSpace(line[idx+len(outputMarker):])
 			if payload != "" {
-				var raw map[string]any
-				if err := json.Unmarshal([]byte(payload), &raw); err == nil {
-					for k, v := range raw {
-						if s, ok := scalarOutputValue(v); ok {
-							output[k] = s
-						}
-					}
-				}
+				ingestOutputPayload(output, payload)
 			}
 		}
 
@@ -574,6 +570,64 @@ func NormalizeStepName(name string) string {
 	return strings.ToUpper(name)
 }
 
+// OutputNamesIndexEnvPrefix is the dedicated environment prefix for the
+// generated name index. The full name is
+// CAESIUM_OUTPUT_NAME_INDEX_<NormalizeStepName(step)>. It sits outside
+// CAESIUM_OUTPUT_<STEP>_<KEY> so a user key named caesium_output_names is
+// forwarded as CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES without colliding
+// with the sidecar.
+//
+// Locked to reagents/internal/tf.OutputNamesIndexEnvPrefix.
+const OutputNamesIndexEnvPrefix = "CAESIUM_OUTPUT_NAME_INDEX_"
+
+// OutputNamesIndexEnv is the dedicated env var carrying the generated JSON
+// name index for stepName.
+func OutputNamesIndexEnv(stepName string) string {
+	return OutputNamesIndexEnvPrefix + NormalizeStepName(stepName)
+}
+
+// EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
+// back to their original output keys. An empty string means every key already
+// survives the fold (ToLower(NormalizeStepName(k)) == k) and the sidecar must
+// be omitted.
+func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
+	index := make(map[string]string, len(outputs))
+	needed := false
+	keys := make([]string, 0, len(outputs))
+	for key := range outputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		folded := NormalizeStepName(key)
+		if prior, exists := index[folded]; exists {
+			return "", fmt.Errorf(
+				"output keys %q and %q both fold to environment suffix %s; rename one of them",
+				prior, key, folded)
+		}
+		index[folded] = key
+		if !outputNameSurvivesEnvFold(key) {
+			needed = true
+		}
+	}
+	if !needed {
+		return "", nil
+	}
+	data, err := json.Marshal(index)
+	if err != nil {
+		return "", fmt.Errorf("encoding output name index: %w", err)
+	}
+	return string(data), nil
+}
+
+// outputNameSurvivesEnvFold reports whether name comes back intact after
+// Caesium spells it into an environment variable and a consumer lowercases the
+// suffix — the historical IMPORT_OUTPUTS_FROM recovery. Names that fail this
+// (mixed case, dashes, dots) need the JSON index to round-trip.
+func outputNameSurvivesEnvFold(name string) bool {
+	return strings.ToLower(NormalizeStepName(name)) == name
+}
+
 // BuildOutputEnv constructs CAESIUM_OUTPUT_<STEP>_<KEY>=<VALUE> environment
 // variables from a map of predecessor step names to their output key-value
 // pairs.
@@ -586,31 +640,81 @@ func NormalizeStepName(name string) string {
 // can re-verify the bytes it reads. The container contract stays string-only
 // env vars: a large payload never enters the environment, only its location and
 // digest do.
-func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]string {
+//
+// Every stored key is user data and is forwarded, including
+// caesium_output_names. The generated name index is emitted separately as
+// CAESIUM_OUTPUT_NAME_INDEX_<STEP> whenever any output key would not survive
+// lowercasing the folded suffix. Snake_case-only maps omit the dedicated env,
+// so existing cache keys stay byte-identical.
+//
+// Any two values that would occupy one environment variable are refused. A
+// map iteration winner would corrupt both the downstream value and its cache
+// identity, so BuildOutputEnv must never guess.
+func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string]string, error) {
 	if len(predecessorOutputs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	env := make(map[string]string)
-	for stepName, outputs := range predecessorOutputs {
+	sources := make(map[string]string)
+	setEnv := func(key, value, source string) error {
+		if prior, exists := sources[key]; exists {
+			return fmt.Errorf("predecessor outputs %s and %s both map to environment variable %s", prior, source, key)
+		}
+		sources[key] = source
+		env[key] = value
+		return nil
+	}
+
+	stepNames := make([]string, 0, len(predecessorOutputs))
+	for stepName := range predecessorOutputs {
+		stepNames = append(stepNames, stepName)
+	}
+	sort.Strings(stepNames)
+	for _, stepName := range stepNames {
+		outputs := predecessorOutputs[stepName]
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
-		for k, v := range outputs {
+		encoded, err := EncodeOutputNamesIndex(outputs)
+		if err != nil {
+			return nil, fmt.Errorf("building output environment for step %q: %w", stepName, err)
+		}
+
+		keys := make([]string, 0, len(outputs))
+		for key := range outputs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := outputs[k]
 			envKey := prefix + NormalizeStepName(k)
+			source := fmt.Sprintf("%q.%q", stepName, k)
 			if ref, ok := DecodeOutputRef(v); ok {
 				// Reference: hand the consumer the path to read and the digest
 				// to verify against, never the encoded JSON.
-				env[envKey] = ref.Path
-				env[envKey+"_DIGEST"] = ref.Digest
+				if err := setEnv(envKey, ref.Path, source); err != nil {
+					return nil, err
+				}
+				if err := setEnv(envKey+"_DIGEST", ref.Digest, source+" digest"); err != nil {
+					return nil, err
+				}
 				continue
 			}
-			env[envKey] = v
+			if err := setEnv(envKey, v, source); err != nil {
+				return nil, err
+			}
+		}
+		if encoded == "" {
+			continue
+		}
+		if err := setEnv(OutputNamesIndexEnv(stepName), encoded, fmt.Sprintf("%q name index", stepName)); err != nil {
+			return nil, err
 		}
 	}
 
 	if len(env) == 0 {
-		return nil
+		return nil, nil
 	}
-	return env
+	return env, nil
 }
 
 // ErrFanInAggregateTooLarge is the sentinel behind FanInAggregateTooLargeError,

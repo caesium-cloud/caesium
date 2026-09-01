@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,6 +9,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func mustBuildOutputEnv(t *testing.T, predOutputs map[string]map[string]string) map[string]string {
+	t.Helper()
+	env, err := BuildOutputEnv(predOutputs)
+	require.NoError(t, err)
+	return env
+}
 
 func TestParseOutput_NoMarkers(t *testing.T) {
 	logs := strings.NewReader("hello world\nsome log line\n")
@@ -252,7 +260,7 @@ func TestBuildOutputEnv_Reference(t *testing.T) {
 	predOutputs := map[string]map[string]string{
 		"extract": {"frame": ref.Encode(), "rows": "5"},
 	}
-	env := BuildOutputEnv(predOutputs)
+	env := mustBuildOutputEnv(t, predOutputs)
 	// Reference exposes the path (not the raw JSON) plus a _DIGEST companion.
 	assert.Equal(t, "/data/out.parquet", env["CAESIUM_OUTPUT_EXTRACT_FRAME"])
 	assert.Equal(t, testDigest, env["CAESIUM_OUTPUT_EXTRACT_FRAME_DIGEST"])
@@ -281,8 +289,8 @@ func TestNormalizeStepName(t *testing.T) {
 }
 
 func TestBuildOutputEnv_Empty(t *testing.T) {
-	assert.Nil(t, BuildOutputEnv(nil))
-	assert.Nil(t, BuildOutputEnv(map[string]map[string]string{}))
+	assert.Nil(t, mustBuildOutputEnv(t, nil))
+	assert.Nil(t, mustBuildOutputEnv(t, map[string]map[string]string{}))
 }
 
 func TestBuildOutputEnv_SinglePredecessor(t *testing.T) {
@@ -292,7 +300,7 @@ func TestBuildOutputEnv_SinglePredecessor(t *testing.T) {
 			"path":      "/data/out.parquet",
 		},
 	}
-	env := BuildOutputEnv(predOutputs)
+	env := mustBuildOutputEnv(t, predOutputs)
 	assert.Equal(t, "42", env["CAESIUM_OUTPUT_ETL_EXTRACT_ROW_COUNT"])
 	assert.Equal(t, "/data/out.parquet", env["CAESIUM_OUTPUT_ETL_EXTRACT_PATH"])
 }
@@ -302,7 +310,7 @@ func TestBuildOutputEnv_MultiplePredecessors(t *testing.T) {
 		"step-a": {"count": "10"},
 		"step-b": {"count": "20", "status": "ok"},
 	}
-	env := BuildOutputEnv(predOutputs)
+	env := mustBuildOutputEnv(t, predOutputs)
 	assert.Equal(t, "10", env["CAESIUM_OUTPUT_STEP_A_COUNT"])
 	assert.Equal(t, "20", env["CAESIUM_OUTPUT_STEP_B_COUNT"])
 	assert.Equal(t, "ok", env["CAESIUM_OUTPUT_STEP_B_STATUS"])
@@ -312,9 +320,209 @@ func TestBuildOutputEnv_KeyNormalization(t *testing.T) {
 	predOutputs := map[string]map[string]string{
 		"step-one": {"some-key": "val", "dot.key": "val2"},
 	}
-	env := BuildOutputEnv(predOutputs)
+	env := mustBuildOutputEnv(t, predOutputs)
 	assert.Equal(t, "val", env["CAESIUM_OUTPUT_STEP_ONE_SOME_KEY"])
 	assert.Equal(t, "val2", env["CAESIUM_OUTPUT_STEP_ONE_DOT_KEY"])
+	// Dashed and dotted keys do not survive lowercasing the folded suffix, so
+	// the name index has to carry the originals — on the dedicated env, not
+	// the per-key suffix space.
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("step-one")]), &index))
+	assert.Equal(t, map[string]string{
+		"SOME_KEY": "some-key",
+		"DOT_KEY":  "dot.key",
+	}, index)
+	_, hasFolded := env["CAESIUM_OUTPUT_STEP_ONE_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded, "generated index must not occupy the per-key suffix space")
+}
+
+func TestOutputNamesIndexEnv(t *testing.T) {
+	assert.Equal(t, "CAESIUM_OUTPUT_NAME_INDEX_APPLY_NETWORK", OutputNamesIndexEnv("apply-network"))
+	assert.Equal(t, "CAESIUM_OUTPUT_NAME_INDEX_STEP_ONE", OutputNamesIndexEnv("step.one"))
+}
+
+func TestEncodeOutputNamesIndex_OmitsIdentityMaps(t *testing.T) {
+	encoded, err := EncodeOutputNamesIndex(map[string]string{
+		"row_count": "42",
+		"path":      "/data/out.parquet",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, encoded, "snake_case keys already survive the fold; emitting an index would churn cache keys")
+}
+
+func TestEncodeOutputNamesIndex_MapsFoldedKeys(t *testing.T) {
+	encoded, err := EncodeOutputNamesIndex(map[string]string{
+		"vpcId":                "vpc-1",
+		"db-url":               "postgres://db",
+		"dot.key":              "v",
+		"greeting":             "hello",
+		"caesium_output_names": `{"stale":"index"}`,
+	})
+	require.NoError(t, err)
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(encoded), &index))
+	assert.Equal(t, map[string]string{
+		"VPCID":                "vpcId",
+		"DB_URL":               "db-url",
+		"DOT_KEY":              "dot.key",
+		"GREETING":             "greeting",
+		"CAESIUM_OUTPUT_NAMES": "caesium_output_names",
+	}, index)
+}
+
+func TestEncodeOutputNamesIndex_RejectsFoldedCollision(t *testing.T) {
+	_, err := EncodeOutputNamesIndex(map[string]string{
+		"vpc-id": "dash",
+		"vpc_id": "underscore",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VPC_ID")
+	assert.Contains(t, err.Error(), `"vpc-id"`)
+	assert.Contains(t, err.Error(), `"vpc_id"`)
+}
+
+func TestBuildOutputEnv_OutputNamesIndexRoundTrip(t *testing.T) {
+	predOutputs := map[string]map[string]string{
+		"apply-network": {
+			"vpcId":    "vpc-1",
+			"db-url":   "postgres://db",
+			"dot.key":  "v",
+			"greeting": "hello",
+		},
+		"apply-account": {
+			"account_id": "acct-1",
+		},
+	}
+	env := mustBuildOutputEnv(t, predOutputs)
+
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	assert.Equal(t, "postgres://db", env["CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL"])
+	assert.Equal(t, "v", env["CAESIUM_OUTPUT_APPLY_NETWORK_DOT_KEY"])
+	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_APPLY_NETWORK_GREETING"])
+	assert.Equal(t, "acct-1", env["CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID"])
+
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, "db-url", index["DB_URL"])
+	assert.Equal(t, "dot.key", index["DOT_KEY"])
+	assert.Equal(t, "greeting", index["GREETING"])
+
+	_, hasFolded := env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded, "generated index must not occupy CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES")
+	_, hasAccountIndex := env[OutputNamesIndexEnv("apply-account")]
+	assert.False(t, hasAccountIndex, "an identity map must not grow an extra env var (cache key churn)")
+}
+
+func TestBuildOutputEnv_ForwardsOrdinaryOutputNamesValueAndIndexesIt(t *testing.T) {
+	env := mustBuildOutputEnv(t, map[string]map[string]string{
+		"apply-network": {
+			"vpcId":                     "vpc-1",
+			"caesium_output_names":      `{"VPCID":"application-data"}`,
+			"caesium_outputs_published": "1",
+		},
+	})
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	assert.Equal(t, `{"VPCID":"application-data"}`, env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
+		"caesium_output_names is application data, not a folded metadata channel")
+	assert.Equal(t, "1", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED"])
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, "caesium_output_names", index["CAESIUM_OUTPUT_NAMES"])
+}
+
+func TestParseOutput_OutputNamesScalarAccepted(t *testing.T) {
+	result, err := ParseOutput(strings.NewReader(`##caesium::output {"caesium_output_names":"hello"}` + "\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"caesium_output_names": "hello"}, result)
+}
+
+func TestParseMarkers_OutputNamesScalarAccepted(t *testing.T) {
+	m, err := ParseMarkers(strings.NewReader(`##caesium::output {"caesium_output_names":"hello","ok":"kept"}` + "\n"))
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, "hello", m.Output["caesium_output_names"])
+	assert.Equal(t, "kept", m.Output["ok"])
+}
+
+func TestParseOutput_OutputNamesIndexStringStored(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output {"vpcId":"vpc-1","caesium_output_names":"{\"VPCID\":\"vpcId\"}"}` + "\n")
+	result, err := ParseOutput(logs)
+	require.NoError(t, err)
+	assert.Equal(t, "vpc-1", result["vpcId"])
+	assert.Equal(t, `{"VPCID":"vpcId"}`, result["caesium_output_names"])
+}
+
+func TestParseOutput_OutputNamesNestedObjectDropped(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output {"vpcId":"vpc-1","caesium_output_names":{"VPCID":"vpcId"}}` + "\n")
+	result, err := ParseOutput(logs)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"vpcId": "vpc-1"}, result)
+	assert.NotContains(t, result, "caesium_output_names")
+}
+
+func TestParseOutput_OutputNamesRefAccepted(t *testing.T) {
+	line := `##caesium::output-ref {"key":"caesium_output_names","path":"/p","digest":"` + testDigest + `"}` + "\n"
+	result, err := ParseOutput(strings.NewReader(line))
+	require.NoError(t, err)
+	ref, ok := DecodeOutputRef(result["caesium_output_names"])
+	require.True(t, ok)
+	assert.Equal(t, "/p", ref.Path)
+	assert.Equal(t, testDigest, ref.Digest)
+}
+
+func TestBuildOutputEnv_ForwardsUserOutputNamesScalar(t *testing.T) {
+	env := mustBuildOutputEnv(t, map[string]map[string]string{
+		"extract": {
+			"row_count":            "42",
+			"caesium_output_names": "hello",
+		},
+	})
+	assert.Equal(t, "42", env["CAESIUM_OUTPUT_EXTRACT_ROW_COUNT"])
+	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_EXTRACT_CAESIUM_OUTPUT_NAMES"],
+		"a user scalar at caesium_output_names must be forwarded")
+	_, hasIndex := env[OutputNamesIndexEnv("extract")]
+	assert.False(t, hasIndex, "snake_case-only maps must omit the dedicated index")
+}
+
+func TestBuildOutputEnv_UserOutputNamesPlusMixedCasePreservesBoth(t *testing.T) {
+	env := mustBuildOutputEnv(t, map[string]map[string]string{
+		"apply-network": {
+			"vpcId":                "vpc-1",
+			"caesium_output_names": "hello",
+		},
+	})
+	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
+	assert.Equal(t, "hello", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
+		"user scalar must not be overwritten by the generated index")
+	var index map[string]string
+	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
+	assert.Equal(t, "vpcId", index["VPCID"])
+	assert.Equal(t, "caesium_output_names", index["CAESIUM_OUTPUT_NAMES"])
+}
+
+func TestBuildOutputEnv_SnakeCaseOmitsSidecar(t *testing.T) {
+	env := mustBuildOutputEnv(t, map[string]map[string]string{
+		"extract": {"row_count": "42", "path": "/data/out.parquet"},
+	})
+	_, hasDedicated := env[OutputNamesIndexEnv("extract")]
+	assert.False(t, hasDedicated, "snake_case-only maps must omit the sidecar so cache keys stay stable")
+	_, hasFolded := env["CAESIUM_OUTPUT_EXTRACT_CAESIUM_OUTPUT_NAMES"]
+	assert.False(t, hasFolded)
+}
+
+func TestBuildOutputEnv_RejectsReferenceDigestCollision(t *testing.T) {
+	ref := OutputRef{Ref: outputRefVersion, Path: "/data/out", Digest: testDigest}
+	_, err := BuildOutputEnv(map[string]map[string]string{
+		"extract": {
+			"artifact":        ref.Encode(),
+			"artifact_digest": "application-value",
+			"vpcId":           "vpc-1",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CAESIUM_OUTPUT_EXTRACT_ARTIFACT_DIGEST")
 }
 
 // ── ParseBranches tests ─────────────────────────────────────────────

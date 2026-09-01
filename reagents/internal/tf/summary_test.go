@@ -305,50 +305,54 @@ func TestPublishableOutputsWithholdsEverySensitiveOutput(t *testing.T) {
 	}
 }
 
-// The cross-stack transport is lossy: Caesium uppercases an output key and maps
-// "-"/"." to "_", and the importing step lowercases it back. A name that does
-// not survive that trip arrives as a DIFFERENT Terraform variable, an
-// undeclared TF_VAR_ is silently ignored, and the consumer plans against a
-// default — a green run built on inputs nobody supplied.
-func TestPublishableOutputsRejectsNamesTheTransportMangles(t *testing.T) {
+// Mixed case and dashes used to be refused because the env fold was lossy.
+// The name index makes those round-trips exact, so they must publish.
+func TestPublishableOutputsAcceptsNamesTheIndexRecovers(t *testing.T) {
+	values, _, err := PublishableOutputs(map[string]tfexec.OutputMeta{
+		"vpcId":  {Value: json.RawMessage(`"vpc-1"`)},
+		"db-url": {Value: json.RawMessage(`"postgres://db"`)},
+		"VPC_ID": {Value: json.RawMessage(`"vpc-2"`)},
+	})
+	if err != nil {
+		t.Fatalf("identifier names the index can recover were refused: %v", err)
+	}
+	if values["vpcId"] != "vpc-1" || values["db-url"] != "postgres://db" || values["VPC_ID"] != "vpc-2" {
+		t.Fatalf("published values = %v", values)
+	}
+}
+
+// Names that cannot be imported exactly are still refused: a collision after
+// folding cannot be disambiguated by the index, and a non-identifier cannot
+// become TF_VAR_<name>.
+func TestPublishableOutputsRejectsUnimportableNames(t *testing.T) {
 	cases := map[string]struct {
 		outputs map[string]tfexec.OutputMeta
 		want    string
 	}{
-		"camelCase": {
-			outputs: map[string]tfexec.OutputMeta{"vpcId": {Value: json.RawMessage(`"vpc-1"`)}},
-			want:    "TF_VAR_vpcid",
-		},
-		"a dash": {
-			outputs: map[string]tfexec.OutputMeta{"vpc-id": {Value: json.RawMessage(`"vpc-1"`)}},
-			want:    "TF_VAR_vpc_id",
-		},
 		"a dot": {
 			outputs: map[string]tfexec.OutputMeta{"vpc.id": {Value: json.RawMessage(`"vpc-1"`)}},
-			want:    "TF_VAR_vpc_id",
+			want:    "TF_VAR_vpc.id",
 		},
-		"upper case": {
-			outputs: map[string]tfexec.OutputMeta{"VPC_ID": {Value: json.RawMessage(`"vpc-1"`)}},
-			want:    "TF_VAR_vpc_id",
+		"non-ASCII": {
+			outputs: map[string]tfexec.OutputMeta{"café": {Value: json.RawMessage(`"vpc-1"`)}},
+			want:    "café",
 		},
 		// Two names that fold together: whichever value wins would be decided by
-		// os.Environ() ordering.
+		// os.Environ() ordering. The index cannot split one env var into two.
 		"a normalized collision": {
 			outputs: map[string]tfexec.OutputMeta{
 				"vpc-id": {Value: json.RawMessage(`"from-dash"`)},
 				"vpc_id": {Value: json.RawMessage(`"from-underscore"`)},
 			},
-			want: "TF_VAR_vpc_id",
+			want: "VPC_ID",
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			values, _, err := PublishableOutputs(tc.outputs)
 			if err == nil {
-				t.Fatalf("a name the transport mangles was published anyway: %v", values)
+				t.Fatalf("an unimportable name was published anyway: %v", values)
 			}
-			// The message has to name the variable the consumer would actually
-			// have read, or the operator cannot see what went wrong.
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("the failure does not mention %s: %v", tc.want, err)
 			}
@@ -388,11 +392,17 @@ func TestPlannedPublishableOutputNames(t *testing.T) {
 	if err := CheckOutputNames(PlannedPublishableOutputNames(plan)); err != nil {
 		t.Fatalf("a plan with ordinary snake_case outputs was refused: %v", err)
 	}
-	bad := &tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
+	camel := &tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
 		"vpcId": {AfterSensitive: yes(false)},
 	}}
+	if err := CheckOutputNames(PlannedPublishableOutputNames(camel)); err != nil {
+		t.Fatalf("a plan publishing vpcId was refused; the name index recovers it: %v", err)
+	}
+	bad := &tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
+		"vpc.id": {AfterSensitive: yes(false)},
+	}}
 	if err := CheckOutputNames(PlannedPublishableOutputNames(bad)); err == nil {
-		t.Fatal("a plan publishing vpcId was accepted before apply")
+		t.Fatal("a plan publishing vpc.id was accepted before apply")
 	}
 }
 
@@ -492,7 +502,7 @@ func TestStripSensitiveKeepsOutputNamesAndActionsButNoOutputValues(t *testing.T)
 }
 
 func TestExportVariableRejectsAnythingThatIsNotAVariableName(t *testing.T) {
-	for _, bad := range []string{"", "1leading", "has space", "has=equals", "has\nnewline", "-flag"} {
+	for _, bad := range []string{"", "1leading", "has space", "has=equals", "has\nnewline", "-flag", "vpc.id"} {
 		if err := ExportVariable(bad, "x"); err == nil {
 			t.Fatalf("ExportVariable accepted %q", bad)
 		}
@@ -500,5 +510,38 @@ func TestExportVariableRejectsAnythingThatIsNotAVariableName(t *testing.T) {
 	t.Setenv("TF_VAR_ok_name", "")
 	if err := ExportVariable("ok_name", "value"); err != nil {
 		t.Fatalf("ExportVariable: %v", err)
+	}
+}
+
+func TestExportVariableAcceptsMixedCaseAndHyphens(t *testing.T) {
+	for _, name := range []string{"vpcId", "vpc-id", "VPC_ID"} {
+		t.Setenv("TF_VAR_"+name, "")
+		if err := ExportVariable(name, "value"); err != nil {
+			t.Fatalf("ExportVariable(%q): %v", name, err)
+		}
+	}
+}
+
+func TestOutputNamesIndexEnv(t *testing.T) {
+	if got := OutputNamesIndexEnv("apply-network"); got != "CAESIUM_OUTPUT_NAME_INDEX_APPLY_NETWORK" {
+		t.Fatalf("OutputNamesIndexEnv = %q", got)
+	}
+}
+
+func TestOutputNamesNeedIndex(t *testing.T) {
+	if OutputNamesNeedIndex(map[string]string{"vpc_id": "vpc-1", "count2": "2"}) {
+		t.Fatal("snake_case output names do not need an index")
+	}
+	for _, name := range []string{"vpcId", "db-url", "VPC_ID"} {
+		if !OutputNamesNeedIndex(map[string]string{name: "value"}) {
+			t.Fatalf("%q needs an index", name)
+		}
+	}
+}
+
+func TestCheckOutputNamesRejectsIndexRequiredSentinel(t *testing.T) {
+	err := CheckOutputNames([]string{OutputNamesIndexRequiredKey})
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("want reserved-name refusal, got %v", err)
 	}
 }
