@@ -55,6 +55,9 @@ type fanOutJob struct {
 	// scenario that needs the producer to re-emit its list every run must turn
 	// its cache off explicitly.
 	ProducerCacheDisabled bool
+	// ConsumerCache, when set, is written as the process step's `cache:` mapping
+	// (one YAML key per line, e.g. "chain: values"). Empty inherits metadata.cache.
+	ConsumerCache string
 	// ProducerCmd and ConsumerCmd are shell scripts run under `sh -c`.
 	ProducerCmd string
 	ConsumerCmd string
@@ -95,6 +98,12 @@ func fanOutManifest(j fanOutJob) string {
 	b.WriteString("  - name: process\n")
 	b.WriteString("    image: alpine:3.23\n")
 	b.WriteString(shellCommandBlock(j.ConsumerCmd, 4))
+	if j.ConsumerCache != "" {
+		b.WriteString("    cache:\n")
+		for _, line := range strings.Split(strings.TrimSpace(j.ConsumerCache), "\n") {
+			fmt.Fprintf(&b, "      %s\n", strings.TrimSpace(line))
+		}
+	}
 	b.WriteString("    dependsOn: [list]\n")
 	b.WriteString("    fanOut:\n")
 	b.WriteString("      from: list\n")
@@ -580,13 +589,14 @@ func TestFanOutManifestOmittedKnobsResolveToSchemaDefaults(t *testing.T) {
 		"an omitted onEmpty must normalize to skip at parse time")
 }
 
-// TestFanOutManifestCacheKnobsAreIndependent pins the two producer-cache shapes
-// apart, because the fan-out cache scenarios differ ONLY in this one line and
-// swapping them silently turns one scenario into a duplicate of the other:
+// TestFanOutManifestCacheKnobsAreIndependent pins the cache shapes apart,
+// because the fan-out cache scenarios differ ONLY in these lines and swapping
+// them silently turns one scenario into a duplicate of another:
 // TestFanOutPerPartitionCacheIdentity needs the producer's cache OFF (so it
-// re-emits its list every run and contributes no predecessor hash), while
+// re-emits its list every run and contributes no predecessor hash),
 // TestFanOutCachedProducerExpandsGroup needs it ON (a warm producer must still
-// expand its consumer's group).
+// expand its consumer's group), and TestFanOutValuesChainPerPartitionSkip needs
+// JobCache ON plus `chain: values` on the consumer.
 func TestFanOutManifestCacheKnobsAreIndependent(t *testing.T) {
 	cacheable := fanOutManifest(fanOutJob{
 		Alias:       "builder-cacheable",
@@ -608,10 +618,21 @@ func TestFanOutManifestCacheKnobsAreIndependent(t *testing.T) {
 	require.Contains(t, disabled, "    cache: false",
 		"the override must land on the producer step, indented under it:\n%s", disabled)
 
+	values := fanOutManifest(fanOutJob{
+		Alias:         "builder-chain-values",
+		JobCache:      true,
+		ConsumerCache: "chain: values",
+		ProducerCmd:   `echo '##caesium::partitions ["a"]'`,
+		ConsumerCmd:   "echo ok",
+	})
+	require.Contains(t, values, "    cache:\n      chain: values\n",
+		"consumer chain: values must land on the process step:\n%s", values)
+	require.NotContains(t, values, "cache: false")
+
 	// Both must still be valid jobs — a `cache:` key in the wrong place parses
 	// as a different field or fails validation, and the failure would otherwise
 	// surface as `job apply` breaking inside every fan-out lane.
-	for name, manifest := range map[string]string{"cacheable": cacheable, "disabled": disabled} {
+	for name, manifest := range map[string]string{"cacheable": cacheable, "disabled": disabled, "values": values} {
 		if _, err := schema.Parse([]byte(manifest)); err != nil {
 			t.Fatalf("%s manifest is not a valid job: %v\n%s", name, err, manifest)
 		}

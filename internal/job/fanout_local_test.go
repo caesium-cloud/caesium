@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -119,11 +120,34 @@ func newFanOutFixture(t *testing.T, partitions string, fo *schema.FanOut, retrie
 // a step-level override is the hermetic way to exercise the cache path.
 func (f *fanOutFixture) enableStepCache(t *testing.T) {
 	t.Helper()
-	cfg := datatypes.JSON("true")
+	f.setFannedCacheConfig(t, datatypes.JSON("true"))
+}
+
+// enableStepCacheChain turns on step-level caching for the fanned step with an
+// explicit cache.chain. The map form also sets Enabled (applyCache), matching
+// a manifest that writes `cache: {chain: values}` rather than `cache: true`.
+func (f *fanOutFixture) enableStepCacheChain(t *testing.T, chain string) {
+	t.Helper()
+	f.setFannedCacheConfig(t, datatypes.JSON(fmt.Sprintf(`{"chain":%q}`, chain)))
+}
+
+func (f *fanOutFixture) setFannedCacheConfig(t *testing.T, cfg datatypes.JSON) {
+	t.Helper()
 	f.taskSvc.tasks[1].CacheConfig = cfg
 	require.NoError(t, f.db.Model(&models.Task{}).
 		Where("id = ?", f.fanned).
 		Update("cache_config", cfg).Error)
+}
+
+// setProducerCommand rewrites the listing step's atom command so the next run
+// computes a different producer identity hash. Used to churn predecessor
+// identity without touching the emitted partition fingerprints.
+func (f *fanOutFixture) setProducerCommand(t *testing.T, commandJSON string) {
+	t.Helper()
+	atomID := f.taskSvc.tasks[0].AtomID
+	atom := f.atomSvc.atoms[atomID]
+	require.NotNil(t, atom, "producer atom must be in the fake catalog")
+	atom.Command = commandJSON
 }
 
 // enableProducerCache turns on step-level caching for the `list` producer so a
@@ -384,6 +408,153 @@ func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
 	withPartition.PartitionFingerprint = ""
 	require.Equal(t, unfanned, withPartition,
 		"partition fields must be the only delta between the two paths")
+}
+
+func localPartitionFingerprint(hexByte string) string {
+	return "sha256:" + strings.Repeat(hexByte, 32)
+}
+
+func structuredPartitionList(fpA, fpB, fpC string) string {
+	return fmt.Sprintf(
+		`[{"key":"a","fingerprint":%q},{"key":"b","fingerprint":%q},{"key":"c","fingerprint":%q}]`,
+		fpA, fpB, fpC)
+}
+
+func producerStatus(t *testing.T, f *fanOutFixture, runID uuid.UUID) string {
+	t.Helper()
+	var row models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", runID, f.producer).First(&row).Error)
+	return row.Status
+}
+
+func instanceStatusByPartition(t *testing.T, f *fanOutFixture, runID uuid.UUID) map[string]string {
+	t.Helper()
+	return statusByPartition(f.instanceRowsFor(t, runID))
+}
+
+// TestFanOutLocalValuesChainSkipsUnchangedPartitions is the local-lane half of
+// issue #360: with cache.chain: values on the fanned consumer, a producer
+// re-run that changes only some fingerprints re-executes exactly those
+// instances. The producer is cache-enabled so it records an identity hash;
+// without that, there is no predecessor-hash churn for values mode to exclude
+// and the skip would be vacuously true (the TestFanOutPerPartitionCacheIdentity
+// workaround).
+func TestFanOutLocalValuesChainSkipsUnchangedPartitions(t *testing.T) {
+	fpA := localPartitionFingerprint("a1")
+	fpB := localPartitionFingerprint("b2")
+	fpC := localPartitionFingerprint("c3")
+	fpBPrime := localPartitionFingerprint("d4")
+
+	f := newFanOutFixture(t, structuredPartitionList(fpA, fpB, fpC), &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+	}, 0)
+	f.enableProducerCache(t)
+	f.enableStepCacheChain(t, schema.CacheChainValues)
+
+	before1 := f.runIDs(t)
+	require.NoError(t, f.run(t, defaultFanOutVars()))
+	run1 := f.newRunIDSince(t, before1)
+	require.Equal(t, string(run.TaskStatusSucceeded), producerStatus(t, f, run1))
+	got1 := instanceStatusByPartition(t, f, run1)
+	require.Equal(t, map[string]string{
+		"a": string(run.TaskStatusSucceeded),
+		"b": string(run.TaskStatusSucceeded),
+		"c": string(run.TaskStatusSucceeded),
+	}, got1)
+	for _, p := range []string{"a", "b", "c"} {
+		require.Equal(t, 1, f.engine.createCount(p), "run 1 partition %s must execute cold", p)
+	}
+
+	// Producer identity churns (command moved); emitted fingerprints do not.
+	// Under chain: values every instance must cache-hit — this is the skip the
+	// feature exists for. The producer itself must re-execute, or the later
+	// assertions cannot distinguish "values mode worked" from "the producer
+	// never actually re-ran".
+	f.setProducerCommand(t, `["echo","ok","r2"]`)
+	before2 := f.runIDs(t)
+	require.NoError(t, f.run(t, defaultFanOutVars()))
+	run2 := f.newRunIDSince(t, before2)
+	require.Equal(t, string(run.TaskStatusSucceeded), producerStatus(t, f, run2),
+		"the producer command changed, so it must re-execute rather than cache-hit")
+	got2 := instanceStatusByPartition(t, f, run2)
+	require.Equal(t, map[string]string{
+		"a": string(run.TaskStatusCached),
+		"b": string(run.TaskStatusCached),
+		"c": string(run.TaskStatusCached),
+	}, got2, "unchanged key+fingerprint+outputs must hit under chain: values")
+	for _, p := range []string{"a", "b", "c"} {
+		require.Equal(t, 1, f.engine.createCount(p),
+			"run 2 partition %s must not re-execute: %v", p, got2)
+	}
+
+	// Fingerprint of b moves. Fingerprints are authoritative: b misses even
+	// though the key and the (empty) predecessor outputs look the same.
+	f.setProducerCommand(t, `["echo","ok","r3"]`)
+	f.engine.logsByName[f.producer.String()] = "##caesium::partitions " + structuredPartitionList(fpA, fpBPrime, fpC) + "\n"
+	before3 := f.runIDs(t)
+	require.NoError(t, f.run(t, defaultFanOutVars()))
+	run3 := f.newRunIDSince(t, before3)
+	require.Equal(t, string(run.TaskStatusSucceeded), producerStatus(t, f, run3))
+	got3 := instanceStatusByPartition(t, f, run3)
+	require.Equal(t, map[string]string{
+		"a": string(run.TaskStatusCached),
+		"b": string(run.TaskStatusSucceeded),
+		"c": string(run.TaskStatusCached),
+	}, got3, "exactly the re-fingerprinted partition must re-execute")
+	require.Equal(t, 1, f.engine.createCount("a"))
+	require.Equal(t, 2, f.engine.createCount("b"), "partition b must re-execute on the fingerprint change")
+	require.Equal(t, 1, f.engine.createCount("c"))
+
+	var bRow models.TaskRun
+	for _, r := range f.instanceRowsFor(t, run3) {
+		if r.PartitionValue == "b" {
+			bRow = r
+			break
+		}
+	}
+	require.Equal(t, fpBPrime, bRow.PartitionFingerprint,
+		"the instance row must record the fingerprint it was keyed by")
+}
+
+// TestFanOutLocalTransitiveChainRerunsAllOnProducerChurn is the no-regression
+// half: the default chain still re-runs every instance when the producer
+// identity moves, even if every fingerprint is unchanged. If this started
+// skipping, TestFanOutLocalValuesChainSkipsUnchangedPartitions would no longer
+// be proving the chain break.
+func TestFanOutLocalTransitiveChainRerunsAllOnProducerChurn(t *testing.T) {
+	fpA := localPartitionFingerprint("a1")
+	fpB := localPartitionFingerprint("b2")
+	fpC := localPartitionFingerprint("c3")
+
+	f := newFanOutFixture(t, structuredPartitionList(fpA, fpB, fpC), &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+	}, 0)
+	f.enableProducerCache(t)
+	f.enableStepCache(t) // boolean true → chain defaults to transitive
+
+	before1 := f.runIDs(t)
+	require.NoError(t, f.run(t, defaultFanOutVars()))
+	run1 := f.newRunIDSince(t, before1)
+	require.Equal(t, string(run.TaskStatusSucceeded), producerStatus(t, f, run1))
+
+	f.setProducerCommand(t, `["echo","ok","r2"]`)
+	before2 := f.runIDs(t)
+	require.NoError(t, f.run(t, defaultFanOutVars()))
+	run2 := f.newRunIDSince(t, before2)
+	require.Equal(t, string(run.TaskStatusSucceeded), producerStatus(t, f, run2),
+		"the producer command changed, so it must re-execute")
+	got2 := instanceStatusByPartition(t, f, run2)
+	require.Equal(t, map[string]string{
+		"a": string(run.TaskStatusSucceeded),
+		"b": string(run.TaskStatusSucceeded),
+		"c": string(run.TaskStatusSucceeded),
+	}, got2, "default chain must re-run every instance when the producer identity moves")
+	for _, p := range []string{"a", "b", "c"} {
+		require.Equal(t, 2, f.engine.createCount(p),
+			"transitive partition %s must re-execute after producer churn", p)
+	}
 }
 
 // --- (d) per-instance retries ------------------------------------------------

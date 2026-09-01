@@ -965,6 +965,10 @@ func (s *IntegrationTestSuite) TestFanOutIdenticalDuplicatePartitionDedups() {
 //     list does NOT re-key the consumer — which is exactly what makes
 //     "only the changed partition misses" observable instead of "everything
 //     misses because the producer changed".
+//
+// The producer-cache-ON composition — `cache.chain: values` on the consumer,
+// only the changed fingerprints miss across a producer re-run — is
+// TestFanOutValuesChainPerPartitionSkip.
 func (s *IntegrationTestSuite) TestFanOutPerPartitionCacheIdentity() {
 	alias := fmt.Sprintf("fanout-cache-identity-%d", time.Now().UnixNano())
 	producer := func(fingerprintForB string) string {
@@ -1027,6 +1031,257 @@ func (s *IntegrationTestSuite) TestFanOutPerPartitionCacheIdentity() {
 	s.Equal("cached", statuses3["c"], "an unchanged partition must stay a hit: %v", statuses3)
 	s.Equal(fingerprintBPrime, partitionsByValue(parts3)["b"].Fingerprint,
 		"the instance row must record the fingerprint it was keyed by")
+}
+
+// valueSkipProducerCmd is the listing step for TestFanOutValuesChainPerPartitionSkip.
+// `revision` is echoed (not a structured output) so it churns the producer's
+// own identity without changing PredecessorOutputs. An empty token emits NO
+// ##caesium::output on purpose: EquivalentPriorHash refuses to short-circuit a
+// silent step, so predecessor-hash churn is real and chain: values is what
+// stops it cascading into every instance. A non-empty token lets the same live
+// scenario prove that predecessor outputs still invalidate every instance.
+func valueSkipProducerCmd(revision, fingerprintForB, attributeForC, token string) string {
+	lines := []string{fmt.Sprintf("echo warming revision=%s", revision)}
+	if token != "" {
+		lines = append(lines, fmt.Sprintf(`echo '##caesium::output {"token":%q}'`, token))
+	}
+	lines = append(lines, fmt.Sprintf(
+		`echo '##caesium::partitions [{"key":"a","fingerprint":%q,"root":"root-a"},{"key":"b","fingerprint":%q,"root":"root-b"},{"key":"c","fingerprint":%q,"root":%q}]'`,
+		fingerprintA, fingerprintForB, fingerprintC, attributeForC))
+	return strings.Join(lines, "\n")
+}
+
+// assertPartitionExecutionLogs proves the cache status through the container's
+// real observable surface. Executed instances print the current run ID and
+// therefore have a persisted log snapshot; cache hits launch no container and
+// have no snapshot on the new TaskRun row. A status-only assertion could stay
+// green if execution happened and the row was projected as cached afterward.
+func (s *IntegrationTestSuite) assertPartitionExecutionLogs(
+	jobID string,
+	run *runResponse,
+	taskID string,
+	executed map[string]bool,
+) {
+	s.T().Helper()
+	instances := partitionsByValue(s.expandedPartitions(s.listPartitions(jobID, run.ID, taskID)))
+	s.Require().Len(instances, 3)
+	for _, partition := range []string{"a", "b", "c"} {
+		instance, ok := instances[partition]
+		s.Require().True(ok, "run %s has no partition %s", run.ID, partition)
+		s.Require().NotEmpty(instance.TaskRunID)
+		resp, err := s.doJSONRequest(http.MethodGet, fmt.Sprintf(
+			"%s/v1/jobs/%s/runs/%s/logs?task_id=%s&task_run_id=%s",
+			s.caesiumURL, jobID, run.ID, taskID, instance.TaskRunID), nil)
+		s.Require().NoError(err)
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		s.Require().NoError(readErr)
+		s.Equal(instance.TaskRunID, resp.Header.Get("X-Caesium-Task-Run-ID"),
+			"log response must name this run's exact partition instance")
+		s.Equal(partition, resp.Header.Get("X-Caesium-Partition"))
+
+		if executed[partition] {
+			s.Require().Equal(http.StatusOK, resp.StatusCode,
+				"partition %s should have an execution log: %s", partition, body)
+			s.Equal("persisted", resp.Header.Get("X-Caesium-Log-Source"))
+			s.Contains(string(body), "executed_run="+run.ID,
+				"partition %s did not expose this run's real container execution: %s", partition, body)
+			continue
+		}
+
+		s.Require().Equal(http.StatusNoContent, resp.StatusCode,
+			"cached partition %s unexpectedly has a container log: %s", partition, body)
+		s.Equal("empty", resp.Header.Get("X-Caesium-Log-State"))
+		s.Empty(body, "cached partition %s must not have executed a container", partition)
+	}
+}
+
+// TestFanOutValuesChainPerPartitionSkip is issue #360's acceptance: with
+// cache.chain: values on the fanned consumer, a producer re-run that changes
+// only some partition fingerprints re-executes exactly those instances.
+//
+// Contrast TestFanOutPerPartitionCacheIdentity, which pins `cache: false` on
+// the producer so it contributes no predecessor hash at all. That proves
+// fingerprints enter the key; this proves the chain break makes them
+// *effective* across a cache-enabled producer whose own inputs moved.
+func (s *IntegrationTestSuite) TestFanOutValuesChainPerPartitionSkip() {
+	alias := fmt.Sprintf("fanout-values-skip-%d", time.Now().UnixNano())
+	job := fanOutJob{
+		Alias:    alias,
+		JobCache: true,
+		// Producer cache stays ON so the producer records an identity hash.
+		// Without that there is no predecessor-hash churn for values mode to
+		// exclude, and a green test would not distinguish the chain break from
+		// the cache-off workaround.
+		ConsumerCache: "chain: values",
+		ProducerCmd:   valueSkipProducerCmd("r1", fingerprintB, "root-c-v1", ""),
+		ConsumerCmd:   "echo partition=$CAESIUM_PARTITION json=$CAESIUM_PARTITION_JSON executed_run=$CAESIUM_RUN_ID",
+	}
+
+	dir := s.writeJobManifest(fanOutManifest(job))
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	jobEntry := s.requireJobByAlias(alias)
+
+	// Run 1 — cold: producer and every instance execute.
+	run1 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run1.Status, "run 1 failed: %s", run1.Error)
+	s.Equal("succeeded", s.taskStatusesByName(jobEntry.ID, run1)["list"],
+		"run 1 producer must execute cold")
+	statuses1 := partitionStatusMap(s.expandedPartitions(s.listPartitions(jobEntry.ID, run1.ID, "process")))
+	s.Require().Len(statuses1, 3)
+	for _, value := range []string{"a", "b", "c"} {
+		s.Equal("succeeded", statuses1[value], "run 1 partition %s should execute cold: %v", value, statuses1)
+	}
+	processID := s.jobTaskIDByName(jobEntry.ID, "process")
+	s.assertPartitionExecutionLogs(jobEntry.ID, run1, processID, map[string]bool{"a": true, "b": true, "c": true})
+
+	// Run 2 — identical inputs: producer and every instance are hits.
+	run2 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run2.Status, "run 2 failed: %s", run2.Error)
+	s.Equal("cached", s.taskStatusesByName(jobEntry.ID, run2)["list"],
+		"run 2 producer must cache-hit, or later assertions prove nothing about chain: values")
+	statuses2 := partitionStatusMap(s.expandedPartitions(s.listPartitions(jobEntry.ID, run2.ID, "process")))
+	s.Require().Len(statuses2, 3)
+	for _, value := range []string{"a", "b", "c"} {
+		s.Equal("cached", statuses2[value], "run 2 partition %s should be a cache hit: %v", value, statuses2)
+	}
+	s.assertPartitionExecutionLogs(jobEntry.ID, run2, processID, map[string]bool{})
+
+	// Run 3 — producer identity churns (revision in the command); fingerprints
+	// and consumed outputs do not. The producer re-executes; every instance
+	// must stay cached. That is the skip chain: values exists for.
+	s.overwriteJobManifest(dir, fanOutManifest(func() fanOutJob {
+		changed := job
+		changed.ProducerCmd = valueSkipProducerCmd("r2-edited", fingerprintB, "root-c-v1", "")
+		return changed
+	}()))
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run3 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run3.Status, "run 3 failed: %s", run3.Error)
+	s.Equal("succeeded", s.taskStatusesByName(jobEntry.ID, run3)["list"],
+		"run 3: the producer's own identity changed, so it must re-execute — "+
+			"if this is cached, the scenario proves nothing")
+	statuses3 := partitionStatusMap(s.expandedPartitions(s.listPartitions(jobEntry.ID, run3.ID, "process")))
+	s.Require().Len(statuses3, 3)
+	for _, value := range []string{"a", "b", "c"} {
+		s.Equal("cached", statuses3[value],
+			"run 3 partition %s must cache-hit under chain: values after producer churn: %v", value, statuses3)
+	}
+	s.assertPartitionExecutionLogs(jobEntry.ID, run3, processID, map[string]bool{})
+
+	whyA := s.parseChainWhyPartition(jobEntry.ID, run3.ID, "process", "a")
+	s.Equal("CACHE_HIT", whyA.Verdict)
+	s.Require().NotNil(whyA.Diff)
+	s.True(whyA.Diff.HashEqual, "an unchanged partition's hashes must be equal")
+	s.Contains(whyA.Diff.Notes, "predecessor hashes excluded (chain: values)",
+		"why --partition must name the exclusion, got %+v", whyA.Diff.Notes)
+
+	// Run 4 — fingerprint of b changes. Fingerprints stay authoritative: b
+	// re-executes even though the key and the (empty) predecessor outputs look
+	// the same. a and c stay hits.
+	s.overwriteJobManifest(dir, fanOutManifest(func() fanOutJob {
+		changed := job
+		changed.ProducerCmd = valueSkipProducerCmd("r2-edited", fingerprintBPrime, "root-c-v1", "")
+		return changed
+	}()))
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run4 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run4.Status, "run 4 failed: %s", run4.Error)
+	s.Equal("succeeded", s.taskStatusesByName(jobEntry.ID, run4)["list"],
+		"run 4: the emitted list changed, so the producer must re-execute")
+	parts4 := s.expandedPartitions(s.listPartitions(jobEntry.ID, run4.ID, "process"))
+	statuses4 := partitionStatusMap(parts4)
+	s.Require().Len(statuses4, 3)
+	s.Equal("succeeded", statuses4["b"], "the re-fingerprinted partition must re-execute: %v", statuses4)
+	s.Equal("cached", statuses4["a"], "an unchanged partition must stay a hit: %v", statuses4)
+	s.Equal("cached", statuses4["c"], "an unchanged partition must stay a hit: %v", statuses4)
+	s.Equal(fingerprintBPrime, partitionsByValue(parts4)["b"].Fingerprint,
+		"the instance row must record the fingerprint it was keyed by")
+	s.assertPartitionExecutionLogs(jobEntry.ID, run4, processID, map[string]bool{"b": true})
+
+	whyB := s.parseChainWhyPartition(jobEntry.ID, run4.ID, "process", "b")
+	s.Equal("CACHE_MISS", whyB.Verdict)
+	s.Require().NotNil(whyB.Diff)
+	foundFingerprint := false
+	for _, c := range whyB.Diff.Changes {
+		if c.Field == "partitionFingerprint" {
+			foundFingerprint = true
+		}
+	}
+	s.True(foundFingerprint,
+		"the miss must be attributed to the changed fingerprint, got %+v", whyB.Diff.Changes)
+
+	// Run 5 — the producer adds a scalar output while every partition identity
+	// stays fixed. values mode excludes only predecessor HASHES, never outputs:
+	// every instance must execute, including in the distributed worker lanes.
+	s.overwriteJobManifest(dir, fanOutManifest(func() fanOutJob {
+		changed := job
+		changed.ProducerCmd = valueSkipProducerCmd("r3-output", fingerprintBPrime, "root-c-v1", "token-v1")
+		return changed
+	}()))
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run5 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run5.Status, "run 5 failed: %s", run5.Error)
+	s.Equal("succeeded", s.taskStatusesByName(jobEntry.ID, run5)["list"],
+		"run 5: the producer command and scalar output changed, so it must execute")
+	statuses5 := partitionStatusMap(s.expandedPartitions(s.listPartitions(jobEntry.ID, run5.ID, "process")))
+	s.Require().Equal(map[string]string{
+		"a": "succeeded",
+		"b": "succeeded",
+		"c": "succeeded",
+	}, statuses5, "a changed predecessor output must invalidate every values-mode instance")
+	s.assertPartitionExecutionLogs(jobEntry.ID, run5, processID, map[string]bool{"a": true, "b": true, "c": true})
+
+	whyOutput := s.parseChainWhyPartition(jobEntry.ID, run5.ID, "process", "a")
+	s.Equal("CACHE_MISS", whyOutput.Verdict)
+	s.Require().NotNil(whyOutput.Diff)
+	foundOutput := false
+	for _, c := range whyOutput.Diff.Changes {
+		if c.Field == "predecessorOutputs.list.token" {
+			foundOutput = true
+		}
+	}
+	s.True(foundOutput,
+		"the miss must be attributed to the changed producer output, got %+v", whyOutput.Diff.Changes)
+
+	// Run 6 — only c's scalar attribute changes; key, fingerprint, producer
+	// output, and every other instance stay fixed. Attributes are execution
+	// inputs because they are exposed through CAESIUM_PARTITION_JSON, so c alone
+	// must miss. This is the live counterpart to the Greptile documentation fix.
+	s.overwriteJobManifest(dir, fanOutManifest(func() fanOutJob {
+		changed := job
+		changed.ProducerCmd = valueSkipProducerCmd("r3-output", fingerprintBPrime, "root-c-v2", "token-v1")
+		return changed
+	}()))
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run6 := s.awaitRun(jobEntry.ID, s.triggerRun(jobEntry.ID), runTimeout)
+	s.Require().Equal("succeeded", run6.Status, "run 6 failed: %s", run6.Error)
+	s.Equal("succeeded", s.taskStatusesByName(jobEntry.ID, run6)["list"],
+		"run 6: the emitted partition attributes changed, so the producer must execute")
+	statuses6 := partitionStatusMap(s.expandedPartitions(s.listPartitions(jobEntry.ID, run6.ID, "process")))
+	s.Require().Equal(map[string]string{
+		"a": "cached",
+		"b": "cached",
+		"c": "succeeded",
+	}, statuses6, "exactly the attribute-changed partition must re-execute")
+	s.assertPartitionExecutionLogs(jobEntry.ID, run6, processID, map[string]bool{"c": true})
+
+	whyAttribute := s.parseChainWhyPartition(jobEntry.ID, run6.ID, "process", "c")
+	s.Equal("CACHE_MISS", whyAttribute.Verdict)
+	s.Require().NotNil(whyAttribute.Diff)
+	foundAttribute := false
+	for _, c := range whyAttribute.Diff.Changes {
+		if c.Field == "partitionAttributes.root" {
+			foundAttribute = true
+		}
+	}
+	s.True(foundAttribute,
+		"the miss must be attributed to the changed partition attribute, got %+v", whyAttribute.Diff.Changes)
 }
 
 // TestFanOutFailFastCancelsPendingSiblings drives failurePolicy: fail_fast —

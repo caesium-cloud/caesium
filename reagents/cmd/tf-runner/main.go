@@ -14,7 +14,15 @@
 //	                     definition serves every stack.
 //	SCAN_ROOT            base for the partition's relative root (fan-out form)
 //	TF_WORKSPACE         workspace to select (default "default")
-//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform
+//	CACHE_DIR            the cache volume mount (default /cache); used with
+//	                     CACHE_KEY to derive TF_CLI_CONFIG_FILE
+//	CACHE_KEY            terraformrc slot matching the warm step. Unset leaves
+//	                     TF_CLI_CONFIG_FILE to the manifest (historical
+//	                     /cache/terraformrc). Set exports
+//	                     /cache/<key>/terraformrc unless TF_CLI_CONFIG_FILE is
+//	                     already that path; a mismatch fails closed.
+//	TF_CLI_CONFIG_FILE   the warm step's generated terraformrc; read by Terraform.
+//	                     Optional when CACHE_KEY is set.
 //	TF_DATA_DIR          Terraform's working directory (default <ARTIFACT_DIR>/tfdata)
 //	ARTIFACT_DIR         where the plan artifact is written (default <root>/.caesium)
 //	BACKEND_CONFIG       comma-separated `-backend-config` key=value settings
@@ -24,7 +32,12 @@
 //
 //	IMPORT_OUTPUTS_FROM  comma-separated upstream apply step names. Every
 //	                     CAESIUM_OUTPUT_<STEP>_<KEY> of those steps is exported as
-//	                     TF_VAR_<key>. This is the cross-stack wiring, and it is
+//	                     TF_VAR_<original>. Original names come from the JSON
+//	                     name index (CAESIUM_OUTPUT_NAME_INDEX_<STEP>) when
+//	                     present, otherwise from lowercasing the folded suffix.
+//	                     A producer that declares the index required fails if an
+//	                     old server did not provide it. This is the cross-stack
+//	                     wiring, and it is
 //	                     deliberately NOT terraform_remote_state: reading an
 //	                     upstream stack's state would mean granting every
 //	                     application stack credentials on the network stack's
@@ -112,6 +125,7 @@ type config struct {
 	DataDir           string
 	ArtifactDir       string
 	ExecPath          string
+	CLIConfigFile     string
 	BackendConfig     []string
 	ImportOutputsFrom []string
 	ApplyStep         string
@@ -124,12 +138,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
+	cliConfig, err := resolveCLIConfig(getenv)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
 		Root:              root,
 		Workspace:         strings.TrimSpace(getenv("TF_WORKSPACE")),
 		DataDir:           strings.TrimSpace(getenv("TF_DATA_DIR")),
 		ArtifactDir:       strings.TrimSpace(getenv("ARTIFACT_DIR")),
 		ExecPath:          strings.TrimSpace(getenv("TF_CLI_PATH")),
+		CLIConfigFile:     cliConfig,
 		BackendConfig:     splitList(getenv("BACKEND_CONFIG")),
 		ImportOutputsFrom: splitList(getenv("IMPORT_OUTPUTS_FROM")),
 		ApplyStep:         strings.TrimSpace(getenv("APPLY_STEP")),
@@ -164,6 +184,41 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.ExecPath = path
 	}
 	return cfg, nil
+}
+
+// resolveCLIConfig is the terraformrc path this process should export.
+//
+// CACHE_KEY unset: leave TF_CLI_CONFIG_FILE to the manifest (or unset). That is
+// the historical `/cache/terraformrc` shape, so existing jobs keep working.
+// CACHE_KEY set: the slot is `{CACHE_DIR}/{key}/terraformrc`. If the manifest
+// also set TF_CLI_CONFIG_FILE, it must already be that path — a warm writing
+// one file and a runner reading another is the single-slot clobber #364
+// exists to close, reached by a mismatched pair of env vars.
+func resolveCLIConfig(getenv func(string) string) (string, error) {
+	key, err := tf.SanitizeCacheKey(getenv("CACHE_KEY"))
+	if err != nil {
+		return "", err
+	}
+	explicit := strings.TrimSpace(getenv("TF_CLI_CONFIG_FILE"))
+	if key == "" {
+		return "", nil
+	}
+
+	cacheDir := strings.TrimSpace(getenv("CACHE_DIR"))
+	if cacheDir == "" {
+		cacheDir = tf.DefaultCacheDir
+	}
+	if !filepath.IsAbs(cacheDir) {
+		return "", fmt.Errorf("CACHE_DIR %q must be an absolute path", cacheDir)
+	}
+	derived := tf.CLIConfigFile(cacheDir, key)
+	if explicit != "" && filepath.Clean(explicit) != filepath.Clean(derived) {
+		return "", fmt.Errorf(
+			"CACHE_KEY %q selects %s, but TF_CLI_CONFIG_FILE is %s; "+
+				"omit TF_CLI_CONFIG_FILE (tf-runner will export the keyed path) or point it at the same file",
+			key, derived, explicit)
+	}
+	return derived, nil
 }
 
 // resolveRoot finds the root module this instance operates on.
@@ -293,6 +348,9 @@ func splitList(raw string) []string {
 // ready Runner. It is shared by all three phases so none of them can drift into
 // a different data directory or a different mirror.
 func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
+	if err := pinCLIConfig(cfg, log); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.ArtifactDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create artifact directory %s: %w", cfg.ArtifactDir, err)
 	}
@@ -310,6 +368,59 @@ func prepare(cfg config, log io.Writer) (*tf.Runner, error) {
 		return nil, err
 	}
 	return tf.NewRunner(cfg.Root, cfg.ExecPath, log)
+}
+
+// pinCLIConfig validates and exports TF_CLI_CONFIG_FILE when CACHE_KEY selected
+// a slot. terraform-exec copies os.Environ() at each invocation (see
+// tf.NewRunner), so the process environment is how every phase actually selects
+// its mirror.
+func pinCLIConfig(cfg config, log io.Writer) error {
+	if cfg.CLIConfigFile == "" {
+		return nil
+	}
+	if err := validateKeyedCLIConfig(cfg.CLIConfigFile); err != nil {
+		return err
+	}
+	if err := os.Setenv("TF_CLI_CONFIG_FILE", cfg.CLIConfigFile); err != nil {
+		return fmt.Errorf("set TF_CLI_CONFIG_FILE: %w", err)
+	}
+	_, _ = fmt.Fprintf(log, "tf-runner: TF_CLI_CONFIG_FILE <- %s (CACHE_KEY slot)\n", cfg.CLIConfigFile)
+	return nil
+}
+
+// validateKeyedCLIConfig fails before Terraform starts if the named slot was
+// never warmed or was replaced by a cache alias. The warm and runner containers
+// can use different uids, so opening the file here also proves this process can
+// actually read it; Lstat alone would let a 0600 config produce a much less
+// useful Terraform diagnostic later.
+func validateKeyedCLIConfig(path string) error {
+	dir := filepath.Dir(path)
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect CACHE_KEY slot %s: %w", dir, err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("CACHE_KEY slot %s is a symbolic link; refusing a cache alias or escape", dir)
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("CACHE_KEY slot %s is not a directory", dir)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect keyed Terraform CLI config %s: %w (did the matching tf-warm step complete?)", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("keyed Terraform CLI config %s is not a regular file", path)
+	}
+	f, err := os.Open(path) //nolint:gosec // path is the validated CACHE_KEY-derived CLI config.
+	if err != nil {
+		return fmt.Errorf("open keyed Terraform CLI config %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close keyed Terraform CLI config %s: %w", path, err)
+	}
+	return nil
 }
 
 // pinGitIdentity installs an inert git identity if the environment has none.
@@ -427,7 +538,14 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 }
 
 // exportImportedOutputs turns every CAESIUM_OUTPUT_<STEP>_<KEY> of the named
-// upstream steps into TF_VAR_<key>, and returns the variable names it set.
+// upstream steps into TF_VAR_<original>, and returns the variable names it set.
+//
+// Original names come from the JSON name index Caesium publishes as
+// CAESIUM_OUTPUT_NAME_INDEX_<STEP>. Without an index the suffix is lowercased,
+// which is lossless for the historical snake_case contract. A tf-apply that
+// publishes a mixed-case or dashed name also emits an index-required sentinel;
+// if that sentinel arrives without the dedicated index, the server is too old
+// for the producer and import fails rather than guessing a lowercase name.
 //
 // A companion _DIGEST variable is skipped: it belongs to an output reference,
 // whose base key already carries the path, and a digest is not a value any
@@ -460,9 +578,11 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 	}
 
 	present := make(map[string]struct{}, len(environ))
+	envValues := make(map[string]string, len(environ))
 	for _, kv := range environ {
-		if key, _, ok := strings.Cut(kv, "="); ok {
+		if key, value, ok := strings.Cut(kv, "="); ok {
 			present[key] = struct{}{}
+			envValues[key] = value
 		}
 	}
 	if err := requireProducers(named, present); err != nil {
@@ -472,6 +592,10 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 	// exactly. See discoverStepPrefixes: this is what makes the match
 	// step-exact instead of merely prefix-based.
 	siblings := discoverStepPrefixes(present, named)
+	indexes, err := outputNamesIndexes(named, envValues, siblings)
+	if err != nil {
+		return nil, err
+	}
 
 	type source struct{ step, envKey string }
 	exported := make(map[string]source)
@@ -497,21 +621,20 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 			// carries the path; it is not a value any Terraform variable wants.
 			// The base key has to actually exist, or a legitimate output named
 			// `foo_digest` would be swallowed.
-			if base, isDigest := strings.CutSuffix(key, "_DIGEST"); isDigest {
-				if _, companion := present[base]; companion {
-					break
-				}
-			}
-			name := strings.ToLower(rest)
-			// The published-count sentinel is protocol, never a Terraform
-			// variable. Every tf-apply emits it, so without this skip a stack
-			// importing from two upstream applies — the diamond form the
-			// contract explicitly allows — collides with ITSELF on
-			// TF_VAR_caesium_outputs_published and fails at plan time, naming a
-			// key the operator never wrote.
-			if name == publishedCountKey {
+			if isSyntheticOutputDigest(prefix, rest, envValues, indexes[prefix]) {
 				break
 			}
+			// Protocol keys are never Terraform variables. Every tf-apply emits
+			// the published-count sentinel, and a producer with non-fold-stable
+			// names emits the index-required sentinel. Without this skip a
+			// diamond import collides with itself on keys the operator never
+			// wrote. The generated index lives on
+			// CAESIUM_OUTPUT_NAME_INDEX_<STEP>, outside this suffix space;
+			// caesium_output_names remains an ordinary application suffix.
+			if isProtocolOutputSuffix(rest) {
+				break
+			}
+			name := importedOutputName(rest, indexes[prefix])
 			if prior, dup := exported[name]; dup {
 				// Last-write-wins here would resolve a real ambiguity by
 				// os.Environ() ordering — an implementation detail of whichever
@@ -536,14 +659,10 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 	// planned against a default. The log is the one place an operator can see
 	// what actually crossed the boundary.
 	//
-	// The round trip through Caesium's environment naming is lossy —
-	// pkg/task.BuildOutputEnv uppercases the output key and maps "-" and "." to
-	// "_", so only lowercase [a-z0-9_] names survive it. That is enforced at the
-	// PRODUCING end, where the operator can still act on it: tf.PublishableOutputs
-	// refuses to publish a name that would arrive under a different one (or that
-	// would collide with a sibling after folding). By the time a value reaches
-	// this side it has already round-tripped, so there is nothing left to check
-	// here — only to log what actually crossed.
+	// Original names are recovered from the JSON index when one was published;
+	// otherwise the suffix is lowercased. The log is the one place an operator
+	// can see which TF_VAR_ actually crossed, including that vpcId did not
+	// become vpcid.
 	for _, name := range names {
 		_, _ = fmt.Fprintf(log, "tf-runner: TF_VAR_%s <- %s (step %q)\n", name, exported[name].envKey, exported[name].step)
 	}
@@ -734,7 +853,15 @@ func runApply(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 	if _, taken := values[publishedCountKey]; taken {
 		return fmt.Errorf("output %q is reserved by tf-apply; rename it", publishedCountKey)
 	}
+	needsNameIndex := tf.OutputNamesNeedIndex(values)
 	values[publishedCountKey] = strconv.Itoa(len(values))
+	// A mixed/dashed name requires server support for the dedicated index.
+	// Persist the requirement after the count so neither protocol key changes
+	// caesium_outputs_published. An old server still forwards this sentinel,
+	// allowing a new consumer to fail explicitly instead of lowercasing names.
+	if needsNameIndex {
+		values[tf.OutputNamesIndexRequiredKey] = "1"
+	}
 	return e.Output(values)
 }
 
@@ -743,6 +870,243 @@ func runApply(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 // runApply) and so a stack that stops publishing a value moves its consumers'
 // cache keys instead of silently starving them.
 const publishedCountKey = "caesium_outputs_published"
+
+// isProtocolOutputSuffix reports whether rest (the folded env suffix after
+// CAESIUM_OUTPUT_<STEP>_) is a tf-apply protocol key, never a Terraform
+// variable.
+func isProtocolOutputSuffix(rest string) bool {
+	switch rest {
+	case normalizeStepName(publishedCountKey), normalizeStepName(tf.OutputNamesIndexRequiredKey):
+		return true
+	default:
+		return false
+	}
+}
+
+// outputNamesIndexes reads and verifies each named step's dedicated JSON name
+// index. Once present, an index is authoritative: it must describe every
+// transported output suffix exactly once, carry no extras, and map each suffix
+// back to an original name that folds to that suffix. A partial index never
+// falls through to lowercase recovery.
+//
+// tf-apply persists OutputNamesIndexRequiredKey when mixed-case or dashed names
+// make an index mandatory. An old server forwards that sentinel but cannot
+// synthesize CAESIUM_OUTPUT_NAME_INDEX_<STEP>; detecting that combination here
+// turns an incompatible rolling upgrade into an explicit failure instead of a
+// green plan against a lowercased variable name.
+func outputNamesIndexes(
+	named map[string]string,
+	envValues map[string]string,
+	siblings map[string]struct{},
+) (map[string]map[string]string, error) {
+	out := make(map[string]map[string]string, len(named))
+	prefixes := make([]string, 0, len(named))
+	for prefix := range named {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	for _, prefix := range prefixes {
+		step := named[prefix]
+		publishedCountEnv := prefix + normalizeStepName(publishedCountKey)
+		publishedCountValue := envValues[publishedCountEnv]
+		publishedCount, err := strconv.Atoi(publishedCountValue)
+		if err != nil || publishedCount < 0 {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q published invalid protocol sentinel %s=%q (want a non-negative integer)",
+				step, publishedCountEnv, publishedCountValue)
+		}
+
+		requiredKey := prefix + normalizeStepName(tf.OutputNamesIndexRequiredKey)
+		requiredValue, required := envValues[requiredKey]
+		if required && requiredValue != "1" {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q published invalid protocol sentinel %s=%q (want 1)",
+				step, requiredKey, requiredValue)
+		}
+
+		indexKey := tf.OutputNamesIndexEnv(step)
+		raw, hasIndex := envValues[indexKey]
+		if required && !hasIndex {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q requires an output-name index, but %s is absent; "+
+					"the Caesium server is too old or incompatible with this tf-apply output row",
+				step, indexKey)
+		}
+		if !hasIndex {
+			continue
+		}
+
+		index, err := decodeOutputNamesIndex(raw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q published invalid %s: %w",
+				step, indexKey, err)
+		}
+		suffixes := ownedOutputSuffixes(prefix, envValues, siblings, index)
+		if err := validateOutputNamesIndex(index, suffixes, publishedCount); err != nil {
+			return nil, fmt.Errorf(
+				"IMPORT_OUTPUTS_FROM: step %q published invalid %s: %w",
+				step, indexKey, err)
+		}
+		out[prefix] = index
+	}
+	return out, nil
+}
+
+func decodeOutputNamesIndex(raw string) (map[string]string, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("expected a JSON object of folded suffixes to original output names: %w", err)
+	}
+	opening, ok := token.(json.Delim)
+	if !ok || opening != '{' {
+		return nil, fmt.Errorf("expected a JSON object of folded suffixes to original output names")
+	}
+
+	index := make(map[string]string)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("reading folded suffix: %w", err)
+		}
+		suffix, ok := keyToken.(string)
+		if !ok {
+			return nil, fmt.Errorf("folded suffix is not a string")
+		}
+		if _, duplicate := index[suffix]; duplicate {
+			return nil, fmt.Errorf("folded suffix %q appears more than once", suffix)
+		}
+		var original string
+		if err := decoder.Decode(&original); err != nil {
+			return nil, fmt.Errorf("original name for suffix %q is not a string: %w", suffix, err)
+		}
+		index[suffix] = original
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("closing output-name index: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("unexpected JSON value after the output-name index")
+		}
+		return nil, fmt.Errorf("reading after output-name index: %w", err)
+	}
+	return index, nil
+}
+
+func ownedOutputSuffixes(
+	prefix string,
+	envValues map[string]string,
+	siblings map[string]struct{},
+	index map[string]string,
+) map[string]struct{} {
+	suffixes := make(map[string]struct{})
+	for key := range envValues {
+		rest, found := strings.CutPrefix(key, prefix)
+		if !found || rest == "" {
+			continue
+		}
+		if owner, taken := longestOwner(siblings, key); taken && owner != prefix {
+			continue
+		}
+		if isSyntheticOutputDigest(prefix, rest, envValues, index) {
+			continue
+		}
+		suffixes[rest] = struct{}{}
+	}
+	return suffixes
+}
+
+// isSyntheticOutputDigest distinguishes the companion env var Caesium adds for
+// an OutputRef from a legitimate original output whose name ends in _digest.
+// With an authoritative index, a real *_digest output names itself while a
+// synthetic companion does not; without one, retain the historical base-key
+// heuristic.
+func isSyntheticOutputDigest(prefix, rest string, envValues map[string]string, index map[string]string) bool {
+	baseSuffix, isDigest := strings.CutSuffix(rest, "_DIGEST")
+	if !isDigest {
+		return false
+	}
+	if _, baseExists := envValues[prefix+baseSuffix]; !baseExists {
+		return false
+	}
+	if index == nil {
+		return true
+	}
+	_, baseIsOutput := index[baseSuffix]
+	_, digestIsOutput := index[rest]
+	return baseIsOutput && !digestIsOutput
+}
+
+func validateOutputNamesIndex(index map[string]string, suffixes map[string]struct{}, publishedCount int) error {
+	originals := make(map[string]string, len(index))
+	applicationMappings := 0
+	indexedSuffixes := make([]string, 0, len(index))
+	for suffix := range index {
+		indexedSuffixes = append(indexedSuffixes, suffix)
+	}
+	sort.Strings(indexedSuffixes)
+	for _, suffix := range indexedSuffixes {
+		original := index[suffix]
+		if prior, duplicate := originals[original]; duplicate {
+			return fmt.Errorf("original output name %q is targeted by both %s and %s", original, prior, suffix)
+		}
+		originals[original] = suffix
+		if folded := normalizeStepName(original); folded != suffix {
+			return fmt.Errorf("suffix %s maps to %q, which folds to %s", suffix, original, folded)
+		}
+		if _, exists := suffixes[suffix]; !exists {
+			return fmt.Errorf("suffix %s has no transported output", suffix)
+		}
+		if !isProtocolOutputSuffix(suffix) {
+			applicationMappings++
+		}
+	}
+
+	protocolNames := map[string]string{
+		normalizeStepName(publishedCountKey):              publishedCountKey,
+		normalizeStepName(tf.OutputNamesIndexRequiredKey): tf.OutputNamesIndexRequiredKey,
+	}
+	for suffix, original := range protocolNames {
+		if got, exists := index[suffix]; exists && got != original {
+			return fmt.Errorf("protocol suffix %s must map to %q, not %q", suffix, original, got)
+		}
+	}
+	transportedSuffixes := make([]string, 0, len(suffixes))
+	for suffix := range suffixes {
+		transportedSuffixes = append(transportedSuffixes, suffix)
+	}
+	sort.Strings(transportedSuffixes)
+	for _, suffix := range transportedSuffixes {
+		if _, exists := index[suffix]; !exists {
+			return fmt.Errorf("transported output suffix %s is missing from the index", suffix)
+		}
+	}
+	// The count is emitted by tf-apply before either protocol sentinel is
+	// appended, so it is the authoritative number of application outputs. In
+	// particular, it closes the only structural ambiguity in the environment:
+	// BASE_DIGEST can be either a synthetic OutputRef companion or a real output.
+	// If a partial index omits the latter, the digest heuristic would otherwise
+	// hide that omission and let the index look complete.
+	if applicationMappings != publishedCount {
+		return fmt.Errorf(
+			"caesium_outputs_published reports %d application output(s), but the index names %d",
+			publishedCount, applicationMappings)
+	}
+	return nil
+}
+
+// importedOutputName restores the original Terraform output name from the
+// folded env suffix. A present index was already verified as complete, so
+// there is deliberately no per-entry lowercase fallback.
+func importedOutputName(rest string, index map[string]string) string {
+	if index != nil {
+		return index[rest]
+	}
+	return strings.ToLower(rest)
+}
 
 // proposal is what a plan step told this apply step.
 type proposal struct {
@@ -864,8 +1228,8 @@ func applyProposal(ctx context.Context, cfg config, runner *tf.Runner, p proposa
 	return writeApplyReceipt(receipt, p)
 }
 
-// checkPlannedOutputNames rejects an output name that could not reach a
-// consumer, BEFORE terraform apply mutates anything.
+// checkPlannedOutputNames rejects an output name a consumer could not import
+// exactly, BEFORE terraform apply mutates anything.
 //
 // The naming rule was previously enforced only after the apply, against
 // `terraform output`. That is late in the one way that matters: the stack has

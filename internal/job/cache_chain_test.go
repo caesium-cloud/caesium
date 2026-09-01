@@ -1,6 +1,7 @@
 package job
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
@@ -87,4 +88,54 @@ func TestLocalLane_ChainReachesPersistedBlob(t *testing.T) {
 	blob, err := in.CanonicalJSON(in.Compute())
 	require.NoError(t, err)
 	assert.Contains(t, string(blob), `"chain":"values"`)
+}
+
+// partitionChainArgs is chainArgs plus the per-instance fields a fanned
+// consumer folds in. The two construction sites share buildTaskHashInput, so
+// this is the same composition the local dispatcher uses for every instance.
+func partitionChainArgs(chain, predHash, predOutput, key, fingerprint string) taskHashInputArgs {
+	args := chainArgs(chain, predHash, predOutput)
+	args.TaskName = "process"
+	args.Partition = key
+	args.PartitionFingerprint = fingerprint
+	return args
+}
+
+func testPartitionFingerprint(hexByte string) string {
+	return "sha256:" + strings.Repeat(hexByte, 32)
+}
+
+// TestLocalLane_ValuesChainPartitionSkipIgnoresPredecessorHash is issue #360
+// at the local construction site: two instances of the same key+fingerprint
+// consuming the same outputs must share a digest even when the producer hash
+// moved. Without this, a values-mode fanned step would still inherit producer
+// churn the same way the default chain does.
+func TestLocalLane_ValuesChainPartitionSkipIgnoresPredecessorHash(t *testing.T) {
+	fp := testPartitionFingerprint("a1")
+	first := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", fp)).Compute()
+	second := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-2", "same-value", "dim_customer", fp)).Compute()
+	assert.Equal(t, first, second,
+		"under chain: values a producer re-run must not re-key an unchanged partition")
+}
+
+// TestLocalLane_ValuesChainPartitionFingerprintIsAuthoritative: a fingerprint
+// change is always a miss. Values mode drops predecessor hashes, never the
+// per-unit content address — a stale hit here would replay the wrong work.
+func TestLocalLane_ValuesChainPartitionFingerprintIsAuthoritative(t *testing.T) {
+	before := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("a1"))).Compute()
+	after := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("b2"))).Compute()
+	assert.NotEqual(t, before, after,
+		"a changed partition fingerprint must miss even under chain: values")
+}
+
+// TestLocalLane_TransitiveChainPartitionStillCascades pins the default for a
+// fanned instance: same key+fingerprint, producer hash moved → different key.
+func TestLocalLane_TransitiveChainPartitionStillCascades(t *testing.T) {
+	fp := testPartitionFingerprint("a1")
+	for _, chain := range []string{"", jobdefschema.CacheChainTransitive} {
+		first := buildTaskHashInput(partitionChainArgs(chain, "hash-run-1", "same-value", "dim_customer", fp)).Compute()
+		second := buildTaskHashInput(partitionChainArgs(chain, "hash-run-2", "same-value", "dim_customer", fp)).Compute()
+		assert.NotEqual(t, first, second,
+			"chain %q must keep cascading predecessor identity into every partition", chain)
+	}
 }
