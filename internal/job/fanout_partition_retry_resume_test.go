@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -235,4 +236,59 @@ func TestFanOutPartitionRetryReplacementAbandonsUndispatchableRetry(t *testing.T
 	again := f.latestJobRun(t)
 	require.Equal(t, string(run.StatusFailed), again.Status)
 	require.Equal(t, final.CompletedAt.UnixNano(), again.CompletedAt.UnixNano(), "the run must be finalized exactly once")
+}
+
+// TestFanOutPartitionRetryResumeFailingBeforeCompletionFinalizesRun pins the
+// early-initialization failure of a resumed engine. Partition-retry kickoff
+// and the shutdown-window replacement both reopen the run and then hand it to
+// a fresh Run; if that Run fails before its completion defer is armed (here:
+// a secret resolver that cannot be built from the environment), nothing else
+// will ever finalize the run. It must be marked failed with the retry-reset
+// instance resolved explicitly, and callbacks must fire once as for any
+// failed run — not left running forever with a pending retry.
+func TestFanOutPartitionRetryResumeFailingBeforeCompletionFinalizesRun(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom")
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	var flakyID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "flaky" {
+			flakyID = r.ID
+		}
+	}
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, flakyID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+	createsBefore := f.engine.createCount("flaky")
+
+	var callbacks atomic.Int32
+	vars := defaultFanOutVars()
+	// A malformed identity keyring cannot be built into a resolver.
+	vars.JobdefSecretsIdentityHMACKeys = "not-an-id-value-pair"
+	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	err = New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), jobRun.ID))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "secret resolver configuration failure",
+		"precondition: the engine must fail before its completion defer is armed")
+
+	final := f.awaitRunStatus(t, jobRun.ID, run.StatusFailed)
+	require.NotNil(t, final.CompletedAt)
+	require.Contains(t, final.Error, "secret resolver configuration failure")
+	var retried models.TaskRun
+	require.NoError(t, f.db.First(&retried, "id = ?", flakyID).Error)
+	require.Equal(t, string(run.TaskStatusSkipped), retried.Status,
+		"the accepted retry must be resolved explicitly, not left pending on a terminal run")
+	require.False(t, retried.PartitionRetryPending)
+	require.True(t, strings.Contains(retried.Error, "partition retry abandoned"), "the skip reason must say why: %q", retried.Error)
+	require.Equal(t, createsBefore, f.engine.createCount("flaky"))
+	require.Equal(t, int32(1), callbacks.Load(), "a run finalized as failed dispatches callbacks exactly once")
 }

@@ -403,6 +403,38 @@ func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string) {
 	}()
 }
 
+// finalizeAbortedResume finalizes a resumed run whose engine failed before its
+// completion defer was armed. Any retry-reset instance is resolved explicitly
+// (skipped, with the reason on the row) so Complete's fence does not refuse,
+// the run is marked failed with the engine's error, and callbacks fire as for
+// any failed run. A run another path already finalized is left alone.
+func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause error) {
+	snapshot, err := store.Get(runID)
+	if err != nil {
+		log.Error("resumed engine failed before executing and the run could not be read", "job_id", j.id, "run_id", runID, "cause", cause, "error", err)
+		return
+	}
+	switch snapshot.Status {
+	case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled:
+		return
+	}
+	reason := fmt.Sprintf("partition retry abandoned: the resumed engine failed before it could execute the reset instance (%v); retry the run", cause)
+	if abandoned, err := store.AbandonPendingPartitionRetries(runID, reason); err != nil {
+		log.Error("failed to resolve retry-reset instances of an aborted resume", "job_id", j.id, "run_id", runID, "abandoned", abandoned, "error", err)
+	}
+	if err := store.Complete(runID, cause); err != nil {
+		log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+		return
+	}
+	log.Error("resumed engine failed before executing; run finalized as failed", "job_id", j.id, "run_id", runID, "error", cause)
+	if snapshot.Quarantine {
+		return
+	}
+	if err := j.dispatchRunCallbacks(context.Background(), j.id, runID, cause); err != nil {
+		log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
+	}
+}
+
 // pendingGroupIndegree returns the smallest outstanding_predecessors among a
 // fanned step's still-pending instances, which is the node's true cross-step
 // indegree: every instance shares the step's cross-step predecessors, and a
@@ -658,8 +690,25 @@ func unmarshalRateLimits(raw []byte) []jobdefschema.RateLimit {
 	return v
 }
 
-func (j *job) Run(ctx context.Context) error {
+func (j *job) Run(ctx context.Context) (err error) {
 	store := j.runStoreFactory()
+
+	// A resumed run — its id arrives in ctx from partition-retry kickoff, a
+	// shutdown-window replacement, whole-run retry, replay, or POST /runs —
+	// was reopened (or created) by the caller and has no other engine. The
+	// completion defer below is what finalizes it, so a failure before that
+	// defer is armed (a secret resolver that cannot be built, a persistent
+	// store error) would leave the run running forever with nothing left to
+	// execute it. Finalize it here instead.
+	completionArmed := false
+	if resumeID, resuming := run.FromContext(ctx); resuming {
+		defer func() {
+			if completionArmed || err == nil {
+				return
+			}
+			j.finalizeAbortedResume(store, resumeID, err)
+		}()
+	}
 	vars := j.envVariables()
 	secretResolver := j.secretResolver
 	if secretResolver == nil {
@@ -777,6 +826,7 @@ func (j *job) Run(ctx context.Context) error {
 	ctx = run.WithContext(ctx, runID)
 
 	var runErr error
+	completionArmed = true
 	defer func() {
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
