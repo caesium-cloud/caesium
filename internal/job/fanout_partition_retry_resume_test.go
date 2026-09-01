@@ -292,3 +292,122 @@ func TestFanOutPartitionRetryResumeFailingBeforeCompletionFinalizesRun(t *testin
 	require.Equal(t, createsBefore, f.engine.createCount("flaky"))
 	require.Equal(t, int32(1), callbacks.Load(), "a run finalized as failed dispatches callbacks exactly once")
 }
+
+// TestFanOutPartitionRetryReplacementHandsFreshRetryToAnotherEngine pins the
+// boundary of the replacement loop-breaker. A replacement may only abandon the
+// retries it was started for; a retry that lands in the REPLACEMENT's own
+// shutdown window is a fresh, dispatchable request and must be handed to yet
+// another engine — abandoning it would leave the partition skipped and, since
+// only failed instances can be retried, permanently un-retryable after a 200.
+func TestFanOutPartitionRetryReplacementHandsFreshRetryToAnotherEngine(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","r1","r2"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["r1"] = fmt.Errorf("boom r1")
+	f.engine.createErrByPartition["r2"] = fmt.Errorf("boom r2")
+
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+
+	var windows atomic.Int32
+	retryInWindow := func(runID uuid.UUID, partition string) {
+		f.engine.mu.Lock()
+		delete(f.engine.createErrByPartition, partition)
+		f.engine.mu.Unlock()
+		for _, r := range f.instanceRowsFor(t, runID) {
+			if r.PartitionValue == partition {
+				_, reopened, err := f.store.RetryPartition(context.Background(), runID, r.ID)
+				require.NoError(t, err)
+				require.False(t, reopened, "the run is still running inside the engine's shutdown window")
+			}
+		}
+	}
+	// Each engine's shutdown window gets one retry: the first engine's window
+	// retries r1 (handled by the replacement), the replacement's window
+	// retries r2 (must be handed to a further engine, not abandoned).
+	runner.beforeComplete = func(runID uuid.UUID) {
+		switch windows.Add(1) {
+		case 1:
+			retryInWindow(runID, "r1")
+		case 2:
+			retryInWindow(runID, "r2")
+		}
+	}
+
+	require.Error(t, runner.Run(context.Background()), "the first engine still reports its own failures")
+	jobRun := f.latestJobRun(t)
+	final := f.awaitRunTerminal(t, jobRun.ID)
+
+	status := statusByPartition(f.instanceRowsFor(t, jobRun.ID))
+	require.Equal(t, string(run.TaskStatusSucceeded), status["r1"])
+	require.Equal(t, string(run.TaskStatusSucceeded), status["r2"],
+		"a retry that lands in the replacement's shutdown window must be executed, not abandoned")
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	require.Equal(t, int32(3), windows.Load(), "three engines: original, replacement for r1, replacement for r2")
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), callbacks.Load(), "only the engine that finalizes the run dispatches callbacks")
+}
+
+// TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone pins the fail-fast
+// half of re-entry. Under the default halt policy the first failure clears the
+// queue, leaving never-dispatched roots pending with indegree 0. A partition
+// retry resumed into that run must execute the reset instance (and whatever
+// its success releases) and nothing else — not resurrect a root the halt
+// deliberately suppressed.
+func TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	later := f.addSideTask(t, "later")
+	// Position it after the fanned step so, with one task at a time, the
+	// group's failure halts the run before it is ever dispatched.
+	for _, taskModel := range f.taskSvc.tasks {
+		if taskModel.ID == later {
+			taskModel.Position = 2
+		}
+	}
+	require.NoError(t, f.db.Model(&models.Task{}).Where("id = ?", later).Update("position", 2).Error)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom")
+
+	vars := defaultFanOutVars()
+	vars.MaxParallelTasks = 1
+	vars.TaskFailurePolicy = taskFailurePolicyHalt
+	require.Error(t, f.run(t, vars))
+	jobRun := f.latestJobRun(t)
+	require.Len(t, f.engine.createRequestsForTask(later), 0, "precondition: the halt must suppress the later root")
+	var laterRow models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", jobRun.ID, later).First(&laterRow).Error)
+	require.Equal(t, string(run.TaskStatusPending), laterRow.Status)
+	var flakyID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "flaky" {
+			flakyID = r.ID
+		}
+	}
+
+	f.engine.mu.Lock()
+	delete(f.engine.createErrByPartition, "flaky")
+	f.engine.mu.Unlock()
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, flakyID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+
+	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	_ = New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), jobRun.ID))
+
+	require.Equal(t, string(run.TaskStatusSucceeded), statusByPartition(f.instanceRows(t))["flaky"])
+	require.Len(t, f.engine.createRequestsForTask(later), 0,
+		"a partition retry must not resurrect a root the fail-fast halt suppressed")
+	require.NoError(t, f.db.First(&laterRow, "id = ?", laterRow.ID).Error)
+	require.Equal(t, string(run.TaskStatusPending), laterRow.Status)
+	f.awaitRunTerminal(t, jobRun.ID)
+}

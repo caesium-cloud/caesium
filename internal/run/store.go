@@ -4350,6 +4350,17 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 var errRunAlreadyTerminal = errors.New("run already terminal")
 
 func (s *Store) Complete(runID uuid.UUID, result error) error {
+	_, err := s.CompleteIfActive(runID, result)
+	return err
+}
+
+// CompleteIfActive is Complete that also reports whether THIS call finalized
+// the run: false when the run was already terminal (the idempotent no-op).
+// Callers that dispatch completion callbacks on their own — an engine
+// finalizing a resume that failed before its normal completion path — need
+// the distinction so a run another path finalized first is not notified
+// twice.
+func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""
@@ -4491,10 +4502,10 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	if errors.Is(err, errRunAlreadyTerminal) {
 		// Run was already finalized by another path (idempotent no-op): no
 		// events, metrics, or gauge bookkeeping to repeat.
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Emit metrics and clear active-run bookkeeping exactly once, after the
@@ -4517,7 +4528,7 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	}
 
 	s.publishEvents(pendingEvents...)
-	return nil
+	return true, nil
 }
 
 func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
@@ -6286,9 +6297,12 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 // all_done after an upstream failure is released by that failure, not
 // stranded behind it. When every predecessor group is terminal the rule is
 // decisive — satisfied means nothing outstanding, unsatisfied means the retry
-// is refused. While any predecessor group is still live the conservative
-// per-edge count is kept, and the engine that finishes those groups releases
-// the row.
+// is refused. While any predecessor group is still live, only the LIVE groups
+// are counted: outstanding_predecessors is a terminality counter, decremented
+// once per predecessor group when that group becomes terminal with the rule
+// evaluated at that moment (shouldRunTaskTx), so a group that is already
+// terminal without succeeding will never decrement again and counting it
+// would strand the row.
 //
 // In-group dependsOn siblings carry no trigger rule: a terminal sibling that
 // did not succeed blocks the retry for good (refused), a non-terminal one
@@ -6325,7 +6339,7 @@ func (s *Store) partitionRetryOutstandingTx(tx *gorm.DB, runID uuid.UUID, row *m
 		} else {
 			byTask := groupTaskRunsByTaskID(predRows)
 			for _, ref := range refs {
-				if !predecessorGroupSatisfied(byTask[ref.TaskID]) {
+				if !IsTerminal(groupStatusFromInstances(byTask[ref.TaskID])) {
 					outstanding++
 				}
 			}
@@ -6361,16 +6375,36 @@ func (s *Store) partitionRetryOutstandingTx(tx *gorm.DB, runID uuid.UUID, row *m
 	return outstanding, nil
 }
 
-// AbandonPendingPartitionRetries resolves every retry-reset instance of a run
-// that is still pending as skipped, with the given reason, and clears its
-// retry provenance. It is the bounded end of the completion fence: a
-// replacement engine that could not dispatch the accepted retry must not spawn
-// yet another engine. The row is resolved explicitly so the run can finalize
-// and the operator can see why. Returns the number of instances resolved.
-func (s *Store) AbandonPendingPartitionRetries(runID uuid.UUID, reason string) (int, error) {
+// PendingPartitionRetries lists the retry-reset instances of a run that are
+// still pending — exactly the rows Complete's fence refuses on. Only id and
+// task_id are populated.
+func (s *Store) PendingPartitionRetries(runID uuid.UUID) ([]models.TaskRun, error) {
+	var rows []models.TaskRun
+	if err := s.db.Select("id", "task_id").
+		Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+			runID, string(TaskStatusPending), true).
+		Order("partition_index ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// AbandonPartitionRetries resolves the given retry-reset instances, if still
+// pending, as skipped with the given reason and clears their retry
+// provenance. It is the bounded end of the completion fence: a replacement
+// engine that could not dispatch the retries it was started for must not
+// spawn yet another engine for them. Each row is resolved explicitly so the
+// run can finalize and the operator can see why. Returns the number of
+// instances resolved.
+func (s *Store) AbandonPartitionRetries(runID uuid.UUID, taskRunIDs []uuid.UUID, reason string) (int, error) {
+	if len(taskRunIDs) == 0 {
+		return 0, nil
+	}
 	var rows []models.TaskRun
 	if err := s.db.Select("id").
-		Where("job_run_id = ? AND status = ? AND partition_retry_pending = ?", runID, string(TaskStatusPending), true).
+		Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+			runID, taskRunIDs, string(TaskStatusPending), true).
 		Find(&rows).Error; err != nil {
 		return 0, err
 	}
@@ -6385,6 +6419,22 @@ func (s *Store) AbandonPendingPartitionRetries(runID uuid.UUID, reason string) (
 		s.invalidateRunState(runID)
 	}
 	return resolved, nil
+}
+
+// AbandonPendingPartitionRetries is AbandonPartitionRetries over every
+// retry-reset instance of the run that is still pending. It is for an engine
+// that failed before it could execute anything, where no retry can be told
+// apart from another.
+func (s *Store) AbandonPendingPartitionRetries(runID uuid.UUID, reason string) (int, error) {
+	rows, err := s.PendingPartitionRetries(runID)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]uuid.UUID, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	return s.AbandonPartitionRetries(runID, ids, reason)
 }
 
 func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {

@@ -494,7 +494,12 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		if hasFailures {
 			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
 		}
-		if cErr := m.store.Complete(runID, runErr); cErr != nil {
+		if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
+			// A per-partition retry was accepted into this run after the owner
+			// saw it drain. The owner has no engine to hand the reset instance
+			// to; say so explicitly rather than burying it in a generic error.
+			log.Error("owner manager: run left running for a pending partition retry the owner cannot execute", "run_id", runID, "error", cErr)
+		} else if cErr != nil {
 			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
 		}
 		m.Drop(runID)

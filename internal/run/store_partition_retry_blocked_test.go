@@ -177,3 +177,33 @@ func TestCompleteRefusesPartitionRetryBlockedOnLiveDependency(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, got.Status)
 }
+
+// TestRetryPartitionCountsOnlyLivePredecessorsWhenMixed pins the non-terminal
+// branch of the re-seed. outstanding_predecessors is a terminality counter —
+// it is decremented exactly once per predecessor group, when that group
+// becomes terminal, and the trigger rule is evaluated at that moment. A group
+// that is already terminal (even without succeeding) will never decrement
+// again, so counting it strands the row; only still-live groups may be
+// counted.
+func TestRetryPartitionCountsOnlyLivePredecessorsWhenMixed(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+	require.NoError(t, f.db.Model(&models.Task{}).
+		Where("id = ?", f.consumer.ID).
+		Update("trigger_rule", jobdefschema.TriggerRuleAllDone).Error)
+	addTerminalUpstream(t, f, TaskStatusFailed)
+	live := addTerminalUpstream(t, f, TaskStatusRunning)
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
+		Update("outstanding_predecessors", 0).Error)
+	rows := f.instances(t)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
+
+	reset, _, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, reset.OutstandingPredecessors,
+		"only the live predecessor %s may be counted; the terminal-failed one will never decrement again", live.Name)
+}

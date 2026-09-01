@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1354,8 +1355,11 @@ func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) 
 	}))
 
 	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	// The seam is carried into the replacement engine too; only the first
+	// engine's window is the one this test choreographs.
+	var completionEnteredOnce sync.Once
 	runner.beforeComplete = func(uuid.UUID) {
-		close(completionEntered)
+		completionEnteredOnce.Do(func() { close(completionEntered) })
 		<-releaseCompletion
 	}
 	runErrs := make(chan error, 1)
