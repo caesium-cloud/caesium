@@ -71,6 +71,8 @@ The resolved mode is snapshot on `TaskRun.cache_chain` and on the task execution
 
 **Sharp edge.** An upstream change that alters behaviour without altering its declared outputs leaves consumers cached. That is the intent and the hazard; the mitigation is the `why` rendering above plus the documentation callout in `job-definitions.md`.
 
+**Fan-out.** A fanned consumer already folds each instance's partition `key`, `fingerprint`, and scalar attributes into its cache identity (`dependsOn` is scheduling-only and excluded). `chain: values` on that consumer is what makes the fingerprint *effective* across a producer re-run: unchanged key+fingerprint+attributes+consumed-outputs instances cache-hit; a changed fingerprint is always a miss. The default transitive chain still re-keys every instance when the producer's own inputs move. See [`design-dynamic-fanout.md`](design-dynamic-fanout.md) (structured partitions) and [`job-definitions.md`](job-definitions.md#dynamic-fan-out).
+
 ### Cache entry & modes
 
 A `task_cache` row associates a hash with its result, structured output, branch selections, originating run/task-run IDs, `created_at`, and optional `expires_at`. The `cache` field controls behaviour per step: `false` (default, always run), `true` (default TTL via `CAESIUM_CACHE_TTL`, 24h), `{ttl: "7d"}`, `{ttl: "never"}` (null `expires_at` — no wall-clock expiry at all, for a step keyed on a content fingerprint), `{version: 2}` (bump to force invalidation), `{chain: "values"}`, or any combination. Step-level `cache` overrides the `metadata.cache` job-level default; `cache: false` on a step opts out even when the job default is on. `chain` and `ttl` layer job → step exactly like `pinDigests`.

@@ -397,6 +397,8 @@ echo '##caesium::partition 2026-07-01'
 
 Each instance sees `$CAESIUM_PARTITION` (or `fanOut.env`) and `$CAESIUM_PARTITION_JSON` (the normalized object). `dependsOn` is a scheduling instruction — a container must not derive data behavior from it. Overflow, cycles, dangling `dependsOn`, and conflicting duplicate keys fail the producer (named key) and insert zero instance rows.
 
+`fingerprint` and partition attributes enter the instance's cache identity (`dependsOn` is scheduling-only and excluded). With `cache.chain: values` on the fanned step, an instance whose key, fingerprint, attributes, and consumed predecessor outputs are unchanged cache-hits across a producer re-run; a changed fingerprint is always a miss. The default `chain: transitive` re-runs every instance when the producer's own identity moves. Per-unit data belongs in the fingerprint or partition attributes, not in the producer's scalar outputs.
+
 Causal tooling is fan-out aware — each verb answers about the group or names one instance, never an arbitrary sibling:
 
 - `caesium why <run> --task <t>` on a fanned step returns a **group summary** (`partitionCount`, `statusCounts`, `cacheHits`, `partitions[]` capped at 50 + `partitionsTruncated`, `firstFailure{partition,partitionIndex,taskRunId,status,attempt,error}`, `baseline.kind: "per_partition"`); `--partition <value>` (`GET .../why?task=<t>&partition=<v>`) returns the full single-instance explanation (`partition`, `taskRunId`); an unknown value 404s listing available partitions.

@@ -1236,3 +1236,121 @@ func TestFramedPredecessorOutputs_CanonicalShape(t *testing.T) {
 			"p": {"a": "x\npred_output:p:b=y"},
 		})), "embedded record separators must be escaped, not passed through")
 }
+
+// ---------------------------------------------------------------------------
+// cache.chain: values × structured partitions (issue #360)
+//
+// Fingerprints make per-unit skip *expressible*; chain: values is what makes it
+// *happen* across a producer re-run. The default transitive chain still folds
+// predecessor identity hashes, so a producer whose own inputs moved re-keys
+// every instance even when the fingerprint did not. These tests pin the
+// composition: same key+fingerprint+consumed outputs → same digest even if the
+// predecessor hash churned; a fingerprint change is always a miss. They must
+// not touch the transitive golden.
+// ---------------------------------------------------------------------------
+
+const (
+	partitionFPAaaa = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	partitionFPBbbb = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func partitionSkipInput(key, fingerprint, predHash, predOutput, chain string) HashInput {
+	in := HashInput{
+		JobAlias:             "fanout-job",
+		TaskName:             "process",
+		Image:                "alpine:3.23",
+		Command:              []string{"sh", "-c", "echo partition=$CAESIUM_PARTITION"},
+		Chain:                chain,
+		Partition:            key,
+		PartitionFingerprint: fingerprint,
+		PredecessorHashes:    []string{predHash},
+		CacheVersion:         1,
+	}
+	if predOutput != "" {
+		in.PredecessorOutputs = map[string]map[string]string{"list": {"token": predOutput}}
+	}
+	return in
+}
+
+// TestCompute_ValuesChainPartitionSkipIgnoresPredecessorHash is the skip the
+// feature exists for: the producer re-ran (its identity moved) but this
+// instance's key, fingerprint and consumed outputs did not. Under chain: values
+// the two runs share a digest, so the instance is a cache hit.
+func TestCompute_ValuesChainPartitionSkipIgnoresPredecessorHash(t *testing.T) {
+	first := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "same", ChainValues)
+	second := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-2", "same", ChainValues)
+	assert.Equal(t, first.Compute(), second.Compute(),
+		"under chain: values a producer re-run must not re-key an unchanged partition")
+
+	// No structured producer output is the listing-step shape (partitions only).
+	// Silence is not an output change, and values mode must not invent one.
+	silentFirst := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "", ChainValues)
+	silentSecond := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-2", "", ChainValues)
+	assert.Equal(t, silentFirst.Compute(), silentSecond.Compute(),
+		"a producer that emits no scalar outputs must still skip unchanged partitions under chain: values")
+}
+
+// TestCompute_ValuesChainPartitionFingerprintIsAuthoritative is the stale-hit
+// guard: a new fingerprint is a different unit of work even when the key and
+// the predecessor outputs look the same. Fingerprints stay in the key; values
+// mode only drops predecessor identity hashes.
+func TestCompute_ValuesChainPartitionFingerprintIsAuthoritative(t *testing.T) {
+	before := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "same", ChainValues)
+	after := partitionSkipInput("dim_customer", partitionFPBbbb, "hash-run-1", "same", ChainValues)
+	assert.NotEqual(t, before.Compute(), after.Compute(),
+		"a changed partition fingerprint must miss even under chain: values")
+
+	// Same even when the predecessor hash also moved — the fingerprint, not the
+	// producer identity, is what discriminates the two units.
+	after.PredecessorHashes = []string{"hash-run-2"}
+	assert.NotEqual(t, before.Compute(), after.Compute())
+}
+
+// TestCompute_ValuesChainPartitionStillHashesPredecessorOutputs: outputs still
+// chain, so a discover step that publishes a changed scalar re-keys every
+// instance. Per-unit data belongs in the fingerprint / attributes, not in the
+// producer's outputs.
+func TestCompute_ValuesChainPartitionStillHashesPredecessorOutputs(t *testing.T) {
+	before := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "v1", ChainValues)
+	after := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "v2", ChainValues)
+	assert.NotEqual(t, before.Compute(), after.Compute(),
+		"a changed predecessor OUTPUT must still invalidate a values-mode partition")
+}
+
+// TestCompute_TransitiveChainPartitionStillCascadesPredecessorHash pins the
+// default: without chain: values, a producer re-run re-keys every instance
+// even when the fingerprint is unchanged. That is v1 conservative identity,
+// and it must stay byte-identical to today.
+func TestCompute_TransitiveChainPartitionStillCascadesPredecessorHash(t *testing.T) {
+	for _, chain := range []string{"", ChainTransitive} {
+		first := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-1", "same", chain)
+		second := partitionSkipInput("dim_customer", partitionFPAaaa, "hash-run-2", "same", chain)
+		assert.NotEqual(t, first.Compute(), second.Compute(),
+			"chain %q must keep cascading predecessor identity into every partition", chain)
+	}
+}
+
+// TestCompute_ValuesChainBareStringPartitionOmitsEmptyFingerprint: a
+// string-form partition has no fingerprint. omit-when-empty must keep that
+// digest independent of the fingerprint field staying "", and values mode must
+// still ignore predecessor-hash churn. No CacheVersion bump.
+func TestCompute_ValuesChainBareStringPartitionOmitsEmptyFingerprint(t *testing.T) {
+	bare := partitionSkipInput("2026-07-01", "", "hash-run-1", "", ChainValues)
+	alsoBare := bare
+	alsoBare.PartitionFingerprint = ""
+	assert.Equal(t, bare.Compute(), alsoBare.Compute())
+
+	churned := partitionSkipInput("2026-07-01", "", "hash-run-2", "", ChainValues)
+	assert.Equal(t, bare.Compute(), churned.Compute(),
+		"bare-string partitions under chain: values skip on key + consumed outputs alone")
+
+	// Empty partition fields + transitive still match the pre-fan-out golden.
+	legacy := baseInput()
+	withEmpty := baseInput()
+	withEmpty.Partition = ""
+	withEmpty.PartitionFingerprint = ""
+	withEmpty.PartitionAttributes = nil
+	assert.Equal(t, goldenStringFormHash, legacy.Compute())
+	assert.Equal(t, goldenStringFormHash, withEmpty.Compute(),
+		"empty partition fields must not change the transitive golden; no CacheVersion bump")
+}
