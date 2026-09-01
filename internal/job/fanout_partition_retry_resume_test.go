@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -410,4 +411,134 @@ func TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone(t *testing.T) {
 	require.NoError(t, f.db.First(&laterRow, "id = ?", laterRow.ID).Error)
 	require.Equal(t, string(run.TaskStatusPending), laterRow.Status)
 	f.awaitRunTerminal(t, jobRun.ID)
+}
+
+// TestFanOutPartitionRetryReplacementRetriesSamePartitionAgain pins that a
+// replacement recognizes its own work by what it DISPATCHED, not by row
+// identity. A partition retry reuses the instance row, so after the
+// replacement ran r1 and r1 failed again, a second retry of r1 landing in the
+// replacement's shutdown window is a fresh request that must be handed to a
+// further engine — not abandoned as "the retry I could not dispatch".
+func TestFanOutPartitionRetryReplacementRetriesSamePartitionAgain(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","r1"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["r1"] = fmt.Errorf("boom r1")
+
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+
+	retryR1 := func(runID uuid.UUID) {
+		for _, r := range f.instanceRowsFor(t, runID) {
+			if r.PartitionValue == "r1" {
+				_, reopened, err := f.store.RetryPartition(context.Background(), runID, r.ID)
+				require.NoError(t, err)
+				require.False(t, reopened)
+			}
+		}
+	}
+	var windows atomic.Int32
+	runner.beforeComplete = func(runID uuid.UUID) {
+		switch windows.Add(1) {
+		case 1:
+			// Still failing: the replacement will run r1 and see it fail again.
+			retryR1(runID)
+		case 2:
+			// Fixed now: this retry lands in the replacement's own window.
+			f.engine.mu.Lock()
+			delete(f.engine.createErrByPartition, "r1")
+			f.engine.mu.Unlock()
+			retryR1(runID)
+		}
+	}
+
+	require.Error(t, runner.Run(context.Background()))
+	jobRun := f.latestJobRun(t)
+	final := f.awaitRunTerminal(t, jobRun.ID)
+
+	status := statusByPartition(f.instanceRowsFor(t, jobRun.ID))
+	require.Equal(t, string(run.TaskStatusSucceeded), status["r1"],
+		"a second retry of the same partition landing in the replacement's window must execute, not be abandoned")
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	require.Equal(t, 3, f.engine.createCount("r1"), "original, replacement (failed again), further replacement (succeeded)")
+	require.Equal(t, int32(3), windows.Load())
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), callbacks.Load())
+}
+
+// TestFanOutPartitionRetryAbortedResumeHandsFreshRetryToAnotherEngine pins
+// the early-failure finalizer's scope. A replacement that fails before it
+// could execute anything may only abandon the retries it was started for; a
+// retry accepted into the run meanwhile is fresh work that gets its own
+// engine rather than being skipped unexecuted (and thereby made
+// un-retryable).
+func TestFanOutPartitionRetryAbortedResumeHandsFreshRetryToAnotherEngine(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky","other"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom flaky")
+	f.engine.createErrByPartition["other"] = fmt.Errorf("boom other")
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	ids := map[string]uuid.UUID{}
+	for _, r := range f.instanceRows(t) {
+		ids[r.PartitionValue] = r.ID
+	}
+	f.engine.mu.Lock()
+	delete(f.engine.createErrByPartition, "flaky")
+	delete(f.engine.createErrByPartition, "other")
+	f.engine.mu.Unlock()
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, ids["flaky"])
+	require.NoError(t, err)
+	require.True(t, reopened)
+	// Accepted while the run is (nominally) running again: no kickoff of its
+	// own, it relies on the engine that owns the run.
+	_, reopened, err = f.store.RetryPartition(context.Background(), jobRun.ID, ids["other"])
+	require.NoError(t, err)
+	require.False(t, reopened)
+
+	// The replacement started for `flaky` fails to initialize; the engine it
+	// hands `other` to must not.
+	var envCalls atomic.Int32
+	envFactory := func() env.Environment {
+		vars := defaultFanOutVars()
+		if envCalls.Add(1) == 1 {
+			vars.JobdefSecretsIdentityHMACKeys = "not-an-id-value-pair"
+		}
+		return vars
+	}
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts,
+		WithEnvVariables(envFactory),
+		WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+			callbacks.Add(1)
+			return nil
+		}),
+		withPartitionRetryReplacement([]uuid.UUID{ids["flaky"]}),
+	)
+	err = New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), jobRun.ID))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "secret resolver configuration failure")
+
+	final := f.awaitRunTerminal(t, jobRun.ID)
+	status := statusByPartition(f.instanceRowsFor(t, jobRun.ID))
+	require.Equal(t, string(run.TaskStatusSucceeded), status["other"],
+		"a retry accepted while the aborted engine was initializing is fresh work and must execute")
+	require.Equal(t, string(run.TaskStatusSkipped), status["flaky"],
+		"the retry the aborted engine was started for is abandoned explicitly")
+	require.Equal(t, 1, f.engine.createCount("flaky"))
+	require.Equal(t, 2, f.engine.createCount("other"))
+	require.NotNil(t, final.CompletedAt)
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), callbacks.Load(), "only the engine that finalizes the run dispatches callbacks")
 }
