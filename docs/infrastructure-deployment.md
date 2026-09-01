@@ -260,7 +260,7 @@ Shared env:
 
 | Env | Meaning |
 |---|---|
-| `IMPORT_OUTPUTS_FROM` | comma-separated upstream **apply** step names. Every `CAESIUM_OUTPUT_<STEP>_<KEY>` of those steps is exported as `TF_VAR_<original>` — original names come from the JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`, falling back to `CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES`) when present, otherwise from lowercasing the folded suffix. The cross-stack wiring is deliberately not `terraform_remote_state` (which would grant every consuming stack read credentials on the producing stack's state). **Every named step must actually be an upstream `tf-apply` that published its `caesium_outputs_published` sentinel**; a typo, a non-predecessor or a skipped producer fails the phase naming the missing step, rather than importing zero variables and letting Terraform plan against variable defaults |
+| `IMPORT_OUTPUTS_FROM` | comma-separated upstream **apply** step names. Every `CAESIUM_OUTPUT_<STEP>_<KEY>` of those steps is exported as `TF_VAR_<original>` — original names come from the server-generated JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`) when present, otherwise from lowercasing the folded suffix for the historical snake_case contract. A mixed-case/dashed producer publishes `caesium_output_name_index_required=1`; seeing that sentinel without the dedicated index fails explicitly as an old/incompatible server rather than guessing a name. The cross-stack wiring is deliberately not `terraform_remote_state` (which would grant every consuming stack read credentials on the producing stack's state). **Every named step must actually be an upstream `tf-apply` that published its `caesium_outputs_published` sentinel**; a typo, a non-predecessor or a skipped producer fails the phase naming the missing step, rather than importing zero variables and letting Terraform plan against variable defaults |
 | `APPLY_STEP` | when set, emit `##caesium::branch <APPLY_STEP>` only if the plan has changes — the leaf-stack branch form |
 
 `tf-apply` additionally reads:
@@ -309,20 +309,25 @@ with `-` and `.` folded to `_`. That fold is not injective (`vpcId` becomes
 `VPCID`; `vpc-id` and `vpc_id` both become `VPC_ID`), so `IMPORT_OUTPUTS_FROM`
 cannot recover the original Terraform name from the env key alone.
 
-`tf-apply` therefore publishes a JSON **name index** mapping each folded env
-suffix back to the original output name. The index travels as
-`CAESIUM_OUTPUT_NAME_INDEX_<STEP>` — outside the `CAESIUM_OUTPUT_<STEP>_<KEY>`
-suffix space, so it cannot collide with a user key. `tf-apply` also dual-writes
-it as the output key `caesium_output_names`, which older servers inject as
-`CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES`. `tf-plan` reads the dedicated
-env first and falls back to that folded suffix, then exports `TF_VAR_vpcId` /
-`TF_VAR_vpc-id` exactly. The index is omitted when every published name
-already survives the fold (lowercase `[a-z0-9_]+`), so existing snake_case
-stacks keep the same output row and cache keys.
+Caesium therefore derives a JSON **name index** from the persisted output keys
+and injects it as `CAESIUM_OUTPUT_NAME_INDEX_<STEP>` — outside the
+`CAESIUM_OUTPUT_<STEP>_<KEY>` suffix space, so it cannot collide with a user
+key. `tf-plan` uses that authoritative map to export `TF_VAR_vpcId` /
+`TF_VAR_vpc-id` exactly. The index must cover every transported suffix, contain
+no extras or duplicate targets, and map every original name back to its actual
+folded suffix; malformed or partial indexes fail the import without a
+per-entry lowercase fallback.
 
-Generic tasks may use `caesium_output_names` as an ordinary output. It is only
-reserved as a Terraform stack output by `tf-apply` (along with
-`caesium_outputs_published`).
+The index is omitted when every published name already survives the fold
+(lowercase `[a-z0-9_]+`), so existing snake_case stacks keep the same env and
+cache keys. When an index is needed, `tf-apply` persists the protocol sentinel
+`caesium_output_name_index_required=1`. An old server copies that sentinel but
+cannot generate the dedicated env, so a new `tf-runner` reports the incompatible
+server instead of silently turning `vpcId` into `vpcid`.
+
+`caesium_output_names` has no protocol meaning and remains an ordinary generic
+or Terraform output. The reserved Terraform output keys are
+`caesium_outputs_published` and `caesium_output_name_index_required`.
 
 What is still refused, **before** `terraform apply` mutates anything:
 
@@ -977,7 +982,7 @@ Ordered by damage:
 | **A cached `discover` replaying a stale remote-module identity** — the checkout is unchanged, but a registry range, Git branch, or re-pointed tag has moved, so `terraform get` would resolve different bytes | Every discover step in both reference manifests sets `cache: false` explicitly; an omitted block is cacheable under `CAESIUM_CACHE_ENABLED=true`. Pin remote modules to immutable revisions as well — that is what keeps plan/apply on the revision discover fingerprinted. |
 | **A fingerprint blind to non-`.tf` assets** — a `templatefile` template, a `file()` asset or an `archive_file` source changes, the fingerprint does not, and plan/apply cache-hit | `tf-discover` hashes every regular file the stack root and its resolved modules own, at any depth, excluding only generated Terraform/state data ([`tf-discover`](#tf-discover)). |
 | **Plan installing a different module revision than discover fingerprinted** | `tf-runner` clears `<TF_DATA_DIR>/modules` before every `init`, so a persistent data directory cannot pin a stale revision ([module re-resolution](#modules-are-re-resolved-on-every-init)). |
-| **A published output name that does not survive the environment transport** — `vpcId` reaching a consumer as `TF_VAR_vpcid`, or `vpc-id`/`vpc_id` folding together, so Terraform uses a default and the run is green with wrong inputs | A JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`, with a folded-suffix fallback when `tf-apply` dual-writes `caesium_output_names`) restores mixed-case and dashed names as `TF_VAR_<original>`. `tf-apply` still fails closed on a pair that folds onto one env suffix, and on names that are not Terraform identifiers ([Published output names](#published-output-names-round-trip-through-a-json-index)). |
+| **A published output name that does not survive the environment transport** — `vpcId` reaching a consumer as `TF_VAR_vpcid`, or `vpc-id`/`vpc_id` folding together, so Terraform uses a default and the run is green with wrong inputs | The server-generated JSON name index (`CAESIUM_OUTPUT_NAME_INDEX_<STEP>`) restores mixed-case and dashed names as `TF_VAR_<original>`, and its mapping is verified as exact before any variable is exported. `caesium_output_name_index_required=1` makes an old/incompatible server fail explicitly. `tf-apply` still refuses a pair that folds onto one env suffix and names that are not Terraform identifiers ([Published output names](#published-output-names-round-trip-through-a-json-index)). |
 | **`IMPORT_OUTPUTS_FROM` naming a producer that never ran** — a typo or a non-predecessor imports zero variables and the stack plans against defaults | Every named step must have published its `caesium_outputs_published` sentinel, or the phase fails naming the missing step. |
 | **A retry re-applying a stale saved plan** after an apply succeeded but a post-apply step failed | `tf-apply` writes a durable apply receipt before its post-apply work; a matching receipt makes the retry republish outputs instead of re-applying ([A successful apply is recoverable](#a-successful-apply-is-recoverable)). Requires `ARTIFACT_DIR` on the state volume. |
 | **A fresh volume unwritable by the reagent images** (they run as UID 10001) | The images own `/src`, `/cache`, `/state` as `10001:10001` 0775, which covers any named volume a reagent image mounts first — `tfcache` and every `tfstate-<stack>` in the reference manifests. `src` is mounted first by the `alpine:3.23` `prepare` step, which hands it over with `chown 10001:10001 /src && chmod 0775 /src`. A PVC needs `fsGroup: 10001` cluster-side; a bind mount needs a host `chown`. All of it in [Volume ownership](#volume-ownership-the-reagent-images-run-as-uid-10001). |

@@ -362,12 +362,23 @@ func TestEncodeOutputNamesIndex_MapsFoldedKeys(t *testing.T) {
 	var index map[string]string
 	require.NoError(t, json.Unmarshal([]byte(encoded), &index))
 	assert.Equal(t, map[string]string{
-		"VPCID":    "vpcId",
-		"DB_URL":   "db-url",
-		"DOT_KEY":  "dot.key",
-		"GREETING": "greeting",
+		"VPCID":                "vpcId",
+		"DB_URL":               "db-url",
+		"DOT_KEY":              "dot.key",
+		"GREETING":             "greeting",
+		"CAESIUM_OUTPUT_NAMES": "caesium_output_names",
 	}, index)
-	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES", "the index must not describe itself")
+}
+
+func TestEncodeOutputNamesIndex_RejectsFoldedCollision(t *testing.T) {
+	_, err := EncodeOutputNamesIndex(map[string]string{
+		"vpc-id": "dash",
+		"vpc_id": "underscore",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VPC_ID")
+	assert.Contains(t, err.Error(), `"vpc-id"`)
+	assert.Contains(t, err.Error(), `"vpc_id"`)
 }
 
 func TestBuildOutputEnv_OutputNamesIndexRoundTrip(t *testing.T) {
@@ -403,35 +414,35 @@ func TestBuildOutputEnv_OutputNamesIndexRoundTrip(t *testing.T) {
 	assert.False(t, hasAccountIndex, "an identity map must not grow an extra env var (cache key churn)")
 }
 
-func TestBuildOutputEnv_ForwardsStoredDualWriteAndEmitsDedicatedIndex(t *testing.T) {
+func TestBuildOutputEnv_ForwardsOrdinaryOutputNamesValueAndIndexesIt(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"apply-network": {
 			"vpcId":                     "vpc-1",
-			OutputNamesIndexKey:         `{"VPCID":"stale"}`,
+			"caesium_output_names":      `{"VPCID":"application-data"}`,
 			"caesium_outputs_published": "1",
 		},
 	})
 	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
-	assert.Equal(t, `{"VPCID":"stale"}`, env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
-		"tf-apply's dual-written sidecar is a stored key and must be forwarded")
+	assert.Equal(t, `{"VPCID":"application-data"}`, env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES"],
+		"caesium_output_names is application data, not a folded metadata channel")
 	assert.Equal(t, "1", env["CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED"])
 	var index map[string]string
 	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
 	assert.Equal(t, "vpcId", index["VPCID"])
-	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES")
+	assert.Equal(t, "caesium_output_names", index["CAESIUM_OUTPUT_NAMES"])
 }
 
 func TestParseOutput_OutputNamesScalarAccepted(t *testing.T) {
 	result, err := ParseOutput(strings.NewReader(`##caesium::output {"caesium_output_names":"hello"}` + "\n"))
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{OutputNamesIndexKey: "hello"}, result)
+	assert.Equal(t, map[string]string{"caesium_output_names": "hello"}, result)
 }
 
 func TestParseMarkers_OutputNamesScalarAccepted(t *testing.T) {
 	m, err := ParseMarkers(strings.NewReader(`##caesium::output {"caesium_output_names":"hello","ok":"kept"}` + "\n"))
 	require.NoError(t, err)
 	require.NotNil(t, m)
-	assert.Equal(t, "hello", m.Output[OutputNamesIndexKey])
+	assert.Equal(t, "hello", m.Output["caesium_output_names"])
 	assert.Equal(t, "kept", m.Output["ok"])
 }
 
@@ -440,7 +451,7 @@ func TestParseOutput_OutputNamesIndexStringStored(t *testing.T) {
 	result, err := ParseOutput(logs)
 	require.NoError(t, err)
 	assert.Equal(t, "vpc-1", result["vpcId"])
-	assert.Equal(t, `{"VPCID":"vpcId"}`, result[OutputNamesIndexKey])
+	assert.Equal(t, `{"VPCID":"vpcId"}`, result["caesium_output_names"])
 }
 
 func TestParseOutput_OutputNamesNestedObjectDropped(t *testing.T) {
@@ -448,14 +459,14 @@ func TestParseOutput_OutputNamesNestedObjectDropped(t *testing.T) {
 	result, err := ParseOutput(logs)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"vpcId": "vpc-1"}, result)
-	assert.NotContains(t, result, OutputNamesIndexKey)
+	assert.NotContains(t, result, "caesium_output_names")
 }
 
 func TestParseOutput_OutputNamesRefAccepted(t *testing.T) {
 	line := `##caesium::output-ref {"key":"caesium_output_names","path":"/p","digest":"` + testDigest + `"}` + "\n"
 	result, err := ParseOutput(strings.NewReader(line))
 	require.NoError(t, err)
-	ref, ok := DecodeOutputRef(result[OutputNamesIndexKey])
+	ref, ok := DecodeOutputRef(result["caesium_output_names"])
 	require.True(t, ok)
 	assert.Equal(t, "/p", ref.Path)
 	assert.Equal(t, testDigest, ref.Digest)
@@ -464,8 +475,8 @@ func TestParseOutput_OutputNamesRefAccepted(t *testing.T) {
 func TestBuildOutputEnv_ForwardsUserOutputNamesScalar(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"extract": {
-			"row_count":         "42",
-			OutputNamesIndexKey: "hello",
+			"row_count":            "42",
+			"caesium_output_names": "hello",
 		},
 	})
 	assert.Equal(t, "42", env["CAESIUM_OUTPUT_EXTRACT_ROW_COUNT"])
@@ -478,8 +489,8 @@ func TestBuildOutputEnv_ForwardsUserOutputNamesScalar(t *testing.T) {
 func TestBuildOutputEnv_UserOutputNamesPlusMixedCasePreservesBoth(t *testing.T) {
 	env := mustBuildOutputEnv(t, map[string]map[string]string{
 		"apply-network": {
-			"vpcId":             "vpc-1",
-			OutputNamesIndexKey: "hello",
+			"vpcId":                "vpc-1",
+			"caesium_output_names": "hello",
 		},
 	})
 	assert.Equal(t, "vpc-1", env["CAESIUM_OUTPUT_APPLY_NETWORK_VPCID"])
@@ -488,7 +499,7 @@ func TestBuildOutputEnv_UserOutputNamesPlusMixedCasePreservesBoth(t *testing.T) 
 	var index map[string]string
 	require.NoError(t, json.Unmarshal([]byte(env[OutputNamesIndexEnv("apply-network")]), &index))
 	assert.Equal(t, "vpcId", index["VPCID"])
-	assert.NotContains(t, index, "CAESIUM_OUTPUT_NAMES")
+	assert.Equal(t, "caesium_output_names", index["CAESIUM_OUTPUT_NAMES"])
 }
 
 func TestBuildOutputEnv_SnakeCaseOmitsSidecar(t *testing.T) {
@@ -501,14 +512,17 @@ func TestBuildOutputEnv_SnakeCaseOmitsSidecar(t *testing.T) {
 	assert.False(t, hasFolded)
 }
 
-func TestIsOutputNamesIndex(t *testing.T) {
-	assert.True(t, IsOutputNamesIndex(`{"VPCID":"vpcId"}`))
-	assert.True(t, IsOutputNamesIndex(`{}`))
-	assert.False(t, IsOutputNamesIndex("hello"))
-	assert.False(t, IsOutputNamesIndex(`["vpcId"]`))
-	assert.False(t, IsOutputNamesIndex(`{"VPCID":1}`))
-	assert.False(t, IsOutputNamesIndex("null"))
-	assert.False(t, IsOutputNamesIndex(""))
+func TestBuildOutputEnv_RejectsReferenceDigestCollision(t *testing.T) {
+	ref := OutputRef{Ref: outputRefVersion, Path: "/data/out", Digest: testDigest}
+	_, err := BuildOutputEnv(map[string]map[string]string{
+		"extract": {
+			"artifact":        ref.Encode(),
+			"artifact_digest": "application-value",
+			"vpcId":           "vpc-1",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CAESIUM_OUTPUT_EXTRACT_ARTIFACT_DIGEST")
 }
 
 // ── ParseBranches tests ─────────────────────────────────────────────

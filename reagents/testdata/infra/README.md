@@ -6,9 +6,9 @@ backend, and the `null`/`random` providers, so it plans and applies with no
 cloud credentials and no network beyond the provider registry.
 
 ```
-stacks/network    exports vpc_id (and a sensitive admin_token)
+stacks/network    exports vpc_id, vpcId, db-url (and a sensitive admin_token)
 stacks/account    ordered after network
-stacks/app-web    consumes network's vpc_id through TF_VAR_vpc_id
+stacks/app-web    consumes those names through TF_VAR_vpc_id / TF_VAR_vpcId / TF_VAR_db-url
 modules/vpc       shared; used by network and app-web
 modules/tags      shared; calls modules/tags/inner by a RELATIVE source
 fail-closed/dynamic-source   a module source that is a variable

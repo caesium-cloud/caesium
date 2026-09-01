@@ -528,49 +528,20 @@ func TestOutputNamesIndexEnv(t *testing.T) {
 	}
 }
 
-func TestEncodeOutputNamesIndexOmitsIdentityMaps(t *testing.T) {
-	encoded, err := EncodeOutputNamesIndex(map[string]string{
-		"vpc_id":                    "vpc-1",
-		"caesium_outputs_published": "1",
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestOutputNamesNeedIndex(t *testing.T) {
+	if OutputNamesNeedIndex(map[string]string{"vpc_id": "vpc-1", "count2": "2"}) {
+		t.Fatal("snake_case output names do not need an index")
 	}
-	if encoded != "" {
-		t.Fatalf("snake_case keys already survive the fold; got %q", encoded)
+	for _, name := range []string{"vpcId", "db-url", "VPC_ID"} {
+		if !OutputNamesNeedIndex(map[string]string{name: "value"}) {
+			t.Fatalf("%q needs an index", name)
+		}
 	}
 }
 
-func TestEncodeOutputNamesIndexMapsFoldedKeys(t *testing.T) {
-	encoded, err := EncodeOutputNamesIndex(map[string]string{
-		"vpcId":                     "vpc-1",
-		"db-url":                    "postgres://db",
-		"greeting":                  "hello",
-		"caesium_outputs_published": "3",
-		OutputNamesIndexKey:         `{"stale":"index"}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var index map[string]string
-	if err := json.Unmarshal([]byte(encoded), &index); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"VPCID":                     "vpcId",
-		"DB_URL":                    "db-url",
-		"GREETING":                  "greeting",
-		"CAESIUM_OUTPUTS_PUBLISHED": "caesium_outputs_published",
-	}
-	if len(index) != len(want) {
-		t.Fatalf("index = %v, want %v", index, want)
-	}
-	for k, v := range want {
-		if index[k] != v {
-			t.Fatalf("index[%q] = %q, want %q (%v)", k, index[k], v, index)
-		}
-	}
-	if _, self := index["CAESIUM_OUTPUT_NAMES"]; self {
-		t.Fatal("the index described itself")
+func TestCheckOutputNamesRejectsIndexRequiredSentinel(t *testing.T) {
+	err := CheckOutputNames([]string{OutputNamesIndexRequiredKey})
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("want reserved-name refusal, got %v", err)
 	}
 }

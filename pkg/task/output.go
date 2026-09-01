@@ -570,17 +570,6 @@ func NormalizeStepName(name string) string {
 	return strings.ToUpper(name)
 }
 
-// OutputNamesIndexKey is the tf-apply protocol output key carrying a JSON
-// object that maps NormalizeStepName(original) → original for each of a
-// stack's published outputs. tf-apply dual-writes it into the output row so
-// an older server that only copies stored keys still injects
-// CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES. Generic tasks may use this
-// spelling as an ordinary output; the generated index does not occupy it.
-//
-// The reagents duplicate this spelling (they cannot import this package; the
-// contract between them is the marker protocol). Keep the two in lockstep.
-const OutputNamesIndexKey = "caesium_output_names"
-
 // OutputNamesIndexEnvPrefix is the dedicated environment prefix for the
 // generated name index. The full name is
 // CAESIUM_OUTPUT_NAME_INDEX_<NormalizeStepName(step)>. It sits outside
@@ -604,12 +593,20 @@ func OutputNamesIndexEnv(stepName string) string {
 func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
 	index := make(map[string]string, len(outputs))
 	needed := false
-	for k := range outputs {
-		if k == OutputNamesIndexKey {
-			continue
+	keys := make([]string, 0, len(outputs))
+	for key := range outputs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		folded := NormalizeStepName(key)
+		if prior, exists := index[folded]; exists {
+			return "", fmt.Errorf(
+				"output keys %q and %q both fold to environment suffix %s; rename one of them",
+				prior, key, folded)
 		}
-		index[NormalizeStepName(k)] = k
-		if !outputNameSurvivesEnvFold(k) {
+		index[folded] = key
+		if !outputNameSurvivesEnvFold(key) {
 			needed = true
 		}
 	}
@@ -631,27 +628,6 @@ func outputNameSurvivesEnvFold(name string) bool {
 	return strings.ToLower(NormalizeStepName(name)) == name
 }
 
-// DecodeOutputNamesIndex parses a names-index sidecar. ok is false for
-// anything that is not a JSON object of string → string (the tf-apply shape).
-func DecodeOutputNamesIndex(value string) (map[string]string, bool) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" || trimmed[0] != '{' {
-		return nil, false
-	}
-	var index map[string]string
-	if err := json.Unmarshal([]byte(value), &index); err != nil || index == nil {
-		return nil, false
-	}
-	return index, true
-}
-
-// IsOutputNamesIndex reports whether value is a well-formed names-index JSON
-// object.
-func IsOutputNamesIndex(value string) bool {
-	_, ok := DecodeOutputNamesIndex(value)
-	return ok
-}
-
 // BuildOutputEnv constructs CAESIUM_OUTPUT_<STEP>_<KEY>=<VALUE> environment
 // variables from a map of predecessor step names to their output key-value
 // pairs.
@@ -665,40 +641,74 @@ func IsOutputNamesIndex(value string) bool {
 // env vars: a large payload never enters the environment, only its location and
 // digest do.
 //
-// Every stored key is forwarded, including caesium_output_names. The generated
-// name index is emitted separately as CAESIUM_OUTPUT_NAME_INDEX_<STEP> whenever
-// any output key would not survive lowercasing the folded suffix, so it cannot
-// collide with a user value at CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES.
-// Snake_case-only maps omit the dedicated env, so existing cache keys stay
-// byte-identical. tf-apply still dual-writes the sidecar into the output row;
-// that value is forwarded as the folded suffix for older consumers.
+// Every stored key is user data and is forwarded, including
+// caesium_output_names. The generated name index is emitted separately as
+// CAESIUM_OUTPUT_NAME_INDEX_<STEP> whenever any output key would not survive
+// lowercasing the folded suffix. Snake_case-only maps omit the dedicated env,
+// so existing cache keys stay byte-identical.
+//
+// Any two values that would occupy one environment variable are refused. A
+// map iteration winner would corrupt both the downstream value and its cache
+// identity, so BuildOutputEnv must never guess.
 func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string]string, error) {
 	if len(predecessorOutputs) == 0 {
 		return nil, nil
 	}
 
 	env := make(map[string]string)
-	for stepName, outputs := range predecessorOutputs {
+	sources := make(map[string]string)
+	setEnv := func(key, value, source string) error {
+		if prior, exists := sources[key]; exists {
+			return fmt.Errorf("predecessor outputs %s and %s both map to environment variable %s", prior, source, key)
+		}
+		sources[key] = source
+		env[key] = value
+		return nil
+	}
+
+	stepNames := make([]string, 0, len(predecessorOutputs))
+	for stepName := range predecessorOutputs {
+		stepNames = append(stepNames, stepName)
+	}
+	sort.Strings(stepNames)
+	for _, stepName := range stepNames {
+		outputs := predecessorOutputs[stepName]
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
-		for k, v := range outputs {
+		encoded, err := EncodeOutputNamesIndex(outputs)
+		if err != nil {
+			return nil, fmt.Errorf("building output environment for step %q: %w", stepName, err)
+		}
+
+		keys := make([]string, 0, len(outputs))
+		for key := range outputs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := outputs[k]
 			envKey := prefix + NormalizeStepName(k)
+			source := fmt.Sprintf("%q.%q", stepName, k)
 			if ref, ok := DecodeOutputRef(v); ok {
 				// Reference: hand the consumer the path to read and the digest
 				// to verify against, never the encoded JSON.
-				env[envKey] = ref.Path
-				env[envKey+"_DIGEST"] = ref.Digest
+				if err := setEnv(envKey, ref.Path, source); err != nil {
+					return nil, err
+				}
+				if err := setEnv(envKey+"_DIGEST", ref.Digest, source+" digest"); err != nil {
+					return nil, err
+				}
 				continue
 			}
-			env[envKey] = v
-		}
-		encoded, err := EncodeOutputNamesIndex(outputs)
-		if err != nil {
-			return nil, err
+			if err := setEnv(envKey, v, source); err != nil {
+				return nil, err
+			}
 		}
 		if encoded == "" {
 			continue
 		}
-		env[OutputNamesIndexEnv(stepName)] = encoded
+		if err := setEnv(OutputNamesIndexEnv(stepName), encoded, fmt.Sprintf("%q name index", stepName)); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(env) == 0 {

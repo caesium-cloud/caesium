@@ -1,7 +1,6 @@
 package tf
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -98,17 +97,6 @@ func PlannedPublishableOutputNames(plan *tfjson.Plan) []string {
 	return names
 }
 
-// OutputNamesIndexKey is the tf-apply protocol output key carrying a JSON
-// object that maps the folded environment suffix (Caesium uppercases the key
-// and maps "-"/"." to "_") back to the original Terraform output name.
-// tf-apply dual-writes it into the output row so an older server that only
-// copies stored keys still injects CAESIUM_OUTPUT_<STEP>_CAESIUM_OUTPUT_NAMES.
-// New servers also emit CAESIUM_OUTPUT_NAME_INDEX_<STEP> from BuildOutputEnv.
-// This spelling is reserved as a Terraform stack output, not as a generic
-// task key. Locked to pkg/task.OutputNamesIndexKey — the reagents cannot
-// import Caesium, so the contract is this string.
-const OutputNamesIndexKey = "caesium_output_names"
-
 // OutputNamesIndexEnvPrefix is the dedicated environment prefix Caesium uses
 // for the generated name index: CAESIUM_OUTPUT_NAME_INDEX_<STEP>. Locked to
 // pkg/task.OutputNamesIndexEnvPrefix.
@@ -120,32 +108,26 @@ func OutputNamesIndexEnv(step string) string {
 	return OutputNamesIndexEnvPrefix + foldOutputKey(step)
 }
 
-// EncodeOutputNamesIndex returns the JSON sidecar mapping folded env suffixes
-// back to original output names. An empty string means every name already
-// survives lowercasing the folded suffix, and the sidecar must be omitted so
-// snake_case stacks keep the same output row (and cache key) as before.
+// OutputNamesIndexRequiredKey is the tf-apply protocol sentinel saying this
+// output row contains at least one name that cannot be recovered by the
+// historical lowercase-suffix rule. A new tf-runner that sees the sentinel
+// requires Caesium to have supplied OutputNamesIndexEnv(step); an old server
+// therefore fails explicitly instead of silently importing vpcId as vpcid.
 //
-// Mirrors pkg/task.EncodeOutputNamesIndex. Keep the two in lockstep.
-func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
-	index := make(map[string]string, len(outputs))
-	needed := false
-	for k := range outputs {
-		if k == OutputNamesIndexKey {
-			continue
+// The sentinel is persisted in the ordinary output row specifically so old
+// servers carry it. It contains no name metadata and cannot be mistaken for a
+// user-provided JSON index.
+const OutputNamesIndexRequiredKey = "caesium_output_name_index_required"
+
+// OutputNamesNeedIndex reports whether any output name needs the dedicated
+// server-generated index to survive the environment fold.
+func OutputNamesNeedIndex(outputs map[string]string) bool {
+	for name := range outputs {
+		if !outputNameSurvivesFold(name) {
+			return true
 		}
-		index[foldOutputKey(k)] = k
-		if !outputNameSurvivesFold(k) {
-			needed = true
-		}
 	}
-	if !needed {
-		return "", nil
-	}
-	data, err := json.Marshal(index)
-	if err != nil {
-		return "", fmt.Errorf("encoding output name index: %w", err)
-	}
-	return string(data), nil
+	return false
 }
 
 func outputNameSurvivesFold(name string) bool {
@@ -170,8 +152,8 @@ func foldOutputKey(name string) string {
 //	                    have arrived as vpcid
 //	vpc-id  -> VPC_ID   collides with a sibling actually named vpc_id
 //
-// The JSON name index (EncodeOutputNamesIndex) makes the unique cases lossless
-// — IMPORT_OUTPUTS_FROM restores the original name — so mixed case and dashes
+// Caesium's dedicated JSON name index makes the unique cases lossless —
+// IMPORT_OUTPUTS_FROM restores the original name — so mixed case and dashes
 // are allowed. What this still refuses:
 //
 //   - two names that fold onto the same env suffix: the index cannot
@@ -198,6 +180,9 @@ func CheckOutputNames(names []string) error {
 		folded[key] = name
 	}
 	for _, name := range names {
+		if name == OutputNamesIndexRequiredKey {
+			return fmt.Errorf("output %q is reserved by tf-apply; rename it", name)
+		}
 		if err := publishableName(name); err != nil {
 			return err
 		}

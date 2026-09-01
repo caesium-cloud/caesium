@@ -165,16 +165,29 @@ func branches(lines []string) []string {
 	return out
 }
 
-// applyOutputsEnviron renders a published output row the way an older server
-// that merely copies stored keys injects it: folded CAESIUM_OUTPUT_<STEP>_<KEY>
-// names, including tf-apply's dual-written name index when present. New
-// servers also emit CAESIUM_OUTPUT_NAME_INDEX_<STEP>; tests that need that
-// path add it explicitly.
-func applyOutputsEnviron(step string, values map[string]string) []string {
+// applyOutputsEnviron renders a published output row the way the Caesium
+// server injects it: folded CAESIUM_OUTPUT_<STEP>_<KEY> values plus a dedicated
+// authoritative index when any original name would not survive the fold.
+func applyOutputsEnviron(t *testing.T, step string, values map[string]string) []string {
+	t.Helper()
 	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
-	environ := make([]string, 0, len(values))
+	environ := make([]string, 0, len(values)+1)
+	index := make(map[string]string, len(values))
+	needsIndex := false
 	for k, v := range values {
-		environ = append(environ, prefix+normalizeStepName(k)+"="+v)
+		folded := normalizeStepName(k)
+		environ = append(environ, prefix+folded+"="+v)
+		index[folded] = k
+		if strings.ToLower(folded) != k {
+			needsIndex = true
+		}
+	}
+	if needsIndex {
+		encoded, err := json.Marshal(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		environ = append(environ, tf.OutputNamesIndexEnv(step)+"="+string(encoded))
 	}
 	return environ
 }
@@ -461,8 +474,8 @@ func TestApplyAppliesTheProposedArtifactAndPublishesOutputs(t *testing.T) {
 	if values["structured"] != `{"a":1,"b":"two"}` {
 		t.Fatalf("structured = %q", values["structured"])
 	}
-	if _, present := values[tf.OutputNamesIndexKey]; present {
-		t.Fatal("a snake_case output row grew a name index; that would churn consumer cache keys")
+	if _, present := values[tf.OutputNamesIndexRequiredKey]; present {
+		t.Fatal("a snake_case output row claimed to require a name index; that would churn consumer cache keys")
 	}
 	if _, present := values["token"]; present {
 		t.Fatal("the sensitive output was published")
@@ -1279,9 +1292,10 @@ output "token" {
 }
 
 // Mixed-case Terraform output names used to be refused because the env fold
-// was lossy. The name index makes the round-trip exact, so apply must publish
-// vpcId under its original key plus caesium_output_names, and IMPORT_OUTPUTS_FROM
-// must restore TF_VAR_vpcId — not TF_VAR_vpcid.
+// was lossy. The server-generated name index makes the round-trip exact, so
+// apply publishes the original keys plus an index-required sentinel and
+// IMPORT_OUTPUTS_FROM restores TF_VAR_vpcId — not TF_VAR_vpcid. An ordinary
+// output named caesium_output_names remains application data throughout.
 func TestApplyPublishesCamelCaseOutputAndNameIndex(t *testing.T) {
 	cfg := newStack(t)
 	mangled := `terraform {
@@ -1301,6 +1315,10 @@ output "vpcId" {
 
 output "db-url" {
   value = "postgres://db"
+}
+
+output "caesium_output_names" {
+  value = "application-value"
 }
 `
 	if err := os.WriteFile(filepath.Join(cfg.Root, "main.tf"), []byte(mangled), 0o600); err != nil {
@@ -1325,36 +1343,39 @@ output "db-url" {
 	if values["db-url"] != "postgres://db" {
 		t.Fatalf("db-url = %q", values["db-url"])
 	}
-	if values["caesium_outputs_published"] != "2" {
-		t.Fatalf("caesium_outputs_published = %q (the index is protocol, not a stack output)", values["caesium_outputs_published"])
+	if values["caesium_output_names"] != "application-value" {
+		t.Fatalf("caesium_output_names = %q", values["caesium_output_names"])
 	}
-	var index map[string]string
-	if err := json.Unmarshal([]byte(values[tf.OutputNamesIndexKey]), &index); err != nil {
-		t.Fatalf("name index is not JSON: %v (%q)", err, values[tf.OutputNamesIndexKey])
+	if values["caesium_outputs_published"] != "3" {
+		t.Fatalf("caesium_outputs_published = %q (protocol sentinels are not stack outputs)", values["caesium_outputs_published"])
 	}
-	if index["VPCID"] != "vpcId" || index["DB_URL"] != "db-url" {
-		t.Fatalf("name index = %v", index)
+	if values[tf.OutputNamesIndexRequiredKey] != "1" {
+		t.Fatalf("%s = %q", tf.OutputNamesIndexRequiredKey, values[tf.OutputNamesIndexRequiredKey])
 	}
 
-	// The published row, injected the way Caesium (or an older server that
-	// merely copies stored keys) exposes it, must import as the original names.
+	// The published row, injected through Caesium's generated dedicated index,
+	// must import every application output under its original name.
 	t.Setenv("TF_VAR_vpcId", "")
 	t.Setenv("TF_VAR_db-url", "")
+	t.Setenv("TF_VAR_caesium_output_names", "")
 	t.Setenv("TF_VAR_vpcid", "")
 	t.Setenv("TF_VAR_db_url", "")
-	environ := applyOutputsEnviron("apply-offline", values)
+	environ := applyOutputsEnviron(t, "apply-offline", values)
 	names, err := exportImportedOutputs([]string{"apply-offline"}, environ, io.Discard)
 	if err != nil {
 		t.Fatalf("exportImportedOutputs: %v", err)
 	}
-	if strings.Join(names, ",") != "db-url,vpcId" {
-		t.Fatalf("exported %v, want db-url,vpcId", names)
+	if strings.Join(names, ",") != "caesium_output_names,db-url,vpcId" {
+		t.Fatalf("exported %v, want caesium_output_names,db-url,vpcId", names)
 	}
 	if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
 		t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
 	}
 	if os.Getenv("TF_VAR_db-url") != "postgres://db" {
 		t.Fatalf("TF_VAR_db-url = %q", os.Getenv("TF_VAR_db-url"))
+	}
+	if os.Getenv("TF_VAR_caesium_output_names") != "application-value" {
+		t.Fatalf("TF_VAR_caesium_output_names = %q", os.Getenv("TF_VAR_caesium_output_names"))
 	}
 	if os.Getenv("TF_VAR_vpcid") != "" || os.Getenv("TF_VAR_db_url") != "" {
 		t.Fatal("the lossy lowercase recovery ran even though the index was present")
@@ -1538,28 +1559,20 @@ func TestImportedOutputsAreStepExactAndFailClosedOnAmbiguity(t *testing.T) {
 		}
 	})
 
-	t.Run("the name index never becomes a variable", func(t *testing.T) {
-		t.Setenv("TF_VAR_vpcId", "")
-		t.Setenv("TF_VAR_accountId", "")
+	t.Run("caesium_output_names is an ordinary variable", func(t *testing.T) {
 		t.Setenv("TF_VAR_caesium_output_names", "")
-		networkIndex := `{"VPCID":"vpcId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published"}`
-		accountIndex := `{"ACCOUNTID":"accountId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published"}`
-		names, err := exportImportedOutputs([]string{"apply-network", "apply-account"}, []string{
-			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=application-value",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + networkIndex,
-			"CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNTID=acct-1",
-			"CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUTS_PUBLISHED=1",
-			"CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUT_NAMES=" + accountIndex,
 		}, io.Discard)
 		if err != nil {
-			t.Fatalf("importing mixed-case outputs from two applies must work; got %v", err)
+			t.Fatalf("ordinary caesium_output_names output was refused: %v", err)
 		}
-		if strings.Join(names, ",") != "accountId,vpcId" {
+		if strings.Join(names, ",") != "caesium_output_names" {
 			t.Fatalf("exported %v", names)
 		}
-		if got := os.Getenv("TF_VAR_caesium_output_names"); got != "" {
-			t.Fatalf("the name index was exported as a Terraform variable (%q)", got)
+		if got := os.Getenv("TF_VAR_caesium_output_names"); got != "application-value" {
+			t.Fatalf("TF_VAR_caesium_output_names = %q", got)
 		}
 	})
 }
@@ -1569,8 +1582,6 @@ func TestImportedOutputsAreStepExactAndFailClosedOnAmbiguity(t *testing.T) {
 // historical lowercase recovery still applies, so a snake_case producer that
 // never emitted one keeps working.
 func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
-	index := `{"VPCID":"vpcId","DB_URL":"db-url","DOT_KEY":"dot.key","GREETING":"greeting"}`
-
 	t.Run("mixed case and dashes restore the original TF_VAR_", func(t *testing.T) {
 		t.Setenv("TF_VAR_vpcId", "")
 		t.Setenv("TF_VAR_db-url", "")
@@ -1582,7 +1593,8 @@ func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
 			"CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL=postgres://db",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_GREETING=hello",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=3",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"VPCID":"vpcId","DB_URL":"db-url","GREETING":"greeting","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
 		}, io.Discard)
 		if err != nil {
 			t.Fatalf("exportImportedOutputs: %v", err)
@@ -1608,7 +1620,8 @@ func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
 		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
 			"CAESIUM_OUTPUT_APPLY_NETWORK_DOT_KEY=v",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"DOT_KEY":"dot.key","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
 		}, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "dot.key") {
 			t.Fatalf("want a refusal naming the original dotted key, got %v", err)
@@ -1629,79 +1642,217 @@ func TestImportedOutputsRoundTripOriginalNames(t *testing.T) {
 		}
 	})
 
-	t.Run("a malformed index fails closed rather than falling back", func(t *testing.T) {
-		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
-			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=not-json",
-		}, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
-			t.Fatalf("want a malformed-index refusal, got %v", err)
-		}
-	})
-
-	t.Run("the dedicated env restores mixed-case names", func(t *testing.T) {
-		t.Setenv("TF_VAR_vpcId", "")
-		t.Setenv("TF_VAR_db-url", "")
-		t.Setenv("TF_VAR_vpcid", "")
-		t.Setenv("TF_VAR_db_url", "")
+	t.Run("a folded JSON value is application data, never index metadata", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpc_id", "")
+		t.Setenv("TF_VAR_caesium_output_names", "")
 		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
-			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_DB_URL=postgres://db",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+			`CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES={"VPCID":"vpcId"}`,
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
-			tf.OutputNamesIndexEnv("apply-network") + "=" + index,
 		}, io.Discard)
 		if err != nil {
 			t.Fatalf("exportImportedOutputs: %v", err)
 		}
-		if strings.Join(names, ",") != "db-url,vpcId" {
+		if strings.Join(names, ",") != "caesium_output_names,vpc_id" {
 			t.Fatalf("exported %v", names)
 		}
-		if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
-			t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
+		if os.Getenv("TF_VAR_vpc_id") != "vpc-1" {
+			t.Fatalf("TF_VAR_vpc_id = %q", os.Getenv("TF_VAR_vpc_id"))
 		}
-		if os.Getenv("TF_VAR_db-url") != "postgres://db" {
-			t.Fatalf("TF_VAR_db-url = %q", os.Getenv("TF_VAR_db-url"))
-		}
-		if os.Getenv("TF_VAR_vpcid") != "" || os.Getenv("TF_VAR_db_url") != "" {
-			t.Fatal("lossy lowercase names were exported alongside the originals")
+		if os.Getenv("TF_VAR_caesium_output_names") != `{"VPCID":"vpcId"}` {
+			t.Fatalf("TF_VAR_caesium_output_names = %q", os.Getenv("TF_VAR_caesium_output_names"))
 		}
 	})
 
-	t.Run("the dedicated env wins over a folded user scalar", func(t *testing.T) {
+	t.Run("a dedicated index preserves a folded user scalar too", func(t *testing.T) {
 		t.Setenv("TF_VAR_vpcId", "")
+		t.Setenv("TF_VAR_caesium_output_names", "")
 		t.Setenv("TF_VAR_vpcid", "")
 		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
 			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=hello",
-			tf.OutputNamesIndexEnv("apply-network") + `={"VPCID":"vpcId"}`,
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"VPCID":"vpcId","CAESIUM_OUTPUT_NAMES":"caesium_output_names","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
 		}, io.Discard)
 		if err != nil {
 			t.Fatalf("exportImportedOutputs: %v", err)
 		}
-		if strings.Join(names, ",") != "vpcId" {
+		if strings.Join(names, ",") != "caesium_output_names,vpcId" {
 			t.Fatalf("exported %v", names)
 		}
 		if os.Getenv("TF_VAR_vpcId") != "vpc-1" {
 			t.Fatalf("TF_VAR_vpcId = %q", os.Getenv("TF_VAR_vpcId"))
 		}
+		if os.Getenv("TF_VAR_caesium_output_names") != "hello" {
+			t.Fatalf("TF_VAR_caesium_output_names = %q", os.Getenv("TF_VAR_caesium_output_names"))
+		}
 	})
 
-	t.Run("a malformed dedicated index fails closed even if the folded suffix is valid", func(t *testing.T) {
+	t.Run("a mixed-name producer may also carry an output reference", func(t *testing.T) {
+		t.Setenv("TF_VAR_artifact", "")
+		t.Setenv("TF_VAR_artifact_digest", "")
+		t.Setenv("TF_VAR_vpcId", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_ARTIFACT=/state/result.bin",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_ARTIFACT_DIGEST=sha256:abc",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"ARTIFACT":"artifact","VPCID":"vpcId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "artifact,vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if os.Getenv("TF_VAR_artifact") != "/state/result.bin" || os.Getenv("TF_VAR_vpcId") != "vpc-1" {
+			t.Fatalf("artifact=%q vpcId=%q", os.Getenv("TF_VAR_artifact"), os.Getenv("TF_VAR_vpcId"))
+		}
+		if os.Getenv("TF_VAR_artifact_digest") != "" {
+			t.Fatal("the synthetic OutputRef digest was exported as application data")
+		}
+	})
+
+	t.Run("an indexed real output ending in digest is not a synthetic companion", func(t *testing.T) {
+		t.Setenv("TF_VAR_foo", "")
+		t.Setenv("TF_VAR_foo_digest", "")
+		t.Setenv("TF_VAR_vpcId", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_FOO=value",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_FOO_DIGEST=application-digest",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=3",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"FOO":"foo","FOO_DIGEST":"foo_digest","VPCID":"vpcId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "foo,foo_digest,vpcId" {
+			t.Fatalf("exported %v", names)
+		}
+		if os.Getenv("TF_VAR_foo_digest") != "application-digest" {
+			t.Fatalf("TF_VAR_foo_digest = %q", os.Getenv("TF_VAR_foo_digest"))
+		}
+	})
+
+	t.Run("a partial index cannot hide a real digest output", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_FOO=value",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_FOO_DIGEST=application-digest",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=3",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+			tf.OutputNamesIndexEnv("apply-network") + `={"FOO":"foo","VPCID":"vpcId","CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "reports 3 application output(s), but the index names 2") {
+			t.Fatalf("want the published count to expose the omitted foo_digest mapping, got %v", err)
+		}
+	})
+
+	t.Run("an old server carrying a required sentinel fails explicitly", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpcid", "")
 		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
 			"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
 			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
-			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAMES=" + index,
-			tf.OutputNamesIndexEnv("apply-network") + "=not-json",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
 		}, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
-			t.Fatalf("want a malformed-index refusal naming the dedicated env, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "too old or incompatible") {
+			t.Fatalf("want an explicit old-server refusal, got %v", err)
 		}
 		if !strings.Contains(err.Error(), tf.OutputNamesIndexEnv("apply-network")) {
-			t.Fatalf("the failure does not name the dedicated env: %v", err)
+			t.Fatalf("the failure does not name the missing dedicated env: %v", err)
+		}
+		if os.Getenv("TF_VAR_vpcid") != "" {
+			t.Fatal("the required mixed-case output was lowercased before the compatibility failure")
 		}
 	})
+}
+
+func TestImportedOutputNameIndexFailsClosedOnIntegrityErrors(t *testing.T) {
+	prefix := []string{
+		"CAESIUM_OUTPUT_APPLY_NETWORK_VPCID=vpc-1",
+		"CAESIUM_OUTPUT_APPLY_NETWORK_GREETING=hello",
+		"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
+		"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=1",
+	}
+	validProtocols := `"CAESIUM_OUTPUTS_PUBLISHED":"caesium_outputs_published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"`
+	cases := map[string]struct {
+		index string
+		want  string
+	}{
+		"malformed JSON": {
+			index: `not-json`,
+			want:  "expected a JSON object",
+		},
+		"non-string value": {
+			index: `{"VPCID":1,"GREETING":"greeting",` + validProtocols + `}`,
+			want:  "not a string",
+		},
+		"duplicate suffix": {
+			index: `{"VPCID":"vpcId","VPCID":"vpcId","GREETING":"greeting",` + validProtocols + `}`,
+			want:  "appears more than once",
+		},
+		"duplicate target": {
+			index: `{"VPCID":"greeting","GREETING":"greeting",` + validProtocols + `}`,
+			want:  "targeted by both",
+		},
+		"arbitrary rename": {
+			index: `{"VPCID":"db-url","GREETING":"greeting",` + validProtocols + `}`,
+			want:  "folds to DB_URL",
+		},
+		"missing mapping": {
+			index: `{"VPCID":"vpcId",` + validProtocols + `}`,
+			want:  "GREETING is missing",
+		},
+		"extra mapping": {
+			index: `{"VPCID":"vpcId","GREETING":"greeting","EXTRA":"extra",` + validProtocols + `}`,
+			want:  "EXTRA has no transported output",
+		},
+		"renamed protocol key": {
+			index: `{"VPCID":"vpcId","GREETING":"greeting","CAESIUM_OUTPUTS_PUBLISHED":"caesium-outputs-published","CAESIUM_OUTPUT_NAME_INDEX_REQUIRED":"caesium_output_name_index_required"}`,
+			want:  "must map to",
+		},
+		"trailing JSON": {
+			index: `{"VPCID":"vpcId","GREETING":"greeting",` + validProtocols + `} {}`,
+			want:  "unexpected JSON value",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			environ := append([]string(nil), prefix...)
+			environ = append(environ, tf.OutputNamesIndexEnv("apply-network")+"="+tc.index)
+			_, err := exportImportedOutputs([]string{"apply-network"}, environ, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want integrity refusal containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+
+	t.Run("invalid required sentinel", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUT_NAME_INDEX_REQUIRED=true",
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "invalid protocol sentinel") {
+			t.Fatalf("want invalid-sentinel refusal, got %v", err)
+		}
+	})
+
+	for _, value := range []string{"not-a-number", "-1"} {
+		t.Run("invalid published count "+value, func(t *testing.T) {
+			_, err := exportImportedOutputs([]string{"apply-network"}, []string{
+				"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+				"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=" + value,
+			}, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "want a non-negative integer") {
+				t.Fatalf("want invalid-count refusal, got %v", err)
+			}
+		})
+	}
 }
 
 // A named producer that is simply not there used to import zero variables and
