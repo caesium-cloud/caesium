@@ -81,3 +81,44 @@ func TestOwnerManager_FenceRefusalLeavesNoCheckpointBehind(t *testing.T) {
 	require.True(t, readyIDs[retriedInstance] || readyIDs[retried.ID],
 		"recovery from scratch must surface the pending retry as dispatchable (ready=%v)", rec.Ready)
 }
+
+// TestOwnerManager_ReleasedRunNeverCheckpointsAgain pins the race behind the
+// release: a worker completion that captured the owned-run pointer before
+// Release forgot it can still reach its checkpoint write afterwards. Every
+// snapshot that state can produce predates the retry, so once the run is
+// released as stale no writer may checkpoint it — not the cadence write in
+// Complete, not the forced write in Drop.
+func TestOwnerManager_ReleasedRunNeverCheckpointsAgain(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, ids := seedChainRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+	mgr.MarkDispatched(runID, ids[0], "node-1", 1, 0)
+	_, err := mgr.Complete(runID, ids[0], TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+
+	// A completion in flight holds the pointer across the release.
+	mgr.mu.Lock()
+	or := mgr.runs[runID]
+	mgr.mu.Unlock()
+	require.NotNil(t, or)
+
+	mgr.Release(runID)
+	require.NoError(t, store.InvalidateRunCheckpoints(runID))
+	cp, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Nil(t, cp, "precondition: nothing survives the release")
+
+	// The late writer paths the in-flight completion (and a racing Drop) use.
+	or.mu.Lock()
+	or.checkpointMaybe()
+	or.checkpointForce()
+	or.mu.Unlock()
+
+	cp, err = store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Nil(t, cp, "a released run's stale state must never be checkpointed again")
+}

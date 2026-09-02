@@ -59,6 +59,28 @@ type ownedRun struct {
 	// It bounds that query to one per reclaimInterval per run in the common case
 	// where nothing has gone wrong (see OwnerManager.ReclaimExpiredClaims).
 	lastReap time.Time
+	// stale is set (under mu) by Release: the state is known to predate a
+	// per-partition retry the store refused to let this owner complete over,
+	// so no writer may checkpoint it again — a completion that captured this
+	// pointer before the release included.
+	stale bool
+}
+
+// checkpointMaybe is the cadence checkpoint; mu must be held.
+func (or *ownedRun) checkpointMaybe() {
+	if or.stale {
+		return
+	}
+	_ = or.writer.Maybe(or.state, or.gen)
+}
+
+// checkpointForce is the unconditional checkpoint taken when the run is
+// dropped; mu must be held.
+func (or *ownedRun) checkpointForce() {
+	if or.stale {
+		return
+	}
+	_ = or.writer.Force(or.state, or.gen)
 }
 
 // NewOwnerManager builds a manager backed by store, using cfg for checkpoint
@@ -450,7 +472,7 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 
 		// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable
 		// from the durable terminal rows, so it must not fail the completion).
-		_ = or.writer.Maybe(or.state, or.gen)
+		or.checkpointMaybe()
 	}
 	// A result with nothing durable is a no-op replay (or a completion for a task
 	// this state never tracked); its staged copy is discarded for the same reason
@@ -678,16 +700,27 @@ func (m *OwnerManager) Drop(runID uuid.UUID) {
 		return
 	}
 	or.mu.Lock()
-	_ = or.writer.Force(or.state, or.gen)
+	or.checkpointForce()
 	or.mu.Unlock()
 }
 
 // Release forgets a run WITHOUT checkpointing its in-memory state. It is for
 // the case where that state is known to be stale — the store refused the
 // owner's completion because a per-partition retry reopened work the state
-// never saw — and a recovering owner must rebuild from the rows instead.
+// never saw — and a recovering owner must rebuild from the rows instead. The
+// run is marked stale under its own lock so a completion that captured the
+// pointer before the release cannot checkpoint it afterwards either.
 func (m *OwnerManager) Release(runID uuid.UUID) {
 	m.mu.Lock()
-	delete(m.runs, runID)
+	or, ok := m.runs[runID]
+	if ok {
+		delete(m.runs, runID)
+	}
 	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	or.mu.Lock()
+	or.stale = true
+	or.mu.Unlock()
 }
