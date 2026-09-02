@@ -1,6 +1,7 @@
 package run
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // TestOwnerManager_FenceRefusalLeavesNoCheckpointBehind pins the owner lane's
@@ -121,4 +123,58 @@ func TestOwnerManager_ReleasedRunNeverCheckpointsAgain(t *testing.T) {
 	cp, err = store.LatestFullCheckpoint(runID)
 	require.NoError(t, err)
 	require.Nil(t, cp, "a released run's stale state must never be checkpointed again")
+}
+
+// TestOwnerManager_ReleaseInvalidatesCheckpointsWhileStillOwned pins the
+// ordering of the release. Once the owner is forgotten, a recovery tick may
+// adopt the run at any moment; if the stale checkpoints were still on disk at
+// that point, recovery would restore the pre-retry state into a fresh owner
+// that the later invalidation cannot reach. So the checkpoints must be gone —
+// and the run already marked stale, so nothing writes a new one — BEFORE the
+// owner is forgotten.
+func TestOwnerManager_ReleaseInvalidatesCheckpointsWhileStillOwned(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, ids := seedChainRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+	mgr.MarkDispatched(runID, ids[0], "node-1", 1, 0)
+	_, err := mgr.Complete(runID, ids[0], TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+	cp, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.NotNil(t, cp, "precondition: a checkpoint exists to invalidate")
+
+	mgr.mu.Lock()
+	or := mgr.runs[runID]
+	mgr.mu.Unlock()
+	require.NotNil(t, or)
+
+	// Observe the run's state at the moment its checkpoints are deleted.
+	var deletes atomic.Int32
+	var ownedAtDelete, staleAtDelete atomic.Bool
+	const name = "test:observe_checkpoint_delete"
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(name, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != "run_checkpoints" {
+			return
+		}
+		deletes.Add(1)
+		ownedAtDelete.Store(mgr.Owns(runID))
+		or.mu.Lock()
+		staleAtDelete.Store(or.stale)
+		or.mu.Unlock()
+	}))
+	t.Cleanup(func() { _ = db.Callback().Delete().Remove(name) })
+
+	require.NoError(t, mgr.Release(runID))
+
+	require.GreaterOrEqual(t, deletes.Load(), int32(1), "release must invalidate the run's checkpoints")
+	require.True(t, ownedAtDelete.Load(), "checkpoints must be invalidated before the owner is forgotten")
+	require.True(t, staleAtDelete.Load(), "the run must already be stale when its checkpoints are invalidated, so none is rewritten")
+	require.False(t, mgr.Owns(runID))
+	cp, err = store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Nil(t, cp)
 }

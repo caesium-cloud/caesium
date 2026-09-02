@@ -529,9 +529,8 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 			// and discard any written since the retry, so recovery rebuilds
 			// from the post-retry truth.
 			log.Error("owner manager: run left running for a pending partition retry the owner cannot execute; releasing it for recovery", "run_id", runID, "error", cErr)
-			m.Release(runID)
-			if iErr := m.store.InvalidateRunCheckpoints(runID); iErr != nil {
-				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", iErr)
+			if rErr := m.Release(runID); rErr != nil {
+				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", rErr)
 			}
 			return CompleteResult{Ready: res.Ready, Complete: complete, Owned: true}, nil
 		} else if cErr != nil {
@@ -704,23 +703,31 @@ func (m *OwnerManager) Drop(runID uuid.UUID) {
 	or.mu.Unlock()
 }
 
-// Release forgets a run WITHOUT checkpointing its in-memory state. It is for
-// the case where that state is known to be stale — the store refused the
-// owner's completion because a per-partition retry reopened work the state
-// never saw — and a recovering owner must rebuild from the rows instead. The
-// run is marked stale under its own lock so a completion that captured the
-// pointer before the release cannot checkpoint it afterwards either.
-func (m *OwnerManager) Release(runID uuid.UUID) {
+// Release forgets a run WITHOUT checkpointing its in-memory state and discards
+// every checkpoint it has on disk. It is for the case where that state is
+// known to be stale — the store refused the owner's completion because a
+// per-partition retry reopened work the state never saw — and a recovering
+// owner must rebuild from the rows instead.
+//
+// The order is load-bearing. The run is marked stale under its own lock
+// first, so a completion that captured the pointer cannot checkpoint it
+// afterwards; then the checkpoints are deleted while this owner still holds
+// the run; only then is the run forgotten. Forgetting it first would open a
+// window in which a recovery tick restores a checkpoint the invalidation has
+// not reached yet, into a fresh owner that would never see the reset row.
+func (m *OwnerManager) Release(runID uuid.UUID) error {
 	m.mu.Lock()
 	or, ok := m.runs[runID]
-	if ok {
-		delete(m.runs, runID)
-	}
 	m.mu.Unlock()
 	if !ok {
-		return
+		return nil
 	}
 	or.mu.Lock()
 	or.stale = true
 	or.mu.Unlock()
+	err := m.store.InvalidateRunCheckpoints(runID)
+	m.mu.Lock()
+	delete(m.runs, runID)
+	m.mu.Unlock()
+	return err
 }
