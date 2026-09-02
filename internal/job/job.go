@@ -193,6 +193,33 @@ func (j *job) ownsUndispatchedRetry(taskRunID uuid.UUID) bool {
 	return !dispatched
 }
 
+// handOffPendingPartitionRetries is the last resort of a bounded completion
+// loop: the fence kept refusing while the loop's own scans found nothing to
+// classify. Whatever is pending NOW — fresh or not — goes to a replacement
+// engine, because returning would leave it pending on a run with no engine.
+// Reports whether a replacement was started.
+func (j *job) handOffPendingPartitionRetries(store *run.Store, runID uuid.UUID, params map[string]string) bool {
+	pending, err := store.PendingPartitionRetries(runID)
+	if err != nil {
+		log.Error("run completion kept being refused and the pending partition retries could not be read",
+			"job_id", j.id, "run_id", runID, "error", err)
+		return false
+	}
+	if len(pending) == 0 {
+		log.Error("run completion kept being refused with no pending partition retry visible; leaving the run for an operator",
+			"job_id", j.id, "run_id", runID)
+		return false
+	}
+	ids := make([]uuid.UUID, 0, len(pending))
+	for i := range pending {
+		ids = append(ids, pending[i].ID)
+	}
+	log.Error("run completion kept being refused; handing every pending partition retry to a replacement engine",
+		"job_id", j.id, "run_id", runID, "instances", len(ids))
+	j.startReplacementRun(runID, params, ids)
+	return true
+}
+
 // recoverPendingPartitionRetries is the bounded end of the completion fence,
 // shared by the normal completion path and the early-failure finalizer. It
 // sorts the run's still-pending retry-reset instances into the ones THIS
@@ -222,6 +249,12 @@ func (j *job) recoverPendingPartitionRetries(store *run.Store, runID uuid.UUID, 
 		abandoned, abandonErr := store.AbandonPartitionRetries(runID, mine, reason)
 		log.Error("partition retry could not be dispatched by the replacement engine; abandoning it",
 			"job_id", j.id, "run_id", runID, "abandoned", abandoned, "error", abandonErr)
+		if abandonErr != nil {
+			// The rows are still pending and marked. Handing them to yet
+			// another engine would only repeat this failure; stop here and
+			// let the caller report a run that needs an operator.
+			return false, runErr, abandonErr
+		}
 		if runErr == nil {
 			runErr = errors.New(reason)
 		}
@@ -515,9 +548,15 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 	// number of times, exactly as the normal completion path does.
 	var finalized bool
 	for attempt := 0; ; attempt++ {
+		if attempt >= 2 {
+			// Bounded like the normal completion path: the last word is a
+			// hand-off, never a return that strands a retry.
+			j.handOffPendingPartitionRetries(store, runID, j.params)
+			return
+		}
 		handedOff, updated, err := j.recoverPendingPartitionRetries(store, runID, j.params, cause)
 		if err != nil {
-			log.Error("failed to read retry-reset instances of an aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+			log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
 			return
 		}
 		if handedOff {
@@ -528,7 +567,7 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 			j.beforeComplete(runID)
 		}
 		finalized, err = store.CompleteIfActive(runID, cause)
-		if errors.Is(err, run.ErrRunHasPendingWork) && attempt < 2 {
+		if errors.Is(err, run.ErrRunHasPendingWork) {
 			continue
 		}
 		if err != nil {
@@ -957,10 +996,15 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// allowed to release if the retried partition succeeds — and the
 			// retries this engine was started for but could not dispatch are
 			// resolved explicitly. Completion callbacks fire from whichever
-			// engine finalizes the run.
+			// engine finalizes the run. The loop is bounded; its last word is
+			// a hand-off, never a return that strands a retry.
+			if attempt >= 2 {
+				j.handOffPendingPartitionRetries(store, runID, snapshot.Params)
+				return
+			}
 			handedOff, updatedErr, recoverErr := j.recoverPendingPartitionRetries(store, runID, snapshot.Params, runErr)
 			if recoverErr != nil {
-				log.Error("run completion refused for a pending partition retry that could not be read",
+				log.Error("run completion refused for a pending partition retry that could not be resolved; leaving the run for an operator",
 					"job_id", j.id, "run_id", runID, "error", recoverErr)
 				return
 			}
@@ -968,11 +1012,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return
 			}
 			runErr = updatedErr
-			if attempt >= 2 {
-				log.Error("run could not be finalized: partition retries kept landing during completion",
-					"job_id", j.id, "run_id", runID)
-				return
-			}
 			completeErr = store.Complete(runID, runErr)
 		}
 		if completeErr != nil {

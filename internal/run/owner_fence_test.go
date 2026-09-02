@@ -1,6 +1,7 @@
 package run
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -177,4 +178,36 @@ func TestOwnerManager_ReleaseInvalidatesCheckpointsWhileStillOwned(t *testing.T)
 	cp, err = store.LatestFullCheckpoint(runID)
 	require.NoError(t, err)
 	require.Nil(t, cp)
+}
+
+// TestOwnerManager_ReleaseKeepsOwnershipWhenInvalidationFails pins the
+// failure edge of the release: if the checkpoints cannot be deleted, the
+// stale snapshot is still on disk, and forgetting the owner would let a
+// recovery tick restore it. The owner must keep the run (stale, so it never
+// checkpoints again) and report the error instead.
+func TestOwnerManager_ReleaseKeepsOwnershipWhenInvalidationFails(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, ids := seedChainRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+	mgr.MarkDispatched(runID, ids[0], "node-1", 1, 0)
+	_, err := mgr.Complete(runID, ids[0], TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+
+	const name = "test:fail_checkpoint_delete"
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(name, func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Table == "run_checkpoints" {
+			_ = tx.AddError(errors.New("simulated checkpoint delete failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Delete().Remove(name) })
+
+	require.Error(t, mgr.Release(runID), "a release that could not discard the checkpoints must say so")
+	require.True(t, mgr.Owns(runID), "the owner must keep the run while a stale checkpoint survives")
+	cp, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.NotNil(t, cp, "precondition: the stale checkpoint is still on disk")
 }

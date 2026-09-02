@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -15,6 +16,8 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // addSideTask wires an independent root task (no edges) into the job so a test
@@ -632,4 +635,202 @@ func TestFanOutPartitionRetryAbortedResumeHandsRetryLandingDuringFinalizeToAnoth
 	require.NotNil(t, final.CompletedAt)
 	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load())
+}
+
+// TestFanOutPartitionRetryCompletionNeverStrandsUnderRetryStream pins the end
+// of the completion loop. Retries can keep landing in an engine's shutdown
+// window; the loop is bounded so it cannot spin, but the bound must end in a
+// hand-off, never in a return that leaves a retry pending on a run with no
+// engine. Every retry accepted here is executed by some engine and the run
+// finalizes exactly once.
+func TestFanOutPartitionRetryCompletionNeverStrandsUnderRetryStream(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","r1","r2","r3","r4","r5","r6"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	for i := 1; i <= 6; i++ {
+		f.engine.createErrByPartition[fmt.Sprintf("r%d", i)] = fmt.Errorf("boom")
+	}
+
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+
+	// Every completion window — in this engine and in each replacement —
+	// retries one more failed partition, until all six have been retried.
+	var next atomic.Int32
+	runner.beforeComplete = func(runID uuid.UUID) {
+		n := int(next.Add(1))
+		if n > 6 {
+			return
+		}
+		partition := fmt.Sprintf("r%d", n)
+		f.engine.mu.Lock()
+		delete(f.engine.createErrByPartition, partition)
+		f.engine.mu.Unlock()
+		for _, r := range f.instanceRowsFor(t, runID) {
+			if r.PartitionValue == partition {
+				_, _, err := f.store.RetryPartition(context.Background(), runID, r.ID)
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	require.Error(t, runner.Run(context.Background()))
+	jobRun := f.latestJobRun(t)
+	final := f.awaitRunTerminal(t, jobRun.ID)
+
+	status := statusByPartition(f.instanceRowsFor(t, jobRun.ID))
+	for i := 1; i <= 6; i++ {
+		require.Equal(t, string(run.TaskStatusSucceeded), status[fmt.Sprintf("r%d", i)],
+			"every accepted retry must be executed by some engine, never stranded at the loop's bound")
+	}
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	awaitCallbacks(t, &callbacks, 1)
+	require.Equal(t, int32(1), callbacks.Load())
+}
+
+// TestFanOutPartitionRetryCompletionBoundEndsInHandoff pins the last attempt
+// of the completion loop. The loop re-classifies pending retries a bounded
+// number of times; if the fence still refuses on the final attempt, whatever
+// is pending must be handed to a replacement engine — returning would leave
+// the retry pending on a run with no engine. The scan is blinded for the
+// first attempts so the fence keeps refusing a row the loop cannot see.
+func TestFanOutPartitionRetryCompletionBoundEndsInHandoff(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","r1"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["r1"] = fmt.Errorf("boom")
+
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	var windows atomic.Int32
+	runner.beforeComplete = func(runID uuid.UUID) {
+		if windows.Add(1) != 1 {
+			return
+		}
+		f.engine.mu.Lock()
+		delete(f.engine.createErrByPartition, "r1")
+		f.engine.mu.Unlock()
+		for _, r := range f.instanceRowsFor(t, runID) {
+			if r.PartitionValue == "r1" {
+				_, _, err := f.store.RetryPartition(context.Background(), runID, r.ID)
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	// Blind the completion loop's classify scans (the id/task_id select over
+	// the marked rows) for every bounded attempt: the fence's own count still
+	// sees the row, so the loop runs out of attempts with the retry pending
+	// and unseen, and only its final hand-off can rescue it.
+	var blinded atomic.Int32
+	const name = "test:blind_pending_retry_scan"
+	require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != "task_runs" || len(tx.Statement.Selects) != 2 || tx.Statement.Selects[0] != "id" {
+			return
+		}
+		where, ok := tx.Statement.Clauses["WHERE"]
+		if !ok {
+			return
+		}
+		w, ok := where.Expression.(clause.Where)
+		if !ok {
+			return
+		}
+		scan := false
+		for _, e := range w.Exprs {
+			if ex, ok := e.(clause.Expr); ok && strings.Contains(ex.SQL, "partition_retry_pending") {
+				scan = true
+			}
+		}
+		// Only the completion loop's scans (after the retry landed in the
+		// window), not the engine's start-of-run scan.
+		if !scan || windows.Load() == 0 || blinded.Load() >= 2 {
+			return
+		}
+		blinded.Add(1)
+		tx.Statement.AddClause(clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "1 = 0"}}})
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Query().Remove(name) })
+
+	require.Error(t, runner.Run(context.Background()))
+	jobRun := f.latestJobRun(t)
+	final := f.awaitRunTerminal(t, jobRun.ID)
+	require.GreaterOrEqual(t, blinded.Load(), int32(2), "precondition: every classify attempt's scan was blinded")
+	require.Equal(t, string(run.TaskStatusSucceeded), statusByPartition(f.instanceRowsFor(t, jobRun.ID))["r1"],
+		"the loop's final attempt must hand the pending retry to a replacement, not return")
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	awaitCallbacks(t, &callbacks, 1)
+	require.Equal(t, int32(1), callbacks.Load())
+}
+
+// TestFanOutPartitionRetryAbandonFailureDoesNotChainReplacements pins the
+// abandonment failure edge. If the store cannot resolve the rows a
+// replacement was started for, they stay pending and marked; treating them as
+// fresh work would start replacement after replacement, each failing the same
+// way. The engine must stop and leave the run for an operator instead.
+func TestFanOutPartitionRetryAbandonFailureDoesNotChainReplacements(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom")
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	var flakyID uuid.UUID
+	for _, r := range f.instanceRows(t) {
+		if r.PartitionValue == "flaky" {
+			flakyID = r.ID
+		}
+	}
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, flakyID)
+	require.NoError(t, err)
+	require.True(t, reopened)
+	// Wedge the group so the replacement cannot dispatch the retry...
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", jobRun.ID, f.fanned).
+		Update("outstanding_predecessors", 99).Error)
+	// ...and make every abandonment write fail.
+	const name = "test:fail_abandon"
+	require.NoError(t, f.db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != "task_runs" {
+			return
+		}
+		if dest, ok := tx.Statement.Dest.(map[string]interface{}); ok {
+			if status, ok := dest["status"].(string); ok && status == string(run.TaskStatusSkipped) {
+				_ = tx.AddError(errors.New("simulated abandonment failure"))
+			}
+		}
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Update().Remove(name) })
+
+	var engines atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, withPartitionRetryReplacement([]uuid.UUID{flakyID}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	runner.beforeComplete = func(uuid.UUID) { engines.Add(1) }
+	require.Error(t, runner.Run(run.WithContext(context.Background(), jobRun.ID)))
+
+	// Give a mistaken chain of replacements time to show itself.
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, int32(1), engines.Load(), "an abandonment the store refuses must not start replacement engines")
+	var retried models.TaskRun
+	require.NoError(t, f.db.First(&retried, "id = ?", flakyID).Error)
+	require.Equal(t, string(run.TaskStatusPending), retried.Status)
+	require.True(t, retried.PartitionRetryPending, "the row keeps its provenance for an operator")
+	require.Equal(t, string(run.StatusRunning), f.latestJobRun(t).Status, "the run is left open rather than finalized over a retry nothing resolved")
 }

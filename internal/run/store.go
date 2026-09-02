@@ -6057,7 +6057,9 @@ func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
 // that retry committed describe a run with nothing left to do, and a recovery
 // that restored one would never discover the reset instance.
 func (s *Store) InvalidateRunCheckpoints(runID uuid.UUID) error {
-	return invalidateCheckpointsForRetryTx(s.db, runID)
+	return withStoreBusyRetry(func() error {
+		return invalidateCheckpointsForRetryTx(s.db, runID)
+	})
 }
 
 // lockJobRunForPartitionRetryTx serializes RetryPartition with Complete on the

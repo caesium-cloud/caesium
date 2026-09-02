@@ -725,9 +725,14 @@ func (m *OwnerManager) Release(runID uuid.UUID) error {
 	or.mu.Lock()
 	or.stale = true
 	or.mu.Unlock()
-	err := m.store.InvalidateRunCheckpoints(runID)
+	if err := m.store.InvalidateRunCheckpoints(runID); err != nil {
+		// The stale snapshot is still on disk. Keep the run (stale, so it
+		// never checkpoints again) rather than let a recovery tick restore
+		// it; the caller reports the error.
+		return err
+	}
 	m.mu.Lock()
 	delete(m.runs, runID)
 	m.mu.Unlock()
-	return err
+	return nil
 }
