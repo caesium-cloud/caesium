@@ -834,3 +834,84 @@ func TestFanOutPartitionRetryAbandonFailureDoesNotChainReplacements(t *testing.T
 	require.True(t, retried.PartitionRetryPending, "the row keeps its provenance for an operator")
 	require.Equal(t, string(run.StatusRunning), f.latestJobRun(t).Status, "the run is left open rather than finalized over a retry nothing resolved")
 }
+
+// TestFanOutPartitionRetryCompletionBoundRetriesFailedHandoff pins the last
+// resort behind the bound: if the hand-off's own read of the pending retries
+// fails, the engine must try again rather than return with the run running
+// and a retry nobody will execute. The classify scans are blinded; the first
+// hand-off read fails; the second succeeds.
+func TestFanOutPartitionRetryCompletionBoundRetriesFailedHandoff(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","r1"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["r1"] = fmt.Errorf("boom")
+
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		callbacks.Add(1)
+		return nil
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	var windows atomic.Int32
+	runner.beforeComplete = func(runID uuid.UUID) {
+		if windows.Add(1) != 1 {
+			return
+		}
+		f.engine.mu.Lock()
+		delete(f.engine.createErrByPartition, "r1")
+		f.engine.mu.Unlock()
+		for _, r := range f.instanceRowsFor(t, runID) {
+			if r.PartitionValue == "r1" {
+				_, _, err := f.store.RetryPartition(context.Background(), runID, r.ID)
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	// Scans 1-2 (the classify attempts) are blinded; scan 3 (the first
+	// hand-off) fails outright; scan 4 sees the row.
+	var scans atomic.Int32
+	const name = "test:blind_then_fail_pending_retry_scan"
+	require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != "task_runs" || len(tx.Statement.Selects) != 2 || tx.Statement.Selects[0] != "id" {
+			return
+		}
+		where, ok := tx.Statement.Clauses["WHERE"]
+		if !ok {
+			return
+		}
+		w, ok := where.Expression.(clause.Where)
+		if !ok {
+			return
+		}
+		scan := false
+		for _, e := range w.Exprs {
+			if ex, ok := e.(clause.Expr); ok && strings.Contains(ex.SQL, "partition_retry_pending") {
+				scan = true
+			}
+		}
+		if !scan || windows.Load() == 0 {
+			return
+		}
+		switch scans.Add(1) {
+		case 1, 2:
+			tx.Statement.AddClause(clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "1 = 0"}}})
+		case 3:
+			_ = tx.AddError(errors.New("simulated pending-retry read failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Query().Remove(name) })
+
+	require.Error(t, runner.Run(context.Background()))
+	jobRun := f.latestJobRun(t)
+	final := f.awaitRunTerminal(t, jobRun.ID)
+	require.GreaterOrEqual(t, scans.Load(), int32(4), "precondition: the first hand-off read failed and a second was attempted")
+	require.Equal(t, string(run.TaskStatusSucceeded), statusByPartition(f.instanceRowsFor(t, jobRun.ID))["r1"],
+		"a failed hand-off read must be retried, not turned into a stranded retry")
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	awaitCallbacks(t, &callbacks, 1)
+	require.Equal(t, int32(1), callbacks.Load())
+}

@@ -577,6 +577,19 @@ func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
 		return nil
 	}
 	or.mu.Lock()
+	stale := or.stale
+	or.mu.Unlock()
+	if stale {
+		// A release that could not discard the run's checkpoints kept the
+		// run so the stale snapshot cannot be restored. This tick is the
+		// retry: once the store cooperates the run is forgotten and a
+		// recovering owner rebuilds it from the rows.
+		if err := m.Release(runID); err != nil {
+			log.Warn("owner manager: stale run release still failing; will retry", "run_id", runID, "error", err)
+		}
+		return nil
+	}
+	or.mu.Lock()
 	defer or.mu.Unlock()
 
 	now := time.Now()

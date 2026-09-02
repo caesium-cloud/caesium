@@ -550,9 +550,22 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 	for attempt := 0; ; attempt++ {
 		if attempt >= 2 {
 			// Bounded like the normal completion path: the last word is a
-			// hand-off, never a return that strands a retry.
-			j.handOffPendingPartitionRetries(store, runID, j.params)
-			return
+			// hand-off (itself retried), never a return that strands a retry.
+			for i := 0; i < 3; i++ {
+				if j.handOffPendingPartitionRetries(store, runID, j.params) {
+					return
+				}
+				finalized, err = store.CompleteIfActive(runID, cause)
+				if !errors.Is(err, run.ErrRunHasPendingWork) {
+					break
+				}
+			}
+			if err != nil {
+				log.Error("aborted resume could not be finalized or handed off; leaving the run for an operator",
+					"job_id", j.id, "run_id", runID, "error", err)
+				return
+			}
+			break
 		}
 		handedOff, updated, err := j.recoverPendingPartitionRetries(store, runID, j.params, cause)
 		if err != nil {
@@ -999,8 +1012,25 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// engine finalizes the run. The loop is bounded; its last word is
 			// a hand-off, never a return that strands a retry.
 			if attempt >= 2 {
-				j.handOffPendingPartitionRetries(store, runID, snapshot.Params)
-				return
+				// Last resort, itself retried: a hand-off read can fail
+				// transiently, and a refusal can be stale by the time it is
+				// examined, so alternate hand-off and completion a few times
+				// before conceding the run to an operator.
+				for i := 0; i < 3; i++ {
+					if j.handOffPendingPartitionRetries(store, runID, snapshot.Params) {
+						return
+					}
+					completeErr = store.Complete(runID, runErr)
+					if !errors.Is(completeErr, run.ErrRunHasPendingWork) {
+						break
+					}
+				}
+				if errors.Is(completeErr, run.ErrRunHasPendingWork) {
+					log.Error("run could not be finalized or handed off; leaving the run for an operator",
+						"job_id", j.id, "run_id", runID)
+					return
+				}
+				break
 			}
 			handedOff, updatedErr, recoverErr := j.recoverPendingPartitionRetries(store, runID, snapshot.Params, runErr)
 			if recoverErr != nil {

@@ -211,3 +211,42 @@ func TestOwnerManager_ReleaseKeepsOwnershipWhenInvalidationFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cp, "precondition: the stale checkpoint is still on disk")
 }
+
+// TestOwnerManager_StaleRunReleaseIsRetriedOnReclaimTick pins the recovery of
+// a release that could not discard its checkpoints. The owner keeps the run
+// (stale) so the surviving snapshot cannot be restored, but it must not keep
+// it forever: the dispatch loop's per-run reclaim tick retries the release
+// until the store cooperates, at which point the run is forgotten and a
+// recovering owner can rebuild it from the rows.
+func TestOwnerManager_StaleRunReleaseIsRetriedOnReclaimTick(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, ids := seedChainRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+	mgr.MarkDispatched(runID, ids[0], "node-1", 1, 0)
+	_, err := mgr.Complete(runID, ids[0], TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+
+	// The first checkpoint delete fails; later ones succeed.
+	var failures atomic.Int32
+	const name = "test:fail_checkpoint_delete_once"
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(name, func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Table == "run_checkpoints" && failures.Add(1) == 1 {
+			_ = tx.AddError(errors.New("simulated checkpoint delete failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Delete().Remove(name) })
+
+	require.Error(t, mgr.Release(runID))
+	require.True(t, mgr.Owns(runID), "precondition: the owner kept the run")
+
+	// The next reclaim tick retries the release.
+	require.Nil(t, mgr.ReclaimExpiredClaims(runID))
+	require.False(t, mgr.Owns(runID), "the reclaim tick must retry a stale run's release once the store cooperates")
+	cp, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Nil(t, cp)
+}
