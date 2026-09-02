@@ -166,6 +166,12 @@ type TaskRun struct {
 	// PartitionValue is empty for an unfanned task. For a fanned instance it is
 	// the partition key (the value injected as CAESIUM_PARTITION).
 	PartitionValue string `gorm:"type:text;not null;default:''" json:"partition_value,omitempty"`
+	// PartitionRetryPending marks an operator-requested per-partition retry that
+	// has not reached a terminal outcome yet. Store.Complete uses this durable
+	// provenance marker to distinguish a retry that landed in the local
+	// engine's shutdown window from an ordinary never-dispatched fan-out row.
+	// It is set only by RetryPartition and cleared by every terminal transition.
+	PartitionRetryPending bool `gorm:"not null;default:false" json:"-"`
 	// PartitionIndex is emission order (never topological order). Unfanned and
 	// the rewritten template row are 0. Unique with (job_run_id, task_id).
 	//

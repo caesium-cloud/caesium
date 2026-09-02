@@ -331,13 +331,13 @@ func TestRetryPartitionRejectsNonTerminalInstance(t *testing.T) {
 	rows := f.instances(t)
 
 	// pending
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.ErrorIs(t, err, ErrTaskRunNotTerminal)
 
 	// running — the dangerous case: resetting here orphans a live container.
 	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", rows[0].ID).
 		Update("status", string(TaskStatusRunning)).Error)
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.ErrorIs(t, err, ErrTaskRunNotTerminal)
 
 	after := f.instances(t)
@@ -376,9 +376,10 @@ func TestRetryPartitionResetsEveryExecutionColumn(t *testing.T) {
 		"cache_expires_at":    now.Add(time.Hour),
 	}).Error)
 
-	updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, TaskStatusPending, updated.Status)
+	assert.False(t, reopened, "a still-running run must not report reopened")
 
 	var row models.TaskRun
 	require.NoError(t, f.db.Where("id = ?", rows[0].ID).First(&row).Error)
@@ -426,25 +427,31 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusSucceeded, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	var b models.TaskRun
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 0, b.OutstandingPredecessors)
 
-	// Now fail a too and retry b again; b must NOT be dragged along, and retrying
-	// b while a is non-terminal must leave b waiting on a. b is put back into the
-	// FAILED state for the second retry because failed is the retryable set
-	// (RetryPartition rejects skipped with ErrPartitionNotRetryable); the
-	// indegree re-seed under test is unaffected by which terminal state b came
-	// from.
+	// Now fail a too, retry a (so it is pending again), and retry b again; b
+	// must NOT be dragged along, and retrying b while a is non-terminal must
+	// leave b waiting on a. b is put back into the FAILED state for the second
+	// retry because failed is the retryable set (RetryPartition rejects skipped
+	// with ErrPartitionNotRetryable); the indegree re-seed under test is
+	// unaffected by which terminal state b came from. Retrying b while a is
+	// still terminal-FAILED is refused instead (ErrPartitionRetryBlocked):
+	// nothing in the run would ever release it.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusFailed, nil)
 	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
-	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
+	require.ErrorIs(t, err, ErrPartitionRetryBlocked)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["a"].ID)
+	require.NoError(t, err)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 1, b.OutstandingPredecessors,
-		"b waits on a, which is not a terminal success")
+		"b waits on a, which is pending again and not a terminal success")
 }
 
 func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T) {
@@ -459,8 +466,9 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 		Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
 	require.NoError(t, f.store.WriteCheckpoint(f.runID, 5, 1, []byte(`{"v":1}`), false))
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
+	assert.True(t, reopened, "retrying a partition of a finished run must report that the run was reopened")
 
 	var jobRun models.JobRun
 	require.NoError(t, f.db.Where("id = ?", f.runID).First(&jobRun).Error)
@@ -471,6 +479,78 @@ func TestRetryPartitionReopensTerminalRunAndInvalidatesCheckpoints(t *testing.T)
 	cp, err := f.store.LatestFullCheckpoint(f.runID)
 	require.NoError(t, err)
 	assert.Nil(t, cp, "the pre-retry checkpoint must be invalidated or a recovering owner re-adopts the stale state")
+}
+
+func TestRetryPartitionRejectsNonRunnableRunWithoutMutation(t *testing.T) {
+	for _, runStatus := range []string{string(StatusCancelled), "queued", "skipped", "unknown"} {
+		t.Run(runStatus, func(t *testing.T) {
+			f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+			_, err := f.expand(t, strParts("a"))
+			require.NoError(t, err)
+			rows := f.instances(t)
+			require.Len(t, rows, 1)
+
+			failedAt := time.Now().UTC().Truncate(time.Millisecond)
+			require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", rows[0].ID).Updates(map[string]any{
+				"status":       string(TaskStatusFailed),
+				"completed_at": failedAt,
+				"error":        "boom",
+			}).Error)
+			require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).Updates(map[string]any{
+				"status":       runStatus,
+				"completed_at": failedAt,
+				"error":        "not runnable",
+			}).Error)
+
+			var eventsBefore int64
+			require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsBefore).Error)
+
+			updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+			require.ErrorIs(t, err, ErrPartitionRunNotRetryable)
+			assert.Nil(t, updated)
+			assert.False(t, reopened)
+
+			var taskAfter models.TaskRun
+			require.NoError(t, f.db.First(&taskAfter, "id = ?", rows[0].ID).Error)
+			assert.Equal(t, string(TaskStatusFailed), taskAfter.Status)
+			assert.Equal(t, "boom", taskAfter.Error)
+			assert.False(t, taskAfter.PartitionRetryPending)
+			assert.NotNil(t, taskAfter.CompletedAt)
+
+			var runAfter models.JobRun
+			require.NoError(t, f.db.First(&runAfter, "id = ?", f.runID).Error)
+			assert.Equal(t, runStatus, runAfter.Status)
+			assert.Equal(t, "not runnable", runAfter.Error)
+
+			var eventsAfter int64
+			require.NoError(t, f.db.Model(&models.ExecutionEvent{}).Where("run_id = ?", f.runID).Count(&eventsAfter).Error)
+			assert.Equal(t, eventsBefore, eventsAfter, "a refused retry must not append ready/retried events")
+		})
+	}
+}
+
+// TestRetryPartitionReturnsReopenedFromTransaction pins that reopened and the
+// reset TaskRun come from the committed transaction, not a post-commit
+// refresh. A refresh error after commit used to return (nil, false, err) and
+// the handler skipped kickoff on a durable reopen.
+func TestRetryPartitionReturnsReopenedFromTransaction(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
+
+	updated, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated, "the reset row must be returned from the transaction, not a post-commit refresh")
+	assert.True(t, reopened, "reopened is the tx flag the handler kickoff follows")
+	assert.Equal(t, TaskStatusPending, updated.Status,
+		"returning the pre-update row would leave status failed and hide that the reset committed")
+	assert.Equal(t, rows[0].ID, updated.ID)
 }
 
 // --- G1/item 4: CompleteTaskOwner skip loop ------------------------------

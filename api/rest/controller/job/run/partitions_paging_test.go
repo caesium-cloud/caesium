@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -122,44 +123,33 @@ func TestListPartitionsKeyedLookupReturnsOneInstance(t *testing.T) {
 	assert.Equal(t, 0, missing.Total)
 }
 
-// --- Review finding 9: a local-mode partition retry never runs -------------
+// --- Review finding 9: a finished local run must resume the reset instance --
 
-// TestRetryPartitionRejectedInLocalExecutionMode pins the guard.
-//
-// Nothing polls for pending work in local execution mode: the in-process job
-// engine drives its own DAG and exits when the run finishes. Resetting a
-// partition on a finished local run therefore returned 200 with
-// {"retried":true} and left the instance PENDING forever, with the run flipped
-// back to `running` so it also never completes again. A 409 naming the
-// supported path is the honest answer.
-func TestRetryPartitionRejectedInLocalExecutionMode(t *testing.T) {
+// TestRetryPartitionKicksOffResumeWhenRunIsTerminal pins the local-lane
+// resume. The original (*job).Run has already returned for a finished run, so
+// the handler must start a new job.New(...).Run or the reset instance stays
+// pending forever with the run re-opened. The kickoff is a seam; that it is
+// invoked with this job and run is what the handler owns. That Run actually
+// executes only the pending instance is pinned in internal/job.
+func TestRetryPartitionKicksOffResumeWhenRunIsTerminal(t *testing.T) {
 	f := newPartitionsFixture(t, 4)
-	f.setExecutionMode(t, "local")
 	f.failPartition(t, 1)
+	f.finishRun(t, string(runstorage.StatusFailed))
 
-	err := f.retry(t, 1)
-	require.Error(t, err)
-	var httpErr *echo.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	assert.Equal(t, http.StatusConflict, httpErr.Code)
-	assert.Contains(t, fmt.Sprint(httpErr.Message), "distributed",
-		"the message must name why it was refused")
-	assert.Contains(t, fmt.Sprint(httpErr.Message), "retry the run",
-		"the message must name the path that DOES work locally")
-
-	var row models.TaskRun
-	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ? AND partition_index = ?",
-		f.runID, f.taskID, 1).First(&row).Error)
-	assert.Equal(t, "failed", row.Status,
-		"a refused retry must leave the instance terminal, not pending-forever")
-}
-
-// TestRetryPartitionAllowedInDistributedExecutionMode is the control: the
-// dispatcher/worker lane does poll for pending rows, so the retry is honoured.
-func TestRetryPartitionAllowedInDistributedExecutionMode(t *testing.T) {
-	f := newPartitionsFixture(t, 4)
-	f.setExecutionMode(t, "distributed")
-	f.failPartition(t, 1)
+	var (
+		kickedJob  uuid.UUID
+		kickedRun  uuid.UUID
+		kickCount  int
+		kickedJobM *models.Job
+	)
+	partitionKickoff = func(j *models.Job, runID uuid.UUID, _ map[string]string) {
+		kickCount++
+		kickedJobM = j
+		if j != nil {
+			kickedJob = j.ID
+		}
+		kickedRun = runID
+	}
 
 	require.NoError(t, f.retry(t, 1))
 
@@ -167,6 +157,142 @@ func TestRetryPartitionAllowedInDistributedExecutionMode(t *testing.T) {
 	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ? AND partition_index = ?",
 		f.runID, f.taskID, 1).First(&row).Error)
 	assert.Equal(t, "pending", row.Status)
+	assert.Equal(t, 1, kickCount, "a terminal run must start a new engine against the reopened run")
+	require.NotNil(t, kickedJobM)
+	assert.Equal(t, f.jobID, kickedJob)
+	assert.Equal(t, f.runID, kickedRun)
+}
+
+// TestRetryPartitionDoesNotKickOffWhileRunIsStillInFlight pins the other
+// half: if the run is still running, the in-process loop (or the dispatcher)
+// is already looking at pending rows. A second Run() would race it.
+func TestRetryPartitionDoesNotKickOffWhileRunIsStillInFlight(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+
+	require.NoError(t, f.retry(t, 1))
+
+	var row models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ? AND partition_index = ?",
+		f.runID, f.taskID, 1).First(&row).Error)
+	assert.Equal(t, "pending", row.Status)
+	assert.Equal(t, 0, kickCount,
+		"a live run already has a driver; kicking off another Run() would race it")
+}
+
+// TestRetryPartitionStillRejectsSucceededInstance keeps the FAILED-only
+// guard after the mode gate is gone: retrying a success would discard a
+// result downstream already consumed.
+func TestRetryPartitionStillRejectsSucceededInstance(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.finishRun(t, string(runstorage.StatusSucceeded))
+	now := time.Now().UTC()
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ? AND partition_index = ?", f.runID, f.taskID, 1).
+		Updates(map[string]any{
+			"status": "succeeded", "result": "success",
+			"started_at": now.Add(-time.Minute), "completed_at": now,
+		}).Error)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+
+	err := f.retry(t, 1)
+	require.Error(t, err)
+	var httpErr *echo.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, http.StatusConflict, httpErr.Code)
+	assert.Contains(t, fmt.Sprint(httpErr.Message), "only a failed partition can be retried")
+	assert.Equal(t, 0, kickCount, "a refused retry must not start an engine")
+}
+
+// TestRetryPartitionKicksOffWhenStoreReopenedDespiteStaleRunningSnapshot pins
+// the race: partitionGetRun can still report running after the run finished
+// and RetryPartition reopened it inside the transaction. Kickoff must follow
+// the transactional reopened flag, not that snapshot, or the reset instance
+// stays pending forever with the reopened run sitting idle.
+func TestRetryPartitionKicksOffWhenStoreReopenedDespiteStaleRunningSnapshot(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+	// Fixture job run stays StatusRunning — the stale snapshot.
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, true, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 1, kickCount,
+		"reopened=true must kick off even when partitionGetRun still says running")
+}
+
+// TestRetryPartitionDoesNotKickOffWhenStoreDidNotReopen pins the other half of
+// the transactional flag: if RetryPartition did not reopen, the in-process
+// loop is still alive. A second Run() would race it, even if some other
+// snapshot looked terminal.
+func TestRetryPartitionDoesNotKickOffWhenStoreDidNotReopen(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, false, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 0, kickCount,
+		"reopened=false means the tx still saw a live driver; a second Run() would race it")
+}
+
+// TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun pins the existing
+// terminal path through the same flag: snapshot failed + reopened=true still
+// starts an engine, now because the store said so rather than because of the
+// pre-tx status.
+func TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+	f.finishRun(t, string(runstorage.StatusFailed))
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return &runstorage.TaskRun{
+			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
+		}, true, nil
+	}
+
+	require.NoError(t, f.retry(t, 1))
+	assert.Equal(t, 1, kickCount, "a terminal snapshot with reopened=true must kick off")
+}
+
+// TestRetryPartitionKicksOffWhenReopenedEvenIfTaskRunPayloadIsIncomplete pins
+// that a committed reopen starts an engine even when the store returns an
+// error or a nil TaskRun. The durable retry already succeeded; dropping
+// kickoff because a payload refresh failed leaves the run running with no
+// local executor.
+func TestRetryPartitionKicksOffWhenReopenedEvenIfTaskRunPayloadIsIncomplete(t *testing.T) {
+	f := newPartitionsFixture(t, 4)
+	f.failPartition(t, 1)
+
+	kickCount := 0
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionRetryInstance = func(_ context.Context, _, _ uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		return nil, true, errors.New("post-commit refresh failed")
+	}
+
+	err := f.retry(t, 1)
+	require.Error(t, err)
+	assert.Equal(t, 1, kickCount,
+		"reopened=true must kick off even when the TaskRun payload is missing")
 }
 
 // --- fixture --------------------------------------------------------------
@@ -218,13 +344,6 @@ func newPartitionsFixture(t *testing.T, instances int) *partitionsFixture {
 	return &partitionsFixture{db: db, jobID: jobID, runID: runID, taskID: taskID}
 }
 
-func (f *partitionsFixture) setExecutionMode(t *testing.T, mode string) {
-	t.Helper()
-	original := partitionExecutionMode
-	partitionExecutionMode = func() string { return mode }
-	t.Cleanup(func() { partitionExecutionMode = original })
-}
-
 func (f *partitionsFixture) failPartition(t *testing.T, index int) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -234,6 +353,13 @@ func (f *partitionsFixture) failPartition(t *testing.T, index int) {
 			"status": "failed", "result": "failure", "error": "boom",
 			"started_at": now.Add(-time.Minute), "completed_at": now,
 		}).Error)
+}
+
+func (f *partitionsFixture) finishRun(t *testing.T, status string) {
+	t.Helper()
+	now := time.Now().UTC()
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{"status": status, "completed_at": now}).Error)
 }
 
 func (f *partitionsFixture) call(t *testing.T, query string) (*httptest.ResponseRecorder, error) {
@@ -288,27 +414,31 @@ func (f *partitionsFixture) retry(t *testing.T, index int) error {
 func usePartitionTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	store := runstorage.NewStore(db)
-	origDB, origJob, origRun, origRetry :=
-		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance
+	origDB, origJob, origRun, origRetry, origKickoff :=
+		partitionDB, partitionGetJob, partitionGetRun, partitionRetryInstance, partitionKickoff
 
 	partitionDB = func() *gorm.DB { return db }
-	partitionJobExists = func(_ context.Context, jobID uuid.UUID) error {
+	partitionGetJob = func(_ context.Context, jobID uuid.UUID) (*models.Job, error) {
 		var j models.Job
-		return db.First(&j, "id = ?", jobID).Error
+		if err := db.First(&j, "id = ?", jobID).Error; err != nil {
+			return nil, err
+		}
+		return &j, nil
 	}
-	partitionRunJobID = func(_ context.Context, runID uuid.UUID) (uuid.UUID, error) {
+	partitionGetRun = func(_ context.Context, runID uuid.UUID) (*runstorage.JobRun, error) {
 		var r models.JobRun
 		if err := db.First(&r, "id = ?", runID).Error; err != nil {
-			return uuid.Nil, err
+			return nil, err
 		}
-		return r.JobID, nil
+		return &runstorage.JobRun{ID: r.ID, JobID: r.JobID, Status: runstorage.Status(r.Status)}, nil
 	}
-	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, error) {
+	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return store.RetryPartition(ctx, runID, taskRunID)
 	}
+	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) {}
 
 	t.Cleanup(func() {
-		partitionDB, partitionJobExists, partitionRunJobID, partitionRetryInstance =
-			origDB, origJob, origRun, origRetry
+		partitionDB, partitionGetJob, partitionGetRun, partitionRetryInstance, partitionKickoff =
+			origDB, origJob, origRun, origRetry, origKickoff
 	})
 }

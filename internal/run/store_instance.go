@@ -191,9 +191,10 @@ func (s *Store) SkipTaskInstance(runID, taskRunID uuid.UUID, reason string) erro
 			result := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND job_run_id = ? AND status NOT IN ?", taskRunID, runID, terminalTaskStatuses()).
 				Updates(map[string]interface{}{
-					"status":       string(TaskStatusSkipped),
-					"error":        reason,
-					"completed_at": now,
+					"status":                  string(TaskStatusSkipped),
+					"error":                   reason,
+					"completed_at":            now,
+					"partition_retry_pending": false,
 				})
 			if result.Error != nil {
 				return result.Error

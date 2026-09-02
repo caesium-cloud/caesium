@@ -59,6 +59,28 @@ type ownedRun struct {
 	// It bounds that query to one per reclaimInterval per run in the common case
 	// where nothing has gone wrong (see OwnerManager.ReclaimExpiredClaims).
 	lastReap time.Time
+	// stale is set (under mu) by Release: the state is known to predate a
+	// per-partition retry the store refused to let this owner complete over,
+	// so no writer may checkpoint it again — a completion that captured this
+	// pointer before the release included.
+	stale bool
+}
+
+// checkpointMaybe is the cadence checkpoint; mu must be held.
+func (or *ownedRun) checkpointMaybe() {
+	if or.stale {
+		return
+	}
+	_ = or.writer.Maybe(or.state, or.gen)
+}
+
+// checkpointForce is the unconditional checkpoint taken when the run is
+// dropped; mu must be held.
+func (or *ownedRun) checkpointForce() {
+	if or.stale {
+		return
+	}
+	_ = or.writer.Force(or.state, or.gen)
 }
 
 // NewOwnerManager builds a manager backed by store, using cfg for checkpoint
@@ -450,7 +472,7 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 
 		// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable
 		// from the durable terminal rows, so it must not fail the completion).
-		_ = or.writer.Maybe(or.state, or.gen)
+		or.checkpointMaybe()
 	}
 	// A result with nothing durable is a no-op replay (or a completion for a task
 	// this state never tracked); its staged copy is discarded for the same reason
@@ -494,7 +516,24 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		if hasFailures {
 			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
 		}
-		if cErr := m.store.Complete(runID, runErr); cErr != nil {
+		if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
+			// A per-partition retry was accepted into this run after the owner
+			// saw it drain. RetryPartition dropped the run's checkpoints so a
+			// recovering owner replays the rows from scratch and finds the
+			// reset instance; every snapshot THIS owner holds predates the
+			// retry and says the run is complete. Dropping with a forced
+			// checkpoint (or keeping the one written on cadence moments ago)
+			// would hand recovery exactly that stale state: it would replay
+			// only the terminal rows after it, never see the pending retry,
+			// and leave the run running forever. Release without a checkpoint
+			// and discard any written since the retry, so recovery rebuilds
+			// from the post-retry truth.
+			log.Error("owner manager: run left running for a pending partition retry the owner cannot execute; releasing it for recovery", "run_id", runID, "error", cErr)
+			if rErr := m.Release(runID); rErr != nil {
+				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", rErr)
+			}
+			return CompleteResult{Ready: res.Ready, Complete: complete, Owned: true}, nil
+		} else if cErr != nil {
 			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
 		}
 		m.Drop(runID)
@@ -535,6 +574,19 @@ func (m *OwnerManager) WithReclaimInterval(d time.Duration) *OwnerManager {
 func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
 	or, ok := m.get(runID)
 	if !ok {
+		return nil
+	}
+	or.mu.Lock()
+	stale := or.stale
+	or.mu.Unlock()
+	if stale {
+		// A release that could not discard the run's checkpoints kept the
+		// run so the stale snapshot cannot be restored. This tick is the
+		// retry: once the store cooperates the run is forgotten and a
+		// recovering owner rebuilds it from the rows.
+		if err := m.Release(runID); err != nil {
+			log.Warn("owner manager: stale run release still failing; will retry", "run_id", runID, "error", err)
+		}
 		return nil
 	}
 	or.mu.Lock()
@@ -660,6 +712,40 @@ func (m *OwnerManager) Drop(runID uuid.UUID) {
 		return
 	}
 	or.mu.Lock()
-	_ = or.writer.Force(or.state, or.gen)
+	or.checkpointForce()
 	or.mu.Unlock()
+}
+
+// Release forgets a run WITHOUT checkpointing its in-memory state and discards
+// every checkpoint it has on disk. It is for the case where that state is
+// known to be stale — the store refused the owner's completion because a
+// per-partition retry reopened work the state never saw — and a recovering
+// owner must rebuild from the rows instead.
+//
+// The order is load-bearing. The run is marked stale under its own lock
+// first, so a completion that captured the pointer cannot checkpoint it
+// afterwards; then the checkpoints are deleted while this owner still holds
+// the run; only then is the run forgotten. Forgetting it first would open a
+// window in which a recovery tick restores a checkpoint the invalidation has
+// not reached yet, into a fresh owner that would never see the reset row.
+func (m *OwnerManager) Release(runID uuid.UUID) error {
+	m.mu.Lock()
+	or, ok := m.runs[runID]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	or.mu.Lock()
+	or.stale = true
+	or.mu.Unlock()
+	if err := m.store.InvalidateRunCheckpoints(runID); err != nil {
+		// The stale snapshot is still on disk. Keep the run (stale, so it
+		// never checkpoints again) rather than let a recovery tick restore
+		// it; the caller reports the error.
+		return err
+	}
+	m.mu.Lock()
+	delete(m.runs, runID)
+	m.mu.Unlock()
+	return nil
 }

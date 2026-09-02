@@ -58,6 +58,23 @@ func TestGroupTerminalLockSQLIsDialectAware(t *testing.T) {
 	require.Error(t, err, "an unknown dialect must fail loudly rather than silently skip the guard")
 }
 
+func TestPartitionRetryRunLockSQLIsDialectAware(t *testing.T) {
+	pg, err := partitionRetryRunLockSQL("postgres")
+	require.NoError(t, err)
+	assert.Contains(t, pg, "job_runs")
+	assert.Contains(t, pg, "FOR UPDATE",
+		"RetryPartition must serialize on the row Complete updates before reading TaskRuns")
+
+	for _, dialect := range []string{"sqlite", "sqlite3", "dqlite"} {
+		stmt, err := partitionRetryRunLockSQL(dialect)
+		require.NoError(t, err, dialect)
+		assert.Empty(t, stmt, "%s serializes writers already; FOR UPDATE is unparseable there", dialect)
+	}
+
+	_, err = partitionRetryRunLockSQL("mysql")
+	require.Error(t, err, "an unknown dialect must fail closed rather than silently skip serialization")
+}
+
 // TestGroupAdvancesExactlyOnceWhenFinalSiblingsRace pins the invariant the
 // Postgres lock protects, on the dialect the unit suite can actually run: when
 // the last siblings of a group complete, the group's cross-step successor is
@@ -236,7 +253,7 @@ func TestRetryPartitionLeavesNoStaleExecutionEvidence(t *testing.T) {
 		"rate_limit_retry_after": now.Add(time.Hour),
 	}).Error)
 
-	_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 	require.NoError(t, err)
 
 	var row models.TaskRun
@@ -283,7 +300,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 			rows := f.instances(t)
 			setInstanceOutcome(t, f.db, rows[0].ID, status, nil)
 
-			_, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+			_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 			require.ErrorIs(t, err, ErrPartitionNotRetryable)
 
 			var row models.TaskRun
@@ -299,7 +316,7 @@ func TestRetryPartitionOnlyAcceptsFailed(t *testing.T) {
 		rows := f.instances(t)
 		setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
 
-		updated, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+		updated, _, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
 		require.NoError(t, err)
 		assert.Equal(t, TaskStatusPending, updated.Status)
 	})

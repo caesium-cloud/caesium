@@ -118,7 +118,7 @@ func runPartitions(cmd *cobra.Command, args []string) error {
 	// a transport failure or a non-2xx response is not a usage error. Cobra
 	// prints the full usage block after ANY error returned from RunE, which
 	// buries the one line that is actually actionable (e.g. a 409 explaining
-	// that per-partition retry needs distributed mode). It also writes that
+	// that only a failed partition can be retried). It also writes that
 	// block through OutOrStderr(), so a caller that has set the command's out
 	// writer gets usage on STDOUT — corrupting --json.
 	//

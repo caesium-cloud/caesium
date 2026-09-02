@@ -568,6 +568,187 @@ func TestCompleteRetriesTransientContention(t *testing.T) {
 	require.Equal(t, StatusSucceeded, finalRun.Status)
 }
 
+// TestCompleteRefusesWhileTaskRunIsPending pins the shutdown-window guard: a
+// partition retry can commit a pending TaskRun after runFannedGroup's last
+// all-terminal snapshot and before this status write. Finalizing anyway would
+// freeze the retried instance in a terminal run with no executor. The refuse
+// is retry-shaped only — a terminal sibling plus a dispatchable pending
+// instance of the same (job_run_id, task_id).
+func TestCompleteRefusesWhileTaskRunIsPending(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 2)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+	setInstanceOutcome(t, f.db, rows[1].ID, TaskStatusSucceeded, nil)
+
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.False(t, reopened, "run is still running; retry must not reopen")
+	var reset models.TaskRun
+	require.NoError(t, f.db.First(&reset, "id = ?", rows[0].ID).Error)
+	require.True(t, reset.PartitionRetryPending,
+		"RetryPartition must persist the provenance Complete uses to distinguish this row from ordinary pending work")
+
+	err = f.store.Complete(f.runID, nil)
+	require.ErrorIs(t, err, ErrRunHasPendingWork)
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status, "Complete must not mark the run terminal while a retry-reset partition is pending")
+	require.Nil(t, got.CompletedAt)
+}
+
+// TestCompleteRefusesSinglePartitionRetry closes the N=1 form of the shutdown
+// race. A terminal-sibling heuristic cannot recognize a one-instance group,
+// so the explicit retry marker is the only durable proof that this pending row
+// was reset after the engine's terminal snapshot.
+func TestCompleteRefusesSinglePartitionRetry(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("only"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 1)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", rows[0].ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+
+	_, reopened, err := f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+	require.False(t, reopened)
+
+	err = f.store.Complete(f.runID, nil)
+	require.ErrorIs(t, err, ErrRunHasPendingWork,
+		"N=1 fan-out retries have no terminal sibling but must still fence completion")
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status)
+}
+
+// TestCompleteDoesNotMistakeOrdinaryPendingFanOutForRetry is the false-positive
+// control. A never-started fan-out row can be ready beside a terminal sibling
+// after fail-fast/halt; partition_count or sibling shape alone does not prove a
+// retry. Without RetryPartition's explicit marker, Complete keeps the
+// repository's established halt semantics and finalizes the failed run.
+func TestCompleteDoesNotMistakeOrdinaryPendingFanOutForRetry(t *testing.T) {
+	f := newFanOutFixture(t, &jobdef.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("failed", "never-started"))
+	require.NoError(t, err)
+	rows := f.instances(t)
+	require.Len(t, rows, 2)
+
+	setInstanceOutcome(t, f.db, f.producerRow(t).ID, TaskStatusSucceeded, nil)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
+		Update("outstanding_predecessors", 0).Error)
+	setInstanceOutcome(t, f.db, rows[0].ID, TaskStatusFailed, nil)
+
+	var pending models.TaskRun
+	require.NoError(t, f.db.First(&pending, "id = ?", rows[1].ID).Error)
+	require.Equal(t, string(TaskStatusPending), pending.Status)
+	require.False(t, pending.PartitionRetryPending,
+		"precondition: ordinary pending work must not carry retry provenance")
+
+	require.NoError(t, f.store.Complete(f.runID, errors.New("fan-out failed")))
+
+	got, err := f.store.Get(f.runID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, got.Status,
+		"ordinary pending fan-out work must not spuriously refuse completion or spawn retry recovery")
+}
+
+// TestCompleteSucceedsWithRunningTaskRun is the timeout analogue: the sleeping
+// task is still running when the run timeout fires. Complete must mark the
+// JobRun failed anyway rather than freeze the run as running forever.
+func TestCompleteSucceedsWithRunningTaskRun(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+
+	err = store.Complete(runRecord.ID, errors.New("run timed out after 15s"))
+	require.NoError(t, err)
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, got.Status)
+	require.NotNil(t, got.CompletedAt)
+	require.Equal(t, "run timed out after 15s", got.Error)
+}
+
+// TestCompleteSucceedsWithPendingOutstandingPredecessors is the producer-fail
+// analogue: leftover consumers still wait on a failed predecessor
+// (outstanding_predecessors > 0) and have no terminal sibling. Complete must
+// still finalize the JobRun.
+func TestCompleteSucceedsWithPendingOutstandingPredecessors(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 1))
+
+	err = store.Complete(runRecord.ID, errors.New("producer failed"))
+	require.NoError(t, err)
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, got.Status)
+	require.NotNil(t, got.CompletedAt)
+}
+
+func TestCompleteFinalizesWhenAllTaskRunsAreTerminal(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`}
+	task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", nil, nil))
+
+	require.NoError(t, store.Complete(runRecord.ID, nil))
+
+	got, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusSucceeded, got.Status)
+	require.NotNil(t, got.CompletedAt)
+}
+
 func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

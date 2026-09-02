@@ -459,14 +459,12 @@ func (s *IntegrationTestSuite) TestFanOutConflictingKeyFailsProducer() {
 	s.Empty(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
 }
 
-// TestFanOutHTTPRetryPartition drives the per-instance retry ENDPOINT, whose
-// contract is deliberately lane-dependent: retrying one instance means
-// re-executing it, and only a distributed lane runs the dispatcher that can, so
-// the local server answers 409 instead of resetting a row nothing would pick up.
-// The endpoint also accepts a `failed` instance only — retrying a success would
-// discard a good result and re-run the work for nothing — so the fixture must
-// hand it a genuinely failed one, which the assertion below pins rather than
-// assumes.
+// TestFanOutHTTPRetryPartition drives the per-instance retry ENDPOINT. A 200
+// means the failed instance is reset AND actually runs again — locally via a
+// new job.New(...).Run against the reopened run, distributed via the
+// dispatcher. The endpoint accepts a `failed` instance only, so the fixture
+// must hand it a genuinely failed one, which the assertion below pins rather
+// than assumes. Succeeded siblings are left alone.
 func (s *IntegrationTestSuite) TestFanOutHTTPRetryPartition() {
 	alias := fmt.Sprintf("fanout-retry-%d", time.Now().UnixNano())
 	manifest := fmt.Sprintf(`
@@ -520,24 +518,11 @@ steps:
 	_ = resp.Body.Close()
 	s.Require().NoError(readErr)
 
-	if !distributedLane() {
-		s.Require().Equal(http.StatusConflict, resp.StatusCode,
-			"local mode must refuse per-partition retry rather than reset an instance nothing re-dispatches: %s", body)
-		s.Contains(string(body), "distributed execution mode",
-			"the refusal must name the condition an operator can act on: %s", body)
-
-		after := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
-		s.Equal("failed", after["fail"].Status,
-			"a refused retry must leave the instance exactly as it was, never half-reset")
-		s.Equal(failRow.TaskRunID, after["fail"].TaskRunID, "a refused retry must not re-key the instance")
-		return
-	}
-
 	s.Require().Equal(http.StatusOK, resp.StatusCode,
-		"retrying a failed instance in a distributed lane must be accepted: %s", body)
+		"retrying a failed instance must be accepted in local and distributed mode: %s", body)
 
-	// The reset happens inside the request, so this half is deterministic in
-	// every distributed configuration regardless of dispatch cadence.
+	// The reset happens inside the request, so this half is deterministic
+	// regardless of dispatch cadence.
 	after := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
 	s.NotEqual("failed", after["fail"].Status,
 		"a 200 retry must reset the instance for another attempt, got %q", after["fail"].Status)
@@ -551,9 +536,14 @@ steps:
 	// is deliberately not asserted — this fixture's command still fails for
 	// `fail`, so failing a second time proves the re-execution just as well.
 	redispatchDeadline := time.Now().Add(60 * time.Second)
+	becameTerminal := false
 	for {
 		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
 		if isTerminalPartitionStatus(current["fail"].Status) {
+			s.Equal(keepRow.Status, current["keep"].Status,
+				"re-running `fail` must not cascade to the succeeded sibling")
+			s.Equal(keepRow.TaskRunID, current["keep"].TaskRunID)
+			becameTerminal = true
 			break
 		}
 		if time.Now().After(redispatchDeadline) {
@@ -564,6 +554,97 @@ steps:
 		}
 		time.Sleep(fanOutPollInterval)
 	}
+	if !becameTerminal {
+		return
+	}
+
+	retried := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Contains([]string{"failed", "succeeded"}, retried.Status,
+		"the reopened run must complete again, not stay running with a pending instance")
+}
+
+// TestFanOutHTTPRetryPartitionResumesRootBehindSkippedDependent drives the
+// resume for an ordered group whose FIRST emitted partition is a dependent.
+// `a` fails and the sweep skips `b` (dependsOn a) with its in-group indegree
+// still recorded; the collapsed run view then reports the group through `b`.
+// Retrying `a` over HTTP reopens the run and the replacement engine must still
+// dispatch it — before the fix it seeded the group from `b`'s indegree, found
+// no runnable task, tripped the completion fence, and spawned replacement
+// engines forever while `a` stayed pending.
+func (s *IntegrationTestSuite) TestFanOutHTTPRetryPartitionResumesRootBehindSkippedDependent() {
+	alias := fmt.Sprintf("fanout-retry-ordered-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: list
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::partitions [{\"key\":\"b\",\"dependsOn\":[\"a\"]},{\"key\":\"a\"}]'"]
+    next: [process]
+  - name: process
+    image: alpine:3.23
+    command: ["sh", "-c", "if [ \"$CAESIUM_PARTITION\" = a ]; then exit 1; fi; echo ok"]
+    dependsOn: [list]
+    fanOut:
+      from: list
+      maxPartitions: 8
+      failurePolicy: continue
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	processID := s.jobTaskIDByName(job.ID, "process")
+	before := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.Require().Len(before, 2, "both partitions must materialize: %v", before)
+	s.Require().Equal("failed", before["a"].Status, "the root must fail so it can be retried: %v", before)
+	s.Require().Equal("skipped", before["b"].Status,
+		"the dependent must be resolved by the sweep, which is what leaves its indegree recorded: %v", before)
+	s.Require().Less(before["b"].Index, before["a"].Index, "the fixture must emit the dependent first")
+
+	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry", s.caesiumURL, job.ID, run.ID, processID, before["a"].Index), nil)
+	s.Require().NoError(err)
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	s.Require().NoError(readErr)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "retrying the failed root must be accepted: %s", body)
+
+	redispatchDeadline := time.Now().Add(60 * time.Second)
+	for {
+		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+		if isTerminalPartitionStatus(current["a"].Status) {
+			s.Equal("failed", current["a"].Status,
+				"the fixture's command still fails for `a`, so a re-execution must land on failed — not on the sweep's skipped")
+			s.Equal(before["a"].TaskRunID, current["a"].TaskRunID)
+			s.Equal("skipped", current["b"].Status, "a partition retry must not cascade to the resolved dependent")
+			s.Equal(before["b"].TaskRunID, current["b"].TaskRunID)
+			break
+		}
+		if time.Now().After(redispatchDeadline) {
+			s.Failf("a reset root never ran again",
+				"partition `a` is still %q 60s after a 200 retry: the reopened run is parked behind the skipped dependent's indegree", current["a"].Status)
+			return
+		}
+		time.Sleep(fanOutPollInterval)
+	}
+
+	retried := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Contains([]string{"failed", "succeeded"}, retried.Status,
+		"the reopened run must finalize again, not stay running or loop on replacement engines")
+	// A run that finalized once must stay finalized: a replacement loop would
+	// keep flipping it back to running.
+	time.Sleep(2 * time.Second)
+	settled := s.awaitRun(job.ID, run.ID, runTimeout)
+	s.Equal(retried.Status, settled.Status, "the run must be finalized exactly once")
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,11 +1548,10 @@ echo partition=$CAESIUM_PARTITION`, rootHealthyAt.Unix(), rootHealthyAt.Unix()),
 
 	// `caesium run retry --partition` is the single-instance verb over the same
 	// group — and at this point every instance in it has SUCCEEDED, so what the
-	// CLI must do is REFUSE. Review settled two guards, and this asserts both
-	// through the operator's surface: the endpoint accepts a `failed` instance
-	// only (retrying a success would discard a good result and re-run the work
-	// for nothing), and the verb requires distributed execution mode. A
-	// successful --partition retry of a genuinely failed instance is covered by
+	// CLI must do is REFUSE. The endpoint accepts a `failed` instance only
+	// (retrying a success would discard a good result and re-run the work for
+	// nothing). A successful --partition retry of a genuinely failed instance
+	// is covered by TestFanOutHTTPRetryPartition and
 	// TestFanOutPartitionsPaginateAndResolveByKey.
 	args := []string{
 		"run", "retry",
@@ -1491,13 +1571,8 @@ echo partition=$CAESIUM_PARTITION`, rootHealthyAt.Unix(), rootHealthyAt.Unix()),
 	combined := stdout + stderr
 	s.Require().Error(cliErr,
 		"retrying a succeeded instance must fail the command, not silently re-run it:\n%s", combined)
-	if distributedLane() {
-		s.Contains(combined, "only a failed partition can be retried",
-			"the refusal must say WHY this instance is ineligible:\n%s", combined)
-	} else {
-		s.Contains(combined, "distributed execution mode",
-			"in local mode the verb is refused for the lane, before instance eligibility:\n%s", combined)
-	}
+	s.Contains(combined, "only a failed partition can be retried",
+		"the refusal must say WHY this instance is ineligible:\n%s", combined)
 
 	// Either refusal must be inert. A retry that half-applied before rejecting
 	// would leave the group inconsistent in a way the run's status never shows.
@@ -1930,22 +2005,34 @@ fi`,
 	// ---- `caesium run retry --partition` ----------------------------------
 
 	// The regression: `e` is on page two of a limit-3 walk and was the row a
-	// page-one scan reported as missing. The retry's OUTCOME is lane-dependent —
-	// per-partition retry requires distributed execution mode, and the local
-	// integration server refuses it with 409 — but "not found" is a defect in
-	// EVERY lane, which is what this asserts.
+	// page-one scan reported as missing. "not found" is a defect in every lane.
 	retryOut, retryErr, err := s.runCLISeparate("run", "retry",
 		"--job-id", job.ID, "--run-id", run.ID, "--task", "process",
 		"--partition", "e", "--server", s.caesiumURL)
 	combined := retryOut + retryErr
+	s.Require().NoError(err, "retrying a failed instance past page one must succeed:\n%s", combined)
 	s.NotContains(combined, "not found",
 		"--partition must resolve through the keyed lookup; a page-one scan is what made an "+
 			"instance past the first page unreachable:\n%s", combined)
-	if err != nil {
-		s.Contains(combined, "distributed execution mode",
-			"the only acceptable failure here is the documented local-mode refusal:\n%s", combined)
-	} else {
-		s.Contains(retryOut, `Retried partition "e" (index 4)`,
-			"a successful retry must name the instance it reset:\n%s", retryOut)
+	s.Contains(retryOut, `Retried partition "e" (index 4)`,
+		"a successful retry must name the instance it reset:\n%s", retryOut)
+	s.NotContains(retryErr, "Usage:", "a successful retry must not dump cobra usage on stderr:\n%s", retryErr)
+
+	// Drain the resume so this test does not leave a reopened run executing
+	// into the next scenario. The command still fails for `e`, so terminal-
+	// failed is the expected re-execution.
+	redispatchDeadline := time.Now().Add(60 * time.Second)
+	for {
+		current := partitionStatusMap(s.expandedPartitions(s.listPartitions(job.ID, run.ID, "process")))
+		if isTerminalPartitionStatus(current["e"]) {
+			break
+		}
+		if time.Now().After(redispatchDeadline) {
+			s.Failf("a reset instance never ran again",
+				"partition `e` is still %q 60s after `run retry --partition`: nothing performed the resume",
+				current["e"])
+			break
+		}
+		time.Sleep(fanOutPollInterval)
 	}
 }
