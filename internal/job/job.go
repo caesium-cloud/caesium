@@ -147,10 +147,12 @@ type job struct {
 	newPodmanEngine        func(context.Context) atom.Engine
 	atomPollInterval       time.Duration
 	secretResolver         secret.Resolver
-	// beforeComplete is an unexported test seam for the shutdown window between
-	// the DAG loop returning and Store.Complete beginning. Production leaves it
-	// nil; keeping the hook before the store transaction lets race regressions
-	// interleave RetryPartition deterministically without database locks/sleeps.
+	// beforeComplete is an unexported test seam for the window between an
+	// engine deciding to finalize the run and the completion write beginning —
+	// the DAG loop's shutdown window, and the aborted-resume finalizer's.
+	// Production leaves it nil; keeping the hook before the store transaction
+	// lets race regressions interleave RetryPartition deterministically without
+	// database locks/sleeps.
 	beforeComplete func(uuid.UUID)
 	// partitionRetryReplacementFor names the retry-reset instances a
 	// replacement engine (startReplacementRun) was started to drive. It bounds
@@ -507,19 +509,33 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 	}
 	// Only the retries this engine was started for may be abandoned; a retry
 	// accepted meanwhile is fresh work that gets its own engine (which, if
-	// it fails the same way, abandons exactly that set — bounded).
-	handedOff, cause, err := j.recoverPendingPartitionRetries(store, runID, j.params, cause)
-	if err != nil {
-		log.Error("failed to read retry-reset instances of an aborted resume", "job_id", j.id, "run_id", runID, "error", err)
-		return
-	}
-	if handedOff {
-		return
-	}
-	finalized, err := store.CompleteIfActive(runID, cause)
-	if err != nil {
-		log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
-		return
+	// it fails the same way, abandons exactly that set — bounded). A retry
+	// can also land between the scan and the completion write; the fence
+	// then refuses, and the classification is simply repeated, a bounded
+	// number of times, exactly as the normal completion path does.
+	var finalized bool
+	for attempt := 0; ; attempt++ {
+		handedOff, updated, err := j.recoverPendingPartitionRetries(store, runID, j.params, cause)
+		if err != nil {
+			log.Error("failed to read retry-reset instances of an aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+			return
+		}
+		if handedOff {
+			return
+		}
+		cause = updated
+		if j.beforeComplete != nil {
+			j.beforeComplete(runID)
+		}
+		finalized, err = store.CompleteIfActive(runID, cause)
+		if errors.Is(err, run.ErrRunHasPendingWork) && attempt < 2 {
+			continue
+		}
+		if err != nil {
+			log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+			return
+		}
+		break
 	}
 	if !finalized {
 		// Another path finalized the run between the status read and this

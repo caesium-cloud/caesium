@@ -560,3 +560,76 @@ func TestFanOutPartitionRetryAbortedResumeHandsFreshRetryToAnotherEngine(t *test
 	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load(), "only the engine that finalizes the run dispatches callbacks")
 }
+
+// TestFanOutPartitionRetryAbortedResumeHandsRetryLandingDuringFinalizeToAnotherEngine
+// pins the aborted-resume finalizer against a retry that commits between its
+// scan of pending retries and its completion write. The fence refuses that
+// write; the finalizer must classify again and hand the fresh retry to a
+// replacement, exactly as the normal completion path does — not log and
+// leave the run running with a retry nothing will execute.
+func TestFanOutPartitionRetryAbortedResumeHandsRetryLandingDuringFinalizeToAnotherEngine(t *testing.T) {
+	f := newFanOutFixture(t, `["ok","flaky","other"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["flaky"] = fmt.Errorf("boom flaky")
+	f.engine.createErrByPartition["other"] = fmt.Errorf("boom other")
+	require.Error(t, f.run(t, defaultFanOutVars()))
+	jobRun := f.latestJobRun(t)
+	ids := map[string]uuid.UUID{}
+	for _, r := range f.instanceRows(t) {
+		ids[r.PartitionValue] = r.ID
+	}
+	f.engine.mu.Lock()
+	delete(f.engine.createErrByPartition, "flaky")
+	delete(f.engine.createErrByPartition, "other")
+	f.engine.mu.Unlock()
+	_, reopened, err := f.store.RetryPartition(context.Background(), jobRun.ID, ids["flaky"])
+	require.NoError(t, err)
+	require.True(t, reopened)
+
+	var envCalls atomic.Int32
+	envFactory := func() env.Environment {
+		vars := defaultFanOutVars()
+		if envCalls.Add(1) == 1 {
+			vars.JobdefSecretsIdentityHMACKeys = "not-an-id-value-pair"
+		}
+		return vars
+	}
+	var callbacks atomic.Int32
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts,
+		WithEnvVariables(envFactory),
+		WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+			callbacks.Add(1)
+			return nil
+		}),
+		withPartitionRetryReplacement([]uuid.UUID{ids["flaky"]}),
+	)
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	// A retry of `other` commits after the finalizer's scan (which found only
+	// `flaky`) and before its completion write. The seam is carried into the
+	// replacement too; only the first window is choreographed.
+	var fired atomic.Bool
+	runner.beforeComplete = func(runID uuid.UUID) {
+		if !fired.CompareAndSwap(false, true) {
+			return
+		}
+		_, reopened, err := f.store.RetryPartition(context.Background(), runID, ids["other"])
+		require.NoError(t, err)
+		require.False(t, reopened, "the run is still open for the aborted engine's finalization")
+	}
+	err = runner.Run(run.WithContext(context.Background(), jobRun.ID))
+	require.Error(t, err)
+	require.True(t, fired.Load(), "precondition: the retry must interleave with the finalizer's completion write")
+
+	final := f.awaitRunTerminal(t, jobRun.ID)
+	status := statusByPartition(f.instanceRowsFor(t, jobRun.ID))
+	require.Equal(t, string(run.TaskStatusSkipped), status["flaky"], "the retry the aborted engine was started for is abandoned")
+	require.Equal(t, string(run.TaskStatusSucceeded), status["other"],
+		"a retry that landed during the finalizer's completion must be handed to a further engine and executed")
+	require.NotNil(t, final.CompletedAt)
+	awaitCallbacks(t, &callbacks, 1)
+	require.Equal(t, int32(1), callbacks.Load())
+}
