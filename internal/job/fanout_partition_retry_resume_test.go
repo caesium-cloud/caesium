@@ -60,6 +60,23 @@ func (f *fanOutFixture) awaitRunTerminal(t *testing.T, runID uuid.UUID) models.J
 	}, "terminal")
 }
 
+// awaitCallbacks waits for the completion-callback counter to reach want.
+// Callbacks are dispatched after the terminal status write, so a test that
+// observed the run become terminal must still wait for them.
+func awaitCallbacks(t *testing.T, counter *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for counter.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("callbacks did not reach %d (got %d)", want, counter.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Let a mistakenly duplicated dispatch show itself before the caller
+	// asserts the exact count.
+	time.Sleep(50 * time.Millisecond)
+}
+
 func (f *fanOutFixture) awaitRun(t *testing.T, runID uuid.UUID, done func(string) bool, want string) models.JobRun {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -291,6 +308,7 @@ func TestFanOutPartitionRetryResumeFailingBeforeCompletionFinalizesRun(t *testin
 	require.False(t, retried.PartitionRetryPending)
 	require.True(t, strings.Contains(retried.Error, "partition retry abandoned"), "the skip reason must say why: %q", retried.Error)
 	require.Equal(t, createsBefore, f.engine.createCount("flaky"))
+	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load(), "a run finalized as failed dispatches callbacks exactly once")
 }
 
@@ -352,7 +370,7 @@ func TestFanOutPartitionRetryReplacementHandsFreshRetryToAnotherEngine(t *testin
 		"a retry that lands in the replacement's shutdown window must be executed, not abandoned")
 	require.Equal(t, string(run.StatusSucceeded), final.Status)
 	require.Equal(t, int32(3), windows.Load(), "three engines: original, replacement for r1, replacement for r2")
-	time.Sleep(50 * time.Millisecond)
+	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load(), "only the engine that finalizes the run dispatches callbacks")
 }
 
@@ -469,7 +487,7 @@ func TestFanOutPartitionRetryReplacementRetriesSamePartitionAgain(t *testing.T) 
 	require.Equal(t, string(run.StatusSucceeded), final.Status)
 	require.Equal(t, 3, f.engine.createCount("r1"), "original, replacement (failed again), further replacement (succeeded)")
 	require.Equal(t, int32(3), windows.Load())
-	time.Sleep(50 * time.Millisecond)
+	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load())
 }
 
@@ -539,6 +557,6 @@ func TestFanOutPartitionRetryAbortedResumeHandsFreshRetryToAnotherEngine(t *test
 	require.Equal(t, 1, f.engine.createCount("flaky"))
 	require.Equal(t, 2, f.engine.createCount("other"))
 	require.NotNil(t, final.CompletedAt)
-	time.Sleep(50 * time.Millisecond)
+	awaitCallbacks(t, &callbacks, 1)
 	require.Equal(t, int32(1), callbacks.Load(), "only the engine that finalizes the run dispatches callbacks")
 }
