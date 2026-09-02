@@ -3,13 +3,16 @@ package run
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // addTerminalUpstream wires a second cross-step predecessor (`warm`) into the
@@ -206,4 +209,49 @@ func TestRetryPartitionCountsOnlyLivePredecessorsWhenMixed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, reset.OutstandingPredecessors,
 		"only the live predecessor %s may be counted; the terminal-failed one will never decrement again", live.Name)
+}
+
+// TestAbandonPartitionRetriesLeavesStartedInstanceAlone pins the abandonment
+// path against the executor it races. The rows are selected as pending, but
+// an executor can start one between that read and the skip write; resolving
+// it as skipped then would clear its retry provenance and let the run
+// finalize while the container keeps running. The skip must be conditional
+// on the row still being pending and unstarted, in the same statement.
+func TestAbandonPartitionRetriesLeavesStartedInstanceAlone(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+	rows := finishFannedRun(t, f, TaskStatusFailed, TaskStatusSucceeded)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, rows[0].ID)
+	require.NoError(t, err)
+
+	// Between the eligibility read and the skip write, an executor claims and
+	// starts the instance. The hook fires on the first task_runs UPDATE after
+	// it is armed — the skip itself — and flips the row on the same
+	// connection first.
+	started := time.Now().UTC()
+	var fired atomic.Bool
+	const name = "test:start_before_skip"
+	require.NoError(t, f.db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != "task_runs" || fired.Load() {
+			return
+		}
+		fired.Store(true)
+		if err := tx.Session(&gorm.Session{NewDB: true, SkipHooks: true}).Exec(
+			"UPDATE task_runs SET status = ?, started_at = ?, claimed_by = ? WHERE id = ?",
+			string(TaskStatusRunning), started, "worker-1", rows[0].ID).Error; err != nil {
+			_ = tx.AddError(err)
+		}
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Update().Remove(name) })
+
+	resolved, err := f.store.AbandonPartitionRetries(f.runID, []uuid.UUID{rows[0].ID}, "abandoned")
+	require.NoError(t, err)
+	require.True(t, fired.Load(), "precondition: the executor start must interleave with the skip")
+	require.Equal(t, 0, resolved, "a row an executor has started is not abandonable")
+
+	var row models.TaskRun
+	require.NoError(t, f.db.First(&row, "id = ?", rows[0].ID).Error)
+	require.Equal(t, string(TaskStatusRunning), row.Status, "the running instance must not be resolved as skipped")
+	require.True(t, row.PartitionRetryPending, "its retry provenance must survive until it reaches a terminal state")
 }

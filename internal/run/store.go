@@ -6400,30 +6400,51 @@ func (s *Store) PendingPartitionRetries(runID uuid.UUID) ([]models.TaskRun, erro
 }
 
 // AbandonPartitionRetries resolves the given retry-reset instances, if still
-// pending, as skipped with the given reason and clears their retry
-// provenance. It is the bounded end of the completion fence: a replacement
-// engine that could not dispatch the retries it was started for must not
-// spawn yet another engine for them. Each row is resolved explicitly so the
-// run can finalize and the operator can see why. Returns the number of
-// instances resolved.
+// pending and unstarted, as skipped with the given reason and clears their
+// retry provenance. It is the bounded end of the completion fence: a
+// replacement engine that could not dispatch the retries it was started for
+// must not spawn yet another engine for them. Each row is resolved explicitly
+// so the run can finalize and the operator can see why.
+//
+// The guard lives in the UPDATE itself, not in a prior read: an executor can
+// claim and start one of these rows at any moment, and a skip that reached a
+// running instance would clear its provenance and let the run finalize under a
+// container that keeps producing side effects. Returns the number of instances
+// actually resolved.
 func (s *Store) AbandonPartitionRetries(runID uuid.UUID, taskRunIDs []uuid.UUID, reason string) (int, error) {
 	if len(taskRunIDs) == 0 {
 		return 0, nil
 	}
-	var rows []models.TaskRun
-	if err := s.db.Select("id").
-		Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
-			runID, taskRunIDs, string(TaskStatusPending), true).
-		Find(&rows).Error; err != nil {
+	now := time.Now().UTC()
+	resolved := 0
+	var counts dbWriteCounts
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		resolved = 0
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			result := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+					runID, taskRunIDs, string(TaskStatusPending), true).
+				Updates(map[string]interface{}{
+					"status":                  string(TaskStatusSkipped),
+					"error":                   reason,
+					"completed_at":            now,
+					"partition_retry_pending": false,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			resolved = int(result.RowsAffected)
+			if result.RowsAffected > 0 {
+				counts.addTaskRunStatus(int(result.RowsAffected))
+			}
+			return nil
+		})
+	})
+	if err != nil {
 		return 0, err
 	}
-	resolved := 0
-	for i := range rows {
-		if err := s.SkipTaskInstance(runID, rows[i].ID, reason); err != nil {
-			return resolved, err
-		}
-		resolved++
-	}
+	counts.commit()
 	if resolved > 0 {
 		s.invalidateRunState(runID)
 	}
