@@ -76,6 +76,41 @@ func newReplayFixture(t *testing.T) replayFixture {
 	return replayFixture{db: db, store: run.NewStore(db), jobID: jobID, runID: runID, now: now}
 }
 
+func TestComputeDescriptorHashHonorsRecordedParamEnvInterpolationCapability(t *testing.T) {
+	desc := models.TaskExecutionDescriptor{
+		Baseline: models.TaskExecutionBaseline{JobAlias: "deploy", TaskName: "checkout"},
+		Runtime: models.TaskExecutionRuntime{
+			Image:                 "caesiumcloud/git-source:latest",
+			ParamEnvInterpolation: true,
+		},
+		ContainerSpec: container.Spec{Env: map[string]string{
+			"GIT_REF": "${CAESIUM_PARAM_SHA}",
+		}},
+	}
+	params := map[string]string{"sha": "abc123"}
+
+	interpolatedHash, err := computeDescriptorHash(desc, params, nil, nil)
+	require.NoError(t, err)
+
+	materialized := desc
+	materialized.Runtime.ParamEnvInterpolation = false
+	materialized.ContainerSpec.Env = map[string]string{"GIT_REF": "abc123"}
+	wantInterpolatedHash, err := computeDescriptorHash(materialized, params, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, wantInterpolatedHash, interpolatedHash)
+
+	legacy := desc
+	legacy.Runtime.ParamEnvInterpolation = false
+	legacyHash, err := computeDescriptorHash(legacy, params, nil, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, interpolatedHash, legacyHash, "legacy descriptors must hash the literal token that historically ran")
+
+	_, err = computeDescriptorHash(desc, nil, nil, nil)
+	require.Error(t, err, "new descriptors must fail closed when a referenced param is missing")
+	_, err = computeDescriptorHash(legacy, nil, nil, nil)
+	require.NoError(t, err, "legacy descriptors must retain literal-env semantics even without the referenced param")
+}
+
 func TestReplayRefusesTaskNotRecordedReplaySafe(t *testing.T) {
 	f := newReplayFixture(t)
 	taskID := f.seedTask(t, seedTaskConfig{name: "deploy", replaySafe: false, result: "success"})
@@ -211,6 +246,7 @@ func TestReplayMaterializesDescriptorInsteadOfLiveRows(t *testing.T) {
 
 	var desc models.TaskExecutionDescriptor
 	require.NoError(t, json.Unmarshal(replayTask.ExecutionDescriptor, &desc))
+	require.True(t, desc.Runtime.ParamEnvInterpolation, "replay must preserve the baseline runtime capability")
 	require.Equal(t, "/baseline", desc.ContainerSpec.WorkDir)
 	require.Equal(t, "baseline", desc.ContainerSpec.Env["MODE"])
 	require.Equal(t, "/baseline/in", desc.ContainerSpec.Mounts[0].Source)
@@ -642,15 +678,16 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		},
 		Run: models.TaskExecutionRun{Params: map[string]string{"mode": "baseline"}},
 		Runtime: models.TaskExecutionRuntime{
-			Engine:       models.AtomEngineDocker,
-			Image:        cfg.image,
-			Command:      cfg.command,
-			CommandRaw:   command,
-			WorkDir:      cfg.spec.WorkDir,
-			TaskType:     "task",
-			RetryCount:   0,
-			RetryDelay:   time.Second,
-			RetryBackoff: true,
+			Engine:                models.AtomEngineDocker,
+			Image:                 cfg.image,
+			ParamEnvInterpolation: true,
+			Command:               cfg.command,
+			CommandRaw:            command,
+			WorkDir:               cfg.spec.WorkDir,
+			TaskType:              "task",
+			RetryCount:            0,
+			RetryDelay:            time.Second,
+			RetryBackoff:          true,
 		},
 		Cache: models.TaskExecutionCache{
 			Enabled: true,

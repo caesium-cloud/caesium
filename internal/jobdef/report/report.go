@@ -148,7 +148,7 @@ func Markdown() string {
 	b.WriteString("| `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |\n")
 	b.WriteString("| `image` | string | required | Container image reference. |\n")
 	b.WriteString("| `command` | array[string] | optional | Executed command; defaults to entrypoint. |\n")
-	b.WriteString("| `env` | map[string]string | optional | Environment variables passed to the runtime. |\n")
+	b.WriteString("| `env` | map[string]string | optional | Environment variables passed to the runtime. `${CAESIUM_PARAM_<NAME>}` is interpolated from run parameters before hashing and container start; a missing param fails the task. |\n")
 	b.WriteString("| `workdir` | string | optional | Working directory inside the container runtime. |\n")
 	b.WriteString("| `mounts` | array[object] | optional | Bind mounts with `source`, `target`, and optional `readOnly`. |\n")
 	b.WriteString("| `volumeMounts` | array[object] | optional | Declared volume mounts with `volume`, `path`, optional `readOnly`, and optional `subPath`. |\n")

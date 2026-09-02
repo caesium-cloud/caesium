@@ -130,6 +130,24 @@ func TestCompute_DifferentEnv(t *testing.T) {
 	assert.NotEqual(t, a.Compute(), b.Compute())
 }
 
+// TestCompute_SubstitutedParamEnvIsHashed is the #363 cache-identity contract:
+// ${CAESIUM_PARAM_*} must be folded AFTER substitution. Hashing the token would
+// let two runs that only differ in the referenced param share a key on Env
+// (RunParams still differ today, but Env is what the container actually saw).
+func TestCompute_SubstitutedParamEnvIsHashed(t *testing.T) {
+	token := HashInput{Env: map[string]string{"GIT_REF": "${CAESIUM_PARAM_SHA}"}}
+	aaa := HashInput{Env: map[string]string{"GIT_REF": "aaa"}}
+	bbb := HashInput{Env: map[string]string{"GIT_REF": "bbb"}}
+	assert.NotEqual(t, token.Compute(), aaa.Compute(), "token and substituted value must not share a key")
+	assert.NotEqual(t, aaa.Compute(), bbb.Compute(), "different substituted values must miss")
+
+	blob, err := aaa.CanonicalJSON(aaa.Compute())
+	require.NoError(t, err)
+	sum := sha256.Sum256([]byte("aaa"))
+	assert.Contains(t, string(blob), "sha256:"+hex.EncodeToString(sum[:]))
+	assert.NotContains(t, string(blob), "${CAESIUM_PARAM_SHA}")
+}
+
 func TestCompute_DifferentWorkDir(t *testing.T) {
 	a := baseInput()
 	b := baseInput()

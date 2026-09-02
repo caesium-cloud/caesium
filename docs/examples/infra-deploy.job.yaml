@@ -116,6 +116,10 @@ trigger:
   type: http
   configuration:
     path: "/hooks/examples/infra-deploy"
+    paramMapping:
+      SHA: "$.sha"
+  defaultParams:
+    SHA: "main"
 volumes:
   - name: src
     accessMode: ReadWriteMany
@@ -196,14 +200,11 @@ steps:
     dependsOn: [prepare]
     env:
       GIT_URL: "git@github.com:acme/infra.git"
-      # A LITERAL ref. Caesium does not interpolate `${...}` in env values —
-      # run params arrive as their own CAESIUM_PARAM_<KEY> variables, and
-      # `git-source` is a Go binary with no shell, so a value like
-      # "${CAESIUM_PARAM_SHA}" (as the design spec's illustrative §5.5 snippet
-      # shows) would reach it verbatim and fail to resolve. Deploying a
-      # specific commit means editing this value and re-applying the manifest,
-      # until a param-aware ref mechanism exists.
-      GIT_REF: "main"
+      # Scheduler interpolates ${CAESIUM_PARAM_*} in env values before hashing
+      # and before the container starts. git-source is a Go binary with no
+      # shell, so this is how a trigger-supplied SHA reaches GIT_REF.
+      # defaultParams.SHA is "main" when the webhook omits it.
+      GIT_REF: "${CAESIUM_PARAM_SHA}"
       GIT_SPARSE: "stacks/** modules/**"
       GIT_SSH_KEY: "secret://env/DEPLOY_KEY"
     volumeMounts:

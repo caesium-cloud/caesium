@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -186,17 +187,18 @@ type Descriptor struct {
 		Params map[string]string `json:"params,omitempty"`
 	} `json:"run"`
 	Runtime struct {
-		Engine              string            `json:"engine"`
-		Image               string            `json:"image"`
-		ResolvedImageDigest string            `json:"resolvedImageDigest,omitempty"`
-		Command             []string          `json:"command,omitempty"`
-		CommandRaw          string            `json:"commandRaw,omitempty"`
-		WorkDir             string            `json:"workdir,omitempty"`
-		TaskType            string            `json:"taskType,omitempty"`
-		NodeSelector        map[string]string `json:"nodeSelector,omitempty"`
-		RetryCount          int               `json:"retryCount"`
-		RetryDelay          time.Duration     `json:"retryDelay"`
-		RetryBackoff        bool              `json:"retryBackoff"`
+		Engine                string            `json:"engine"`
+		Image                 string            `json:"image"`
+		ResolvedImageDigest   string            `json:"resolvedImageDigest,omitempty"`
+		ParamEnvInterpolation bool              `json:"paramEnvInterpolation,omitempty"`
+		Command               []string          `json:"command,omitempty"`
+		CommandRaw            string            `json:"commandRaw,omitempty"`
+		WorkDir               string            `json:"workdir,omitempty"`
+		TaskType              string            `json:"taskType,omitempty"`
+		NodeSelector          map[string]string `json:"nodeSelector,omitempty"`
+		RetryCount            int               `json:"retryCount"`
+		RetryDelay            time.Duration     `json:"retryDelay"`
+		RetryBackoff          bool              `json:"retryBackoff"`
 	} `json:"runtime"`
 	Timing struct {
 		TaskTimeout time.Duration `json:"taskTimeout"`
@@ -269,8 +271,28 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 	secretRefs := secretRefsByEnv(desc.SecretRefs)
 	processedSecretEnv := make(map[string]struct{})
 
-	for _, key := range sortedKeys(desc.ContainerSpec.Env) {
-		value := desc.ContainerSpec.Env[key]
+	mergedParams := make(map[string]string, len(desc.Run.Params)+len(opts.SetParams))
+	for key, value := range desc.Run.Params {
+		mergedParams[key] = value
+	}
+	for _, assignment := range opts.SetParams {
+		if strings.TrimSpace(assignment.Key) == "" {
+			return nil, fmt.Errorf("--set key cannot be empty")
+		}
+		mergedParams[assignment.Key] = assignment.Value
+	}
+
+	interpolatedEnv := desc.ContainerSpec.Env
+	if desc.Runtime.ParamEnvInterpolation {
+		var err error
+		interpolatedEnv, err = jobdefruntime.InterpolateParamRefs(desc.ContainerSpec.Env, mergedParams)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, key := range sortedKeys(interpolatedEnv) {
+		value := interpolatedEnv[key]
 		if isSecretRef(value) {
 			ref := secretRefs[key]
 			ref.EnvKey = key
@@ -296,7 +318,7 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 		if _, ok := processedSecretEnv[ref.EnvKey]; ok {
 			continue
 		}
-		if _, ok := desc.ContainerSpec.Env[ref.EnvKey]; !ok {
+		if _, ok := interpolatedEnv[ref.EnvKey]; !ok {
 			processedSecretEnv[ref.EnvKey] = struct{}{}
 			if resolved, resolutionWarnings, ok := resolveRecordedSecret(ctx, ref, opts); ok {
 				env[ref.EnvKey] = resolved.Value
@@ -319,8 +341,8 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 		sort.Slice(omitted, func(i, j int) bool { return omitted[i].EnvKey < omitted[j].EnvKey })
 	}
 
-	for _, key := range sortedKeys(desc.Run.Params) {
-		env[paramEnvKey(key)] = desc.Run.Params[key]
+	for _, key := range sortedKeys(mergedParams) {
+		env[paramEnvKey(key)] = mergedParams[key]
 	}
 
 	outputEnv, outputWarnings, err := predecessorOutputEnv(desc)
@@ -332,12 +354,6 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 		env[key] = outputEnv[key]
 	}
 
-	for _, assignment := range opts.SetParams {
-		if strings.TrimSpace(assignment.Key) == "" {
-			return nil, fmt.Errorf("--set key cannot be empty")
-		}
-		env[paramEnvKey(assignment.Key)] = assignment.Value
-	}
 	for _, assignment := range opts.SetEnv {
 		if strings.TrimSpace(assignment.Key) == "" {
 			return nil, fmt.Errorf("--set-env key cannot be empty")

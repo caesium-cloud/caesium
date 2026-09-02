@@ -730,9 +730,9 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 		for _, i := range group.order {
 			task := group.tasks[i]
 			pending := pendingPredecessors + pendingSiblings[task.partition.Key]
-			replayHash, err := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
-			if err != nil {
-				return nil, err
+			replayHash, hashErr := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
+			if hashErr != nil {
+				return nil, fmt.Errorf("replay: interpolate env for step %q: %w", firstNonEmpty(task.taskName, group.taskName), hashErr)
 			}
 			unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
 			plan := plannedTask{
@@ -884,6 +884,13 @@ func computeDescriptorInstanceHash(
 ) (string, error) {
 	spec := desc.ContainerSpec
 	env := maps.Clone(spec.Env)
+	if desc.Runtime.ParamEnvInterpolation {
+		var err error
+		env, err = jobdefruntime.InterpolateParamRefs(spec.Env, params)
+		if err != nil {
+			return "", err
+		}
+	}
 	if env == nil {
 		env = make(map[string]string)
 	}

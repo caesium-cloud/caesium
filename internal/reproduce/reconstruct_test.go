@@ -72,6 +72,73 @@ func TestReconstructEnvLayeringAndSecretOmission(t *testing.T) {
 	}
 }
 
+func TestReconstructInterpolatesParamRefs(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "checkout"
+	desc.Runtime.Image = "caesiumcloud/git-source:latest"
+	desc.Runtime.ParamEnvInterpolation = true
+	desc.ContainerSpec.Env = map[string]string{
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+		"LITERAL": "keep-me",
+	}
+	desc.Run.Params = map[string]string{"sha": "abc123"}
+
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	if got := env.Env["GIT_REF"]; got != "abc123" {
+		t.Fatalf("GIT_REF = %q, want interpolated sha", got)
+	}
+	if got := env.Env["LITERAL"]; got != "keep-me" {
+		t.Fatalf("LITERAL = %q", got)
+	}
+
+	overridden, err := Reconstruct(context.Background(), desc, ReconstructOptions{
+		SetParams: []Assignment{{Key: "sha", Value: "override"}},
+	})
+	if err != nil {
+		t.Fatalf("Reconstruct(--set) error = %v", err)
+	}
+	if got := overridden.Env["GIT_REF"]; got != "override" {
+		t.Fatalf("GIT_REF after --set = %q, want override", got)
+	}
+
+	desc.Run.Params = nil
+	_, err = Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err == nil {
+		t.Fatal("expected unresolved param to fail closed")
+	}
+	if !strings.Contains(err.Error(), "${CAESIUM_PARAM_SHA}") {
+		t.Fatalf("error = %v, want unresolved ${CAESIUM_PARAM_SHA}", err)
+	}
+}
+
+func TestReconstructLegacyDescriptorKeepsParamRefLiteral(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "checkout"
+	desc.Runtime.Image = "caesiumcloud/git-source:latest"
+	// ParamEnvInterpolation is intentionally omitted, as it is on descriptors
+	// captured before scheduler interpolation existed.
+	desc.ContainerSpec.Env = map[string]string{
+		"GIT_REF": "${CAESIUM_PARAM_SHA}",
+	}
+	desc.Run.Params = map[string]string{"sha": "abc123"}
+
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	if got := env.Env["GIT_REF"]; got != "${CAESIUM_PARAM_SHA}" {
+		t.Fatalf("legacy GIT_REF = %q, want historical literal token", got)
+	}
+	if got := env.Env["CAESIUM_PARAM_SHA"]; got != "abc123" {
+		t.Fatalf("legacy CAESIUM_PARAM_SHA = %q, want recorded param env", got)
+	}
+}
+
 func TestReconstructOutputRefUsesBuildOutputEnvShape(t *testing.T) {
 	desc := &Descriptor{}
 	desc.SchemaVersion = 1

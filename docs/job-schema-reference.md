@@ -107,7 +107,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |
 | `image` | string | required | Container image reference. |
 | `command` | array[string] | optional | Executed command; defaults to entrypoint. |
-| `env` | map[string]string | optional | Environment variables passed to the runtime. |
+| `env` | map[string]string | optional | Environment variables passed to the runtime. `${CAESIUM_PARAM_<NAME>}` is interpolated from run parameters before hashing and container start; a missing param fails the task. |
 | `workdir` | string | optional | Working directory inside the container runtime. |
 | `mounts` | array[object] | optional | Bind mounts with `source`, `target`, and optional `readOnly`. |
 | `volumeMounts` | array[object] | optional | Declared volume mounts with `volume`, `path`, optional `readOnly`, and optional `subPath`. |

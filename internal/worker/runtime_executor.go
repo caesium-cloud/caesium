@@ -193,6 +193,22 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		return
 	}
 
+	// Substitute ${CAESIUM_PARAM_*} in the step-declared env before hashing and
+	// before container create. Quarantined replay honors the capability bit
+	// frozen on the baseline descriptor: descriptors captured before this
+	// feature must keep the literal env semantics that historically executed.
+	if descriptor == nil || descriptor.Runtime.ParamEnvInterpolation {
+		interpolatedEnv, interpolateErr := jobdefruntime.InterpolateParamRefs(atomSpec.Env, runParams)
+		if interpolateErr != nil {
+			log.Error("failed to interpolate run params in step env", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", interpolateErr)
+			if persistErr := sink.Failed(ctx, taskRun, interpolateErr); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+				log.Error("failed to persist env interpolation failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+			}
+			return
+		}
+		atomSpec.Env = interpolatedEnv
+	}
+
 	// Cache check: attempt to satisfy the task from cache before container execution.
 	var cacheStore *cache.Store
 	var cacheHash string
@@ -251,6 +267,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		// Build merged env for hashing, excluding volatile per-run vars.
+		// atomSpec.Env is already ${CAESIUM_PARAM_*}-interpolated above.
 		mergedEnv := make(map[string]string, len(atomSpec.Env))
 		for k, v := range atomSpec.Env {
 			mergedEnv[k] = v

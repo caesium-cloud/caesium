@@ -323,8 +323,12 @@ type HashInput struct {
 	// only the mutable tag contributes. When set, the digest is folded into the
 	// key in addition to the tag, so a tag that moves to a new digest yields a
 	// different hash — a cache miss, never a stale hit.
-	ResolvedImageDigest  string
-	Command              []string
+	ResolvedImageDigest string
+	Command             []string
+	// Env is the step-declared environment after ${CAESIUM_PARAM_*}
+	// interpolation and predecessor-output injection, and before secret://
+	// resolution. The substituted values (not the tokens) are what Compute
+	// folds in, so two runs that differ only in a referenced param miss.
 	Env                  map[string]string
 	WorkDir              string
 	Mounts               []container.Mount
