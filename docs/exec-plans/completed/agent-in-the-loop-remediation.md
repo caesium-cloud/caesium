@@ -85,6 +85,19 @@ resource-right-sizing lands its detection, and that limit is recorded, not hidde
 
 ## Progress (as of 2026-07-05)
 
+> **Correction (2026-09-05):** Despite the ticks below, B4 (tier-3
+> producers/provenance router) and the `ApprovalRequest`-creation half of D1
+> did not land in #281/#283. Verified in-code: `internal/incident/executor.go`
+> `Execute` records a tier-3 action as `proposed` and nothing creates an
+> `ApprovalRequest`; `api/rest/service/agent/actions.go` `SetActionExecutor`
+> has no caller; `api/rest/service/incident/approvals.go` `decide` marks an
+> action approved and nothing executes it; `internal/incident/actions.go`
+> `dispatch` has no case for `apply_jobdef_patch`, `skip_task`, or
+> `override_schema_gate`; `internal/incident/provenance.go` does not exist.
+> Closed by `trust-the-substrate.md` C4/C7 (proposal → `ApprovalRequest` →
+> approve → execute, direct route) and `data-circuit-breaker.md` F3 (Git-PR
+> route) in the closed-loop arc.
+
 The plan was published from the `design-agent-in-the-loop.md` design of record.
 The design is explicitly phased (0→3); Wave 1 landed Stream A, the entire Phase-0
 incident core + substrate, which unblocks every other stream.

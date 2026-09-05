@@ -6,6 +6,9 @@
 > yet. Depends on and delivers the stats substrate planned in roadmap §2.5;
 > composes with [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
 > and reuses its provenance-routed GitOps-patch machinery.
+> → **active — Plan 2 of the closed-loop arc** (see
+> [`exec-plans/active/resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md);
+> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 

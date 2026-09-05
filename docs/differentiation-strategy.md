@@ -1,6 +1,6 @@
 # Differentiation Strategy: Where Caesium Wins
 
-> Status: Proposed positioning (2026-06-19). This document reframes how Caesium is positioned and prioritized. It is the output of a structured competitive analysis + a six-angle adversarial red-team of the resulting thesis. It does not change shipped behavior; it changes what we lead with, what we build next, and why. Supersedes the implicit "better Airflow" framing of the feature roadmap. The companion build spec is [`design-data-plane-memory.md`](design-data-plane-memory.md).
+> Status: Proposed positioning (2026-06-19). This document reframes how Caesium is positioned and prioritized. It is the output of a structured competitive analysis + a six-angle adversarial red-team of the resulting thesis. It does not change shipped behavior; it changes what we lead with, what we build next, and why. Supersedes the implicit "better Airflow" framing of the feature roadmap. The companion build spec is [`design-data-plane-memory.md`](design-data-plane-memory.md); re-scored 2026-09-05 — see Status update below.
 
 ## The problem this document solves
 
@@ -13,7 +13,7 @@ Nearly every roadmap item is something a competent platform team can approximate
 ## The market actually has two camps, and we were straddling both
 
 - **Camp 1 — pure container schedulers** (raw k8s Jobs + Kueue, Argo Workflows/Events). *Data-blind by design.* Kueue is a quota cop (hierarchical cohort borrowing, weighted fair-share, preemption, gang admission) with no DAG, no data, no lineage — and it never will, by scope. Argo adds a DAG but bolts a NATS/Kafka EventBus + external Postgres back on; its "cache" is string-keyed memoization, blind to whether *data* changed.
-- **Camp 2 — data-aware orchestrators** (Dagster, Flyte, Airflow 3, Prefect, Kestra, Mage). They own data semantics — but every serious one carries at least one of: **Python/SDK lock-in**, a **mandatory heavy backend** (Postgres, often + Redis/Kafka/ES), or an **open-core paywall** on the parts that make the demo shine (Dagster+ Insights/Catalog/Branch-Deploys; Kestra paywalls k8s/SSO/RBAC/audit). Kestra is the most dangerous lookalike (OSS, YAML-first, no-SDK) but is a fat 5-process JVM platform that mandates a DB.
+- **Camp 2 — data-aware orchestrators** (Dagster, Flyte, Airflow 3, Prefect, Kestra, Mage, Windmill). They own data semantics — but every serious one carries at least one of: **Python/SDK lock-in**, a **mandatory heavy backend** (Postgres, often + Redis/Kafka/ES), or an **open-core paywall** on the parts that make the demo shine (Dagster+ Insights/Catalog/Branch-Deploys; Kestra paywalls k8s/SSO/RBAC/audit). Kestra is the most dangerous lookalike (OSS, YAML-first, no-SDK) but is a fat 5-process JVM platform that mandates a DB.
 
 The roadmap aimed Caesium at Camp 2's *feature axis* (data-awareness) while quietly depending on Camp 1's *operational simplicity*. That is backwards.
 
@@ -92,14 +92,70 @@ Use the words a frustrated engineer actually types into a search bar: *"lightwei
 - A funded zero-dep competitor (e.g. Kestra adding richer caching) closes the deployment-simplicity gap **and** offers data-awareness → both asymmetries collapse; reassess.
 - Engineering effort keeps flowing to `internal/cache/hash.go` (the built, replicable 60%) instead of digest-pinning + decomposed-input persistence (the unbuilt, differentiating 40%) → polishing the streetlight instead of searching the dark.
 
+## Interim status update (2026-09-05; final re-score in the arc's Tell-it wave)
+
+Re-scored two and a half months after the pivot, as part of drafting the
+closed-loop arc ([`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
+
+**What changed in the market.**
+
+- **Prefect acquired Dagster Labs (announced 2026-07-13, [dagster.io](https://dagster.io/blog/prefect-is-acquiring-dagster) — verified 2026-09-05).** Dagster OSS and
+  Dagster+ continue under their own names; the combined company operates as
+  Prefect. Two independent Camp-2 vendors became one, with a heavier stack
+  (Python SDK + Postgres + a cloud control plane) and more to keep paywalled.
+  The deployment asymmetry strengthens. Watch: a combined vendor has the
+  resources to ship a lighter free tier — that is kill-condition 5 in a new
+  form.
+- **Airflow 3 shipped Data Assets (AIP-74/75) and event-driven scheduling
+  (AIP-82)** ([airflow.apache.org](https://airflow.apache.org/blog/airflow-three-point-oh-is-here)).
+  Asset/freshness-based scheduling is now table stakes in the
+  highest-adoption OSS orchestrator. Freshness scheduling stays shipped and
+  useful; it is no longer a differentiator to lead with.
+- **Every orchestrator grew an MCP server** (Prefect/FastMCP, Dagster, Mage,
+  Kestra, Bruin). "Has an MCP" is table stakes. Caesium's approval-gated
+  incident runtime and the catalogued but not-yet-executing `apply_jobdef_patch`
+  action (proposal → approval → execution pipeline Plan 0 wires; Git-PR route
+  Plan 1 adds) is the differentiator, not the transport — and the arc adds
+  something we have not seen any of them ship: proposals that are
+  **backtested against production history before a human approves them**.
+- **Windmill** belongs in Camp 2 and was missing from the Camp 2 list above
+  (and from `sovereignty.md`'s comparison table): Postgres-backed,
+  open-core, with SSO/SCIM/audit/HA paywalled ([windmill.dev](https://windmill.dev/docs/advanced/self_host)).
+  Kestra's own paywalled feature set is documented at
+  [kestra.io](https://kestra.io/docs/oss-vs-paid).
+
+**What changed in the product.** The "~60% built, the unbuilt 40% is the
+product" critique above is retired: data-plane-memory, data-plane-memory-ii,
+reproduce, contract-enforcement, freshness-scheduling, dynamic-fanout and
+infra-deploy have all shipped. Digest pinning shipped for Docker; pre-run
+digest resolution on Podman/Kubernetes is an unfiled follow-up (Plan 0 of the
+arc files it), so kill-condition 4 is **mostly closed, not closed**.
+
+**Kill-conditions, re-scored.**
+
+| # | Condition | 2026-09 reading |
+|---|---|---|
+| 1 | Zero inbound from air-gapped/edge/regulated users after 3–6 months | **Untestable so far** — no release has ever been cut and the CLI binary is not downloadable; the sovereignty pitch has not actually been put in front of anyone. Plan 0 fixes this (`v0.1.0`). |
+| 2 | An incumbent ships a field-level "why" panel before `caesium why` works | Not observed; `caesium why` / `blame` / `run diff` shipped. UNVERIFIED against every vendor. |
+| 3 | Adopters install but never touch skip/why/receipt | No adopters to measure — see 1. |
+| 4 | Receipts treated as authoritative while images are unpinned | Mostly closed (Docker digest pinning shipped); Podman/k8s pre-run resolution outstanding. |
+| 5 | A funded zero-dep competitor closes the simplicity gap and adds data-awareness | Not observed; the Prefect+Dagster consolidation moves the other way. |
+| 6 | Effort keeps flowing to the built 60% instead of the unbuilt 40% | **Not triggered** — the 40% shipped (data-plane-memory #213–#222, -ii #230–#244). |
+
+**The third act.** Hook with DX, close with sovereignty, retain with data-plane
+memory — and now *keep* with the closed loop: the memory is used to act (hold,
+size, park, propose), and every action is explainable and backtestable. The
+arc doc is the operating plan for that act.
+
 ## How we got here (methodology)
 
 This thesis was not authored top-down. It came from: (1) a structured competitive deep-dive of k8s/Kueue, Argo, Airflow, Dagster, Prefect, Temporal, Kestra, and Flyte/Windmill/Hatchet/Mage, grounded against the Caesium codebase; (2) multi-lens ideation of ~33 candidate differentiators; (3) an adversarial stress-test of each (skeptics instructed to kill ideas by proving them me-too, easy-on-k8s, or principle-violating — verified against real code); and (4) a six-angle red-team of the surviving north-star itself. The pivot above is the red-team's verdict, recorded honestly including where the first synthesis overfit to existing code. Future readers should treat the kill-conditions as the live test of whether this positioning still holds.
 
 ## Related documents
 
-- [`exec-plans/active/sovereignty-execution.md`](exec-plans/active/sovereignty-execution.md) — the execution plan operationalizing this positioning (README repositioning + Kueue delegation).
+- [`exec-plans/completed/sovereignty-execution.md`](exec-plans/completed/sovereignty-execution.md) — the execution plan operationalizing this positioning (README repositioning + Kueue delegation); shipped.
+- [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) — the closed-loop arc: the third act this positioning now extends (see the 2026-09-05 status update above).
 - [`design-data-plane-memory.md`](design-data-plane-memory.md) — the second-act substrate build, in correctness-first order.
-- [`roadmap.md`](roadmap.md) — feature roadmap (to be re-ranked behind this positioning).
+- [`roadmap.md`](roadmap.md) — feature roadmap (re-ranked; Phase 5 = the closed-loop arc).
 - [`design-incremental-execution.md`](design-incremental-execution.md) — the shipped content-addressed cache this builds on.
 - [`archive/brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) — the original (pre-pivot) idea backlog.

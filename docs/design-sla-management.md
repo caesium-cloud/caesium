@@ -1,6 +1,6 @@
 # Design: SLA Management & Predictive ETAs
 
-> Status: Proposed. This document covers SLA deadline tracking, predictive completion estimates, and escalation chains.
+> Status: Parked (2026-09-05) — see [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) § Parked; breach detection already shipped (`internal/notification/watcher.go` `scanCompletedBySLA`), freshness SLOs cover the declarative half, and the predictive-ETA engine folds into Plan 4's predictor (optional tail — if Plan 4 is not run, the ETA engine stays parked here). This document covers SLA deadline tracking, predictive completion estimates, and escalation chains.
 
 ## Problem Statement
 

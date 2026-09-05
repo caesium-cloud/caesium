@@ -7,6 +7,9 @@
 > [`design-sla-management.md`](design-sla-management.md) (§2.3),
 > [`design-freshness-scheduling.md`](design-freshness-scheduling.md),
 > [`design-resource-right-sizing.md`](design-resource-right-sizing.md).
+> → **active — Plan 4 of the closed-loop arc (optional tail)** (see
+> [`exec-plans/active/window-scheduling.md`](exec-plans/active/window-scheduling.md);
+> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 

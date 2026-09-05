@@ -1,6 +1,6 @@
 # Design: Pipeline Backtesting — Regression-Test a Change Against Recorded Production History
 
-> Status: Brainstorm/Design — proposal for a pre-merge verb that replays a candidate change over the last N production runs' recorded inputs and reports output deltas per run. Composes shipped primitives (quarantined replay, execution descriptors, receipts, causal run diff); requires one significant piece of new machinery (controlled descriptor overrides) with its own safety analysis.
+> Status: Brainstorm/Design — proposal for a pre-merge verb that replays a candidate change over the last N production runs' recorded inputs and reports output deltas per run. Composes shipped primitives (quarantined replay, execution descriptors, receipts, causal run diff); requires one significant piece of new machinery (controlled descriptor overrides) with its own safety analysis. → **active — Plan 3 of the closed-loop arc** (see [`exec-plans/active/backtesting.md`](exec-plans/active/backtesting.md); umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 

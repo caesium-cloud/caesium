@@ -6,6 +6,9 @@
 > half of the contract story), [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
 > (shared declared-dataset registry), [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
 > (holds become an incident class and a gated action).
+> → **active — Plan 1 of the closed-loop arc** (see
+> [`exec-plans/active/data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md);
+> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 

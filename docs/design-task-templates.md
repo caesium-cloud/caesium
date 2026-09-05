@@ -1,6 +1,6 @@
 # Design: Composable Task Templates
 
-> Status: Proposed. This document covers reusable step templates with parameterized configuration.
+> Status: Parked (2026-09-05) — see [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) § Parked; DX breadth outside the arc's thesis and the strategy doc's "do not build connector/plugin breadth" line — door left open. This document covers reusable step templates with parameterized configuration.
 
 ## Problem Statement
 
