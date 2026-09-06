@@ -385,10 +385,9 @@ trigger, columns, and `ParkWindowRun`).
       The dependency on Plan 2 A1 is **soft**: absent
       those columns the predictor is complete over timestamps alone; present,
       it filters better. **This predictor is also the designated home for the
-      predictive at-risk ETA from the parked
-      [`design-sla-management.md`](../../design-sla-management.md)** (arc §
-      Parked designs: "the predictive-ETA engine folds into Plan 4's
-      predictor"): expose `ETA(runID)` = `StartedAt + P95(jobID)` alongside
+      predictive at-risk ETA from the removed SLA-management design** (deleted
+      2026-09-06 — `git show 2459109:docs/design-sla-management.md`; arc §
+      Parked: "the predictive-ETA engine folds into Plan 4's predictor"): expose `ETA(runID)` = `StartedAt + P95(jobID)` alongside
       `P95` so B2's `window_deadline_at_risk` and any later at-risk alerting
       share one quantile engine. Do **not** import that design's EWMA model,
       escalation chains, `internal/sla/` package, `caesium sla` verbs, or
@@ -1032,8 +1031,8 @@ The plan is done when **all** of these hold:
   site and Plan 4 B1 imports it" and asks that this plan's text be corrected
   at its next re-cut — done here. B1 passes p95 where right-sizing passes p99.
   Soft dependency — see Sequencing for the not-yet-shipped fallback.
-- [`docs/design-sla-management.md`](../../design-sla-management.md) —
-  **parked design** (arc § Parked designs: breach detection already shipped in
+- the removed `docs/design-sla-management.md` (`git show 2459109:docs/design-sla-management.md`) —
+  **superseded design** (arc § Parked designs: breach detection already shipped in
   `internal/notification/watcher.go`, freshness SLOs cover the declarative
   half). Its predictive-ETA engine folds into this plan's B1 predictor
   (`ETA(runID)`); its EWMA model, escalation chains, `internal/sla/` package,

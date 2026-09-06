@@ -30,7 +30,7 @@ These are real, actionable limitations of already-shipped workstreams — track 
 
 - **WS6 branching is local-mode only.** Under `CAESIUM_EXECUTION_MODE=distributed`, the worker completes a branch task via `CompleteTaskClaimed` without evaluating branch selections, so every successor unblocks. Distributed branching needs the orchestrator to parse branch selections from task logs after completion and apply skips before successors become claimable. (Same crash-window class as trigger-rule evaluation: a run resumed after a crash between `CompleteTask` and the skip writes can run branches that should have been skipped — a transactional successor-resolution or WAL-based recovery fixes both.)
 - **WS8 task outputs** still lack a dedicated read API (`GET /v1/jobs/{id}/runs/{run_id}/tasks/{task_id}/outputs`) and a mount-based path for larger payloads.
-- **WS11 SLA tracking is partial:** breach detection ships (`internal/notification/watcher.go` scans running and completed-by SLAs and emits `SLAMissed`), but predictive at-risk alerting and escalation chains are designed separately in [design-sla-management.md](design-sla-management.md) and not yet built.
+- **WS11 SLA tracking is partial:** breach detection ships (`internal/notification/watcher.go` scans running and completed-by SLAs and emits `SLAMissed`), but predictive at-risk alerting and escalation chains were designed separately (that design was removed 2026-09-06 as superseded — freshness SLOs cover the declarative half and the predictive ETA folds into window scheduling's predictor, `docs/exec-plans/active/window-scheduling.md` B1) and are not built.
 
 ---
 
@@ -120,7 +120,7 @@ Files: `internal/models/pool.go` (new), `internal/models/models.go`, `internal/p
 
 ## Workstream 11: SLA Tracking (P2) — partially shipped
 
-Breach detection shipped (see [Known gaps](#known-gaps-in-shipped-features)): `internal/notification/watcher.go` scans running runs and `completedBy` deadlines and emits `SLAMissed` without killing the task; `SLAConfig` exists in `pkg/jobdef`. The remaining work — predictive **at-risk** alerting (EWMA over historical durations) and stage-based escalation chains — is owned by its dedicated design: **[design-sla-management.md](design-sla-management.md)**. Do not duplicate that design here.
+Breach detection shipped (see [Known gaps](#known-gaps-in-shipped-features)): `internal/notification/watcher.go` scans running runs and `completedBy` deadlines and emits `SLAMissed` without killing the task; `SLAConfig` exists in `pkg/jobdef`. The remaining work — predictive **at-risk** alerting (EWMA over historical durations) and stage-based escalation chains — is now scoped by `exec-plans/active/window-scheduling.md` B1 (predictive ETA; the standalone SLA design was removed 2026-09-06 as superseded — freshness SLOs cover the declarative half). Do not duplicate that scope here.
 
 ## Workstream 13: Priority Weights (P2)
 
@@ -153,4 +153,4 @@ Workstream 2 (Trigger Rules, shipped) ← Workstream 7 (Dynamic Mapping) uses ru
 Workstream 9 (Task Pools)             ← Workstream 13 (Priority) uses pools for ordering
 ```
 
-Recommended order for the remaining work: WS5 (Sensors) and WS9 (Task Pools) first (highest operator value, P1), then WS7/WS13/WS14 (P2). WS11 and WS13 are tracked primarily in [design-sla-management.md](design-sla-management.md) and [design-concurrency-priority.md](design-concurrency-priority.md) respectively.
+Recommended order for the remaining work: WS5 (Sensors) and WS9 (Task Pools) first (highest operator value, P1), then WS7/WS13/WS14 (P2). WS11's remaining half (predictive ETA) now lives in `exec-plans/active/window-scheduling.md` B1 (its standalone design was removed 2026-09-06) and WS13 is tracked in [design-concurrency-priority.md](design-concurrency-priority.md) respectively.

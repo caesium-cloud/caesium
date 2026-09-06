@@ -332,14 +332,16 @@ Explicit decisions so they don't rot as prose inside archived plans:
   release-drain (circuit-breaker Phase 3 leftover); per-partition freshness
   watermarks; selective per-task re-run for quarantined replay; a run-level
   `caesium why` verb (today's is task-scoped).
-- **Parked designs (banner flipped, file left in place — the
-  `TestPlanningAndHistoricalDocsCarryStatusBanner` guardrail pins their paths):**
-  `docs/design-sla-management.md` — breach detection already shipped
+- **Removed designs (deleted 2026-09-06; recover from git history with
+  `git show 2459109:docs/<file>`; their entries dropped from the
+  `TestPlanningAndHistoricalDocsCarryStatusBanner` list):**
+  `design-sla-management.md` — superseded: breach detection already shipped
   (`internal/notification/watcher.go`), freshness SLOs cover the declarative
-  half, and the predictive-ETA engine folds into Plan 4's predictor.
-  `docs/design-task-templates.md` — DX breadth, outside the arc's thesis and
-  the strategy doc's "do not build connector/plugin breadth" line; door left
-  open.
+  half, and the predictive-ETA engine folds into Plan 4's predictor (optional
+  tail — if Plan 4 never runs, roadmap §2.3 keeps the intent).
+  `design-task-templates.md` — DX breadth, outside the arc's thesis and the
+  strategy doc's "do not build connector/plugin breadth" line; roadmap §2.2
+  keeps the intent.
 - **To be filed as issues by Plan 0 N-3:** the ~20 deferred items recon found
   unfiled across completed plans — event-trigger UI follow-on, node-affinity
   for RWO volumes in distributed mode, local-executor quarantined replay,

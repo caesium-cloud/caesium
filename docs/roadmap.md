@@ -101,7 +101,7 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 **Target state**: Steps can reference reusable templates with parameterized configuration. Templates can be local files, git references, or entries in a shared registry. This reduces boilerplate, enforces consistency, and creates an ecosystem of community-contributed templates.
 
-**Design doc**: [`design-task-templates.md`](design-task-templates.md)
+**Design doc**: removed 2026-09-06 (superseded; recover with `git show 2459109:docs/design-task-templates.md`)
 
 ### 2.3 SLA Management & Predictive ETAs
 
@@ -111,7 +111,7 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 **Target state**: Jobs declare SLA deadlines ("must complete by 06:00 UTC"). Caesium uses historical run durations to predict completion times and escalate proactively — alerting when a pipeline is at risk of missing its SLA, not just when it has already missed. Escalation chains support Slack, PagerDuty, and webhook notifications.
 
-**Design doc**: [`design-sla-management.md`](design-sla-management.md)
+**Design doc**: removed 2026-09-06 (superseded; recover with `git show 2459109:docs/design-sla-management.md`)
 
 ### 2.4 UI Refresh (Caesium Console v2) ✅ Shipped 2026-04-28
 
@@ -330,6 +330,4 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system
 - [Design: Event-Driven Triggers](design-event-triggers.md) — P0 trigger overhaul
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
-- [Design: Task Templates](design-task-templates.md) — P2 reusable steps (parked 2026-09-05)
-- [Design: SLA Management](design-sla-management.md) — P2 deadline tracking (parked 2026-09-05)
 - [Design: Agent-in-the-Loop ETL Remediation](design-agent-in-the-loop.md) — P3 autonomous failure triage & remediation

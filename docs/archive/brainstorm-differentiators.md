@@ -15,9 +15,9 @@ The following ideas now have dedicated design docs and appear on the [roadmap](r
 | Live DAG Debugging / Run Diff (§1) | [roadmap §3.4](roadmap.md) | Phase 3 |
 | Cost Tracking & Resource Awareness (§3) | [roadmap §2.4](roadmap.md) | Phase 2 |
 | Self-Serve Triggers (§5) | [roadmap §3.3](roadmap.md) | Phase 3 |
-| Intelligent Scheduling & SLA Management (§6) | [design-sla-management.md](design-sla-management.md) | Phase 2 |
+| Intelligent Scheduling & SLA Management (§6) | design-sla-management.md (removed 2026-09-06) | Phase 2 |
 | GitOps PR Previews (§7) | [roadmap §2.1](roadmap.md) | Phase 2 |
-| Composable Task Templates (§8) | [design-task-templates.md](design-task-templates.md) | Phase 2 |
+| Composable Task Templates (§8) | design-task-templates.md (removed 2026-09-06) | Phase 2 |
 | Multi-Tenancy (§9) | [roadmap §3.1](roadmap.md) | Phase 3 |
 
 Additional features not in this original brainstorm but now on the roadmap:
