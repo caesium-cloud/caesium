@@ -814,6 +814,11 @@ binary to download (Ledger L14).
       (`CAESIUM_AGENT_INTEGRATION_MIN_PASS`, default `3`) so H-2 can reuse the
       shape per lane; verified failing at `99` and passing at `3`.
 - [ ] H-2. Give every lane an explicit time budget and the hollow-lane guard.
+      *W1 orchestrator fix-forward: the time-budget half landed early (every
+      integration `go test` line now passes `-timeout 30m` — default, agent,
+      podman recipes and CI's kind/podman jobs) because the default lane had
+      reached 520 s against Go's 600 s default and W1 adds scenarios. The
+      per-lane `--- PASS` floor half is still open.*
       The default recipe `integration-test` passes no `-timeout` (Go's 10m
       default; L12 shows the suite now takes longer), `integration-test-podman`
       and the helm job pass `10m`/`15m`. Set `-timeout 30m` on

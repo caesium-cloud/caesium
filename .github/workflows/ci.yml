@@ -579,7 +579,7 @@ jobs:
             --network=host \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
-            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 15m'
+            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'
       - name: Stop port-forward
         if: always()
         run: kill $(cat /tmp/port-forward.pid) 2>/dev/null || true
@@ -655,7 +655,7 @@ jobs:
             --network=container:caesium-server-podman \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
-            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'
+            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'
       - name: Dump Caesium logs on failure
         if: failure()
         run: docker logs caesium-server-podman || true
