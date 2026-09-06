@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -83,11 +84,14 @@ Reprocess policies:
 			return fmt.Errorf("backfill create failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
-		// The created record is this command's machine-readable output, so it
-		// goes to stdout. cobra's Printf writes to OutOrStderr, which meant
-		// `caesium backfill create ... | jq .id` read an empty stream.
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Backfill started:\n%s\n", string(respBody))
-		return nil
+		// stdout is the created record and NOTHING else, so
+		// `caesium backfill create … | jq .id` works. The human framing goes to
+		// stderr — same split as `caesium receipt get` (cmd/receipt/get.go),
+		// where stdout stays the receipt bytes and every note is on stderr.
+		// (Before this it was cobra's Printf, which writes to OutOrStderr, so
+		// the record reached neither stream usefully.)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Backfill started:")
+		return cliutil.WritePrettyJSON(cmd, respBody, "backfill create response")
 	},
 }
 

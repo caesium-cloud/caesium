@@ -1,13 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -63,17 +63,9 @@ var auditCmd = &cobra.Command{
 			return fmt.Errorf("audit query failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// The audit log is the machine-readable half of this command; cobra's
-		// Print* helpers write to OutOrStderr, so `caesium auth audit | jq`
-		// read nothing.
-		var out interface{}
-		if err := json.Unmarshal(body, &out); err != nil {
-			_, _ = fmt.Fprint(cmd.OutOrStdout(), string(body))
-			return nil
-		}
-		pretty, _ := json.MarshalIndent(out, "", "  ")
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
-		return nil
+		// The audit log is this command's whole output; cobra's Print* helpers
+		// write to OutOrStderr, so `caesium auth audit | jq` read nothing.
+		return cliutil.WritePrettyJSON(cmd, body, "auth audit response")
 	},
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -45,9 +46,12 @@ var cancelCmd = &cobra.Command{
 			return fmt.Errorf("backfill cancel failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// stdout, not cobra's Printf (which writes to OutOrStderr).
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Backfill %s cancelled\n", cancelBackfillID)
-		return nil
+		// The endpoint answers with the updated backfill record
+		// (api/rest/controller/backfill/backfill.go Cancel), so stdout carries
+		// that record and nothing else — same contract as create and list. The
+		// human confirmation goes to stderr.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Backfill %s cancelled\n", cancelBackfillID)
+		return cliutil.WritePrettyJSON(cmd, body, "backfill cancel response")
 	},
 }
 

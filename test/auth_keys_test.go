@@ -68,32 +68,27 @@ func (s *IntegrationTestSuite) createAPIKeyCLI(extraArgs ...string) createdAPIKe
 	return s.parseCreatedKey(stdout)
 }
 
-// parseCreatedKey extracts the plaintext key and the metadata block from the
-// output shared by `auth key create` and `auth key rotate`.
+// parseCreatedKey decodes the record `auth key create` and `auth key rotate`
+// write to stdout.
+//
+// It unmarshals the WHOLE stream with no stripping, on purpose: stdout must be
+// exactly one JSON object. An earlier version scanned for a `csk_` token and
+// sliced from the first `{`, which would have kept passing if the commands
+// went back to interleaving prose into stdout — the reviewer's point on #391.
 func (s *IntegrationTestSuite) parseCreatedKey(stdout string) createdAPIKey {
 	s.T().Helper()
 
-	var plaintext string
-	for _, field := range strings.Fields(stdout) {
-		if strings.HasPrefix(field, "csk_") {
-			plaintext = field
-			break
-		}
+	var resp struct {
+		Key    string         `json:"key"`
+		APIKey apiKeyMetadata `json:"api_key"`
 	}
-	s.Require().NotEmpty(plaintext, "auth key output must carry the plaintext key:\n%s", stdout)
-
-	marker := strings.Index(stdout, "metadata:")
-	s.Require().GreaterOrEqual(marker, 0, "auth key output must carry a metadata block:\n%s", stdout)
-	brace := strings.Index(stdout[marker:], "{")
-	s.Require().GreaterOrEqual(brace, 0, "auth key metadata block must be JSON:\n%s", stdout)
-
-	var meta apiKeyMetadata
-	s.Require().NoError(
-		json.Unmarshal([]byte(stdout[marker+brace:]), &meta),
-		"auth key metadata block must parse as JSON:\n%s", stdout,
-	)
-	s.Require().NotEmpty(meta.ID, "auth key metadata must carry the key id:\n%s", stdout)
-	return createdAPIKey{Plaintext: plaintext, Meta: meta}
+	s.Require().NoError(json.Unmarshal([]byte(stdout), &resp),
+		"auth key stdout must be exactly one JSON object, with no human framing:\n%s", stdout)
+	s.Require().NotEmpty(resp.Key, "the response must carry the plaintext key:\n%s", stdout)
+	s.Require().True(strings.HasPrefix(resp.Key, "csk_"),
+		"the plaintext key must be a caesium key, got %q", resp.Key)
+	s.Require().NotEmpty(resp.APIKey.ID, "the response must carry the key id:\n%s", stdout)
+	return createdAPIKey{Plaintext: resp.Key, Meta: resp.APIKey}
 }
 
 // requestWithKey issues a request authenticated with an explicit bearer token,
@@ -156,8 +151,8 @@ func (s *IntegrationTestSuite) TestAuthKeyLifecycleCLI() {
 		"the --api-key warning must not contaminate machine-readable stdout")
 
 	var listed []apiKeyMetadata
-	s.Require().NoError(json.Unmarshal([]byte(strings.TrimSpace(listOut)), &listed),
-		"auth key list stdout must be valid JSON:\n%s", listOut)
+	s.Require().NoError(json.Unmarshal([]byte(listOut), &listed),
+		"auth key list stdout must be exactly one JSON array, with no human framing:\n%s", listOut)
 	s.True(containsAPIKeyID(listed, created.Meta.ID),
 		"key %s must appear in `auth key list`", created.Meta.ID)
 	s.NotContains(listOut, `"key_hash"`, "the stored key hash must never be serialised")
@@ -190,7 +185,13 @@ func (s *IntegrationTestSuite) TestAuthKeyLifecycleCLI() {
 		"--server", s.caesiumURL,
 	)
 	s.Require().NoError(err, "caesium auth key revoke failed:\n%s", revokeOut)
-	s.Contains(revokeOut, "revoked")
+
+	var revoked struct {
+		Status string `json:"status"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(revokeOut), &revoked),
+		"auth key revoke stdout must be exactly one JSON object:\n%s", revokeOut)
+	s.Equal("revoked", revoked.Status)
 
 	status, body = s.requestWithKey(http.MethodGet, "/v1/jobs", rotated.Plaintext, nil)
 	s.Equal(http.StatusUnauthorized, status,
@@ -223,8 +224,8 @@ func (s *IntegrationTestSuite) TestAuthAuditCLI() {
 	s.Require().NoError(err, "caesium auth audit failed:\nstdout: %s\nstderr: %s", auditOut, auditErr)
 
 	var entries []auditEntry
-	s.Require().NoError(json.Unmarshal([]byte(strings.TrimSpace(auditOut)), &entries),
-		"caesium auth audit stdout must be valid JSON (log contamination?):\n%s", auditOut)
+	s.Require().NoError(json.Unmarshal([]byte(auditOut), &entries),
+		"caesium auth audit stdout must be exactly one JSON array (log or framing contamination?):\n%s", auditOut)
 	s.Require().NotEmpty(entries)
 
 	var found *auditEntry

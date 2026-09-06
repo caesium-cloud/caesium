@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -66,32 +67,20 @@ var keyCreateCmd = &cobra.Command{
 			return fmt.Errorf("key creation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
-		// NOTE: write the key and its metadata via cmd.OutOrStdout(), NOT
-		// cmd.Print/Println — cobra's Print* helpers write to OutOrStderr, so
-		// the ONE-TIME plaintext key was going to stderr. Anyone capturing it
-		// (`caesium auth key create ... > key.txt`, or any script that pipes)
-		// got an empty file and an unrecoverable key.
-		stdout := cmd.OutOrStdout()
-
-		var result map[string]interface{}
-		if err := json.Unmarshal(respBody, &result); err != nil {
-			_, _ = fmt.Fprint(stdout, string(respBody))
-			return nil
-		}
-
-		if key, ok := result["key"].(string); ok {
-			_, _ = fmt.Fprintln(stdout, "API Key (save this — it will not be shown again):")
-			_, _ = fmt.Fprintln(stdout, key)
-			_, _ = fmt.Fprintln(stdout)
-		}
-
-		if apiKey, ok := result["api_key"].(map[string]interface{}); ok {
-			pretty, _ := json.MarshalIndent(apiKey, "", "  ")
-			_, _ = fmt.Fprintln(stdout, "Key metadata:")
-			_, _ = fmt.Fprintln(stdout, string(pretty))
-		}
-
-		return nil
+		// stdout is the created-key record and NOTHING else — the plaintext is
+		// its `key` field, the metadata its `api_key` field — so
+		// `caesium auth key create … | jq -r .key` works and
+		// `… > key.json` is a usable file. The prose that used to be
+		// interleaved into stdout goes to stderr, the same split
+		// `caesium receipt get` uses (cmd/receipt/get.go).
+		//
+		// Two bugs lived here: cobra's Print* helpers write to OutOrStderr, so
+		// the ONE-TIME plaintext key went to stderr and `> key.txt` produced an
+		// empty file; and the labels made stdout unparseable even once that was
+		// corrected.
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
+			"API Key issued — the plaintext is the `key` field on stdout and will not be shown again.")
+		return cliutil.WritePrettyJSON(cmd, respBody, "auth key create response")
 	},
 }
 

@@ -1,12 +1,12 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -41,17 +41,10 @@ var keyListCmd = &cobra.Command{
 			return fmt.Errorf("key list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// Machine-readable listing → stdout. cobra's Print* helpers write to
-		// OutOrStderr, which made `caesium auth key list | jq` read an empty
-		// stream.
-		var out interface{}
-		if err := json.Unmarshal(body, &out); err != nil {
-			_, _ = fmt.Fprint(cmd.OutOrStdout(), string(body))
-			return nil
-		}
-		pretty, _ := json.MarshalIndent(out, "", "  ")
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
-		return nil
+		// Machine-readable listing → stdout, nothing else on it. cobra's Print*
+		// helpers write to OutOrStderr, which made `caesium auth key list | jq`
+		// read an empty stream.
+		return cliutil.WritePrettyJSON(cmd, body, "auth key list response")
 	},
 }
 

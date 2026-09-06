@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -534,7 +533,11 @@ func (s *IntegrationTestSuite) TestBackfillCLILifecycle() {
 		"--server", s.caesiumURL,
 	)
 	s.Require().NoError(err, "caesium backfill create failed:\nstdout: %s\nstderr: %s", createOut, createErr)
-	s.Contains(createOut, "Backfill started:")
+	// The human framing belongs on stderr; stdout is the record and nothing
+	// else, so `caesium backfill create … | jq .id` is valid JSON.
+	s.Contains(createErr, "Backfill started:")
+	s.NotContains(createOut, "Backfill started:",
+		"stdout must be parseable JSON, not prose plus JSON:\n%s", createOut)
 
 	created := s.parseBackfillFromCLI(createOut)
 	s.Require().NotEmpty(created.ID)
@@ -572,8 +575,8 @@ func (s *IntegrationTestSuite) TestBackfillCLILifecycle() {
 	s.Require().NoError(err, "caesium backfill list failed:\nstdout: %s\nstderr: %s", listOut, listErr)
 
 	var listed []backfillResponse
-	s.Require().NoError(json.Unmarshal([]byte(strings.TrimSpace(listOut)), &listed),
-		"caesium backfill list stdout must be valid JSON:\n%s", listOut)
+	s.Require().NoError(json.Unmarshal([]byte(listOut), &listed),
+		"caesium backfill list stdout must be exactly one JSON array, with no human framing:\n%s", listOut)
 	var found bool
 	for _, entry := range listed {
 		if entry.ID == created.ID {
@@ -590,7 +593,9 @@ func (s *IntegrationTestSuite) TestBackfillCLILifecycle() {
 		"--server", s.caesiumURL,
 	)
 	s.Require().NoError(err, "caesium backfill cancel failed:\nstdout: %s\nstderr: %s", cancelOut, cancelErr)
-	s.Contains(cancelOut, created.ID)
+	s.Contains(cancelErr, "cancelled", "the human confirmation belongs on stderr")
+	cancelled := s.parseBackfillFromCLI(cancelOut)
+	s.Equal(created.ID, cancelled.ID)
 
 	result := s.awaitBackfill(job.ID, created.ID, 90*time.Second)
 	s.Equal("cancelled", result.Status, "the CLI cancel must reach the record, not just print a line")
@@ -599,17 +604,20 @@ func (s *IntegrationTestSuite) TestBackfillCLILifecycle() {
 	s.Equal(2, result.TotalRuns)
 }
 
-// parseBackfillFromCLI extracts the backfill record `caesium backfill create`
-// prints after its "Backfill started:" line.
+// parseBackfillFromCLI decodes the backfill record a `caesium backfill`
+// subcommand writes to stdout.
+//
+// It unmarshals the WHOLE stream with no stripping, on purpose. An earlier
+// version sliced from the first `{`, which hid the fact that `backfill create`
+// prefixed stdout with "Backfill started:" — so the documented
+// `caesium backfill create … | jq .id` got invalid JSON while the test stayed
+// green (review finding on #391). The framing now goes to stderr.
 func (s *IntegrationTestSuite) parseBackfillFromCLI(stdout string) backfillResponse {
 	s.T().Helper()
 
-	brace := strings.Index(stdout, "{")
-	s.Require().GreaterOrEqual(brace, 0, "backfill create must print the created record:\n%s", stdout)
-
 	var b backfillResponse
-	s.Require().NoError(json.Unmarshal([]byte(stdout[brace:]), &b),
-		"backfill create output must be JSON:\n%s", stdout)
+	s.Require().NoError(json.Unmarshal([]byte(stdout), &b),
+		"backfill stdout must be exactly one JSON object, with no human framing:\n%s", stdout)
 	return b
 }
 

@@ -1,12 +1,12 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -45,14 +45,7 @@ var keyRevokeCmd = &cobra.Command{
 		}
 
 		// Machine-readable result → stdout (cobra's Print* goes to stderr).
-		var out interface{}
-		if err := json.Unmarshal(body, &out); err != nil {
-			_, _ = fmt.Fprint(cmd.OutOrStdout(), string(body))
-			return nil
-		}
-		pretty, _ := json.MarshalIndent(out, "", "  ")
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
-		return nil
+		return cliutil.WritePrettyJSON(cmd, body, "auth key revoke response")
 	},
 }
 

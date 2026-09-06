@@ -517,12 +517,22 @@ guard.
       and cobra's `Print`/`Printf`/`Println` write to `OutOrStderr` — so the
       **one-time plaintext API key** went to stderr. `caesium auth key create
       … > key.txt` produced an empty file and an unrecoverable key, and
-      `auth key list` / `auth audit` were unpipeable. Fixed in
-      `cmd/auth/{key_create,key_rotate,key_list,key_revoke,audit}.go` by
-      writing through `cmd.OutOrStdout()`, the convention `cmd/why/why.go`
-      and `cmd/cliutil/json.go` already document. This is the exact failure
+      `auth key list` / `auth audit` were unpipeable. This is the exact failure
       mode `CLAUDE.md` warns about, caught only because the scenarios capture
       stdout separately (`runCLIStdout`/`runCLISeparate`).
+      Review (#391) then caught the **second half** of the same rule: moving the
+      bytes to stdout is not enough if they are prose *plus* JSON —
+      `… | jq -r .key` still fails. So stdout is now **exactly one JSON value
+      and nothing else** for every one of
+      `cmd/auth/{key_create,key_rotate,key_list,key_revoke,audit}.go`, emitted
+      through the shared `cliutil.WritePrettyJSON`, with the "save this, it will
+      not be shown again" line on stderr — the split `cmd/receipt/get.go`
+      already documents ("stdout must stay the receipt bytes and nothing
+      else"). The plaintext is the response's `key` field, so nothing is lost.
+      The test helper was rewritten to unmarshal the whole stream with **no
+      stripping**: the earlier version scanned for a `csk_` token and sliced
+      from the first `{`, which would have stayed green if the prose ever came
+      back.
       `--api-key` is exercised on `auth key list` and its "visible in process
       listings" warning is asserted to land on **stderr** while stdout stays
       parseable JSON (`runCLISeparate`); the other steps use the runner's
@@ -634,8 +644,14 @@ guard.
       `cmd/run/retry_callbacks_test.go`.
       - *`caesium backfill` wrote to the wrong stream too.* `backfill create`,
         `list` and `cancel` all used cobra's `cmd.Print*` (→ `OutOrStderr`), so
-        `backfill create | jq .id` read nothing. Same one-line fix as C2's
-        (`cmd.OutOrStdout()`), and `TestBackfillCLILifecycle` is what holds it.
+        `backfill create | jq .id` read nothing. All three now emit **exactly
+        one JSON value on stdout** via `cliutil.WritePrettyJSON`, with
+        "Backfill started:" / "Backfill … cancelled" on stderr — the first fix
+        only moved the stream and left `create` prefixing its JSON with
+        "Backfill started:", which review on #391 correctly called a P1
+        because the documented `| jq .id` workflow still got invalid JSON.
+        `TestBackfillCLILifecycle` now parses stdout with no stripping and
+        asserts the framing is on stderr and absent from stdout.
         Note for anyone extending that scenario: `total_runs` is **0** on the
         create response — `RunBackfill` enumerates the window on its own
         goroutine and calls `SetTotalRuns` afterwards
