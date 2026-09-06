@@ -6,7 +6,6 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
-	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 )
 
@@ -60,16 +59,11 @@ func collectDescendants(adjacency map[uuid.UUID][]uuid.UUID, start uuid.UUID) []
 // isTolerantRule returns true for trigger rules that explicitly handle
 // failures and should therefore NOT be pre-emptively skipped when an
 // upstream task fails under the "continue" failure policy.
+// It is a thin wrapper over run.IsTolerantTriggerRule so this sweep and the
+// distributed worker's cannot drift — they did, and a distributed run under
+// `continue` skipped the all_done consumer a failed predecessor had released.
 func isTolerantRule(rule string) bool {
-	switch rule {
-	case jobdefschema.TriggerRuleAllDone,
-		jobdefschema.TriggerRuleAllFailed,
-		jobdefschema.TriggerRuleAlways,
-		jobdefschema.TriggerRuleOneSuccess:
-		return true
-	default:
-		return false
-	}
+	return run.IsTolerantTriggerRule(rule)
 }
 
 // skipDescendantsFiltered walks the adjacency graph from start, calling

@@ -996,7 +996,27 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 	runID := snapshot.ID
 	runQuarantined := snapshot.Quarantine
-	ctx = run.WithContext(ctx, runID)
+
+	// THE run-cancel registration, for every path that reaches an engine.
+	//
+	// The kickoff sites register too, but they can only do so for a run id they
+	// already hold — and the trigger paths do not: `caesium` cron
+	// (internal/trigger/cron, both the scheduled fire and the catch-up sweep),
+	// http, event and webhook triggers all call job.New(...).Run(ctx) and let
+	// THIS function resolve the run above. Registering only at the kickoff sites
+	// therefore left every trigger-originated run uncancellable, and silently:
+	// CancelRunContexts returns 0 and the log line is gated on n > 0, so a
+	// cancelled cron run looked identical to a cancelled manual one while its
+	// container kept going.
+	//
+	// Registering here is the fix because this is the single point all eleven
+	// paths converge on, immediately after the run id exists. The kickoff-site
+	// registrations stay: they close the window between creating the run row and
+	// entering Run, and the registry holds a SET per run id, so both entries
+	// cancel the same work.
+	cancelCtx, releaseCancel := RegisterRunCancel(ctx, runID)
+	defer releaseCancel()
+	ctx = run.WithContext(cancelCtx, runID)
 
 	var runErr error
 	completionArmed = true
@@ -1961,6 +1981,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// dispatch runs one attempt of one instance. It owns every terminal write
 		// for that instance.
 		dispatch := func(taskRunID uuid.UUID, m instanceMeta, attempt int) {
+			// A cancelled run must not start another partition attempt, for the
+			// same reason the unfanned loop refuses one: the retry budget exists
+			// for transient faults, and cancellation is not one. Checked here
+			// because this closure is re-entered for attempt N+1 after
+			// RetryTaskInstance, so a cancel that ended attempt N would
+			// otherwise be what launches the next container.
+			if err := ctx.Err(); err != nil {
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
+				return
+			}
+
 			partEnv := map[string]string{
 				envName: m.partition.Key,
 			}
@@ -2709,6 +2740,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			// A cancelled run must not start another attempt. The retry budget
+			// is spent on transient failures, and a cancellation is not one:
+			// without this the cancel that ended attempt N was itself the
+			// trigger for attempt N+1 launching a fresh container on a run the
+			// operator had already stopped. The delay-based select below only
+			// covers retryDelay > 0, which is the default, so this is the check
+			// that holds for a step with no delay configured.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+
 			taskCtx := ctx
 			cancel := func() {}
 			if taskTimeout > 0 {
@@ -3295,7 +3337,15 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				liveCount = taskCount
 			}
 
+			// readyPending counts rows the dispatcher can still pick up right
+			// now: pending with every predecessor resolved. It is the difference
+			// between "nothing more will happen" and "nothing has happened yet".
+			readyPending := 0
+
 			for _, taskState := range snapshot.Tasks {
+				if taskState.Status == run.TaskStatusPending && taskState.OutstandingPredecessors == 0 {
+					readyPending++
+				}
 				switch taskState.Status {
 				case run.TaskStatusFailed:
 					failed++
@@ -3331,6 +3381,32 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			}
 
 			if failed > 0 && running == 0 {
+				// `failed > 0 && running == 0` is a heuristic for "nothing more
+				// will happen", and under the CONTINUE policy it fired too
+				// early: a failed predecessor releases its rule-tolerant
+				// successors in the same transaction that records the failure
+				// (outstanding_predecessors → 0, task_ready), and for the
+				// moment between that commit and the dispatcher's next tick
+				// nothing is running — so this declared the run stalled and
+				// finalized it, after which ClaimNext's `jr.status = running`
+				// predicate refuses the row forever. The local Kahn loop under
+				// the same policy runs those successors, so this was a
+				// distributed-only defect, not a policy difference.
+				//
+				// A row that is pending with no outstanding predecessors is
+				// exactly the thing the dispatcher is about to claim, so it is
+				// not a stall. Deliberately scoped to continueOnFailure: under
+				// `halt` BOTH executors stop dispatching after a failure (the
+				// Kahn loop clears its queue), and waiting here would make the
+				// distributed lane run a tolerant successor the local lane
+				// refuses to — re-creating the mode-dependent divergence the
+				// route-completeness contract exists to prevent. Whether `halt`
+				// should release rule-tolerant successors at all is a product
+				// decision for both executors, filed rather than smuggled in
+				// here.
+				if continueOnFailure && readyPending > 0 {
+					continue
+				}
 				if continueOnFailure {
 					return fmt.Errorf("run %s has %d failed task(s) and %d unresolved pending task(s)", runID, failed, taskCount-terminal)
 				}

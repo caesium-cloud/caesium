@@ -94,75 +94,128 @@ func TestSubscribeRunCancellationsCancelsOnEvent(t *testing.T) {
 // taskCtx.Done() branch → engine.Stop(Force: true) — with a fake engine
 // standing in for Docker, and asserts both halves: the atom was force-stopped,
 // and the cancelled row was NOT resurrected by the task write that follows.
+// The `retries` case is not a variation for completeness — it is its own bug.
+// Cancelling attempt 1 makes the attempt FAIL, and a retry budget turns that
+// failure into attempt 2: the executor re-entered the loop, retryTask flipped
+// the cancelled row back to pending (it had no terminal guard, unlike its
+// fanned twin), StartTask's guard then saw a legitimately pending row, and a
+// second container started on a run the operator had already cancelled. The
+// cancel was what triggered the container it was supposed to prevent.
 func TestRunLocalCancelStopsAtom(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		retries int
+	}{
+		{name: "no retries", retries: 0},
+		{name: "with a retry budget", retries: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := jobdeftestutil.OpenTestDB(t)
+			t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+			store := run.NewStore(db)
+			bus := event.New()
+			store.SetBus(bus)
+
+			subCtx, stopSub := context.WithCancel(context.Background())
+			defer stopSub()
+			SubscribeRunCancellations(subCtx, bus)
+
+			engine := newFakeEngine()
+
+			jobID := uuid.New()
+			taskID := uuid.New()
+			atomID := uuid.New()
+
+			taskSvc := &fakeTaskService{tasks: models.Tasks{
+				{ID: taskID, JobID: jobID, AtomID: atomID, Retries: tc.retries},
+			}}
+			persistGraph(t, db, taskSvc.tasks, nil)
+			atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+				atomID: fakeModelAtom(atomID),
+			}}
+
+			// The `sleep 120` of the integration scenario: long enough that the
+			// cancel provably lands mid-flight.
+			engine.runDurationByName[taskID.String()] = 10 * time.Second
+
+			require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-stops-atom"}).Error)
+			runRecord, err := store.Start(jobID, nil)
+			require.NoError(t, err)
+
+			opts := withTestDeps(store, env.Environment{
+				MaxParallelTasks:  1,
+				TaskFailurePolicy: taskFailurePolicyHalt,
+				ExecutionMode:     executionModeLocal,
+			}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+			runCtx, release := RegisterRunCancel(context.Background(), runRecord.ID)
+			defer release()
+
+			done := make(chan error, 1)
+			go func() {
+				done <- New(&models.Job{ID: jobID}, opts...).Run(run.WithContext(runCtx, runRecord.ID))
+			}()
+
+			// Wait for the container to exist before cancelling: cancelling
+			// before the atom is created would prove nothing about reaching it.
+			require.Eventually(t, func() bool {
+				return len(engine.createRequestsForTask(taskID)) > 0
+			}, 10*time.Second, 10*time.Millisecond, "the executor never created the atom")
+
+			require.NoError(t, store.CancelRun(context.Background(), runRecord.ID))
+
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the cancelled run never returned")
+			}
+
+			require.True(t, engine.wasForceStopped(taskID.String()),
+				"a cancelled run must force-stop its in-flight container, not abandon it")
+
+			require.Len(t, engine.createRequestsForTask(taskID), 1,
+				"a cancelled run must not spend its retry budget: the cancel ends the task, it does not start the next attempt")
+
+			var row models.TaskRun
+			require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskID).First(&row).Error)
+			require.Equal(t, string(run.TaskStatusCancelled), row.Status,
+				"the cancelled row must stay cancelled — no later write may resurrect it")
+		})
+	}
+}
+
+// TestRetryTaskRefusesTerminalRow pins the store half directly: the in-run
+// retry is the one write that could resurrect a terminal row, and it must
+// refuse with the same sentinel its fanned twin uses.
+func TestRetryTaskRefusesTerminalRow(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 
 	store := run.NewStore(db)
-	bus := event.New()
-	store.SetBus(bus)
-
-	subCtx, stopSub := context.WithCancel(context.Background())
-	defer stopSub()
-	SubscribeRunCancellations(subCtx, bus)
-
-	engine := newFakeEngine()
 
 	jobID := uuid.New()
 	taskID := uuid.New()
 	atomID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "retry-guard"}).Error)
+	require.NoError(t, db.Create(fakeModelAtom(atomID)).Error)
+	task := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID, Name: "a"}
+	require.NoError(t, db.Create(task).Error)
 
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskID, JobID: jobID, AtomID: atomID},
-	}}
-	persistGraph(t, db, taskSvc.tasks, nil)
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		atomID: fakeModelAtom(atomID),
-	}}
-
-	// The `sleep 120` of the integration scenario: long enough that the cancel
-	// provably lands mid-flight.
-	engine.runDurationByName[taskID.String()] = 10 * time.Second
-
-	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-stops-atom"}).Error)
 	runRecord, err := store.Start(jobID, nil)
 	require.NoError(t, err)
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  1,
-		TaskFailurePolicy: taskFailurePolicyHalt,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
-
-	runCtx, release := RegisterRunCancel(context.Background(), runRecord.ID)
-	defer release()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- New(&models.Job{ID: jobID}, opts...).Run(run.WithContext(runCtx, runRecord.ID))
-	}()
-
-	// Wait for the container to exist before cancelling: cancelling before the
-	// atom is created would prove nothing about reaching it.
-	require.Eventually(t, func() bool {
-		return len(engine.createRequestsForTask(taskID)) > 0
-	}, 10*time.Second, 10*time.Millisecond, "the executor never created the atom")
+	require.NoError(t, store.RegisterTasks(runRecord.ID, []run.RegisterTaskInput{
+		{Task: task, Atom: fakeModelAtom(atomID), OutstandingPredecessors: 0},
+	}))
 
 	require.NoError(t, store.CancelRun(context.Background(), runRecord.ID))
 
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the cancelled run never returned")
-	}
-
-	require.True(t, engine.wasForceStopped(taskID.String()),
-		"a cancelled run must force-stop its in-flight container, not abandon it")
+	require.ErrorIs(t, store.RetryTask(runRecord.ID, taskID, 2), run.ErrTaskInstanceNotRetryable,
+		"retrying a cancelled row must be refused, not silently flip it back to pending")
 
 	var row models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskID).First(&row).Error)
-	require.Equal(t, string(run.TaskStatusCancelled), row.Status,
-		"the cancelled row must stay cancelled — the post-cancel task write is a no-op against a terminal row")
+	require.Equal(t, string(run.TaskStatusCancelled), row.Status)
 }
 
 // TestRunLocalWaitErrorStopsAtom pins the OTHER door of the executor's select,

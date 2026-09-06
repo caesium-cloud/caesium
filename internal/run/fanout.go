@@ -745,6 +745,44 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 			return err
 		}
 		if shouldRun {
+			// A fanned step that was never EXPANDED must not be announced
+			// ready. Expansion happens inside the producer's completion
+			// transaction, before this advancement runs, so a successor still
+			// sitting as an unexpanded template at this point has no partition
+			// list and never will — its producer did not succeed.
+			//
+			// Without this, releasing a failed plain task's successors handed
+			// the dispatcher a template row: `partition_count = 0`,
+			// `partition_value = ''`, indistinguishable in SQL from an ordinary
+			// unfanned task, so PendingTasksForDispatch, ClaimTaskForDispatch
+			// and the local dispatch would all have run the fanned step ONCE,
+			// unpartitioned, with no CAESIUM_PARTITION — a step executing a
+			// shape its author never declared. (Excluding templates in those
+			// three predicates is the wrong lever: none of them can tell a
+			// template from a plain task without joining the catalog's
+			// fan_out_config, and the row should never be left pending here in
+			// the first place.)
+			//
+			// Skipping is what design-dynamic-fanout.md already prescribes for
+			// a group that cannot materialize — the same resolution `onEmpty:
+			// skip` uses — and it keeps the group's own status truthful:
+			// `skipped` for a group that never existed, which downstream
+			// trigger rules then read normally.
+			isTemplate, producer, tmplErr := s.unexpandedFanOutTemplateTx(tx, runID, successor.TaskID)
+			if tmplErr != nil {
+				return tmplErr
+			}
+			if isTemplate {
+				reason := fmt.Sprintf("fan-out producer %q did not produce a partition list", producer)
+				skipped, skipErr := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, reason, pendingEvents, counts)
+				if skipErr != nil {
+					return skipErr
+				}
+				if skippedIDs != nil {
+					*skippedIDs = append(*skippedIDs, skipped...)
+				}
+				continue
+			}
 			if err := s.appendTaskReadyEventTx(tx, runID, successor.TaskID, pendingEvents, counts); err != nil {
 				return err
 			}
@@ -760,6 +798,43 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 		}
 	}
 	return nil
+}
+
+// unexpandedFanOutTemplateTx reports whether a task's rows in this run are
+// still the single UNEXPANDED template of a fanned step — the row RegisterTasks
+// created before any partition list existed — and returns the producer name its
+// fanOut declares.
+//
+// The test is the catalog saying "this step fans out" plus the run holding
+// exactly one row with no partition identity. isFanOutInstance answers the
+// opposite question (is this row one materialized instance) and deliberately
+// returns false for a template, which is why it cannot be reused here.
+func (s *Store) unexpandedFanOutTemplateTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, string, error) {
+	var task models.Task
+	if err := tx.Select("id", "fan_out_config").First(&task, "id = ?", taskID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	fo, err := decodeFanOutConfig(task.FanOutConfig)
+	if err != nil || fo == nil {
+		// An unreadable fanOut block is not grounds for skipping a step: fall
+		// back to the ordinary ready path, which is what a non-fanned task gets.
+		return false, "", nil
+	}
+
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&rows).Error; err != nil {
+		return false, "", err
+	}
+	if len(rows) != 1 {
+		return false, "", nil
+	}
+	if isFanOutInstance(&rows[0]) {
+		return false, "", nil
+	}
+	return true, fo.From, nil
 }
 
 // jobAliasForRunTx resolves a run's job alias for metric labelling. Best effort:

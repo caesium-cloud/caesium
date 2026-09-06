@@ -292,3 +292,74 @@ func TestFanOutInstanceFailureStillGatesOnGroupTerminal(t *testing.T) {
 		return nil
 	}))
 }
+
+// TestFailedFanOutProducerSkipsUnexpandedConsumerTemplate is the negative
+// control for the release A1 introduced.
+//
+// Expansion happens inside the PRODUCER's completion transaction, so a fanned
+// consumer whose producer FAILED never gets a partition list. Releasing that
+// consumer the way a plain one is released left its template row pending with
+// outstanding_predecessors = 0 — and a template is indistinguishable in SQL
+// from an ordinary unfanned task (partition_count = 0, partition_value = ''),
+// so PendingTasksForDispatch, ClaimTaskForDispatch and the local dispatch would
+// all have run the fanned step ONCE, unpartitioned, with no CAESIUM_PARTITION.
+//
+// The rule is tolerant here (all_done) precisely so the trigger rule cannot be
+// what saves it: a group that can never materialize must resolve `skipped`,
+// which is what design-dynamic-fanout.md prescribes for the same situation
+// under `onEmpty: skip`.
+func TestFailedFanOutProducerSkipsUnexpandedConsumerTemplate(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	jobID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "failed-producer-template"}).Error)
+
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","hi"]`}
+	require.NoError(t, db.Create(atom).Error)
+
+	produce := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "produce", Position: 0, Type: "task", TriggerRule: jobdefschema.TriggerRuleAllSuccess}
+	fan := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "fan", Position: 1, Type: "task", TriggerRule: jobdefschema.TriggerRuleAllDone}
+	tail := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "tail", Position: 2, Type: "task", TriggerRule: jobdefschema.TriggerRuleAllSuccess}
+
+	encoded, err := json.Marshal(&jobdefschema.FanOut{From: "produce", MaxPartitions: 8})
+	require.NoError(t, err)
+	fan.FanOutConfig = datatypes.JSON(encoded)
+
+	for _, task := range []*models.Task{produce, fan, tail} {
+		require.NoError(t, db.Create(task).Error)
+	}
+	for _, edge := range [][2]uuid.UUID{{produce.ID, fan.ID}, {fan.ID, tail.ID}} {
+		require.NoError(t, db.Create(&models.TaskEdge{ID: uuid.New(), JobID: jobID, FromTaskID: edge[0], ToTaskID: edge[1]}).Error)
+	}
+
+	require.NoError(t, store.RegisterTasks(runRecord.ID, []RegisterTaskInput{
+		{Task: produce, Atom: atom, OutstandingPredecessors: 0},
+		{Task: fan, Atom: atom, OutstandingPredecessors: 1},
+		{Task: tail, Atom: atom, OutstandingPredecessors: 1},
+	}))
+
+	require.NoError(t, store.FailTask(runRecord.ID, produce.ID, errors.New("producer blew up")))
+
+	var fanRows []models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, fan.ID).Find(&fanRows).Error)
+	require.Len(t, fanRows, 1, "a failed producer expands nothing, so the template is still the only row")
+	assert.Equal(t, string(TaskStatusSkipped), fanRows[0].Status,
+		"an unexpandable fan-out template must be skipped, never handed to a dispatcher as an unpartitioned task")
+	assert.Equal(t, `fan-out producer "produce" did not produce a partition list`, fanRows[0].Error)
+
+	// And the skip cascades by the ordinary rules, so nothing downstream is
+	// stranded waiting on a group that will never exist.
+	var tailRow models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, tail.ID).First(&tailRow).Error)
+	assert.Equal(t, string(TaskStatusSkipped), tailRow.Status)
+
+	// The dispatcher must see nothing left to pick up.
+	pending, err := store.PendingTasksForDispatch(context.Background(), runRecord.ID, 16)
+	require.NoError(t, err)
+	assert.Empty(t, pending, "no row of this run may remain dispatchable: %+v", pending)
+}

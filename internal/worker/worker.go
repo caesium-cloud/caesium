@@ -528,6 +528,16 @@ func (w *Worker) cancelLostClaimsNow(ctx context.Context) {
 		if len(ids) == 0 {
 			continue
 		}
+		// An empty claimedBy is not a node whose claims can be checked: the
+		// query would ask "which rows are claimed by nobody", which matches
+		// exactly the rows a cancel has already released — so every task under
+		// it would be reported HELD and never cancelled, or, read the other
+		// way, a genuinely unclaimed in-flight entry would be cancelled for the
+		// wrong reason. Such an entry only exists if a task was tracked before
+		// its claim was stamped; leave it to the next tick.
+		if nodeID == "" {
+			continue
+		}
 		held, err := inspector.ClaimedTaskRunIDs(ctx, nodeID, ids)
 		if err != nil {
 			// Unknown, not lost: a transient read failure must never kill a

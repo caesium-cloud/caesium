@@ -4388,11 +4388,33 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 		delete(updates, "claimed_by")
 		delete(updates, "claim_expires_at")
 
+		// Retryable statuses only — the same predicate and sentinel the fanned
+		// twin carries (store_instance.go RetryTaskInstance).
+		//
+		// This used to be an unguarded `WHERE id = ?`, which made an in-run retry
+		// the one write that could RESURRECT a terminal row. It only became
+		// reachable once a cancelled run started returning an error from the
+		// executor's attempt loop: cancel → the attempt fails → RetryTask flips
+		// cancelled → pending → attempt 2 passes StartTask's own terminal guard
+		// (the row is pending again by then, so the guard sees nothing wrong),
+		// publishes a phantom task_started, launches a second container on a run
+		// the operator already cancelled, and finally lands `failed` — at which
+		// point the failed-task successor advancement runs on a cancelled run.
+		// Every downstream guard was doing its job; this write was undoing them.
 		resultUpdate := tx.Model(&models.TaskRun{}).
-			Where("id = ?", row.ID).
+			Where("id = ? AND status IN ?", row.ID, []string{
+				string(TaskStatusPending),
+				string(TaskStatusRunning),
+				string(TaskStatusFailed),
+			}).
 			Updates(updates)
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
+		}
+		if resultUpdate.RowsAffected == 0 {
+			// Already resolved by a cascade or a cancellation; a retry here
+			// would resurrect a terminal row.
+			return ErrTaskInstanceNotRetryable
 		}
 		counts.addTaskRunStatus(1)
 

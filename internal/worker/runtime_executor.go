@@ -1155,15 +1155,62 @@ func collectDescendantsFromEdges(db *gorm.DB, start uuid.UUID) ([]uuid.UUID, err
 			return nil, err
 		}
 
+		frontier := make([]uuid.UUID, 0, len(edges))
 		for _, edge := range edges {
 			if _, ok := seen[edge.ToTaskID]; ok {
 				continue
 			}
 			seen[edge.ToTaskID] = struct{}{}
-			descendants = append(descendants, edge.ToTaskID)
-			queue = append(queue, edge.ToTaskID)
+			frontier = append(frontier, edge.ToTaskID)
+		}
+		if len(frontier) == 0 {
+			continue
+		}
+
+		// A TOLERANT successor is not a casualty of its predecessor's failure —
+		// its rule is what decides, once every predecessor is terminal. Skipping
+		// it here is a lie the store then has to live with, and it raced the
+		// store's own advancement: a failed predecessor releases an all_done
+		// consumer (outstanding_predecessors → 0, task_ready) and this sweep
+		// then marked it `skipped` before the owner's next dispatch tick could
+		// claim it. The local executor's sweep has always filtered by rule
+		// (internal/job skipDescendantsFiltered); this one did not, which is the
+		// drift run.IsTolerantTriggerRule now prevents.
+		//
+		// Like the local sweep, a tolerant node also stops the walk: what lies
+		// beyond it depends on how it resolves, which is not known yet.
+		rules, err := triggerRulesByTaskID(db, frontier)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range frontier {
+			if run.IsTolerantTriggerRule(rules[id]) {
+				continue
+			}
+			descendants = append(descendants, id)
+			queue = append(queue, id)
 		}
 	}
 
 	return descendants, nil
+}
+
+// triggerRulesByTaskID reads the effective trigger rule for a set of catalog
+// tasks in one query. A task the catalog no longer has resolves to the empty
+// rule, which IsTolerantTriggerRule treats as the all_success default — the
+// safe direction here, since an unknown successor of a failed task is skipped
+// rather than left dangling.
+func triggerRulesByTaskID(db *gorm.DB, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []models.Task
+	if err := db.Select("id", "trigger_rule").Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		out[rows[i].ID] = rows[i].TriggerRule
+	}
+	return out, nil
 }

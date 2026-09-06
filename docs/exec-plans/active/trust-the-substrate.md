@@ -191,6 +191,31 @@ orders this stream first.
       the executor's later cascade is a pending-only no-op). That reason change
       is user-visible and deliberate — it is the string the local, fanned and
       distributed lanes now all emit.
+      **Two corrections from adversarial review.** (i) A1 did not actually
+      deliver in distributed mode under `CAESIUM_TASK_FAILURE_POLICY=continue`:
+      the worker's post-failure sweep (`collectDescendantsFromEdges`) walked
+      every transitive descendant with **no trigger-rule filter**, unlike the
+      local `skipDescendantsFiltered`, so the `all_done` consumer the store had
+      just released was marked `skipped` before the owner's next dispatch tick.
+      The predicate now lives once in `internal/run` as
+      `IsTolerantTriggerRule` — `internal/job` imports `internal/worker`, so
+      that is the only direction a shared helper can point — and both sweeps use
+      it; a tolerant node also stops the walk, as the local one always did.
+      Covered by `internal/worker/descendant_skip_test.go`. (ii) A failed
+      fan-out PRODUCER released its consumer's unexpanded template row
+      (`partition_count = 0`, `partition_value = ''`), which no dispatch
+      predicate can tell from an ordinary unfanned task, so the fanned step
+      would have run once, unpartitioned, with no `CAESIUM_PARTITION`.
+      Expansion only ever happens inside the producer's completion transaction,
+      so such a template can never materialize: `advanceCrossStepSuccessorsTx`
+      now skips it with `fan-out producer %q did not produce a partition list`,
+      the resolution `docs/design-dynamic-fanout.md` already prescribes for a
+      group that cannot exist (`onEmpty: skip`). Pinned by
+      `TestFailedFanOutProducerSkipsUnexpandedConsumerTemplate`, which also
+      asserts `PendingTasksForDispatch` is left empty. Excluding templates in
+      the three dispatch predicates was considered and rejected: none of them
+      can distinguish a template without joining `tasks.fan_out_config`, and the
+      row should never be left pending in the first place.
 - [x] A2. Integration scenarios that fail before A1 and pass after, on the lanes
       where the bug bites. (a) Default (local) lane, new
       `test/trigger_rule_failure_test.go`
@@ -243,9 +268,31 @@ orders this stream first.
       (`ownerInMemoryLane()`), which advances the DAG in memory and
       deliberately does not decrement the SQL scalar (`TestCompleteTaskOwner`:
       "owner path must not decrement successors in SQL"), so the rule-skip
-      assertion is the regression guard there. Whether `halt` *should* strand a
-      tolerant consumer whose rule is satisfied is a product question this
-      stream did not take — worth an N-3 issue.
+      assertion is the regression guard there.
+      **Corrected after review — the earlier claim that "no configuration
+      produces the tolerant consumer executing" was wrong, and two real defects
+      were hiding behind it.** Under `CAESIUM_TASK_FAILURE_POLICY=continue` the
+      LOCAL executor has always run a released `all_done` consumer; the
+      distributed lane did not, for two reasons now fixed under A1: the worker's
+      unfiltered descendant sweep buried the consumer, and
+      `waitForRunCompletion`'s `failed > 0 && running == 0` heuristic finalized
+      the run in the gap between the failure transaction (which releases the
+      successor) and the dispatcher's next tick, after which `ClaimNext`'s
+      `jr.status = running` predicate refuses the row forever. A row that is
+      pending with `outstanding_predecessors = 0` is precisely what the
+      dispatcher is about to claim, so it is no longer treated as a stall.
+      That guard is **deliberately scoped to `continue`**: under `halt` BOTH
+      executors stop dispatching after a failure (the Kahn loop clears its
+      queue), and making only the distributed waiter wait would have it run a
+      tolerant successor the local lane refuses to — re-creating exactly the
+      mode-dependent divergence this plan's route-completeness contract exists
+      to prevent.
+      So the scenarios still cannot assert execution, and the reason is now
+      precise rather than a blanket claim: **no `integration-up*` recipe sets
+      `CAESIUM_TASK_FAILURE_POLICY=continue`**, and adding one is a lane-env
+      change owned by H-2, not by this stream. The remaining product question —
+      should `halt` release rule-tolerant successors at all, in BOTH executors? —
+      is an N-3 issue, not something to smuggle into a scheduler-correctness PR.
 - [x] A3. Make run cancellation reach the local executor's container. Add a
       process-wide run-cancel registry in `internal/job` (new
       `internal/job/cancel_registry.go`: `Register(runID) (ctx, release)`,
@@ -316,6 +363,32 @@ orders this stream first.
       that test fails 100% of the time without the fix (the cancel test itself
       passed 40/40 locally pre-fix, which is exactly why it could not be the
       guard).
+      **Third correction, from adversarial review: the six kickoff sites were
+      the wrong place to register.** `job.Run` resolves the run id itself
+      (`runID := snapshot.ID`), and the cron (scheduled *and* catch-up), http,
+      event and webhook triggers all call `job.New(...).Run(ctx)` without one —
+      so every trigger-originated run was uncancellable, and silently, because
+      `CancelRunContexts` returns 0 and the log line is gated on `n > 0`.
+      Registration now happens inside `job.Run` immediately after the run id
+      exists, the single point all eleven paths converge on; the six kickoff
+      registrations stay as belt-and-braces (they close the window between
+      creating the run row and entering `Run`, and the registry holds a set per
+      run id).
+      **Fourth correction: the cancel was starting the container it existed to
+      prevent.** Cancelling attempt 1 makes the attempt fail, and a `retries`
+      budget turned that into attempt 2 — `retryTask` had no terminal guard
+      (unlike its fanned twin `RetryTaskInstance`), so it flipped the cancelled
+      row back to `pending`, `StartTask`'s guard then saw a legitimately pending
+      row, and a second container started on a cancelled run, ending in a
+      `failed` write that ran A1's advancement on a cancelled run. Fixed on both
+      halves: `retryTask` gained the same status predicate and
+      `ErrTaskInstanceNotRetryable` sentinel, and both executor attempt loops
+      (the unfanned loop and `runFannedGroup`'s `dispatch`) refuse to start an
+      attempt on a dead context — the `retryDelay > 0` select was the only
+      previous check and the default delay is 0. `TestRunLocalCancelStopsAtom`
+      is now table-driven over `retries` 0 and 1 and asserts exactly one
+      container was created; without the fix the retry case creates a second
+      (`…-attempt2`). `TestRetryTaskRefusesTerminalRow` pins the store half.
 - [x] A4. Make run cancellation reach a distributed worker's container. A
       cancelled run strips `claimed_by` from its tasks (`cancelRunTx`), so
       the worker's batched `RenewLeases` (`internal/run/store.go`
@@ -375,6 +448,19 @@ orders this stream first.
       tests rather than only the lane; that one was verified red against the
       pre-fix wiring. `internal/run/store.go` gains the read-only
       `ClaimedTaskRunIDs` (A1 is this stream's only other editor of that file).
+      Detection latency is one tick of the WORKER-claim renewal ticker,
+      `CAESIUM_WORKER_LEASE_TTL/4` — 7.5 s on the distributed lane, 75 s on the
+      5 m default (**not** `CAESIUM_RUN_LEASE_TTL`, which governs a different
+      ticker; the A5 comment said so and is corrected). `cancelLostClaimsNow`
+      also skips an empty `claimedBy` group rather than querying "claimed by
+      nobody", which matches exactly the rows a cancel has already released.
+      **Known gap, for N-3 rather than this PR:** `run_cancelled` is delivered
+      on the non-blocking in-process bus (`internal/event/bus.go` drops on a
+      full subscriber buffer), so a dropped event orphans a LOCAL container
+      permanently — there is no reconciliation loop. The distributed half is
+      already self-healing (the liveness check re-asks the catalog every tick);
+      the local half needs a periodic reconcile of registered runs against run
+      status to match it.
 - [x] A5. Integration scenario: replace-cancel stops the orphaned container.
       Extend `test/run_concurrency_test.go` "replace cancels oldest and starts
       fresh" (or add `TestReplaceCancelStopsOrphanedContainer` in a new
