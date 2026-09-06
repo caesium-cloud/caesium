@@ -13,6 +13,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
@@ -514,4 +515,96 @@ func requireActionByID(s *IntegrationTestSuite, detail approvalDetail, actionID 
 	}
 	s.T().Fatalf("action %s not found on incident timeline (actions: %s)", actionID, strings.Join(types, ", "))
 	return approvalAction{}
+}
+
+// TestIncidentEscalationDeliversNotifiableEvent drives the tier-1 `escalate`
+// action through its real surface and asserts the escalation is DELIVERED, not
+// merely recorded.
+//
+// This is the shape that hid the bug: the action row said `executed` with
+// `"escalated": true` in its result while the server-side operation only wrote a
+// log line, so an assertion on the action's status passed while nobody was ever
+// contacted. The same call is what a git-synced job's approved jobdef patch
+// degrades to, carrying the rendered diff — so "recorded but undelivered" meant
+// an approved change nobody was told about. The assertion is therefore on the
+// persisted incident_escalated event, which is what the notification subscriber
+// routes to a channel.
+func (s *IntegrationTestSuite) TestIncidentEscalationDeliversNotifiableEvent() {
+	s.requireAuthLane()
+
+	alias := fmt.Sprintf("escalate-delivery-%d", time.Now().UnixNano())
+	s.applyDefinition(failingJobDefinition(alias, s.engineType))
+
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	s.Require().Equal("failed", run.Status, "the gate step must fail so an incident opens")
+
+	incident := s.awaitIncidentForJobTask(job.ID, "gate", 60*time.Second)
+	token := s.mintAgentSessionToken(incident.ID, alias)
+
+	summary := fmt.Sprintf("vendor feed unrecoverable for %s; a human owns this", alias)
+	status, body := s.postWithToken(
+		fmt.Sprintf("%s/v1/agent/incidents/%s/actions", s.caesiumURL, incident.ID),
+		token,
+		map[string]any{
+			"type": "escalate",
+			"params": map[string]any{
+				"channel": "oncall",
+				"summary": summary,
+			},
+		})
+	// 200, not the 202 a tier-3 proposal gets: escalate is tier 1, so it has
+	// already run by the time the endpoint answers.
+	s.Require().Equal(http.StatusOK, status, string(body))
+
+	var proposal struct {
+		Action      approvalAction `json:"action"`
+		Disposition string         `json:"disposition"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &proposal))
+	s.Require().Equal("executed", proposal.Action.Status,
+		"escalate is tier 1 and runs autonomously under the default playbook")
+
+	// The delivery assertion. An escalate recorded `executed` whose event never
+	// reached the stream is precisely the failure mode this scenario exists for.
+	s.requireEscalationEvent(incident.ID, summary, 30*time.Second)
+}
+
+// requireEscalationEvent polls the persisted event stream for the
+// incident_escalated event belonging to one incident. It reads /v1/events rather
+// than the action row on purpose: the action row is what looked healthy while
+// nothing was delivered.
+func (s *IntegrationTestSuite) requireEscalationEvent(incidentID, wantSummary string, timeout time.Duration) {
+	s.T().Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, evt := range s.readSSEBacklog("/v1/events", time.Second) {
+			if evt.Type != event.TypeIncidentEscalated {
+				continue
+			}
+			var payload struct {
+				IncidentID string `json:"incident_id"`
+				Channel    string `json:"channel"`
+				Summary    string `json:"summary"`
+				JobAlias   string `json:"job_alias"`
+			}
+			if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.IncidentID != incidentID {
+				continue
+			}
+			s.Require().Equal("oncall", payload.Channel,
+				"the escalation must name the channel the agent asked for")
+			s.Require().Equal(wantSummary, payload.Summary,
+				"the escalation body must reach the recipient, not just the action row")
+			s.Require().NotEmpty(payload.JobAlias,
+				"job_alias must be present so notification policies can filter on it")
+			return
+		}
+	}
+	s.Require().Fail("no incident_escalated event was delivered",
+		"incident %s escalated but nothing reached the event stream", incidentID)
 }

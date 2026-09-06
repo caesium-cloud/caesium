@@ -255,6 +255,9 @@ func (s *IntegrationTestSuite) openSSE(path string) (*replaySSECapture, func()) 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.caesiumURL+path, nil)
 	s.Require().NoError(err)
 	req.Header.Set("Accept", "text/event-stream")
+	// Carry the suite's API key so this helper works on the auth-enabled lanes
+	// too; a no-op on lanes with auth off, where authAPIKey is empty.
+	s.authorize(req)
 	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // closed by the returned cleanup func (defer closeFn)
 	s.Require().NoError(err)
 	s.Require().Equal(http.StatusOK, resp.StatusCode)

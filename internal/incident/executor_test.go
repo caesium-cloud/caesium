@@ -536,3 +536,92 @@ func TestSnoozeRetryRearmGivesUpAtCeiling(t *testing.T) {
 		Count(&gaveUp).Error)
 	require.Equal(t, int64(1), gaveUp)
 }
+
+// --- Playbook.Narrow (review follow-up, PR #390) -----------------------------
+
+// TestPlaybookNarrowNeverWidens pins the one property Narrow exists for: the
+// result may not permit anything either input withholds. It is what lets a job's
+// `metadata.remediation.autonomy` block constrain the AgentProfile playbook it
+// names without either document being able to grant on the other's behalf.
+func TestPlaybookNarrowNeverWidens(t *testing.T) {
+	const (
+		tier1 = ActionTypeRetryFromFailure
+		tier2 = ActionTypePauseJob
+	)
+
+	t.Run("empty yields to the configured side", func(t *testing.T) {
+		configured := Playbook{Allow: map[string]bool{tier1: true}}
+		require.Equal(t, configured.Allow, Playbook{}.Narrow(configured).Allow)
+		require.Equal(t, configured.Allow, configured.Narrow(Playbook{}).Allow)
+	})
+
+	t.Run("two allowlists intersect", func(t *testing.T) {
+		wide := Playbook{Allow: map[string]bool{tier1: true, tier2: true}}
+		narrow := Playbook{Allow: map[string]bool{tier1: true}}
+
+		got := wide.Narrow(narrow)
+		require.True(t, got.Allow[tier1])
+		require.False(t, got.Allow[tier2], "an action only one side allows must not survive")
+		require.Equal(t, decisionExecute, got.decide(tier1, TierAutonomous))
+		require.Equal(t, decisionDeny, got.decide(tier2, TierGated))
+	})
+
+	t.Run("disjoint allowlists deny rather than reopen", func(t *testing.T) {
+		// The trap: an empty Allow map means "unconstrained", so an intersection
+		// that empties out must NOT collapse to the permissive default.
+		got := Playbook{Allow: map[string]bool{tier1: true}}.
+			Narrow(Playbook{Allow: map[string]bool{tier2: true}})
+
+		require.NotEmpty(t, got.Allow, "disjoint policies must stay configured, not become unconstrained")
+		require.Equal(t, decisionDeny, got.decide(tier1, TierAutonomous))
+		require.Equal(t, decisionDeny, got.decide(tier2, TierAutonomous))
+	})
+
+	t.Run("require-approval is a union", func(t *testing.T) {
+		got := Playbook{RequireApproval: map[string]bool{tier1: true}}.
+			Narrow(Playbook{RequireApproval: map[string]bool{tier2: true}})
+
+		require.Equal(t, decisionApprove, got.decide(tier1, TierAutonomous))
+		require.Equal(t, decisionApprove, got.decide(tier2, TierAutonomous))
+	})
+
+	t.Run("param overrides intersect keys and values", func(t *testing.T) {
+		got := Playbook{ParamOverrides: map[string][]string{
+			"region": {"us-east-1", "us-west-2"},
+			"tier":   {"gold"},
+		}}.Narrow(Playbook{ParamOverrides: map[string][]string{
+			"region": {"us-east-1"},
+		}})
+
+		require.Equal(t, []string{"us-east-1"}, got.ParamOverrides["region"])
+		require.NotContains(t, got.ParamOverrides, "tier",
+			"a key only one side whitelists must not survive")
+		require.NoError(t, validateParamOverrides(map[string]string{"region": "us-east-1"}, got.ParamOverrides))
+		require.Error(t, validateParamOverrides(map[string]string{"region": "us-west-2"}, got.ParamOverrides))
+		require.Error(t, validateParamOverrides(map[string]string{"tier": "gold"}, got.ParamOverrides))
+	})
+
+	t.Run("disjoint param values deny rather than admit everything", func(t *testing.T) {
+		// The same trap one level down: an empty VALUE list means "any value".
+		got := Playbook{ParamOverrides: map[string][]string{"region": {"us-east-1"}}}.
+			Narrow(Playbook{ParamOverrides: map[string][]string{"region": {"eu-west-1"}}})
+
+		require.NotEmpty(t, got.ParamOverrides["region"])
+		require.Error(t, validateParamOverrides(map[string]string{"region": "us-east-1"}, got.ParamOverrides))
+		require.Error(t, validateParamOverrides(map[string]string{"region": "eu-west-1"}, got.ParamOverrides))
+	})
+}
+
+// TestDenyAllPlaybookPermitsNothing: the fail-closed policy used when a job's
+// DECLARED remediation policy cannot be resolved. It must be distinguishable
+// from the zero Playbook, which still lets tier 0/1 run autonomously.
+func TestDenyAllPlaybookPermitsNothing(t *testing.T) {
+	deny := DenyAllPlaybook()
+	require.Equal(t, decisionDeny, deny.decide(ActionTypeRetryFromFailure, TierAutonomous))
+	require.Equal(t, decisionDeny, deny.decide(ActionTypePauseJob, TierGated))
+	require.Equal(t, decisionApprove, deny.decide(ActionTypeSkipTask, TierApproval),
+		"tier 3 still terminates at a human rather than being denied outright")
+
+	require.Equal(t, decisionExecute, Playbook{}.decide(ActionTypeRetryFromFailure, TierAutonomous),
+		"the zero Playbook means unconfigured, not denied")
+}

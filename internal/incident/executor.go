@@ -96,16 +96,8 @@ type Playbook struct {
 
 // playbookDocument mirrors the JSON shape stored on AgentProfile.Playbook (see
 // agentprofile.SeedDefaults) and the `metadata.remediation` block in
-// pkg/jobdef.RemediationAutonomy, so one decoder serves both once the job-level
-// block is persisted.
-//
-// HONEST SCOPE: today only the profile-level document is reachable — the
-// `metadata.remediation` block is validated by the jobdef schema but never
-// persisted onto models.Job, so a job-level narrowing cannot yet be enforced.
-// That is safe in the direction that matters: an unresolvable playbook decodes
-// to the zero Playbook, under which tier 3 ALWAYS routes to approval and tier 2
-// requires an explicit allow. Widening, not narrowing, is what needs the missing
-// data.
+// pkg/jobdef.RemediationAutonomy, so one decoder serves both: the profile-level
+// document and the job-level block now persisted on models.Job.Remediation.
 type playbookDocument struct {
 	Autonomy struct {
 		Allow           []string            `json:"allow"`
@@ -140,6 +132,119 @@ func DecodePlaybook(raw []byte) Playbook {
 		}
 	}
 	return pb
+}
+
+// Narrow combines two playbooks so the RESULT IS NEVER WIDER THAN EITHER — the
+// only safe direction when a job-level policy meets its profile's. It is how a
+// job's `metadata.remediation.autonomy` block constrains the AgentProfile
+// playbook it names: neither document can grant what the other withholds.
+//
+// Per field, following the enforcement semantics in decide/allowsAutonomous:
+//   - Allow: an EMPTY set means "unconstrained" (tier 0/1 default autonomous),
+//     so narrowing empty with a list yields the list, and two lists intersect.
+//   - RequireApproval: a union — either side may force the approval gate.
+//   - ParamOverrides: a missing key is denied, so keys intersect; per key an
+//     empty value list means "any value", so it yields to the other side's list
+//     and two lists intersect.
+func (pb Playbook) Narrow(other Playbook) Playbook {
+	out := Playbook{}
+
+	switch {
+	case len(pb.Allow) == 0:
+		out.Allow = other.Allow
+	case len(other.Allow) == 0:
+		out.Allow = pb.Allow
+	default:
+		out.Allow = make(map[string]bool)
+		for action := range pb.Allow {
+			if pb.Allow[action] && other.Allow[action] {
+				out.Allow[action] = true
+			}
+		}
+		// An intersection that empties out must NOT read as "unconstrained": two
+		// disjoint allowlists agree on nothing, so keep a sentinel that allows no
+		// action rather than collapsing to the permissive empty set.
+		if len(out.Allow) == 0 {
+			out.Allow = map[string]bool{allowNothingSentinel: false}
+		}
+	}
+
+	if len(pb.RequireApproval) > 0 || len(other.RequireApproval) > 0 {
+		out.RequireApproval = make(map[string]bool, len(pb.RequireApproval)+len(other.RequireApproval))
+		for action, required := range pb.RequireApproval {
+			if required {
+				out.RequireApproval[action] = true
+			}
+		}
+		for action, required := range other.RequireApproval {
+			if required {
+				out.RequireApproval[action] = true
+			}
+		}
+	}
+
+	switch {
+	case len(pb.ParamOverrides) == 0:
+		out.ParamOverrides = other.ParamOverrides
+	case len(other.ParamOverrides) == 0:
+		out.ParamOverrides = pb.ParamOverrides
+	default:
+		out.ParamOverrides = make(map[string][]string)
+		for key, mine := range pb.ParamOverrides {
+			theirs, ok := other.ParamOverrides[key]
+			if !ok {
+				continue
+			}
+			out.ParamOverrides[key] = intersectValues(mine, theirs)
+		}
+	}
+
+	return out
+}
+
+// allowNothingSentinel is an action type no catalog entry can ever use, so an
+// Allow map containing only it is non-empty (hence "configured") while matching
+// nothing. It makes "these two policies allow nothing in common" expressible in
+// a map whose emptiness already means the opposite.
+const allowNothingSentinel = "\x00none"
+
+// DenyAllPlaybook is the fail-closed policy: no action type is autonomously
+// permitted at any tier, so every proposal is either denied or routed to a
+// human. It is what a caller uses when a job's DECLARED policy cannot be
+// resolved — substituting any other policy there would enforce something the
+// job did not ask for, in the widening direction.
+//
+// It is deliberately distinct from the zero Playbook, which means "unconfigured"
+// and still lets tier 0/1 run autonomously.
+func DenyAllPlaybook() Playbook {
+	return Playbook{Allow: map[string]bool{allowNothingSentinel: false}}
+}
+
+// intersectValues intersects two rerun_with_params value whitelists, treating an
+// empty list as "any value" (so it yields to the other side).
+func intersectValues(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		seen[v] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	for _, v := range a {
+		if _, ok := seen[v]; ok {
+			out = append(out, v)
+		}
+	}
+	// An empty intersection must deny every value, not admit every value, so
+	// return a list that matches nothing rather than the "any value" empty list.
+	if len(out) == 0 {
+		return []string{allowNothingSentinel}
+	}
+	return out
 }
 
 // decision is the executor's routing verdict for one action.

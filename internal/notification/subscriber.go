@@ -26,6 +26,10 @@ var notifiableTypes = []event.Type{
 	// bypassed. Routing it through the ordinary policy/channel machinery means a
 	// team can page or Slack on it without new plumbing (trust-the-substrate C8).
 	event.TypeAgentActionExecuted,
+	// An escalation is a remediation handing the incident to a human. It is the
+	// one incident event whose whole purpose is to reach a person, so it must be
+	// routable to a channel — recording it and logging it contacts nobody.
+	event.TypeIncidentEscalated,
 }
 
 // Subscriber listens to the event bus and dispatches notifications

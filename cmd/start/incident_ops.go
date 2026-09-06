@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
@@ -50,10 +51,20 @@ var errPatchAliasMismatch = errors.New("incident: jobdef patch alias does not ma
 type incidentActionOps struct {
 	db       *gorm.DB
 	runStore *run.Store
+	// bus and eventStore are how Escalate DELIVERS. Both may be nil (unit tests,
+	// a server started without an event sink); Escalate refuses rather than
+	// pretending it escalated when it has no way to reach anyone.
+	bus        event.Bus
+	eventStore *event.Store
 }
 
-func newIncidentActionOps(conn *gorm.DB) *incidentActionOps {
-	return &incidentActionOps{db: conn, runStore: run.NewStore(conn)}
+func newIncidentActionOps(conn *gorm.DB, bus event.Bus, eventStore *event.Store) *incidentActionOps {
+	return &incidentActionOps{
+		db:         conn,
+		runStore:   run.NewStore(conn),
+		bus:        bus,
+		eventStore: eventStore,
+	}
 }
 
 func (o *incidentActionOps) RetryFromFailure(_ context.Context, runID uuid.UUID) error {
@@ -83,16 +94,81 @@ func (o *incidentActionOps) Notify(_ context.Context, _, _ string) error {
 	return errIncidentOpNotWired
 }
 
-// Escalate surfaces an escalation. It is reached today only by the
-// apply_jobdef_patch provenance router, which degrades a git-synced job's
-// approved patch to an escalation carrying the rendered diff.
+// Escalate DELIVERS an escalation by publishing a persisted
+// incident_escalated event carrying the incident, the requested channel, and the
+// rendered summary (for the apply_jobdef_patch provenance route, the diff).
 //
-// Routing it to a configured notification channel is the notification-sender
-// wiring that lands with the rest of the tier-1/2 catalog; until then it logs at
-// warn level. The escalation is NOT lost by that degradation: the AgentAction
-// row records route=escalate with the rendered diff in its result, and the
-// agent_action_executed event carries the same on the event stream.
-func (o *incidentActionOps) Escalate(_ context.Context, incidentID uuid.UUID, channel, summary string) error {
+// Publishing rather than calling a sender directly is deliberate: the
+// notification subsystem is keyed by channel ID and driven by NotificationPolicy
+// rows, and incident_escalated is in notifiableTypes, so an operator routes this
+// to Slack/PagerDuty/webhook with the ordinary policy machinery and no new
+// plumbing. The event is persisted before it is published, so an escalation
+// raised while no subscriber was listening is still queryable from /v1/events.
+//
+// It returns an error when it cannot publish. That is the point: dispatch
+// records the AgentAction `executed` only if this returns nil, so an escalation
+// that reached nobody is recorded `failed` instead of claiming a human was
+// contacted. Logging and returning success — what this did before — recorded
+// `route=escalate` on a page nobody ever received.
+func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, channel, summary string) error {
+	if o.bus == nil && o.eventStore == nil {
+		return fmt.Errorf("%w: no event sink is wired, so an escalation cannot be delivered", errIncidentOpNotWired)
+	}
+
+	var inc models.Incident
+	if err := o.db.WithContext(ctx).First(&inc, "id = ?", incidentID).Error; err != nil {
+		return fmt.Errorf("incident: load incident for escalation: %w", err)
+	}
+
+	payload := map[string]any{
+		"incident_id":     inc.ID.String(),
+		"job_id":          inc.JobID.String(),
+		"incident_class":  inc.Class,
+		"incident_status": string(inc.Status),
+		"summary":         summary,
+	}
+	if channel != "" {
+		payload["channel"] = channel
+	}
+	if inc.TaskName != "" {
+		payload["task_name"] = inc.TaskName
+	}
+	// job_alias feeds NotificationPolicy's alias/label filters and the rendered
+	// notification body; a lookup failure degrades the payload, never the delivery.
+	var job models.Job
+	if err := o.db.WithContext(ctx).Select("id", "alias", "labels").First(&job, "id = ?", inc.JobID).Error; err == nil {
+		payload["job_alias"] = job.Alias
+		if len(job.Labels) > 0 {
+			payload["job_labels"] = job.Labels
+		}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("incident: encode escalation payload: %w", err)
+	}
+
+	evt := event.Event{
+		Type:      event.TypeIncidentEscalated,
+		JobID:     inc.JobID,
+		Timestamp: time.Now().UTC(),
+		Payload:   body,
+	}
+	if inc.RemediationTargetRunID != nil {
+		evt.RunID = *inc.RemediationTargetRunID
+	} else if inc.RunID != nil {
+		evt.RunID = *inc.RunID
+	}
+
+	if o.eventStore != nil {
+		if err := o.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return o.eventStore.AppendTx(tx, &evt)
+		}); err != nil {
+			return fmt.Errorf("incident: persist escalation event: %w", err)
+		}
+	}
+	event.PublishAndMarkBusDispatched(ctx, o.bus, o.eventStore, evt)
+
 	log.Warn("incident: escalation raised",
 		"incident_id", incidentID,
 		"channel", channel,

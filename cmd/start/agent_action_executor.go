@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -81,17 +83,101 @@ func disposition(action *models.AgentAction) string {
 	return string(action.Status)
 }
 
-// playbook resolves the effective policy for an incident from its job's agent
-// profile, falling back to the bootstrap default profile and finally to the zero
-// Playbook. The fallback direction is the safe one: an unresolved playbook still
-// routes every tier-3 action to a human and still requires an explicit allow for
-// tier 2.
+// playbook resolves the EFFECTIVE policy for an incident from the job the
+// incident belongs to.
+//
+// This is an authorization decision, not a lookup convenience: the returned
+// Playbook is what incident.Executor.Execute consults to decide whether a
+// proposed action runs autonomously. Resolving it from the deployment-wide
+// CAESIUM_AGENT_DEFAULT_PROFILE — as this did before — evaluates a job that
+// narrowed its own allowlist under the default's wider one, so an action the
+// job forbids executes without a human ever seeing it.
+//
+// Resolution, in order:
+//
+//  1. incident → job. The job's persisted `metadata.remediation` block
+//     (models.Job.Remediation) is the job's policy.
+//  2. That block names the AgentProfile whose playbook is the base; a job that
+//     declares a block but no profile uses the deployment default. The block's
+//     `autonomy` sub-block then NARROWS that base (Playbook.Narrow — neither
+//     document can grant what the other withholds).
+//  3. A job with no remediation block at all falls back to the deployment
+//     default profile: that is what "default profile" means, and the job has
+//     expressed no policy to override it.
+//
+// Every failure fails CLOSED, and the severity matches what was lost:
+//
+//   - the incident or job cannot be read → the zero Playbook (tier 3 to a
+//     human, tier 2 needs an explicit allow, tier 0/1 default autonomous);
+//   - the job DECLARED a policy whose profile cannot be loaded → DenyAllPlaybook,
+//     which permits no autonomous action at all. Falling back to the deployment
+//     default here would substitute a policy the job explicitly replaced, which
+//     is the exact widening this function exists to prevent.
 func (a *agentActionExecutor) playbook(ctx context.Context, incidentID uuid.UUID) incident.Playbook {
+	var inc models.Incident
+	if err := a.db.WithContext(ctx).Select("id", "job_id").First(&inc, "id = ?", incidentID).Error; err != nil {
+		log.Warn("agent: could not load incident for playbook; failing closed",
+			"incident_id", incidentID, "error", err)
+		return incident.Playbook{}
+	}
+
+	var job models.Job
+	if err := a.db.WithContext(ctx).Select("id", "alias", "remediation").First(&job, "id = ?", inc.JobID).Error; err != nil {
+		log.Warn("agent: could not load job for playbook; failing closed",
+			"incident_id", incidentID, "job_id", inc.JobID, "error", err)
+		return incident.Playbook{}
+	}
+
+	if len(job.Remediation) == 0 {
+		// No job-level policy: the deployment default governs.
+		return a.defaultProfilePlaybook(ctx, incidentID)
+	}
+
+	var block schema.MetadataRemediation
+	if err := json.Unmarshal(job.Remediation, &block); err != nil {
+		log.Warn("agent: could not decode job remediation policy; denying autonomous actions",
+			"incident_id", incidentID, "job_id", inc.JobID, "error", err)
+		return incident.DenyAllPlaybook()
+	}
+
+	base, ok := a.profilePlaybook(ctx, incidentID, block.Profile)
+	if !ok {
+		// The job named a policy we cannot resolve. Denying is the only answer
+		// that does not silently substitute a different one.
+		return incident.DenyAllPlaybook()
+	}
+
+	// The job's own autonomy block is a valid playbook document (both are
+	// pkg/jobdef.RemediationAutonomy's shape), so the shared decoder reads it.
+	return base.Narrow(incident.DecodePlaybook(job.Remediation))
+}
+
+// profilePlaybook loads a named AgentProfile's playbook. An empty name means the
+// job deferred to the deployment default. The bool reports whether resolution
+// SUCCEEDED — false is a hard failure the caller must fail closed on, and is
+// deliberately distinct from "resolved to an unconfigured (zero) playbook".
+func (a *agentActionExecutor) profilePlaybook(ctx context.Context, incidentID uuid.UUID, name string) (incident.Playbook, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return a.defaultProfilePlaybook(ctx, incidentID), true
+	}
 	var profile models.AgentProfile
-	name := env.Variables().AgentDefaultProfile
+	if err := a.db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
+		log.Warn("agent: could not load job-declared agent profile for playbook",
+			"incident_id", incidentID, "profile", name, "error", err)
+		return incident.Playbook{}, false
+	}
+	return incident.DecodePlaybook(profile.Playbook), true
+}
+
+// defaultProfilePlaybook resolves CAESIUM_AGENT_DEFAULT_PROFILE's playbook. An
+// unset or unreadable default yields the zero Playbook — never a permissive one.
+func (a *agentActionExecutor) defaultProfilePlaybook(ctx context.Context, incidentID uuid.UUID) incident.Playbook {
+	name := strings.TrimSpace(env.Variables().AgentDefaultProfile)
 	if name == "" {
 		return incident.Playbook{}
 	}
+	var profile models.AgentProfile
 	if err := a.db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Warn("agent: could not load default profile for playbook",

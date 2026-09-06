@@ -875,6 +875,27 @@ guard.
       `api/rest/service/agent/agent_test.go`
       (`TestProposeActionDelegatesToRegisteredExecutor` strengthened to assert
       the fallback row is NOT also written).
+      Review follow-up (PR #390): the playbook is now JOB-SCOPED, closing the
+      widening the deviation above left open. `metadata.remediation` IS persisted
+      (`models.Job.Remediation`, mapped on both importer branches), and
+      `agent_action_executor.go` resolves incident → job → the job's declared
+      profile, narrowed by the job's own `autonomy` block via a new
+      `Playbook.Narrow` (allow intersects, requireApproval unions, paramOverrides
+      intersect keys and values — an emptied intersection denies rather than
+      reopening, since an empty `Allow` means "unconstrained"). A job with no
+      block still inherits `CAESIUM_AGENT_DEFAULT_PROFILE`; a job whose DECLARED
+      profile cannot be resolved gets `incident.DenyAllPlaybook()`, never the
+      default's allowlist.
+      Review follow-up (PR #390): `requestApproval` creates the `ApprovalRequest`
+      and parks the incident in ONE transaction. Parking used to be best-effort,
+      so a proposal against a terminal or concurrently-advanced incident could
+      commit an approval no feed lists and no human can decide. It now fails
+      whole with `ErrIncidentNotApprovable` and creates nothing. Relatedly
+      `Supervisor.EndSession` now STOPS the session container through its
+      `atom.Engine` (it only revoked the credential before, leaving the agent
+      burning tokens against a revoked key), and every session state write is
+      guarded on pending/running so a later finalization cannot rewrite an
+      already-ended session as `timed_out`.
 - [x] C5. Scoped-key allow/deny matrix as one table-driven live scenario
       (`TestScopedKeyAllowDenyMatrix`): for a key scoped to job `A`, assert
       200 on `GET /v1/jobs` (filtered to `A`), `GET /v1/jobs/:idA`,
@@ -1070,9 +1091,26 @@ guard.
       must match the target job. The provenance route is derived in the executor
       (`gitSynced` over the four `Provenance*` fields) and the `AUTH_MODE=none`
       refusal (`ErrAuthModeNone`) mirrors `pkg/env`'s master-gate condition
-      exactly, including the SSO clause. `Escalate` currently logs (the
-      notification senders are still `errIncidentOpNotWired`); the diff is
-      preserved on the action row and the `agent_action_executed` event.
+      exactly, including the SSO clause.
+      Review follow-up (PR #390): `Escalate` no longer only logs. It publishes a
+      PERSISTED `event.TypeIncidentEscalated` carrying the incident, the
+      requested channel, the rendered summary/diff and `job_alias`, and returns
+      an error when it cannot — so `dispatch` records the action `executed` only
+      once the escalation is actually on the stream, never for a page nobody
+      received. `incidentActionOps` therefore takes the bus + event store
+      (`newIncidentActionOps(conn, bus, eventStore)`).
+      Review follow-up (PR #390): `ExecuteApproved` now CLAIMS the action with a
+      conditional `approved → executing` UPDATE
+      (`models.AgentActionStatusExecuting`), so dispatch is once-only across the
+      synchronous post-decision path and the new leader-gated
+      `incident.ApprovalRedriver` (`internal/incident/redrive.go`, wired in
+      `cmd/start/start.go` under the master gate, tuned by
+      `CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL` / `_GRACE`). The redrive closes
+      the crash window the decide/execute split opens: an action stranded
+      `approved` by a process death is re-dispatched, since re-approving is
+      refused by the pending-only guard. A row left `executing` is deliberately
+      NOT auto-redriven — re-running a half-applied tier-3 mutation unattended is
+      worse than a visible stuck row.
 - [x] C8. Make the approved-action decision explainable (arc convention 3 —
       this plan's single explainability item). Declare
       `TypeAgentActionExecuted` in `internal/event/bus.go` (today's incident

@@ -500,22 +500,26 @@ func start(cmd *cobra.Command, args []string) error {
 	// --- Agent-in-the-Loop Remediation (Phase 0 incident substrate) ---
 	//
 	// The whole feature is gated behind CAESIUM_AGENT_REMEDIATION_ENABLED; a
-	// deployment that never enables it starts neither the incident subscriber nor
-	// the timer sweeper and pays nothing. Both are leader-gated
-	// (dqlite.IsLocalLeader, like the run-queue dequeuer) so an N-node cluster
-	// opens exactly one incident per failure and fires each durable timer once.
+	// deployment that never enables it starts none of the incident subscriber, the
+	// timer sweeper or the approved-action redrive sweeper, and pays nothing. All
+	// three are leader-gated (dqlite.IsLocalLeader, like the run-queue dequeuer) so
+	// an N-node cluster opens exactly one incident per failure, fires each durable
+	// timer once, and redrives each stranded approved action once.
 	if vars.AgentRemediationEnabled {
 		incConn := db.Connection()
+		incEventStore := event.NewStore(incConn)
 
 		// The action executor backs the deterministic Phase-0 remediation and the
 		// durable snooze_retry timer with the admit-aware retry entry point. It is
 		// shared by the subscriber (deterministic rules on incident open) and the
 		// timer sweeper (RegisterTimerHandlers), so the snooze_retry handler fires
-		// instead of being claimed-and-skipped.
-		incExecutor := incident.NewExecutor(incident.NewStore(incConn), newIncidentActionOps(incConn))
+		// instead of being claimed-and-skipped. The ops adapter takes the event sink
+		// too: `escalate` DELIVERS by publishing incident_escalated, which the
+		// notification subscriber routes to a channel.
+		incExecutor := incident.NewExecutor(incident.NewStore(incConn), newIncidentActionOps(incConn, bus, incEventStore))
 		// The approval/execution lifecycle rides the shared event stream, persisted
 		// first so approval_requested / agent_action_executed survive a restart.
-		incExecutor.SetEventSink(bus, event.NewStore(incConn))
+		incExecutor.SetEventSink(bus, incEventStore)
 
 		// --- Tier-3 approval pipeline, both ends (trust-the-substrate C4 + C7) ---
 		//
@@ -542,6 +546,22 @@ func start(cmd *cobra.Command, args []string) error {
 		runAsync(func() {
 			log.Info("launching incident timer sweeper")
 			timerSweeper.Run(ctx)
+		})
+
+		// The decision commits before the dispatch runs (approvals.go explains why
+		// they are not one transaction), so a process death in between strands the
+		// action `approved` with nobody able to re-drive it — re-approving is
+		// refused by the pending-only guard. This sweeper is the recovery path;
+		// ExecuteApproved's approved → executing claim is what keeps it and the
+		// synchronous fast path from both dispatching the same action.
+		approvalRedriver := incident.NewApprovalRedriver(incConn, incExecutor, dqlite.IsLocalLeader,
+			vars.AgentApprovalRedriveInterval, vars.AgentApprovalRedriveGrace)
+		runAsync(func() {
+			log.Info("launching approved-action redrive sweeper",
+				"interval", vars.AgentApprovalRedriveInterval,
+				"grace", vars.AgentApprovalRedriveGrace,
+			)
+			approvalRedriver.Run(ctx)
 		})
 
 		// --- Agent session supervisor (Stream C: agent runtime) ---

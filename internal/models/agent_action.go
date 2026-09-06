@@ -14,8 +14,19 @@ const (
 	AgentActionStatusProposed AgentActionStatus = "proposed"
 	AgentActionStatusApproved AgentActionStatus = "approved"
 	AgentActionStatusRejected AgentActionStatus = "rejected"
-	AgentActionStatusExecuted AgentActionStatus = "executed"
-	AgentActionStatusFailed   AgentActionStatus = "failed"
+	// AgentActionStatusExecuting is the CLAIM an approved action holds while it
+	// is being dispatched. It exists so dispatch is once-only: the executor moves
+	// approved → executing with a conditional UPDATE, and a second attempt (the
+	// redrive sweeper racing the synchronous post-decision execute, or two
+	// operators' requests interleaving) matches zero rows and does nothing.
+	//
+	// A row left `executing` by a process death is a deliberately VISIBLE stuck
+	// state, not an invisible one: it is never auto-redriven, because re-running a
+	// half-applied tier-3 mutation (a jobdef patch, a skipped task) unattended is
+	// worse than surfacing it for a human. See ApprovalRedriver.
+	AgentActionStatusExecuting AgentActionStatus = "executing"
+	AgentActionStatusExecuted  AgentActionStatus = "executed"
+	AgentActionStatusFailed    AgentActionStatus = "failed"
 )
 
 // AgentActionActor identifies who originated an action row.

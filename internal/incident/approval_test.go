@@ -395,3 +395,72 @@ func approveAction(t *testing.T, db *gorm.DB, actionID uuid.UUID, decider, reaso
 		Where("id = ?", actionID).
 		Updates(map[string]any{"status": models.AgentActionStatusApproved, "updated_at": now}).Error)
 }
+
+// --- Proposal atomicity (review follow-up, PR #390) --------------------------
+
+// TestProposalAgainstTerminalIncidentCreatesNoApproval pins the invariant that a
+// pending ApprovalRequest is never created for an incident nobody can decide it
+// on. The approval is only reachable through its incident — the feed lists what
+// is parked in awaiting_approval, and decide advances it out — so an approval
+// whose incident stayed terminal is invisible forever: the proposal it stands
+// for silently never happens. Creating the row first and parking best-effort
+// made exactly that a logged warning.
+func TestProposalAgainstTerminalIncidentCreatesNoApproval(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+
+	// A human closed the incident before the agent's proposal landed.
+	_, err := store.Transition(context.Background(), inc.ID, models.IncidentStatusEscalated, "")
+	require.NoError(t, err)
+	_, err = store.Transition(context.Background(), inc.ID, models.IncidentStatusClosed, "")
+	require.NoError(t, err)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Actor:      models.AgentActionActorAgent,
+		Type:       ActionTypeOverrideSchemaGate,
+	})
+	require.ErrorIs(t, err, ErrIncidentNotApprovable)
+	require.NotNil(t, action, "the refusal must still be readable as a row")
+
+	var approvals int64
+	require.NoError(t, db.Model(&models.ApprovalRequest{}).
+		Where("incident_id = ?", inc.ID).Count(&approvals).Error)
+	require.Zero(t, approvals, "no undecidable approval may survive a refused proposal")
+
+	var got models.AgentAction
+	require.NoError(t, db.First(&got, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, got.Status,
+		"a proposal that produced no approval must not read as awaiting one")
+
+	var closed models.Incident
+	require.NoError(t, db.First(&closed, "id = ?", inc.ID).Error)
+	require.Equal(t, models.IncidentStatusClosed, closed.Status,
+		"a late agent proposal must not yank a closed incident back into awaiting_approval")
+
+	require.Empty(t, ops.overrideGate, "nothing may dispatch for a refused proposal")
+}
+
+// TestProposalParksIncidentAndCreatesApprovalTogether is the positive half: the
+// approval row and the awaiting_approval parking commit together.
+func TestProposalParksIncidentAndCreatesApprovalTogether(t *testing.T) {
+	db, store, _, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Actor:      models.AgentActionActorAgent,
+		Type:       ActionTypeOverrideSchemaGate,
+	})
+	require.NoError(t, err)
+	require.Equal(t, models.AgentActionStatusProposed, action.Status)
+
+	var approval models.ApprovalRequest
+	require.NoError(t, db.First(&approval, "action_id = ?", action.ID).Error)
+	require.Equal(t, models.ApprovalDecisionPending, approval.Decision)
+
+	var parked models.Incident
+	require.NoError(t, db.First(&parked, "id = ?", inc.ID).Error)
+	require.Equal(t, models.IncidentStatusAwaitingApproval, parked.Status,
+		"an approval a human can decide requires its incident parked awaiting one")
+}
