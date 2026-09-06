@@ -542,3 +542,39 @@ func (s *IntegrationTestSuite) doJSONRequest(method, target string, body io.Read
 	//nolint:bodyclose // Response body ownership is transferred to the caller.
 	return http.DefaultClient.Do(req)
 }
+
+// TestJobTasksSerialiseSnakeCaseIDs pins the WIRE SHAPE of
+// GET /v1/jobs/:id/tasks. models.Task is serialised directly by that endpoint,
+// and before it carried json tags Go emitted its Go field names — "ID",
+// "JobID", "AtomID", "CreatedAt", "UpdatedAt" — while every other endpoint
+// emitted snake_case. The UI had to ship a casing shim for this one route and
+// the mismatch broke its task lookup. The assertion reads the RAW decoded keys
+// (not the case-insensitive stringFromMap helper), so a regression to the Go
+// casing fails here rather than passing silently.
+func (s *IntegrationTestSuite) TestJobTasksSerialiseSnakeCaseIDs() {
+	created := s.createJob(fmt.Sprintf("test_job_tasks_snake_case_%d", time.Now().UnixNano()), nil)
+	s.Require().NotNil(created)
+
+	tasks := s.jobTasks(created.ID.String())
+	s.Require().NotEmpty(tasks, "job should expose its catalog tasks")
+
+	for i, task := range tasks {
+		for _, key := range []string{"id", "job_id", "atom_id", "created_at", "updated_at"} {
+			raw, ok := task[key]
+			s.Require().Truef(ok, "task[%d] is missing the %q key: %v", i, key, task)
+			str, isStr := raw.(string)
+			s.Require().Truef(isStr, "task[%d].%s should be a string, got %T", i, key, raw)
+			s.NotEmptyf(str, "task[%d].%s should not be empty", i, key)
+		}
+		for _, legacy := range []string{"ID", "JobID", "AtomID", "CreatedAt", "UpdatedAt"} {
+			_, ok := task[legacy]
+			s.Falsef(ok, "task[%d] must not emit the Go field name %q: %v", i, legacy, task)
+		}
+
+		_, err := uuid.Parse(task["id"].(string))
+		s.Require().NoErrorf(err, "task[%d].id should be a uuid", i)
+		s.Equalf(created.ID.String(), task["job_id"].(string), "task[%d].job_id should name its job", i)
+		_, err = uuid.Parse(task["atom_id"].(string))
+		s.Require().NoErrorf(err, "task[%d].atom_id should be a uuid", i)
+	}
+}

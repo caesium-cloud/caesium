@@ -244,6 +244,13 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 // stepNameFromFacet extracts the step_name field from the FacetSummary JSON
 // blob stored on the lineage_dataset row.  Returns "" on any parse error so
 // the caller degrades gracefully.
+//
+// Two shapes are accepted:
+//   - the current nested shape {"caesium_dataset": {"step_name": …}} that
+//     mapper.go's persistTaskDatasets writes, and
+//   - the legacy FLAT shape {"step_name": …} that persistTaskDatasets wrote
+//     before the two sides were reconciled, so rows persisted by an older
+//     server still resolve a producing step instead of reporting "".
 func stepNameFromFacet(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
@@ -252,9 +259,13 @@ func stepNameFromFacet(raw []byte) string {
 		CaesiumDataset struct {
 			StepName string `json:"step_name"`
 		} `json:"caesium_dataset"`
+		LegacyStepName string `json:"step_name"`
 	}
 	if err := json.Unmarshal(raw, &summary); err != nil {
 		return ""
 	}
-	return summary.CaesiumDataset.StepName
+	if summary.CaesiumDataset.StepName != "" {
+		return summary.CaesiumDataset.StepName
+	}
+	return summary.LegacyStepName
 }

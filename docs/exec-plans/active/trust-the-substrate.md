@@ -259,7 +259,7 @@ orders this stream first.
 
 Three shipped surfaces report something other than what happened.
 
-- [ ] B1. Write and read one `caesium_dataset` facet shape. In
+- [x] B1. Write and read one `caesium_dataset` facet shape. In
       `internal/lineage/mapper.go` `persistTaskDatasets`, replace the flat
       `json.Marshal(map[string]string{"step_name": …})` with the nested
       `{"caesium_dataset": {"step_name": …}}` that `stepNameFromFacet` reads
@@ -274,7 +274,17 @@ Three shipped surfaces report something other than what happened.
       `CAESIUM_OPEN_LINEAGE_ENABLED=true`). No UI change — Ledger L5.
       Files: `internal/lineage/mapper.go`, `internal/lineage/impact.go`,
       `internal/lineage/impact_test.go`, `test/data_plane_e2e_test.go`.
-- [ ] B2. Give `models.Task` JSON tags (`id`, `job_id`, `atom_id`,
+      *Done (W1-γ).* `persistTaskDatasets` now writes
+      `{"caesium_dataset":{"step_name":…}}`; `stepNameFromFacet` falls back to
+      the legacy flat key so pre-fix rows still resolve. `TestStepNameFromFacet`
+      is a round-trip (`mapEvent` → `persistTaskDatasets` → `QueryImpact`) and
+      **additionally pins the writer's blob shape directly** — necessary because
+      the tolerant reader makes a flat write indistinguishable through
+      `QueryImpact` alone; verified red-before by restoring the flat marshal
+      (`producing_step must write the nested caesium_dataset facet`).
+      `TestLineageImpactReturnsDownstream` now asserts
+      `producing_step == "transform"`.
+- [x] B2. Give `models.Task` JSON tags (`id`, `job_id`, `atom_id`,
       `created_at`, `updated_at`) so `GET /v1/jobs/:id/tasks` serialises like
       every other endpoint; delete `RawJobTask`/`normalizeJobTask`/
       `normalizeJobTasks` in `ui/src/lib/api.ts` (keep `next_id` handling if
@@ -286,7 +296,20 @@ Three shipped surfaces report something other than what happened.
       raw JSON keys. Files: `internal/models/task.go`, `ui/src/lib/api.ts`,
       `ui/src/lib/__tests__/api.test.ts`, `test/fanout_test.go`,
       `test/job_test.go`.
-- [ ] B3. Source the freshness consumed-dataset snapshot from the run's start,
+      *Done (W1-γ).* `next_id` verified: **no** `models.Task` field carries it,
+      so the shim's `NextID` arm was dead — the `JobTask.next_id?` field stays
+      (job-detail-manifest's `fallbackNext` reads it) but nothing normalises it.
+      `node_selector` is `omitempty` on the model, so with the normaliser gone
+      it became optional on `JobTask` (every consumer already guarded it).
+      **Ledger L6's "no other consumer" is wrong**: two integration helpers
+      decode the exact tag `json:"AtomID"`, which does *not* case-insensitively
+      match `atom_id`, so they silently returned empty — `fetchTasks`
+      (`test/integration_test.go`) and `jobTaskCommand`
+      (`test/retry_frozen_recipe_test.go`) were retagged in the same PR (out of
+      the item's stated file list, by necessity). Helpers whose tags lack an
+      underscore (`json:"ID"`, `json:"Name"`) still match case-insensitively and
+      were left alone.
+- [x] B3. Source the freshness consumed-dataset snapshot from the run's start,
       not its completion. Investigate, then implement if bounded: in
       `internal/freshness/subscriber.go` `handleRunCompleted`, read the run's
       params (`internal/run/store.go` `decodeRunParams`) and, when
@@ -305,7 +328,116 @@ Three shipped surfaces report something other than what happened.
       **all six** ledger bugs, L7 included) in the same PR; see the carve-out
       note on Acceptance Criterion 2. The item is done either way only when
       the decision **and** the arc amendment are recorded. Files: `internal/freshness/subscriber.go`,
-      `internal/freshness/subscriber_test.go`, `test/freshness_test.go`.
+      `internal/freshness/startparams.go`, `internal/freshness/startparams_test.go`,
+      `internal/freshness/subscriber_test.go`, `internal/run/store.go`,
+      `internal/run/start_params_enricher_test.go`, `cmd/start/start.go`,
+      `test/freshness_test.go`.
+      *Done (W1-γ) — **decision: FIXED, the change is bounded**; no persisted
+      table and therefore no arc AC-1 amendment (the AC 2 carve-out is not
+      exercised).* The consumed view is captured **synchronously at run
+      creation** and persisted on the run row. `internal/run` gained one seam —
+      `run.SetStartParamsEnricher`, a process-wide
+      `func(ctx, db, jobID, params) (params, error)` that `startRun` applies just
+      before `newStartRunModel`, so the enriched params are marshalled into
+      `job_runs.params` by the same INSERT (and into the `run_queue` row on the
+      queued path). It is registered process-wide, not per-`*Store`, because run
+      stores are constructed ad hoc (`runstorage.NewStore(tx)` in
+      `internal/trigger/event/router.go`), and a per-instance hook would silently
+      skip event-triggered runs. The `db` argument is load-bearing for the same
+      reason: that router creates runs inside its OWN open transaction, and the
+      first cut of this fix read a captured connection instead — which deadlocked
+      the whole database for 7m55s on the integration lane
+      (`TestEventIngestRoutesEventTriggerJob`) until the request context was
+      cancelled. Every enricher read now goes through the store's handle;
+      `TestStartRunEnricherReadsTheStoresOwnHandle` pins it by reading a row that
+      exists only inside the uncommitted transaction. Nil by default and
+      non-fatal on error: with no enricher, or with a failing one, run creation
+      is byte-identical to before.
+      `internal/freshness.EnrichStartParams` implements it — one indexed
+      `dataset_declarations` read, then `consumedSnapshot` for a job that both
+      produces and consumes, stamping `_consumed_watermarks_start`
+      (`ConsumedWatermarksStartParam`) in the evaluator's exact JSON format. It is
+      a plain func, so `internal/freshness` still does not import `internal/run`;
+      `cmd/start/start.go` wires it in one line inside the existing
+      `vars.FreshnessEnabled` block. `Capturer.consumedForRun` reads that param
+      first, then the evaluator's `_consumed_watermarks`, and falls back to the
+      completion-time read only for runs created before this change or with
+      freshness disabled at creation.
+      **The async `run_started` design was rejected**, not merely improved on:
+      the event only queues work for the subscriber, so the read could land after
+      the run was already executing (an input advancing in between was credited
+      to a run that never read it), and the non-blocking bus can drop the event
+      entirely; its in-memory map also needed a TTL sweep that would expire a
+      long-running run's snapshot (runs have no default timeout) and a 4096-entry
+      cap that evicted live runs under load. The map, the 24 h TTL and the cap
+      are deleted, and the `Capturer` is back to subscribing only
+      `run_completed`. Unit tests: `internal/run` proves the enriched params are
+      on the persisted row, that a failing enricher still starts the run, and
+      that an unregistered enricher changes nothing; `internal/freshness` proves
+      the creation-time value beats a mid-run advance end to end, the derived
+      param is never overwritten, an empty view is stamped authoritatively, the
+      caller's map is not mutated, and jobs with nothing to freeze are untouched.
+      Integration `TestFreshnessConsumedSnapshotTakenAtRunStart` uses an
+      **arrival-bound** external source as the input, so each mid-run advance is
+      one ingest POST rather than a whole producer run — the consumer only has to
+      stay alive for an HTTP round trip (30 s sleep, ~40 s total) instead of a
+      container start — and asserts the output's `consumed_watermarks` carries
+      the START-time watermark, with a guard that fails loudly if the consumer
+      terminated before the mid-run advance landed; it is now deterministic (no
+      sleep waiting for an observer) because the view is frozen with the row.
+      Three review refinements followed. (a) A **failed** watermark read is no
+      longer written down as an empty view: `consumedSnapshot` returns
+      `(map, error)` so "every input is genuinely without a watermark" (stamp
+      `{}`, authoritative) is distinguishable from "the read failed" (omit the
+      param, so completion falls back to its own read). The failure stays
+      non-fatal to run creation — freshness is optional and a run must still
+      start — so it travels the warn-and-degrade path in `enrichedStartParams`.
+      (b) The seam carries `fromQueue`, and a **queue-strategy run is re-enriched
+      on promotion**: it is admitted twice (enqueue, then `StartQueuedRun` when
+      the dequeuer frees a slot), and only the second call happens when the run
+      actually begins, so keeping the admission-time view would credit the output
+      to inputs the run never read and let freshness derive redundant catch-up
+      work. (c) That refresh is why the capture now uses **two keys, not one**.
+      They look alike — same JSON shape, same dataset keys — but they answer
+      different questions and have different owners.
+      `_consumed_watermarks` is the DERIVATION-time view: the evaluator stamps it
+      in `derive` and matches on it in `hasActiveOrQueuedRun`, whose
+      `sameDerivationParams` compares exactly `_derived_from_dataset` +
+      `_consumed_watermarks` against every running `job_runs` row and every
+      `run_queue` row for the job. The enricher never reads or writes it.
+      `_consumed_watermarks_start` is the START-time view, written only by the
+      enricher, unconditionally overwritten on every creation of the run, and
+      **deleted** (never left stale) when that read fails, so completion degrades
+      to its own read instead of believing a snapshot from a different run. The
+      retraction is not gated on `fromQueue`, because promotion is not the only
+      way a run inherits someone else's view: a retry re-runs with the params of
+      the run it is retrying (`cmd/run/retry.go`,
+      `api/rest/controller/job/run/retry.go`). With the key no longer shared,
+      `fromQueue` stops being load-bearing here at all — it was what told
+      admission's "keep what is there" from promotion's "take it again", and
+      there is now nothing to keep. Collapsing them
+      onto one key broke both ends: the promotion refresh overwrote the
+      evaluator's decision view, and since the dequeuer deletes the `run_queue`
+      row once `StartQueuedRun` succeeds, the running row is all the dedupe has
+      left to match — it no longer matched, so the next tick derived a duplicate
+      run for work already in flight. Retracting a value the enricher can no
+      longer stand behind needs the seam's help: `enrichedStartParams` keeps the
+      map an enricher returns *alongside* its error (nil still means "use the
+      caller's params"), because on a promotion the caller's params are the
+      run_queue row's and carry the very value the failed re-read invalidated.
+      Covered by `TestStartQueuedRunRefreshesEnrichedParams` and
+      `TestStartQueuedRunAppliesEnricherRetraction` (`internal/run`, real
+      enqueue→dequeue→promote path) and, in `internal/freshness`,
+      `TestStartParamsEnricherRefreshesOnQueuePromotion`,
+      `TestStartParamsEnricherNeverTouchesTheDerivationView`,
+      `TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails`,
+      `TestStartParamsEnricherDropsAnInheritedViewWhenTheReadFails`,
+      `TestCapturerPrefersTheStartViewOverTheDerivationView` and
+      `TestQueuePromotionKeepsTheDerivationDedupe`, which drives the real
+      `hasActiveOrQueuedRun` against a promoted run's persisted params rather
+      than comparing strings; no integration variant, a queued-concurrency
+      scenario would add a dequeuer poll and a second slow run for a rule the
+      unit tests pin exactly.
 
 ### Stream C — Auth surface end-to-end, and the approval gate made reachable
 

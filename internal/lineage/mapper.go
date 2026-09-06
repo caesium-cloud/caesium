@@ -563,7 +563,17 @@ func (m *mapper) persistTaskDatasets(payload taskRunPayload, inputs, outputs []D
 		return
 	}
 
-	summary, _ := json.Marshal(map[string]string{"step_name": payload.TaskName})
+	// The summary is stored NESTED under "caesium_dataset" — the exact shape
+	// stepNameFromFacet (internal/lineage/impact.go) reads, and the same key the
+	// OpenLineage RunEvent carries its CaesiumDatasetFacet under. Writing it flat
+	// (the pre-fix shape) made /lineage/impact's producing_step permanently empty
+	// because the reader looked one level deeper than the writer wrote.
+	// One summary is shared by every row in this batch: it names the task run's
+	// OWN step, which is what the impact query attributes as the producer of the
+	// direction='output' rows (the only rows whose summary it reads).
+	summary, _ := json.Marshal(map[string]map[string]string{
+		"caesium_dataset": {"step_name": payload.TaskName},
+	})
 	rows := make([]models.LineageDataset, 0, len(inputs)+len(outputs))
 	// Deduplicate within the batch: distinct output keys can resolve to the same
 	// dataset value (e.g. the same file path), and a duplicate

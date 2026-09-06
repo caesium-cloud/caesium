@@ -9,10 +9,15 @@ import (
 )
 
 type Task struct {
-	ID           uuid.UUID         `gorm:"type:uuid;primaryKey"`
-	JobID        uuid.UUID         `gorm:"type:uuid;index;not null"`
+	// ID, JobID and AtomID (and CreatedAt/UpdatedAt below) carry explicit
+	// snake_case json tags so GET /v1/jobs/:id/tasks — which serialises this
+	// model directly — matches every other endpoint's casing. Without them Go
+	// emitted the Go field names ("ID", "JobID", "AtomID", …), which every
+	// consumer had to shim.
+	ID           uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID         `gorm:"type:uuid;index;not null" json:"job_id"`
 	Job          Job               `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	AtomID       uuid.UUID         `gorm:"type:uuid;index;not null"`
+	AtomID       uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
 	Atom         Atom              `gorm:"constraint:OnDelete:RESTRICT" json:"-"`
 	Name         string            `gorm:"type:text;not null;default:''" json:"name"`
 	Position     int               `gorm:"not null;default:0" json:"-"`
@@ -38,8 +43,8 @@ type Task struct {
 	// required keys from each predecessor's output.
 	InputSchema datatypes.JSON `gorm:"type:json" json:"input_schema,omitempty"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
-	CreatedAt   time.Time      `gorm:"not null"`
-	UpdatedAt   time.Time      `gorm:"not null"`
+	CreatedAt   time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt   time.Time      `gorm:"not null" json:"updated_at"`
 }
 
 type Tasks []*Task

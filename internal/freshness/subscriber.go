@@ -21,13 +21,21 @@ import (
 // reverse.
 const taskRunTerminalSucceeded = "succeeded"
 
-// Capturer hooks the run-completion lifecycle path (NOT a poll): it subscribes
-// to run_completed events and, for each producing step's non-cached success,
-// advances the dataset it declares — calling Store.Advance with the emitted
-// watermark value (or refreshing verified_at in degraded mode when the step
-// declares no watermark key or emits none). It also snapshots each produced
-// dataset's consumed-input watermarks so "is my output up to date with my
-// inputs" is a pure row comparison.
+// Capturer hooks the run lifecycle path (NOT a poll): it subscribes to
+// run_completed and, for each producing step's non-cached success, advances the
+// dataset it declares — calling Store.Advance with the emitted watermark value
+// (or refreshing verified_at in degraded mode when the step declares no
+// watermark key or emits none). It also snapshots each produced dataset's
+// consumed-input watermarks so "is my output up to date with my inputs" is a
+// pure row comparison.
+//
+// That consumed snapshot is the view the run had when it was CREATED, not the
+// one current at its completion, so an input that advances mid-run is not
+// credited to a run that never saw it. StartParamsEnricher stamps it onto the
+// job_runs row synchronously at creation, under ConsumedWatermarksStartParam, so
+// this subscriber only ever reads it back — falling back to a derived run's
+// decision-time _consumed_watermarks and then to a completion-time read. See
+// consumedForRun.
 //
 // It reads the declared registry (dataset_declarations, freshness A2) to know
 // which output key is a watermark, and the run's task_runs for the emitted
@@ -53,15 +61,17 @@ func NewCapturer(bus event.Bus, db *gorm.DB) *Capturer {
 	}
 }
 
-// Start subscribes to run-completion events and drives watermark capture until
-// the context is cancelled. It mirrors the lineage subscriber's lifecycle shape.
+// Start subscribes to the run lifecycle and drives watermark capture until the
+// context is cancelled. It mirrors the lineage subscriber's lifecycle shape.
 func (c *Capturer) Start(ctx context.Context) error {
 	return c.StartWithReady(ctx, nil)
 }
 
 // StartWithReady is Start with a readiness signal for deterministic tests.
 func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
-	ch, err := c.bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeRunCompleted}})
+	ch, err := c.bus.Subscribe(ctx, event.Filter{Types: []event.Type{
+		event.TypeRunCompleted,
+	}})
 	if err != nil {
 		return err
 	}
@@ -76,7 +86,9 @@ func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) er
 			if !ok {
 				return nil
 			}
-			c.handleRunCompleted(ctx, evt)
+			if evt.Type == event.TypeRunCompleted {
+				c.handleRunCompleted(ctx, evt)
+			}
 		}
 	}
 }
@@ -90,11 +102,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	backfill, completedAt, err := c.runTiming(ctx, evt.RunID)
+	info, err := c.runInfo(ctx, evt.RunID)
 	if err != nil {
 		log.Error("freshness: capture failed to read run timing", "run_id", evt.RunID, "error", err)
 		return
 	}
+	backfill, completedAt := info.backfill, info.completedAt
 
 	var decls []models.DatasetDeclaration
 	if err := c.db.WithContext(ctx).Where("job_id = ?", evt.JobID).Find(&decls).Error; err != nil {
@@ -122,21 +135,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	// Snapshot the consumed-input watermarks once for the whole run.
-	//
-	// KNOWN LIMITATION (v1, per plan B3 — "capture the consumed-watermark set at
-	// run completion"): this reads each input's CURRENT watermark at completion
-	// time, not the input view the run actually consumed at start. If an input
-	// advances mid-run, the produced dataset records the newer input watermark
-	// even though this run never saw it, which can make a freshness comparison
-	// over-report the output as caught-up. This field is WRITE-ONLY today — its
-	// only reader is the freshness evaluator (Stream C), which does not exist
-	// yet. The correct input-view sourcing (snapshot input watermarks at
-	// TypeRunStarted, keyed by run, and read them back here) belongs to the
-	// evaluator stream, where the read semantics and the run-start seam live;
-	// until then completion-time capture is the accepted v1 behavior. See
-	// docs/exec-plans/completed/freshness-scheduling.md (Stream C, C2 at-risk).
-	consumed := c.consumedSnapshot(ctx, consumedNames)
+	// Resolve the consumed-input watermarks once for the whole run, preferring
+	// the view stamped on the run row when it was CREATED — the view it actually
+	// consumed. A completion-time read would record an input that advanced
+	// mid-run and this run never saw, making the freshness comparison
+	// over-report the output as caught-up.
+	consumed := c.consumedForRun(ctx, info.params, consumedNames)
 
 	for i := range produced {
 		p := &produced[i]
@@ -215,26 +219,93 @@ func (c *Capturer) publishDatasetAdvanced(namespace *string, name string, jobID,
 	})
 }
 
-// runTiming reports whether the run is a backfill and its effective completion
-// time (falling back to started_at, then now).
-func (c *Capturer) runTiming(ctx context.Context, runID uuid.UUID) (backfill bool, completedAt time.Time, err error) {
+// capturedRun is the job_runs projection the completion path needs: whether the
+// run is a backfill, its effective completion time, and its start params.
+type capturedRun struct {
+	backfill    bool
+	completedAt time.Time
+	params      map[string]string
+}
+
+// runInfo reports whether the run is a backfill, its effective completion time
+// (falling back to started_at, then now), and the params it was started with.
+func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, error) {
 	var row struct {
 		BackfillID  *uuid.UUID
 		CompletedAt *time.Time
 		StartedAt   time.Time
+		Params      datatypes.JSON
 	}
-	if err = c.db.WithContext(ctx).Table("job_runs").
-		Select("backfill_id", "completed_at", "started_at").
+	if err := c.db.WithContext(ctx).Table("job_runs").
+		Select("backfill_id", "completed_at", "started_at", "params").
 		Where("id = ?", runID).Take(&row).Error; err != nil {
-		return false, time.Time{}, err
+		return capturedRun{}, err
 	}
-	completedAt = time.Now().UTC()
+	completedAt := time.Now().UTC()
 	if row.CompletedAt != nil && !row.CompletedAt.IsZero() {
 		completedAt = row.CompletedAt.UTC()
 	} else if !row.StartedAt.IsZero() {
 		completedAt = row.StartedAt.UTC()
 	}
-	return row.BackfillID != nil, completedAt, nil
+	return capturedRun{
+		backfill:    row.BackfillID != nil,
+		completedAt: completedAt,
+		params:      decodeParamsJSON(row.Params),
+	}, nil
+}
+
+// consumedForRun resolves the consumed-input watermark snapshot to record
+// against this run's produced datasets:
+//
+//  1. _consumed_watermarks_start — the view the run BEGAN on, frozen into the
+//     job_runs row by StartParamsEnricher at creation and re-taken when a queued
+//     run is promoted, since that is when it truly starts. This is the start-time
+//     truth and wins outright. Durable, so it survives a restart, a leader change
+//     and a dropped event. An empty document is an answer, not a miss: it says
+//     this run consumed inputs that had no watermark yet.
+//  2. _consumed_watermarks — a freshness-derived run's DERIVATION-time view,
+//     stamped by the evaluator. Close to the start-time view and much better than
+//     a completion-time read, so it is the next-best answer when the enricher
+//     never ran (freshness disabled at creation) or its read failed.
+//  3. A completion-time read, the legacy behaviour. Only reached for a run
+//     created before this change, or one that carries neither param. Degraded —
+//     it can credit an input that advanced mid-run — but it is exactly what every
+//     run recorded before, never a missing row.
+func (c *Capturer) consumedForRun(
+	ctx context.Context,
+	params map[string]string,
+	consumedNames []string,
+) map[string]string {
+	for _, param := range []string{ConsumedWatermarksStartParam, freshnessConsumedWatermarksParam} {
+		if captured, ok := decodeConsumedParam(params, param); ok {
+			return captured
+		}
+	}
+	snapshot, err := consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
+	if err != nil {
+		// The fallback read is already the degraded path; a failure here leaves
+		// the produced datasets with no consumed view rather than a wrong one.
+		log.Error("freshness: capture failed to read consumed state", "error", err)
+		return nil
+	}
+	return snapshot
+}
+
+// decodeConsumedParam decodes one captured consumed-watermark param. Absent,
+// blank and undecodable all report false so the caller moves to its next source
+// rather than recording a view it cannot read.
+func decodeConsumedParam(params map[string]string, param string) (map[string]string, bool) {
+	raw, ok := params[param]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, false
+	}
+	var captured map[string]string
+	if err := json.Unmarshal([]byte(raw), &captured); err != nil {
+		log.Warn("freshness: run carried an undecodable consumed-watermark param; falling back",
+			"param", param)
+		return nil, false
+	}
+	return captured, true
 }
 
 type stepOutput struct {
@@ -283,15 +354,20 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 }
 
 // consumedSnapshot reads the current watermark of every consumed dataset in a
-// single query (no per-name N+1), keyed on the nil→” namespace mapping.
+// single query (no per-name N+1), keyed on the nil→"" namespace mapping.
 //
-// This is a completion-time read: it reflects each input's watermark now, not
-// as-of the producing run's start. See the KNOWN LIMITATION note at the call
-// site — the input-view-at-consumption refinement is owned by the evaluator
-// stream (Stream C), the field's only reader.
-func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[string]string {
+// It is a point-in-time read of whenever it is called: StartParamsEnricher calls
+// it to freeze the run's input view at creation, and consumedForRun calls it
+// only as the degraded fallback for a run that carries no captured view.
+//
+// A nil map and a non-nil error are two different answers and callers must not
+// conflate them: nil with no error means "every consumed input is genuinely
+// without a watermark", which is a real view worth recording, while an error
+// means the view is UNKNOWN. Returning nil for both is what let a transient read
+// failure be written down as an authoritative empty view.
+func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) (map[string]string, error) {
 	if len(names) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Dedupe before the IN query.
 	seen := make(map[string]struct{}, len(names))
@@ -305,20 +381,19 @@ func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[str
 	}
 
 	var rows []models.DatasetState
-	if err := c.db.WithContext(ctx).
-		Where("namespace = ? AND name IN ?", nsValue(c.namespace), uniq).
+	if err := db.WithContext(ctx).
+		Where("namespace = ? AND name IN ?", nsValue(namespace), uniq).
 		Find(&rows).Error; err != nil {
-		log.Error("freshness: capture failed to read consumed state", "error", err)
-		return nil
+		return nil, err
 	}
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	snapshot := make(map[string]string, len(rows))
 	for i := range rows {
 		snapshot[rows[i].Name] = rows[i].Watermark
 	}
-	return snapshot
+	return snapshot, nil
 }
 
 // decodeOutput parses a task run's ##caesium::output blob into string values.

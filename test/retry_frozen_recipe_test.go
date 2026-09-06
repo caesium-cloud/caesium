@@ -247,8 +247,8 @@ func (s *IntegrationTestSuite) jobTaskCommand(jobID, name string) string {
 	s.T().Helper()
 
 	var tasks []struct {
-		Name   string `json:"Name"`
-		AtomID string `json:"AtomID"`
+		Name   string `json:"name"`
+		AtomID string `json:"atom_id"`
 	}
 	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
 
