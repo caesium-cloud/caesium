@@ -216,6 +216,11 @@ steps:
 type impactResult struct {
 	Downstream []struct {
 		DatasetName string `json:"dataset_name"`
+		// ProducingStep is the step that emits the downstream dataset. It was
+		// permanently empty in production because the mapper persisted the facet
+		// summary flat while the impact query read it nested — asserted here so a
+		// re-divergence is caught on the real HTTP surface, not just in a unit test.
+		ProducingStep string `json:"producing_step"`
 	} `json:"downstream"`
 }
 
@@ -282,10 +287,17 @@ steps:
 	}
 	s.Require().NotEmpty(res.Downstream, "impact query returned no downstream consumer for %s", rootName)
 	found := false
+	producingStep := ""
 	for _, n := range res.Downstream {
 		if n.DatasetName == wantName {
 			found = true
+			producingStep = n.ProducingStep
 		}
 	}
 	s.True(found, "expected %s downstream of %s, got %+v", wantName, rootName, res.Downstream)
+	// producing_step must name the step that emits the downstream dataset. The
+	// UI renders it (LineageGraph's producingStep); before the facet shapes were
+	// reconciled it was always "" on every real deployment.
+	s.Equal("transform", producingStep,
+		"producing_step must resolve from the persisted facet summary, got %+v", res.Downstream)
 }

@@ -294,7 +294,7 @@ func (s *IntegrationTestSuite) requireJobByAlias(alias string) *jobSummary {
 
 func (s *IntegrationTestSuite) fetchTasks(jobID string) []string {
 	var tasks []struct {
-		AtomID string `json:"AtomID"`
+		AtomID string `json:"atom_id"`
 	}
 	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
 	ids := make([]string, 0, len(tasks))

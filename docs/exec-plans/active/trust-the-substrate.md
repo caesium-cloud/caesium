@@ -259,7 +259,7 @@ orders this stream first.
 
 Three shipped surfaces report something other than what happened.
 
-- [ ] B1. Write and read one `caesium_dataset` facet shape. In
+- [x] B1. Write and read one `caesium_dataset` facet shape. In
       `internal/lineage/mapper.go` `persistTaskDatasets`, replace the flat
       `json.Marshal(map[string]string{"step_name": …})` with the nested
       `{"caesium_dataset": {"step_name": …}}` that `stepNameFromFacet` reads
@@ -274,7 +274,17 @@ Three shipped surfaces report something other than what happened.
       `CAESIUM_OPEN_LINEAGE_ENABLED=true`). No UI change — Ledger L5.
       Files: `internal/lineage/mapper.go`, `internal/lineage/impact.go`,
       `internal/lineage/impact_test.go`, `test/data_plane_e2e_test.go`.
-- [ ] B2. Give `models.Task` JSON tags (`id`, `job_id`, `atom_id`,
+      *Done (W1-γ).* `persistTaskDatasets` now writes
+      `{"caesium_dataset":{"step_name":…}}`; `stepNameFromFacet` falls back to
+      the legacy flat key so pre-fix rows still resolve. `TestStepNameFromFacet`
+      is a round-trip (`mapEvent` → `persistTaskDatasets` → `QueryImpact`) and
+      **additionally pins the writer's blob shape directly** — necessary because
+      the tolerant reader makes a flat write indistinguishable through
+      `QueryImpact` alone; verified red-before by restoring the flat marshal
+      (`producing_step must write the nested caesium_dataset facet`).
+      `TestLineageImpactReturnsDownstream` now asserts
+      `producing_step == "transform"`.
+- [x] B2. Give `models.Task` JSON tags (`id`, `job_id`, `atom_id`,
       `created_at`, `updated_at`) so `GET /v1/jobs/:id/tasks` serialises like
       every other endpoint; delete `RawJobTask`/`normalizeJobTask`/
       `normalizeJobTasks` in `ui/src/lib/api.ts` (keep `next_id` handling if
@@ -286,7 +296,20 @@ Three shipped surfaces report something other than what happened.
       raw JSON keys. Files: `internal/models/task.go`, `ui/src/lib/api.ts`,
       `ui/src/lib/__tests__/api.test.ts`, `test/fanout_test.go`,
       `test/job_test.go`.
-- [ ] B3. Source the freshness consumed-dataset snapshot from the run's start,
+      *Done (W1-γ).* `next_id` verified: **no** `models.Task` field carries it,
+      so the shim's `NextID` arm was dead — the `JobTask.next_id?` field stays
+      (job-detail-manifest's `fallbackNext` reads it) but nothing normalises it.
+      `node_selector` is `omitempty` on the model, so with the normaliser gone
+      it became optional on `JobTask` (every consumer already guarded it).
+      **Ledger L6's "no other consumer" is wrong**: two integration helpers
+      decode the exact tag `json:"AtomID"`, which does *not* case-insensitively
+      match `atom_id`, so they silently returned empty — `fetchTasks`
+      (`test/integration_test.go`) and `jobTaskCommand`
+      (`test/retry_frozen_recipe_test.go`) were retagged in the same PR (out of
+      the item's stated file list, by necessity). Helpers whose tags lack an
+      underscore (`json:"ID"`, `json:"Name"`) still match case-insensitively and
+      were left alone.
+- [x] B3. Source the freshness consumed-dataset snapshot from the run's start,
       not its completion. Investigate, then implement if bounded: in
       `internal/freshness/subscriber.go` `handleRunCompleted`, read the run's
       params (`internal/run/store.go` `decodeRunParams`) and, when
@@ -306,6 +329,29 @@ Three shipped surfaces report something other than what happened.
       note on Acceptance Criterion 2. The item is done either way only when
       the decision **and** the arc amendment are recorded. Files: `internal/freshness/subscriber.go`,
       `internal/freshness/subscriber_test.go`, `test/freshness_test.go`.
+      *Done (W1-γ) — **decision: FIXED, the change is bounded**; no persisted
+      table and therefore no arc AC-1 amendment (the AC 2 carve-out is not
+      exercised).* The `Capturer` now subscribes to `run_started` /
+      `run_failed` / `run_cancelled` alongside `run_completed` and
+      `consumedForRun` resolves the snapshot strongest-first: (1) the run's own
+      `_consumed_watermarks` param — durable on the `job_runs` row, so a
+      freshness-derived run is correct across a restart; (2) the in-memory
+      `run_started` snapshot; (3) the legacy completion-time read. Boundedness:
+      every terminal run event evicts the entry, a 24 h TTL is swept on insert,
+      and the map is hard-capped at 4096 (oldest first). A snapshot lost to a
+      restart, a leader change or a cap eviction degrades to (3) — exactly the
+      pre-fix behaviour, never a missing or wrong row — which is why no schema
+      change is needed. No `cmd/start/start.go` edit: the subscription filter
+      widened inside `StartWithReady`. Unit tests: start-time value wins over a
+      mid-run advance, the derived param beats both, non-completing runs release
+      their slot, the cap holds, and the no-start-snapshot fallback still
+      records. Integration `TestFreshnessConsumedSnapshotTakenAtRunStart` uses an
+      **arrival-bound** external source as the input, so each mid-run advance is
+      one ingest POST rather than a whole producer run — the consumer only has to
+      stay alive for an HTTP round trip (30 s sleep, ~40 s total) instead of a
+      container start — and asserts the output's `consumed_watermarks` carries
+      the START-time watermark, with a guard that fails loudly if the consumer
+      terminated before the mid-run advance landed.
 
 ### Stream C — Auth surface end-to-end, and the approval gate made reachable
 

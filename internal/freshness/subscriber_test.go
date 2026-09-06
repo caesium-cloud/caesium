@@ -101,6 +101,168 @@ func TestCapturerAdvancesAndSnapshotsConsumed(t *testing.T) {
 	}
 }
 
+// consumedSnapshotOf reads back the consumed-watermark blob the capturer wrote
+// onto a produced dataset's state row.
+func consumedSnapshotOf(t *testing.T, c *Capturer, name string) map[string]string {
+	t.Helper()
+	st, ok, err := c.store.Get(context.Background(), nil, name)
+	if err != nil || !ok {
+		t.Fatalf("get produced %q: %v ok=%v", name, err, ok)
+	}
+	var consumed map[string]string
+	if err := json.Unmarshal(st.ConsumedWatermarks, &consumed); err != nil {
+		t.Fatalf("unmarshal consumed: %v", err)
+	}
+	return consumed
+}
+
+// TestCapturerConsumedSnapshotTakenAtRunStart is the regression for the
+// completion-time capture bug: an input that advances WHILE the run is in flight
+// must not be credited to that run. The produced dataset has to record the input
+// view the run actually consumed at its start, otherwise a freshness comparison
+// over-reports the output as caught-up with an input it never read.
+func TestCapturerConsumedSnapshotTakenAtRunStart(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	wm := "2026-07-03T04:31:00Z"
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": wm}, nil, "max_order_ts")
+
+	// The input's watermark as the run begins.
+	if _, err := c.store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "vendor-key-1", RunID: uuid.New(), CompletedAt: t0,
+	}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+
+	c.handleRunStarted(ctx, event.Event{Type: event.TypeRunStarted, JobID: jobID, RunID: runID})
+
+	// The input advances MID-RUN — this run never saw vendor-key-2.
+	if _, err := c.store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "vendor-key-2", RunID: uuid.New(),
+		RunOrder: t0.Add(time.Minute), CompletedAt: t0.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("advance upstream mid-run: %v", err)
+	}
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	consumed := consumedSnapshotOf(t, c, "staging.orders")
+	if consumed["raw.vendor_x"] != "vendor-key-1" {
+		t.Fatalf("consumed snapshot = %v, want the START-time raw.vendor_x=vendor-key-1", consumed)
+	}
+	if len(c.startSnapshots) != 0 {
+		t.Fatalf("completion must evict the run's start snapshot, %d left", len(c.startSnapshots))
+	}
+}
+
+// TestCapturerPrefersDerivedConsumedWatermarks proves the strongest source wins:
+// a freshness-derived run carries the evaluator's start-time input view on its
+// own job_runs row (_consumed_watermarks), which survives a restart the
+// in-memory snapshot would not. It must beat both a start snapshot and a
+// completion-time read.
+func TestCapturerPrefersDerivedConsumedWatermarks(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, nil, "max_order_ts")
+
+	// The evaluator's derivation view, stored the way derive() stores it: the
+	// param VALUE is itself a JSON document.
+	params, err := json.Marshal(map[string]string{
+		freshnessConsumedWatermarksParam: `{"raw.vendor_x":"derived-key"}`,
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	if err := db.Model(&models.JobRun{}).Where("id = ?", runID).
+		Update("params", datatypes.JSON(params)).Error; err != nil {
+		t.Fatalf("set run params: %v", err)
+	}
+
+	// A different, later value is what a completion-time read would pick up.
+	if _, err := c.store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "completion-time-key", RunID: uuid.New(), CompletedAt: t0,
+	}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+	c.handleRunStarted(ctx, event.Event{Type: event.TypeRunStarted, JobID: jobID, RunID: runID})
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	consumed := consumedSnapshotOf(t, c, "staging.orders")
+	if consumed["raw.vendor_x"] != "derived-key" {
+		t.Fatalf("consumed snapshot = %v, want the derived raw.vendor_x=derived-key", consumed)
+	}
+}
+
+// TestCapturerStartSnapshotEvictedOnNonCompletion proves the bounded-memory
+// claim on the paths that never reach handleRunCompleted: a failed or cancelled
+// run releases its slot too, so the map cannot accumulate one entry per run that
+// did not succeed.
+func TestCapturerStartSnapshotEvictedOnNonCompletion(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "x"}, nil, "max_order_ts")
+
+	c.handleRunStarted(ctx, event.Event{Type: event.TypeRunStarted, JobID: jobID, RunID: runID})
+	if len(c.startSnapshots) != 1 {
+		t.Fatalf("run start should snapshot exactly one run, got %d", len(c.startSnapshots))
+	}
+
+	c.dropStartSnapshot(runID)
+	if len(c.startSnapshots) != 0 {
+		t.Fatalf("a non-completing run must release its slot, %d left", len(c.startSnapshots))
+	}
+}
+
+// TestCapturerStartSnapshotCapEvictsOldest pins the hard cap that makes the
+// in-memory map bounded even if a terminal event is lost for every run.
+func TestCapturerStartSnapshotCapEvictsOldest(t *testing.T) {
+	c := NewCapturer(event.New(), openRegistryDB(t))
+
+	for i := 0; i < maxStartSnapshots+8; i++ {
+		c.putStartSnapshot(uuid.New(), map[string]string{"raw.vendor_x": "v"})
+	}
+	if len(c.startSnapshots) > maxStartSnapshots {
+		t.Fatalf("start snapshots = %d, must never exceed the cap %d", len(c.startSnapshots), maxStartSnapshots)
+	}
+}
+
+// TestCapturerNoStartSnapshotFallsBackToCompletionRead covers the degraded path:
+// a process that missed run_started (restart mid-run, leader change) still
+// records a snapshot rather than none — exactly the pre-fix behaviour, never a
+// missing row.
+func TestCapturerNoStartSnapshotFallsBackToCompletionRead(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	if _, err := c.store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "vendor-key-1", RunID: uuid.New(), CompletedAt: t0,
+	}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, nil, "max_order_ts")
+
+	// No handleRunStarted for this run.
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	consumed := consumedSnapshotOf(t, c, "staging.orders")
+	if consumed["raw.vendor_x"] != "vendor-key-1" {
+		t.Fatalf("consumed snapshot = %v, want the completion-time fallback raw.vendor_x=vendor-key-1", consumed)
+	}
+}
+
 func TestCapturerBackfillNeverAdvances(t *testing.T) {
 	db := openRegistryDB(t)
 	c := NewCapturer(event.New(), db)

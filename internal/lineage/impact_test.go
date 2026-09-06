@@ -242,14 +242,79 @@ func (s *ImpactSuite) TestMultipleProducers() {
 	s.Equal(0, cNode.Depth)
 }
 
-// TestStepNameFromFacet: helper correctly extracts step names.
+// TestStepNameFromFacet is a ROUND-TRIP over the real write path rather than a
+// hand-built JSON literal. persistTaskDatasets is the only writer of
+// lineage_datasets.facet_summary and QueryImpact is its only reader; a literal
+// here is exactly what let the writer (flat {"step_name":…}) and the reader
+// (nested caesium_dataset.step_name) drift apart for a whole release while this
+// test stayed green and /lineage/impact reported an empty producing_step in
+// production. Driving mapEvent → persistTaskDatasets → QueryImpact means the
+// two sides cannot disagree again without this test going red.
 func (s *ImpactSuite) TestStepNameFromFacet() {
-	raw := marshalFacet(map[string]interface{}{
-		"caesium_dataset": map[string]interface{}{
-			"step_name": "my-step",
-		},
-	})
-	s.Equal("my-step", stepNameFromFacet(raw))
+	const ns = "caesium"
+	const alias = "facet-roundtrip"
+
+	job, _ := s.createJobAndRun(alias, "")
+	var jobRun models.JobRun
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).First(&jobRun).Error)
+
+	outSchema := []byte(`{"type":"object","properties":{"rows":{"type":"string"}}}`)
+	inSchema := []byte(`{"extract":{"properties":{"rows":{"type":"string"}}}}`)
+	extractRun := s.createTaskWithRun(job.ID, jobRun.ID, "extract", nil, outSchema)
+	transformRun := s.createTaskWithRun(job.ID, jobRun.ID, "transform", inSchema, outSchema)
+
+	m := newMapper(ns, s.db)
+	for _, tr := range []*models.TaskRun{extractRun, transformRun} {
+		_, err := m.mapEvent(event.Event{
+			Type:      event.TypeTaskSucceeded,
+			JobID:     job.ID,
+			RunID:     jobRun.ID,
+			TaskID:    tr.TaskID,
+			Timestamp: time.Now().UTC(),
+			Payload: marshalFacet(taskRunPayload{
+				ID: tr.ID, JobRunID: jobRun.ID, TaskID: tr.TaskID,
+				Engine: "docker", Image: "alpine:3.23", Status: "succeeded",
+			}),
+		})
+		s.Require().NoError(err)
+	}
+
+	res, err := QueryImpact(s.ctx, s.db, ns, alias+".extract.output", 0)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(res.Downstream, "impact query returned no downstream consumer")
+
+	var node *ImpactNode
+	for i := range res.Downstream {
+		if res.Downstream[i].DatasetName == alias+".transform.output" {
+			node = &res.Downstream[i]
+			break
+		}
+	}
+	s.Require().NotNil(node, "expected transform.output downstream, got %+v", res.Downstream)
+	s.Equal("transform", node.ProducingStep,
+		"producing_step must round-trip from the mapper's persisted facet summary")
+
+	// Pin the WRITER's shape independently. Because stepNameFromFacet tolerates
+	// the legacy flat encoding, the round-trip above alone would still pass if
+	// persistTaskDatasets regressed to writing it — so assert the persisted blob
+	// itself is the nested one, which is what any other facet consumer reads.
+	var row models.LineageDataset
+	s.Require().NoError(s.db.
+		Where("task_run_id = ? AND direction = ?", transformRun.ID, "output").
+		First(&row).Error)
+	var persisted struct {
+		CaesiumDataset struct {
+			StepName string `json:"step_name"`
+		} `json:"caesium_dataset"`
+	}
+	s.Require().NoError(json.Unmarshal(row.FacetSummary, &persisted))
+	s.Equal("transform", persisted.CaesiumDataset.StepName,
+		"persistTaskDatasets must write the nested caesium_dataset facet, not the legacy flat shape")
+
+	// The reader still accepts the LEGACY flat shape persistTaskDatasets wrote
+	// before the fix, so rows already on disk keep resolving. This literal
+	// deliberately pins the historical on-disk encoding, not the current one.
+	s.Equal("legacy-step", stepNameFromFacet([]byte(`{"step_name":"legacy-step"}`)))
 	s.Equal("", stepNameFromFacet(nil))
 	s.Equal("", stepNameFromFacet([]byte(`{}`)))
 	s.Equal("", stepNameFromFacet([]byte(`not-json`)))

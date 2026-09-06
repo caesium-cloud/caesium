@@ -93,40 +93,28 @@ describe('api', () => {
     await expect(api.getContractGraph()).rejects.toMatchObject({ status: 404 });
   });
 
-  it('getJobTasks normalizes task IDs from Go model casing', async () => {
-    mockFetch.mockResolvedValue(okResponse([
-      {
-        ID: 'task-1',
-        JobID: 'job-1',
-        AtomID: 'atom-1',
-        name: 'extract',
-        node_selector: { disk: 'ssd' },
-        retries: 2,
-        retry_delay: 1000,
-        retry_backoff: true,
-        trigger_rule: 'all_success',
-        cache_config: null,
-        CreatedAt: '2026-06-26T00:00:00Z',
-        UpdatedAt: '2026-06-26T00:00:01Z',
-      },
-    ]));
+  // models.Task now carries explicit json tags, so /jobs/:id/tasks emits
+  // snake_case like every other endpoint and the client passes the payload
+  // straight through — no casing shim. This pins the wire shape the UI depends
+  // on; the server-side counterpart is TestJobTasksSerialiseSnakeCaseIDs.
+  it('getJobTasks returns the snake_case task payload unchanged', async () => {
+    const task = {
+      id: 'task-1',
+      job_id: 'job-1',
+      atom_id: 'atom-1',
+      name: 'extract',
+      node_selector: { disk: 'ssd' },
+      retries: 2,
+      retry_delay: 1000,
+      retry_backoff: true,
+      trigger_rule: 'all_success',
+      cache_config: null,
+      created_at: '2026-06-26T00:00:00Z',
+      updated_at: '2026-06-26T00:00:01Z',
+    };
+    mockFetch.mockResolvedValue(okResponse([task]));
 
-    await expect(api.getJobTasks('job-1')).resolves.toEqual([
-      {
-        id: 'task-1',
-        job_id: 'job-1',
-        atom_id: 'atom-1',
-        name: 'extract',
-        node_selector: { disk: 'ssd' },
-        retries: 2,
-        retry_delay: 1000,
-        retry_backoff: true,
-        trigger_rule: 'all_success',
-        cache_config: null,
-        created_at: '2026-06-26T00:00:00Z',
-        updated_at: '2026-06-26T00:00:01Z',
-      },
-    ]);
+    await expect(api.getJobTasks('job-1')).resolves.toEqual([task]);
   });
 
   it('applyJobDef preserves volume and workload identity fields in the request payload', async () => {

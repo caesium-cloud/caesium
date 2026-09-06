@@ -41,16 +41,11 @@ func (s *IntegrationTestSuite) jobTaskIDByName(jobID, name string) string {
 	s.T().Helper()
 	var raw []map[string]any
 	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &raw)
+	// models.Task carries json tags, so the endpoint emits snake_case like every
+	// other one — no dual-casing fallback.
 	for _, t := range raw {
-		n, _ := t["name"].(string)
-		if n == "" {
-			n, _ = t["Name"].(string)
-		}
-		if n != name {
+		if n, _ := t["name"].(string); n != name {
 			continue
-		}
-		if id, ok := t["ID"].(string); ok && id != "" {
-			return id
 		}
 		if id, ok := t["id"].(string); ok && id != "" {
 			return id

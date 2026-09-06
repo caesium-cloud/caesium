@@ -70,9 +70,11 @@ type DatasetState struct {
 	LastRunID *uuid.UUID `gorm:"type:uuid;index" json:"last_run_id,omitempty"`
 
 	// ConsumedWatermarks snapshots the watermarks of this dataset's declared
-	// inputs at the time LastRunID produced it, so "is my output up to date with
-	// my inputs" is a pure row comparison, not a heuristic. JSON object keyed by
-	// consumed dataset name.
+	// inputs as LastRunID STARTED — the view that run actually consumed, not the
+	// values current when it finished — so "is my output up to date with my
+	// inputs" is a pure row comparison, not a heuristic. JSON object keyed by
+	// consumed dataset name. See internal/freshness.Capturer.consumedForRun for
+	// the three sources of that start-time view.
 	ConsumedWatermarks datatypes.JSON `gorm:"type:json" json:"consumed_watermarks,omitempty"`
 
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
