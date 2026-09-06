@@ -44,11 +44,10 @@ caesium/
 │   └── event/            # Internal event bus
 ├── pkg/                  # Public, reusable packages
 │   ├── jobdef/           # Exported job definition schema
-│   ├── client/           # HTTP client for the REST API
 │   ├── db/               # Database connection pooling
 │   ├── dqlite/           # dqlite consensus wrapper
 │   └── log/              # Structured logging (Zap)
-├── api/                  # HTTP server, REST controllers, GraphQL
+├── api/                  # HTTP server, REST controllers
 ├── ui/                   # React + TypeScript + Vite frontend
 ├── build/                # Dockerfiles for builder and runtime images
 ├── helm/                 # Kubernetes Helm chart
@@ -241,8 +240,7 @@ Here is a walkthrough for common contribution types.
 
 1. Add the handler in `api/rest/controller/<resource>/`.
 2. Bind the route in `api/rest/bind/bind.go`.
-3. Update the client package (`pkg/client/`) if the endpoint should be accessible via the Go client.
-4. Add integration tests in `test/`.
+3. Add integration tests in `test/`.
 
 ### Adding a UI page or component
 

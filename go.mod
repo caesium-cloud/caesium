@@ -11,13 +11,12 @@ require (
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/crewjam/saml v0.5.1
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/docker/go-connections v0.6.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-git/go-git/v5 v5.16.5
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
-	github.com/graphql-go/graphql v0.8.1
-	github.com/graphql-go/handler v0.2.4
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/jackc/pgx/v4 v4.18.3
 	github.com/kelseyhightower/envconfig v1.4.0
@@ -84,7 +83,6 @@ require (
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.5 // indirect
-	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect

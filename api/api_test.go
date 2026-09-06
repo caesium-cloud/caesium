@@ -20,20 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegisterGraphQLWhenAuthDisabled(t *testing.T) {
-	e := echo.New()
-	registerGraphQL(e, env.Environment{AuthMode: "none"})
-
-	require.True(t, hasRoute(e, http.MethodGet, "/gql"))
-}
-
-func TestRegisterGraphQLSkippedWhenAuthEnabled(t *testing.T) {
-	e := echo.New()
-	registerGraphQL(e, env.Environment{AuthMode: "api-key"})
-
-	require.False(t, hasRoute(e, http.MethodGet, "/gql"))
-}
-
 func TestAuthStatusReflectsAuthMode(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
 		rec := performRequest(t, authStatus(env.Environment{AuthMode: "api-key"}), http.MethodGet, "/auth/status")

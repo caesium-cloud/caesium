@@ -72,7 +72,7 @@ Follow the existing repo patterns:
 
 - **Persistent state**: GORM model in `internal/models/<name>.go` registered in the `All` slice in `internal/models/models.go` — ORDER matters (parents/FK-targets before children). No hand-written SQL; struct tags ARE the schema. Hot per-run tables also go in `hotPathModels()` (`pkg/db/db.go`) + the `hotTables` map (`pkg/db/router.go`). No concurrent-writer patterns (writes serialize through Raft).
 - **Business logic**: `internal/<feature>/` (`store.go` pattern). Background processors `New...(deps).Start(ctx)`, env-gated, wired in `cmd/start/start.go`.
-- **REST routes**: controller in `api/rest/controller/<feature>/`, service in `api/rest/service/<feature>/`, route line in `Protected()` of `api/rest/bind/bind.go` (+ import). GraphQL (`api/gql/`) is a live-but-placeholder endpoint (only a `place` query; mounted at `/gql` only when auth is off) — add features via REST, not GraphQL.
+- **REST routes**: controller in `api/rest/controller/<feature>/`, service in `api/rest/service/<feature>/`, route line in `Protected()` of `api/rest/bind/bind.go` (+ import). Add features via REST only — there is no alternative query API.
 - **CLI**: `cmd/<group>/` exporting `var Cmd`; subcommands `Cmd.AddCommand(...)` in `init()`; new top-level group → append to the `cmds` slice in `cmd/execute.go`.
 - **Metrics**: `caesium_*` var in `internal/metrics/metrics.go` + add it to the `prometheus.MustRegister(...)` list in `Register()` (two edit sites).
 - **Config**: a `CAESIUM_*` field on the `Environment` struct in `pkg/env/env.go` (+ `validate()` if cross-field).
