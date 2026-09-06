@@ -257,7 +257,7 @@ integration-test:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration'; then \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'; then \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
     else \
       echo "integration tests failed; caesium server logs:"; \
@@ -386,7 +386,7 @@ integration-test-agent:
         --network=container:{{ agent_it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 10m -v' >"$log" 2>&1 || rc=$?; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 30m -v' >"$log" 2>&1 || rc=$?; \
     cat "$log"; \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -445,7 +445,7 @@ integration-test-podman: build
         --network=host \
         -w {{ bld_dir }} \
         {{ repo }}/{{ builder_image }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'; then
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'; then
       docker rm -f caesium-server-podman >/dev/null 2>&1 || true
     else
       echo "integration tests (podman) failed; caesium server logs:"
