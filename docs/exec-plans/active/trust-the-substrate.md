@@ -406,9 +406,16 @@ Three shipped surfaces report something other than what happened.
       `_consumed_watermarks` against every running `job_runs` row and every
       `run_queue` row for the job. The enricher never reads or writes it.
       `_consumed_watermarks_start` is the START-time view, written only by the
-      enricher, unconditionally overwritten on promotion, and **deleted** (never
-      left stale) when the promotion read fails, so completion degrades to its
-      own read instead of believing an admission-time snapshot. Collapsing them
+      enricher, unconditionally overwritten on every creation of the run, and
+      **deleted** (never left stale) when that read fails, so completion degrades
+      to its own read instead of believing a snapshot from a different run. The
+      retraction is not gated on `fromQueue`, because promotion is not the only
+      way a run inherits someone else's view: a retry re-runs with the params of
+      the run it is retrying (`cmd/run/retry.go`,
+      `api/rest/controller/job/run/retry.go`). With the key no longer shared,
+      `fromQueue` stops being load-bearing here at all — it was what told
+      admission's "keep what is there" from promotion's "take it again", and
+      there is now nothing to keep. Collapsing them
       onto one key broke both ends: the promotion refresh overwrote the
       evaluator's decision view, and since the dequeuer deletes the `run_queue`
       row once `StartQueuedRun` succeeds, the running row is all the dedupe has
@@ -424,6 +431,7 @@ Three shipped surfaces report something other than what happened.
       `TestStartParamsEnricherRefreshesOnQueuePromotion`,
       `TestStartParamsEnricherNeverTouchesTheDerivationView`,
       `TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails`,
+      `TestStartParamsEnricherDropsAnInheritedViewWhenTheReadFails`,
       `TestCapturerPrefersTheStartViewOverTheDerivationView` and
       `TestQueuePromotionKeepsTheDerivationDedupe`, which drives the real
       `hasActiveOrQueuedRun` against a promoted run's persisted params rather

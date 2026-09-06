@@ -70,12 +70,16 @@ var enricherNamespace *string
 // Because the start-time view has its own key, that refresh costs the evaluator
 // nothing: a freshness-derived run's _consumed_watermarks is never read or
 // written here, so its decision-time view — and the hasActiveOrQueuedRun dedupe
-// that compares it — survives promotion untouched.
+// that compares it — survives promotion untouched. It is also why fromQueue is
+// no longer branched on. When the two views shared a key the flag was what told
+// admission's "keep what is already there" apart from promotion's "take it
+// again"; with a key of its own there is nothing to keep, and the honest rule is
+// simply that every creation of a run re-reads the view that run starts with.
 //
 // Register it from the server bootstrap under CAESIUM_FRESHNESS_ENABLED. It is a
 // plain func rather than a run.StartParamsEnricher so this package keeps no
 // dependency on internal/run — the dependency runs the other way.
-func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error) {
+func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, _ bool) (map[string]string, error) {
 	if db == nil || jobID == uuid.Nil {
 		return params, nil
 	}
@@ -84,7 +88,7 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	// case of a job that declares no dataset.
 	var decls []models.DatasetDeclaration
 	if err := db.WithContext(ctx).Where("job_id = ?", jobID).Find(&decls).Error; err != nil {
-		return withoutStartView(params, fromQueue), err
+		return withoutStartView(params), err
 	}
 
 	produces := false
@@ -110,14 +114,15 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	// believe it. It is deliberately not fatal to run creation: freshness is an
 	// optional subsystem and a run must still start when its read fails.
 	//
-	// Absent has to be made true, not just left true: on a promotion the params
-	// arrive off the run_queue row still carrying the ADMISSION-time view, and
-	// persisting that onto a run starting now is exactly the misattribution
-	// above. withoutStartView strips it, and run.enrichedStartParams keeps the
-	// map returned alongside the error for precisely this case.
+	// Absent has to be made true, not just left true: params handed down from an
+	// earlier run — the run_queue row on a promotion, the retried run's own row
+	// on a retry — still carry that run's view, and persisting it onto a run
+	// starting now is exactly the misattribution above. withoutStartView strips
+	// it, and run.enrichedStartParams keeps the map returned alongside the error
+	// for precisely this case.
 	snapshot, err := consumedSnapshot(ctx, db, enricherNamespace, consumedNames)
 	if err != nil {
-		return withoutStartView(params, fromQueue), err
+		return withoutStartView(params), err
 	}
 
 	// Stamp even an EMPTY view: "no input had a watermark when this run was
@@ -132,13 +137,15 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 }
 
 // withoutStartView returns params with any start-time view removed, so a failed
-// read can never leave a stale one behind. Only a promotion can be handed one
-// (it rides the run_queue row from admission), so every other path returns the
-// caller's map untouched and uncloned.
-func withoutStartView(params map[string]string, fromQueue bool) map[string]string {
-	if !fromQueue {
-		return params
-	}
+// read can never leave a stale one behind.
+//
+// It does not ask how the params got one, because more than one path hands them
+// down: a promotion carries the admission-time view on the run_queue row, and a
+// retry re-runs with the params of the run it is retrying (cmd/run/retry.go and
+// api/rest/controller/job/run/retry.go both pass a prior JobRun's Params). Both
+// are views of a run that is not this one. Nothing is cloned unless there is
+// something to remove.
+func withoutStartView(params map[string]string) map[string]string {
 	if _, ok := params[ConsumedWatermarksStartParam]; !ok {
 		return params
 	}

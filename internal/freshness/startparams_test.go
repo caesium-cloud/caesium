@@ -331,6 +331,36 @@ func TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails(t *testin
 	}
 }
 
+// TestStartParamsEnricherDropsAnInheritedViewWhenTheReadFails covers the other
+// way a run is handed someone else's view: a retry re-runs with the params of
+// the run it is retrying (cmd/run/retry.go, api/rest/controller/job/run/retry.go
+// both pass a prior JobRun's Params), so the stale value arrives on an ordinary
+// creation, with fromQueue false. Retraction cannot be gated on the queue path.
+func TestStartParamsEnricherDropsAnInheritedViewWhenTheReadFails(t *testing.T) {
+	db := openRegistryDB(t)
+	jobID := uuid.New()
+	seedEnricherJob(t, db, jobID, []string{"staging.orders"}, []string{"raw.vendor_x"})
+
+	if err := db.Migrator().DropTable(&models.DatasetState{}); err != nil {
+		t.Fatalf("drop dataset_states: %v", err)
+	}
+
+	// Exactly what a retry passes: the retried run's persisted params.
+	out, err := EnrichStartParams(context.Background(), db, jobID, map[string]string{
+		"logical_date":               "2026-07-03",
+		ConsumedWatermarksStartParam: `{"raw.vendor_x":"the-previous-run's-view"}`,
+	}, false)
+	if err == nil {
+		t.Fatal("a failed consumed-state read must be reported, not swallowed")
+	}
+	if got, ok := out[ConsumedWatermarksStartParam]; ok {
+		t.Fatalf("an inherited view survived a failed read: %q", got)
+	}
+	if out["logical_date"] != "2026-07-03" {
+		t.Fatalf("the caller's other params must survive: %v", out)
+	}
+}
+
 func TestStartParamsEnricherIgnoresJobsWithNothingToFreeze(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
