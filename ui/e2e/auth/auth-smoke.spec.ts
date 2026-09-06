@@ -11,15 +11,22 @@ import {
 // roles:
 //   - viewer and runner keys log in through the real UI and resolve their principal
 //     via GET /auth/whoami (200).
-//   - the job-SCOPED key is an API-ONLY principal: the scope middleware
-//     (api/middleware/auth_scope.go) denies a scoped key GET /auth/whoami with 403, so
-//     it cannot complete the UI's api-key login (apiKeyLogin requires a 200 whoami).
-//     We assert that 403 at the API level instead of attempting a UI login.
+//   - the job-SCOPED key also resolves its principal: whoami is IDENTITY, not
+//     resource access, so the scope middleware (api/middleware/auth_scope.go
+//     `authorizeScope`, case "/auth/whoami") allows every authenticated API-key
+//     principal through, and the response names the jobs the key is scoped to.
+//     This job is the ONLY place that assertion runs, which is why ui-e2e-auth is
+//     a required check.
+//
+// Passing the whoami gate grants identity ONLY — the scoped key remains 403'd on
+// every cross-job route (see test/auth_scoped_test.go TestScopedKeyAllowDenyMatrix,
+// which pins the allow/deny matrix against the live server). Agent-session tokens
+// are a different principal kind and stay confined to /v1/agent/*: they are still
+// denied whoami, so an agent can never complete a UI login.
 //
 // The real RBAC affordance-gating assertions (a viewer must not see Replay; a scoped
 // principal must not see cross-job lineage) land WITH their gated controls in B3
-// (replay) and F3 (lineage). Note for F3: because a scoped key cannot UI-login, the
-// scoped-lineage-denied behaviour must be exercised at the API level, not via the UI.
+// (replay) and F3 (lineage).
 
 let keys: AuthLaneKeys;
 
@@ -39,10 +46,21 @@ test("runner login resolves a runner principal through the UI", async ({ page })
   expect(principal.role).toBe("runner");
 });
 
-test("a job-scoped key is denied the global whoami (API-only principal)", async ({ request }) => {
+test("a job-scoped key resolves its own principal and whoami names its scope", async ({
+  request,
+}) => {
   const response = await request.get("/auth/whoami", {
     headers: authHeaders(keys.scoped),
   });
 
-  expect(response.status()).toBe(403);
+  expect(response.status()).toBe(200);
+
+  const body = (await response.json()) as {
+    kind?: string;
+    role?: string;
+    scope?: { jobs?: string[] };
+  };
+  expect(body.kind).toBe("api_key");
+  expect(body.role).toBe("viewer");
+  expect(body.scope?.jobs).toContain(keys.scopedJobAlias);
 });

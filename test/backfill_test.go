@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -495,6 +496,121 @@ func (s *IntegrationTestSuite) TestBackfillGetNotFound() {
 	s.Require().NoError(err)
 	defer resp.Body.Close()
 	s.Equal(http.StatusNotFound, resp.StatusCode)
+}
+
+// TestBackfillCLILifecycle drives create → list → cancel through the `caesium
+// backfill` BINARY (Stream C6). Every other backfill scenario in this file
+// speaks raw HTTP, so nothing pinned the CLI's flag names, its RFC3339 parsing,
+// or the PUT verb its cancel subcommand uses — a rename or a typo'd URL in
+// cmd/backfill/*.go would have shipped green.
+func (s *IntegrationTestSuite) TestBackfillCLILifecycle() {
+	alias := fmt.Sprintf("integration-backfill-cli-%d", time.Now().UnixNano())
+	// sleep 20 at max-concurrent 1 keeps the backfill in flight long enough for
+	// the cancel subcommand to have something to cancel.
+	dir := s.writeJobManifest(backfillJobManifest(alias, "0 * * * *", "sleep 20"))
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	// 2 hourly fire times, one at a time → ~40 s of work, which is comfortably
+	// longer than the create → list → cancel round trip below without adding a
+	// long scenario to the default lane's overall budget.
+	start := "2024-07-01T00:00:00Z"
+	end := "2024-07-01T02:00:00Z"
+	startTime, err := time.Parse(time.RFC3339, start)
+	s.Require().NoError(err)
+	endTime, err := time.Parse(time.RFC3339, end)
+	s.Require().NoError(err)
+
+	createOut, createErr, err := s.runCLISeparate(
+		"backfill", "create",
+		"--job-id", job.ID,
+		"--start", start,
+		"--end", end,
+		"--max-concurrent", "1",
+		"--reprocess", "none",
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(err, "caesium backfill create failed:\nstdout: %s\nstderr: %s", createOut, createErr)
+	s.Contains(createOut, "Backfill started:")
+
+	created := s.parseBackfillFromCLI(createOut)
+	s.Require().NotEmpty(created.ID)
+	s.Equal(job.ID, created.JobID)
+	s.Equal("running", created.Status)
+	s.Equal(1, created.MaxConcurrent)
+	s.Equal("none", created.Reprocess)
+	// The window the CLI parsed out of --start/--end must arrive unchanged.
+	// This is the synchronous half of that proof; total_runs is NOT — the
+	// created record always carries 0 because RunBackfill enumerates the
+	// logical dates on its own goroutine (internal/job/backfill.go
+	// SetTotalRuns), so asserting it here would be asserting a race.
+	s.True(created.Start.Equal(startTime), "start round-trip: want %s, got %s", startTime, created.Start)
+	s.True(created.End.Equal(endTime), "end round-trip: want %s, got %s", endTime, created.End)
+
+	// The asynchronous half: once the runner has enumerated the window it must
+	// resolve to exactly the two hourly fire times. Waiting for this also
+	// guarantees the backfill is genuinely under way before the cancel below,
+	// which is what makes that step deterministic.
+	var enumerated backfillResponse
+	s.Require().Eventually(func() bool {
+		if err := s.tryGetJSON(fmt.Sprintf("/v1/jobs/%s/backfills/%s", job.ID, created.ID), &enumerated); err != nil {
+			return false
+		}
+		return enumerated.TotalRuns > 0
+	}, 60*time.Second, 250*time.Millisecond, "the backfill must enumerate the CLI-supplied window")
+	s.Equal(2, enumerated.TotalRuns, "the CLI must pass the RFC3339 window through unchanged")
+
+	// `backfill list` must show it.
+	listOut, listErr, err := s.runCLISeparate(
+		"backfill", "list",
+		"--job-id", job.ID,
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(err, "caesium backfill list failed:\nstdout: %s\nstderr: %s", listOut, listErr)
+
+	var listed []backfillResponse
+	s.Require().NoError(json.Unmarshal([]byte(strings.TrimSpace(listOut)), &listed),
+		"caesium backfill list stdout must be valid JSON:\n%s", listOut)
+	var found bool
+	for _, entry := range listed {
+		if entry.ID == created.ID {
+			found = true
+		}
+	}
+	s.True(found, "backfill %s must appear in `caesium backfill list`:\n%s", created.ID, listOut)
+
+	// `backfill cancel` (a PUT under the hood) must actually stop it.
+	cancelOut, cancelErr, err := s.runCLISeparate(
+		"backfill", "cancel",
+		"--job-id", job.ID,
+		"--backfill-id", created.ID,
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(err, "caesium backfill cancel failed:\nstdout: %s\nstderr: %s", cancelOut, cancelErr)
+	s.Contains(cancelOut, created.ID)
+
+	result := s.awaitBackfill(job.ID, created.ID, 90*time.Second)
+	s.Equal("cancelled", result.Status, "the CLI cancel must reach the record, not just print a line")
+	s.Less(result.CompletedRuns, result.TotalRuns,
+		"a cancelled backfill must not have run every date")
+	s.Equal(2, result.TotalRuns)
+}
+
+// parseBackfillFromCLI extracts the backfill record `caesium backfill create`
+// prints after its "Backfill started:" line.
+func (s *IntegrationTestSuite) parseBackfillFromCLI(stdout string) backfillResponse {
+	s.T().Helper()
+
+	brace := strings.Index(stdout, "{")
+	s.Require().GreaterOrEqual(brace, 0, "backfill create must print the created record:\n%s", stdout)
+
+	var b backfillResponse
+	s.Require().NoError(json.Unmarshal([]byte(stdout[brace:]), &b),
+		"backfill create output must be JSON:\n%s", stdout)
+	return b
 }
 
 // TestBackfillCancelAlreadyDone verifies that cancelling a completed backfill

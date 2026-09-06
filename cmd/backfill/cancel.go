@@ -45,7 +45,8 @@ var cancelCmd = &cobra.Command{
 			return fmt.Errorf("backfill cancel failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		cmd.Printf("Backfill %s cancelled\n", cancelBackfillID)
+		// stdout, not cobra's Printf (which writes to OutOrStderr).
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Backfill %s cancelled\n", cancelBackfillID)
 		return nil
 	},
 }

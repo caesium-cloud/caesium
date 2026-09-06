@@ -42,18 +42,20 @@ var listCmd = &cobra.Command{
 			return fmt.Errorf("backfill list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// Pretty-print the JSON response.
+		// Pretty-print the JSON response to STDOUT: cobra's Print* helpers
+		// write to OutOrStderr, which made this listing unpipeable.
+		stdout := cmd.OutOrStdout()
 		var out interface{}
 		if err := json.Unmarshal(body, &out); err != nil {
-			cmd.Print(string(body))
+			_, _ = fmt.Fprint(stdout, string(body))
 			return nil
 		}
 		pretty, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
-			cmd.Print(string(body))
+			_, _ = fmt.Fprint(stdout, string(body))
 			return nil
 		}
-		cmd.Println(string(pretty))
+		_, _ = fmt.Fprintln(stdout, string(pretty))
 		return nil
 	},
 }

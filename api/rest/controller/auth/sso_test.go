@@ -56,6 +56,35 @@ func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
 	require.Equal(t, "viewer@example.com", body["email"])
 	require.Equal(t, string(models.RoleViewer), body["role"])
 	require.Equal(t, "csrf-token", body["csrf_token"])
+	require.NotContains(t, body, "scope", "an unscoped principal must not gain a scope key")
+}
+
+// TestWhoamiNamesTheScopeOfAScopedKey pins the C1 half that makes the allow
+// useful: a job-scoped API key may now reach whoami, so the answer has to name
+// what the key is scoped to — otherwise the caller cannot distinguish a scoped
+// principal from an unscoped one.
+func TestWhoamiNamesTheScopeOfAScopedKey(t *testing.T) {
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
+	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
+		Kind:    iauth.PrincipalAPIKey,
+		Subject: "csk_live_abcd",
+		Role:    models.RoleViewer,
+		Scope:   []byte(`{"jobs":["beta","alpha"]}`),
+	})
+
+	require.NoError(t, ctrl.Whoami(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, string(iauth.PrincipalAPIKey), body["kind"])
+	require.NotContains(t, body, "email", "an api-key principal has no email")
+
+	scope, ok := body["scope"].(map[string]any)
+	require.True(t, ok, "scoped key whoami must carry a scope object, got %v", body["scope"])
+	// ScopeJobs normalises (trim/dedupe/sort), so the order is deterministic.
+	require.Equal(t, []any{"alpha", "beta"}, scope["jobs"])
 }
 
 func TestNewSSORetainsCompletionService(t *testing.T) {

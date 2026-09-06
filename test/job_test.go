@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -577,4 +578,78 @@ func (s *IntegrationTestSuite) TestJobTasksSerialiseSnakeCaseIDs() {
 		_, err = uuid.Parse(task["atom_id"].(string))
 		s.Require().NoErrorf(err, "task[%d].atom_id should be a uuid", i)
 	}
+}
+
+// TestJobUnpauseRoute drives the pause/unpause pair end to end (Stream C6).
+// `PUT /v1/jobs/:id/unpause` had no integration coverage at all, and it is a
+// PUT — not a POST (api/rest/bind/bind.go), which is exactly the kind of detail
+// an untested route gets wrong. The proof that unpause actually took effect is
+// a manual run: a paused job answers 409 on POST /v1/jobs/:id/run
+// (api/rest/controller/job/run/post.go), so a successful run after unpausing
+// cannot be produced by a no-op handler.
+func (s *IntegrationTestSuite) TestJobUnpauseRoute() {
+	alias := fmt.Sprintf("integration-unpause-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
+steps:
+  - name: run
+    image: alpine:3.23
+    command: ["sh", "-c", "echo unpause-ok"]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	jobEntry := s.requireJobByAlias(alias)
+	s.Require().NotNil(jobEntry)
+
+	s.Require().Equal(http.StatusOK, s.setJobPaused(jobEntry.ID, "pause"))
+	s.True(s.fetchJobPaused(jobEntry.ID), "the job must report paused after PUT /pause")
+
+	// A paused job refuses a manual run, so the unpause below is load-bearing.
+	pausedRun, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%v/v1/jobs/%s/run", s.caesiumURL, jobEntry.ID), nil)
+	s.Require().NoError(err)
+	defer pausedRun.Body.Close()
+	s.Require().Equal(http.StatusConflict, pausedRun.StatusCode, "a paused job must refuse a manual run")
+
+	s.Require().Equal(http.StatusOK, s.setJobPaused(jobEntry.ID, "unpause"))
+	s.False(s.fetchJobPaused(jobEntry.ID), "the job must report unpaused after PUT /unpause")
+
+	runID := s.triggerRun(jobEntry.ID)
+	s.Equal("succeeded", s.awaitRun(jobEntry.ID, runID, runTimeout).Status,
+		"an unpaused job must run on demand")
+}
+
+// setJobPaused issues PUT /v1/jobs/:id/{pause,unpause} and returns the status.
+// The verb is PUT for both — a POST 404s.
+func (s *IntegrationTestSuite) setJobPaused(jobID, verb string) int {
+	s.T().Helper()
+
+	resp, err := s.doJSONRequest(http.MethodPut, fmt.Sprintf("%v/v1/jobs/%s/%s", s.caesiumURL, jobID, verb), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().NotEqual(http.StatusNotFound, resp.StatusCode,
+		"PUT /v1/jobs/:id/%s must be a bound route: %s", verb, string(body))
+	return resp.StatusCode
+}
+
+func (s *IntegrationTestSuite) fetchJobPaused(jobID string) bool {
+	s.T().Helper()
+
+	var view struct {
+		Paused bool `json:"paused"`
+	}
+	s.getJSON("/v1/jobs/"+jobID, &view)
+	return view.Paused
 }

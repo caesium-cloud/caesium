@@ -451,7 +451,7 @@ surface, per the `CLAUDE.md` coverage gate. All scenarios are named
 `-run` pattern picks them up, and each starts with the H-1 `requireAuthLane()`
 guard.
 
-- [ ] C1. Allow `GET /auth/whoami` for any authenticated **API-key** principal.
+- [x] C1. Allow `GET /auth/whoami` for any authenticated **API-key** principal.
       Decision: whoami is identity, not resource access. In
       `api/middleware/auth_scope.go` `authorizeScope`, add a
       `case "/auth/whoami"` returning an empty `scopeAuditContext` for
@@ -467,7 +467,38 @@ guard.
       Files: `api/middleware/auth_scope.go`,
       `api/middleware/auth_scope_test.go`, `ui/e2e/auth/auth-smoke.spec.ts`,
       new `test/auth_scoped_test.go`. Depends on: H-1.
-- [ ] C2. Live scenarios for the key-management surface. `TestAuthKeyLifecycleCLI`
+      *Done (W1-ζ).* The `case "/auth/whoami"` is first in `authorizeScope`'s
+      switch, ahead of the `/v1/jobs/:id` prefix branch; the agent-session arm
+      returns before the switch, so an agent token is still `AgentScopeDenyMessage`
+      -denied on whoami (pinned by `TestMiddlewareWhoamiDeniesAgentSessionToken`).
+      **Extra beyond the item text:** "the response names the key's scope"
+      required the whoami body to carry one — it serialised only
+      kind/subject/role — so `api/rest/controller/auth/sso.go` now emits
+      `scope: {jobs: […]}` for a scoped API key and omits the field for an
+      unscoped one. No UI change was needed: `scopeFromWhoami`
+      (`ui/src/lib/auth.ts`) already read `body.scope.jobs`; only its stale
+      comment and the matching one in `LineageGraph.tsx` were corrected.
+      - *`ApprovalAgentTokenDenyMessage` reachability (raised by W1-ε).* The
+        finding is correct: `api/middleware/auth.go` checks RBAC before
+        `authorizeScope`, and `auth.MintAgentSessionKey` issues at
+        `AgentSessionKeyRole == RoleRunner` while the approval routes require
+        `RoleOperator`, so a genuine agent token is denied
+        `insufficient permissions` by the role gate and the specific message is
+        never seen on the wire. **Decision: keep the arm as defence in depth.**
+        It is the deny that still holds if an agent claim ever rides an
+        operator-or-above key (a future minting path, a stamped scope, or any
+        widening of the approval routes' required role) — deleting it would
+        make "tier 3 always terminates at a human" depend on a single role
+        constant. What was hollow was the *documentation*, not the code, so
+        `auth_scope.go` now records the layering explicitly and
+        `auth_scope_approval_test.go` gained
+        `TestMiddlewareApprovalRouteDeniesMintedAgentKeyAtRBAC`, which mints a
+        **real** agent key, asserts the handler is never reached, asserts the
+        message is the RBAC one, and asserts
+        `RoleLevel(AgentSessionKeyRole) < RoleLevel(RoleOperator)` so the
+        premise fails loudly if the roles ever move. No scope was widened and
+        no role was lowered to make the other arm reachable.
+- [x] C2. Live scenarios for the key-management surface. `TestAuthKeyLifecycleCLI`
       drives `caesium auth key create --role viewer --description …`,
       `key list`, `key rotate --id … --grace-period 1m`, `key revoke --id …`
       with `--server`/`--api-key` (flags in `cmd/auth/key_*.go`), asserting
@@ -479,6 +510,27 @@ guard.
       (`api/rest/bind/bind.go` `bindAuth`) directly, including a 403 for a
       viewer-role key on `POST /v1/auth/keys`. Files: new
       `test/auth_keys_test.go`. Depends on: H-1.
+      *Done (W1-ζ).* All four scenarios live in `test/auth_keys_test.go`
+      (the three named here plus `TestAuthJobApplyCLI`, see C6).
+      **The item's own gate found a real bug on the first lane run:** every
+      `caesium auth` subcommand wrote its output with cobra's `cmd.Print*`,
+      and cobra's `Print`/`Printf`/`Println` write to `OutOrStderr` — so the
+      **one-time plaintext API key** went to stderr. `caesium auth key create
+      … > key.txt` produced an empty file and an unrecoverable key, and
+      `auth key list` / `auth audit` were unpipeable. Fixed in
+      `cmd/auth/{key_create,key_rotate,key_list,key_revoke,audit}.go` by
+      writing through `cmd.OutOrStdout()`, the convention `cmd/why/why.go`
+      and `cmd/cliutil/json.go` already document. This is the exact failure
+      mode `CLAUDE.md` warns about, caught only because the scenarios capture
+      stdout separately (`runCLIStdout`/`runCLISeparate`).
+      `--api-key` is exercised on `auth key list` and its "visible in process
+      listings" warning is asserted to land on **stderr** while stdout stays
+      parseable JSON (`runCLISeparate`); the other steps use the runner's
+      `CAESIUM_API_KEY`. The lifecycle also pins that the rotated-**out** key
+      survives its `--grace-period 1m` window, and `TestAuthKeysREST` adds a
+      404 on revoking an unknown key id. The shared helpers
+      (`createAPIKeyCLI`, `parseCreatedKey`, `requestWithKey`) live here and
+      are reused by C1/C5.
 - [ ] C3. Live approve/reject through a **real** proposal. `TestIncidentApprovalDecisionsCLI`:
       apply a failing job on the auth lane, wait for the incident
       (`GET /v1/incidents`), post a tier-3 action (`apply_jobdef_patch` or
@@ -520,7 +572,7 @@ guard.
       `internal/incident/executor_test.go`,
       `api/rest/service/agent/actions.go`,
       `api/rest/service/agent/actions_test.go`.
-- [ ] C5. Scoped-key allow/deny matrix as one table-driven live scenario
+- [x] C5. Scoped-key allow/deny matrix as one table-driven live scenario
       (`TestScopedKeyAllowDenyMatrix`): for a key scoped to job `A`, assert
       200 on `GET /v1/jobs` (filtered to `A`), `GET /v1/jobs/:idA`,
       `POST /v1/jobs/:idA/run`, `GET /v1/events?run_id=<A run>`; 403 on
@@ -530,7 +582,24 @@ guard.
       `prune`; 404 for a run id that does not exist. Each row cites the
       `authorizeScope` case it pins. Files: `test/auth_scoped_test.go` (shared
       with C1). Depends on: C1 + H-1.
-- [ ] C6. Close the no-test gaps recon found, each through its real surface:
+      *Done (W1-ζ).* Every listed row is present, plus three the item did not
+      name: a positive `POST /v1/jobdefs/apply` (no prune, in-scope alias), a
+      deny for an apply naming an out-of-scope alias, and the trailing-deny row
+      (`GET /v1/stats`). Two deviations forced by the code, not choices:
+      (a) the key is minted at **operator**, because `POST /v1/jobs/:id/run`
+      (runner) and `POST /v1/jobdefs/apply` (operator) would otherwise 403 on
+      the RBAC role gate and pin the wrong thing; (b) the fixture carries a
+      second in-scope alias that is never run, because an apply is refused 409
+      while the job has a running run (`ensureJobNotRunningTx`) and the matrix
+      deliberately starts runs. The `/v1/events` rows are outside the table:
+      a 200 there is an open SSE stream whose body must not be drained.
+      The scoped jobs are applied over `POST /v1/jobdefs/apply` rather than
+      `caesium job apply` because the matrix pins `parseApplyAliasesForScope`'s
+      branches (prune on/off, an out-of-scope alias in the body), which are
+      properties of the request, not of the CLI. (`caesium job apply` could not
+      authenticate at all when this was written; that is fixed under C6 and
+      covered by `TestAuthJobApplyCLI`.)
+- [x] C6. Close the no-test gaps recon found, each through its real surface:
       `TestJobUnpauseRoute` (`PUT /v1/jobs/:id/pause` then `PUT …/unpause`,
       then a manual run succeeds); `TestRunRetryCallbacksCLI` (`caesium run
       retry-callbacks`, `cmd/run/retry_callbacks.go`, against a run whose
@@ -546,6 +615,50 @@ guard.
       for the auth lane. Files: `test/job_test.go`, `test/callback_test.go`,
       new `test/notification_routes_test.go`, new `test/node_workers_test.go`,
       `test/backfill_test.go`.
+      *Done (W1-ζ).* All five scenarios are green on `just integration-test`.
+      Notes per row: `TestJobUnpauseRoute` proves unpause is load-bearing by
+      asserting the paused job answers **409** on a manual run first (PUT, not
+      POST, per Ledger L11). `TestNodeWorkersRoute` asserts the 200 shape —
+      the handler answers for *any* address (`api/rest/service/worker`
+      `Status`), so there is no 404 branch to document. **One production edit
+      was unavoidable:** `caesium run retry-callbacks` had no `--server` flag
+      and reached the database through `db.Connection()`, which opens a
+      **native** dqlite node bound to `CAESIUM_NODE_ADDRESS` — impossible
+      beside a server already holding that address, so the command was
+      undrivable from any test runner (and from any operator not on the server
+      host). `cmd/run/retry_callbacks.go` now takes `--server`/`--api-key` and
+      posts to the shipped `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`,
+      using the exact `cmd.Flags().Changed("server")` convention of
+      `caesium run retry`; the in-process path is unchanged apart from moving
+      its success line to stdout so both transports agree. Unit tests in
+      `cmd/run/retry_callbacks_test.go`.
+      - *`caesium backfill` wrote to the wrong stream too.* `backfill create`,
+        `list` and `cancel` all used cobra's `cmd.Print*` (→ `OutOrStderr`), so
+        `backfill create | jq .id` read nothing. Same one-line fix as C2's
+        (`cmd.OutOrStdout()`), and `TestBackfillCLILifecycle` is what holds it.
+        Note for anyone extending that scenario: `total_runs` is **0** on the
+        create response — `RunBackfill` enumerates the window on its own
+        goroutine and calls `SetTotalRuns` afterwards
+        (`internal/job/backfill.go`) — so the window round-trip is asserted
+        synchronously on the echoed `start`/`end` and the fire-time count is
+        polled. Asserting `total_runs` on the create response is a race, and it
+        is the one this scenario tripped over on its first default-lane run.
+      - *`caesium job apply` sent no `Authorization` header at all* (raised by
+        W1-ε; confirmed in `cmd/job/apply.go` `sendApplyRequest`). The deploy
+        verb the README and `CLAUDE.md` both name could therefore not reach a
+        server with `CAESIUM_AUTH_MODE=api-key` — the auth surface cannot be
+        true end to end while its primary write command 401s. Fixed with the
+        **existing** shared helper (`cliutil.ResolveAPIKey` + a `--api-key`
+        flag, exactly as `cmd/job/lint.go` already did), not a second
+        convention, and covered on the auth lane by `TestAuthJobApplyCLI`:
+        refused with the key cleared (and no job created), accepted via
+        `CAESIUM_API_KEY`, accepted via `--api-key` with the "visible in
+        process listings" warning on stderr. Checked the neighbours as asked:
+        `caesium job lint --server` already resolved a key through the same
+        helper (no change); `caesium job diff` has **no** `--server` mode at
+        all — it reads `db.Connection()` locally — so it has no header to
+        send and is out of scope here (worth a follow-up via N-3 if a
+        server-side diff is wanted).
 - [ ] C7. Execute approved tier-3 actions (the far end of Ledger L9). (a) In
       `api/rest/service/incident/approvals.go` `decide`, after the transaction
       commits an `approved` decision, hand the `AgentAction` to a

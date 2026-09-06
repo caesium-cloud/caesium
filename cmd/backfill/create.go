@@ -83,7 +83,10 @@ Reprocess policies:
 			return fmt.Errorf("backfill create failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
-		cmd.Printf("Backfill started:\n%s\n", string(respBody))
+		// The created record is this command's machine-readable output, so it
+		// goes to stdout. cobra's Printf writes to OutOrStderr, which meant
+		// `caesium backfill create ... | jq .id` read an empty stream.
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Backfill started:\n%s\n", string(respBody))
 		return nil
 	},
 }

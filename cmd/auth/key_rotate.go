@@ -55,22 +55,26 @@ var keyRotateCmd = &cobra.Command{
 			return fmt.Errorf("key rotation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
+		// See key_create.go: cobra's Print* helpers write to OutOrStderr, which
+		// sent the one-time plaintext key to the wrong stream.
+		stdout := cmd.OutOrStdout()
+
 		var result map[string]interface{}
 		if err := json.Unmarshal(respBody, &result); err != nil {
-			cmd.Print(string(respBody))
+			_, _ = fmt.Fprint(stdout, string(respBody))
 			return nil
 		}
 
 		if key, ok := result["key"].(string); ok {
-			cmd.Println("New API Key (save this — it will not be shown again):")
-			cmd.Println(key)
-			cmd.Println()
+			_, _ = fmt.Fprintln(stdout, "New API Key (save this — it will not be shown again):")
+			_, _ = fmt.Fprintln(stdout, key)
+			_, _ = fmt.Fprintln(stdout)
 		}
 
 		if apiKey, ok := result["api_key"].(map[string]interface{}); ok {
 			pretty, _ := json.MarshalIndent(apiKey, "", "  ")
-			cmd.Println("New key metadata:")
-			cmd.Println(string(pretty))
+			_, _ = fmt.Fprintln(stdout, "New key metadata:")
+			_, _ = fmt.Fprintln(stdout, string(pretty))
 		}
 
 		return nil

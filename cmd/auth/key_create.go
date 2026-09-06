@@ -66,22 +66,29 @@ var keyCreateCmd = &cobra.Command{
 			return fmt.Errorf("key creation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
+		// NOTE: write the key and its metadata via cmd.OutOrStdout(), NOT
+		// cmd.Print/Println — cobra's Print* helpers write to OutOrStderr, so
+		// the ONE-TIME plaintext key was going to stderr. Anyone capturing it
+		// (`caesium auth key create ... > key.txt`, or any script that pipes)
+		// got an empty file and an unrecoverable key.
+		stdout := cmd.OutOrStdout()
+
 		var result map[string]interface{}
 		if err := json.Unmarshal(respBody, &result); err != nil {
-			cmd.Print(string(respBody))
+			_, _ = fmt.Fprint(stdout, string(respBody))
 			return nil
 		}
 
 		if key, ok := result["key"].(string); ok {
-			cmd.Println("API Key (save this — it will not be shown again):")
-			cmd.Println(key)
-			cmd.Println()
+			_, _ = fmt.Fprintln(stdout, "API Key (save this — it will not be shown again):")
+			_, _ = fmt.Fprintln(stdout, key)
+			_, _ = fmt.Fprintln(stdout)
 		}
 
 		if apiKey, ok := result["api_key"].(map[string]interface{}); ok {
 			pretty, _ := json.MarshalIndent(apiKey, "", "  ")
-			cmd.Println("Key metadata:")
-			cmd.Println(string(pretty))
+			_, _ = fmt.Fprintln(stdout, "Key metadata:")
+			_, _ = fmt.Fprintln(stdout, string(pretty))
 		}
 
 		return nil

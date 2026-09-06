@@ -44,13 +44,14 @@ var keyRevokeCmd = &cobra.Command{
 			return fmt.Errorf("key revocation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
+		// Machine-readable result → stdout (cobra's Print* goes to stderr).
 		var out interface{}
 		if err := json.Unmarshal(body, &out); err != nil {
-			cmd.Print(string(body))
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), string(body))
 			return nil
 		}
 		pretty, _ := json.MarshalIndent(out, "", "  ")
-		cmd.Println(string(pretty))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
 		return nil
 	},
 }

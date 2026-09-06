@@ -41,13 +41,16 @@ var keyListCmd = &cobra.Command{
 			return fmt.Errorf("key list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
+		// Machine-readable listing → stdout. cobra's Print* helpers write to
+		// OutOrStderr, which made `caesium auth key list | jq` read an empty
+		// stream.
 		var out interface{}
 		if err := json.Unmarshal(body, &out); err != nil {
-			cmd.Print(string(body))
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), string(body))
 			return nil
 		}
 		pretty, _ := json.MarshalIndent(out, "", "  ")
-		cmd.Println(string(pretty))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
 		return nil
 	},
 }
