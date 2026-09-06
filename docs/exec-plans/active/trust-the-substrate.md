@@ -385,6 +385,30 @@ Three shipped surfaces report something other than what happened.
       the START-time watermark, with a guard that fails loudly if the consumer
       terminated before the mid-run advance landed; it is now deterministic (no
       sleep waiting for an observer) because the view is frozen with the row.
+      Two review refinements followed. (a) A **failed** watermark read is no
+      longer written down as an empty view: `consumedSnapshot` returns
+      `(map, error)` so "every input is genuinely without a watermark" (stamp
+      `{}`, authoritative) is distinguishable from "the read failed" (omit the
+      param, so completion falls back to its own read). The failure stays
+      non-fatal to run creation — freshness is optional and a run must still
+      start — so it travels the existing warn-and-use-caller-params path in
+      `enrichedStartParams`. (b) The seam carries `fromQueue`, and a
+      **queue-strategy run is re-enriched on promotion**: it is admitted twice
+      (enqueue, then `StartQueuedRun` when the dequeuer frees a slot), and only
+      the second call happens when the run actually begins, so keeping the
+      admission-time view would credit the output to inputs the run never read
+      and let freshness derive redundant catch-up work. This is right for a
+      freshness-derived run that was queued too (`derive` → `AdmitRun` can return
+      `ErrRunQueued`): the evaluator's decision-time view is separately durable
+      on the `dataset_derivations` row via `recordDerivation`, so overwriting the
+      run param loses nothing, and `hasActiveOrQueuedRun`'s dedupe still compares
+      against the *queue* row, which is untouched. Covered by
+      `TestStartQueuedRunRefreshesEnrichedParams` (`internal/run`, real
+      enqueue→dequeue→promote path) and
+      `TestStartParamsEnricherRefreshesOnQueuePromotion` /
+      `TestStartParamsEnricherOmitsViewWhenTheReadFails` (`internal/freshness`);
+      no integration variant, a queued-concurrency scenario would add a dequeuer
+      poll and a second slow run for a rule the unit tests pin exactly.
 
 ### Stream C — Auth surface end-to-end, and the approval gate made reachable
 

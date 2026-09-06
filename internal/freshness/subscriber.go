@@ -258,8 +258,10 @@ func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, e
 //
 //  1. The run's own _consumed_watermarks param — the view captured when the run
 //     was CREATED and written with the job_runs row, by the evaluator for a
-//     freshness-derived run and by StartParamsEnricher for every other trigger.
-//     Durable, so it survives a restart, a leader change and a dropped event.
+//     freshness-derived run and by StartParamsEnricher for every other trigger
+//     (and re-taken by the enricher when a queued run is promoted, since that is
+//     when it truly starts). Durable, so it survives a restart, a leader change
+//     and a dropped event.
 //  2. A completion-time read, the legacy behaviour. Only reached for a run
 //     created before this change, or created while freshness was disabled (no
 //     enricher was registered, so nothing stamped the param). Degraded — it can
@@ -278,7 +280,14 @@ func (c *Capturer) consumedForRun(
 		log.Warn("freshness: run carried an undecodable consumed-watermark param; falling back",
 			"param", freshnessConsumedWatermarksParam)
 	}
-	return consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
+	snapshot, err := consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
+	if err != nil {
+		// The fallback read is already the degraded path; a failure here leaves
+		// the produced datasets with no consumed view rather than a wrong one.
+		log.Error("freshness: capture failed to read consumed state", "error", err)
+		return nil
+	}
+	return snapshot
 }
 
 type stepOutput struct {
@@ -332,9 +341,15 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 // It is a point-in-time read of whenever it is called: StartParamsEnricher calls
 // it to freeze the run's input view at creation, and consumedForRun calls it
 // only as the degraded fallback for a run that carries no captured view.
-func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) map[string]string {
+//
+// A nil map and a non-nil error are two different answers and callers must not
+// conflate them: nil with no error means "every consumed input is genuinely
+// without a watermark", which is a real view worth recording, while an error
+// means the view is UNKNOWN. Returning nil for both is what let a transient read
+// failure be written down as an authoritative empty view.
+func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) (map[string]string, error) {
 	if len(names) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Dedupe before the IN query.
 	seen := make(map[string]struct{}, len(names))
@@ -351,17 +366,16 @@ func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names
 	if err := db.WithContext(ctx).
 		Where("namespace = ? AND name IN ?", nsValue(namespace), uniq).
 		Find(&rows).Error; err != nil {
-		log.Error("freshness: capture failed to read consumed state", "error", err)
-		return nil
+		return nil, err
 	}
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	snapshot := make(map[string]string, len(rows))
 	for i := range rows {
 		snapshot[rows[i].Name] = rows[i].Watermark
 	}
-	return snapshot
+	return snapshot, nil
 }
 
 // decodeOutput parses a task run's ##caesium::output blob into string values.

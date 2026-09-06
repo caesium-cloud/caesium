@@ -153,7 +153,7 @@ func TestCapturerRecordsConsumedViewCapturedAtRunCreation(t *testing.T) {
 	}
 
 	// What run creation does: enrich, then write the params with the row.
-	enriched, err := EnrichStartParams(ctx, db, jobID, nil)
+	enriched, err := EnrichStartParams(ctx, db, jobID, nil, false)
 	if err != nil {
 		t.Fatalf("enrich start params: %v", err)
 	}

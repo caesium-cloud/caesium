@@ -34,23 +34,34 @@ var enricherNamespace *string
 //
 // The result is read back at completion by Capturer.consumedForRun.
 //
-// On the queued-concurrency path the view is frozen when the run is first
-// admitted and rides the run_queue row to the eventual start, so a queued run
-// records a view no NEWER than the one it read. That errs toward reporting an
-// output as behind its inputs, which is the safe direction — the failure this
-// capture exists to prevent is the opposite one.
+// On the queued-concurrency path a run is admitted twice: once when it is
+// enqueued (the view rides the run_queue row) and again when the dequeuer
+// promotes it, which is when the run actually begins. fromQueue marks that
+// second call and makes it RE-read: a run that waited in the queue while its
+// inputs advanced began on the newer view, and keeping the admission-time one
+// would attribute its output to inputs it never read — the same misattribution
+// this capture exists to prevent, only in the other direction (freshness would
+// then see the output as behind and derive redundant work).
+//
+// Refreshing on promotion is correct for a freshness-derived run too, even
+// though its param is the evaluator's decision-time view: that view is
+// separately durable on the dataset_derivations row (evaluator.recordDerivation
+// writes consumed_watermarks there), so overwriting the run param loses nothing
+// and makes the run row say what the run truly consumed.
 //
 // Register it from the server bootstrap under CAESIUM_FRESHNESS_ENABLED. It is a
 // plain func rather than a run.StartParamsEnricher so this package keeps no
 // dependency on internal/run — the dependency runs the other way.
-func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string) (map[string]string, error) {
+func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error) {
 	if db == nil || jobID == uuid.Nil {
 		return params, nil
 	}
 	// A freshness-derived run already carries the evaluator's view of exactly
 	// the inputs its derivation decision was made on. That is the authoritative
-	// view for such a run; never overwrite it.
-	if raw, ok := params[freshnessConsumedWatermarksParam]; ok && strings.TrimSpace(raw) != "" {
+	// view for such a run; never overwrite it — except on queue promotion, where
+	// the run is starting now and the decision-time view is no longer what it
+	// consumes.
+	if raw, ok := params[freshnessConsumedWatermarksParam]; ok && !fromQueue && strings.TrimSpace(raw) != "" {
 		return params, nil
 	}
 
@@ -77,6 +88,18 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 		return params, nil
 	}
 
+	// A failed read means the view is UNKNOWN, which is not the same answer as
+	// an empty one. Returning the error omits the param (run.enrichedStartParams
+	// logs at warn and keeps the caller's params), so completion falls back to
+	// its current-watermark read — degraded, but honest. Writing {} here would
+	// instead record "this run consumed nothing" as fact, and completion would
+	// believe it. It is deliberately not fatal to run creation: freshness is an
+	// optional subsystem and a run must still start when its read fails.
+	snapshot, err := consumedSnapshot(ctx, db, enricherNamespace, consumedNames)
+	if err != nil {
+		return params, err
+	}
+
 	// Stamp even an EMPTY view: "no input had a watermark when this run was
 	// created" is an authoritative answer, and omitting the param would send the
 	// completion path back to the current-watermark read this exists to avoid.
@@ -84,8 +107,6 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	if out == nil {
 		out = make(map[string]string, 1)
 	}
-	out[freshnessConsumedWatermarksParam] = string(canonicalConsumedJSON(
-		consumedSnapshot(ctx, db, enricherNamespace, consumedNames),
-	))
+	out[freshnessConsumedWatermarksParam] = string(canonicalConsumedJSON(snapshot))
 	return out, nil
 }

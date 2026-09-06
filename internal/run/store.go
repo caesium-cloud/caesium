@@ -351,7 +351,14 @@ func startOptionsFrom(opts []StartOption) StartOptions {
 // built over an open transaction (internal/trigger/event/router.go passes its
 // tx), and a read issued on any other connection while that transaction is open
 // deadlocks the database until the request's context is cancelled.
-type StartParamsEnricher func(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string) (map[string]string, error)
+//
+// fromQueue reports that this creation is the PROMOTION of a run that was
+// already admitted once and parked in run_queue. A queue-strategy run is
+// enriched twice — at enqueue, whose params ride the run_queue row, and here,
+// where it actually starts — so an enricher whose value is a point-in-time
+// observation must re-take it when this is set, or it records a view the run had
+// while it was still waiting rather than the one it began with.
+type StartParamsEnricher func(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error)
 
 // startParamsEnricher is registered process-wide rather than per-Store on
 // purpose: run stores are constructed ad hoc all over the codebase (a
@@ -374,12 +381,12 @@ func SetStartParamsEnricher(fn StartParamsEnricher) {
 // enrichedStartParams applies the registered enricher. A failing enricher is
 // deliberately NOT fatal: a run must still start when an optional subsystem's
 // read fails, so the params the caller supplied are used unchanged.
-func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string) map[string]string {
+func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) map[string]string {
 	fn := startParamsEnricher.Load()
 	if fn == nil || *fn == nil {
 		return params
 	}
-	enriched, err := (*fn)(ctx, db, jobID, params)
+	enriched, err := (*fn)(ctx, db, jobID, params, fromQueue)
 	if err != nil {
 		log.Warn("run: start params enricher failed; starting run with unenriched params",
 			"job_id", jobID, "error", err)
@@ -1096,8 +1103,10 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	// on the queued path), rather than being observed after the run is live.
 	// conn is handed down so the enricher reads on THIS store's handle — when
 	// that handle is a caller's open transaction, reading anywhere else wedges
-	// the database behind it.
-	req.params = enrichedStartParams(ctx, conn, req.jobID, req.params)
+	// the database behind it. req.fromQueue tells the enricher this is a
+	// promotion out of run_queue, so an observation taken when the run was
+	// enqueued can be re-taken for the moment it truly starts.
+	req.params = enrichedStartParams(ctx, conn, req.jobID, req.params, req.fromQueue)
 
 	model, err := newStartRunModel(req)
 	if err != nil {
