@@ -86,6 +86,52 @@ func (s *IntegrationTestSuite) TestReplaceCancelStopsOrphanedContainer() {
 		return true
 	}, cancelledContainerDeadline, 2*time.Second,
 		"the cancelled run's container(s) %v are still running; a cancelled run must reach the container, not only the row", orphanIDs)
+
+	s.retireReplacementRun(cli, marker, orphanIDs, job.ID, secondRunID)
+}
+
+// retireReplacementRun tears down the run the `replace` admission STARTED.
+//
+// It is not tidiness: the replacement is running the same `sleep 120`, the
+// distributed lane runs one worker slot (CAESIUM_WORKER_POOL_SIZE=1), and a
+// scenario that walks away leaves the next two minutes of that lane with no
+// capacity. That is not hypothetical — it is how this scenario's first run took
+// TestRetryAfterApplyExecutesRegisteredCommand down with it, as a 120 s
+// "timeout waiting for run to complete" that looks nothing like its cause.
+//
+// The replacement's container is force-removed (its task then fails, exactly as
+// if the container had died) and the run is required to reach a terminal status
+// before the scenario returns, so the slot is provably free for the next test.
+func (s *IntegrationTestSuite) retireReplacementRun(cli *client.Client, marker string, orphanIDs []string, jobID, runID string) {
+	s.T().Helper()
+
+	orphaned := make(map[string]bool, len(orphanIDs))
+	for _, id := range orphanIDs {
+		orphaned[id] = true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// The replacement is only claimable once the cancelled run's slot frees, so
+	// its container appears shortly AFTER the assertion above — poll for it.
+	s.Require().Eventually(func() bool {
+		removed := false
+		for _, id := range s.containerIDsWithMarker(cli, marker) {
+			if orphaned[id] {
+				continue
+			}
+			if err := cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil {
+				s.T().Logf("retiring replacement container %s: %v", id, err)
+				continue
+			}
+			removed = true
+		}
+		return removed
+	}, 60*time.Second, time.Second,
+		"the replacement run never started a container carrying %q, so it could not be retired", marker)
+
+	s.awaitRunStatus(jobID, runID, 60*time.Second, "succeeded", "failed", "cancelled")
 }
 
 // runningContainerIDsWithMarker returns the ids of RUNNING containers whose

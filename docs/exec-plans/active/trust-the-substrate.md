@@ -325,11 +325,36 @@ orders this stream first.
       treated as "unknown", never "lost" (a database blip must not kill a
       container). Lost claims are cancelled and dropped from the in-flight set.
       Covers both causes: a cancelled run (blanked `claimed_by`) and a lease
-      reassigned to another node. Three new tests in
-      `internal/worker/run_lease_renewal_test.go`; the pre-existing
+      reassigned to another node. The pre-existing
       `TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate` asserted the old
       "keep the entry, leave the expiry" behaviour and is now
       `…ZeroRowsAffectedDropsTheClaim`.
+      **Correction found by the distributed lane (this item's ledger row is
+      incomplete).** `RowsAffected` alone is NOT a sufficient detector, because
+      the renewal is only ISSUED when a claim is within `lease_ttl/2` of expiry
+      — and on a run-owner lane `claim_expires_at` is stamped from the OWNER's
+      dispatch deadline (`internal/dispatch/dispatch.go`
+      `ttl := time.Until(req.Deadline)`, `CAESIUM_RUN_OWNER_DISPATCH_DEADLINE`,
+      5m) rather than from `CAESIUM_WORKER_LEASE_TTL` (30s on the lane). A task
+      cancelled seconds after dispatch is therefore not renewal-due for ~4m45s,
+      `renewLeasesNow` short-circuits on `!needsRenewal`, and the container ran
+      on: `just integration-test-distributed` failed
+      `TestReplaceCancelStopsOrphanedContainer` with the container still alive
+      after the full 90 s, and no claim-loss log line in the server output.
+      The fix decouples the two questions: a new `ClaimInspector`
+      (`run.Store.ClaimedTaskRunIDs`, one indexed `SELECT`, discovered from the
+      `LeaseRenewer` by type assertion like `ExpiredReclaimer`) is asked on
+      EVERY renewal tick by `Worker.cancelLostClaimsNow`, before
+      `renewLeasesNow`'s unchanged skip-when-not-needed short-circuit.
+      Detection latency is now one tick (`lease_ttl/4`). Seven tests in
+      `internal/worker/run_lease_renewal_test.go`, including
+      `TestClaimLivenessCancelsClaimThatIsNotRenewalDue` (a 5-minute expiry —
+      the exact case the `RowsAffected` detector cannot see) and
+      `TestRunLeaseRenewalTickCancelsLostClaim`, which drives the real ticker
+      goroutine so dropping the call from `runLeaseRenewal` fails the build's
+      tests rather than only the lane; that one was verified red against the
+      pre-fix wiring. `internal/run/store.go` gains the read-only
+      `ClaimedTaskRunIDs` (A1 is this stream's only other editor of that file).
 - [x] A5. Integration scenario: replace-cancel stops the orphaned container.
       Extend `test/run_concurrency_test.go` "replace cancels oldest and starts
       fresh" (or add `TestReplaceCancelStopsOrphanedContainer` in a new
@@ -357,6 +382,14 @@ orders this stream first.
       half the TTL of expiry), not immediately. Red-before verified against the
       pre-A3 tree: "the cancelled run's container(s) […] are still running"
       after the full 90 s.
+      The scenario also RETIRES the run the `replace` admission started
+      (`retireReplacementRun`): it runs the same `sleep 120`, the distributed
+      lane has one worker slot, and walking away left the lane with no capacity
+      for two minutes — which is how this scenario's first distributed run took
+      `TestRetryAfterApplyExecutesRegisteredCommand` down with it as a 120 s
+      "timeout waiting for run to complete" that looks nothing like its cause.
+      The replacement's container is force-removed and its run is required to
+      reach a terminal status before the scenario returns.
 
 ### Stream B — Data-plane truth
 
