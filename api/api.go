@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caesium-cloud/caesium/api/gql"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
@@ -63,8 +62,6 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 
 	// REST
 	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter, sessions)
-
-	registerGraphQL(e, vars)
 
 	// Embedded web UI
 	RegisterUI(e)
@@ -286,15 +283,6 @@ func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, 
 	}
 
 	e.GET("/metrics", handler)
-}
-
-func registerGraphQL(e *echo.Echo, vars env.Environment) {
-	if vars.AuthMode == "none" {
-		e.GET("/gql", gql.Handler())
-		return
-	}
-
-	log.Info("graphql endpoint disabled while authentication is enabled")
 }
 
 func configureIPExtractor(e *echo.Echo, vars env.Environment) {

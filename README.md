@@ -19,7 +19,7 @@
 
 Caesium runs your data pipelines as declarative YAML DAGs on Docker, Podman, or Kubernetes — and ships as a **single self-contained binary with an embedded database**. No PostgreSQL, no Redis, no message broker, no control plane to babysit. `scp` one binary to a laptop, an edge node, an air-gapped cluster, or a regulated on-prem environment, and it just runs. Everything the managed orchestrators paywall — HA, RBAC, SSO, audit logging, Kubernetes execution — is free and self-hosted, forever.
 
-You still operate it through a REST API, Prometheus metrics, and an embedded React UI (plus an optional GraphQL endpoint when API-key auth is disabled).
+You still operate it through a REST API, Prometheus metrics, and an embedded React UI.
 
 ## Why Caesium
 
@@ -237,7 +237,7 @@ The embedded UI exposes a few optional power-user surfaces:
 
 ## API Reference
 
-The server exposes REST on port `8080`. GraphQL is available at `GET /gql` only when `CAESIUM_AUTH_MODE=none`; when API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources. Native OIDC, SAML, and LDAP SSO can be enabled alongside API keys; see [docs/sso-authentication.md](docs/sso-authentication.md).
+The server exposes REST on port `8080`. When API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources. Native OIDC, SAML, and LDAP SSO can be enabled alongside API keys; see [docs/sso-authentication.md](docs/sso-authentication.md).
 
 | Endpoint | Purpose |
 |---|---|
@@ -246,7 +246,6 @@ The server exposes REST on port `8080`. GraphQL is available at `GET /gql` only 
 | `GET /auth/whoami` | Return the current authenticated API-key or session principal |
 | `POST /auth/logout` | Revoke the current browser session |
 | `GET /metrics` | Prometheus metrics (viewer auth required when `CAESIUM_AUTH_MODE=api-key`) |
-| `GET /gql` | GraphQL endpoint when `CAESIUM_AUTH_MODE=none` |
 | `GET /v1/jobs` | List jobs |
 | `GET /v1/jobs/:id` | Get one job |
 | `GET /v1/jobs/:id/tasks` | List persisted task definitions for a job |

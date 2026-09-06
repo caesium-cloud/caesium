@@ -695,7 +695,7 @@ binary to download (Ledger L14).
 
 ### Stream F — Dead scaffolding
 
-- [ ] F1. Remove the GraphQL placeholder. Delete `api/gql/` (schema has one
+- [x] F1. Remove the GraphQL placeholder. Delete `api/gql/` (schema has one
       `place` → `"holder"` query, `JobRunType`/`jobRunParamsType` never
       wired, no `Mutation`), `registerGraphQL` and its call in `api/api.go`,
       the `/gql` prefix in `api/ui.go`'s SPA-bypass list, the two
@@ -726,7 +726,20 @@ binary to download (Ledger L14).
       `.claude/skills/draft-exec-plan/PLAYBOOK.md`,
       `.claude/skills/exec-plan-wave/stream-agent-prompt.md`,
       `.claude/skills/exec-plan-wave/stream-agent-prompt-codex.md`.
-- [ ] F2. Remove the zero-importer stubs. `internal/task/task.go` (one line:
+      **Done (W1-δ):** all listed deletions/edits made as described;
+      `go.mod`/`go.sum` regenerated via `go mod tidy` inside
+      `caesiumcloud/caesium-builder:latest-full` (drops the two
+      `graphql-go` requires). The prescribed replacement wording ("there
+      is no GraphQL; surface features via REST") itself contains the
+      substring the verify grep checks for case-insensitively, so it was
+      reworded to "there is no alternative query API" in the three
+      `.claude/skills/**` files to actually reach an empty grep. Also
+      removed two further stale `pkg/client/` mentions found in
+      `CONTRIBUTING.md` while editing it for this item (the repo-tree
+      line and the "update the client package" step under "Adding a REST
+      API endpoint") — that package is deleted by F2 in this same PR.
+      Verify command confirmed empty; see F1's grep in this PR.
+- [x] F2. Remove the zero-importer stubs. `internal/task/task.go` (one line:
       `package task`), `pkg/client/client.go` (an empty `Caesium` interface
       and a `client` struct), and — only after confirming zero importers —
       `pkg/bytes/` and `pkg/compare/`. Tool: `grep -rn '"github.com/caesium-cloud/caesium/pkg/bytes"'`
@@ -737,6 +750,15 @@ binary to download (Ledger L14).
       confirmation). Keep any package that has an importer and record it
       here. Files: `internal/task/` (delete), `pkg/client/` (delete),
       `pkg/bytes/` and `pkg/compare/` (delete if unreferenced).
+      **Done (W1-δ):** all four packages had zero importers — confirmed
+      via `grep -rn '"github.com/caesium-cloud/caesium/<path>"'` for each
+      of `internal/task`, `pkg/client`, `pkg/bytes`, `pkg/compare` across
+      the main module and separately across the `reagents/` module — and
+      all four were deleted; none were kept. (`pkg/task`, a distinct,
+      unrelated package with real importers and 87.4% unit coverage, was
+      left untouched — do not confuse it with the deleted
+      `internal/task`.) `go build ./... && go vet ./...` confirmed clean
+      inside `just lint`'s container.
 
 ## Harness Strengthening
 

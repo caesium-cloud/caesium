@@ -100,9 +100,8 @@ Sources for candidate items:
     (`api/rest/controller/<f>/` + `api/rest/service/<f>/` + a route line
     in `Protected()` of `api/rest/bind/bind.go`); UI page
     (`ui/src/features/<f>/` + route in `ui/src/router.tsx` + a method in
-    `ui/src/lib/api.ts`). GraphQL (`api/gql/`) is a live-but-placeholder
-    endpoint (only a `place` query; mounted at `/gql` only when auth is
-    off) — surface new features via REST, not GraphQL.
+    `ui/src/lib/api.ts`). New features surface via REST only — there is
+    no alternative query API.
     UI-gated capabilities add a field to the `Features` struct in
     `api/rest/service/system/system.go`.
   - **Metrics** — a `caesium_*` collector declared in the `var (...)`

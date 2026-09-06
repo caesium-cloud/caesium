@@ -8,7 +8,7 @@ Caesium is a distributed job scheduler with declarative YAML DAG pipelines suppo
 - `cmd/` – CLI entrypoints built with Cobra; binaries assemble here.
 - `internal/` – private packages for app logic (not imported externally).
 - `pkg/` – public packages intended for reuse.
-- `api/` – HTTP/GraphQL handlers and related schema/routes.
+- `api/` – HTTP handlers and related schema/routes.
 - `build/` – Dockerfiles (`Dockerfile`, `Dockerfile.build`) and build assets.
 - `test/` – integration tests (run with `-tags=integration`).
 - `docs/` – user and developer documentation.
