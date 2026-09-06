@@ -122,7 +122,18 @@ func TestIntegrationCallbackDispatchAndRetry(t *testing.T) {
 // The receiver below 500s the run-completion dispatch, then flips to 200, so
 // the retry's effect is observable at the receiver: a second delivery that only
 // happens if the command really re-dispatched.
+//
+// The receiver binds inside the test runner process, which only shares the
+// caesium server's network namespace on the docker + podman lanes (the test
+// container runs with --network=container:<server-container> there). On the
+// kubernetes lane the server runs in a separate kind pod reachable only via
+// the one-directional kubectl port-forward the CLI uses, so a callback the
+// server dispatches can never reach back to the receiver's loopback address.
 func (s *IntegrationTestSuite) TestRunRetryCallbacksCLI() {
+	if s.engineType == "kubernetes" {
+		s.T().Skipf("callback receiver runs in the test process and is not reachable from the caesium server pod under CAESIUM_TEST_ENGINE=%s; covered on the docker + podman lanes, where the test runner shares the server's network namespace", s.engineType)
+	}
+
 	receiver := newFlakyCallbackReceiver()
 	defer receiver.Close()
 
@@ -185,7 +196,9 @@ steps:
 // flakyCallbackReceiver answers 500 until Heal is called, then 200. It records
 // every delivery so a test can prove a retry actually reached the wire. It
 // listens inside the test runner container, which shares the server's network
-// namespace on the integration lanes, so the server can reach it on loopback.
+// namespace on the docker + podman integration lanes, so the server can reach
+// it on loopback there (see TestRunRetryCallbacksCLI for the kubernetes lane,
+// where that does not hold).
 type flakyCallbackReceiver struct {
 	server    *httptest.Server
 	calls     atomic.Int32
