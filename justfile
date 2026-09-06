@@ -286,7 +286,7 @@ integration-test-distributed:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m'; then \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m'; then \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
     else \
       echo "distributed integration tests failed; caesium server logs:"; \
@@ -316,7 +316,7 @@ integration-test-owner-memory:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/TestFanOut" -timeout 30m'; then \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m'; then \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
     else \
       echo "owner-memory integration tests failed; caesium server logs:"; \
