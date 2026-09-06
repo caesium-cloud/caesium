@@ -740,7 +740,7 @@ binary to download (Ledger L14).
 
 ## Harness Strengthening
 
-- [ ] H-1. Make the auth-enabled lane real and wide. In the justfile
+- [x] H-1. Make the auth-enabled lane real and wide. In the justfile
       `integration-test-agent` recipe: (a) add
       `-e CAESIUM_AUTH_MODE=api-key -e CAESIUM_AGENT_REMEDIATION_ENABLED=true`
       to the **runner** container so the existing guards in
@@ -771,6 +771,26 @@ binary to download (Ledger L14).
       (`integration-test-agent`, `agent_integration_run`), new
       `test/auth_lane_test.go`, `test/agent_mcp_test.go`,
       `test/agent_remediation_cli_test.go`, `test/incident_gating_test.go`.
+      Done: the lane now executes **5** scenarios (`TestAgentMCPToolsListBundleAndIncidentScope`,
+      `TestAgentProfileCLIListJSONStdout`, `TestAgentProfileCRUD`,
+      `TestAgentProfileCreateRejectsUnsupportedSecretProvider`,
+      `TestIncidentCLIListJSONStdout`) with `TestIncidentRoutesGatedOffByDefault`
+      inverse-skipped, up from **0**. `requireAuthLane()` (`test/auth_lane_test.go`)
+      does not merely skip off-lane: on-lane it *asserts* the runner carries
+      `CAESIUM_AUTH_MODE=api-key` / `CAESIUM_AGENT_REMEDIATION_ENABLED`, so
+      losing the env again fails the lane instead of skipping it. Two facts the
+      item did not anticipate: (i) the runner also needs
+      `CAESIUM_AUTH_KEY_HASH_SECRET` to match the server's, or the agent-session
+      key `TestAgentMCP…` mints hashes to a value the server cannot look up
+      (401, not 200); (ii) that scenario's `pkg/db.Connection()` would open a
+      *native* dqlite app bound to `CAESIUM_NODE_ADDRESS` — 127.0.0.1:9001,
+      already held by the server on the shared netns — and `pkg/db` `log.Fatal`s
+      on a connection error, so the guard becoming true would have killed the
+      whole test binary; it now reaches the server's catalog through the dqlite
+      *client* driver (`openIntegrationCatalogGorm`, over `openIntegrationCatalogDB`).
+      The floor lives in the new `agent_integration_min_pass` justfile variable
+      (`CAESIUM_AGENT_INTEGRATION_MIN_PASS`, default `3`) so H-2 can reuse the
+      shape per lane; verified failing at `99` and passing at `3`.
 - [ ] H-2. Give every lane an explicit time budget and the hollow-lane guard.
       The default recipe `integration-test` passes no `-timeout` (Go's 10m
       default; L12 shows the suite now takes longer), `integration-test-podman`

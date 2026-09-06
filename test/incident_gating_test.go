@@ -15,10 +15,18 @@ import (
 //
 // The full live approve/reject flow requires the feature enabled AND an active
 // auth mode together (the D1 master-gate precondition refuses remediation under
-// AUTH_MODE=none). That combination needs a dedicated auth-enabled integration
-// server lane, which is stood up by the plan's harness item (H-1); it cannot be
-// enabled on this shared no-auth server without breaking every other scenario.
+// AUTH_MODE=none). That combination runs on the dedicated auth-enabled lane
+// (`just integration-test-agent`, CI job `build-and-integration-test-agent-auth`),
+// widened and de-hollowed by item H-1 of
+// docs/exec-plans/active/trust-the-substrate.md; it cannot be enabled on this
+// shared no-auth server without breaking every other scenario.
+//
+// That widening brings this scenario into the auth lane's `-run` pattern, where
+// its premise is false — the routes ARE mounted there — so it carries the
+// inverse guard (Ledger L10).
 func (s *IntegrationTestSuite) TestIncidentRoutesGatedOffByDefault() {
+	s.skipOnAuthLane("the incident routes are deliberately mounted when remediation is enabled")
+
 	for _, path := range []string{
 		"/v1/incidents",
 		"/v1/incidents/00000000-0000-0000-0000-000000000000",

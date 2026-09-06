@@ -15,20 +15,17 @@ import (
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	iincident "github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
+	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
 func (s *IntegrationTestSuite) TestAgentMCPToolsListBundleAndIncidentScope() {
-	s.Require().NoError(env.Process())
+	s.requireAuthLane()
 	vars := env.Variables()
-	if vars.AuthMode != "api-key" || !vars.AgentRemediationEnabled {
-		s.T().Skip("agent MCP integration requires the auth-enabled remediation lane")
-	}
 
-	conn := db.Connection()
+	conn := s.openIntegrationCatalogGorm()
 	incX, aliasX := seedMCPIncident(s.T(), conn, "x")
 	incY, _ := seedMCPIncident(s.T(), conn, "y")
 
@@ -133,6 +130,32 @@ func (s *IntegrationTestSuite) postAgentMCP(token string, incidentID uuid.UUID, 
 	out, err := io.ReadAll(resp.Body)
 	s.Require().NoError(err)
 	return resp.StatusCode, out
+}
+
+// openIntegrationCatalogGorm returns a gorm handle on the *live server's*
+// catalog database, reached with the dqlite client driver over the network
+// namespace the runner container shares with the server.
+//
+// It deliberately does not use pkg/db.Connection(): that opens a *native*
+// dqlite app bound to CAESIUM_NODE_ADDRESS, which in the runner container means
+// binding 127.0.0.1:9001 — already held by the server on the shared netns — and
+// pkg/db log.Fatals on a connection error, taking the whole test binary with it.
+//
+// The gorm sqlite dialector (rather than pkg/dqlite's) is what wraps the
+// connection: pkg/dqlite's dialector issues `PRAGMA busy_timeout` on any
+// caller-supplied pool, and go-dqlite rejects SQL PRAGMA statements with
+// SQLITE_AUTH. dqlite speaks SQLite, so the dialect itself is the same.
+func (s *IntegrationTestSuite) openIntegrationCatalogGorm() *gorm.DB {
+	s.T().Helper()
+
+	sqlDB := s.openIntegrationCatalogDB()
+	s.T().Cleanup(func() { _ = sqlDB.Close() })
+
+	conn, err := gorm.Open(gormsqlite.Dialector{Conn: sqlDB}, &gorm.Config{
+		SkipDefaultTransaction: true,
+	})
+	s.Require().NoError(err, "open gorm over the integration catalog database")
+	return conn
 }
 
 func seedMCPIncident(t *testing.T, conn *gorm.DB, suffix string) (*models.Incident, string) {

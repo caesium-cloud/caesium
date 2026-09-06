@@ -22,9 +22,7 @@ func (s *IntegrationTestSuite) TestAgentProfileCLIListJSONStdout() {
 }
 
 func (s *IntegrationTestSuite) TestIncidentCLIListJSONStdout() {
-	if !envBool("CAESIUM_AGENT_REMEDIATION_ENABLED") {
-		s.T().Skip("incident CLI stdout check requires the remediation-enabled auth integration lane")
-	}
+	s.requireAuthLane()
 
 	args := []string{"incident", "list", "--json", "--server", s.caesiumURL}
 	if key := firstEnv("CAESIUM_INCIDENT_API_KEY", "CAESIUM_API_KEY", "CAESIUM_E2E_AUTH_ADMIN_KEY"); key != "" {
@@ -42,15 +40,6 @@ func (s *IntegrationTestSuite) TestIncidentCLIListJSONStdout() {
 	}
 	s.Require().NoError(json.Unmarshal([]byte(incidentOut), &incidents))
 	s.Require().NotNil(incidents.Incidents, "incident list JSON must include incidents array")
-}
-
-func envBool(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
 }
 
 func firstEnv(names ...string) string {
