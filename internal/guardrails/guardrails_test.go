@@ -381,8 +381,6 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 		"docs/design-reproduce.md",
 		"docs/design-resource-right-sizing.md",
 		"docs/design-scaling-job-execution.md",
-		"docs/design-sla-management.md",
-		"docs/design-task-templates.md",
 		"docs/design-window-scheduling.md",
 		"docs/differentiation-strategy.md",
 	}

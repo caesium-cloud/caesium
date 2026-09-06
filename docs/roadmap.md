@@ -95,19 +95,23 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 ### 2.2 Composable Task Templates & Registry
 
+**Status**: Parked (2026-09-05) — see the [closed-loop arc § Parked](exec-plans/active/closed-loop-arc.md#parked-archived-filed). DX breadth outside the arc's thesis and the strategy doc's "do not build connector/plugin breadth" line; the door is left open.
+
 **Current state**: Every step is defined inline in the job YAML. Common patterns (dbt-run, spark-submit, s3-sync, pg-dump) are copy-pasted across jobs.
 
 **Target state**: Steps can reference reusable templates with parameterized configuration. Templates can be local files, git references, or entries in a shared registry. This reduces boilerplate, enforces consistency, and creates an ecosystem of community-contributed templates.
 
-**Design doc**: [`design-task-templates.md`](design-task-templates.md)
+**Design doc**: removed 2026-09-06 (superseded; recover with `git show 2459109:docs/design-task-templates.md`)
 
 ### 2.3 SLA Management & Predictive ETAs
 
-**Current state**: No SLA support. Users monitor pipeline health manually or build custom alerting on top of Prometheus metrics.
+**Status**: Parked (2026-09-05) — see the [closed-loop arc § Parked](exec-plans/active/closed-loop-arc.md#parked-archived-filed). Breach detection already shipped (`internal/notification/watcher.go` `scanCompletedBySLA`), freshness SLOs cover the declarative half, and the predictive-ETA engine folds into Plan 4's predictor (optional tail — if Plan 4 is not run, the ETA engine stays parked here).
+
+**Current state**: `sla.duration`/`sla.completedBy` breach detection ships (`scanCompletedBySLA`, `sla_missed` events); no predictive ETAs or escalation chains.
 
 **Target state**: Jobs declare SLA deadlines ("must complete by 06:00 UTC"). Caesium uses historical run durations to predict completion times and escalate proactively — alerting when a pipeline is at risk of missing its SLA, not just when it has already missed. Escalation chains support Slack, PagerDuty, and webhook notifications.
 
-**Design doc**: [`design-sla-management.md`](design-sla-management.md)
+**Design doc**: removed 2026-09-06 (superseded; recover with `git show 2459109:docs/design-sla-management.md`)
 
 ### 2.4 UI Refresh (Caesium Console v2) ✅ Shipped 2026-04-28
 
@@ -131,6 +135,8 @@ Design system, status semantics, and full page refreshes shipped across PRs [#14
 5. Cost model configuration via `CAESIUM_COST_MODEL` env var (JSON mapping resource types to $/unit)
 6. UI: cost column on job list, cost breakdown on run detail, anomaly badges
 7. Anomaly detection: rolling average over last N runs, alert when current run exceeds 2x
+
+**Status**: Items 1, 2 and 4 land as the Phase 5 Plan 2 Stream A stats substrate (see the arc, Convention 5); cost models and anomaly detection remain here.
 
 ---
 
@@ -210,7 +216,7 @@ steps:
 
 ### 3.5 Agent-in-the-Loop ETL Remediation
 
-**Status**: Shipped (runtime). A failing run now opens a persisted incident that a deterministic classifier triages. The `metadata.remediation` jobdef block (`profile`/`classes`/`maxAttempts`/`autonomy`/`escalation`) declares a tiered, server-enforced action policy, and a container-native agent runtime — scoped session token, session supervisor, triage bundle, the `/v1/agent/*` tool surface plus an MCP surface — executes bounded tier-1/2 actions autonomously while tier-3 actions are gated behind a human approval. AgentProfiles are managed via `/v1/agentprofiles`; incident reads, the `ai_agent` dispatch channel, and Console incident/agent-activity/analytics panels ship alongside. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call. Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with an active auth mode.
+**Status**: Shipped (runtime). A failing run now opens a persisted incident that a deterministic classifier triages. The `metadata.remediation` jobdef block (`profile`/`classes`/`maxAttempts`/`autonomy`/`escalation`) declares a tiered, server-enforced action policy, and a container-native agent runtime — scoped session token, session supervisor, triage bundle, the `/v1/agent/*` tool surface plus an MCP surface — executes bounded tier-1/2 actions autonomously while tier-3 actions are gated behind a human approval. AgentProfiles are managed via `/v1/agentprofiles`; incident reads, the `ai_agent` dispatch channel, and Console incident/agent-activity/analytics panels ship alongside. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call. Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with an active auth mode. The tier-3 approval pipeline itself is not yet wired — proposals are recorded but no `ApprovalRequest` is created, approved actions are not executed, and `apply_jobdef_patch`/`skip_task`/`override_schema_gate` have no dispatch; closed by [`trust-the-substrate.md`](exec-plans/active/trust-the-substrate.md) C4/C7 (direct route) and [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) F3 (Git-PR route).
 
 **Delivered state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done.
 
@@ -224,13 +230,13 @@ steps:
 
 A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc. **Freshness-driven scheduling — the strategic flagship — has since shipped** (streams A–G merged), and contract enforcement has also shipped its full implementation wave. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
 
-Each design has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams. Freshness-driven scheduling and contract enforcement have shipped their full waves (see the rows below and the [Completed Features](#completed-features) table); the remaining active plans are eligible for the `exec-plan-wave` skill but have not yet shipped an implementation wave.
+Each design has an execution plan under `docs/exec-plans/{active,completed}/` decomposing it into parallelizable streams. Freshness-driven scheduling and contract enforcement have shipped their full waves (see the rows below and the [Completed Features](#completed-features) table). The four remaining plans (resource right-sizing, deadline-window scheduling, pipeline backtesting, data circuit breaker) are no longer independently eligible for `exec-plan-wave`: they are now sequenced by the [closed-loop arc](exec-plans/active/closed-loop-arc.md) (see [Phase 5](#phase-5-closed-loop-orchestration-current-arc)), which orders them behind a substrate-hardening Plan 0 and folds each into a loop over the shared data-plane memory.
 
 | Design | One-liner | Doc | Plan |
 |--------|-----------|-----|------|
 | Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
 | Dynamic fan-out | **Shipped.** A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md) |
-| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
+| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start (P0 re-cut: predictor + deadline-safe force-start; load/cost/carbon signals parked — see Phase 5) | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
 | Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md) |
 | Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
 | Contract enforcement | **Shipped.** Cross-job schema-compatibility checks at lint/diff/apply with named consumers, REST/CLI/Console graph surfaces, JobDefs diff badges, and an intentional-break acknowledgement path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | `exec-plans/completed/contract-enforcement.md` |
@@ -240,16 +246,42 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 
 ---
 
+## Phase 5: Closed-Loop Orchestration (Current Arc)
+
+Caesium already has a memory of the data plane — execution descriptors, receipts, lineage, per-task cache identity, run history, quarantined replay, `caesium why` / `blame` / `run diff`, and an incident runtime with approval gates — but none of them yet acts on a *data*, *compute*, or *time* signal; the shipped remediation acts only on run failures. This arc closes the loop: Caesium holds bad data before it spreads, sizes compute to what the data actually needed, picks when to run, and proves a fix before it merges — with an agent doing the diagnosis, a human holding the approval, and every automated decision answerable with `caesium why`. The four still-unshipped Phase 4 designs are not four unrelated features; they are three loops over the same memory, and the shipped agent-in-the-loop runtime (`internal/incident/`, `internal/mcp/`) is the connective tissue that makes each loop close durably. The program-level source of truth is [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md); when a child plan and the arc disagree on *why* or on cross-plan ordering, the arc wins.
+
+| Loop | Observe | Judge | Act | Prove |
+|------|---------|-------|-----|-------|
+| **Data** | `##caesium::metrics` per declared dataset, rolling baselines, lineage impact cone | assertion violated | **hold** the dataset; downstream admits straight to `skipped` (`dataset_hold:<ns>/<name>`); `data_quality_hold` incident → agent proposes `release_hold` or a producer patch | backtest the patch over the last N recorded runs before approval |
+| **Compute** | peak memory / CPU seconds / OOM per attempt (fan-out partitions included) | OOM, or `p99(peak) × headroom` far from declared `resources:` | **escalate** the retry to a larger size; `oom` incident (Plan 2 A2 adds an OOM-evidenced → `oom` branch ahead of the `ResourceFailure` → `transient_infra` case) → agent proposes right-sized `resources:` as the catalogued `apply_jobdef_patch` action, whose proposal → approval → execution pipeline Plan 0 wires and whose Git-PR route Plan 1 adds | backtest with a resource override: do the last N runs' peaks fit? |
+| **Time** | per-step duration history from the shared stats substrate | p95 vs. declared window + deadline | **park** the fire as a durable `run_queue` row; force-start at `deadline − p95 − buffer` | — |
+
+Plans run in this order; each is a normal `exec-plan-wave` target with its own streams, dashboard, and acceptance criteria. Sizes are anchored on shipped siblings (`freshness-scheduling` ≈ 4 waves / 11 PRs; `reproduce` ≈ 5 waves). Status lives in the arc dashboard, not here.
+
+| # | Plan | Loop | Plan doc |
+|---|------|------|----------|
+| 0 | Trust the substrate — fix the six ledger bugs, close the tier-3 approval loop (proposal → `ApprovalRequest` → approve → execute), de-hollow and widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, delete dead scaffolding, file the unfiled follow-ups | foundation | [`trust-the-substrate.md`](exec-plans/active/trust-the-substrate.md) |
+| 1 | The data loop — data circuit breaker plus its previously-deferred Phase 3 (`data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance) | data | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
+| 2 | The compute loop — resource right-sizing with the apply path recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations | compute | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
+| 3 | The proof loop — backtesting after a design refresh (`internal/outputdiff` reuse; reconcile with the fan-out-aware replay core), plus proposal verification in the approval flow and assertion-threshold backtests | proof | [`backtesting.md`](exec-plans/active/backtesting.md) |
+| 4 | The time loop *(optional tail)* — window scheduling re-cut to P0 over the shared stats substrate; cost/carbon signals parked | time | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
+| ✦ | Tell it — README rewritten around the loop, strategy doc refreshed, onboarding tour, `v0.2.0` | narrative | drafted as `exec-plans/active/tell-it.md` when Plan 3 enters its final wave |
+
+Plan 4 runs only if the arc still has momentum after Plan 3 and is explicitly not an arc gate. The arc's § Parked records what was set aside so it does not rot inside archived plans: §2.2 task templates and §2.3 SLA management (above), window-scheduling P1/P2 signal sources, the `park` run disposition, per-partition freshness watermarks, and selective per-task re-run for quarantined replay.
+
+---
+
 ## Execution Priority
 
 | Priority | Feature | Rationale |
 |----------|---------|-----------|
+| **P0** | Phase 5 closed-loop arc | Plan 0 first: the substrate must be true and obtainable before the loops build on it. Then Plans 1 → 2 → 3 → (4) → ✦ per [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md). |
 | **P0** | 1.2 Event-driven routing | Completes the trigger story. Without events, Caesium can only do time-based and manual scheduling. |
 | **P1** | 1.3 Concurrency strategies | Table-stakes for shared clusters. Blocks multi-team adoption. |
 | **P1** | 1.4 Priority queues | Small scope, high impact for distributed deployments. |
 | **P1** | 2.1 PR preview runs | Leverages existing CLI capabilities. Uniquely strong differentiator. |
-| **P2** | 2.2 Task templates | Creates ecosystem and reduces boilerplate. Medium scope. |
-| **P2** | 2.3 SLA management | Genuinely unique. No orchestrator does this well. |
+| **P2** | 2.2 Task templates | Creates ecosystem and reduces boilerplate. Medium scope. *Parked 2026-09-05 (see §2.2).* |
+| **P2** | 2.3 SLA management | Genuinely unique. No orchestrator does this well. *Parked 2026-09-05 (see §2.3); breach detection shipped, ETA folds into Phase 5 Plan 4.* |
 | **P2** | 2.4 UI refresh | Visual identity + primitive consolidation. Phased so foundations land first and propagate automatically. |
 | **P2** | 2.5 Cost tracking | FinOps for pipelines. Large scope but high value. |
 | **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. |
@@ -257,7 +289,7 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
 | **P3** | 3.5 Agent-in-the-loop remediation | Runtime shipped. Converts the data-plane-memory substrate into autonomous ops; the `metadata.remediation` policy + agent runtime land, Phase 0 (diagnosed pages) first. |
-| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling and contract enforcement have **shipped** their full waves, with right-sizing the remaining near-term standout. |
+| **P3** | Phase 4 design wave | Nine proposed designs compounding the data-plane substrate; freshness-driven scheduling, contract enforcement, dynamic fan-out, `caesium reproduce`, and infra-deploy have **shipped** their full waves. The four unshipped designs (right-sizing, window scheduling, backtesting, circuit breaker) are no longer prioritised here — they are sequenced as Plans 1–4 of the [Phase 5](#phase-5-closed-loop-orchestration-current-arc) closed-loop arc (P0 above). |
 
 ---
 
@@ -287,7 +319,9 @@ Features that were previously on the roadmap and are now shipped:
 
 ## Related Documents
 
-- [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel
+- [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel (re-scored 2026-09-05)
+- [Closed-Loop Orchestration — The Arc](exec-plans/active/closed-loop-arc.md) — the Phase 5 umbrella: program-level source of truth sequencing Plans 0–4 and the closing "tell it" wave
+- [Exec Plan: Trust the Substrate](exec-plans/active/trust-the-substrate.md) — Plan 0 of the arc: known-bug fixes, widened auth-enabled integration lane, CI gating, `v0.1.0` with a downloadable CLI, dead-scaffolding removal, unfiled follow-ups filed
 - [Exec Plan: Sovereignty Execution](exec-plans/completed/sovereignty-execution.md) — operationalizes the positioning pivot (README repositioning + Kueue delegation); shipped
 - [Design: Data-Plane Memory](design-data-plane-memory.md) — the second-act substrate enabling explain/reproduce/skip
 - [Exec Plan: Data-Plane Memory](exec-plans/completed/data-plane-memory.md) — the substrate build plan (streams A–D); shipped (#213–#222)
@@ -296,6 +330,4 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system
 - [Design: Event-Driven Triggers](design-event-triggers.md) — P0 trigger overhaul
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
-- [Design: Task Templates](design-task-templates.md) — P2 reusable steps
-- [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
 - [Design: Agent-in-the-Loop ETL Remediation](design-agent-in-the-loop.md) — P3 autonomous failure triage & remediation

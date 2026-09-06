@@ -4,9 +4,12 @@
 > completion deadline and signal-driven start selection. No implementation
 > yet. The *temporal* slice of "Dataflow-style elasticity"; the spatial slice
 > is [`design-dynamic-fanout.md`](design-dynamic-fanout.md). Companions:
-> [`design-sla-management.md`](design-sla-management.md) (§2.3),
+> roadmap §2.3 SLA management (its design doc was removed 2026-09-06; this design's predictor is the home for its predictive ETA),
 > [`design-freshness-scheduling.md`](design-freshness-scheduling.md),
 > [`design-resource-right-sizing.md`](design-resource-right-sizing.md).
+> → **active — Plan 4 of the closed-loop arc (optional tail)** (see
+> [`exec-plans/active/window-scheduling.md`](exec-plans/active/window-scheduling.md);
+> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 
@@ -359,9 +362,10 @@ endpoint ships with an integration test in `test/` driving the real surface.
 - [`design-resource-right-sizing.md`](design-resource-right-sizing.md) —
   same run-history substrate applied to sizing; its cost models should share
   the signal-source interface defined here.
-- [`design-sla-management.md`](design-sla-management.md) — shipped breach
-  detection reused verbatim; its proposed predictive-ETA engine should become
-  the shared quantile provider.
+- roadmap §2.3 SLA management — shipped breach detection
+  (`internal/notification/watcher.go`) reused verbatim; the removed design's
+  predictive-ETA engine (recover with `git show 2459109:docs/design-sla-management.md`)
+  becomes the shared quantile provider here.
 - [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) —
   `window_deadline_at_risk` / `window_forced` are incident inputs; "reschedule
   within window" is a natural bounded playbook verb.

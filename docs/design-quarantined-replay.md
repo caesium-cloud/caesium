@@ -1,6 +1,6 @@
 # Design: Quarantined Replay
 
-> Status: Design - authoritative for replay safety invariants (data-plane-memory-ii B1).
+> Status: Shipped — implemented by data-plane-memory-ii Stream B (#233, #235, #240–#244); remains the authoritative safety-invariant spec for replay/backtest (originally the data-plane-memory-ii B1 design gate; the closed-loop arc's Plan 3 backtesting builds on these invariants).
 
 This memo is the B1 design gate for
 [`data-plane-memory-ii`](exec-plans/completed/data-plane-memory-ii.md). It fixes the

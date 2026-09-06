@@ -1,6 +1,6 @@
 # Design: Volumes & Workload-Identity Passthrough (BYO storage + identity)
 
-**Status:** Proposed
+**Status:** Shipped (PRs #207/#208, 2026-06-18/19): volumes, PVC/claimTemplate/bind/tmpfs mounts, serviceAccountName passthrough, and the Component 0 executor fix; node-affinity/co-location for RWO volumes in distributed mode remains open (to be filed as an issue by Plan 0 N-3 of the closed-loop arc — `../../exec-plans/active/closed-loop-arc.md` § Parked, archived, filed)
 **Date:** 2026-05-29
 **Author:** Christopher Ryan
 **Topic:** Inter-step file handoff via bring-your-own shared storage, and bring-your-own
