@@ -46,7 +46,12 @@ port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
 contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
-agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
+agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/(TestAgent|TestAuth|TestIncident|TestScoped|TestHold)")
+# Minimum number of suite scenarios the auth lane must actually execute. The
+# lane used to pass in 0.068s with every scenario skipped on an env guard the
+# runner container never received; the recipe now counts `--- PASS` lines and
+# fails below this floor so a hollow lane can never be green again.
+agent_integration_min_pass := env("CAESIUM_AGENT_INTEGRATION_MIN_PASS", "3")
 # Suite-qualified: a bare method name matches no test at all.
 infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
 # A deliberately fake deploy key. The infra lane resolves it through the real
@@ -320,6 +325,13 @@ integration-test-owner-memory:
       exit 1; \
     fi
 
+# The runner container is given the same CAESIUM_AUTH_MODE /
+# CAESIUM_AGENT_REMEDIATION_ENABLED / CAESIUM_AUTH_KEY_HASH_SECRET that
+# `integration-up-agent` gives the server. Keep the hash secret in sync with it:
+# a mismatch makes every agent-session key the suite mints unlookupable, so the
+# server answers 401 where the scenario expects 200.
+
+# Run the integration suite against an auth-enabled, remediation-enabled server.
 integration-test-agent:
     just tag={{ tag }} integration-up-agent
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
@@ -354,7 +366,10 @@ integration-test-agent:
         fi; \
         sleep 1; \
     done; \
-    if {{ container_cli }} run --rm --platform {{ platform }} \
+    log={{ repo_dir }}/.tmp/integration-test-agent.log; \
+    rm -f "$log"; \
+    rc=0; \
+    {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
@@ -363,19 +378,32 @@ integration-test-agent:
         -e CAESIUM_AUTH_ADMIN_KEY="$admin_key" \
         -e CAESIUM_API_KEY="$admin_key" \
         -e CAESIUM_AGENT_AUTH_LANE=true \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
+        -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
         -e CAESIUM_TRIAGE_AGENT_IMAGE={{ triage_agent_image }}:latest \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ agent_it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 10m'; then \
-      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
-    else \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 10m -v' >"$log" 2>&1 || rc=$?; \
+    cat "$log"; \
+    passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
+    passes=${passes:-0}; \
+    if [ "$rc" -ne 0 ]; then \
       echo "agent auth integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ agent_it_container }} || true; \
       {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
-    fi
+    fi; \
+    if [ "$passes" -lt {{ agent_integration_min_pass }} ]; then \
+      echo "agent auth lane executed only $passes scenario(s), expected at least {{ agent_integration_min_pass }}: the lane is hollow (guards skipped every scenario)"; \
+      {{ container_cli }} logs {{ agent_it_container }} || true; \
+      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
+    echo "agent auth lane executed $passes scenario(s) (minimum {{ agent_integration_min_pass }})"; \
+    {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
 
 integration-down:
     {{ container_cli }} rm -f {{ it_container }}
