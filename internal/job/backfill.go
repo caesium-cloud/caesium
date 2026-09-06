@@ -250,7 +250,11 @@ func RunBackfill(
 			defer wg.Done()
 			defer sem.Release(1)
 
-			runCtx := runstore.WithContext(context.Background(), id)
+			// Each backfill run is independently cancellable: cancelling one of
+			// them must stop that run's container, not the whole backfill.
+			cancelCtx, release := RegisterRunCancel(context.Background(), id)
+			defer release()
+			runCtx := runstore.WithContext(cancelCtx, id)
 			runErr := New(j, WithTriggerID(nil), WithParams(params)).Run(runCtx)
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)

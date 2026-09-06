@@ -358,7 +358,11 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 				log.Error("replay dispatch panic", "job_id", runModel.JobID, "run_id", runID, "recover", r)
 			}
 		}()
-		runCtx := runstorage.WithContext(context.Background(), runID)
+		// A quarantined replay is a detached run like any other: cancelling it
+		// must reach its containers.
+		cancelCtx, release := jobrunner.RegisterRunCancel(context.Background(), runID)
+		defer release()
+		runCtx := runstorage.WithContext(cancelCtx, runID)
 		err := jobrunner.New(
 			&jobModel,
 			jobrunner.WithTriggerID(nil),

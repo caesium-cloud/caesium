@@ -486,7 +486,12 @@ func withPartitionRetryReplacement(taskRunIDs []uuid.UUID) JobOption {
 // taskRunIDs are the retry-reset instances the replacement is responsible for.
 func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, taskRunIDs []uuid.UUID) {
 	go func() {
-		runCtx := run.WithContext(context.Background(), runID)
+		// The replacement engine registers its own cancellable context against
+		// the SAME run id: the registry holds a set per run, so cancelling the
+		// run reaches this engine and the one that spawned it.
+		cancelCtx, release := RegisterRunCancel(context.Background(), runID)
+		defer release()
+		runCtx := run.WithContext(cancelCtx, runID)
 		replacement := New(&models.Job{
 			ID:               j.id,
 			Alias:            j.alias,
@@ -1465,6 +1470,30 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
 				return "", nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+			}
+			// A CANCELLED run must reach the container, exactly as a timed-out
+			// task already does. Only the deadline branch used to stop the atom,
+			// so `caesium run cancel` and the concurrency `replace` admission
+			// wrote the row cancelled and abandoned a live container: it ran to
+			// completion holding a pool slot and a rate-limit token, and before
+			// PR #275's terminal guards its exit overwrote the cancelled row
+			// (cancelled → running → succeeded). The cancellation reaches this
+			// select because every detached run context is derived from the
+			// run-cancel registry (cancel_registry.go).
+			//
+			// Force, like the timeout branch: a container the run has already
+			// given up on must not be allowed to outlive it by its own graceful
+			// stop timeout. A failed Stop is reported rather than swallowed —
+			// "cancelled" and "cancelled but the container is still out there"
+			// are different operational facts.
+			if errors.Is(taskCtx.Err(), context.Canceled) {
+				if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+					ID:    a.ID(),
+					Force: true,
+				}); stopErr != nil {
+					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
+				}
+				return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
 			}
 			return "", nil, nil, nil, nil, taskCtx.Err()
 		case result := <-waitResult:
