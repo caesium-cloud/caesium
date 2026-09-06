@@ -470,8 +470,15 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       an absence — the design's "an invisible non-run would be silent-poison's evil
       twin"), leaving the concurrency path's no-row behavior unchanged;
       (c) reuse the existing `admissionSkipped`/`skipReason` plumbing to carry the
-      reason to that insert. Confirm `JobRunStatus*` gains/uses a `skipped` value
-      and that run-list/why readers tolerate a run with no tasks.
+      reason to that insert. Confirm `JobRunStatus*` gains/uses a `skipped` value.
+      (d) **A hold-skipped run has task rows.** Materialise one `TaskRun` per
+      catalog task of the job in terminal `skipped` status through the shape
+      `markInstanceSkippedWhereTx` already produces for trigger-rule skips — the
+      reason in the row's `error` column, `dataset_hold:<ns>/<name> hold=<id>` —
+      and emit `task_skipped` for each, so run history, the DAG view and the
+      task-scoped `why` (F5) all have rows to read; "a run with no tasks" is not
+      a shape any reader has to tolerate. (Revised 2026-09-06 after review: the
+      earlier wording left the run task-less and F5 unsatisfiable.)
       **Depends inline on [`trust-the-substrate.md`](trust-the-substrate.md) Stream A**
       (the tolerant-rule stranding fix): until a failed plain task's successors
       advance correctly in the SQL lane, "downstream skipped because held" is not
@@ -883,11 +890,20 @@ precedent for it is warn-mode schema validation, which publishes
       `WhyExplanation.Summary` line must say so. Render it in `cmd/why/why.go`
       `renderTable` (and keep it in the `--json` shape). **Do not add a run-level
       `why` verb** — the arc is explicit that today's explainer is task-scoped and
-      no plan adds one. Note the shape problem in the PR: a gate-skipped run has
-      **no tasks**, so a task-scoped `why` has no task to name; resolve it by
-      making the skip reason readable from the run's own explanation path and
-      document the chosen behavior. (c) One integration scenario asserts the `why`
-      output for a hold-skipped run, capturing **stdout separately** via
+      no plan adds one. **The explanation surface is (decided 2026-09-06):** C2(d)
+      gives a hold-skipped run a `skipped` `TaskRun` per catalog task, so
+      `caesium why <run-id> --task <any step> --job-id <job-id>` resolves a task
+      exactly as it does today; this item adds the missing verdict —
+      `VerdictSkipped` (`SKIPPED`) beside `CACHE_HIT`/`CACHE_MISS`/`CACHE_DISABLED`/
+      `UNKNOWN` in `internal/run/why.go` — populated when the instance row's
+      status is `skipped`, carrying the row's `error` reason (which today's
+      trigger-rule skips also benefit from: "SKIPPED — trigger rule
+      `all_success` not satisfied"), and `WhyTrigger` carries the run-level
+      hold provenance so the `Summary` line reads
+      `SKIPPED — dataset <ns>/<name> held since run <id> (assertion <name>:
+      observed <v> vs bound <b>; hold <hold-id>)`. Render both in `renderTable`
+      and in the API's JSON. (c) One integration scenario asserts that exact
+      `why` output for a hold-skipped run, capturing **stdout separately** via
       `runCLIStdout` (never the stream-merging `runCLIRaw`).
       Files: `internal/run/why.go`, `cmd/why/why.go`,
       `api/rest/controller/why/why.go`, `test/`.
@@ -1071,8 +1087,7 @@ here; the ordering it fixes and this plan honors:
   [`backtesting.md`](backtesting.md) Stream F item **F3** ("Add the
   assertion-threshold backtest — pure metric replay") calls both, and that plan's
   own preamble records "**F3** needs Plan 1 A2 … A5". Ship them in that
-  shape in the first place. (The arc's Synergies row still says "Plan 3 F2" — a
-  stale id raised as an arc-doc change, not fixed here.)
+  shape in the first place.
 - **Plan 2 Stream A may overlap Plan 1's D/E waves** (disjoint files) but must
   **never share a wave with Plan 1 Stream A** — both edit `internal/job/job.go` and
   `internal/worker/runtime_executor.go`. **Plan 1's Stream F is explicitly NOT in
@@ -1286,7 +1301,9 @@ The plan is done when **all** of these hold:
    diff (and degrades to `escalate` with the diff when
    `CAESIUM_GIT_WRITE_CREDENTIALS` has no matching entry); a held dataset reports
    **not fresh** and does not derive a freshness-triggered run; and
-   `caesium why <downstream-run> --task <task> --job-id <job-id>` names the hold.
+   `caesium why <downstream-run> --task <task> --job-id <job-id>` returns verdict
+   `SKIPPED` and a summary naming the held dataset, the violated assertion and
+   the hold id (the run has one `skipped` task row per catalog task, C2(d)).
 7. **H-1 — every lane runs the real path:** `CAESIUM_DATA_ASSERTIONS_ENABLED=true`
    is set on `integration-up` **and** on `integration-up-distributed`,
    `-owner-memory`, `-agent`, `-infra`, `integration-test-podman`, **`ui-e2e`,
@@ -1434,13 +1451,12 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    overloading `Quarantined`. `Violated` is the closest existing fit but already
    means "freshness SLO breached", which would make the reason string carry all the
    distinction. Decide in F4.
-4. **`why` for a task-less run (F5).** A gate-skipped run has no tasks, but the
-   shipped explainer is task-scoped (`WhyTask` / `WhyTaskPartition`) and the arc
-   forbids adding a run-level `why` verb. How does an operator ask "why did nothing
-   run?" — `caesium why <run-id>` with no `--task` returning the trigger block
-   alone, or the skip reason surfaced on the run detail/list instead? Decide in F5
-   and, if the answer needs a shape the arc's convention 3 does not anticipate,
-   raise it to the arc doc rather than adding a verb.
+4. **`why` for a task-less run (F5) — resolved 2026-09-06.** A hold-skipped run
+   is not task-less: C2(d) materialises a `skipped` `TaskRun` per catalog task, and
+   F5 adds the `SKIPPED` verdict to the task-scoped explainer, so
+   `caesium why <run-id> --task <any step>` answers "why did nothing run?"
+   without a run-level verb. Remaining sub-question: whether the run *list*
+   should also surface `SkipReason` inline (Stream E may add it; not a gate).
 5. **Forge coverage and its test bar (F3).** GitHub first is settled; GitLab and
    Gitea are not scoped. Neither is the CI verification bar for the live-PR path —
    an integration test cannot open a real PR, so the honest bar is a unit test

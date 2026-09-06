@@ -460,9 +460,12 @@ design:
       column to the quarantined `JobRun` recording the delta (so `caesium why` /
       `run diff` attribute the re-run to the `image` field for free). Digest-resolve
       the candidate tag to `sha256:…` **up front, once, at backtest-create time**
-      via `internal/imagecheck/resolve.go` — all N replays run that digest;
-      unresolvable images are **refused, not degraded** *for Docker-engine
-      baselines* (see the engine rule in the Refresh below).
+      via `internal/imagecheck/resolve.go` — the resolved `sha256:…` is stored
+      on the `Backtest` row and it is the **digest, never the tag**, that is
+      written into every replay's candidate descriptor, so all N replays run
+      one image even if the tag moves mid-backtest; a candidate that cannot be
+      digest-resolved is **refused, not degraded, on every engine** (see the
+      engine rule in the Refresh below).
       **Refresh (2026-09-05):** apply the override inside `planTasks` per group
       (it is the group's `descriptor()` that names the step) to each instance's
       `task.descriptor` copy before `computeDescriptorInstanceHash`, so a fanned
@@ -495,17 +498,28 @@ design:
       `models.AtomEngineDocker` only (`r.byEngine[models.AtomEngineDocker] =
       dockerDigestFunc`), and `Resolve` returns `ErrDigestUnavailable` +
       `cacheNegative` whenever `fn == nil` — so podman and k8s baselines can
-      *never* resolve a tag. A blanket "refuse unresolvable" rule would therefore
-      silently refuse every override backtest whose baseline ran on the helm/kind
-      lane (the arc's k8s verification bar, convention 2). **v1 rule:** refuse only
-      when the baseline's `desc.Runtime.Engine` is `docker` and resolution fails
-      (a moved/absent Docker tag is a real hazard we can detect); for `podman` and
-      `kubernetes` baselines, accept the candidate **tag-pinned**, record
-      `digest_unresolved` on the `BacktestRun` row, and surface it as a per-run
-      caveat in the report/CLI/heat-strip tooltip ("candidate not digest-pinned on
-      engine `kubernetes`") so the reader knows the candidate identity is only as
-      stable as the tag. A `@sha256:` candidate reference is always accepted on any
-      engine (`digestFromReference` short-circuits before the backend lookup).
+      *never* resolve a tag. **v1 rule (revised 2026-09-06 after review):** a
+      candidate whose digest cannot be established is **refused on every
+      engine** with a typed `ErrCandidateUnpinned` whose message names the
+      accepted form (`image@sha256:…`) and the CLI flag that produces it —
+      accepting a mutable tag on podman/kubernetes would let each replay task
+      resolve the image independently at container-create time, so a tag that
+      moves during an N-run backtest (or workers holding different cached
+      versions) would combine results from different images under one
+      candidate verdict, which is exactly the identity guarantee the design
+      requires. A `@sha256:` candidate reference is accepted on any engine
+      (`digestFromReference` short-circuits before the backend lookup), so the
+      helm/kind and podman lanes stay usable: their scenarios pass a digest
+      reference obtained in the harness (`docker manifest inspect` / image
+      inspect on the fixture image), and D2's `--image` gains a
+      `--resolve-digest` behaviour (default on) that pins client-side before
+      submission using the local container CLI or a registry manifest HEAD,
+      so an operator can still type a tag. The engine-independent registry
+      resolver that would let the server resolve tags for podman/k8s itself is
+      the Plan 0 N-3 follow-up ("Podman/k8s pre-run digest resolution"); when it
+      ships, the refusal narrows to genuinely unresolvable references. No
+      `digest_unresolved` caveat state exists — a backtest either has one digest
+      for all N runs or it is not created.
       Replay's own fan-out
       cross-checks (`assertReusedProducerListMatches`, `adoptRecordedPartitions`)
       are untouched — an image override never changes a partition list, because
@@ -1322,9 +1336,11 @@ The plan is done when **all** of these hold:
    principal capability under `api-key` mode** (C2's scoped rule); a structural
    (`--path`) change is rejected toward `job diff`; an override on a fanned
    template step re-executes every partition, while partition-scoped and
-   fan-out-producer overrides are refused with the typed errors; a Docker-engine
-   candidate that cannot be digest-resolved is refused, while a podman/k8s
-   candidate is accepted tag-pinned and flagged `digest_unresolved`. Closed by an
+   fan-out-producer overrides are refused with the typed errors; a candidate
+   whose digest cannot be established is refused with `ErrCandidateUnpinned`
+   on every engine, and every replay of a backtest runs the single digest
+   stored on the `Backtest` row (asserted by inspecting the N replay
+   `TaskRun.ResolvedImageDigest` values). Closed by an
    override integration scenario on `just integration-test-distributed` asserting
    exactly the changed runs, re-executed/cached counts, the fan-out rules, and
    zero production side effects.

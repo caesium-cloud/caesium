@@ -67,7 +67,7 @@ not a substitute.
 | L11 | `/jobs/:id/unpause` is **`PUT`**, not POST (`api/rest/bind/bind.go` `g.PUT("/jobs/:id/unpause", job.Unpause)`). `whoami` is mounted at `/auth/whoami` (not `/v1/…`) in `api/api.go` with `authMiddleware`; `internal/auth/rbac.go` maps `GET /auth/whoami` → `RoleViewer`; `api/middleware/auth_scope.go` `authorizeScope` has no `/auth/whoami` case, so a job-scoped key falls to the trailing `insufficient permissions` deny. `ui/e2e/auth/auth-smoke.spec.ts` "a job-scoped key is denied the global whoami (API-only principal)" pins the 403. | as cited | C1/C6. |
 | L12 | Master red causes (last 17 runs, 6 failures): default lane (`build-and-integration-test`) ×2 → `panic: test timed out after 10m0s` — the recipe passes **no `-timeout`**, so the suite now exceeds Go's default; helm/kind lane ×1 → `test timed out after 15m0s`; owner-memory ×2 → `TestFanOutHTTPRetryPartition` "a reset instance never ran again" (runs 33563305235, 33563129021 — pre-#384; not seen since); podman ×1 → `TestGenericUnitPipelineCachesPerUnit` "unit pipeline run … should succeed" (run 33563332037); unit-test ×1 → `no such vfs` in `TestRouterRoutePersistsEventAndMatches` / `TestRouterRouteAfterSharedTriggerJobDeleteFiresSibling` (run 33254267485). | `gh run view <id> --log` | D1/H-2 start from these, not from a fresh triage. |
 | L13 | `gh api repos/caesium-cloud/caesium/branches/master/protection` → `required_status_checks.contexts: []`, `checks: []`. | live API | D2. |
-| L14 | `helm/caesium/Chart.yaml` is already `version: 0.1.0` (only `appVersion` is `"latest"`), so E3's chart work is an `appVersion` pin, not a `version` bump. `caesiumcloud/caesium:latest` **exists** on Docker Hub, but the `publish` job has never run (no `v*` tag; `gh release list` empty) and it pushes only `${IMAGE_TAG}` (never `latest`); `helm/caesium/values.yaml` `image.tag: ""` defaults to `Chart.appVersion` = `"latest"`, so every Helm install today pulls an image CI never built. `just run` builds from source. `build/Dockerfile.build` builds with `GOOS=linux GOARCH=${TARGETARCH}` against a CGO dqlite built in the same stage — no darwin target is possible from this builder. | justfile `run`/`push`/`push-multiarch`; `.github/workflows/ci.yml` `publish`; `helm/caesium/Chart.yaml`; `build/Dockerfile.build` | E1 is linux-only; E3 pins `appVersion` to the tag. |
+| L14 | `helm/caesium/Chart.yaml` is already `version: 0.1.0` (only `appVersion` is `"latest"`), so E3's chart work is an `appVersion` pin, not a `version` bump. `caesiumcloud/caesium:latest` **exists** on Docker Hub, but the `publish` job has never run (no `v*` tag; `gh release list` empty) and it pushes only `${IMAGE_TAG}` (never `latest`); `helm/caesium/values.yaml` `image.tag: ""` defaults to `Chart.appVersion` = `"latest"`, so every Helm install today pulls an image CI never built. `just run` builds from source. `build/Dockerfile.build` builds with `GOOS=linux GOARCH=${TARGETARCH}` against a CGO dqlite built in the same stage — no darwin target is possible from this builder — and the result is **dynamically linked**: `build/Dockerfile`'s builder stage runs `ldd /dist/bin/caesium` to collect its `.so` closure into the image, so the executable alone is not a host binary. | justfile `run`/`push`/`push-multiarch`; `.github/workflows/ci.yml` `publish`; `helm/caesium/Chart.yaml`; `build/Dockerfile.build` | E1 is linux-only and must ship a statically linked (or lib-bundled) artifact with a bare-host smoke test; E3 pins `appVersion` to the tag. |
 | L15 | `README.md` is **not** scanned by `TestPinnedContainerImageVersionsAreConsistent` (`scanDirs` in `internal/guardrails/guardrails_test.go` lists `api build cmd docs helm internal pkg test ui .github`) — which is why its stale base-image tag (3.20) survives. `docs/` **is** scanned: this plan and every doc the plan touches must use `alpine:3.23` / `busybox:1.36.1`. | as cited | N-1 fixes the drift; all docs items obey the pin. |
 | L16 | `docs/roadmap.md` Phase 5 table and `docs/README.md` already link `exec-plans/active/trust-the-substrate.md` — but **both describe this plan as "fix the five known bugs"** (`docs/roadmap.md` row 0 of the Phase 5 table; `docs/README.md` the `exec-plans/active/trust-the-substrate.md` bullet), which the ledger's six bugs (L1, L3, L5, L6, L7, L9) and the arc's own AC 1 ("the six ledger bugs") contradict. `docs/roadmap.md`'s Phase 5 table has **four** columns (#, Plan, Loop, Plan doc) and no status column — arc convention 7 forbids adding one. `.gitignore` has `.claude/*` (18 worktree checkouts under `.claude/worktrees` are ignored, not tracked, but **are** on disk and inside any bare `grep -r` scan set); `ui/test-results/.last-run.json` **is** tracked. | `git ls-files ui/test-results`; `git check-ignore -v .claude/worktrees`; `docs/roadmap.md` Phase 5 table; `docs/README.md` active-plans list | Two sibling-doc wording fixes are needed after all — N-4 carries them (this corrects the draft-time "no sibling doc edits needed"); D3 handles hygiene; F1's verification grep must exclude the worktree checkouts. |
 
@@ -586,27 +586,63 @@ The README's first sentence is "single self-contained binary"; there is no
 binary to download (Ledger L14).
 
 - [ ] E1. Extend the `publish` job to create a GitHub Release with per-arch
-      CLI binaries. After the existing "Load release images" step, extract
-      `/bin/caesium` from `caesiumcloud/caesium:${IMAGE_TAG}-amd64` and
-      `…-arm64` (`docker create` + `docker cp`, the same idiom the
-      helm/podman jobs use), name them `caesium-linux-amd64` /
-      `caesium-linux-arm64`, write `SHA256SUMS`, and attach all three to a
-      release for `${IMAGE_TAG}` via `gh release create --verify-tag
-      --generate-notes` (or `softprops/action-gh-release`), plus the
-      multi-arch image digests in the release body. Add
-      `permissions: contents: write` on the **publish job only** (not the
-      workflow top-level, to keep D1/H-2's edits to the test jobs
-      conflict-free). **Linux only**: the builder compiles with
-      `GOOS=linux` against CGO dqlite built in-stage (`build/Dockerfile.build`),
-      so a darwin binary is out of scope — say so in the release notes
-      template and in N-1's install step (macOS users run the container via
-      `just cli`/E2). Files: `.github/workflows/ci.yml` (`publish` job only).
-- [ ] E2. Add a `cli` justfile recipe: `just tag=v0.1.0 cli` pulls
-      `caesiumcloud/caesium:{{tag}}` (defaulting to the latest release tag
-      resolved with `gh release view --json tagName` when `tag` is `latest`),
-      `docker create` + `docker cp` the binary to `./.tmp/caesium-cli/caesium`
-      (the path every integration recipe already uses), prints the path, and
-      refuses to run when the tag does not exist. Place it directly after
+      CLI binaries **that run on a bare Linux host**. The executable in the
+      release image is **dynamically linked** — `CGO_ENABLED=1` in
+      `build/Dockerfile.build`, and `build/Dockerfile`'s builder stage
+      collects its shared-library closure with `ldd` (musl, `libdqlite`,
+      `libuv`, `lz4`, `sqlite`) into the image — so extracting `/bin/caesium`
+      alone (the first draft of this item) would publish a download that
+      fails to load outside the image. (Revised 2026-09-06 after review.)
+      (a) **Portable artifact, primary path — static link.** Add a
+      `caesium-static` build target to `build/Dockerfile.build`/`build/Dockerfile`:
+      in the `dqlite` stage also install the static archives
+      (`sqlite-static`, `libuv-static`, `lz4-static`) and build dqlite with
+      `--enable-static`; in a new `cli-static` stage link with
+      `-tags libsqlite3 -ldflags '-linkmode external -extldflags "-static"'`
+      (the form go-dqlite documents for static builds) and fail the stage
+      unless `ldd` reports the binary is statically linked. Export it as a
+      `release-cli-<arch>` artifact from the existing per-arch build jobs
+      (additive step; no change to the image build).
+      (b) **Bare-host smoke test in `publish`** — the gate, whichever
+      artifact ships: run each downloaded binary inside a minimal container
+      that carries **no** extra libraries (a plain glibc base, not the
+      release image), asserting `caesium --help` exits 0 and
+      `caesium job lint --path docs/examples/minimal.job.yaml` succeeds;
+      then name them `caesium-linux-amd64` / `caesium-linux-arm64`, write
+      `SHA256SUMS`, and attach all three to a release for `${IMAGE_TAG}` via
+      `gh release create --verify-tag --generate-notes` (or
+      `softprops/action-gh-release`), plus the multi-arch image digests in
+      the release body. Add `permissions: contents: write` on the **publish
+      job only** (not the workflow top-level, to keep D1/H-2's edits to the
+      test jobs conflict-free).
+      (c) **Fallback, only if (a) cannot be made to link in the wave** (record
+      the exact linker failure in the PR): publish
+      `caesium-linux-<arch>.tar.gz` containing the executable plus the
+      `ldd`-collected library closure the image build already produces and a
+      `caesium` wrapper script that sets `LD_LIBRARY_PATH` to the bundle;
+      label it as a bundled-libs artifact in the release notes and in N-1's
+      install step, and file the static build via N-3. The (b) smoke test
+      runs the wrapper.
+      **Linux only**: the builder compiles with `GOOS=linux` against CGO
+      dqlite built in-stage, so a darwin binary is out of scope — say so in
+      the release notes template and in N-1's install step (macOS users run
+      the container via `just cli`/E2).
+      Files: `build/Dockerfile.build`, `build/Dockerfile`,
+      `.github/workflows/ci.yml` (per-arch build jobs: artifact export;
+      `publish` job: smoke test + release).
+- [ ] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
+      host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
+      (defaulting to the latest release tag resolved with
+      `gh release view --json tagName` when `tag` is `latest`) and writes
+      `./.tmp/caesium-cli/caesium` as a **wrapper script** that runs the CLI
+      inside that image (`docker run --rm --network host -v "$PWD":/work -w
+      /work caesiumcloud/caesium:<tag> caesium "$@"`, env passthrough for
+      `CAESIUM_*`), prints the path, and refuses to run when the tag does not
+      exist. A `docker cp` of the image's executable is **not** a host binary
+      (E1's linking facts) — the existing `docker cp` in the integration
+      recipes is only valid because the copied binary runs *inside* the
+      builder container. On Linux, `just cli` prefers the E1 static binary
+      from the release when present. Place the recipe directly after
       `push-multiarch`. Files: `justfile`.
 - [ ] E3. Version the Helm chart with the release. Set
       `helm/caesium/Chart.yaml` `appVersion: "v0.1.0"` (from `"latest"`);
@@ -1010,8 +1046,13 @@ The plan is done when **all** of these hold:
    exists with `caesium-linux-amd64`, `caesium-linux-arm64`, `SHA256SUMS`;
    `docker manifest inspect caesiumcloud/caesium:v0.1.0` lists
    `linux/amd64` and `linux/arm64`; `helm/caesium/Chart.yaml` `appVersion`
-   equals the tag and the rule is documented; `just tag=v0.1.0 cli` yields a
-   runnable `./.tmp/caesium-cli/caesium --help`.
+   equals the tag and the rule is documented; the `publish` job's bare-host
+   smoke test (E1(b)) passed for both binaries — `caesium --help` and
+   `caesium job lint` succeed in a minimal glibc container with no extra
+   libraries — and the release notes state which artifact form shipped
+   (static, or the bundled-libs fallback with the issue number); `just
+   tag=v0.1.0 cli` yields a runnable `./.tmp/caesium-cli/caesium --help` on
+   the host.
 6. **Stream F — dead scaffolding:** `api/gql/`, `internal/task/`,
    `pkg/client/` are gone; `pkg/bytes`/`pkg/compare` are gone or the
    importer that kept them is named in F2; `go.mod` has no `graphql-go`
