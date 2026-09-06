@@ -1,12 +1,12 @@
 package backfill
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -42,19 +42,11 @@ var listCmd = &cobra.Command{
 			return fmt.Errorf("backfill list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		// Pretty-print the JSON response.
-		var out interface{}
-		if err := json.Unmarshal(body, &out); err != nil {
-			cmd.Print(string(body))
-			return nil
-		}
-		pretty, err := json.MarshalIndent(out, "", "  ")
-		if err != nil {
-			cmd.Print(string(body))
-			return nil
-		}
-		cmd.Println(string(pretty))
-		return nil
+		// stdout is the listing and nothing else, so `backfill list | jq` works.
+		// It used cobra's Println (→ OutOrStderr), which made the listing
+		// unpipeable; the old raw-body fallback is gone too, because emitting a
+		// non-JSON body onto stdout is the same defect in a different disguise.
+		return cliutil.WritePrettyJSON(cmd, body, "backfill list response")
 	},
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	jobdefsvc "github.com/caesium-cloud/caesium/api/rest/service/jobdef"
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -21,6 +22,7 @@ import (
 var (
 	applyPaths              []string
 	applyServer             string
+	applyAPIKey             string
 	applyForce              bool
 	applyPrune              bool
 	applyProvenanceSourceID string
@@ -52,7 +54,8 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune, applyProvenanceFromFlags(), allowBreaking)
+		apiKey := cliutil.ResolveAPIKey(cmd, applyAPIKey, cliutil.APIKeyEnvVar)
+		resp, err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), apiKey, defs, applyForce, applyPrune, applyProvenanceFromFlags(), allowBreaking)
 		if err != nil {
 			return err
 		}
@@ -72,6 +75,7 @@ var applyCmd = &cobra.Command{
 func init() {
 	applyCmd.Flags().StringSliceVarP(&applyPaths, "path", "p", nil, "Paths to job definition files or directories (default: current directory)")
 	applyCmd.Flags().StringVar(&applyServer, "server", "http://localhost:8080", "Caesium server base URL")
+	applyCmd.Flags().StringVar(&applyAPIKey, "api-key", "", "API key for authentication (prefer "+cliutil.APIKeyEnvVar+"; --api-key is visible in process listings)")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false, "Override provenance ownership checks when applying definitions")
 	applyCmd.Flags().BoolVar(&applyPrune, "prune", false, "Retire active jobs that are missing from the supplied path set")
 	applyCmd.Flags().StringVar(&applyProvenanceSourceID, "provenance-source-id", "", "Record the source ID that produced the applied definitions")
@@ -182,7 +186,16 @@ func allowBreakingFromFlags() (*jobdefsvc.AllowBreakingRequest, error) {
 	}, nil
 }
 
-func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool, provenance *jobdefsvc.ApplyProvenance, allowBreaking *jobdefsvc.AllowBreakingRequest) (*jobdefsvc.ApplyResponse, error) {
+// sendApplyRequest POSTs the definitions to /v1/jobdefs/apply.
+//
+// apiKey is attached as a bearer token when non-empty. Without it this command
+// could not reach a server with CAESIUM_AUTH_MODE=api-key at all: the request
+// carried no Authorization header, so `caesium job apply` — the command the
+// README and CLAUDE.md both present as THE deploy verb — answered 401 against
+// every authenticated deployment. `caesium job lint --server` already resolved
+// a key through cliutil.ResolveAPIKey; this reuses that same helper rather than
+// introducing a second convention.
+func sendApplyRequest(ctx context.Context, server, apiKey string, defs []schema.Definition, force, prune bool, provenance *jobdefsvc.ApplyProvenance, allowBreaking *jobdefsvc.AllowBreakingRequest) (*jobdefsvc.ApplyResponse, error) {
 	reqBody := jobdefsvc.ApplyRequest{
 		Definitions:   defs,
 		Force:         force,
@@ -200,6 +213,9 @@ func sendApplyRequest(ctx context.Context, server string, defs []schema.Definiti
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

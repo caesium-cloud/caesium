@@ -77,6 +77,15 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 	if principal.Kind == iauth.PrincipalUser {
 		body["email"] = principal.Subject
 	}
+	// A job-scoped API key may now resolve its own principal (the scope
+	// middleware allows GET /auth/whoami for every API-key principal), so the
+	// answer has to say what it is scoped TO — otherwise a caller cannot tell a
+	// scoped key from an unscoped one and has no way to learn which jobs it may
+	// reach. Unscoped principals keep the previous body verbatim: the key is
+	// omitted rather than emitted empty.
+	if jobs, err := iauth.ScopeJobs(principal.Scope); err == nil && len(jobs) > 0 {
+		body["scope"] = map[string]any{"jobs": jobs}
+	}
 	if csrf := authmw.GetCSRFToken(c); csrf != "" {
 		body["csrf_token"] = csrf
 	}

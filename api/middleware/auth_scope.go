@@ -94,6 +94,19 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 		// route is not under /v1/agent/*), so this neither widens nor narrows the
 		// boundary; it names the reason precisely. tier 3 always terminates at a
 		// human.
+		//
+		// LAYERING (verified, trust-the-substrate W1-ζ): for the agent-session
+		// keys the system actually mints this arm is the SECOND line, not the
+		// first. auth.Auth checks RBAC before calling authorizeScope, and
+		// MintAgentSessionKey issues at auth.AgentSessionKeyRole == RoleRunner
+		// while the approval routes require RoleOperator — so a genuine agent
+		// token is already denied "insufficient permissions" by the role gate and
+		// never reaches here. The arm is kept deliberately as defence in depth:
+		// it is what still refuses an agent claim carried on an operator-or-above
+		// key (a future minting path, a stamped scope, or any widening of the
+		// approval routes' required role). Deleting it would make the
+		// "tier 3 terminates at a human" invariant depend on one role constant.
+		// api/middleware/auth_scope_approval_test.go pins BOTH layers.
 		if isIncidentApprovalRoute(routePath) {
 			return nil, echo.NewHTTPError(http.StatusForbidden, ApprovalAgentTokenDenyMessage)
 		}
@@ -112,6 +125,19 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	state := &scopeAuditContext{}
 
 	switch routePath {
+	case "/auth/whoami":
+		// Whoami is IDENTITY, not resource access: every authenticated API-key
+		// principal — scoped or not — is entitled to be told who it is. Without
+		// this case a job-scoped key fell through to the trailing deny below, so
+		// a scoped key got 403 on its own principal lookup and could never
+		// complete the UI's api-key login (ui/src/lib/auth.ts requires a 200
+		// whoami). No job is named by the route, so the audit context stays
+		// empty — this grants no job access whatsoever.
+		//
+		// Agent-session tokens never reach here: the agent branch above returns
+		// first, keeping an agent token confined to /v1/agent/* so it can never
+		// complete a UI login.
+		return state, nil
 	case "/v1/jobs":
 		switch c.Request().Method {
 		case http.MethodGet:

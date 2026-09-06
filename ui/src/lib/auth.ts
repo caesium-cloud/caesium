@@ -125,9 +125,12 @@ function scopeFromWhoami(
     }
   }
 
-  // Current /auth/whoami serializes kind/subject/role only. User principals are
-  // unscoped by construction; API-key scope cannot be inferred until the backend
-  // exposes a scope marker, so leave isScoped false and scopeKnown false.
+  // /auth/whoami emits `scope` only for a job-scoped API key (the scope object
+  // is omitted, not emitted empty, for unscoped principals), so reaching here
+  // means no restriction was declared. User principals are unscoped by
+  // construction; for an api-key principal we still cannot distinguish
+  // "unscoped" from "an older server that never serialised scope", so leave
+  // scopeKnown false rather than asserting an unscoped principal.
   if (kind === "user") {
     return { isScoped: false, scopeKnown: true };
   }

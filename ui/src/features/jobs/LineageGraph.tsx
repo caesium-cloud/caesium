@@ -198,10 +198,12 @@ export function LineageGraph({
     [navigate],
   );
 
-  // Presently unreachable for scoped API keys: UI login calls GET /auth/whoami,
-  // which scoped keys receive as 403, and whoami does not expose a scope marker
-  // for already-authenticated principals. Keep this as the future scoped-session
-  // guard for the global lineage graph.
+  // Live for scoped API keys: GET /auth/whoami now answers 200 for every
+  // API-key principal (api/middleware/auth_scope.go, case "/auth/whoami") and
+  // names the key's scope, so a scoped key can complete the UI login and
+  // scopeFromWhoami (ui/src/lib/auth.ts) resolves isScoped from the response.
+  // The server denies the cross-job lineage query for such a principal
+  // (LineageImpactScopedDenyMessage); this branch is the matching affordance.
   if (isScoped) {
     return (
       <div className="space-y-5" data-testid="lineage-container">

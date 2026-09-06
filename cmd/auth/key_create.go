@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -66,25 +67,20 @@ var keyCreateCmd = &cobra.Command{
 			return fmt.Errorf("key creation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
-		var result map[string]interface{}
-		if err := json.Unmarshal(respBody, &result); err != nil {
-			cmd.Print(string(respBody))
-			return nil
-		}
-
-		if key, ok := result["key"].(string); ok {
-			cmd.Println("API Key (save this — it will not be shown again):")
-			cmd.Println(key)
-			cmd.Println()
-		}
-
-		if apiKey, ok := result["api_key"].(map[string]interface{}); ok {
-			pretty, _ := json.MarshalIndent(apiKey, "", "  ")
-			cmd.Println("Key metadata:")
-			cmd.Println(string(pretty))
-		}
-
-		return nil
+		// stdout is the created-key record and NOTHING else — the plaintext is
+		// its `key` field, the metadata its `api_key` field — so
+		// `caesium auth key create … | jq -r .key` works and
+		// `… > key.json` is a usable file. The prose that used to be
+		// interleaved into stdout goes to stderr, the same split
+		// `caesium receipt get` uses (cmd/receipt/get.go).
+		//
+		// Two bugs lived here: cobra's Print* helpers write to OutOrStderr, so
+		// the ONE-TIME plaintext key went to stderr and `> key.txt` produced an
+		// empty file; and the labels made stdout unparseable even once that was
+		// corrected.
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
+			"API Key issued — the plaintext is the `key` field on stdout and will not be shown again.")
+		return cliutil.WritePrettyJSON(cmd, respBody, "auth key create response")
 	},
 }
 

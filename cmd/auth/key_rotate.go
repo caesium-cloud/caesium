@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -55,25 +56,11 @@ var keyRotateCmd = &cobra.Command{
 			return fmt.Errorf("key rotation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
 
-		var result map[string]interface{}
-		if err := json.Unmarshal(respBody, &result); err != nil {
-			cmd.Print(string(respBody))
-			return nil
-		}
-
-		if key, ok := result["key"].(string); ok {
-			cmd.Println("New API Key (save this — it will not be shown again):")
-			cmd.Println(key)
-			cmd.Println()
-		}
-
-		if apiKey, ok := result["api_key"].(map[string]interface{}); ok {
-			pretty, _ := json.MarshalIndent(apiKey, "", "  ")
-			cmd.Println("New key metadata:")
-			cmd.Println(string(pretty))
-		}
-
-		return nil
+		// See key_create.go: stdout is the new key's record and nothing else,
+		// prose on stderr.
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
+			"New API Key issued — the plaintext is the `key` field on stdout and will not be shown again.")
+		return cliutil.WritePrettyJSON(cmd, respBody, "auth key rotate response")
 	},
 }
 
