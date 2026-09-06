@@ -360,10 +360,11 @@ func startOptionsFrom(opts []StartOption) StartOptions {
 // while it was still waiting rather than the one it began with.
 //
 // On failure an enricher returns an error and, optionally, a corrected map. That
-// second return is not decoration: on a promotion the params handed in came off
-// the run_queue row and may already carry a param this enricher wrote at
-// admission, which a failed re-read has just made stale. Returning the params
-// with it REMOVED is how an enricher retracts a value it can no longer stand
+// second return is not decoration: params are handed down between runs — off the
+// run_queue row on a promotion, off the retried run's own row on a retry — so
+// they may already carry a param this enricher wrote for a DIFFERENT run, which
+// a failed re-read has just left it unable to confirm. Returning the params with
+// that param REMOVED is how an enricher retracts a value it can no longer stand
 // behind; returning nil means "nothing to correct, use the caller's params".
 type StartParamsEnricher func(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error)
 
@@ -390,10 +391,10 @@ func SetStartParamsEnricher(fn StartParamsEnricher) {
 // read fails.
 //
 // A failure keeps the enricher's own returned map when it gave one, and the
-// caller's params otherwise. The distinction matters on the promotion path,
-// where the params come off the run_queue row already carrying what the enricher
-// wrote at admission: discarding its correction there would persist a value the
-// failed re-read just invalidated, as if it were current.
+// caller's params otherwise. The distinction matters wherever params are
+// inherited from an earlier run (a queue promotion, a retry): those params carry
+// what the enricher wrote for THAT run, and discarding its correction would
+// persist a value the failed re-read just invalidated, as if it were current.
 func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) map[string]string {
 	fn := startParamsEnricher.Load()
 	if fn == nil || *fn == nil {
@@ -401,7 +402,7 @@ func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, para
 	}
 	enriched, err := (*fn)(ctx, db, jobID, params, fromQueue)
 	if err != nil {
-		log.Warn("run: start params enricher failed; starting run with unenriched params",
+		log.Warn("run: start params enricher failed; starting run with degraded params",
 			"job_id", jobID, "error", err)
 		if enriched != nil {
 			return enriched
