@@ -211,7 +211,16 @@ func TestRunLocalContinuePolicySkipsFailedDescendants(t *testing.T) {
 
 	runTask := taskRunByID(snapshot, taskSkipped)
 	require.NotNil(t, runTask)
-	require.Contains(t, runTask.Error, taskFailed.String())
+	// The STORE resolves the successor first, inside the failure transaction
+	// (internal/run/fanout.go resolveInstanceFailureTx → advanceCrossStepSuccessorsTx),
+	// so the reason on the row is the trigger-rule reason every other
+	// advancement path emits — not the executor's "skipped due to failed
+	// dependency task <id>". The executor still runs its own cascade a moment
+	// later; markTaskSkippedTx is pending-only, so that pass is a no-op and must
+	// NOT overwrite the reason. Both strings say the same thing; only one of
+	// them is emitted identically by the local, fanned and distributed lanes,
+	// which is the whole point of resolving in the store.
+	require.Equal(t, `trigger rule "all_success" not satisfied`, runTask.Error)
 }
 
 func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {

@@ -970,10 +970,11 @@ func (s *Store) decrementInGroupDependentsTx(tx *gorm.DB, runID uuid.UUID, compl
 }
 
 // resolveInstanceFailureTx is THE SQL lane's terminal-failure resolution: one
-// instance has just been written terminal-failed, and everything that follows
+// task run has just been written terminal-failed, and everything that follows
 // from that — the group's failurePolicy, the task_failed event carrying this
-// instance's identity, and the group-terminal gate that releases the fanned
-// step's cross-step successors — happens here, once.
+// row's identity, and the cross-step successor advancement (immediately for a
+// plain task, behind the group-terminal gate for a fanned instance) — happens
+// here, once.
 //
 // It exists because the SQL lane reaches a failed instance by TWO routes and
 // they must not drift:
@@ -1032,11 +1033,50 @@ func (s *Store) resolveInstanceFailureTx(
 		}
 	}
 
-	// Only a fanned group has a group to resolve. An unfanned task's successors
-	// are advanced by the ordinary trigger-rule path, not from here.
-	if row == nil || !isFanOutInstance(row) {
+	// A row the completion route could not load names no successors to advance:
+	// the whole advancement is keyed on the failed row's identity, and guessing
+	// from catalogTaskID alone would decrement a fanned group's successors on
+	// the first instance's failure.
+	if row == nil {
 		return nil
 	}
+
+	// A PLAIN failed task advances its own successors, exactly as the success
+	// path does.
+	//
+	// This used to return here, with the comment "an unfanned task's successors
+	// are advanced by the ordinary trigger-rule path". There is no such path:
+	// shouldRunTaskTx has four callers (completeTask's SUCCESS branch,
+	// cacheHitTask's own successor loop, advanceCrossStepSuccessorsTx and
+	// skipTaskAndDescendantsTx) and none of them is reached by a plain failure.
+	// So the row scalar outstanding_predecessors was never decremented for a
+	// failed plain step, and everything that gates on it stalled: the fanned
+	// consumer of a failed plain step (runFannedGroup reads the row scalar, so
+	// its instances swept as "never dispatched"), and in distributed mode EVERY
+	// tolerant consumer (ClaimTaskForDispatch and PendingTasksForDispatch both
+	// require outstanding_predecessors = 0). A `all_success` consumer stayed
+	// pending on a terminal run instead of being skipped with its rule reason.
+	//
+	// advanceCrossStepSuccessorsTx already does the right thing per successor —
+	// batchDecrementPredecessorsTx, then shouldRunTaskTx → task_ready or
+	// skipTaskAndDescendantsTx with the same `trigger rule %q not satisfied`
+	// reason the other three copies emit — and the trigger rule is what decides:
+	// a failed predecessor makes all_success unsatisfiable and leaves all_done
+	// satisfied. The store is the only place all three lanes agree (the local
+	// executor's in-memory Kahn map, runFannedGroup's row read, and the
+	// distributed claimer), which is why this lives here and not in an executor.
+	//
+	// Double-skipping is safe: markTaskSkippedTx only touches `pending` rows, so
+	// the local executor's own store.SkipTask cascade (internal/job/job.go
+	// skipDescendantsFiltered), which runs AFTER this transaction commits, finds
+	// the successor already terminal and emits neither a second row write nor a
+	// second task_skipped event.
+	if !isFanOutInstance(row) {
+		return s.advanceCrossStepSuccessorsTx(tx, runID, catalogTaskID, pendingEvents, skippedTaskIDs, counts)
+	}
+
+	// A fanned instance keeps the group gate: the step's cross-step successors
+	// are advanced once, on the transition that makes every instance terminal.
 	allTerminal, err := s.groupAllTerminalTx(tx, runID, catalogTaskID)
 	if err != nil || !allTerminal {
 		return err
