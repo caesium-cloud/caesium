@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -162,4 +163,52 @@ func TestRunLocalCancelStopsAtom(t *testing.T) {
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskID).First(&row).Error)
 	require.Equal(t, string(run.TaskStatusCancelled), row.Status,
 		"the cancelled row must stay cancelled — the post-cancel task write is a no-op against a terminal row")
+}
+
+// TestRunLocalWaitErrorStopsAtom pins the OTHER door of the executor's select,
+// the one an arm64 unit failure exposed.
+//
+// When a run is cancelled, engine.Wait returns ctx.Err() at the same instant
+// taskCtx.Done() closes, so both select cases are ready and Go picks between
+// them uniformly at random — roughly half of all cancels arrive through
+// waitResult, which used to return the error without stopping anything and
+// left exactly the orphaned container the cancel path exists to kill. The door
+// cannot be selected on purpose, so this drives the code behind it directly: a
+// failing Wait with a LIVE task context must still force-stop the atom, which
+// is also what the distributed worker's monitorTask has always done.
+func TestRunLocalWaitErrorStopsAtom(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+
+	engine.runDurationByName[taskID.String()] = 10 * time.Second
+	engine.waitErrByName[taskID.String()] = errors.New("engine wait failed")
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "engine wait failed",
+		"the wait failure is the cause worth surfacing")
+
+	require.True(t, engine.wasForceStopped(taskID.String()),
+		"a failed Wait means we stopped watching, not that the container stopped — it must be force-stopped, not abandoned")
 }

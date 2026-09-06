@@ -296,6 +296,26 @@ orders this stream first.
       run context → `engine.Stop(Force: true)`) against the existing fake
       engine and asserts the row stays `cancelled`; verified red without the
       `job.go` half.
+      **Second correction, found by `unit-test-arm64`.** Stopping the atom on
+      the `taskCtx.Done()` branch alone is not enough, because that branch wins
+      only half the time: when the task context ends, `engine.Wait` returns
+      `ctx.Err()` too (the real docker engine does this as well —
+      `internal/atom/docker/engine.go` returns `waitCtx.Err()`), so
+      `taskCtx.Done()` and `waitResult` become ready in the same instant and Go
+      picks between them **uniformly at random**. The `waitResult` door returned
+      the error without stopping anything, so roughly half of all cancelled
+      containers were still abandoned — the exact orphan A3 exists to kill.
+      arm64 surfaced it only because the slower runner lands the cancel before
+      `Wait` starts polling more often; the race is arch-independent. Both doors
+      now converge on one `abandonAtom` helper, which also force-stops on ANY
+      wait error, matching what the distributed worker's `monitorTask` has
+      always done ("Wait failed" means we stopped watching, never that the
+      container stopped). Pinned by `TestRunLocalWaitErrorStopsAtom` via a new
+      `waitErrByName` knob on the fake engine: the racing door cannot be
+      selected on purpose, but the code behind it can be driven directly, and
+      that test fails 100% of the time without the fix (the cancel test itself
+      passed 40/40 locally pre-fix, which is exactly why it could not be the
+      guard).
 - [x] A4. Make run cancellation reach a distributed worker's container. A
       cancelled run strips `claimed_by` from its tasks (`cancelRunTx`), so
       the worker's batched `RenewLeases` (`internal/run/store.go`

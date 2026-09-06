@@ -1456,13 +1456,39 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}{atom: next, err: waitErr}
 		}()
 
-		select {
-		case <-taskCtx.Done():
-			if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-				if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-					ID:    a.ID(),
-					Force: true,
-				}); stopErr != nil {
+		// abandonAtom force-stops the container and classifies why we are walking
+		// away from it. It is shared by BOTH doors of the select below, and that
+		// sharing is the point.
+		//
+		// When taskCtx ends, engine.Wait ALSO returns — with ctx.Err() — so
+		// `taskCtx.Done()` and `waitResult` become ready at the same instant and
+		// Go picks between them uniformly at random. Stopping the atom on only
+		// the taskCtx.Done() door therefore abandoned roughly half of all
+		// cancelled containers, which is the very orphan this cancel path exists
+		// to kill. It reproduced as an arm64-only unit failure
+		// (TestRunLocalCancelStopsAtom) purely because the slower runner made
+		// the cancel land before Wait started polling more often; the race is
+		// arch-independent and real against Docker, whose Wait returns
+		// waitCtx.Err() the same way (internal/atom/docker/engine.go).
+		//
+		// Any OTHER wait error is stopped too, matching what the distributed
+		// worker already does (internal/worker/runtime_executor.go monitorTask):
+		// a failed Wait means we stopped watching, never that the container
+		// stopped.
+		//
+		// Force, like the timeout branch always did: a container the run has
+		// given up on must not outlive it by its own graceful stop timeout. A
+		// failed Stop is reported rather than swallowed — "cancelled" and
+		// "cancelled but the container is still out there" are different
+		// operational facts.
+		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, *run.TaskLogSnapshot, error) {
+			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+				ID:    a.ID(),
+				Force: true,
+			})
+			switch {
+			case errors.Is(taskCtx.Err(), context.DeadlineExceeded):
+				if stopErr != nil {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
@@ -1470,35 +1496,30 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
 				return "", nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
-			}
-			// A CANCELLED run must reach the container, exactly as a timed-out
-			// task already does. Only the deadline branch used to stop the atom,
-			// so `caesium run cancel` and the concurrency `replace` admission
-			// wrote the row cancelled and abandoned a live container: it ran to
-			// completion holding a pool slot and a rate-limit token, and before
-			// PR #275's terminal guards its exit overwrote the cancelled row
-			// (cancelled → running → succeeded). The cancellation reaches this
-			// select because every detached run context is derived from the
-			// run-cancel registry (cancel_registry.go).
-			//
-			// Force, like the timeout branch: a container the run has already
-			// given up on must not be allowed to outlive it by its own graceful
-			// stop timeout. A failed Stop is reported rather than swallowed —
-			// "cancelled" and "cancelled but the container is still out there"
-			// are different operational facts.
-			if errors.Is(taskCtx.Err(), context.Canceled) {
-				if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-					ID:    a.ID(),
-					Force: true,
-				}); stopErr != nil {
+			case errors.Is(taskCtx.Err(), context.Canceled):
+				if stopErr != nil {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
 				}
 				return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
 			}
+			// taskCtx is still live, so this is a genuine wait failure rather
+			// than a cancellation arriving by the other door. The stop is
+			// best-effort here: the wait error is the cause worth surfacing.
+			if stopErr != nil {
+				log.Warn("failed to stop atom after engine wait error", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", stopErr)
+			}
+			if waitErr != nil {
+				return "", nil, nil, nil, nil, waitErr
+			}
 			return "", nil, nil, nil, nil, taskCtx.Err()
+		}
+
+		select {
+		case <-taskCtx.Done():
+			return abandonAtom(nil)
 		case result := <-waitResult:
 			if result.err != nil {
-				return "", nil, nil, nil, nil, result.err
+				return abandonAtom(result.err)
 			}
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
