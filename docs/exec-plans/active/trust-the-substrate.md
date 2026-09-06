@@ -328,30 +328,63 @@ Three shipped surfaces report something other than what happened.
       **all six** ledger bugs, L7 included) in the same PR; see the carve-out
       note on Acceptance Criterion 2. The item is done either way only when
       the decision **and** the arc amendment are recorded. Files: `internal/freshness/subscriber.go`,
-      `internal/freshness/subscriber_test.go`, `test/freshness_test.go`.
+      `internal/freshness/startparams.go`, `internal/freshness/startparams_test.go`,
+      `internal/freshness/subscriber_test.go`, `internal/run/store.go`,
+      `internal/run/start_params_enricher_test.go`, `cmd/start/start.go`,
+      `test/freshness_test.go`.
       *Done (W1-γ) — **decision: FIXED, the change is bounded**; no persisted
       table and therefore no arc AC-1 amendment (the AC 2 carve-out is not
-      exercised).* The `Capturer` now subscribes to `run_started` /
-      `run_failed` / `run_cancelled` alongside `run_completed` and
-      `consumedForRun` resolves the snapshot strongest-first: (1) the run's own
-      `_consumed_watermarks` param — durable on the `job_runs` row, so a
-      freshness-derived run is correct across a restart; (2) the in-memory
-      `run_started` snapshot; (3) the legacy completion-time read. Boundedness:
-      every terminal run event evicts the entry, a 24 h TTL is swept on insert,
-      and the map is hard-capped at 4096 (oldest first). A snapshot lost to a
-      restart, a leader change or a cap eviction degrades to (3) — exactly the
-      pre-fix behaviour, never a missing or wrong row — which is why no schema
-      change is needed. No `cmd/start/start.go` edit: the subscription filter
-      widened inside `StartWithReady`. Unit tests: start-time value wins over a
-      mid-run advance, the derived param beats both, non-completing runs release
-      their slot, the cap holds, and the no-start-snapshot fallback still
-      records. Integration `TestFreshnessConsumedSnapshotTakenAtRunStart` uses an
+      exercised).* The consumed view is captured **synchronously at run
+      creation** and persisted on the run row. `internal/run` gained one seam —
+      `run.SetStartParamsEnricher`, a process-wide
+      `func(ctx, db, jobID, params) (params, error)` that `startRun` applies just
+      before `newStartRunModel`, so the enriched params are marshalled into
+      `job_runs.params` by the same INSERT (and into the `run_queue` row on the
+      queued path). It is registered process-wide, not per-`*Store`, because run
+      stores are constructed ad hoc (`runstorage.NewStore(tx)` in
+      `internal/trigger/event/router.go`), and a per-instance hook would silently
+      skip event-triggered runs. The `db` argument is load-bearing for the same
+      reason: that router creates runs inside its OWN open transaction, and the
+      first cut of this fix read a captured connection instead — which deadlocked
+      the whole database for 7m55s on the integration lane
+      (`TestEventIngestRoutesEventTriggerJob`) until the request context was
+      cancelled. Every enricher read now goes through the store's handle;
+      `TestStartRunEnricherReadsTheStoresOwnHandle` pins it by reading a row that
+      exists only inside the uncommitted transaction. Nil by default and
+      non-fatal on error: with no enricher, or with a failing one, run creation
+      is byte-identical to before.
+      `internal/freshness.EnrichStartParams` implements it — one indexed
+      `dataset_declarations` read, then `consumedSnapshot` for a job that both
+      produces and consumes, stamping `_consumed_watermarks` in the evaluator's
+      exact format and never overwriting a value already present (a
+      freshness-derived run carries the evaluator's own view). It is a plain func,
+      so `internal/freshness` still does not import `internal/run`;
+      `cmd/start/start.go` wires it in one line inside the existing
+      `vars.FreshnessEnabled` block. `Capturer.consumedForRun` now reads the
+      param first and falls back to the completion-time read only for runs
+      created before this change or with freshness disabled at creation.
+      **The async `run_started` design was rejected**, not merely improved on:
+      the event only queues work for the subscriber, so the read could land after
+      the run was already executing (an input advancing in between was credited
+      to a run that never read it), and the non-blocking bus can drop the event
+      entirely; its in-memory map also needed a TTL sweep that would expire a
+      long-running run's snapshot (runs have no default timeout) and a 4096-entry
+      cap that evicted live runs under load. The map, the 24 h TTL and the cap
+      are deleted, and the `Capturer` is back to subscribing only
+      `run_completed`. Unit tests: `internal/run` proves the enriched params are
+      on the persisted row, that a failing enricher still starts the run, and
+      that an unregistered enricher changes nothing; `internal/freshness` proves
+      the creation-time value beats a mid-run advance end to end, the derived
+      param is never overwritten, an empty view is stamped authoritatively, the
+      caller's map is not mutated, and jobs with nothing to freeze are untouched.
+      Integration `TestFreshnessConsumedSnapshotTakenAtRunStart` uses an
       **arrival-bound** external source as the input, so each mid-run advance is
       one ingest POST rather than a whole producer run — the consumer only has to
       stay alive for an HTTP round trip (30 s sleep, ~40 s total) instead of a
       container start — and asserts the output's `consumed_watermarks` carries
       the START-time watermark, with a guard that fails loudly if the consumer
-      terminated before the mid-run advance landed.
+      terminated before the mid-run advance landed; it is now deterministic (no
+      sleep waiting for an observer) because the view is frozen with the row.
 
 ### Stream C — Auth surface end-to-end, and the approval gate made reachable
 

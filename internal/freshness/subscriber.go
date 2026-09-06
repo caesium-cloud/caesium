@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -22,17 +21,20 @@ import (
 // reverse.
 const taskRunTerminalSucceeded = "succeeded"
 
-// Capturer hooks the run lifecycle path (NOT a poll): it subscribes to the run
-// lifecycle events and, on run_completed, for each producing step's non-cached
-// success, advances the dataset it declares — calling Store.Advance with the
-// emitted watermark value (or refreshing verified_at in degraded mode when the
-// step declares no watermark key or emits none). It also snapshots each produced
-// dataset's consumed-input watermarks so "is my output up to date with my
-// inputs" is a pure row comparison.
+// Capturer hooks the run lifecycle path (NOT a poll): it subscribes to
+// run_completed and, for each producing step's non-cached success, advances the
+// dataset it declares — calling Store.Advance with the emitted watermark value
+// (or refreshing verified_at in degraded mode when the step declares no
+// watermark key or emits none). It also snapshots each produced dataset's
+// consumed-input watermarks so "is my output up to date with my inputs" is a
+// pure row comparison.
 //
-// That consumed snapshot is taken at the run's START, not its completion, so an
-// input that advances mid-run is not credited to a run that never saw it. See
-// consumedForRun for the three sources, strongest first.
+// That consumed snapshot is the view the run had when it was CREATED, not the
+// one current at its completion, so an input that advances mid-run is not
+// credited to a run that never saw it. The view is stamped onto the job_runs row
+// synchronously at creation — by the evaluator for a derived run, and by
+// StartParamsEnricher for every other trigger — so this subscriber only ever
+// reads it back. See consumedForRun.
 //
 // It reads the declared registry (dataset_declarations, freshness A2) to know
 // which output key is a watermark, and the run's task_runs for the emitted
@@ -47,45 +49,14 @@ type Capturer struct {
 	db        *gorm.DB
 	store     *Store
 	namespace *string // v1: always nil (dataset identity keys on name)
-
-	// mu guards startSnapshots.
-	mu sync.Mutex
-	// startSnapshots holds each in-flight run's consumed-input watermark view as
-	// observed at run_started, so a completion records the inputs the run
-	// actually consumed rather than a mid-run advance it never saw.
-	//
-	// Deliberately in-memory and bounded three ways: every terminal run event
-	// (completed / failed / cancelled) evicts its entry, entries older than
-	// startSnapshotTTL are swept on insert, and the map is hard-capped at
-	// maxStartSnapshots (oldest evicted first). A snapshot lost to a restart or
-	// a cap eviction degrades to the old completion-time read, never to a wrong
-	// or missing dataset row — which is why this needs no persisted table.
-	startSnapshots map[uuid.UUID]runStartSnapshot
 }
-
-// runStartSnapshot is one run's start-time consumed-input view.
-type runStartSnapshot struct {
-	consumed map[string]string
-	takenAt  time.Time
-}
-
-const (
-	// maxStartSnapshots caps the in-flight snapshot map. Each entry is a small
-	// map of this job's declared inputs, so the ceiling is a few MB even when
-	// every slot is taken by a wide job.
-	maxStartSnapshots = 4096
-	// startSnapshotTTL bounds a snapshot whose terminal event never arrived
-	// (a lost event, a run outliving a leader change). Swept lazily on insert.
-	startSnapshotTTL = 24 * time.Hour
-)
 
 // NewCapturer constructs a Capturer over the event bus and DB connection.
 func NewCapturer(bus event.Bus, db *gorm.DB) *Capturer {
 	return &Capturer{
-		bus:            bus,
-		db:             db,
-		store:          NewStore(db),
-		startSnapshots: make(map[uuid.UUID]runStartSnapshot),
+		bus:   bus,
+		db:    db,
+		store: NewStore(db),
 	}
 }
 
@@ -96,17 +67,9 @@ func (c *Capturer) Start(ctx context.Context) error {
 }
 
 // StartWithReady is Start with a readiness signal for deterministic tests.
-//
-// run_started is subscribed alongside the terminal events so the consumed-input
-// snapshot is taken when the run BEGINS (the view it actually consumed) rather
-// than when it ends. run_failed / run_cancelled carry no capture of their own —
-// they exist only to evict that run's snapshot.
 func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
 	ch, err := c.bus.Subscribe(ctx, event.Filter{Types: []event.Type{
-		event.TypeRunStarted,
 		event.TypeRunCompleted,
-		event.TypeRunFailed,
-		event.TypeRunCancelled,
 	}})
 	if err != nil {
 		return err
@@ -122,107 +85,11 @@ func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) er
 			if !ok {
 				return nil
 			}
-			switch evt.Type {
-			case event.TypeRunStarted:
-				c.handleRunStarted(ctx, evt)
-			case event.TypeRunCompleted:
+			if evt.Type == event.TypeRunCompleted {
 				c.handleRunCompleted(ctx, evt)
-			case event.TypeRunFailed, event.TypeRunCancelled:
-				c.dropStartSnapshot(evt.RunID)
 			}
 		}
 	}
-}
-
-// handleRunStarted records the run's consumed-input watermarks as of its START.
-// It is a no-op for a job that neither produces nor consumes a declared dataset,
-// so the common case costs exactly one indexed read of dataset_declarations.
-func (c *Capturer) handleRunStarted(ctx context.Context, evt event.Event) {
-	if evt.RunID == uuid.Nil || evt.JobID == uuid.Nil {
-		return
-	}
-
-	var decls []models.DatasetDeclaration
-	if err := c.db.WithContext(ctx).Where("job_id = ?", evt.JobID).Find(&decls).Error; err != nil {
-		log.Error("freshness: capture failed to load declarations at run start",
-			"job_id", evt.JobID, "run_id", evt.RunID, "error", err)
-		return
-	}
-
-	produces := false
-	consumedNames := make([]string, 0, len(decls))
-	for i := range decls {
-		switch decls[i].Direction {
-		case models.DatasetDirectionProduces:
-			produces = true
-		case models.DatasetDirectionConsumes:
-			consumedNames = append(consumedNames, decls[i].Name)
-		}
-	}
-	// Nothing produced means the completion handler returns before it ever wants
-	// a snapshot; nothing consumed means there is no input view to freeze.
-	if !produces || len(consumedNames) == 0 {
-		return
-	}
-
-	c.putStartSnapshot(evt.RunID, c.consumedSnapshot(ctx, consumedNames))
-}
-
-// putStartSnapshot stores one run's start-time view, sweeping expired entries
-// and enforcing the hard cap (oldest first) so the map cannot grow unbounded
-// when a terminal event is lost.
-func (c *Capturer) putStartSnapshot(runID uuid.UUID, consumed map[string]string) {
-	now := time.Now().UTC()
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.startSnapshots == nil {
-		c.startSnapshots = make(map[uuid.UUID]runStartSnapshot)
-	}
-
-	for id, snap := range c.startSnapshots {
-		if now.Sub(snap.takenAt) > startSnapshotTTL {
-			delete(c.startSnapshots, id)
-		}
-	}
-	for len(c.startSnapshots) >= maxStartSnapshots {
-		oldestID, oldestAt := uuid.Nil, time.Time{}
-		for id, snap := range c.startSnapshots {
-			if oldestAt.IsZero() || snap.takenAt.Before(oldestAt) {
-				oldestID, oldestAt = id, snap.takenAt
-			}
-		}
-		if oldestID == uuid.Nil {
-			break
-		}
-		delete(c.startSnapshots, oldestID)
-	}
-
-	c.startSnapshots[runID] = runStartSnapshot{consumed: consumed, takenAt: now}
-}
-
-// takeStartSnapshot removes and returns a run's start-time view. The second
-// result distinguishes "snapshot taken, no input had a watermark yet" (an
-// authoritative empty view) from "no snapshot for this run".
-func (c *Capturer) takeStartSnapshot(runID uuid.UUID) (map[string]string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	snap, ok := c.startSnapshots[runID]
-	if !ok {
-		return nil, false
-	}
-	delete(c.startSnapshots, runID)
-	return snap.consumed, true
-}
-
-// dropStartSnapshot evicts a non-completing run's snapshot.
-func (c *Capturer) dropStartSnapshot(runID uuid.UUID) {
-	if runID == uuid.Nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.startSnapshots, runID)
 }
 
 // handleRunCompleted is the per-event capture. run_completed fires only for a
@@ -233,10 +100,6 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	if evt.RunID == uuid.Nil || evt.JobID == uuid.Nil {
 		return
 	}
-
-	// Take (and evict) the start-time view up front so a run that bails out of
-	// this handler for any reason below still releases its map slot.
-	startConsumed, hasStartConsumed := c.takeStartSnapshot(evt.RunID)
 
 	info, err := c.runInfo(ctx, evt.RunID)
 	if err != nil {
@@ -271,11 +134,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	// Snapshot the consumed-input watermarks once for the whole run, taken as of
-	// the run's START — the view it actually consumed. A completion-time read
-	// would record an input that advanced mid-run and this run never saw, making
-	// the freshness comparison over-report the output as caught-up.
-	consumed := c.consumedForRun(ctx, info.params, startConsumed, hasStartConsumed, consumedNames)
+	// Resolve the consumed-input watermarks once for the whole run, preferring
+	// the view stamped on the run row when it was CREATED — the view it actually
+	// consumed. A completion-time read would record an input that advanced
+	// mid-run and this run never saw, making the freshness comparison
+	// over-report the output as caught-up.
+	consumed := c.consumedForRun(ctx, info.params, consumedNames)
 
 	for i := range produced {
 		p := &produced[i]
@@ -390,37 +254,31 @@ func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, e
 }
 
 // consumedForRun resolves the consumed-input watermark snapshot to record
-// against this run's produced datasets, preferring views taken at the run's
-// START in this order:
+// against this run's produced datasets:
 //
-//  1. The run's own _consumed_watermarks param. A freshness-derived run carries
-//     the evaluator's start-time view of exactly the inputs its derivation
-//     decision was made on — durable (it is on the job_runs row) and therefore
-//     the strongest signal, surviving a restart the in-memory map would not.
-//  2. The run_started snapshot this Capturer took for the run.
-//  3. A completion-time read, the legacy behaviour. Only reached when the run
-//     is not freshness-derived AND the process missed its run_started event
-//     (restart mid-run, leader change, cap eviction). Degraded, never wrong in
-//     a new way — it is exactly what every run recorded before this fix.
+//  1. The run's own _consumed_watermarks param — the view captured when the run
+//     was CREATED and written with the job_runs row, by the evaluator for a
+//     freshness-derived run and by StartParamsEnricher for every other trigger.
+//     Durable, so it survives a restart, a leader change and a dropped event.
+//  2. A completion-time read, the legacy behaviour. Only reached for a run
+//     created before this change, or created while freshness was disabled (no
+//     enricher was registered, so nothing stamped the param). Degraded — it can
+//     credit an input that advanced mid-run — but it is exactly what every run
+//     recorded before, never a missing row.
 func (c *Capturer) consumedForRun(
 	ctx context.Context,
 	params map[string]string,
-	startConsumed map[string]string,
-	hasStartConsumed bool,
 	consumedNames []string,
 ) map[string]string {
 	if raw, ok := params[freshnessConsumedWatermarksParam]; ok && strings.TrimSpace(raw) != "" {
-		var derived map[string]string
-		if err := json.Unmarshal([]byte(raw), &derived); err == nil {
-			return derived
+		var captured map[string]string
+		if err := json.Unmarshal([]byte(raw), &captured); err == nil {
+			return captured
 		}
 		log.Warn("freshness: run carried an undecodable consumed-watermark param; falling back",
 			"param", freshnessConsumedWatermarksParam)
 	}
-	if hasStartConsumed {
-		return startConsumed
-	}
-	return c.consumedSnapshot(ctx, consumedNames)
+	return consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
 }
 
 type stepOutput struct {
@@ -469,12 +327,12 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 }
 
 // consumedSnapshot reads the current watermark of every consumed dataset in a
-// single query (no per-name N+1), keyed on the nil→” namespace mapping.
+// single query (no per-name N+1), keyed on the nil→"" namespace mapping.
 //
-// It is a point-in-time read of whenever it is called: handleRunStarted calls it
-// to freeze the run's input view, and consumedForRun calls it only as the
-// degraded fallback for a run whose start was never observed.
-func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[string]string {
+// It is a point-in-time read of whenever it is called: StartParamsEnricher calls
+// it to freeze the run's input view at creation, and consumedForRun calls it
+// only as the degraded fallback for a run that carries no captured view.
+func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) map[string]string {
 	if len(names) == 0 {
 		return nil
 	}
@@ -490,8 +348,8 @@ func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[str
 	}
 
 	var rows []models.DatasetState
-	if err := c.db.WithContext(ctx).
-		Where("namespace = ? AND name IN ?", nsValue(c.namespace), uniq).
+	if err := db.WithContext(ctx).
+		Where("namespace = ? AND name IN ?", nsValue(namespace), uniq).
 		Find(&rows).Error; err != nil {
 		log.Error("freshness: capture failed to read consumed state", "error", err)
 		return nil

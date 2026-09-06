@@ -195,6 +195,10 @@ func start(cmd *cobra.Command, args []string) error {
 		// controllers) to the bus so an accepted arrival advance publishes
 		// dataset_advanced, waking the evaluator without a timer tick.
 		freshness.DefaultArrivalObserver().SetBus(bus)
+		// Freeze each run's consumed-input watermarks onto the run row as it is
+		// created, so a completion is only ever credited with the view the run
+		// actually started from.
+		run.SetStartParamsEnricher(freshness.EnrichStartParams)
 		capturer := freshness.NewCapturer(bus, conn)
 		evaluator := freshness.NewEvaluator(freshness.Config{
 			DB:                    conn,

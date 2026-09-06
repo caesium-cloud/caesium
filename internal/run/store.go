@@ -333,6 +333,61 @@ func startOptionsFrom(opts []StartOption) StartOptions {
 	return out
 }
 
+// StartParamsEnricher augments the params a run is created with. It is invoked
+// inside the run-creation path, BEFORE the job_runs row is built and inserted,
+// so whatever it records is written atomically with the row.
+//
+// That timing is the whole point of the seam: a subsystem that instead observes
+// run_started asynchronously reads its view after the run is already executing
+// (and reads nothing at all if the non-blocking bus drops the event), so it can
+// credit a run with state the run never had. Returning the enriched map from
+// here makes the view part of the run record itself.
+//
+// It runs on every run creation, so it must be cheap, and it must not mutate
+// the map it is handed.
+//
+// db is the handle this store creates runs on, and every read the enricher makes
+// MUST go through it. That is not a convenience: a run can be created by a store
+// built over an open transaction (internal/trigger/event/router.go passes its
+// tx), and a read issued on any other connection while that transaction is open
+// deadlocks the database until the request's context is cancelled.
+type StartParamsEnricher func(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string) (map[string]string, error)
+
+// startParamsEnricher is registered process-wide rather than per-Store on
+// purpose: run stores are constructed ad hoc all over the codebase (a
+// per-transaction one in internal/trigger/event/router.go, one per test), so a
+// hook carried only by the default store would silently skip the runs those
+// create.
+var startParamsEnricher atomic.Pointer[StartParamsEnricher]
+
+// SetStartParamsEnricher registers the enricher run creation applies, or clears
+// it when fn is nil. Called once from the server bootstrap; with none
+// registered, run creation behaves exactly as it did before the seam existed.
+func SetStartParamsEnricher(fn StartParamsEnricher) {
+	if fn == nil {
+		startParamsEnricher.Store(nil)
+		return
+	}
+	startParamsEnricher.Store(&fn)
+}
+
+// enrichedStartParams applies the registered enricher. A failing enricher is
+// deliberately NOT fatal: a run must still start when an optional subsystem's
+// read fails, so the params the caller supplied are used unchanged.
+func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string) map[string]string {
+	fn := startParamsEnricher.Load()
+	if fn == nil || *fn == nil {
+		return params
+	}
+	enriched, err := (*fn)(ctx, db, jobID, params)
+	if err != nil {
+		log.Warn("run: start params enricher failed; starting run with unenriched params",
+			"job_id", jobID, "error", err)
+		return params
+	}
+	return enriched
+}
+
 func startPriorityTx(tx *gorm.DB, jobID uuid.UUID, override string) (int, error) {
 	if strings.TrimSpace(override) != "" {
 		return PriorityValue(override)
@@ -1035,6 +1090,14 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		return nil, err
 	}
 	conn := s.db.WithContext(ctx)
+
+	// Enrich before the model is built so the added params are marshalled into
+	// models.JobRun.Params and land with the INSERT (and with the run_queue row
+	// on the queued path), rather than being observed after the run is live.
+	// conn is handed down so the enricher reads on THIS store's handle — when
+	// that handle is a caller's open transaction, reading anywhere else wedges
+	// the database behind it.
+	req.params = enrichedStartParams(ctx, conn, req.jobID, req.params)
 
 	model, err := newStartRunModel(req)
 	if err != nil {

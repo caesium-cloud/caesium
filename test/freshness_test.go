@@ -83,14 +83,18 @@ func (s *IntegrationTestSuite) TestFreshnessEvaluatorStateTransitions() {
 // consumer's output with that mid-run advance (the old completion-time read)
 // would make a freshness comparison report the output as caught-up with an
 // input the run never read.
+//
+// The view is frozen synchronously as the run row is created, so the assertion
+// is deterministic: there is no window in which an observer might not yet have
+// looked.
 func (s *IntegrationTestSuite) TestFreshnessConsumedSnapshotTakenAtRunStart() {
 	if s.engineType == "kubernetes" {
 		s.T().Skipf("freshness state DB assertions need direct dqlite access; covered on docker + podman lanes, not CAESIUM_TEST_ENGINE=%s", s.engineType)
 	}
 
 	// The consumer step must still be running when the second arrival lands.
-	// The window it has to cover is one HTTP POST plus the capturer's async
-	// advance; the guard below fails loudly if that ever stops holding.
+	// The window it has to cover is one HTTP POST plus the arrival's advance;
+	// the guard below fails loudly if that ever stops holding.
 	const consumerSleepSeconds = 30
 
 	suffix := time.Now().UnixNano()
@@ -126,12 +130,11 @@ func (s *IntegrationTestSuite) TestFreshnessConsumedSnapshotTakenAtRunStart() {
 	// 1. The input's watermark as the consumer's run will begin.
 	arrive(earlyWatermark)
 
-	// 2. Start the slow consumer. The run row is already "running" when
-	//    triggerRun returns — the run_started event is published just after that
-	//    transaction commits, so give the capturer a moment to observe it.
+	// 2. Start the slow consumer. Its _consumed_watermarks param was written
+	//    with the run row, so once the run exists the early view is already
+	//    frozen — nothing has to be waited on here.
 	runID := s.triggerRun(consumer.ID)
 	s.awaitRunStatus(consumer.ID, runID, runTimeout, "running")
-	time.Sleep(3 * time.Second)
 
 	// 3. Advance the input MID-RUN. This run never sees the late value.
 	arrive(lateWatermark)
