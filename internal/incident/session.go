@@ -369,6 +369,45 @@ func (s *Supervisor) captureLogs(engine atom.Engine, atomID string, since time.T
 	return string(buf)
 }
 
+// EndSession terminates a still-active agent session and revokes its scoped
+// credential. It is the "no idle container burning tokens while a human decides"
+// half of the tier-3 approval flow (design-agent-in-the-loop.md, Approval
+// gates): once a proposal parks the incident in awaiting_approval, the session
+// that made it has nothing left to do.
+//
+// The state write is CONDITIONAL on the session still being pending/running, so
+// it can never rewrite a session the supervisor's own execute() already
+// finalized — the two race by construction (the agent is mid-HTTP-call to the
+// API when this runs). Token revocation is unconditional and idempotent: a
+// credential that outlives its session is the thing worth being paranoid about.
+func (s *Supervisor) EndSession(ctx context.Context, sessionID uuid.UUID) error {
+	if s == nil || sessionID == uuid.Nil {
+		return nil
+	}
+	var session models.AgentSession
+	if err := s.db.WithContext(ctx).First(&session, "id = ?", sessionID).Error; err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	res := s.db.WithContext(ctx).
+		Model(&models.AgentSession{}).
+		Where("id = ? AND state IN ?", sessionID, []models.AgentSessionState{
+			models.AgentSessionStatePending,
+			models.AgentSessionStateRunning,
+		}).
+		Updates(map[string]any{
+			"state":        models.AgentSessionStateSucceeded,
+			"completed_at": now,
+			"updated_at":   now,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	s.revoke(session.TokenID)
+	return nil
+}
+
 // finalize writes the terminal state + session log and revokes the scoped token
 // so the credential dies with the session. It runs on a DETACHED context (not
 // the caller's, which may be cancelled by shutdown or a client disconnect) so

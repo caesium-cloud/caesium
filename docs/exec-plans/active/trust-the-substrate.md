@@ -783,7 +783,7 @@ guard.
       404 on revoking an unknown key id. The shared helpers
       (`createAPIKeyCLI`, `parseCreatedKey`, `requestWithKey`) live here and
       are reused by C1/C5.
-- [ ] C3. Live approve/reject through a **real** proposal. `TestIncidentApprovalDecisionsCLI`:
+- [x] C3. Live approve/reject through a **real** proposal. `TestIncidentApprovalDecisionsCLI`:
       apply a failing job on the auth lane, wait for the incident
       (`GET /v1/incidents`), post a tier-3 action (`apply_jobdef_patch` or
       `skip_task`, `internal/incident/actions.go` `TierApproval`) through
@@ -803,7 +803,38 @@ guard.
       `test/incident_gating_test.go` to point here. Files: new
       `test/incident_approval_test.go`, `test/incident_gating_test.go`
       (comment). Depends on: C4 + C7 + H-1.
-- [ ] C4. Wire the tier-3 approval flow the completed plan says exists. Call
+      Note: W1-ε shipped `TestIncidentApprovalDecisionsCLI` on the auth lane. It
+      applies a single-step always-failing job, waits for the real incident,
+      mints an agent-session token the way `test/agent_mcp_test.go` does, posts
+      `skip_task` through `POST /v1/agent/incidents/:id/actions` (asserting the
+      202 disposition is `awaiting_approval`, the incident parked, and a pending
+      `ApprovalRequest` exists), proves the agent token gets
+      `ApprovalAgentTokenDenyMessage` on the approve route, then drives
+      `caesium incident approve --json` through `runCLIStdout` and asserts the
+      action reached `executed` AND the task row is `skipped` on a terminal run.
+      A second incident is rejected and asserted `rejected` + `escalated`. The
+      stale H-1 comment in `test/incident_gating_test.go` now points here.
+      Deviations: the scenario applies the job over the **authenticated REST**
+      surface, not `caesium job apply` — that command sends no `Authorization`
+      header at all (`cmd/job/apply.go` `sendApplyRequest`), so it cannot reach
+      an auth-enabled server; worth filing via N-3. Second deviation, also for
+      N-3: `ApprovalAgentTokenDenyMessage` is **unreachable on the wire**. The
+      auth middleware checks the RBAC role before `authorizeScope`
+      (`api/middleware/auth.go`), and an agent-session key is minted `RoleRunner`
+      while the approve route requires `RoleOperator`, so the role gate answers
+      first with `insufficient permissions`;
+      `api/middleware/auth_scope_approval_test.go` pins the specific arm by
+      calling `authorizeScope` directly and therefore never proved the wire
+      behaviour. The scenario asserts the 403 plus either documented denial AND
+      that the incident stayed `awaiting_approval` with the approval `pending` —
+      the property that actually matters. Fixing the ordering belongs to
+      `api/middleware/auth_scope.go`'s owner (C1). The single-step job keeps the
+      "task is skipped" assertion unambiguous, and the incident is matched by
+      task name so a run-level twin cannot be latched onto. The `AUTH_MODE=none`
+      `apply_jobdef_patch` refusal is unit-tested
+      (`TestApplyJobdefPatchRefusedWithoutAuthMode`); its default-lane assertion
+      remains C6's row.
+- [x] C4. Wire the tier-3 approval flow the completed plan says exists. Call
       `agentsvc.SetActionExecutor(...)` in `cmd/start/start.go` next to the
       existing `incExecutor` construction (an adapter implementing
       `ExecuteAgentAction(ctx, agentsvc.ActionRequest) (*ActionResult, error)`
@@ -824,6 +855,26 @@ guard.
       `internal/incident/executor_test.go`,
       `api/rest/service/agent/actions.go`,
       `api/rest/service/agent/actions_test.go`.
+      Note: W1-ε wired `agentsvc.SetActionExecutor` in `cmd/start/start.go` to a
+      new `cmd/start/agent_action_executor.go` adapter (it also resolves the
+      effective playbook and the proposing agent session, neither of which the
+      HTTP surface can know). `Execute`'s `decisionApprove` branch now calls
+      `requestApproval` in new `internal/incident/approval.go`: it creates the
+      `ApprovalRequest`, walks the incident `open → triaging →
+      awaiting_approval` through the store's transition table (there is no
+      `open → awaiting_approval` edge), publishes a **persisted**
+      `TypeApprovalRequested`, and ends the proposing session via a new
+      `Supervisor.EndSession`. Two deviations from the item text, both recorded
+      in code comments: the executor gained a `SetEventSink(bus, *event.Store)`
+      seam (nothing in `internal/incident` could publish before — `TypeIncidentOpened`
+      still has no publisher either), and the effective playbook can only be
+      resolved from the `AgentProfile` document, because `metadata.remediation`
+      is schema-validated but never persisted onto `models.Job`; the fallback is
+      the zero `Playbook`, under which tier 3 always routes to approval.
+      Unit tests: `internal/incident/approval_test.go`,
+      `api/rest/service/agent/agent_test.go`
+      (`TestProposeActionDelegatesToRegisteredExecutor` strengthened to assert
+      the fallback row is NOT also written).
 - [x] C5. Scoped-key allow/deny matrix as one table-driven live scenario
       (`TestScopedKeyAllowDenyMatrix`): for a key scoped to job `A`, assert
       200 on `GET /v1/jobs` (filtered to `A`), `GET /v1/jobs/:idA`,
@@ -917,7 +968,7 @@ guard.
         all — it reads `db.Connection()` locally — so it has no header to
         send and is out of scope here (worth a follow-up via N-3 if a
         server-side diff is wanted).
-- [ ] C7. Execute approved tier-3 actions (the far end of Ledger L9). (a) In
+- [x] C7. Execute approved tier-3 actions (the far end of Ledger L9). (a) In
       `api/rest/service/incident/approvals.go` `decide`, after the transaction
       commits an `approved` decision, hand the `AgentAction` to a
       post-approval executor — add `Executor.ExecuteApproved(ctx, actionID)`
@@ -988,7 +1039,41 @@ guard.
       `internal/models/run.go` (only if `override_schema_gate` needs a
       column), `docs/design-agent-in-the-loop.md` (banner caveat).
       Depends on: C4.
-- [ ] C8. Make the approved-action decision explainable (arc convention 3 —
+      Note: W1-ε added `Executor.ExecuteApproved(ctx, actionID)`
+      (`internal/incident/approval.go`), invoked by `Service.Approve` AFTER the
+      decision transaction commits, injected via
+      `incidentsvc.SetApprovedActionExecutor` in `cmd/start/start.go`; unset it
+      degrades to a logged "approved, not executed" and `DecideResult` gained
+      `Executed`/`ExecutionError`. The decider is read from the `ApprovalRequest`
+      (never the caller) and mirrored into the audit log as `human:<decider>` via
+      a new `finishAs`/`mirrorAudit` actor override. All three `dispatch` cases
+      and their `ActionOps` methods landed, implemented on `incidentActionOps`
+      (`cmd/start/incident_ops.go`, now constructed from the `*gorm.DB`).
+      Deviations, all commented in code: (1) `run.Store.SkipTask` is
+      **pending-only** (`markTaskSkippedTx` filters `status = pending`), so it
+      cannot skip the FAILED task the design names — the adapter calls the
+      shipped store op for pending rows and flips terminal-`failed` rows itself,
+      deliberately without re-advancing successors or emitting a second
+      `task_skipped` (the failure path already resolved them). It errors when it
+      finds neither, so an approved action that changed nothing is recorded
+      `failed`. (2) `override_schema_gate` needed a column:
+      `models.JobRun.SchemaGateOverride`, read by a new
+      `run.SchemaGateOverridden` from BOTH `ValidateTaskOutputSchema`
+      (`internal/run/schema_validation.go`) and
+      `ValidateTaskOutputSchemaInstance` (`internal/run/store_instance.go`) — one
+      read point, so the bypass cannot cover the unfanned path and miss the
+      fanned one. A run param was rejected: params feed cache identity. (3)
+      `apply_jobdef_patch` takes a whole `pkg/jobdef.Definition` and applies it
+      through `internaljobdef.Importer.ValidateBatch` + `ApplyWithOptions` (the
+      same in-process entry point `POST /v1/jobdefs/apply` uses), with the diff
+      rendered by `jobdef/diff.Compare` scoped to the target alias; the alias
+      must match the target job. The provenance route is derived in the executor
+      (`gitSynced` over the four `Provenance*` fields) and the `AUTH_MODE=none`
+      refusal (`ErrAuthModeNone`) mirrors `pkg/env`'s master-gate condition
+      exactly, including the SSO clause. `Escalate` currently logs (the
+      notification senders are still `errIncidentOpNotWired`); the diff is
+      preserved on the action row and the `agent_action_executed` event.
+- [x] C8. Make the approved-action decision explainable (arc convention 3 —
       this plan's single explainability item). Declare
       `TypeAgentActionExecuted` in `internal/event/bus.go` (today's incident
       types stop at `TypeApprovalRequested`; verify no existing type already
@@ -1011,6 +1096,26 @@ guard.
       `internal/notification/subscriber.go`, `internal/run/why.go`,
       `cmd/why/why.go`, new `test/incident_approval_test.go` (shared with C3).
       Depends on: C7 + C3 + H-1.
+      Note: W1-ε added `event.TypeAgentActionExecuted` (verified distinct from
+      `TypeAgentActionRecorded`, which the approvals controller emits at DECISION
+      time and which says nothing about execution), published from
+      `ExecuteApproved`'s finish path with decider/type/tier/outcome, PERSISTED
+      via `event.Store.AppendTx` before publish, and added to
+      `notification.notifiableTypes` (so it is also policy-routable and appears
+      in `ValidEventTypes`). `caesium why` gained `WhyExplanation.Remediation`
+      (`internal/run/why_remediation.go`), a joined read of executed
+      `AgentAction` rows whose `ApprovalRequest` is approved, attributed from the
+      action's RESULT payload (run id, and task id for a task-scoped action) —
+      never over-attributed. It renders in the summary's first line and as an
+      `Approved remediation` block in `cmd/why/why.go` `renderTable`, printed
+      before the group/diff early returns because a `skipped` task carries no
+      diff. The API JSON needed no controller change (the `why` controller
+      returns the struct verbatim). Deviation: `apply_jobdef_patch` is
+      deliberately NOT surfaced in `why` — it is job-scoped and mutates future
+      runs, so attributing it to a recorded task run would assert causality that
+      may not hold. Integration scenario `TestIncidentApprovalWhyExplains` on the
+      auth lane asserts both the table and `--json` forms through
+      `runCLIStdout`; unit coverage in `internal/run/why_remediation_test.go`.
 
 ### Stream D — CI gates merges and master is honestly green
 

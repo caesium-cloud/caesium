@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -35,6 +36,23 @@ const (
 type Executor struct {
 	store *Store
 	ops   ActionOps
+
+	// bus and eventStore carry the approval/execution lifecycle onto the shared
+	// event stream. Both are optional (nil in unit tests); when eventStore is set
+	// the event is PERSISTED first and then published, mirroring the notification
+	// watcher's persistAndPublish, so `approval_requested` /
+	// `agent_action_executed` survive a restart and are queryable from
+	// /v1/events rather than existing only as an in-memory fan-out.
+	bus        event.Bus
+	eventStore *event.Store
+}
+
+// SetEventSink wires the process event bus and the durable event store onto the
+// executor. Wired once at startup (cmd/start/start.go) behind the remediation
+// master gate; nil-safe, so a test executor simply emits nothing.
+func (e *Executor) SetEventSink(bus event.Bus, store *event.Store) {
+	e.bus = bus
+	e.eventStore = store
 }
 
 // NewExecutor constructs an executor over the incident store and the action
@@ -74,6 +92,54 @@ type Playbook struct {
 	RequireApproval map[string]bool
 	// ParamOverrides whitelists rerun_with_params keys → allowed values.
 	ParamOverrides map[string][]string
+}
+
+// playbookDocument mirrors the JSON shape stored on AgentProfile.Playbook (see
+// agentprofile.SeedDefaults) and the `metadata.remediation` block in
+// pkg/jobdef.RemediationAutonomy, so one decoder serves both once the job-level
+// block is persisted.
+//
+// HONEST SCOPE: today only the profile-level document is reachable — the
+// `metadata.remediation` block is validated by the jobdef schema but never
+// persisted onto models.Job, so a job-level narrowing cannot yet be enforced.
+// That is safe in the direction that matters: an unresolvable playbook decodes
+// to the zero Playbook, under which tier 3 ALWAYS routes to approval and tier 2
+// requires an explicit allow. Widening, not narrowing, is what needs the missing
+// data.
+type playbookDocument struct {
+	Autonomy struct {
+		Allow           []string            `json:"allow"`
+		ParamOverrides  map[string][]string `json:"paramOverrides"`
+		RequireApproval []string            `json:"requireApproval"`
+	} `json:"autonomy"`
+}
+
+// DecodePlaybook parses a stored playbook document into the enforcement input.
+// An empty or malformed document yields the zero Playbook (tier 3 → approval),
+// never a permissive one.
+func DecodePlaybook(raw []byte) Playbook {
+	if len(raw) == 0 {
+		return Playbook{}
+	}
+	var doc playbookDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		log.Warn("incident: could not decode playbook; falling back to the default policy", "error", err)
+		return Playbook{}
+	}
+	pb := Playbook{ParamOverrides: doc.Autonomy.ParamOverrides}
+	if len(doc.Autonomy.Allow) > 0 {
+		pb.Allow = make(map[string]bool, len(doc.Autonomy.Allow))
+		for _, a := range doc.Autonomy.Allow {
+			pb.Allow[a] = true
+		}
+	}
+	if len(doc.Autonomy.RequireApproval) > 0 {
+		pb.RequireApproval = make(map[string]bool, len(doc.Autonomy.RequireApproval))
+		for _, a := range doc.Autonomy.RequireApproval {
+			pb.RequireApproval[a] = true
+		}
+	}
+	return pb
 }
 
 // decision is the executor's routing verdict for one action.
@@ -174,10 +240,21 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 		})
 		return action, fmt.Errorf("%w: %s", ErrActionNotPermitted, req.Type)
 	case decisionApprove:
-		// Recorded as proposed; the tier-3 approval flow (Stream D / B4) creates
-		// the ApprovalRequest and resolves it. No execution here.
+		// Tier 3 (or a playbook-forced approval): record the proposal, create the
+		// ApprovalRequest a human decides on, park the incident in
+		// awaiting_approval, and end the agent session so no container idles while
+		// a human thinks. NOTHING executes here — ExecuteApproved is the only path
+		// that dispatches a tier-3 action, and only after a recorded decision.
 		e.observe(action)
-		e.mirrorAudit(ctx, action, "proposed")
+		e.mirrorAudit(ctx, action, "proposed", "")
+		approval, err := e.requestApproval(ctx, inc, action)
+		if err != nil {
+			// The approval row is the ONLY way a human can act on this proposal, so
+			// failing to create it must not look like a successful proposal.
+			e.finish(ctx, action, models.AgentActionStatusFailed, map[string]any{"error": err.Error()})
+			return action, err
+		}
+		e.endSessionForApproval(ctx, req.SessionID, inc, approval)
 		return action, nil
 	}
 
@@ -245,6 +322,14 @@ func (e *Executor) newAction(inc *models.Incident, req ActionRequest, tier int, 
 // finish stamps a terminal status + result on an action, emits the metric, and
 // mirrors tier-2/3 executions into the audit log.
 func (e *Executor) finish(ctx context.Context, action *models.AgentAction, status models.AgentActionStatus, result any) {
+	e.finishAs(ctx, action, status, result, "")
+}
+
+// finishAs is finish with an explicit audit-log actor. auditActor is empty for
+// the autonomous path (the audit row then names the action's own actor) and
+// carries "human:<decider>" for an approved execution, so the audit spine
+// records WHO approved the mutation, not merely that an agent proposed it.
+func (e *Executor) finishAs(ctx context.Context, action *models.AgentAction, status models.AgentActionStatus, result any, auditActor string) {
 	action.Status = status
 	action.Result = encodeJSON(result)
 	action.UpdatedAt = time.Now().UTC()
@@ -259,7 +344,7 @@ func (e *Executor) finish(ctx context.Context, action *models.AgentAction, statu
 		log.Warn("incident: failed to update action status", "action_id", action.ID, "error", err)
 	}
 	e.observe(action)
-	e.mirrorAudit(ctx, action, string(status))
+	e.mirrorAudit(ctx, action, string(status), auditActor)
 }
 
 // observe increments caesium_agent_actions_total for this action.
@@ -272,7 +357,7 @@ func (e *Executor) observe(action *models.AgentAction) {
 // mirrorAudit writes tier-2/3 executions into AuditLog (design Security Posture:
 // "AuditLog entries mirror tier 2/3 executions"). Tier 0/1 rows live only in the
 // AgentAction timeline.
-func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, outcome string) {
+func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, outcome, auditActor string) {
 	if action.Tier < TierGated {
 		return
 	}
@@ -281,10 +366,14 @@ func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, 
 	if action.Status == models.AgentActionStatusRejected {
 		return
 	}
+	actor := "agent:" + string(action.Actor)
+	if auditActor != "" {
+		actor = auditActor
+	}
 	entry := &models.AuditLog{
 		ID:           uuid.New(),
 		Timestamp:    time.Now().UTC(),
-		Actor:        "agent:" + string(action.Actor),
+		Actor:        actor,
 		Action:       "agent.action." + action.Type,
 		ResourceType: "incident",
 		ResourceID:   action.IncidentID.String(),

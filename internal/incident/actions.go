@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -34,9 +36,9 @@ const (
 	ActionTypeSuppressDownstreamAlerts = "suppress_downstream_alerts"
 	ActionTypeExtendSLAOnce            = "extend_sla_once"
 
-	// Tier 3 — always approval-gated, never auto-executed. The producers ship in
-	// Stream B4; they are registered here so the executor knows their tier and
-	// routes them through the approval gate rather than rejecting them as unknown.
+	// Tier 3 — always approval-gated, never auto-executed. Execute() routes them
+	// to an ApprovalRequest; ExecuteApproved() is the only path that dispatches
+	// them, and only after a human decision (trust-the-substrate C4/C7).
 	ActionTypeSkipTask           = "skip_task"
 	ActionTypeOverrideSchemaGate = "override_schema_gate"
 	ActionTypeApplyJobdefPatch   = "apply_jobdef_patch"
@@ -97,6 +99,15 @@ type ActionParams struct {
 	DelaySeconds int64 `json:"delay_seconds,omitempty"`
 	// ExtendSeconds extends a per-run SLA once (extend_sla_once).
 	ExtendSeconds int64 `json:"extend_seconds,omitempty"`
+	// Reason is the operator-facing justification recorded on a skip_task (it
+	// becomes the skipped task row's error text, so the DAG explains itself).
+	Reason string `json:"reason,omitempty"`
+	// Definition carries the FULL desired job definition for apply_jobdef_patch,
+	// in the same schema `caesium job apply` sends (pkg/jobdef.Definition). A
+	// whole-document proposal rather than a field patch is deliberate: it is what
+	// the shipped diff/apply path consumes, so the human approves exactly the
+	// document that will be applied and the rendered diff is the real one.
+	Definition json.RawMessage `json:"definition,omitempty"`
 }
 
 // encode marshals the params for the AgentAction row. It never fails the caller;
@@ -148,6 +159,30 @@ type ActionOps interface {
 	SuppressDownstreamAlerts(ctx context.Context, incidentID uuid.UUID, until time.Time) error
 	// ExtendSLAOnce writes a durable per-run SLA override.
 	ExtendSLAOnce(ctx context.Context, runID uuid.UUID, extend time.Duration) error
+
+	// --- Tier 3, approval-gated (trust-the-substrate C7) ---------------------
+	//
+	// These three are reachable ONLY from Executor.ExecuteApproved, i.e. after a
+	// human decision recorded on an ApprovalRequest. dispatch() is shared with
+	// the autonomous path, but Playbook.decide routes every tier-3 type to
+	// decisionApprove, so Execute() can never reach them.
+
+	// SkipTask marks a task in a run skipped. The adapter goes through the
+	// shipped run.Store.SkipTask, whose skipTaskAndDescendantsTx honours the
+	// successors' trigger rules (design Open Question 3: skip interacts with
+	// all_success/all_done and with cache identity — the result payload records
+	// that caveat rather than hiding it).
+	SkipTask(ctx context.Context, runID, taskID uuid.UUID, reason string) error
+	// OverrideSchemaGateOnce records a ONE-RUN output-schema validation bypass on
+	// the run row, which both ValidateTaskOutputSchema call sites read.
+	OverrideSchemaGateOnce(ctx context.Context, runID uuid.UUID) error
+	// ApplyJobdefPatch renders the proposed definition against the live job as a
+	// diff and, unless dryRun, applies it through the shipped jobdefs importer
+	// (the same in-process entry point POST /v1/jobdefs/apply uses). It returns
+	// the rendered diff as JSON so the action row and the escalation carry the
+	// exact change a human approved. Provenance routing is NOT its decision —
+	// the executor derives the route and calls it with dryRun accordingly.
+	ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error)
 }
 
 // errNoOps signals a dispatching action with no ActionOps configured.
@@ -395,11 +430,210 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 		}
 		return out, nil
 
+	case ActionTypeSkipTask:
+		runID, err := resolveRunID(inc, params)
+		if err != nil {
+			return nil, err
+		}
+		taskID, taskName, err := e.resolveTaskTarget(ctx, inc, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.ops == nil {
+			return nil, errNoOps
+		}
+		reason := params.Reason
+		if reason == "" {
+			reason = fmt.Sprintf("skipped by approved remediation action for incident %s", inc.ID)
+		}
+		if err := e.ops.SkipTask(ctx, runID, taskID, reason); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"run_id":    runID.String(),
+			"task_id":   taskID.String(),
+			"task_name": taskName,
+			"reason":    reason,
+			// design-agent-in-the-loop.md Open Question 3, recorded on the row
+			// rather than left as folklore: a skip changes what downstream sees.
+			"caveat": "skipping a task changes downstream trigger-rule evaluation (all_success vs all_done) and the cache identity of consumers that hashed its output",
+		}, nil
+
+	case ActionTypeOverrideSchemaGate:
+		runID, err := resolveRunID(inc, params)
+		if err != nil {
+			return nil, err
+		}
+		if e.ops == nil {
+			return nil, errNoOps
+		}
+		if err := e.ops.OverrideSchemaGateOnce(ctx, runID); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"run_id": runID.String(),
+			"scope":  "one_run",
+			"caveat": "output schema violations are not enforced for the remaining tasks of this run; violations are neither recorded nor escalated while the override stands",
+		}, nil
+
+	case ActionTypeApplyJobdefPatch:
+		return e.dispatchApplyJobdefPatch(ctx, inc, params)
+
 	default:
-		// Tier-3 producers reach here only if mis-routed; they must go through the
-		// approval gate (decisionApprove), never dispatch. Guard defensively.
-		return nil, fmt.Errorf("%w: %q has no autonomous executor (tier-3 or deferred)", ErrUnknownAction, actionType)
+		// An action type in the catalog with no dispatch arm. Every tier-3 type
+		// now has one; this stays as the guard for a future catalog addition that
+		// forgets its executor.
+		return nil, fmt.Errorf("%w: %q has no autonomous executor", ErrUnknownAction, actionType)
 	}
+}
+
+// ErrAuthModeNone refuses apply_jobdef_patch under CAESIUM_AUTH_MODE=none (arc
+// convention 4). Without an auth mode the approve route is an UNAUTHENTICATED
+// POST that the agent container itself — which has network reach to the API —
+// could call to approve its own jobdef rewrite. The master gate in
+// Environment.Validate only refuses turning remediation ON without an auth mode;
+// it does not cover a deployment that enabled remediation and later flipped auth
+// off, which is exactly the window this check closes. Recorded as a failed
+// AgentAction with this reason: not a panic, not a silent no-op.
+var ErrAuthModeNone = errors.New("incident: apply_jobdef_patch refused: an auth mode is required (CAESIUM_AUTH_MODE=none)")
+
+// ErrPatchDefinitionRequired is returned when apply_jobdef_patch carries no
+// proposed definition.
+var ErrPatchDefinitionRequired = errors.New("incident: apply_jobdef_patch requires a definition")
+
+// dispatchApplyJobdefPatch is the provenance router for the tier-3 jobdef patch.
+//
+// It is enforced SERVER-SIDE and the agent cannot choose the route: for a job
+// with authoritative git provenance a direct database apply is refused (the next
+// sync cycle would silently revert it and leave Git and the database in
+// disagreement), so the approved patch degrades to `escalate` with the rendered
+// diff attached. Only a job with no git provenance takes the direct
+// diff + apply path.
+//
+// The Git-PR route (open a PR against the source repo using
+// CAESIUM_GIT_WRITE_CREDENTIALS, internal/incident/provenance.go) is
+// deliberately NOT here: it belongs to data-circuit-breaker.md Stream F in the
+// closed-loop arc. Until it lands, a git-synced job escalates with the diff,
+// which is the completed plan's documented no-credentials behaviour.
+func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Incident, params ActionParams) (map[string]any, error) {
+	if !authModeActive() {
+		return nil, ErrAuthModeNone
+	}
+	if len(params.Definition) == 0 {
+		return nil, ErrPatchDefinitionRequired
+	}
+	if e.ops == nil {
+		return nil, errNoOps
+	}
+
+	jobID := resolveJobID(inc, params)
+	var job models.Job
+	if err := e.store.DB().WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
+		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
+	}
+
+	if gitSynced(&job) {
+		diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, params.Definition, true)
+		if err != nil {
+			return nil, err
+		}
+		summary := params.Summary
+		if summary == "" {
+			summary = fmt.Sprintf("approved jobdef patch for git-synced job %q cannot be applied directly; apply it in the source repository", job.Alias)
+		}
+		if err := e.ops.Escalate(ctx, inc.ID, params.Channel, summary+"\n"+string(diff)); err != nil {
+			return nil, err
+		}
+		out := map[string]any{
+			"job_id":    jobID.String(),
+			"job_alias": job.Alias,
+			"route":     routeEscalate,
+			"applied":   false,
+			"reason":    "job has authoritative git provenance; a direct apply would be reverted by the next sync",
+		}
+		if len(diff) > 0 {
+			out["diff"] = diff
+		}
+		return out, nil
+	}
+
+	diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, params.Definition, false)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"job_id":    jobID.String(),
+		"job_alias": job.Alias,
+		"route":     routeDirect,
+		"applied":   true,
+	}
+	if len(diff) > 0 {
+		out["diff"] = diff
+	}
+	return out, nil
+}
+
+// Patch routes recorded on the action result so the timeline says which half of
+// the provenance router ran.
+const (
+	routeDirect   = "direct"
+	routeEscalate = "escalate"
+)
+
+// authModeActive mirrors the master gate in pkg/env's validate() EXACTLY: an
+// auth mode is active when CAESIUM_AUTH_MODE is neither empty nor "none", or an
+// SSO provider is configured. Keeping the two conditions identical is what makes
+// "the approve route is authenticated" a single rule rather than two that can
+// drift; the difference is only WHEN each runs (startup vs. every apply).
+func authModeActive() bool {
+	vars := env.Variables()
+	mode := strings.ToLower(strings.TrimSpace(vars.AuthMode))
+	if mode != "" && mode != "none" {
+		return true
+	}
+	return vars.SSOEnabled()
+}
+
+// gitSynced reports whether a job's definition is owned by git-sync. Any
+// provenance field being set means an external source of truth exists; SourceID
+// is the one git-sync always stamps, and the others are checked so a partially
+// recorded provenance still routes conservatively (escalate, never apply).
+func gitSynced(job *models.Job) bool {
+	return strings.TrimSpace(job.ProvenanceSourceID) != "" ||
+		strings.TrimSpace(job.ProvenanceRepo) != "" ||
+		strings.TrimSpace(job.ProvenanceRef) != "" ||
+		strings.TrimSpace(job.ProvenanceCommit) != "" ||
+		strings.TrimSpace(job.ProvenancePath) != ""
+}
+
+// resolveTaskTarget resolves the skip_task target to a catalog task id + name.
+// It prefers the params task name, falling back to the incident's own failing
+// task, and refuses a name that does not belong to the incident's job — the
+// incident boundary applies to task targets exactly as verifyActionBoundary
+// applies it to run/job targets.
+func (e *Executor) resolveTaskTarget(ctx context.Context, inc *models.Incident, params ActionParams) (uuid.UUID, string, error) {
+	name := strings.TrimSpace(params.TaskName)
+	if name == "" {
+		name = strings.TrimSpace(inc.TaskName)
+	}
+	if name == "" {
+		if inc.TaskID != nil && *inc.TaskID != uuid.Nil {
+			return *inc.TaskID, "", nil
+		}
+		return uuid.Nil, "", errors.New("incident: skip_task requires a task name (none in params or incident)")
+	}
+	var task models.Task
+	err := e.store.DB().WithContext(ctx).
+		Select("id", "name").
+		Where("job_id = ? AND name = ?", inc.JobID, name).
+		First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return uuid.Nil, "", fmt.Errorf("%w: task %q is not a task of incident job %s", ErrCrossBoundaryTarget, name, inc.JobID)
+		}
+		return uuid.Nil, "", err
+	}
+	return task.ID, task.Name, nil
 }
 
 // validateParamOverrides enforces the rerun_with_params whitelist: every key must

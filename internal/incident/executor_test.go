@@ -29,9 +29,27 @@ type fakeOps struct {
 	suppress         []time.Time
 	extendSLA        []extendCall
 	replay           []uuid.UUID
+	skipTask         []skipTaskCall
+	overrideGate     []uuid.UUID
+	applyPatch       []applyPatchCall
 
 	retryErr error
 	rerunID  uuid.UUID
+	// applyPatchErr forces the jobdef apply to fail so the approved-action
+	// failure path is exercised.
+	applyPatchErr error
+}
+
+type skipTaskCall struct {
+	runID  uuid.UUID
+	taskID uuid.UUID
+	reason string
+}
+
+type applyPatchCall struct {
+	jobID      uuid.UUID
+	definition json.RawMessage
+	dryRun     bool
 }
 
 type rerunCall struct {
@@ -98,6 +116,21 @@ func (f *fakeOps) SuppressDownstreamAlerts(_ context.Context, _ uuid.UUID, until
 func (f *fakeOps) ExtendSLAOnce(_ context.Context, runID uuid.UUID, extend time.Duration) error {
 	f.extendSLA = append(f.extendSLA, extendCall{runID: runID, extend: extend})
 	return nil
+}
+func (f *fakeOps) SkipTask(_ context.Context, runID, taskID uuid.UUID, reason string) error {
+	f.skipTask = append(f.skipTask, skipTaskCall{runID: runID, taskID: taskID, reason: reason})
+	return nil
+}
+func (f *fakeOps) OverrideSchemaGateOnce(_ context.Context, runID uuid.UUID) error {
+	f.overrideGate = append(f.overrideGate, runID)
+	return nil
+}
+func (f *fakeOps) ApplyJobdefPatch(_ context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
+	f.applyPatch = append(f.applyPatch, applyPatchCall{jobID: jobID, definition: definition, dryRun: dryRun})
+	if f.applyPatchErr != nil {
+		return nil, f.applyPatchErr
+	}
+	return json.RawMessage(`{"alias":"demo","empty":false}`), nil
 }
 
 // seedIncident opens an incident with a remediation-target run so run-scoped

@@ -366,13 +366,18 @@ func ValidateTaskOutputSchemaInstance(
 	if len(outputSchema) == 0 || schemaValidation == "" {
 		return nil
 	}
-
 	violations, err := pkgtask.ValidateOutputSchemaBytes(output, outputSchema)
 	if err != nil {
 		log.Warn("schema validation error", "task_id", taskID, "error", err)
 		return nil
 	}
 	if len(violations) == 0 {
+		return nil
+	}
+	// Same single read point as the unfanned form, consulted only once
+	// violations exist so the clean path costs nothing.
+	if SchemaGateOverridden(store, runID) {
+		logSchemaGateBypass(runID, taskID, len(violations))
 		return nil
 	}
 

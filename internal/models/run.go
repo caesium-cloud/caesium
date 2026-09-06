@@ -33,14 +33,25 @@ type JobRun struct {
 	// participate in the unique index.
 	ReplayFingerprint *string        `gorm:"type:text;uniqueIndex:idx_job_runs_replay_fingerprint" json:"replay_fingerprint,omitempty"`
 	ReplayOverrides   datatypes.JSON `gorm:"type:json" json:"replay_overrides,omitempty"`
-	StartedAt         time.Time      `gorm:"not null" json:"started_at"`
-	CompletedAt       *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt         time.Time      `gorm:"not null" json:"created_at"`
-	UpdatedAt         time.Time      `gorm:"not null" json:"updated_at"`
-	Tasks             []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
-	CacheHits         int            `gorm:"-" json:"cache_hits"`
-	ExecutedTasks     int            `gorm:"-" json:"executed_tasks"`
-	TotalTasks        int            `gorm:"-" json:"total_tasks"`
+	// SchemaGateOverride records an APPROVED tier-3 `override_schema_gate` action
+	// for this ONE run (design-agent-in-the-loop.md action catalog). While set,
+	// ValidateTaskOutputSchema / ValidateTaskOutputSchemaInstance skip output
+	// schema enforcement for the run's tasks and say so in the log.
+	//
+	// It lives on the run rather than in Params deliberately: run params feed
+	// cache identity (HashInput), so stamping the bypass as a param would re-key
+	// the DAG and silently change what the run computes. A column is inert to
+	// hashing, which is what "bypass the gate, change nothing else" requires. It
+	// is never set by a job definition — only by the approval executor.
+	SchemaGateOverride bool       `gorm:"not null;default:false" json:"schema_gate_override,omitempty"`
+	StartedAt          time.Time  `gorm:"not null" json:"started_at"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	CreatedAt          time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt          time.Time  `gorm:"not null" json:"updated_at"`
+	Tasks              []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	CacheHits          int        `gorm:"-" json:"cache_hits"`
+	ExecutedTasks      int        `gorm:"-" json:"executed_tasks"`
+	TotalTasks         int        `gorm:"-" json:"total_tasks"`
 }
 
 type TaskRun struct {

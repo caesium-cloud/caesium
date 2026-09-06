@@ -21,6 +21,11 @@ var notifiableTypes = []event.Type{
 	event.TypeRunCompleted,
 	event.TypeTaskSucceeded,
 	event.TypeContractBreakDeclared,
+	// An approved tier-3 remediation that actually ran is operator-visible news:
+	// somebody's job definition changed, a task was skipped, or a schema gate was
+	// bypassed. Routing it through the ordinary policy/channel machinery means a
+	// team can page or Slack on it without new plumbing (trust-the-substrate C8).
+	event.TypeAgentActionExecuted,
 }
 
 // Subscriber listens to the event bus and dispatches notifications

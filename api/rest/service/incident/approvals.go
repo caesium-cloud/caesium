@@ -1,12 +1,14 @@
 package incident
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	incidentcore "github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -31,13 +33,80 @@ type DecideResult struct {
 	// StatusChanged reports whether the incident advanced state as part of the
 	// decision. Used to decide SSE emission.
 	StatusChanged bool
+	// Executed reports whether the approved action was actually dispatched.
+	// False on a rejection, when no post-approval executor is registered (the
+	// degraded "approved, not executed" path), and when the dispatch failed.
+	Executed bool
+	// ExecutionError carries the dispatch failure, if any. The DECISION still
+	// stands: it committed before execution was attempted, and the AgentAction
+	// row records the failure. Surfacing it here lets the caller say so instead
+	// of implying the remediation ran.
+	ExecutionError string
 }
 
-// Approve resolves a pending tier-3 approval as approved. decider is the operator
-// identity from the authenticated principal. An approve resumes the incident to
-// triaging so the executor can run the approved action.
+// ApprovedActionExecutor dispatches a tier-3 AgentAction after a human approved
+// it. *incident.Executor satisfies it; the interface keeps this service free of
+// a dependency on the executor's construction (its ActionOps, its event sink).
+//
+// This is the far end of the tier-3 pipeline. Before it existed, `decide`
+// stamped the action `approved`, moved the incident back to triaging, and
+// nothing ever ran the action — the comment said "the executor runs the approved
+// action" and there was no executor (trust-the-substrate ledger L9).
+type ApprovedActionExecutor interface {
+	ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*models.AgentAction, error)
+}
+
+// approvedExecutor is the process-wide post-approval executor, registered once
+// at startup inside the remediation master gate.
+var approvedExecutor ApprovedActionExecutor
+
+// SetApprovedActionExecutor registers the post-approval executor.
+func SetApprovedActionExecutor(e ApprovedActionExecutor) { approvedExecutor = e }
+
+// Approve resolves a pending tier-3 approval as approved, then executes the
+// approved action.
+//
+// The two steps are deliberately sequential and NOT in one transaction: the
+// decision must be durable before anything acts on it, so a crash mid-dispatch
+// leaves an approved-but-unexecuted action a human can see and re-drive, rather
+// than a rolled-back approval whose side effects already landed. decider is the
+// operator identity from the authenticated principal.
 func (s *Service) Approve(incidentID, approvalID uuid.UUID, decider, reason string) (*DecideResult, error) {
-	return s.decide(incidentID, approvalID, models.ApprovalDecisionApproved, decider, reason)
+	result, err := s.decide(incidentID, approvalID, models.ApprovalDecisionApproved, decider, reason)
+	if err != nil {
+		return nil, err
+	}
+	s.executeApproved(result)
+	return result, nil
+}
+
+// executeApproved dispatches the just-approved action. When no executor is
+// registered the approval degrades to "approved, not executed" with a logged
+// warning rather than silently pretending the remediation ran — that degraded
+// path is what a server started without the remediation master gate (and the
+// service's own unit tests) exercise.
+func (s *Service) executeApproved(result *DecideResult) {
+	if result == nil {
+		return
+	}
+	if approvedExecutor == nil {
+		log.Warn("incident: approval recorded but no post-approval executor is registered; action approved, not executed",
+			"incident_id", result.Incident.ID,
+			"approval_id", result.Approval.ID,
+			"action_id", result.Approval.ActionID,
+		)
+		return
+	}
+	if _, err := approvedExecutor.ExecuteApproved(s.ctx, result.Approval.ActionID); err != nil {
+		result.ExecutionError = err.Error()
+		log.Error("incident: approved action failed to execute",
+			"incident_id", result.Incident.ID,
+			"action_id", result.Approval.ActionID,
+			"error", err,
+		)
+		return
+	}
+	result.Executed = true
 }
 
 // Reject resolves a pending tier-3 approval as rejected. A rejection is a human's
@@ -61,8 +130,9 @@ func (s *Service) Reject(incidentID, approvalID uuid.UUID, decider, reason strin
 // authorizeScope agent-token rejection guarantee the caller is a human operator;
 // this method records WHO decided (decider) on the approval row.
 func (s *Service) decide(incidentID, approvalID uuid.UUID, decision models.ApprovalDecision, decider, reason string) (*DecideResult, error) {
-	// Approve resumes triaging (the executor runs the approved action); reject
-	// escalates (a human owns it) — reject must never re-enter the triage loop.
+	// Approve resumes triaging (Approve then runs the approved action through the
+	// registered post-approval executor); reject escalates (a human owns it) —
+	// reject must never re-enter the triage loop.
 	target := models.IncidentStatusTriaging
 	actionStatus := models.AgentActionStatusApproved
 	if decision == models.ApprovalDecisionRejected {

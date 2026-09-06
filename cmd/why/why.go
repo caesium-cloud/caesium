@@ -60,8 +60,9 @@ type explanation struct {
 		Kind  string `json:"kind"`
 		RunID string `json:"runId"`
 	} `json:"baseline"`
-	Group *groupSummary `json:"group"`
-	Diff  *struct {
+	Group       *groupSummary `json:"group"`
+	Remediation []remediation `json:"remediation"`
+	Diff        *struct {
 		HashEqual    bool   `json:"hashEqual"`
 		SubjectHash  string `json:"subjectHash"`
 		BaselineHash string `json:"baselineHash"`
@@ -122,6 +123,22 @@ func explanationNotes(exp *explanation) []string {
 		add(exp.Group.Notes)
 	}
 	return notes
+}
+
+// remediation mirrors run.WhyRemediation: an approved tier-3 action that changed
+// this task's outcome. Rendered as its own block because "a human decided this"
+// is a different KIND of answer from a cache diff, and collapsing it into the
+// field table would bury the decider.
+type remediation struct {
+	ActionID   string `json:"actionId"`
+	IncidentID string `json:"incidentId"`
+	Type       string `json:"type"`
+	Tier       int    `json:"tier"`
+	ApprovedBy string `json:"approvedBy"`
+	ApprovedAt string `json:"approvedAt"`
+	ExecutedAt string `json:"executedAt"`
+	Reason     string `json:"reason"`
+	Scope      string `json:"scope"`
 }
 
 // groupFailure mirrors run.WhyGroupFailure.
@@ -255,6 +272,13 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 		_, _ = fmt.Fprintf(out, "note: %s\n", note)
 	}
 
+	// Printed on EVERY path and BEFORE the group/diff early returns, for the same
+	// reason the notes are: a task that is `skipped` carries no diff and a fanned
+	// group carries none either, and those are exactly the shapes an approved
+	// skip_task produces. Hiding the decider behind a `return` would leave the
+	// human decision — the actual cause — off the answer.
+	renderRemediation(out, exp.Remediation)
+
 	if exp.Group != nil {
 		renderGroup(out, exp.Group)
 		return
@@ -317,6 +341,29 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 		_, _ = fmt.Fprintf(dw, "%s\t%s\t%s\t%s\n", ch.Field, change, dashIfEmpty(before), dashIfEmpty(after))
 	}
 	_ = dw.Flush()
+}
+
+// renderRemediation prints the approved-remediation provenance: which action
+// ran, who approved it, and when it executed.
+func renderRemediation(out io.Writer, entries []remediation) {
+	if len(entries) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Approved remediation (%d):\n", len(entries))
+	rw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(rw, "ACTION\tSCOPE\tAPPROVED-BY\tEXECUTED-AT\tINCIDENT\tREASON")
+	for _, e := range entries {
+		_, _ = fmt.Fprintf(rw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			e.Type,
+			dashIfEmpty(e.Scope),
+			dashIfEmpty(e.ApprovedBy),
+			dashIfEmpty(e.ExecutedAt),
+			dashIfEmpty(e.IncidentID),
+			dashIfEmpty(e.Reason),
+		)
+	}
+	_ = rw.Flush()
 }
 
 // renderGroup prints the fanned-step aggregate: the status histogram, the

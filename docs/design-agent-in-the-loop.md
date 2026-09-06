@@ -7,11 +7,16 @@
 > the `/v1/agent/*` and MCP tool surfaces), approval gates, incident reads, the
 > `ai_agent` dispatch channel, and the Console incident/agent-activity/analytics
 > panels all ship, feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with
-> an active auth mode — except the tier-3 approval pipeline: proposals are
-> recorded but no `ApprovalRequest` is created, approved actions are not
-> executed, and `apply_jobdef_patch`/`skip_task`/`override_schema_gate` have no
-> dispatch; wired by trust-the-substrate.md C4/C7 (direct route) and
-> data-circuit-breaker.md F3 (Git-PR route) in the closed-loop arc. Exec plan:
+> an active auth mode. The tier-3 approval pipeline is now wired end to end by
+> trust-the-substrate.md C4/C7/C3/C8: a tier-3 proposal creates the
+> `ApprovalRequest` and parks the incident in `awaiting_approval`, an approved
+> action is executed by `incident.Executor.ExecuteApproved` under the decider's
+> identity, and `skip_task`/`override_schema_gate`/`apply_jobdef_patch` all
+> dispatch. **Caveat:** `apply_jobdef_patch` ships the **direct** route only
+> (jobs with no git provenance); a git-synced job's approved patch degrades to
+> `escalate` with the rendered diff, and the **Git-PR route
+> (`CAESIUM_GIT_WRITE_CREDENTIALS`, `internal/incident/provenance.go`) is
+> data-circuit-breaker.md Stream F's**, not shipped here. Exec plan:
 > [`agent-in-the-loop-remediation.md`](exec-plans/completed/agent-in-the-loop-remediation.md);
 > the `metadata.remediation` surface is documented in
 > [`job-schema-reference.md`](job-schema-reference.md#remediation). Companion

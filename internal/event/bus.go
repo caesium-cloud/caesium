@@ -70,6 +70,14 @@ const (
 	TypeIncidentStatusChanged Type = "incident_status_changed"
 	TypeAgentActionRecorded   Type = "agent_action_recorded"
 	TypeApprovalRequested     Type = "approval_requested"
+	// TypeAgentActionExecuted is emitted when an approved tier-3 action actually
+	// RUNS (trust-the-substrate C8). It is deliberately distinct from
+	// TypeAgentActionRecorded, which the approvals controller emits at DECISION
+	// time and which therefore says nothing about whether the action executed or
+	// what it did. This one carries the decider, the action type/tier, and the
+	// result summary, so "approved by X at T, executed at T'" is reconstructable
+	// from the event stream alone.
+	TypeAgentActionExecuted Type = "agent_action_executed"
 )
 
 // Event represents a system event.

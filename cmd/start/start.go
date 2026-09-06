@@ -13,6 +13,8 @@ import (
 
 	"github.com/caesium-cloud/caesium/api"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
+	incidentsvc "github.com/caesium-cloud/caesium/api/rest/service/incident"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
@@ -510,7 +512,21 @@ func start(cmd *cobra.Command, args []string) error {
 		// shared by the subscriber (deterministic rules on incident open) and the
 		// timer sweeper (RegisterTimerHandlers), so the snooze_retry handler fires
 		// instead of being claimed-and-skipped.
-		incExecutor := incident.NewExecutor(incident.NewStore(incConn), newIncidentActionOps(run.NewStore(incConn)))
+		incExecutor := incident.NewExecutor(incident.NewStore(incConn), newIncidentActionOps(incConn))
+		// The approval/execution lifecycle rides the shared event stream, persisted
+		// first so approval_requested / agent_action_executed survive a restart.
+		incExecutor.SetEventSink(bus, event.NewStore(incConn))
+
+		// --- Tier-3 approval pipeline, both ends (trust-the-substrate C4 + C7) ---
+		//
+		// Proposal end: without this the agent tool surface records a bare
+		// `proposed` row with no tier evaluation and no ApprovalRequest, so a
+		// tier-3 proposal is unapprovable. Decision end: without this an approved
+		// action is marked `approved` and nothing ever runs it. Both setters are
+		// inside the master gate, so a deployment with remediation disabled wires
+		// neither and the services keep their inert fallbacks.
+		agentsvc.SetActionExecutor(newAgentActionExecutor(incConn, incExecutor))
+		incidentsvc.SetApprovedActionExecutor(incExecutor)
 
 		incidentSub := incident.NewSubscriber(bus, incConn, dqlite.IsLocalLeader, vars.AgentIncidentCooldown)
 		incidentSub.SetRemediator(incExecutor, incident.DefaultRuleSet())
