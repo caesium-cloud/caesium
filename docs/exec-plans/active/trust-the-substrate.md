@@ -603,18 +603,29 @@ binary to download (Ledger L14).
       unless `ldd` reports the binary is statically linked. Export it as a
       `release-cli-<arch>` artifact from the existing per-arch build jobs
       (additive step; no change to the image build).
-      (b) **Bare-host smoke test in `publish`** — the gate, whichever
-      artifact ships: run each downloaded binary inside a minimal container
-      that carries **no** extra libraries (a plain glibc base, not the
-      release image), asserting `caesium --help` exits 0 and
-      `caesium job lint --path docs/examples/minimal.job.yaml` succeeds;
-      then name them `caesium-linux-amd64` / `caesium-linux-arm64`, write
-      `SHA256SUMS`, and attach all three to a release for `${IMAGE_TAG}` via
-      `gh release create --verify-tag --generate-notes` (or
-      `softprops/action-gh-release`), plus the multi-arch image digests in
-      the release body. Add `permissions: contents: write` on the **publish
-      job only** (not the workflow top-level, to keep D1/H-2's edits to the
-      test jobs conflict-free).
+      (b) **Bare-host smoke test, run natively where each artifact is
+      built** — the gate, whichever artifact ships. The `publish` job runs on
+      `ubuntu-24.04` (amd64) with no QEMU/binfmt setup, so it cannot execute
+      the arm64 binary; instead each per-arch build job smoke-tests its own
+      output on its own runner: `build-and-integration-test`
+      (`ubuntu-24.04`) for amd64 and `build-and-integration-test-arm64`
+      (`ubuntu-24.04-arm`) for arm64 — the two jobs that already build and
+      save `release-amd64` / `release-arm64`. Each runs its binary inside a
+      minimal container that carries **no** extra libraries (a plain glibc
+      base, not the release image), asserting `caesium --help` exits 0 and
+      `caesium job lint --path docs/examples/minimal.job.yaml` succeeds, and
+      uploads `caesium-linux-<arch>` together with a `caesium-linux-<arch>.smoke-ok`
+      marker (containing the binary's sha256 and the runner arch) as the
+      `release-cli-<arch>` artifact. `publish` then **verifies, never
+      executes**: both markers present, each sha256 matches its binary, then
+      writes `SHA256SUMS` and attaches all three to a release for
+      `${IMAGE_TAG}` via `gh release create --verify-tag --generate-notes`
+      (or `softprops/action-gh-release`), plus the multi-arch image digests
+      in the release body. (`docker/setup-qemu-action` in `publish` was
+      considered and rejected: emulating a CGO/dqlite binary proves less than
+      a native run on the arm64 runner CI already has.) Add `permissions:
+      contents: write` on the **publish job only** (not the workflow
+      top-level, to keep D1/H-2's edits to the test jobs conflict-free).
       (c) **Fallback, only if (a) cannot be made to link in the wave** (record
       the exact linker failure in the PR): publish
       `caesium-linux-<arch>.tar.gz` containing the executable plus the
@@ -622,14 +633,17 @@ binary to download (Ledger L14).
       `caesium` wrapper script that sets `LD_LIBRARY_PATH` to the bundle;
       label it as a bundled-libs artifact in the release notes and in N-1's
       install step, and file the static build via N-3. The (b) smoke test
-      runs the wrapper.
+      runs the wrapper, still natively per arch.
       **Linux only**: the builder compiles with `GOOS=linux` against CGO
       dqlite built in-stage, so a darwin binary is out of scope — say so in
       the release notes template and in N-1's install step (macOS users run
       the container via `just cli`/E2).
       Files: `build/Dockerfile.build`, `build/Dockerfile`,
-      `.github/workflows/ci.yml` (per-arch build jobs: artifact export;
-      `publish` job: smoke test + release).
+      `.github/workflows/ci.yml` (`build-and-integration-test` and
+      `build-and-integration-test-arm64`: static build export + native smoke
+      test + `release-cli-<arch>` artifact; `publish`: marker/sha verification
+      + release). The two build jobs are also edited by H-2 (timeouts) —
+      sequence H-2 first, E1 rebases (both additive steps).
 - [ ] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
       host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
       (defaulting to the latest release tag resolved with
@@ -913,9 +927,11 @@ binary to download (Ledger L14).
   `push-multiarch`), D3 (new `clean-worktrees` recipe at EOF) — different
   recipes, sequence H-2 first and let E2/D3 rebase mechanically. Arc rule
   "one plan's H-1 per wave" is satisfied (this is the only plan running).
-- `.github/workflows/ci.yml`: D1/H-2 edit the **test** jobs; E1/E3 edit the
-  **publish** job only (job-level `permissions`, not top-level). Same wave is
-  acceptable; H-2 merges first, E1 rebases.
+- `.github/workflows/ci.yml`: D1/H-2 edit the **test** jobs; E1 adds steps to
+  the two per-arch build jobs (`build-and-integration-test`,
+  `build-and-integration-test-arm64`) and to `publish`; E3 edits `publish`
+  only (job-level `permissions`, not top-level). Same wave is acceptable; H-2
+  merges first, E1 rebases onto it, E3 onto E1.
 - `cmd/start/start.go`: A3 (cancel-registry subscriber), C4
   (`SetActionExecutor`) and C7 (incident-service executor setter) all add
   lines in W1 — additive; A3 merges first, C7 rebases onto C4.
@@ -1046,10 +1062,13 @@ The plan is done when **all** of these hold:
    exists with `caesium-linux-amd64`, `caesium-linux-arm64`, `SHA256SUMS`;
    `docker manifest inspect caesiumcloud/caesium:v0.1.0` lists
    `linux/amd64` and `linux/arm64`; `helm/caesium/Chart.yaml` `appVersion`
-   equals the tag and the rule is documented; the `publish` job's bare-host
-   smoke test (E1(b)) passed for both binaries — `caesium --help` and
-   `caesium job lint` succeed in a minimal glibc container with no extra
-   libraries — and the release notes state which artifact form shipped
+   equals the tag and the rule is documented; the bare-host smoke test
+   (E1(b)) passed **natively on each architecture's own runner** —
+   `caesium --help` and `caesium job lint` succeed in a minimal glibc
+   container with no extra libraries on `ubuntu-24.04` (amd64) and
+   `ubuntu-24.04-arm` (arm64) — and `publish` verified both `.smoke-ok`
+   markers and sha256s before attaching; the release notes state which
+   artifact form shipped
    (static, or the bundled-libs fallback with the issue number); `just
    tag=v0.1.0 cli` yields a runnable `./.tmp/caesium-cli/caesium --help` on
    the host.

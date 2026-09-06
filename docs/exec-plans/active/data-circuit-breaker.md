@@ -471,14 +471,35 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       twin"), leaving the concurrency path's no-row behavior unchanged;
       (c) reuse the existing `admissionSkipped`/`skipReason` plumbing to carry the
       reason to that insert. Confirm `JobRunStatus*` gains/uses a `skipped` value.
-      (d) **A hold-skipped run has task rows.** Materialise one `TaskRun` per
-      catalog task of the job in terminal `skipped` status through the shape
-      `markInstanceSkippedWhereTx` already produces for trigger-rule skips — the
-      reason in the row's `error` column, `dataset_hold:<ns>/<name> hold=<id>` —
-      and emit `task_skipped` for each, so run history, the DAG view and the
-      task-scoped `why` (F5) all have rows to read; "a run with no tasks" is not
-      a shape any reader has to tolerate. (Revised 2026-09-06 after review: the
-      earlier wording left the run task-less and F5 unsatisfiable.)
+      (d) **A hold-skipped run has task rows.** Task rows do not exist at
+      admission — for a normal run the local executor registers them after
+      start (`internal/job/job.go` calls `store.RegisterTasks(runID,
+      []RegisterTaskInput{…})`, one input per catalog task at
+      `PartitionIndex: 0`), so the insert path must **create** them itself:
+      in the same store transaction as the terminal-`skipped` `JobRun`
+      insert, register one row per catalog `Task` of the job (a tx-scoped
+      variant of `RegisterTasks` — factor `registerTasksTx` out of it if one
+      does not exist — with `OutstandingPredecessors: 0`, `PartitionIndex: 0`,
+      the catalog `Task` + `Atom` loaded the way `RegisterTasks` loads them),
+      then flip each from `pending` to `skipped` via `markInstanceSkippedWhereTx`
+      with the reason `dataset_hold:<ns>/<name> hold=<id>` in the row's `error`
+      column (the exact shape trigger-rule skips already have) and emit
+      `task_skipped` per row. **Fan-out representation:** a fanned step is
+      registered exactly as a fresh run registers it before its producer has
+      emitted — one **unexpanded template row** (`PartitionIndex 0`,
+      `PartitionCount 0`; see `internal/models/run.go` `TaskRun` and
+      `internal/run/fanout.go` `HasFanOutSuccessor`'s "unexpanded, expandable
+      template row") — and that template row is what gets skipped: no
+      per-partition instances are synthesised, because the producer never ran
+      and the partition list never existed. This is the same shape a fanned
+      group has today whenever its producer never runs (the group "collapses to
+      its single template row"), so the DAG view and `why --task <fanned step>`
+      already know how to render it. Run history, the DAG view and the
+      task-scoped `why` (F5) therefore all have rows to read; "a run with no
+      tasks" is not a shape any reader has to tolerate. (Revised 2026-09-06
+      after review, twice: the first wording left the run task-less; the second
+      cited an update-only helper for rows that did not yet exist and left the
+      fan-out shape undefined.)
       **Depends inline on [`trust-the-substrate.md`](trust-the-substrate.md) Stream A**
       (the tolerant-rule stranding fix): until a failed plain task's successors
       advance correctly in the SQL lane, "downstream skipped because held" is not
