@@ -358,6 +358,13 @@ func startOptionsFrom(opts []StartOption) StartOptions {
 // where it actually starts — so an enricher whose value is a point-in-time
 // observation must re-take it when this is set, or it records a view the run had
 // while it was still waiting rather than the one it began with.
+//
+// On failure an enricher returns an error and, optionally, a corrected map. That
+// second return is not decoration: on a promotion the params handed in came off
+// the run_queue row and may already carry a param this enricher wrote at
+// admission, which a failed re-read has just made stale. Returning the params
+// with it REMOVED is how an enricher retracts a value it can no longer stand
+// behind; returning nil means "nothing to correct, use the caller's params".
 type StartParamsEnricher func(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error)
 
 // startParamsEnricher is registered process-wide rather than per-Store on
@@ -380,7 +387,13 @@ func SetStartParamsEnricher(fn StartParamsEnricher) {
 
 // enrichedStartParams applies the registered enricher. A failing enricher is
 // deliberately NOT fatal: a run must still start when an optional subsystem's
-// read fails, so the params the caller supplied are used unchanged.
+// read fails.
+//
+// A failure keeps the enricher's own returned map when it gave one, and the
+// caller's params otherwise. The distinction matters on the promotion path,
+// where the params come off the run_queue row already carrying what the enricher
+// wrote at admission: discarding its correction there would persist a value the
+// failed re-read just invalidated, as if it were current.
 func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params map[string]string, fromQueue bool) map[string]string {
 	fn := startParamsEnricher.Load()
 	if fn == nil || *fn == nil {
@@ -390,6 +403,9 @@ func enrichedStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, para
 	if err != nil {
 		log.Warn("run: start params enricher failed; starting run with unenriched params",
 			"job_id", jobID, "error", err)
+		if enriched != nil {
+			return enriched
+		}
 		return params
 	}
 	return enriched

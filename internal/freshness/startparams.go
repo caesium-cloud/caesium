@@ -3,12 +3,36 @@ package freshness
 import (
 	"context"
 	"maps"
-	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// ConsumedWatermarksStartParam is the run param holding the watermarks of a
+// run's consumed inputs AS THE RUN STARTED — the start-time truth, written by
+// EnrichStartParams and read back at completion by Capturer.consumedForRun.
+//
+// It is deliberately a DIFFERENT key from freshnessConsumedWatermarksParam
+// (_consumed_watermarks), which carries a freshness-derived run's
+// DERIVATION-time view and belongs to the evaluator alone. The two look alike —
+// same JSON shape, same dataset keys — but they answer different questions and
+// have different owners:
+//
+//   - _consumed_watermarks is the view the derivation DECISION was made on. The
+//     evaluator stamps it in derive() and matches on it in hasActiveOrQueuedRun
+//     to recognise a run it has already scheduled for those inputs. It must stay
+//     fixed for the life of the run or that dedupe stops recognising its own run.
+//   - _consumed_watermarks_start is the view the run BEGAN on. It is re-taken
+//     whenever the run is (re-)created, which for a queued run means at
+//     promotion, because that is when it truly starts.
+//
+// Collapsing them onto one key is what an earlier cut of this did, and it made
+// the promotion refresh overwrite the evaluator's decision view: once promotion
+// deletes the run_queue row, the running row is all hasActiveOrQueuedRun has
+// left to match against, and it no longer matched — so the next tick derived a
+// duplicate run for work already in flight.
+const ConsumedWatermarksStartParam = "_consumed_watermarks_start"
 
 // enricherNamespace is the namespace the consumed view is read under. v1 always
 // keys dataset identity on name alone, matching Capturer.namespace.
@@ -16,8 +40,7 @@ var enricherNamespace *string
 
 // EnrichStartParams is the run-store start-params hook that freezes a run's
 // consumed-input watermarks onto the run row AT CREATION, under
-// _consumed_watermarks — the same param, in the same format, the evaluator
-// already writes for a freshness-derived run.
+// ConsumedWatermarksStartParam.
 //
 // It exists because the consumed view has to be the one the run actually began
 // with. Capturing it from an asynchronous run_started subscriber cannot promise
@@ -36,18 +59,18 @@ var enricherNamespace *string
 //
 // On the queued-concurrency path a run is admitted twice: once when it is
 // enqueued (the view rides the run_queue row) and again when the dequeuer
-// promotes it, which is when the run actually begins. fromQueue marks that
-// second call and makes it RE-read: a run that waited in the queue while its
-// inputs advanced began on the newer view, and keeping the admission-time one
-// would attribute its output to inputs it never read — the same misattribution
-// this capture exists to prevent, only in the other direction (freshness would
-// then see the output as behind and derive redundant work).
+// promotes it, which is when the run actually begins. The read is therefore
+// unconditional and the second call OVERWRITES the first: a run that waited in
+// the queue while its inputs advanced began on the newer view, and keeping the
+// admission-time one would attribute its output to inputs it never read — the
+// same misattribution this capture exists to prevent, only in the other
+// direction (freshness would then see the output as behind and derive redundant
+// work).
 //
-// Refreshing on promotion is correct for a freshness-derived run too, even
-// though its param is the evaluator's decision-time view: that view is
-// separately durable on the dataset_derivations row (evaluator.recordDerivation
-// writes consumed_watermarks there), so overwriting the run param loses nothing
-// and makes the run row say what the run truly consumed.
+// Because the start-time view has its own key, that refresh costs the evaluator
+// nothing: a freshness-derived run's _consumed_watermarks is never read or
+// written here, so its decision-time view — and the hasActiveOrQueuedRun dedupe
+// that compares it — survives promotion untouched.
 //
 // Register it from the server bootstrap under CAESIUM_FRESHNESS_ENABLED. It is a
 // plain func rather than a run.StartParamsEnricher so this package keeps no
@@ -56,20 +79,12 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	if db == nil || jobID == uuid.Nil {
 		return params, nil
 	}
-	// A freshness-derived run already carries the evaluator's view of exactly
-	// the inputs its derivation decision was made on. That is the authoritative
-	// view for such a run; never overwrite it — except on queue promotion, where
-	// the run is starting now and the decision-time view is no longer what it
-	// consumes.
-	if raw, ok := params[freshnessConsumedWatermarksParam]; ok && !fromQueue && strings.TrimSpace(raw) != "" {
-		return params, nil
-	}
 
 	// One indexed read per run creation, which is the whole cost for the common
 	// case of a job that declares no dataset.
 	var decls []models.DatasetDeclaration
 	if err := db.WithContext(ctx).Where("job_id = ?", jobID).Find(&decls).Error; err != nil {
-		return params, err
+		return withoutStartView(params, fromQueue), err
 	}
 
 	produces := false
@@ -89,15 +104,20 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	}
 
 	// A failed read means the view is UNKNOWN, which is not the same answer as
-	// an empty one. Returning the error omits the param (run.enrichedStartParams
-	// logs at warn and keeps the caller's params), so completion falls back to
-	// its current-watermark read — degraded, but honest. Writing {} here would
+	// an empty one. The param is left ABSENT so completion falls back to its
+	// current-watermark read — degraded, but honest. Writing {} here would
 	// instead record "this run consumed nothing" as fact, and completion would
 	// believe it. It is deliberately not fatal to run creation: freshness is an
 	// optional subsystem and a run must still start when its read fails.
+	//
+	// Absent has to be made true, not just left true: on a promotion the params
+	// arrive off the run_queue row still carrying the ADMISSION-time view, and
+	// persisting that onto a run starting now is exactly the misattribution
+	// above. withoutStartView strips it, and run.enrichedStartParams keeps the
+	// map returned alongside the error for precisely this case.
 	snapshot, err := consumedSnapshot(ctx, db, enricherNamespace, consumedNames)
 	if err != nil {
-		return params, err
+		return withoutStartView(params, fromQueue), err
 	}
 
 	// Stamp even an EMPTY view: "no input had a watermark when this run was
@@ -107,6 +127,22 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	if out == nil {
 		out = make(map[string]string, 1)
 	}
-	out[freshnessConsumedWatermarksParam] = string(canonicalConsumedJSON(snapshot))
+	out[ConsumedWatermarksStartParam] = string(canonicalConsumedJSON(snapshot))
 	return out, nil
+}
+
+// withoutStartView returns params with any start-time view removed, so a failed
+// read can never leave a stale one behind. Only a promotion can be handed one
+// (it rides the run_queue row from admission), so every other path returns the
+// caller's map untouched and uncloned.
+func withoutStartView(params map[string]string, fromQueue bool) map[string]string {
+	if !fromQueue {
+		return params
+	}
+	if _, ok := params[ConsumedWatermarksStartParam]; !ok {
+		return params
+	}
+	out := maps.Clone(params)
+	delete(out, ConsumedWatermarksStartParam)
+	return out
 }

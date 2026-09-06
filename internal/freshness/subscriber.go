@@ -31,10 +31,11 @@ const taskRunTerminalSucceeded = "succeeded"
 //
 // That consumed snapshot is the view the run had when it was CREATED, not the
 // one current at its completion, so an input that advances mid-run is not
-// credited to a run that never saw it. The view is stamped onto the job_runs row
-// synchronously at creation — by the evaluator for a derived run, and by
-// StartParamsEnricher for every other trigger — so this subscriber only ever
-// reads it back. See consumedForRun.
+// credited to a run that never saw it. StartParamsEnricher stamps it onto the
+// job_runs row synchronously at creation, under ConsumedWatermarksStartParam, so
+// this subscriber only ever reads it back — falling back to a derived run's
+// decision-time _consumed_watermarks and then to a completion-time read. See
+// consumedForRun.
 //
 // It reads the declared registry (dataset_declarations, freshness A2) to know
 // which output key is a watermark, and the run's task_runs for the emitted
@@ -256,29 +257,29 @@ func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, e
 // consumedForRun resolves the consumed-input watermark snapshot to record
 // against this run's produced datasets:
 //
-//  1. The run's own _consumed_watermarks param — the view captured when the run
-//     was CREATED and written with the job_runs row, by the evaluator for a
-//     freshness-derived run and by StartParamsEnricher for every other trigger
-//     (and re-taken by the enricher when a queued run is promoted, since that is
-//     when it truly starts). Durable, so it survives a restart, a leader change
-//     and a dropped event.
-//  2. A completion-time read, the legacy behaviour. Only reached for a run
-//     created before this change, or created while freshness was disabled (no
-//     enricher was registered, so nothing stamped the param). Degraded — it can
-//     credit an input that advanced mid-run — but it is exactly what every run
-//     recorded before, never a missing row.
+//  1. _consumed_watermarks_start — the view the run BEGAN on, frozen into the
+//     job_runs row by StartParamsEnricher at creation and re-taken when a queued
+//     run is promoted, since that is when it truly starts. This is the start-time
+//     truth and wins outright. Durable, so it survives a restart, a leader change
+//     and a dropped event. An empty document is an answer, not a miss: it says
+//     this run consumed inputs that had no watermark yet.
+//  2. _consumed_watermarks — a freshness-derived run's DERIVATION-time view,
+//     stamped by the evaluator. Close to the start-time view and much better than
+//     a completion-time read, so it is the next-best answer when the enricher
+//     never ran (freshness disabled at creation) or its read failed.
+//  3. A completion-time read, the legacy behaviour. Only reached for a run
+//     created before this change, or one that carries neither param. Degraded —
+//     it can credit an input that advanced mid-run — but it is exactly what every
+//     run recorded before, never a missing row.
 func (c *Capturer) consumedForRun(
 	ctx context.Context,
 	params map[string]string,
 	consumedNames []string,
 ) map[string]string {
-	if raw, ok := params[freshnessConsumedWatermarksParam]; ok && strings.TrimSpace(raw) != "" {
-		var captured map[string]string
-		if err := json.Unmarshal([]byte(raw), &captured); err == nil {
+	for _, param := range []string{ConsumedWatermarksStartParam, freshnessConsumedWatermarksParam} {
+		if captured, ok := decodeConsumedParam(params, param); ok {
 			return captured
 		}
-		log.Warn("freshness: run carried an undecodable consumed-watermark param; falling back",
-			"param", freshnessConsumedWatermarksParam)
 	}
 	snapshot, err := consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
 	if err != nil {
@@ -288,6 +289,23 @@ func (c *Capturer) consumedForRun(
 		return nil
 	}
 	return snapshot
+}
+
+// decodeConsumedParam decodes one captured consumed-watermark param. Absent,
+// blank and undecodable all report false so the caller moves to its next source
+// rather than recording a view it cannot read.
+func decodeConsumedParam(params map[string]string, param string) (map[string]string, bool) {
+	raw, ok := params[param]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, false
+	}
+	var captured map[string]string
+	if err := json.Unmarshal([]byte(raw), &captured); err != nil {
+		log.Warn("freshness: run carried an undecodable consumed-watermark param; falling back",
+			"param", param)
+		return nil, false
+	}
+	return captured, true
 }
 
 type stepOutput struct {

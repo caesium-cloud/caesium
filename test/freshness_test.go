@@ -130,9 +130,9 @@ func (s *IntegrationTestSuite) TestFreshnessConsumedSnapshotTakenAtRunStart() {
 	// 1. The input's watermark as the consumer's run will begin.
 	arrive(earlyWatermark)
 
-	// 2. Start the slow consumer. Its _consumed_watermarks param was written
-	//    with the run row, so once the run exists the early view is already
-	//    frozen — nothing has to be waited on here.
+	// 2. Start the slow consumer. Its _consumed_watermarks_start param was
+	//    written with the run row, so once the run exists the early view is
+	//    already frozen — nothing has to be waited on here.
 	runID := s.triggerRun(consumer.ID)
 	s.awaitRunStatus(consumer.ID, runID, runTimeout, "running")
 

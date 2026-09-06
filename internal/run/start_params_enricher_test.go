@@ -165,11 +165,11 @@ func TestStartQueuedRunRefreshesEnrichedParams(t *testing.T) {
 		for k, v := range params {
 			out[k] = v
 		}
-		// The real enricher's rule: an existing view is authoritative until the
-		// run is promoted, at which point it is re-taken.
-		if _, ok := out["_consumed_watermarks"]; !ok || fromQueue {
-			out["_consumed_watermarks"] = view
-		}
+		// The real enricher's rule: the value is a point-in-time observation, so
+		// it is re-taken on every creation of the run — including the promotion,
+		// which is the one that happens when the run truly begins. It owns this
+		// key alone and never rewrites a caller's.
+		out["_consumed_watermarks_start"] = view
 		return out, nil
 	})
 
@@ -177,14 +177,14 @@ func TestStartQueuedRunRefreshesEnrichedParams(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, occupying)
 
-	_, err = store.Start(job.ID, nil)
+	_, err = store.Start(job.ID, nil, WithStartParams(map[string]string{"_consumed_watermarks": "derivation-view"}))
 	require.ErrorIs(t, err, ErrRunQueued)
 
 	var queuedRow models.RunQueue
 	require.NoError(t, db.First(&queuedRow, "job_id = ?", job.ID).Error)
 	var queuedParams map[string]string
 	require.NoError(t, json.Unmarshal(queuedRow.Params, &queuedParams))
-	require.Equal(t, "admission-key", queuedParams["_consumed_watermarks"],
+	require.Equal(t, "admission-key", queuedParams["_consumed_watermarks_start"],
 		"the enqueued row should carry the view taken at admission")
 
 	// The input advances while the run waits, and the slot frees.
@@ -202,8 +202,64 @@ func TestStartQueuedRunRefreshesEnrichedParams(t *testing.T) {
 
 	require.Equal(t, []bool{false, false, true}, sawFromQueue,
 		"only the promotion out of run_queue is a fromQueue creation")
-	require.Equal(t, "promotion-key", runParams(t, db, promoted.ID)["_consumed_watermarks"],
+	promotedParams := runParams(t, db, promoted.ID)
+	require.Equal(t, "promotion-key", promotedParams["_consumed_watermarks_start"],
 		"a promoted run must record the view it started with, not the one it was queued with")
+	require.Equal(t, "derivation-view", promotedParams["_consumed_watermarks"],
+		"the refresh must not touch a param the caller owns")
+}
+
+// TestStartQueuedRunAppliesEnricherRetraction is the regression for a stale
+// snapshot surviving a failed refresh. A promotion's params come off the
+// run_queue row already carrying what the enricher wrote at admission, so when
+// its re-read fails, dropping its returned map would persist that admission-time
+// value onto a run starting now — recorded as if it were the view the run began
+// with. The map returned alongside the error is the enricher's retraction and
+// must be the one written to the row; the run still starts either way.
+func TestStartQueuedRunAppliesEnricherRetraction(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	job := createConcurrencyJob(t, db, "queue-retract", jobdef.ConcurrencyStrategyQueue, 1)
+
+	registerStartParamsEnricher(t, func(_ context.Context, _ *gorm.DB, _ uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error) {
+		out := map[string]string{}
+		for k, v := range params {
+			out[k] = v
+		}
+		if fromQueue {
+			// The re-read failed: retract the value taken at admission rather
+			// than let it stand in for the one this run actually started on.
+			delete(out, "_consumed_watermarks_start")
+			return out, errors.New("watermark read failed")
+		}
+		out["_consumed_watermarks_start"] = "admission-key"
+		return out, nil
+	})
+
+	occupying, err := store.Start(job.ID, nil)
+	require.NoError(t, err)
+	require.NotNil(t, occupying)
+
+	_, err = store.Start(job.ID, nil, WithStartParams(map[string]string{"logical_date": "2026-06-25"}))
+	require.ErrorIs(t, err, ErrRunQueued)
+
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", occupying.ID).
+		Update("status", string(StatusSucceeded)).Error)
+
+	claimed, err := store.DequeueNextRun(context.Background(), job.ID, "claim-a")
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	promoted, err := store.StartQueuedRun(context.Background(), claimed)
+	require.NoError(t, err, "a failed enricher must not stop the run from starting")
+	require.NotNil(t, promoted)
+
+	params := runParams(t, db, promoted.ID)
+	require.NotContains(t, params, "_consumed_watermarks_start",
+		"the stale admission-time view must not survive a failed refresh")
+	require.Equal(t, "2026-06-25", params["logical_date"], "the caller's params must survive the retraction")
 }
 
 // TestStartRunWithoutEnricherIsUnchanged pins the nil-safe default: with nothing

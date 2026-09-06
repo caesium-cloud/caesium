@@ -175,10 +175,37 @@ func TestCapturerRecordsConsumedViewCapturedAtRunCreation(t *testing.T) {
 	}
 }
 
+// TestCapturerPrefersTheStartViewOverTheDerivationView pins the precedence
+// between the two keys a queued freshness-derived run carries: the evaluator's
+// _consumed_watermarks is the view its DECISION was made on, which for a run
+// that sat in run_queue is older than the view it actually started on. The
+// enricher's _consumed_watermarks_start is the start-time truth and wins.
+func TestCapturerPrefersTheStartViewOverTheDerivationView(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, nil, "max_order_ts")
+
+	setRunParams(t, db, runID, map[string]string{
+		freshnessConsumedWatermarksParam: `{"raw.vendor_x":"derivation-key"}`,
+		ConsumedWatermarksStartParam:     `{"raw.vendor_x":"start-key"}`,
+	})
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	consumed := consumedSnapshotOf(t, c, "staging.orders")
+	if consumed["raw.vendor_x"] != "start-key" {
+		t.Fatalf("consumed snapshot = %v, want the start-time raw.vendor_x=start-key", consumed)
+	}
+}
+
 // TestCapturerPrefersDerivedConsumedWatermarks proves the captured view beats a
 // completion-time read: a freshness-derived run carries the evaluator's view of
 // exactly the inputs its derivation decision was made on, on its own job_runs
-// row (_consumed_watermarks).
+// row (_consumed_watermarks). It is the fallback when no start-time view was
+// stamped — freshness disabled at creation, or the enricher's read failed.
 func TestCapturerPrefersDerivedConsumedWatermarks(t *testing.T) {
 	db := openRegistryDB(t)
 	c := NewCapturer(event.New(), db)

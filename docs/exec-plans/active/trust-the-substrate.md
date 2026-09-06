@@ -355,14 +355,14 @@ Three shipped surfaces report something other than what happened.
       is byte-identical to before.
       `internal/freshness.EnrichStartParams` implements it — one indexed
       `dataset_declarations` read, then `consumedSnapshot` for a job that both
-      produces and consumes, stamping `_consumed_watermarks` in the evaluator's
-      exact format and never overwriting a value already present (a
-      freshness-derived run carries the evaluator's own view). It is a plain func,
-      so `internal/freshness` still does not import `internal/run`;
+      produces and consumes, stamping `_consumed_watermarks_start`
+      (`ConsumedWatermarksStartParam`) in the evaluator's exact JSON format. It is
+      a plain func, so `internal/freshness` still does not import `internal/run`;
       `cmd/start/start.go` wires it in one line inside the existing
-      `vars.FreshnessEnabled` block. `Capturer.consumedForRun` now reads the
-      param first and falls back to the completion-time read only for runs
-      created before this change or with freshness disabled at creation.
+      `vars.FreshnessEnabled` block. `Capturer.consumedForRun` reads that param
+      first, then the evaluator's `_consumed_watermarks`, and falls back to the
+      completion-time read only for runs created before this change or with
+      freshness disabled at creation.
       **The async `run_started` design was rejected**, not merely improved on:
       the event only queues work for the subscriber, so the read could land after
       the run was already executing (an input advancing in between was credited
@@ -385,30 +385,51 @@ Three shipped surfaces report something other than what happened.
       the START-time watermark, with a guard that fails loudly if the consumer
       terminated before the mid-run advance landed; it is now deterministic (no
       sleep waiting for an observer) because the view is frozen with the row.
-      Two review refinements followed. (a) A **failed** watermark read is no
+      Three review refinements followed. (a) A **failed** watermark read is no
       longer written down as an empty view: `consumedSnapshot` returns
       `(map, error)` so "every input is genuinely without a watermark" (stamp
       `{}`, authoritative) is distinguishable from "the read failed" (omit the
       param, so completion falls back to its own read). The failure stays
       non-fatal to run creation — freshness is optional and a run must still
-      start — so it travels the existing warn-and-use-caller-params path in
-      `enrichedStartParams`. (b) The seam carries `fromQueue`, and a
-      **queue-strategy run is re-enriched on promotion**: it is admitted twice
-      (enqueue, then `StartQueuedRun` when the dequeuer frees a slot), and only
-      the second call happens when the run actually begins, so keeping the
-      admission-time view would credit the output to inputs the run never read
-      and let freshness derive redundant catch-up work. This is right for a
-      freshness-derived run that was queued too (`derive` → `AdmitRun` can return
-      `ErrRunQueued`): the evaluator's decision-time view is separately durable
-      on the `dataset_derivations` row via `recordDerivation`, so overwriting the
-      run param loses nothing, and `hasActiveOrQueuedRun`'s dedupe still compares
-      against the *queue* row, which is untouched. Covered by
-      `TestStartQueuedRunRefreshesEnrichedParams` (`internal/run`, real
-      enqueue→dequeue→promote path) and
-      `TestStartParamsEnricherRefreshesOnQueuePromotion` /
-      `TestStartParamsEnricherOmitsViewWhenTheReadFails` (`internal/freshness`);
-      no integration variant, a queued-concurrency scenario would add a dequeuer
-      poll and a second slow run for a rule the unit tests pin exactly.
+      start — so it travels the warn-and-degrade path in `enrichedStartParams`.
+      (b) The seam carries `fromQueue`, and a **queue-strategy run is re-enriched
+      on promotion**: it is admitted twice (enqueue, then `StartQueuedRun` when
+      the dequeuer frees a slot), and only the second call happens when the run
+      actually begins, so keeping the admission-time view would credit the output
+      to inputs the run never read and let freshness derive redundant catch-up
+      work. (c) That refresh is why the capture now uses **two keys, not one**.
+      They look alike — same JSON shape, same dataset keys — but they answer
+      different questions and have different owners.
+      `_consumed_watermarks` is the DERIVATION-time view: the evaluator stamps it
+      in `derive` and matches on it in `hasActiveOrQueuedRun`, whose
+      `sameDerivationParams` compares exactly `_derived_from_dataset` +
+      `_consumed_watermarks` against every running `job_runs` row and every
+      `run_queue` row for the job. The enricher never reads or writes it.
+      `_consumed_watermarks_start` is the START-time view, written only by the
+      enricher, unconditionally overwritten on promotion, and **deleted** (never
+      left stale) when the promotion read fails, so completion degrades to its
+      own read instead of believing an admission-time snapshot. Collapsing them
+      onto one key broke both ends: the promotion refresh overwrote the
+      evaluator's decision view, and since the dequeuer deletes the `run_queue`
+      row once `StartQueuedRun` succeeds, the running row is all the dedupe has
+      left to match — it no longer matched, so the next tick derived a duplicate
+      run for work already in flight. Retracting a value the enricher can no
+      longer stand behind needs the seam's help: `enrichedStartParams` keeps the
+      map an enricher returns *alongside* its error (nil still means "use the
+      caller's params"), because on a promotion the caller's params are the
+      run_queue row's and carry the very value the failed re-read invalidated.
+      Covered by `TestStartQueuedRunRefreshesEnrichedParams` and
+      `TestStartQueuedRunAppliesEnricherRetraction` (`internal/run`, real
+      enqueue→dequeue→promote path) and, in `internal/freshness`,
+      `TestStartParamsEnricherRefreshesOnQueuePromotion`,
+      `TestStartParamsEnricherNeverTouchesTheDerivationView`,
+      `TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails`,
+      `TestCapturerPrefersTheStartViewOverTheDerivationView` and
+      `TestQueuePromotionKeepsTheDerivationDedupe`, which drives the real
+      `hasActiveOrQueuedRun` against a promoted run's persisted params rather
+      than comparing strings; no integration variant, a queued-concurrency
+      scenario would add a dequeuer poll and a second slow run for a rule the
+      unit tests pin exactly.
 
 ### Stream C — Auth surface end-to-end, and the approval gate made reachable
 

@@ -2,11 +2,14 @@ package freshness
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -43,8 +46,8 @@ func TestStartParamsEnricherStampsConsumedView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
-	if got := out[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"vendor-key-1"}` {
-		t.Fatalf("%s = %q, want the creation-time view", freshnessConsumedWatermarksParam, got)
+	if got := out[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"vendor-key-1"}` {
+		t.Fatalf("%s = %q, want the creation-time view", ConsumedWatermarksStartParam, got)
 	}
 	if out["logical_date"] != "2026-07-03" {
 		t.Fatalf("enricher dropped a caller param: %v", out)
@@ -68,10 +71,11 @@ func TestStartParamsEnricherDoesNotMutateCallerParams(t *testing.T) {
 	}
 }
 
-// TestStartParamsEnricherKeepsDerivedView proves the evaluator's view wins: a
-// freshness-derived run already carries the exact inputs its derivation decision
-// was made on, so the enricher must not restamp it with a later read.
-func TestStartParamsEnricherKeepsDerivedView(t *testing.T) {
+// TestStartParamsEnricherNeverTouchesTheDerivationView pins the key separation:
+// _consumed_watermarks is the evaluator's DECISION-time view and belongs to the
+// evaluator alone, so the enricher must leave it exactly as it found it while
+// stamping its own start-time view beside it.
+func TestStartParamsEnricherNeverTouchesTheDerivationView(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
 	store := NewStore(db)
@@ -94,6 +98,9 @@ func TestStartParamsEnricherKeepsDerivedView(t *testing.T) {
 	if got := out[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"derived-key"}` {
 		t.Fatalf("%s = %q, want the evaluator's view untouched", freshnessConsumedWatermarksParam, got)
 	}
+	if got := out[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"later-key"}` {
+		t.Fatalf("%s = %q, want the start-time view read now", ConsumedWatermarksStartParam, got)
+	}
 }
 
 // TestStartParamsEnricherStampsEmptyView covers the input that has no state row
@@ -109,8 +116,8 @@ func TestStartParamsEnricherStampsEmptyView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
-	if got := out[freshnessConsumedWatermarksParam]; got != `{}` {
-		t.Fatalf("%s = %q, want an authoritative empty view", freshnessConsumedWatermarksParam, got)
+	if got := out[ConsumedWatermarksStartParam]; got != `{}` {
+		t.Fatalf("%s = %q, want an authoritative empty view", ConsumedWatermarksStartParam, got)
 	}
 }
 
@@ -137,8 +144,8 @@ func TestStartParamsEnricherRefreshesOnQueuePromotion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich at admission: %v", err)
 	}
-	if got := queued[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"admission-key"}` {
-		t.Fatalf("%s = %q, want the admission-time view", freshnessConsumedWatermarksParam, got)
+	if got := queued[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"admission-key"}` {
+		t.Fatalf("%s = %q, want the admission-time view", ConsumedWatermarksStartParam, got)
 	}
 
 	// The input advances while the run sits in run_queue.
@@ -152,11 +159,96 @@ func TestStartParamsEnricherRefreshesOnQueuePromotion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich at promotion: %v", err)
 	}
-	if got := promoted[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"promotion-key"}` {
-		t.Fatalf("%s = %q, want the promotion-time view", freshnessConsumedWatermarksParam, got)
+	if got := promoted[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"promotion-key"}` {
+		t.Fatalf("%s = %q, want the promotion-time view", ConsumedWatermarksStartParam, got)
 	}
-	if got := queued[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"admission-key"}` {
+	if got := queued[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"admission-key"}` {
 		t.Fatalf("promotion mutated the queued params: %q", got)
+	}
+}
+
+// TestQueuePromotionKeepsTheDerivationDedupe is the regression for a duplicate
+// freshness run. hasActiveOrQueuedRun recognises work it already scheduled by
+// comparing exactly two params (sameDerivationParams): _derived_from_dataset and
+// _consumed_watermarks. Promotion deletes the run_queue row, so the running row
+// is the only thing left to match against — and when the enricher's refresh
+// shared that key it overwrote the derivation view, the match failed, and the
+// next tick derived a second run for work already in flight. The start-time view
+// having its own key is what keeps the match.
+func TestQueuePromotionKeepsTheDerivationDedupe(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	seedEnricherJob(t, db, jobID, []string{"staging.orders"}, []string{"raw.vendor_x"})
+
+	if _, err := store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "admission-key", RunID: uuid.New(), CompletedAt: t0,
+	}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+
+	// Exactly what derive() builds, and what a later tick evaluating the same
+	// unchanged inputs will build again and compare with.
+	derivation := map[string]string{
+		freshnessDerivedFromDatasetParam: "staging.orders",
+		freshnessConsumedWatermarksParam: `{"raw.vendor_x":"admission-key"}`,
+	}
+
+	queued, err := EnrichStartParams(ctx, db, jobID, derivation, false)
+	if err != nil {
+		t.Fatalf("enrich at admission: %v", err)
+	}
+
+	// The input advances while the run waits in run_queue, so the promotion read
+	// returns a different view from the derivation one.
+	if _, err := store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "promotion-key", RunID: uuid.New(), CompletedAt: t0.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("advance upstream: %v", err)
+	}
+
+	promoted, err := EnrichStartParams(ctx, db, jobID, queued, true)
+	if err != nil {
+		t.Fatalf("enrich at promotion: %v", err)
+	}
+	if got := promoted[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"admission-key"}` {
+		t.Fatalf("promotion overwrote the derivation view: %s = %q", freshnessConsumedWatermarksParam, got)
+	}
+	if got := promoted[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"promotion-key"}` {
+		t.Fatalf("%s = %q, want the promotion-time view", ConsumedWatermarksStartParam, got)
+	}
+
+	// The dequeuer deletes the run_queue row after StartQueuedRun succeeds, so
+	// only the running job_runs row remains for the dedupe to see.
+	seedRunningRun(t, db, jobID, promoted)
+
+	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunAdmitter{t: t, db: db}})
+	active, err := eval.hasActiveOrQueuedRun(ctx, jobID, derivation)
+	if err != nil {
+		t.Fatalf("hasActiveOrQueuedRun: %v", err)
+	}
+	if !active {
+		t.Fatal("the promoted run no longer matches its derivation view; freshness would derive a duplicate")
+	}
+}
+
+// seedRunningRun writes a running job_runs row carrying params, the way run
+// creation persists them.
+func seedRunningRun(t *testing.T, db *gorm.DB, jobID uuid.UUID, params map[string]string) {
+	t.Helper()
+	blob, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	now := t0.Add(time.Hour)
+	if err := db.Create(&models.JobRun{
+		ID: uuid.New(), JobID: jobID, TriggerID: uuid.New(),
+		Status: string(runstorage.StatusRunning), Params: datatypes.JSON(blob),
+		StartedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed running run: %v", err)
 	}
 }
 
@@ -181,11 +273,61 @@ func TestStartParamsEnricherOmitsViewWhenTheReadFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed consumed-state read must be reported, not swallowed")
 	}
-	if _, ok := out[freshnessConsumedWatermarksParam]; ok {
+	if _, ok := out[ConsumedWatermarksStartParam]; ok {
 		t.Fatalf("a failed read was written down as a view: %v", out)
 	}
 	if out["logical_date"] != "2026-07-03" {
 		t.Fatalf("the caller's params must come back unchanged: %v", out)
+	}
+}
+
+// TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails is the other
+// half of that rule, and the one a failing promotion actually depends on: the
+// params arrive off the run_queue row still carrying the ADMISSION-time view, so
+// "leave it absent" has to mean "make it absent". Anything else persists a view
+// the run did not start on, and completion believes it. The evaluator's
+// derivation view is not the enricher's to retract and must survive.
+func TestStartParamsEnricherDropsTheStaleViewWhenThePromotionReadFails(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	seedEnricherJob(t, db, jobID, []string{"staging.orders"}, []string{"raw.vendor_x"})
+
+	if _, err := store.Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "admission-key", RunID: uuid.New(), CompletedAt: t0,
+	}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+
+	queued, err := EnrichStartParams(ctx, db, jobID, map[string]string{
+		freshnessConsumedWatermarksParam: `{"raw.vendor_x":"admission-key"}`,
+	}, false)
+	if err != nil {
+		t.Fatalf("enrich at admission: %v", err)
+	}
+	if _, ok := queued[ConsumedWatermarksStartParam]; !ok {
+		t.Fatalf("admission did not stamp a start view: %v", queued)
+	}
+
+	// The promotion-time read fails.
+	if err := db.Migrator().DropTable(&models.DatasetState{}); err != nil {
+		t.Fatalf("drop dataset_states: %v", err)
+	}
+
+	promoted, err := EnrichStartParams(ctx, db, jobID, queued, true)
+	if err == nil {
+		t.Fatal("a failed promotion read must be reported, not swallowed")
+	}
+	if got, ok := promoted[ConsumedWatermarksStartParam]; ok {
+		t.Fatalf("the stale admission-time view survived a failed promotion read: %q", got)
+	}
+	if got := promoted[freshnessConsumedWatermarksParam]; got != `{"raw.vendor_x":"admission-key"}` {
+		t.Fatalf("%s = %q, want the evaluator's view left intact", freshnessConsumedWatermarksParam, got)
+	}
+	if got := queued[ConsumedWatermarksStartParam]; got != `{"raw.vendor_x":"admission-key"}` {
+		t.Fatalf("the retraction mutated the caller's params: %q", got)
 	}
 }
 
@@ -210,9 +352,9 @@ func TestStartParamsEnricherIgnoresJobsWithNothingToFreeze(t *testing.T) {
 			if err != nil {
 				t.Fatalf("enrich: %v", err)
 			}
-			if _, ok := out[freshnessConsumedWatermarksParam]; ok {
+			if _, ok := out[ConsumedWatermarksStartParam]; ok {
 				t.Fatalf("nothing to freeze, but the enricher stamped %s: %v",
-					freshnessConsumedWatermarksParam, out)
+					ConsumedWatermarksStartParam, out)
 			}
 		})
 	}
