@@ -745,6 +745,44 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 			return err
 		}
 		if shouldRun {
+			// A fanned step that was never EXPANDED must not be announced
+			// ready. Expansion happens inside the producer's completion
+			// transaction, before this advancement runs, so a successor still
+			// sitting as an unexpanded template at this point has no partition
+			// list and never will — its producer did not succeed.
+			//
+			// Without this, releasing a failed plain task's successors handed
+			// the dispatcher a template row: `partition_count = 0`,
+			// `partition_value = ''`, indistinguishable in SQL from an ordinary
+			// unfanned task, so PendingTasksForDispatch, ClaimTaskForDispatch
+			// and the local dispatch would all have run the fanned step ONCE,
+			// unpartitioned, with no CAESIUM_PARTITION — a step executing a
+			// shape its author never declared. (Excluding templates in those
+			// three predicates is the wrong lever: none of them can tell a
+			// template from a plain task without joining the catalog's
+			// fan_out_config, and the row should never be left pending here in
+			// the first place.)
+			//
+			// Skipping is what design-dynamic-fanout.md already prescribes for
+			// a group that cannot materialize — the same resolution `onEmpty:
+			// skip` uses — and it keeps the group's own status truthful:
+			// `skipped` for a group that never existed, which downstream
+			// trigger rules then read normally.
+			isTemplate, producer, tmplErr := s.unexpandedFanOutTemplateTx(tx, runID, successor.TaskID)
+			if tmplErr != nil {
+				return tmplErr
+			}
+			if isTemplate {
+				reason := fmt.Sprintf("fan-out producer %q did not produce a partition list", producer)
+				skipped, skipErr := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, reason, pendingEvents, counts)
+				if skipErr != nil {
+					return skipErr
+				}
+				if skippedIDs != nil {
+					*skippedIDs = append(*skippedIDs, skipped...)
+				}
+				continue
+			}
 			if err := s.appendTaskReadyEventTx(tx, runID, successor.TaskID, pendingEvents, counts); err != nil {
 				return err
 			}
@@ -760,6 +798,43 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 		}
 	}
 	return nil
+}
+
+// unexpandedFanOutTemplateTx reports whether a task's rows in this run are
+// still the single UNEXPANDED template of a fanned step — the row RegisterTasks
+// created before any partition list existed — and returns the producer name its
+// fanOut declares.
+//
+// The test is the catalog saying "this step fans out" plus the run holding
+// exactly one row with no partition identity. isFanOutInstance answers the
+// opposite question (is this row one materialized instance) and deliberately
+// returns false for a template, which is why it cannot be reused here.
+func (s *Store) unexpandedFanOutTemplateTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, string, error) {
+	var task models.Task
+	if err := tx.Select("id", "fan_out_config").First(&task, "id = ?", taskID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	fo, err := decodeFanOutConfig(task.FanOutConfig)
+	if err != nil || fo == nil {
+		// An unreadable fanOut block is not grounds for skipping a step: fall
+		// back to the ordinary ready path, which is what a non-fanned task gets.
+		return false, "", nil
+	}
+
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&rows).Error; err != nil {
+		return false, "", err
+	}
+	if len(rows) != 1 {
+		return false, "", nil
+	}
+	if isFanOutInstance(&rows[0]) {
+		return false, "", nil
+	}
+	return true, fo.From, nil
 }
 
 // jobAliasForRunTx resolves a run's job alias for metric labelling. Best effort:
@@ -970,10 +1045,11 @@ func (s *Store) decrementInGroupDependentsTx(tx *gorm.DB, runID uuid.UUID, compl
 }
 
 // resolveInstanceFailureTx is THE SQL lane's terminal-failure resolution: one
-// instance has just been written terminal-failed, and everything that follows
+// task run has just been written terminal-failed, and everything that follows
 // from that — the group's failurePolicy, the task_failed event carrying this
-// instance's identity, and the group-terminal gate that releases the fanned
-// step's cross-step successors — happens here, once.
+// row's identity, and the cross-step successor advancement (immediately for a
+// plain task, behind the group-terminal gate for a fanned instance) — happens
+// here, once.
 //
 // It exists because the SQL lane reaches a failed instance by TWO routes and
 // they must not drift:
@@ -1032,11 +1108,50 @@ func (s *Store) resolveInstanceFailureTx(
 		}
 	}
 
-	// Only a fanned group has a group to resolve. An unfanned task's successors
-	// are advanced by the ordinary trigger-rule path, not from here.
-	if row == nil || !isFanOutInstance(row) {
+	// A row the completion route could not load names no successors to advance:
+	// the whole advancement is keyed on the failed row's identity, and guessing
+	// from catalogTaskID alone would decrement a fanned group's successors on
+	// the first instance's failure.
+	if row == nil {
 		return nil
 	}
+
+	// A PLAIN failed task advances its own successors, exactly as the success
+	// path does.
+	//
+	// This used to return here, with the comment "an unfanned task's successors
+	// are advanced by the ordinary trigger-rule path". There is no such path:
+	// shouldRunTaskTx has four callers (completeTask's SUCCESS branch,
+	// cacheHitTask's own successor loop, advanceCrossStepSuccessorsTx and
+	// skipTaskAndDescendantsTx) and none of them is reached by a plain failure.
+	// So the row scalar outstanding_predecessors was never decremented for a
+	// failed plain step, and everything that gates on it stalled: the fanned
+	// consumer of a failed plain step (runFannedGroup reads the row scalar, so
+	// its instances swept as "never dispatched"), and in distributed mode EVERY
+	// tolerant consumer (ClaimTaskForDispatch and PendingTasksForDispatch both
+	// require outstanding_predecessors = 0). A `all_success` consumer stayed
+	// pending on a terminal run instead of being skipped with its rule reason.
+	//
+	// advanceCrossStepSuccessorsTx already does the right thing per successor —
+	// batchDecrementPredecessorsTx, then shouldRunTaskTx → task_ready or
+	// skipTaskAndDescendantsTx with the same `trigger rule %q not satisfied`
+	// reason the other three copies emit — and the trigger rule is what decides:
+	// a failed predecessor makes all_success unsatisfiable and leaves all_done
+	// satisfied. The store is the only place all three lanes agree (the local
+	// executor's in-memory Kahn map, runFannedGroup's row read, and the
+	// distributed claimer), which is why this lives here and not in an executor.
+	//
+	// Double-skipping is safe: markTaskSkippedTx only touches `pending` rows, so
+	// the local executor's own store.SkipTask cascade (internal/job/job.go
+	// skipDescendantsFiltered), which runs AFTER this transaction commits, finds
+	// the successor already terminal and emits neither a second row write nor a
+	// second task_skipped event.
+	if !isFanOutInstance(row) {
+		return s.advanceCrossStepSuccessorsTx(tx, runID, catalogTaskID, pendingEvents, skippedTaskIDs, counts)
+	}
+
+	// A fanned instance keeps the group gate: the step's cross-step successors
+	// are advanced once, on the transition that makes every instance terminal.
 	allTerminal, err := s.groupAllTerminalTx(tx, runID, catalogTaskID)
 	if err != nil || !allTerminal {
 		return err

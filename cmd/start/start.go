@@ -26,6 +26,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/incident"
+	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
@@ -175,6 +176,12 @@ func start(cmd *cobra.Command, args []string) error {
 	runStore.SetBus(bus)
 	jsvc.Service(ctx).SetBus(bus)
 	runsvc.New(ctx).SetBus(bus)
+	// Make a cancelled run reach the LOCAL executor's containers: CancelRun and
+	// the concurrency `replace` admission both publish run_cancelled, and this
+	// subscriber turns it into a context cancel for every in-process engine
+	// driving that run (internal/job/cancel_registry.go). The distributed lane's
+	// half is claim-loss detection in internal/worker.
+	job.SubscribeRunCancellations(ctx, bus)
 	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
 		dequeuer := runqueue.NewDequeuer(runqueue.Config{
 			DB:                  db.Connection(),

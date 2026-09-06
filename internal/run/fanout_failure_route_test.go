@@ -165,11 +165,20 @@ func TestCompleteTaskClaimedFailureResultContinueSkipsOnlyDependents(t *testing.
 		"`continue` must not resolve an independent sibling on the completion route either")
 }
 
-// TestCompleteTaskFailureResultLeavesUnfannedTasksAlone pins that routing the
-// failure branch through the shared resolution did not give an ORDINARY task
-// fan-out consequences: an unfanned row has no group, so nothing else in the
-// run may be touched by its failure.
-func TestCompleteTaskFailureResultLeavesUnfannedTasksAlone(t *testing.T) {
+// TestCompleteTaskFailureResultResolvesUnfannedSuccessorsByRule pins that an
+// ORDINARY task's failure resolves its successors through the TRIGGER RULE, not
+// through a fan-out group cascade it has no group for.
+//
+// It used to assert the successor was left `pending` — the shape of the bug: an
+// unfanned failure returned before any advancement at all, on the claim that
+// "the ordinary trigger-rule path" would handle it, and there was no such path.
+// The row scalar stayed >0 forever, so the local executor's runFannedGroup and
+// the distributed claimer both refused to dispatch, and an all_success consumer
+// sat pending on a terminal run. The successor here carries the default
+// all_success rule, so the correct resolution is a skip carrying the rule
+// reason — the same string the fanned path, cacheHitTask and completeTask's
+// success branch emit.
+func TestCompleteTaskFailureResultResolvesUnfannedSuccessorsByRule(t *testing.T) {
 	f := newFanOutFixture(t, nil)
 
 	require.NoError(t, f.store.CompleteTask(f.runID, f.producer.ID, "failure", nil, nil))
@@ -179,6 +188,10 @@ func TestCompleteTaskFailureResultLeavesUnfannedTasksAlone(t *testing.T) {
 
 	consumer, err := loadUniqueTaskRun(f.db, f.runID, f.consumer.ID)
 	require.NoError(t, err)
-	assert.Equal(t, string(TaskStatusPending), consumer.Status,
-		"an unfanned failure must not resolve its successors through the fan-out path")
+	assert.Equal(t, string(TaskStatusSkipped), consumer.Status,
+		"an all_success successor of a failed plain task must be resolved, not stranded pending")
+	assert.Equal(t, `trigger rule "all_success" not satisfied`, consumer.Error,
+		"the reason must be the rule reason every other advancement path emits")
+	assert.Zero(t, consumer.OutstandingPredecessors,
+		"the failed predecessor must be decremented off its successor's outstanding count")
 }

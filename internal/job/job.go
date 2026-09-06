@@ -486,7 +486,12 @@ func withPartitionRetryReplacement(taskRunIDs []uuid.UUID) JobOption {
 // taskRunIDs are the retry-reset instances the replacement is responsible for.
 func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, taskRunIDs []uuid.UUID) {
 	go func() {
-		runCtx := run.WithContext(context.Background(), runID)
+		// The replacement engine registers its own cancellable context against
+		// the SAME run id: the registry holds a set per run, so cancelling the
+		// run reaches this engine and the one that spawned it.
+		cancelCtx, release := RegisterRunCancel(context.Background(), runID)
+		defer release()
+		runCtx := run.WithContext(cancelCtx, runID)
 		replacement := New(&models.Job{
 			ID:               j.id,
 			Alias:            j.alias,
@@ -991,7 +996,27 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 	runID := snapshot.ID
 	runQuarantined := snapshot.Quarantine
-	ctx = run.WithContext(ctx, runID)
+
+	// THE run-cancel registration, for every path that reaches an engine.
+	//
+	// The kickoff sites register too, but they can only do so for a run id they
+	// already hold — and the trigger paths do not: `caesium` cron
+	// (internal/trigger/cron, both the scheduled fire and the catch-up sweep),
+	// http, event and webhook triggers all call job.New(...).Run(ctx) and let
+	// THIS function resolve the run above. Registering only at the kickoff sites
+	// therefore left every trigger-originated run uncancellable, and silently:
+	// CancelRunContexts returns 0 and the log line is gated on n > 0, so a
+	// cancelled cron run looked identical to a cancelled manual one while its
+	// container kept going.
+	//
+	// Registering here is the fix because this is the single point all eleven
+	// paths converge on, immediately after the run id exists. The kickoff-site
+	// registrations stay: they close the window between creating the run row and
+	// entering Run, and the registry holds a SET per run id, so both entries
+	// cancel the same work.
+	cancelCtx, releaseCancel := RegisterRunCancel(ctx, runID)
+	defer releaseCancel()
+	ctx = run.WithContext(cancelCtx, runID)
 
 	var runErr error
 	completionArmed = true
@@ -1451,13 +1476,39 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}{atom: next, err: waitErr}
 		}()
 
-		select {
-		case <-taskCtx.Done():
-			if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-				if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-					ID:    a.ID(),
-					Force: true,
-				}); stopErr != nil {
+		// abandonAtom force-stops the container and classifies why we are walking
+		// away from it. It is shared by BOTH doors of the select below, and that
+		// sharing is the point.
+		//
+		// When taskCtx ends, engine.Wait ALSO returns — with ctx.Err() — so
+		// `taskCtx.Done()` and `waitResult` become ready at the same instant and
+		// Go picks between them uniformly at random. Stopping the atom on only
+		// the taskCtx.Done() door therefore abandoned roughly half of all
+		// cancelled containers, which is the very orphan this cancel path exists
+		// to kill. It reproduced as an arm64-only unit failure
+		// (TestRunLocalCancelStopsAtom) purely because the slower runner made
+		// the cancel land before Wait started polling more often; the race is
+		// arch-independent and real against Docker, whose Wait returns
+		// waitCtx.Err() the same way (internal/atom/docker/engine.go).
+		//
+		// Any OTHER wait error is stopped too, matching what the distributed
+		// worker already does (internal/worker/runtime_executor.go monitorTask):
+		// a failed Wait means we stopped watching, never that the container
+		// stopped.
+		//
+		// Force, like the timeout branch always did: a container the run has
+		// given up on must not outlive it by its own graceful stop timeout. A
+		// failed Stop is reported rather than swallowed — "cancelled" and
+		// "cancelled but the container is still out there" are different
+		// operational facts.
+		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, *run.TaskLogSnapshot, error) {
+			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+				ID:    a.ID(),
+				Force: true,
+			})
+			switch {
+			case errors.Is(taskCtx.Err(), context.DeadlineExceeded):
+				if stopErr != nil {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
@@ -1465,11 +1516,30 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
 				return "", nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+			case errors.Is(taskCtx.Err(), context.Canceled):
+				if stopErr != nil {
+					return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
+				}
+				return "", nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
+			}
+			// taskCtx is still live, so this is a genuine wait failure rather
+			// than a cancellation arriving by the other door. The stop is
+			// best-effort here: the wait error is the cause worth surfacing.
+			if stopErr != nil {
+				log.Warn("failed to stop atom after engine wait error", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", stopErr)
+			}
+			if waitErr != nil {
+				return "", nil, nil, nil, nil, waitErr
 			}
 			return "", nil, nil, nil, nil, taskCtx.Err()
+		}
+
+		select {
+		case <-taskCtx.Done():
+			return abandonAtom(nil)
 		case result := <-waitResult:
 			if result.err != nil {
-				return "", nil, nil, nil, nil, result.err
+				return abandonAtom(result.err)
 			}
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
@@ -1911,6 +1981,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// dispatch runs one attempt of one instance. It owns every terminal write
 		// for that instance.
 		dispatch := func(taskRunID uuid.UUID, m instanceMeta, attempt int) {
+			// A cancelled run must not start another partition attempt, for the
+			// same reason the unfanned loop refuses one: the retry budget exists
+			// for transient faults, and cancellation is not one. Checked here
+			// because this closure is re-entered for attempt N+1 after
+			// RetryTaskInstance, so a cancel that ended attempt N would
+			// otherwise be what launches the next container.
+			if err := ctx.Err(); err != nil {
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
+				return
+			}
+
 			partEnv := map[string]string{
 				envName: m.partition.Key,
 			}
@@ -2659,6 +2740,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			// A cancelled run must not start another attempt. The retry budget
+			// is spent on transient failures, and a cancellation is not one:
+			// without this the cancel that ended attempt N was itself the
+			// trigger for attempt N+1 launching a fresh container on a run the
+			// operator had already stopped. The delay-based select below only
+			// covers retryDelay > 0, which is the default, so this is the check
+			// that holds for a step with no delay configured.
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+
 			taskCtx := ctx
 			cancel := func() {}
 			if taskTimeout > 0 {
@@ -3245,7 +3337,15 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				liveCount = taskCount
 			}
 
+			// readyPending counts rows the dispatcher can still pick up right
+			// now: pending with every predecessor resolved. It is the difference
+			// between "nothing more will happen" and "nothing has happened yet".
+			readyPending := 0
+
 			for _, taskState := range snapshot.Tasks {
+				if taskState.Status == run.TaskStatusPending && taskState.OutstandingPredecessors == 0 {
+					readyPending++
+				}
 				switch taskState.Status {
 				case run.TaskStatusFailed:
 					failed++
@@ -3281,6 +3381,32 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			}
 
 			if failed > 0 && running == 0 {
+				// `failed > 0 && running == 0` is a heuristic for "nothing more
+				// will happen", and under the CONTINUE policy it fired too
+				// early: a failed predecessor releases its rule-tolerant
+				// successors in the same transaction that records the failure
+				// (outstanding_predecessors → 0, task_ready), and for the
+				// moment between that commit and the dispatcher's next tick
+				// nothing is running — so this declared the run stalled and
+				// finalized it, after which ClaimNext's `jr.status = running`
+				// predicate refuses the row forever. The local Kahn loop under
+				// the same policy runs those successors, so this was a
+				// distributed-only defect, not a policy difference.
+				//
+				// A row that is pending with no outstanding predecessors is
+				// exactly the thing the dispatcher is about to claim, so it is
+				// not a stall. Deliberately scoped to continueOnFailure: under
+				// `halt` BOTH executors stop dispatching after a failure (the
+				// Kahn loop clears its queue), and waiting here would make the
+				// distributed lane run a tolerant successor the local lane
+				// refuses to — re-creating the mode-dependent divergence the
+				// route-completeness contract exists to prevent. Whether `halt`
+				// should release rule-tolerant successors at all is a product
+				// decision for both executors, filed rather than smuggled in
+				// here.
+				if continueOnFailure && readyPending > 0 {
+					continue
+				}
 				if continueOnFailure {
 					return fmt.Errorf("run %s has %d failed task(s) and %d unresolved pending task(s)", runID, failed, taskCount-terminal)
 				}

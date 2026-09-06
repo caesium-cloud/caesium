@@ -61,11 +61,33 @@ type LeaseRenewer interface {
 	RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID, newExpiresAt time.Time) (int64, error)
 }
 
+// ClaimInspector answers "of these task runs, which do I still hold the claim
+// on?" without writing anything. Implemented by *run.Store; discovered from the
+// LeaseRenewer by type assertion, the same way ExpiredReclaimer is discovered
+// from the TaskClaimer, so a renewer that cannot answer simply falls back to
+// the RenewLeases row count.
+type ClaimInspector interface {
+	ClaimedTaskRunIDs(ctx context.Context, nodeID string, ids []uuid.UUID) ([]uuid.UUID, error)
+}
+
 // inFlightClaim records the minimal state needed to decide whether renewal is
-// required for a single in-flight task run.
+// required for a single in-flight task run, plus the handle that stops it.
+//
+// cancel cancels the context the executor is running this task under. It is the
+// distributed lane's half of run cancellation: a cancelled run strips
+// claimed_by from its task rows (internal/run/store.go cancelRunTx), so the
+// next batched RenewLeases stops matching this row and the claim is provably
+// gone — at which point the container must go too. monitorTask
+// (internal/worker/runtime_executor.go) already engine.Stops on any ctx error;
+// without a cancel func there was nothing to trigger it, so the container ran
+// to completion after the run had been cancelled or its lease reassigned to
+// another node that was re-executing the same work.
+//
+// nil for a claim registered without an execution context (tests).
 type inFlightClaim struct {
 	claimedBy      string
 	claimExpiresAt time.Time
+	cancel         context.CancelFunc
 }
 
 type Worker struct {
@@ -410,22 +432,30 @@ func (w *Worker) drainInbound(ctx context.Context) error {
 // execCtx is the context passed to the executor (it carries dispatch metadata
 // for push-path tasks).
 func (w *Worker) startOnReservedSlot(execCtx context.Context, task *models.TaskRun) {
+	// Per-task cancellation, derived from the worker's context: losing the
+	// claim (a cancelled run, or a lease reassigned to another node) must be
+	// able to stop THIS task without stopping the whole worker.
+	taskCtx, cancel := context.WithCancel(execCtx)
 	// Register the claim before starting so the renewal ticker can see it as
 	// soon as the goroutine is alive, even before execution starts.
-	w.trackInFlight(task)
+	w.trackInFlight(task, cancel)
 	w.pool.Go(func() {
+		defer cancel()
 		defer w.untrackInFlight(task.ID)
-		w.executor(execCtx, task)
+		w.executor(taskCtx, task)
 	})
 }
 
-// trackInFlight registers a task run as in-flight for lease renewal purposes.
-func (w *Worker) trackInFlight(task *models.TaskRun) {
+// trackInFlight registers a task run as in-flight for lease renewal purposes,
+// together with the cancel func that stops its execution when the claim is
+// lost. cancel may be nil for a claim with no execution context behind it.
+func (w *Worker) trackInFlight(task *models.TaskRun, cancel context.CancelFunc) {
 	if task == nil {
 		return
 	}
 	claim := &inFlightClaim{
 		claimedBy: task.ClaimedBy,
+		cancel:    cancel,
 	}
 	if task.ClaimExpiresAt != nil {
 		claim.claimExpiresAt = *task.ClaimExpiresAt
@@ -443,7 +473,14 @@ func (w *Worker) untrackInFlight(id uuid.UUID) {
 }
 
 // runLeaseRenewal is the background goroutine that fires the per-node batched
-// lease renewal on a fixed cadence.
+// lease renewal on a fixed cadence — and, on every tick, the claim-liveness
+// check that stops containers this node no longer owns.
+//
+// The two run on the same ticker but are NOT the same question, and conflating
+// them was a real bug: renewal is due only when a claim is within lease_ttl/2
+// of expiry, while a cancelled run's container must die on the next tick
+// whatever its expiry says. cancelLostClaimsNow therefore runs first and is
+// ungated; renewLeasesNow keeps its skip-when-not-needed short-circuit.
 func (w *Worker) runLeaseRenewal(ctx context.Context) {
 	ticker := time.NewTicker(w.leaseRenewInterval)
 	defer ticker.Stop()
@@ -453,9 +490,91 @@ func (w *Worker) runLeaseRenewal(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			w.cancelLostClaimsNow(ctx)
 			w.renewLeasesNow(ctx)
 		}
 	}
+}
+
+// cancelLostClaimsNow asks the catalog which of this node's in-flight claims it
+// still holds, and cancels the execution context of every task it does not.
+// monitorTask (internal/worker/runtime_executor.go) already engine.Stops on any
+// ctx error, so cancelling is what actually reaches the container.
+//
+// It is a READ on every tick rather than a by-product of the renewal UPDATE
+// because the renewal cadence is the wrong clock for this. A run-owner lane
+// stamps claim_expires_at from the OWNER's dispatch deadline
+// (internal/dispatch/dispatch.go — CAESIUM_RUN_OWNER_DISPATCH_DEADLINE, 5m by
+// default), not from CAESIUM_WORKER_LEASE_TTL, so a freshly dispatched task is
+// not renewal-due for minutes: a worker that learned about lost claims only
+// from RenewLeases' RowsAffected left a cancelled run's container running for
+// the rest of that window. That is precisely the bug this exists to fix, and it
+// is invisible to any test that drives renewLeasesNow directly with an
+// already-imminent expiry.
+//
+// A renewer that does not implement ClaimInspector keeps the old behaviour: the
+// RowsAffected path in renewLeasesNow remains the detector.
+func (w *Worker) cancelLostClaimsNow(ctx context.Context) {
+	if w.leaseRenewer == nil {
+		return
+	}
+	inspector, ok := w.leaseRenewer.(ClaimInspector)
+	if !ok {
+		return
+	}
+
+	byNode := w.inFlightByNode()
+	for nodeID, ids := range byNode {
+		if len(ids) == 0 {
+			continue
+		}
+		// An empty claimedBy is not a node whose claims can be checked: the
+		// query would ask "which rows are claimed by nobody", which matches
+		// exactly the rows a cancel has already released — so every task under
+		// it would be reported HELD and never cancelled, or, read the other
+		// way, a genuinely unclaimed in-flight entry would be cancelled for the
+		// wrong reason. Such an entry only exists if a task was tracked before
+		// its claim was stamped; leave it to the next tick.
+		if nodeID == "" {
+			continue
+		}
+		held, err := inspector.ClaimedTaskRunIDs(ctx, nodeID, ids)
+		if err != nil {
+			// Unknown, not lost: a transient read failure must never kill a
+			// container. The next tick re-asks.
+			if ctx.Err() == nil {
+				log.Error("failed to check worker task claims", "node_id", nodeID, "count", len(ids), "error", err)
+			}
+			continue
+		}
+		if len(held) == len(ids) {
+			continue
+		}
+		heldSet := make(map[uuid.UUID]struct{}, len(held))
+		for _, id := range held {
+			heldSet[id] = struct{}{}
+		}
+		lost := make([]uuid.UUID, 0, len(ids)-len(held))
+		for _, id := range ids {
+			if _, ok := heldSet[id]; !ok {
+				lost = append(lost, id)
+			}
+		}
+		w.cancelClaims(nodeID, lost)
+	}
+}
+
+// inFlightByNode snapshots the in-flight claim set grouped by claimedBy. A
+// worker normally tracks claims for a single node, but a stale or cross-node
+// claim must not contaminate another node's query or UPDATE.
+func (w *Worker) inFlightByNode() map[string][]uuid.UUID {
+	w.inFlightMu.Lock()
+	defer w.inFlightMu.Unlock()
+	byNode := make(map[string][]uuid.UUID, 1)
+	for id, claim := range w.inFlight {
+		byNode[claim.claimedBy] = append(byNode[claim.claimedBy], id)
+	}
+	return byNode
 }
 
 // renewLeasesNow groups in-flight claims by their claimedBy node, skips the
@@ -502,25 +621,126 @@ func (w *Worker) renewLeasesNow(ctx context.Context) {
 			}
 			continue
 		}
-		if rowsAffected <= 0 {
-			// Nothing was actually renewed (every claim was reassigned in the
-			// window). Don't touch the counter or the in-memory expiries —
-			// stale rows will surface on the next tick or expire naturally.
-			continue
+		if rowsAffected > 0 {
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Add(float64(rowsAffected))
 		}
-		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Add(float64(rowsAffected))
 		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
 
-		// Update the in-memory expiry only for the IDs we attempted to renew
-		// AND whose claimedBy is still nodeID (the latter check guards against
-		// a concurrent local reassignment between snapshot and write).
-		w.inFlightMu.Lock()
-		for _, id := range ids {
-			if claim, ok := w.inFlight[id]; ok && claim.claimedBy == nodeID {
-				claim.claimExpiresAt = newExpiresAt
-			}
+		if rowsAffected == int64(len(ids)) {
+			w.markRenewed(nodeID, ids, newExpiresAt)
+			continue
 		}
-		w.inFlightMu.Unlock()
+
+		// FEWER ROWS THAN CLAIMS: at least one of these task rows no longer
+		// carries this node's claimed_by, and the two ways that happens are
+		// both reasons to stop the container.
+		//
+		//   - the run was CANCELLED. cancelRunTx writes every non-terminal task
+		//     row cancelled and blanks claimed_by, so the claim is gone by
+		//     construction. This is the distributed lane's half of A3: the
+		//     event-driven registry cancels local engines, and this cancels
+		//     claimed work.
+		//   - the LEASE EXPIRED and another node reclaimed the row. That node
+		//     is now re-executing the same task; leaving this container running
+		//     means two containers for one task run, and the loser's
+		//     completion is claim-rejected anyway.
+		//
+		// The batched UPDATE reports only a count, so the losers are identified
+		// by re-issuing the renewal one id at a time — on this path only, which
+		// a healthy worker never takes. A single-claim group needs no probe:
+		// the batch already named the loser.
+		lost := w.lostClaims(ctx, nodeID, ids, rowsAffected, newExpiresAt)
+		if len(lost) == 0 {
+			continue
+		}
+		w.cancelClaims(nodeID, lost)
+	}
+}
+
+// markRenewed advances the in-memory expiry for claims still held by nodeID
+// (the claimedBy check guards against a concurrent local reassignment between
+// the snapshot and the write), keeping in-memory state honest with the DB.
+func (w *Worker) markRenewed(nodeID string, ids []uuid.UUID, newExpiresAt time.Time) {
+	w.inFlightMu.Lock()
+	defer w.inFlightMu.Unlock()
+	for _, id := range ids {
+		if claim, ok := w.inFlight[id]; ok && claim.claimedBy == nodeID {
+			claim.claimExpiresAt = newExpiresAt
+		}
+	}
+}
+
+// lostClaims resolves WHICH of ids no longer belong to nodeID after a batched
+// renewal matched fewer rows than it was given, and advances the in-memory
+// expiry for the survivors it identifies along the way.
+//
+// A one-id group is already resolved by the batch. Otherwise each id is probed
+// with its own single-row renewal: RenewLeases filters on `claimed_by = nodeID`,
+// so a zero row count is the claim being gone, and a non-zero one both proves
+// the claim held and performs the renewal that the batch statement failed to
+// apply to it.
+func (w *Worker) lostClaims(ctx context.Context, nodeID string, ids []uuid.UUID, rowsAffected int64, newExpiresAt time.Time) []uuid.UUID {
+	if len(ids) == 1 {
+		if rowsAffected > 0 {
+			w.markRenewed(nodeID, ids, newExpiresAt)
+			return nil
+		}
+		return ids
+	}
+
+	lost := make([]uuid.UUID, 0, int64(len(ids))-rowsAffected)
+	survived := make([]uuid.UUID, 0, rowsAffected)
+	for _, id := range ids {
+		probe := []uuid.UUID{id}
+		n, err := w.leaseRenewer.RenewLeases(ctx, nodeID, probe, newExpiresAt)
+		if err != nil {
+			// Unknown, not lost: a transient read/write failure must never
+			// kill a container. The next tick re-evaluates.
+			if ctx.Err() == nil {
+				log.Error("failed to probe worker task lease", "node_id", nodeID, "task_run_id", id, "error", err)
+			}
+			continue
+		}
+		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
+		if n > 0 {
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Add(float64(n))
+			survived = append(survived, id)
+			continue
+		}
+		lost = append(lost, id)
+	}
+	w.markRenewed(nodeID, survived, newExpiresAt)
+	return lost
+}
+
+// cancelClaims cancels the execution context of every task run whose claim this
+// node has lost, and drops it from the in-flight set so the next renewal tick
+// does not re-probe a task that is already being torn down. The executor's own
+// untrackInFlight remains harmless (deleting an absent key is a no-op).
+func (w *Worker) cancelClaims(nodeID string, ids []uuid.UUID) {
+	w.inFlightMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(ids))
+	cancelled := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		claim, ok := w.inFlight[id]
+		if !ok {
+			continue
+		}
+		delete(w.inFlight, id)
+		if claim.cancel == nil {
+			continue
+		}
+		cancels = append(cancels, claim.cancel)
+		cancelled = append(cancelled, id)
+	}
+	w.inFlightMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	if len(cancelled) > 0 {
+		log.Info("cancelling worker tasks whose claim was lost",
+			"node_id", nodeID, "task_run_ids", cancelled)
 	}
 }
 

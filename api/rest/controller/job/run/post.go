@@ -72,7 +72,12 @@ func Post(c *echo.Context) error {
 	}
 
 	go func() {
-		runCtx := runstorage.WithContext(context.Background(), r.ID)
+		// Detached from the request context on purpose (the run outlives the
+		// HTTP call), but NOT uncancellable: RegisterRunCancel makes a later
+		// CancelRun / concurrency-replace reach this engine's containers.
+		cancelCtx, release := job.RegisterRunCancel(context.Background(), r.ID)
+		defer release()
+		runCtx := runstorage.WithContext(cancelCtx, r.ID)
 		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
 			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}

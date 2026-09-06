@@ -668,6 +668,39 @@ func (s *Store) RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID,
 	return result.RowsAffected, nil
 }
 
+// ClaimedTaskRunIDs returns the subset of ids whose task_run row is STILL
+// claimed by nodeID. It is the read half of claim-loss detection: the worker
+// asks "of the tasks I am executing, which do I still own?" and stops the
+// containers of the rest.
+//
+// A read rather than the batched RenewLeases UPDATE, because the two answer
+// different questions on different clocks. Renewal is due only when a claim is
+// within lease_ttl/2 of expiry, and the OWNER's push path stamps
+// claim_expires_at from its dispatch deadline (internal/dispatch/dispatch.go,
+// CAESIUM_RUN_OWNER_DISPATCH_DEADLINE, 5m by default) rather than from
+// CAESIUM_WORKER_LEASE_TTL — so on a run-owner lane a freshly claimed task is
+// not renewal-due for minutes, and a worker that only learned about lost claims
+// from RenewLeases' RowsAffected learned about them minutes late. A cancelled
+// run's container must not outlive the cancel by the renewal cadence, so the
+// question is asked on every tick with a single indexed SELECT instead.
+//
+// The two ways a claim is lost both surface here: cancelRunTx blanks claimed_by
+// on every non-terminal row of a cancelled run, and a reclaim after lease
+// expiry overwrites claimed_by with the new owner's node id.
+func (s *Store) ClaimedTaskRunIDs(ctx context.Context, nodeID string, ids []uuid.UUID) ([]uuid.UUID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var held []uuid.UUID
+	if err := s.db.WithContext(ctx).
+		Model(&models.TaskRun{}).
+		Where("claimed_by = ? AND id IN ?", nodeID, ids).
+		Pluck("id", &held).Error; err != nil {
+		return nil, err
+	}
+	return held, nil
+}
+
 // SetTaskHash persists a task's identity hash. taskRef follows the
 // TaskRun-primary-key-or-catalog-task-ID contract, so a fan-out instance is
 // addressed by its own TaskRun ID.
@@ -4355,11 +4388,33 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 		delete(updates, "claimed_by")
 		delete(updates, "claim_expires_at")
 
+		// Retryable statuses only — the same predicate and sentinel the fanned
+		// twin carries (store_instance.go RetryTaskInstance).
+		//
+		// This used to be an unguarded `WHERE id = ?`, which made an in-run retry
+		// the one write that could RESURRECT a terminal row. It only became
+		// reachable once a cancelled run started returning an error from the
+		// executor's attempt loop: cancel → the attempt fails → RetryTask flips
+		// cancelled → pending → attempt 2 passes StartTask's own terminal guard
+		// (the row is pending again by then, so the guard sees nothing wrong),
+		// publishes a phantom task_started, launches a second container on a run
+		// the operator already cancelled, and finally lands `failed` — at which
+		// point the failed-task successor advancement runs on a cancelled run.
+		// Every downstream guard was doing its job; this write was undoing them.
 		resultUpdate := tx.Model(&models.TaskRun{}).
-			Where("id = ?", row.ID).
+			Where("id = ? AND status IN ?", row.ID, []string{
+				string(TaskStatusPending),
+				string(TaskStatusRunning),
+				string(TaskStatusFailed),
+			}).
 			Updates(updates)
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
+		}
+		if resultUpdate.RowsAffected == 0 {
+			// Already resolved by a cascade or a cancellation; a retry here
+			// would resurrect a terminal row.
+			return ErrTaskInstanceNotRetryable
 		}
 		counts.addTaskRunStatus(1)
 

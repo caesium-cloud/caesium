@@ -56,7 +56,11 @@ func Retry(c *echo.Context) error {
 	}
 
 	go func() {
-		runCtx := runstorage.WithContext(context.Background(), r.ID)
+		// Registered like the manual-run kickoff: a cancel issued DURING a retry
+		// must reach the retry's containers too.
+		cancelCtx, release := job.RegisterRunCancel(context.Background(), r.ID)
+		defer release()
+		runCtx := runstorage.WithContext(cancelCtx, r.ID)
 		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
 			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}

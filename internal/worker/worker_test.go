@@ -247,7 +247,7 @@ func TestBatchedRenewal_NInflightOneUpdate(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		task := makeTask(nodeID, imminent)
 		ids[task.ID] = struct{}{}
-		w.trackInFlight(task)
+		w.trackInFlight(task, nil)
 	}
 
 	w.renewLeasesNow(t.Context())
@@ -281,7 +281,7 @@ func TestBatchedRenewal_SkipWhenNotNeeded(t *testing.T) {
 	// Tasks expire in 4 minutes — well beyond halfTTL of 2.5 minutes.
 	distant := time.Now().Add(4 * time.Minute)
 	for i := 0; i < 3; i++ {
-		w.trackInFlight(makeTask(nodeID, distant))
+		w.trackInFlight(makeTask(nodeID, distant), nil)
 	}
 
 	w.renewLeasesNow(t.Context())
@@ -308,7 +308,7 @@ func TestBatchedRenewal_OtherNodeNotTouched(t *testing.T) {
 	taskA := makeTask(nodeA, imminent)
 	taskB := makeTask(nodeB, imminent)
 
-	w.trackInFlight(taskA)
+	w.trackInFlight(taskA, nil)
 	// Directly insert a node-b entry into the in-flight map to simulate a
 	// cross-node scenario.
 	w.inFlightMu.Lock()
@@ -347,7 +347,7 @@ func TestBatchedRenewal_ZeroLeaseTTLNoRenewal(t *testing.T) {
 	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
 		WithLeaseRenewal(renewer, 0, 0)
 
-	w.trackInFlight(makeTask("node-a", time.Now().Add(-time.Hour))) // already expired
+	w.trackInFlight(makeTask("node-a", time.Now().Add(-time.Hour)), nil) // already expired
 	w.renewLeasesNow(t.Context())
 
 	if got := renewer.callCount(); got != 0 {
@@ -355,11 +355,14 @@ func TestBatchedRenewal_ZeroLeaseTTLNoRenewal(t *testing.T) {
 	}
 }
 
-// TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate verifies that when the DB
-// reports zero rows affected (every claim was reassigned between snapshot and
-// write), the worker neither bumps the counter nor advances the in-memory
-// expiry — keeping in-memory state honest with the DB.
-func TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate(t *testing.T) {
+// TestBatchedRenewal_ZeroRowsAffectedDropsTheClaim verifies that when the DB
+// reports zero rows affected (every claim was cancelled or reassigned between
+// snapshot and write), the worker does not advance the in-memory expiry for
+// work it no longer owns — it drops the claim entirely and cancels its
+// execution context (see the claim-loss tests in run_lease_renewal_test.go).
+// The expiry used to be left untouched and the entry kept, which is how a lost
+// claim's container survived: nothing ever acted on the count.
+func TestBatchedRenewal_ZeroRowsAffectedDropsTheClaim(t *testing.T) {
 	renewer := &fakeLeaseRenewer{
 		rowsAffectedFn: func(_ string, _ []uuid.UUID) int64 { return 0 },
 	}
@@ -369,19 +372,19 @@ func TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate(t *testing.T) {
 
 	imminent := time.Now().Add(time.Minute)
 	task := makeTask("node-a", imminent)
-	w.trackInFlight(task)
+	w.trackInFlight(task, nil)
 
 	w.renewLeasesNow(t.Context())
 
 	if got := renewer.callCount(); got != 1 {
-		t.Fatalf("expected 1 RenewLeases call (still attempted), got %d", got)
+		t.Fatalf("expected 1 RenewLeases call (a single-claim group needs no probe), got %d", got)
 	}
 
 	w.inFlightMu.Lock()
-	claim := w.inFlight[task.ID]
+	_, tracked := w.inFlight[task.ID]
 	w.inFlightMu.Unlock()
-	if !claim.claimExpiresAt.Equal(imminent) {
-		t.Fatalf("expected in-memory expiry unchanged when rows_affected=0, got %v want %v", claim.claimExpiresAt, imminent)
+	if tracked {
+		t.Fatalf("expected the lost claim to be dropped from the in-flight set")
 	}
 }
 

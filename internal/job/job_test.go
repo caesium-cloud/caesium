@@ -211,7 +211,16 @@ func TestRunLocalContinuePolicySkipsFailedDescendants(t *testing.T) {
 
 	runTask := taskRunByID(snapshot, taskSkipped)
 	require.NotNil(t, runTask)
-	require.Contains(t, runTask.Error, taskFailed.String())
+	// The STORE resolves the successor first, inside the failure transaction
+	// (internal/run/fanout.go resolveInstanceFailureTx → advanceCrossStepSuccessorsTx),
+	// so the reason on the row is the trigger-rule reason every other
+	// advancement path emits — not the executor's "skipped due to failed
+	// dependency task <id>". The executor still runs its own cascade a moment
+	// later; markTaskSkippedTx is pending-only, so that pass is a no-op and must
+	// NOT overwrite the reason. Both strings say the same thing; only one of
+	// them is emitted identically by the local, fanned and distributed lanes,
+	// which is the whole point of resolving in the store.
+	require.Equal(t, `trigger rule "all_success" not satisfied`, runTask.Error)
 }
 
 func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
@@ -589,6 +598,14 @@ type fakeEngine struct {
 	// atomLookupKey. Empty (the default) means a silent container.
 	logsByName map[string]string
 
+	// waitErrByName makes Wait fail immediately for an atom, keyed by
+	// atomLookupKey — the engine reporting "I stopped watching", which says
+	// nothing about whether the container stopped. It exists to pin the
+	// waitResult door of the executor's select deterministically: a cancelled
+	// run's Wait returns ctx.Err() and races taskCtx.Done() there, so the door
+	// cannot be selected on purpose, but the code it runs can be.
+	waitErrByName map[string]error
+
 	// logsByPartition is the stream a FANNED instance's container prints, keyed
 	// by partition value. Every instance of a fanned step shares one task ID, so
 	// logsByName (keyed on atomLookupKey) cannot give them distinct output.
@@ -662,6 +679,7 @@ func newFakeEngine() *fakeEngine {
 		runDurationByName:       map[string]time.Duration{},
 		resultByName:            map[string]atom.Result{},
 		logsByName:              map[string]string{},
+		waitErrByName:           map[string]error{},
 		logsByPartition:         map[string]string{},
 		partitionByAtomID:       map[string]string{},
 		createErrByPartition:    map[string]error{},
@@ -831,6 +849,13 @@ func (e *fakeEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 	waitCtx := context.Background()
 	if req.Context != nil {
 		waitCtx = req.Context
+	}
+
+	e.mu.Lock()
+	waitErr := e.waitErrByName[atomLookupKey(req.ID)]
+	e.mu.Unlock()
+	if waitErr != nil {
+		return nil, waitErr
 	}
 
 	for {

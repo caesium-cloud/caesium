@@ -297,7 +297,11 @@ func kickoffPartitionRetryRun(j *models.Job, runID uuid.UUID, params map[string]
 		return
 	}
 	go func() {
-		runCtx := runstorage.WithContext(context.Background(), runID)
+		// Registered like the manual-run kickoff: a cancel issued DURING a
+		// partition retry must reach the resumed engine's containers too.
+		cancelCtx, release := job.RegisterRunCancel(context.Background(), runID)
+		defer release()
+		runCtx := runstorage.WithContext(cancelCtx, runID)
 		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(runCtx); err != nil {
 			log.Error("partition retry run failure", "id", j.ID, "run_id", runID, "error", err)
 		}
