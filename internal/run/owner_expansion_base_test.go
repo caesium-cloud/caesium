@@ -71,7 +71,7 @@ type crossStepFanOutTopo struct {
 func newCrossStepFanOutTopo(nPreds int) *crossStepFanOutTopo {
 	b := newTopoBuilder()
 	preds := make([]uuid.UUID, 0, nPreds)
-	for i := 0; i < nPreds; i++ {
+	for range nPreds {
 		preds = append(preds, b.task(""))
 	}
 	fanned := b.task("")
@@ -272,7 +272,7 @@ func newCrossStepFixture(t *testing.T, nPreds int) *crossStepFixture {
 	require.NoError(t, db.Create(atom).Error)
 
 	preds := make([]*models.Task, 0, nPreds)
-	for i := 0; i < nPreds; i++ {
+	for i := range nPreds {
 		p := &models.Task{
 			ID: uuid.New(), JobID: jobID, AtomID: atom.ID,
 			Name: fmt.Sprintf("pred-%d", i), Position: i, Type: "task",

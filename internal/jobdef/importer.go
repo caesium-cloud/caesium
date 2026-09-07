@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/url"
 	"reflect"
@@ -530,7 +531,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 }
 
 func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias string, trig *schema.Trigger, opts *ApplyOptions) (*models.Trigger, error) {
-	cfgMap := cloneAnyMap(trig.Configuration)
+	cfgMap := cloneMap(trig.Configuration)
 	if cfgMap == nil {
 		cfgMap = make(map[string]any)
 	}
@@ -1133,7 +1134,7 @@ func marshalOptionalJSON(value any) (datatypes.JSON, error) {
 	}
 	rv := reflect.ValueOf(value)
 	switch rv.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		if rv.IsNil() {
 			return nil, nil
 		}
@@ -1229,15 +1230,11 @@ func copyProvenance(sourceID, repo, ref, commit, path *string, prov *Provenance,
 	*path = basePath + "#" + suffix
 }
 
-func cloneAnyMap(in map[string]any) map[string]any {
+func cloneMap[K comparable, V any](in map[K]V) map[K]V {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(in)
 }
 
 // marshalSLA converts an SLAConfig pointer to JSON for storage.

@@ -80,14 +80,14 @@ func init() {
 
 func renderPlainSummary(summary report.Summary) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Total definitions: %d\n", summary.Total))
+	fmt.Fprintf(&b, "Total definitions: %d\n", summary.Total)
 
 	if len(summary.MissingAliases) > 0 {
 		sorted := slices.Clone(summary.MissingAliases)
 		slices.Sort(sorted)
 		b.WriteString("Missing aliases:\n")
 		for _, entry := range sorted {
-			b.WriteString(fmt.Sprintf("  - %s\n", entry))
+			fmt.Fprintf(&b, "  - %s\n", entry)
 		}
 	}
 

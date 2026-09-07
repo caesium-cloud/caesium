@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -676,7 +677,7 @@ func (s *Store) persistExpandedGroupTx(tx *gorm.DB, templateID uuid.UUID, instan
 // comes from outstanding_predecessors reaching zero, which is driven by TERMINAL
 // siblings, never by a free slot. a→b→c with maxParallel=1 runs a, and only once
 // a is terminal does b become ready — at which point the running count is 0.
-func (s *Store) fanOutMaxParallelPredicateTx(tx *gorm.DB, row *models.TaskRun) (string, []interface{}, error) {
+func (s *Store) fanOutMaxParallelPredicateTx(tx *gorm.DB, row *models.TaskRun) (string, []any, error) {
 	if row == nil || !isFanOutInstance(row) {
 		return "", nil, nil
 	}
@@ -689,7 +690,7 @@ func (s *Store) fanOutMaxParallelPredicateTx(tx *gorm.DB, row *models.TaskRun) (
 		return "", nil, err
 	}
 	return " AND (SELECT COUNT(*) FROM task_runs sib WHERE sib.job_run_id = ? AND sib.task_id = ? AND sib.status = ?) < ?",
-		[]interface{}{row.JobRunID, row.TaskID, string(TaskStatusRunning), fo.MaxParallel},
+		[]any{row.JobRunID, row.TaskID, string(TaskStatusRunning), fo.MaxParallel},
 		nil
 }
 
@@ -1033,11 +1034,8 @@ func (s *Store) decrementInGroupDependentsTx(tx *gorm.DB, runID uuid.UUID, compl
 		if len(siblings[i].PartitionDependsOn) > 0 {
 			_ = json.Unmarshal(siblings[i].PartitionDependsOn, &deps)
 		}
-		for _, d := range deps {
-			if d == completed.PartitionValue {
-				ids = append(ids, siblings[i].ID)
-				break
-			}
+		if slices.Contains(deps, completed.PartitionValue) {
+			ids = append(ids, siblings[i].ID)
 		}
 	}
 	_, err := s.batchDecrementSiblingPredecessorsTx(tx, runID, ids)
@@ -1253,9 +1251,9 @@ func taskRunStarted(row *models.TaskRun) bool {
 // predicate rather than a status list because the check must happen INSIDE the
 // guarded UPDATE — a worker that starts the container between the read and the
 // write must make the cancel fail, not lose the race silently.
-func cancellableBeforeStartPredicate() (string, []interface{}) {
+func cancellableBeforeStartPredicate() (string, []any) {
 	return "(status = ? OR (status = ? AND COALESCE(runtime_id, '') = ''))",
-		[]interface{}{string(TaskStatusPending), string(TaskStatusRunning)}
+		[]any{string(TaskStatusPending), string(TaskStatusRunning)}
 }
 
 // failFastSkipSiblingsTx resolves every not-yet-started sibling of a failed instance,
@@ -1291,7 +1289,7 @@ func cancellableBeforeStartPredicate() (string, []interface{}) {
 // pending or dispatched-but-not-started.
 func (s *Store) failFastSkipSiblingsTx(tx *gorm.DB, runID uuid.UUID, failed *models.TaskRun, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
 	predSQL, predArgs := cancellableBeforeStartPredicate()
-	args := append([]interface{}{runID, failed.TaskID, failed.ID}, predArgs...)
+	args := append([]any{runID, failed.TaskID, failed.ID}, predArgs...)
 	var siblings []models.TaskRun
 	if err := tx.Where("job_run_id = ? AND task_id = ? AND id <> ? AND "+predSQL, args...).
 		Order("partition_index ASC").

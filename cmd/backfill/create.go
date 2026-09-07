@@ -48,7 +48,7 @@ Reprocess policies:
 			return fmt.Errorf("invalid --end (expected RFC3339, e.g. 2024-02-01T00:00:00Z): %w", err)
 		}
 
-		body := map[string]interface{}{
+		body := map[string]any{
 			"start": start,
 			"end":   end,
 		}

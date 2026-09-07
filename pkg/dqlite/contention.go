@@ -33,8 +33,7 @@ func IsContentionError(err error) bool {
 		return false
 	}
 
-	var sqliteErr sqlite3.Error
-	if errors.As(err, &sqliteErr) {
+	if sqliteErr, ok := errors.AsType[sqlite3.Error](err); ok {
 		if sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked {
 			return true
 		}

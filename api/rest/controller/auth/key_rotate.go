@@ -58,7 +58,7 @@ func (ctrl *Controller) RotateKey(c *echo.Context) error {
 		ResourceID:   id.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"new_key_id":   resp.Key.ID.String(),
 			"grace_period": gracePeriod.String(),
 		},

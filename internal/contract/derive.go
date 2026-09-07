@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"regexp"
 	"sort"
@@ -1235,9 +1236,7 @@ func paramMapping(cfg map[string]any) (map[string]string, error) {
 	switch mapping := rawMapping.(type) {
 	case map[string]string:
 		out := make(map[string]string, len(mapping))
-		for key, value := range mapping {
-			out[key] = value
-		}
+		maps.Copy(out, mapping)
 		return out, nil
 	case map[string]any:
 		out := make(map[string]string, len(mapping))
@@ -1537,15 +1536,11 @@ func stringLabels(labels datatypes.JSONMap) map[string]string {
 	return out
 }
 
-func cloneStringMap(in map[string]string) map[string]string {
+func cloneStringMap[K comparable, V any](in map[K]V) map[K]V {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
+	return maps.Clone(in)
 }
 
 func cloneAnyMap(in map[string]any) map[string]any {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"sync"
@@ -77,12 +78,12 @@ func TestValidateSignature(t *testing.T) {
 	body := []byte(`{"hello":"world"}`)
 
 	t.Run("no auth when secret empty", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		require.True(t, validateSignature(req, body, "", "", "", ""))
 	})
 
 	t.Run("hmac sha256", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		mac := hmac.New(sha256.New, []byte("secret"))
 		_, _ = mac.Write(body)
 		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
@@ -90,7 +91,7 @@ func TestValidateSignature(t *testing.T) {
 	})
 
 	t.Run("hmac sha256 with timestamp", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		mac := hmac.New(sha256.New, []byte("secret"))
 		_, _ = mac.Write([]byte("1713000000."))
 		_, _ = mac.Write(body)
@@ -99,7 +100,7 @@ func TestValidateSignature(t *testing.T) {
 	})
 
 	t.Run("hmac sha256 rejects rewritten timestamp", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		// Signature was computed with timestamp "1713000000"
 		mac := hmac.New(sha256.New, []byte("secret"))
 		_, _ = mac.Write([]byte("1713000000."))
@@ -110,7 +111,7 @@ func TestValidateSignature(t *testing.T) {
 	})
 
 	t.Run("hmac sha1", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		mac := hmac.New(sha1.New, []byte("secret"))
 		_, _ = mac.Write(body)
 		req.Header.Set("X-Hub-Signature", "sha1="+hex.EncodeToString(mac.Sum(nil)))
@@ -118,13 +119,13 @@ func TestValidateSignature(t *testing.T) {
 	})
 
 	t.Run("bearer", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer secret-token")
 		require.True(t, validateSignature(req, body, "secret-token", "bearer", "", ""))
 	})
 
 	t.Run("basic", func(t *testing.T) {
-		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(body))
 		req.SetBasicAuth("svc", "password")
 		require.True(t, validateSignature(req, body, "svc:password", "basic", "", ""))
 	})
@@ -202,7 +203,7 @@ func TestExtractWebhookParams(t *testing.T) {
 	h, err := New(trigger)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(nil))
 	req.Header.Set("Authorization", "Bearer shared-secret")
 
 	params, err := h.ExtractWebhookParams(context.Background(), req, []byte(`{"ref":"refs/heads/main"}`))
@@ -234,7 +235,7 @@ func TestExtractWebhookParamsResolvesSecretReference(t *testing.T) {
 	h, err := New(trigger, WithSecretResolver(resolver))
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(nil))
 	req.Header.Set("Authorization", "Bearer resolved-token")
 
 	params, err := h.ExtractWebhookParams(context.Background(), req, []byte(`{"ref":"refs/heads/main"}`))
@@ -259,7 +260,7 @@ func TestExtractWebhookParamsSupportsBasicAuth(t *testing.T) {
 	h, err := New(trigger)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/ops/debug", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/v1/hooks/ops/debug", bytes.NewReader(nil))
 	req.SetBasicAuth("svc", "password")
 
 	params, err := h.ExtractWebhookParams(context.Background(), req, []byte(`{"env":"staging"}`))
@@ -285,9 +286,7 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 	}
 	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
 		copied := make(map[string]string, len(params))
-		for k, v := range params {
-			copied[k] = v
-		}
+		maps.Copy(copied, params)
 		mu.Lock()
 		seen = append(seen, copied)
 		seenPriorities = append(seenPriorities, priority)
@@ -346,9 +345,7 @@ func TestFireUsesDefaultsWhenParamsMissing(t *testing.T) {
 	}
 	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
 		copied := make(map[string]string, len(params))
-		for k, v := range params {
-			copied[k] = v
-		}
+		maps.Copy(copied, params)
 		done <- copied
 		return nil
 	}
@@ -390,7 +387,7 @@ func TestResolveJSONPathRejectsInvalidPaths(t *testing.T) {
 func TestValidateSignatureRejectsInvalidBearer(t *testing.T) {
 	t.Parallel()
 
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", bytes.NewReader(nil))
 	req.Header.Set("Authorization", "Bearer wrong")
 	require.False(t, validateSignature(req, nil, "secret", "bearer", "", ""))
 }
@@ -423,7 +420,7 @@ func TestValidateTimestampSkippedWhenNoHeader(t *testing.T) {
 	t.Parallel()
 
 	h := &HTTP{config: Config{}}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	require.NoError(t, h.validateTimestamp(req))
 }
 
@@ -434,7 +431,7 @@ func TestValidateTimestampSkippedForBearerScheme(t *testing.T) {
 		TimestampHeader: "X-Webhook-Timestamp",
 		SignatureScheme: "bearer",
 	}}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	require.NoError(t, h.validateTimestamp(req))
 }
 
@@ -448,7 +445,7 @@ func TestValidateTimestampAcceptsFreshTimestamp(t *testing.T) {
 		},
 		now: func() time.Time { return time.Unix(1713000060, 0) },
 	}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.NoError(t, h.validateTimestamp(req))
 }
@@ -463,7 +460,7 @@ func TestValidateTimestampRejectsExpired(t *testing.T) {
 		},
 		now: func() time.Time { return time.Unix(1713000600, 0) }, // 10 minutes later
 	}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
@@ -475,7 +472,7 @@ func TestValidateTimestampRejectsMissingHeader(t *testing.T) {
 		TimestampHeader: "X-Webhook-Timestamp",
 		SignatureScheme: "hmac-sha256",
 	}}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
 
@@ -489,7 +486,7 @@ func TestValidateTimestampRejectsFutureTimestamp(t *testing.T) {
 		},
 		now: func() time.Time { return time.Unix(1713000000, 0) },
 	}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000600") // 10 minutes in the future
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
@@ -505,7 +502,7 @@ func TestValidateTimestampCustomMaxAge(t *testing.T) {
 		},
 		now: func() time.Time { return time.Unix(1713000120, 0) }, // 2 minutes later
 	}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
@@ -520,7 +517,7 @@ func TestValidateTimestampDefaultSchemeIsHMACSHA256(t *testing.T) {
 		},
 		now: func() time.Time { return time.Unix(1713000060, 0) },
 	}
-	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.NoError(t, h.validateTimestamp(req))
 }
@@ -549,7 +546,7 @@ func TestExtractWebhookParamsReplayProtection(t *testing.T) {
 	_, _ = mac.Write([]byte("1713000000."))
 	_, _ = mac.Write(body)
 
-	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-Webhook-Timestamp", "1713000000") // 10 minutes old
 

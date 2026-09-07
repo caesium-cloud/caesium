@@ -1,6 +1,7 @@
 package bind
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,12 +43,12 @@ func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 	e := echo.New()
 	All(e.Group("/v1"), nil, svc, auditor, limiter, nil)
 
-	protectedReq := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	protectedReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	protectedRec := httptest.NewRecorder()
 	e.ServeHTTP(protectedRec, protectedReq)
 	require.Equal(t, http.StatusUnauthorized, protectedRec.Code)
 
-	webhookReq := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{}`))
+	webhookReq := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{}`))
 	webhookRec := httptest.NewRecorder()
 	e.ServeHTTP(webhookRec, webhookReq)
 	require.Equal(t, http.StatusAccepted, webhookRec.Code)

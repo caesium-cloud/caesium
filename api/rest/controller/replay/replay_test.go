@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,7 @@ func TestDecodePostRequestRejectsOversizedBody(t *testing.T) {
 
 func TestDecodePostRequestRejectsOverCapSet(t *testing.T) {
 	set := make(map[string]string, maxReplaySetEntries+1)
-	for i := 0; i < maxReplaySetEntries+1; i++ {
+	for i := range maxReplaySetEntries + 1 {
 		set[fmt.Sprintf("key-%03d", i)] = "value"
 	}
 	body, err := json.Marshal(PostRequest{Set: set})
@@ -37,7 +38,7 @@ func TestDecodePostRequestRejectsOverCapSet(t *testing.T) {
 
 func replayDecodeContext(body string) *echo.Context {
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/job/runs/run/replay", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/jobs/job/runs/run/replay", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	return e.NewContext(req, rec)

@@ -97,7 +97,7 @@ func invocations(t *testing.T, path string) []string {
 		t.Fatal(err)
 	}
 	var out []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		if line != "" {
 			out = append(out, line)
 		}
@@ -459,14 +459,12 @@ func TestConcurrentWarmsOfOneKeyBothPromoteACompleteMirror(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if i > 0 {
 				time.Sleep(200 * time.Millisecond)
 			}
 			errs[i] = warm(context.Background(), cfg, io.Discard)
-		}()
+		})
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -845,12 +843,9 @@ func TestConcurrentWarmsOfDifferentSlotsDoNotClobber(t *testing.T) {
 	errCh := make(chan error, len(cfgs))
 	var wg sync.WaitGroup
 	for _, cfg := range cfgs {
-		cfg := cfg
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errCh <- warm(context.Background(), cfg, io.Discard)
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)

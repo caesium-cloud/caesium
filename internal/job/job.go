@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -36,6 +37,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -79,13 +81,21 @@ var ErrLocalQuarantinedReplayUnsupported = errors.New("replay requires the descr
 // run-start reads guarded here are side-effect-free (or abort without
 // committing on contention), so re-running the whole call is safe. A cancelled
 // context stops the loop and returns the last error.
-func retryOnContention(ctx context.Context, fn func() error) error {
+// contentionRetrier retries idempotent work that fails on transient dqlite
+// contention. Do is a generic method so callers can return a value from the
+// retried function instead of closing over an outer variable.
+type contentionRetrier struct {
+	backoffs []time.Duration
+}
+
+func (r contentionRetrier) Do[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
 	for attempt := 0; ; attempt++ {
-		err := fn()
-		if err == nil || !dqlite.IsContentionError(err) || attempt >= len(runStartReadBackoffs) {
-			return err
+		value, err := fn()
+		if err == nil || !dqlite.IsContentionError(err) || attempt >= len(r.backoffs) {
+			return value, err
 		}
-		base := runStartReadBackoffs[attempt]
+		base := r.backoffs[attempt]
 		d := base
 		if maxJitter := int64(base / 5); maxJitter > 0 {
 			d = base - time.Duration(rand.Int64N(maxJitter+1))
@@ -97,10 +107,21 @@ func retryOnContention(ctx context.Context, fn func() error) error {
 			// Return the cancellation, not the dqlite error, so the run's
 			// failure reason is a clear cancellation rather than a misleading
 			// "checkpoint in progress".
-			return ctx.Err()
+			return zero, ctx.Err()
 		case <-timer.C:
 		}
 	}
+}
+
+func retryOnContention(ctx context.Context, fn func() error) error {
+	_, err := retryOnContentionDo(ctx, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	return err
+}
+
+func retryOnContentionDo[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	return contentionRetrier{backoffs: runStartReadBackoffs}.Do(ctx, fn)
 }
 
 func waitForHaltedDispatchResult(results <-chan taskResult, wait time.Duration) (taskResult, bool) {
@@ -556,7 +577,7 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 		if attempt >= 2 {
 			// Bounded like the normal completion path: the last word is a
 			// hand-off (itself retried), never a return that strands a retry.
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				if j.handOffPendingPartitionRetries(store, runID, j.params) {
 					return
 				}
@@ -680,12 +701,10 @@ func buildLocalRunners(
 				// exactly where it was before this map was built from the rows:
 				// scheduling THAT task reports "missing runner", while a retry
 				// whose retired task already succeeded still completes.
-				var frozenAtom *models.Atom
-				if err := retryOnContention(ctx, func() error {
-					var e error
-					frozenAtom, e = svc.Get(taskState.AtomID)
-					return e
-				}); err != nil {
+				frozenAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+					return svc.Get(taskState.AtomID)
+				})
+				if err != nil {
 					if !errors.Is(err, gorm.ErrRecordNotFound) {
 						return err
 					}
@@ -843,8 +862,8 @@ func unmarshalConcurrency(raw []byte) *jobdefschema.Concurrency {
 	if len(raw) == 0 {
 		return nil
 	}
-	var v *jobdefschema.Concurrency
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := jsonutil.Unmarshal[*jobdefschema.Concurrency](raw)
+	if err != nil {
 		log.Warn("failed to unmarshal job concurrency metadata", "error", err)
 		return nil
 	}
@@ -855,8 +874,8 @@ func unmarshalRateLimits(raw []byte) []jobdefschema.RateLimit {
 	if len(raw) == 0 {
 		return nil
 	}
-	var v []jobdefschema.RateLimit
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := jsonutil.Unmarshal[[]jobdefschema.RateLimit](raw)
+	if err != nil {
 		log.Warn("failed to unmarshal job rate limit metadata", "error", err)
 		return nil
 	}
@@ -979,12 +998,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return store.Start(j.id, j.triggerID, startOpts...)
 	}
 
-	var snapshot *run.JobRun
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		snapshot, e = resolveRun()
-		return e
-	}); err != nil {
+	snapshot, err := retryOnContentionDo(ctx, resolveRun)
+	if err != nil {
 		if errors.Is(err, run.ErrRunSkipped) || errors.Is(err, run.ErrRunQueued) {
 			return nil
 		}
@@ -1041,7 +1056,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// transiently, and a refusal can be stale by the time it is
 				// examined, so alternate hand-off and completion a few times
 				// before conceding the run to an operator.
-				for i := 0; i < 3; i++ {
+				for range 3 {
 					if j.handOffPendingPartitionRetries(store, runID, snapshot.Params) {
 						return
 					}
@@ -1085,15 +1100,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return runErr
 	}
 
-	var tasks models.Tasks
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		tasks, e = j.taskServiceFactory(ctx).List(&task.ListRequest{
+	tasks, err := retryOnContentionDo(ctx, func() (models.Tasks, error) {
+		return j.taskServiceFactory(ctx).List(&task.ListRequest{
 			JobID:   j.id.String(),
 			OrderBy: []string{"position", "created_at"},
 		})
-		return e
-	}); err != nil {
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}
@@ -1123,12 +1136,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 		triggerRuleByTask[t.ID] = rule
 
-		var modelAtom *models.Atom
-		if err := retryOnContention(ctx, func() error {
-			var e error
-			modelAtom, e = svc.Get(t.AtomID)
-			return e
-		}); err != nil {
+		modelAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+			return svc.Get(t.AtomID)
+		})
+		if err != nil {
 			runErr = err
 			return err
 		}
@@ -1136,15 +1147,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 		atomsByTask[t.ID] = modelAtom
 	}
 
-	var edges models.TaskEdges
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		edges, e = j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
+	edges, err := retryOnContentionDo(ctx, func() (models.TaskEdges, error) {
+		return j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
 			JobID:   j.id.String(),
 			OrderBy: []string{"created_at"},
 		})
-		return e
-	}); err != nil {
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}
@@ -1208,12 +1217,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	var currentRun *run.JobRun
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		currentRun, e = store.Get(runID)
-		return e
-	}); err != nil {
+	currentRun, err := retryOnContentionDo(ctx, func() (*run.JobRun, error) {
+		return store.Get(runID)
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}
@@ -1438,15 +1445,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 		if len(paramEnv) > 0 || len(extraEnv) > 0 {
 			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
-			for k, v := range spec.Env {
-				merged[k] = v
-			}
-			for k, v := range paramEnv {
-				merged[k] = v
-			}
-			for k, v := range extraEnv {
-				merged[k] = v
-			}
+			maps.Copy(merged, spec.Env)
+			maps.Copy(merged, paramEnv)
+			maps.Copy(merged, extraEnv)
 			spec.Env = merged
 		}
 
@@ -1564,8 +1565,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
 				if parseErr != nil {
-					var pe *pkgtask.PartitionError
-					if errors.As(parseErr, &pe) {
+					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
 							return "", nil, nil, nil, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
@@ -1741,12 +1741,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return cacheCfg, taskHashInputArgs{}, nil, err
 		}
 		mergedEnv := make(map[string]string, len(interpolatedEnv)+len(outputEnv))
-		for k, v := range interpolatedEnv {
-			mergedEnv[k] = v
-		}
-		for k, v := range outputEnv {
-			mergedEnv[k] = v
-		}
+		maps.Copy(mergedEnv, interpolatedEnv)
+		maps.Copy(mergedEnv, outputEnv)
 
 		var predHashes []string
 		for _, predID := range predecessors[taskID] {
@@ -1921,10 +1917,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// which is what the distributed worker runs on (taskRun.MaxAttempts).
 		// Reading taskModel.Retries here would give a retried run a different
 		// budget per lane after a `job apply` changed `retries:`.
-		maxAttempts := runner.maxAttempts
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		maxAttempts := max(runner.maxAttempts, 1)
 		meta := make(map[uuid.UUID]instanceMeta, len(group.Instances))
 		for _, inst := range group.Instances {
 			meta[inst.TaskRunID] = instanceMeta{partition: inst.Partition, maxAttempt: maxAttempts}
@@ -1999,12 +1992,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 				partEnv[jobdefschema.FanOutPartitionJSONEnv] = string(raw)
 			}
 			extra := make(map[string]string, len(outputEnv)+len(partEnv))
-			for k, v := range outputEnv {
-				extra[k] = v
-			}
-			for k, v := range partEnv {
-				extra[k] = v
-			}
+			maps.Copy(extra, outputEnv)
+			maps.Copy(extra, partEnv)
 
 			// Per-partition identity: the shared args plus this instance's
 			// partition fields. The partition env above is deliberately NOT part
@@ -2733,10 +2722,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		// Frozen on the row, exactly as the distributed worker reads it — see
 		// the identical note in runFannedGroup.
-		maxAttempts := runner.maxAttempts
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		maxAttempts := max(runner.maxAttempts, 1)
 
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -3332,10 +3318,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			cached := 0
 			cancelled := 0
 
-			liveCount := len(snapshot.Tasks)
-			if liveCount < taskCount {
-				liveCount = taskCount
-			}
+			liveCount := max(len(snapshot.Tasks), taskCount)
 
 			// readyPending counts rows the dispatcher can still pick up right
 			// now: pending with every predecessor resolved. It is the difference

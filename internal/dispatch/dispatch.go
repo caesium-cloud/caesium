@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -98,12 +99,7 @@ func (c *CapabilitiesResponse) Supports(name string) bool {
 	if c == nil {
 		return false
 	}
-	for _, have := range c.Capabilities {
-		if have == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.Capabilities, name)
 }
 
 // CapabilityAdvertiser is implemented by a worker that can name the optional
@@ -802,7 +798,7 @@ func (h *Handler) rejectRetryable(w http.ResponseWriter, req CompleteRequest, ap
 	})
 }
 
-func writeJSON(w http.ResponseWriter, code int, v interface{}) {
+func writeJSON(w http.ResponseWriter, code int, v any) {
 	b, _ := json.Marshal(v)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

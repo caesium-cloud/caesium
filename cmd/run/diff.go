@@ -129,7 +129,7 @@ var diffCmd = &cobra.Command{
 
 		stdout := cmd.OutOrStdout()
 		if diffJSON {
-			var out interface{}
+			var out any
 			if err := json.Unmarshal(body, &out); err != nil {
 				return fmt.Errorf("run diff response was not valid JSON (status %d): %w", resp.StatusCode, err)
 			}

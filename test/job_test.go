@@ -381,18 +381,8 @@ func valueFromMap(m map[string]any, key string) any {
 }
 
 func convertToStringMap(v any) (map[string]any, bool) {
-	if mm, ok := v.(map[string]any); ok {
-		return mm, true
-	}
-	mi, ok := v.(map[string]interface{})
-	if !ok {
-		return nil, false
-	}
-	out := make(map[string]any, len(mi))
-	for k, val := range mi {
-		out[k] = val
-	}
-	return out, true
+	mm, ok := v.(map[string]any)
+	return mm, ok
 }
 
 func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {

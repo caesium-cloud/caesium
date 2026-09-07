@@ -29,7 +29,7 @@ var keyCreateCmd = &cobra.Command{
 		server := strings.TrimSuffix(createServer, "/")
 		apiKey := resolveAPIKey(cmd, createAPIKey)
 
-		body := map[string]interface{}{
+		body := map[string]any{
 			"role":        createRole,
 			"description": createDescription,
 		}
@@ -37,7 +37,7 @@ var keyCreateCmd = &cobra.Command{
 			body["expires_in"] = createExpiresIn
 		}
 		if len(createScopeJobs) > 0 {
-			body["scope"] = map[string]interface{}{
+			body["scope"] = map[string]any{
 				"jobs": createScopeJobs,
 			}
 		}

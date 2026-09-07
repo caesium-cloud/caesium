@@ -206,7 +206,7 @@ var Cmd = &cobra.Command{
 		if whyJSON {
 			// Re-indent for readability; fall back to the raw body if it isn't
 			// JSON (it always should be).
-			var out interface{}
+			var out any
 			if err := json.Unmarshal(body, &out); err != nil {
 				_, _ = stdout.Write(body)
 				return nil

@@ -113,13 +113,13 @@ func newSignedSAMLFixture(t *testing.T, mutateAssertion func(*crewsaml.Assertion
 	provider.now = func() time.Time { return samlFixtureNow }
 
 	rec := httptest.NewRecorder()
-	beginReq := httptest.NewRequest(http.MethodGet, samlFixturePublicBaseURL+"/auth/sso/saml/login", nil)
+	beginReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, samlFixturePublicBaseURL+"/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, beginReq, "/runs?status=failed#latest")
 	require.NoError(t, err)
 	cookies := rec.Result().Cookies()
 	require.Len(t, cookies, 1)
 
-	stateReq := httptest.NewRequest(http.MethodGet, samlFixturePublicBaseURL+"/auth/sso/saml/acs", nil)
+	stateReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, samlFixturePublicBaseURL+"/auth/sso/saml/acs", nil)
 	stateReq.AddCookie(cookies[0])
 	state, err := provider.readStateCookie(stateReq)
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func (f signedSAMLFixture) acsRequest(t *testing.T, samlResponse string) *http.R
 		"RelayState":   {f.relayState},
 		"SAMLResponse": {samlResponse},
 	}
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodPost,
 		samlFixturePublicBaseURL+"/auth/sso/saml/acs",
 		strings.NewReader(form.Encode()),
@@ -173,7 +173,7 @@ func makeSignedSAMLResponse(
 		Now:                     samlFixtureNow,
 		IDP:                     idp,
 		RelayState:              state.RelayState,
-		HTTPRequest:             httptest.NewRequest(http.MethodPost, idp.SSOURL.String(), nil),
+		HTTPRequest:             httptest.NewRequestWithContext(context.Background(), http.MethodPost, idp.SSOURL.String(), nil),
 		Request:                 fixtureAuthnRequest(provider, state.RequestID),
 		ServiceProviderMetadata: spMetadata,
 		SPSSODescriptor:         spDescriptor,

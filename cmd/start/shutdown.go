@@ -81,11 +81,9 @@ func activateShutdownCoordinator(coordinator *shutdownCoordinator) func() {
 }
 
 func (s *shutdownCoordinator) runAsync(fn func()) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		fn()
-	}()
+	})
 }
 
 func shutdown() error {

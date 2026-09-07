@@ -110,7 +110,7 @@ func seedRateLimitedFanOutGroup(t *testing.T, db *gorm.DB, n int) (uuid.UUID, uu
 	}).Error)
 
 	ids := make([]uuid.UUID, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := uuid.New()
 		require.NoError(t, db.Create(&models.TaskRun{
 			ID: id, JobRunID: runID, TaskID: taskID, AtomID: atomID,

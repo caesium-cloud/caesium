@@ -170,7 +170,7 @@ func (ctrl *Controller) buildFilter(c *echo.Context) (event.Filter, error) {
 	}
 
 	if typesStr := c.QueryParam("types"); typesStr != "" {
-		for _, part := range strings.Split(typesStr, ",") {
+		for part := range strings.SplitSeq(typesStr, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue

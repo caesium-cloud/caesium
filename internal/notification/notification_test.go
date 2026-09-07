@@ -18,7 +18,7 @@ func TestBuildPayload(t *testing.T) {
 	taskID := uuid.New()
 	now := time.Now().UTC()
 
-	raw, _ := json.Marshal(map[string]interface{}{
+	raw, _ := json.Marshal(map[string]any{
 		"job_alias": "etl-daily",
 		"error":     "exit code 1",
 	})
@@ -451,7 +451,7 @@ func TestRunMetSLA_BoundaryConditions(t *testing.T) {
 	}
 }
 
-func mustJSON(v interface{}) json.RawMessage {
+func mustJSON(v any) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
 		panic(err)

@@ -39,7 +39,7 @@ func TestCheckpointWriter_CadenceAdvancesPerFanOutInstance(t *testing.T) {
 	rs := NewRunState(b.build(), 0)
 
 	parts := make([]pkgtask.Partition, 0, partitions)
-	for i := 0; i < partitions; i++ {
+	for i := range partitions {
 		parts = append(parts, pkgtask.Partition{Key: string(rune('a' + i))})
 	}
 	insts := make([]ExpandedInstance, 0, len(parts))

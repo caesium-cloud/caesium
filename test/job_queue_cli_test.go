@@ -4,6 +4,7 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -200,7 +201,7 @@ func callJobQueueScopedRoute(
 ) (int, error) {
 	t.Helper()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+jobID.String()+"/queue", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs/"+jobID.String()+"/queue", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)

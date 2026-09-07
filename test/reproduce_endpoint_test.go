@@ -234,7 +234,7 @@ func callDescriptorScopedRoute(
 	t.Helper()
 
 	e := echo.New()
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		fmt.Sprintf("/v1/jobs/%s/runs/%s/tasks/%s/descriptor", jobID, runID, url.PathEscape(task)),
 		nil,

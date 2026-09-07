@@ -35,13 +35,13 @@ func setupHandler(t *testing.T) (*run.Store, *run.LeaseStore, *Handler) {
 }
 
 // postJSON sends a POST request with JSON body to the given handler func.
-func postJSON(t *testing.T, handler http.HandlerFunc, body interface{}) *httptest.ResponseRecorder {
+func postJSON(t *testing.T, handler http.HandlerFunc, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(b))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -57,7 +57,6 @@ func TestHandleComplete_InvalidStatus(t *testing.T) {
 	invalidStatuses := []string{"skipped", "pending", "running", "bogus", ""}
 
 	for _, status := range invalidStatuses {
-		status := status
 		t.Run("status="+status, func(t *testing.T) {
 			_, ls, h := setupHandler(t)
 
@@ -167,7 +166,7 @@ func TestHandleComplete_RunNotFound(t *testing.T) {
 func TestHandleComplete_Malformed(t *testing.T) {
 	_, _, h := setupHandler(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("not json")))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", bytes.NewReader([]byte("not json")))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	w := httptest.NewRecorder()
 	h.HandleComplete(w, req)
@@ -185,7 +184,7 @@ func TestHandleComplete_Malformed(t *testing.T) {
 func TestHandleComplete_Unauthorized(t *testing.T) {
 	_, _, h := setupHandler(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("{}")))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Authorization", "Bearer wrong-token")
 	w := httptest.NewRecorder()
 	h.HandleComplete(w, req)
@@ -219,7 +218,7 @@ func TestHandleDispatch_WrongWorker(t *testing.T) {
 func TestHandleDispatch_Unauthorized(t *testing.T) {
 	_, _, h := setupHandler(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("{}")))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", bytes.NewReader([]byte("{}")))
 	// No Authorization header.
 	w := httptest.NewRecorder()
 	h.HandleDispatch(w, req)

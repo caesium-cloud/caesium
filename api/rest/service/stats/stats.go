@@ -251,7 +251,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	if hourly {
 		now := time.Now().UTC()
 		startHour := now.Add(-23 * time.Hour).Truncate(time.Hour)
-		for i := 0; i < 24; i++ {
+		for i := range 24 {
 			hour := startHour.Add(time.Duration(i) * time.Hour)
 			hourStr := hour.Format("2006-01-02T15:04:05Z")
 			point := trendMap[hourStr]

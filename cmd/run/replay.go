@@ -92,7 +92,7 @@ func runReplay(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if replayJSON {
-			var out interface{}
+			var out any
 			if err := json.Unmarshal(diff, &out); err != nil {
 				return fmt.Errorf("run diff response was not valid JSON: %w", err)
 			}

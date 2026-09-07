@@ -126,13 +126,7 @@ func StartIngestRetentionPruner(ctx context.Context, store *IngestStore, retenti
 		return
 	}
 
-	interval := defaultIngestRetentionPruneInterval
-	if retention < interval {
-		interval = retention
-	}
-	if interval < minIngestRetentionPruneInterval {
-		interval = minIngestRetentionPruneInterval
-	}
+	interval := max(min(retention, defaultIngestRetentionPruneInterval), minIngestRetentionPruneInterval)
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()

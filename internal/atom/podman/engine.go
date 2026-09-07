@@ -84,22 +84,16 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	}
 
 	spec := &specgen.SpecGenerator{
-		ContainerBasicConfig: specgen.ContainerBasicConfig{
-			Name:    req.Name,
-			Command: req.Command,
-			Env:     req.Spec.Env,
-		},
-		ContainerStorageConfig: specgen.ContainerStorageConfig{
-			Image: req.Image,
-		},
+		Name:    req.Name,
+		Command: req.Command,
+		Env:     req.Spec.Env,
+		Image:   req.Image,
 		// HealthLogDestination carries no `omitempty` in specgen (upstream
 		// defers that to v6.0), so leaving it unset serializes as "" rather
 		// than omitting it. Podman servers validate the field and stat("")
 		// fails, rejecting every create with "HealthCheck Log '' destination
 		// error". Send the documented default explicitly.
-		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
-			HealthLogDestination: define.DefaultHealthCheckLocalDestination,
-		},
+		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
 	}
 	if req.Spec.WorkDir != "" {
 		spec.WorkDir = req.Spec.WorkDir

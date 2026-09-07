@@ -363,7 +363,7 @@ func (s *ImpactSuite) createJobAndRunWithRepo(alias, commit, repo string) (*mode
 		TriggerID:   triggerID,
 		Status:      "succeeded",
 		StartedAt:   time.Now().UTC(),
-		CompletedAt: ptrTime(time.Now().UTC()),
+		CompletedAt: new(time.Now().UTC()),
 	}
 	s.Require().NoError(s.db.Create(jobRun).Error)
 
@@ -469,8 +469,8 @@ func (s *ImpactSuite) TestMapperPersistsAndLinksImpact() {
 }
 
 func (s *ImpactSuite) createDataset(run *models.TaskRun, ns, name, direction, stepName string) {
-	facet := marshalFacet(map[string]interface{}{
-		"caesium_dataset": map[string]interface{}{
+	facet := marshalFacet(map[string]any{
+		"caesium_dataset": map[string]any{
 			"step_name": stepName,
 			"direction": direction,
 		},
@@ -487,9 +487,7 @@ func (s *ImpactSuite) createDataset(run *models.TaskRun, ns, name, direction, st
 	s.Require().NoError(s.db.Create(ds).Error)
 }
 
-func ptrTime(t time.Time) *time.Time { return &t }
-
-func marshalFacet(v interface{}) []byte {
+func marshalFacet(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
 		panic(err)

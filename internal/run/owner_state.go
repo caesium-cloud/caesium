@@ -3,6 +3,7 @@ package run
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
@@ -1157,10 +1158,7 @@ func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []model
 				if len(row.PartitionDependsOn) > 0 {
 					_ = json.Unmarshal(row.PartitionDependsOn, &deps)
 				}
-				indegree := 0
-				if len(deps) > 0 {
-					indegree = len(deps)
-				}
+				indegree := max(len(deps), 0)
 				expanded = append(expanded, ExpandedInstance{
 					TaskRunID:               row.ID,
 					TaskID:                  catalogID,
@@ -1379,24 +1377,16 @@ func (rs *RunState) Clone() *RunState {
 		copied := *ts
 		out.tasks[id] = &copied
 	}
-	for id, n := range rs.indegree {
-		out.indegree[id] = n
-	}
-	for id, st := range rs.outcomes {
-		out.outcomes[id] = st
-	}
-	for id, ok := range rs.inReady {
-		out.inReady[id] = ok
-	}
+	maps.Copy(out.indegree, rs.indegree)
+	maps.Copy(out.outcomes, rs.outcomes)
+	maps.Copy(out.inReady, rs.inReady)
 	for id, rec := range rs.completions {
 		out.completions[id] = completionRecord{
 			TerminalSequence: rec.TerminalSequence,
 			Skipped:          append([]SkippedTask(nil), rec.Skipped...),
 		}
 	}
-	for id, cat := range rs.catalogOf {
-		out.catalogOf[id] = cat
-	}
+	maps.Copy(out.catalogOf, rs.catalogOf)
 	// instancesOf / inGroupAdj are appended to, so the slices must be copied and
 	// not merely re-headered: append into a shared backing array would write
 	// through to the original.
@@ -1406,27 +1396,13 @@ func (rs *RunState) Clone() *RunState {
 	for id, deps := range rs.inGroupAdj {
 		out.inGroupAdj[id] = append([]uuid.UUID(nil), deps...)
 	}
-	for id, n := range rs.instanceOrder {
-		out.instanceOrder[id] = n
-	}
-	for id, n := range rs.maxParallel {
-		out.maxParallel[id] = n
-	}
-	for id, key := range rs.partitionKeys {
-		out.partitionKeys[id] = key
-	}
-	for id, policy := range rs.failurePolicy {
-		out.failurePolicy[id] = policy
-	}
-	for id, name := range rs.groupNames {
-		out.groupNames[id] = name
-	}
-	for id, at := range rs.groupStarted {
-		out.groupStarted[id] = at
-	}
-	for id, seen := range rs.groupObserved {
-		out.groupObserved[id] = seen
-	}
+	maps.Copy(out.instanceOrder, rs.instanceOrder)
+	maps.Copy(out.maxParallel, rs.maxParallel)
+	maps.Copy(out.partitionKeys, rs.partitionKeys)
+	maps.Copy(out.failurePolicy, rs.failurePolicy)
+	maps.Copy(out.groupNames, rs.groupNames)
+	maps.Copy(out.groupStarted, rs.groupStarted)
+	maps.Copy(out.groupObserved, rs.groupObserved)
 	return out
 }
 

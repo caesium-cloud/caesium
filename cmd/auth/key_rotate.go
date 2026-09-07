@@ -27,7 +27,7 @@ var keyRotateCmd = &cobra.Command{
 		apiKey := resolveAPIKey(cmd, rotateAPIKey)
 		url := fmt.Sprintf("%s/v1/auth/keys/%s/rotate", server, rotateID)
 
-		body := map[string]interface{}{}
+		body := map[string]any{}
 		if rotateGracePeriod != "" {
 			body["grace_period"] = rotateGracePeriod
 		}

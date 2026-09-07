@@ -173,32 +173,32 @@ func TestStartAndRegisterTasksPropagatePriority(t *testing.T) {
 }
 
 func TestTaskExecutionDescriptorCaptureCoversContainerSpecFields(t *testing.T) {
-	descriptorType := reflect.TypeOf(models.TaskExecutionDescriptor{})
+	descriptorType := reflect.TypeFor[models.TaskExecutionDescriptor]()
 
 	containerField, ok := descriptorType.FieldByName("ContainerSpec")
 	require.True(t, ok, "descriptor must carry the runtime container spec")
-	require.Equal(t, reflect.TypeOf(container.Spec{}), containerField.Type)
+	require.Equal(t, reflect.TypeFor[container.Spec](), containerField.Type)
 
 	kubernetesField, ok := descriptorType.FieldByName("KubernetesSpec")
 	require.True(t, ok, "descriptor must carry the Kubernetes workload identity spec")
-	require.Equal(t, reflect.TypeOf((*container.KubernetesSpec)(nil)), kubernetesField.Type)
+	require.Equal(t, reflect.TypeFor[*container.KubernetesSpec](), kubernetesField.Type)
 
 	// These explicit lists intentionally force a descriptor review when either
 	// container carrier grows, even though v1 currently stores the structs whole.
 	require.ElementsMatch(t,
 		[]string{"Env", "WorkDir", "Mounts", "ResolvedVolumeMounts", "Kubernetes"},
-		exportedFieldNames(reflect.TypeOf(container.Spec{})),
+		exportedFieldNames(reflect.TypeFor[container.Spec]()),
 	)
 	require.ElementsMatch(t,
 		[]string{"ServiceAccountName", "PodAnnotations", "AutomountServiceAccountToken", "QueueName"},
-		exportedFieldNames(reflect.TypeOf(container.KubernetesSpec{})),
+		exportedFieldNames(reflect.TypeFor[container.KubernetesSpec]()),
 	)
 }
 
 func exportedFieldNames(rt reflect.Type) []string {
 	names := make([]string, 0, rt.NumField())
-	for i := 0; i < rt.NumField(); i++ {
-		field := rt.Field(i)
+	for field := range rt.Fields() {
+		field := field
 		if field.IsExported() {
 			names = append(names, field.Name)
 		}
@@ -1174,7 +1174,7 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 	claimOwner := "node-a"
 	require.NoError(t, db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":           string(TaskStatusRunning),
 			"claimed_by":       claimOwner,
 			"claim_expires_at": time.Now().UTC().Add(1 * time.Minute),

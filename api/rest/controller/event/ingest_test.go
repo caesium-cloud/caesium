@@ -41,7 +41,7 @@ func TestIngestRoutesEventWithAPIKey(t *testing.T) {
 		observeEventArrival = originalArrival
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events", strings.NewReader(`{
 		"type":"order.created",
 		"source":"integration",
 		"data":{"id":"ord-1"}
@@ -64,7 +64,7 @@ func TestIngestRejectsMissingAPIKey(t *testing.T) {
 	t.Setenv("CAESIUM_EVENT_INGEST_API_KEY", "test-key")
 	require.NoError(t, env.Process())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{"type":"order.created","data":{}}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events", strings.NewReader(`{"type":"order.created","data":{}}`))
 	rec := httptest.NewRecorder()
 
 	err := New(nil).Ingest(echo.New().NewContext(req, rec))

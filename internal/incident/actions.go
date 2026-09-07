@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -751,13 +752,7 @@ func validateParamOverrides(overrides map[string]string, whitelist map[string][]
 		if len(allowed) == 0 {
 			continue
 		}
-		match := false
-		for _, a := range allowed {
-			if a == val {
-				match = true
-				break
-			}
-		}
+		match := slices.Contains(allowed, val)
 		if !match {
 			return fmt.Errorf("incident: rerun_with_params value %q for key %q is not whitelisted", val, key)
 		}
