@@ -1439,9 +1439,12 @@ binary to download (Ledger L14).
       Changed" from the repository's first commit and a body over 125,000
       characters 422s *after* the images are public) and is idempotent (a
       re-run re-uploads the assets with `--clobber` instead of failing on an
-      existing release); the smoke also runs `caesium job diff`, which opens
-      the embedded dqlite catalog (`CAESIUM_DATABASE_PATH`) — the cgo path
-      the static link exists for; `--help` and `job lint` are pure Go.
+      existing release); the smoke also runs a bounded `caesium start` (which
+      opens and migrates the embedded dqlite catalog under
+      `CAESIUM_DATABASE_PATH`) and drives `caesium job apply` against it over
+      HTTP in the same bare container — the cgo dqlite/sqlite path the static
+      link exists for; `--help` and `job lint` are pure Go and prove nothing
+      about that link. Verified locally on arm64 before CI.
 - [x] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
       host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
       (defaulting to the latest release tag resolved with

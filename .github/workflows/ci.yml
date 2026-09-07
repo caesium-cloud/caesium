@@ -200,18 +200,36 @@ jobs:
           }
           run_cli --help
           run_cli job lint --path /examples/minimal.job.yaml
-          # `job diff` opens the embedded dqlite catalog (CAESIUM_DATABASE_PATH,
-          # a fresh single-node store) - the cgo dqlite/sqlite path the static
-          # link exists for. --help and job lint are pure Go and would pass
-          # even if that link were broken.
-          run_cli job diff --path /examples/minimal.job.yaml
+          # --help and job lint are pure Go and would pass even if the static
+          # cgo link were broken. This runs the server: `caesium start` opens
+          # the embedded dqlite catalog (a fresh single-node store under
+          # CAESIUM_DATABASE_PATH), migrates it, and serves `job apply` over
+          # HTTP - the dqlite/sqlite path the static link exists for. One
+          # container, because the server and the client must share it.
+          docker run --rm \
+            -v /tmp/caesium-linux-amd64:/usr/local/bin/caesium:ro \
+            -v "$PWD/docs/examples:/examples:ro" \
+            -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
+            ubuntu:24.04 sh -ec '
+              mkdir -p /tmp/caesium-db
+              (timeout 60 caesium start >/tmp/start.log 2>&1 || true) &
+              applied=0
+              for i in $(seq 1 40); do
+                if caesium job apply --path /examples/minimal.job.yaml --server http://127.0.0.1:8080 >/tmp/apply.log 2>&1; then applied=1; break; fi
+                sleep 1
+              done
+              cat /tmp/apply.log
+              grep -q "migrating database" /tmp/start.log || { echo "server never reached migration:"; cat /tmp/start.log; exit 1; }
+              [ "$applied" = 1 ] || { echo "job apply against the embedded server never succeeded:"; cat /tmp/start.log; exit 1; }
+              echo "OK: embedded dqlite catalog opened, migrated and served job apply"
+            '
           sha="$(sha256sum /tmp/caesium-linux-amd64 | awk '{print $1}')"
           {
             echo "binary=caesium-linux-amd64"
             echo "sha256=${sha}"
             echo "runner_arch=$(uname -m)"
             echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium job diff' (opens the embedded dqlite catalog; native, no emulation)"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium start' serving 'caesium job apply' (embedded dqlite catalog opened+migrated; native, no emulation)"
           } > /tmp/caesium-linux-amd64.smoke-ok
           cat /tmp/caesium-linux-amd64.smoke-ok
       - uses: actions/upload-artifact@v7
@@ -428,18 +446,36 @@ jobs:
           }
           run_cli --help
           run_cli job lint --path /examples/minimal.job.yaml
-          # `job diff` opens the embedded dqlite catalog (CAESIUM_DATABASE_PATH,
-          # a fresh single-node store) - the cgo dqlite/sqlite path the static
-          # link exists for. --help and job lint are pure Go and would pass
-          # even if that link were broken.
-          run_cli job diff --path /examples/minimal.job.yaml
+          # --help and job lint are pure Go and would pass even if the static
+          # cgo link were broken. This runs the server: `caesium start` opens
+          # the embedded dqlite catalog (a fresh single-node store under
+          # CAESIUM_DATABASE_PATH), migrates it, and serves `job apply` over
+          # HTTP - the dqlite/sqlite path the static link exists for. One
+          # container, because the server and the client must share it.
+          docker run --rm \
+            -v /tmp/caesium-linux-arm64:/usr/local/bin/caesium:ro \
+            -v "$PWD/docs/examples:/examples:ro" \
+            -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
+            ubuntu:24.04 sh -ec '
+              mkdir -p /tmp/caesium-db
+              (timeout 60 caesium start >/tmp/start.log 2>&1 || true) &
+              applied=0
+              for i in $(seq 1 40); do
+                if caesium job apply --path /examples/minimal.job.yaml --server http://127.0.0.1:8080 >/tmp/apply.log 2>&1; then applied=1; break; fi
+                sleep 1
+              done
+              cat /tmp/apply.log
+              grep -q "migrating database" /tmp/start.log || { echo "server never reached migration:"; cat /tmp/start.log; exit 1; }
+              [ "$applied" = 1 ] || { echo "job apply against the embedded server never succeeded:"; cat /tmp/start.log; exit 1; }
+              echo "OK: embedded dqlite catalog opened, migrated and served job apply"
+            '
           sha="$(sha256sum /tmp/caesium-linux-arm64 | awk '{print $1}')"
           {
             echo "binary=caesium-linux-arm64"
             echo "sha256=${sha}"
             echo "runner_arch=$(uname -m)"
             echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium job diff' (opens the embedded dqlite catalog; native, no emulation)"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium start' serving 'caesium job apply' (embedded dqlite catalog opened+migrated; native, no emulation)"
           } > /tmp/caesium-linux-arm64.smoke-ok
           cat /tmp/caesium-linux-arm64.smoke-ok
       - uses: actions/upload-artifact@v7
