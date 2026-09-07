@@ -284,9 +284,8 @@ integration-test-distributed:
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     log={{ repo_dir }}/.tmp/integration-test-distributed.log; \
-    rm -f "$log"; \
-    rc=0; \
-    {{ container_cli }} run --rm --platform {{ platform }} \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
@@ -296,8 +295,8 @@ integration-test-distributed:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m -v' >"$log" 2>&1 || rc=$?; \
-    cat "$log"; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
     if [ "$rc" -ne 0 ]; then \
@@ -326,9 +325,8 @@ integration-test-owner-memory:
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     log={{ repo_dir }}/.tmp/integration-test-owner-memory.log; \
-    rm -f "$log"; \
-    rc=0; \
-    {{ container_cli }} run --rm --platform {{ platform }} \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
@@ -339,8 +337,8 @@ integration-test-owner-memory:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m -v' >"$log" 2>&1 || rc=$?; \
-    cat "$log"; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
     if [ "$rc" -ne 0 ]; then \
@@ -664,9 +662,8 @@ integration-test-infra:
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     log={{ repo_dir }}/.tmp/integration-test-infra.log; \
-    rm -f "$log"; \
-    rc=0; \
-    {{ container_cli }} run --rm --platform {{ platform }} \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-infra/caesium \
@@ -680,8 +677,8 @@ integration-test-infra:
         --network=container:{{ infra_it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v' >"$log" 2>&1 || rc=$?; \
-    cat "$log"; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
     if [ "$rc" -ne 0 ]; then \
