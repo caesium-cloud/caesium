@@ -17,6 +17,14 @@ Install a single-node Caesium instance:
 helm install caesium ./helm/caesium
 ```
 
+This pulls `caesiumcloud/caesium:<Chart.yaml appVersion>`. To deploy a
+different image — a locally built one, or a tag other than the chart's pinned
+release — set it explicitly:
+
+```bash
+helm install caesium ./helm/caesium --set image.tag=<tag>
+```
+
 Wait for readiness:
 
 ```bash
@@ -74,6 +82,15 @@ kubectl exec caesium-2 -- cat /etc/caesium/database-nodes
 ## Configuration Reference
 
 All settings are in `helm/caesium/values.yaml`.
+
+> **Chart versioning.** `image.tag` defaults to the chart's `appVersion`
+> (`helm/caesium/Chart.yaml`), which is pinned to a released image tag — so an
+> un-overridden `helm install` deploys exactly that release. **Every `v*` tag
+> bumps `Chart.yaml` `appVersion` to the tag, and `version` per semver, in the
+> same PR**; the `publish` job in `.github/workflows/ci.yml` fails the release
+> if `appVersion` does not equal the pushed tag. Override `image.tag`
+> explicitly (as CI's `helm-integration-test` lane and `just k8s-distributed`
+> do) whenever you deploy an image that is not a published release.
 
 | Key | Purpose | Default |
 |---|---|---|

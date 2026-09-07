@@ -1347,7 +1347,7 @@ names (L12).
 The README's first sentence is "single self-contained binary"; there is no
 binary to download (Ledger L14).
 
-- [ ] E1. Extend the `publish` job to create a GitHub Release with per-arch
+- [x] E1. Extend the `publish` job to create a GitHub Release with per-arch
       CLI binaries **that run on a bare Linux host**. The executable in the
       release image is **dynamically linked** — `CGO_ENABLED=1` in
       `build/Dockerfile.build`, and `build/Dockerfile`'s builder stage
@@ -1406,7 +1406,46 @@ binary to download (Ledger L14).
       test + `release-cli-<arch>` artifact; `publish`: marker/sha verification
       + release). The two build jobs are also edited by H-2 (timeouts) —
       sequence H-2 first, E1 rebases (both additive steps).
-- [ ] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
+      **Done (W2-β):** path (a) — the **static** artifact shipped; the
+      bundled-libs fallback (c) was not needed and no issue was filed.
+      `build/Dockerfile` gained a `cli-static` stage (`FROM builder`, so it
+      reuses the builder image CI already loads and only the link differs);
+      `build/Dockerfile.build`'s dqlite stage now configures
+      `--enable-static` and installs `sqlite-static`/`libuv-static`/
+      `lz4-static`. Link line:
+      `-tags "libsqlite3,containers_image_openpgp" -ldflags "-s -w -linkmode
+      external -extldflags '-static -luv -llz4 -lsqlite3 -lm'"`. Two
+      link failures had to be resolved and are recorded in the stage
+      comments: (i) `libgpgme.a` does not resolve on musl
+      (`undefined reference to gpgrt_lock_lock` /
+      `gpg_err_code_from_syserror` — the dynamic build gets those through
+      `libgpgme.so`'s `DT_NEEDED`; Alpine ships no `gpgme-static`), fixed with
+      the `containers_image_openpgp` tag (pure-Go OpenPGP; only container-image
+      *signature verification* differs, which caesium does not use);
+      (ii) a static `libdqlite.a` has no `DT_NEEDED`, so `-luv -llz4
+      -lsqlite3` are appended explicitly. The stage fails unless `ldd` shows no
+      `=>` lines **and** `file` reports "statically linked". CI-proven: both
+      `build-and-integration-test` and `build-and-integration-test-arm64` build
+      the binary, smoke it natively (`ubuntu:24.04`, `caesium --help` +
+      `caesium job lint --path docs/examples/minimal.job.yaml`) and upload
+      `release-cli-amd64` / `release-cli-arm64` with a `.smoke-ok` marker
+      (sha256 + runner arch). Review-only (cannot run before a `v*` tag): the
+      `publish` job's marker/sha256 verification, `SHA256SUMS`, job-scoped
+      `permissions: contents: write`, and `gh release create --verify-tag`
+      with the Linux-only / static-artifact release-notes template —
+      validated with `actionlint` (no new findings). Review fixes (W2, after
+      the substitute adversarial review): the release step no longer passes
+      `--generate-notes` (on a first release GitHub generates "What's
+      Changed" from the repository's first commit and a body over 125,000
+      characters 422s *after* the images are public) and is idempotent (a
+      re-run re-uploads the assets with `--clobber` instead of failing on an
+      existing release); the smoke also runs a bounded `caesium start` (which
+      opens and migrates the embedded dqlite catalog under
+      `CAESIUM_DATABASE_PATH`) and drives `caesium job apply` against it over
+      HTTP in the same bare container — the cgo dqlite/sqlite path the static
+      link exists for; `--help` and `job lint` are pure Go and prove nothing
+      about that link. Verified locally on arm64 before CI.
+- [x] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
       host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
       (defaulting to the latest release tag resolved with
       `gh release view --json tagName` when `tag` is `latest`) and writes
@@ -1420,7 +1459,28 @@ binary to download (Ledger L14).
       builder container. On Linux, `just cli` prefers the E1 static binary
       from the release when present. Place the recipe directly after
       `push-multiarch`. Files: `justfile`.
-- [ ] E3. Version the Helm chart with the release. Set
+      **Done (W2-β):** recipe added directly after `push-multiarch`. It
+      resolves `tag=latest` through `gh release view --json tagName`, prefers
+      the E1 static asset on Linux (`gh release download --pattern
+      caesium-linux-<arch>`), and otherwise writes a wrapper script. The
+      wrapper uses `--entrypoint /bin/caesium` (the plan's literal
+      `… <image> caesium "$@"` would pass `caesium` as *argv[1]* to the
+      image's `/bin/caesium` ENTRYPOINT), plus `--network host` on Linux
+      (on macOS Docker Desktop's host network is the VM's, so the wrapper
+      maps `host.docker.internal` to the host gateway instead and prints the
+      `http://host.docker.internal:8080` hint — a W2 review fix),
+      `-v "$PWD":/work -w /work`, `--user $(id -u):$(id -g)` so writes to the
+      working directory land as the host user, and a `CAESIUM_*` env
+      passthrough. A locally present image skips the pull, so the recipe is
+      testable offline. Verified: `just cli` refuses with "no published GitHub
+      release yet"; `just tag=v9.9.9-nope cli` refuses with the Docker Hub
+      hint; `just tag=v0.0.0-w2local cli` (a local retag of
+      `caesiumcloud/caesium:latest`) writes the wrapper and both
+      `./.tmp/caesium-cli/caesium --help` and `… job lint --path
+      docs/examples/minimal.job.yaml` succeed. `.tmp/` was already gitignored.
+      Not wired: container-executing subcommands (`caesium dev`) would also
+      need the Docker socket mounted.
+- [x] E3. Version the Helm chart with the release. Set
       `helm/caesium/Chart.yaml` `appVersion: "v0.1.0"` (from `"latest"`);
       **leave `version` at `0.1.0`** — it is already `0.1.0` (Ledger L14), so
       the first release needs no chart-version bump, and bumping it here would
@@ -1432,6 +1492,19 @@ binary to download (Ledger L14).
       the `image.tag` row. Files: `helm/caesium/Chart.yaml`,
       `.github/workflows/ci.yml` (`publish` job — same PR as E1 or rebased
       after it), `docs/kubernetes-deployment.md`. Depends on: E1.
+      **Done (W2-β):** `appVersion: "v0.1.0"`, `version` left at `0.1.0`. The
+      `publish` job now checks out the repo and fails on
+      `appVersion` ≠ `$GITHUB_REF_NAME` before anything is pushed. **image.tag
+      audit (the kind lane cannot go red on merge):** every lane that actually
+      installs the chart already overrides the tag — CI's
+      `helm-integration-test` passes `--set image.tag=${IMAGE_TAG}-amd64`, and
+      `just k8s-distributed` sets both `image.repository` and `image.tag` to
+      its local-registry dev tag. `just helm-lint` and `just helm-template`
+      only lint/render (no pull), and `just helm-test` runs `helm test` against
+      an already-installed release. Nothing needed fixing. The rule and the
+      "override `image.tag` unless you are deploying a published release"
+      guidance are documented in `docs/kubernetes-deployment.md` (Quick Start
+      and Configuration Reference).
 - [ ] E4. Cut `v0.1.0`. The tag push is the **user's action**; the item is
       the checklist around it: E1–E3 merged; **every job in `publish.needs`
       (`.github/workflows/ci.yml`) green on the tagged commit** — a strictly

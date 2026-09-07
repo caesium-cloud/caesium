@@ -4,15 +4,21 @@ RUN apk add --no-cache \
     autoconf automake libtool \
     libuv-dev lz4-dev \
     make gcc g++ musl-dev linux-headers \
-    sqlite-dev git
+    sqlite-dev git \
+    sqlite-static libuv-static lz4-static
 ARG DQLITE_REF=v1.18.7
 WORKDIR /bld
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
+# --enable-static also emits /usr/lib/libdqlite.a alongside the shared library.
+# The shared library is what the release image links (unchanged); the archive is
+# what build/Dockerfile's `cli-static` stage links for the bare-host CLI
+# artifacts published on a release. Both are carried into the `builder` stage by
+# the `libdqlite*` glob below.
 RUN autoreconf -i && \
     CFLAGS="-Wno-error=maybe-musttail-local-addr" \
     CXXFLAGS="-Wno-error=maybe-musttail-local-addr" \
-    ./configure --disable-backtrace --prefix=/usr && \
+    ./configure --disable-backtrace --prefix=/usr --enable-static && \
     make -j$(nproc) install
 
 # -------- Stage 2: Lean builder for compiling the release binary --------
