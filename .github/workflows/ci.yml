@@ -170,6 +170,52 @@ jobs:
           path: /tmp/release-amd64.tar.gz
           retention-days: 1
           compression-level: 0
+      # --- Portable CLI artifact (Stream E1): built, smoke-tested and
+      # checksummed on this runner, which is natively amd64. `publish` only
+      # verifies the marker + sha256; it never executes either binary.
+      - name: Build static CLI binary (amd64)
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg BUILDER_IMAGE=caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64 \
+            --target cli-static \
+            -t caesium-cli-static:${{ env.IMAGE_TAG }}-amd64 \
+            -f build/Dockerfile .
+          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-amd64)"
+          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-amd64
+          docker rm -f "$ctr"
+          chmod +x /tmp/caesium-linux-amd64
+      - name: Bare-host smoke test (amd64, native)
+        run: |
+          set -euo pipefail
+          # ubuntu:24.04 carries none of the caesium runtime libraries
+          # (libdqlite / libuv / lz4 / sqlite3) and a different libc than the
+          # build image: if the binary runs here it is genuinely self-contained.
+          run_cli() {
+            docker run --rm \
+              -v /tmp/caesium-linux-amd64:/usr/local/bin/caesium:ro \
+              -v "$PWD/docs/examples:/examples:ro" \
+              ubuntu:24.04 caesium "$@"
+          }
+          run_cli --help
+          run_cli job lint --path /examples/minimal.job.yaml
+          sha="$(sha256sum /tmp/caesium-linux-amd64 | awk '{print $1}')"
+          {
+            echo "binary=caesium-linux-amd64"
+            echo "sha256=${sha}"
+            echo "runner_arch=$(uname -m)"
+            echo "runner_os=${{ runner.os }}"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' (native, no emulation)"
+          } > /tmp/caesium-linux-amd64.smoke-ok
+          cat /tmp/caesium-linux-amd64.smoke-ok
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-cli-amd64
+          path: |
+            /tmp/caesium-linux-amd64
+            /tmp/caesium-linux-amd64.smoke-ok
+          retention-days: 1
+          compression-level: 0
 
   build-and-integration-test-distributed:
     needs: builder
@@ -344,6 +390,52 @@ jobs:
         with:
           name: release-arm64
           path: /tmp/release-arm64.tar.gz
+          retention-days: 1
+          compression-level: 0
+      # --- Portable CLI artifact (Stream E1): built, smoke-tested and
+      # checksummed on this runner, which is natively arm64. `publish` only
+      # verifies the marker + sha256; it never executes either binary.
+      - name: Build static CLI binary (arm64)
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg BUILDER_IMAGE=caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64 \
+            --target cli-static \
+            -t caesium-cli-static:${{ env.IMAGE_TAG }}-arm64 \
+            -f build/Dockerfile .
+          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-arm64)"
+          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-arm64
+          docker rm -f "$ctr"
+          chmod +x /tmp/caesium-linux-arm64
+      - name: Bare-host smoke test (arm64, native)
+        run: |
+          set -euo pipefail
+          # ubuntu:24.04 carries none of the caesium runtime libraries
+          # (libdqlite / libuv / lz4 / sqlite3) and a different libc than the
+          # build image: if the binary runs here it is genuinely self-contained.
+          run_cli() {
+            docker run --rm \
+              -v /tmp/caesium-linux-arm64:/usr/local/bin/caesium:ro \
+              -v "$PWD/docs/examples:/examples:ro" \
+              ubuntu:24.04 caesium "$@"
+          }
+          run_cli --help
+          run_cli job lint --path /examples/minimal.job.yaml
+          sha="$(sha256sum /tmp/caesium-linux-arm64 | awk '{print $1}')"
+          {
+            echo "binary=caesium-linux-arm64"
+            echo "sha256=${sha}"
+            echo "runner_arch=$(uname -m)"
+            echo "runner_os=${{ runner.os }}"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' (native, no emulation)"
+          } > /tmp/caesium-linux-arm64.smoke-ok
+          cat /tmp/caesium-linux-arm64.smoke-ok
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-cli-arm64
+          path: |
+            /tmp/caesium-linux-arm64
+            /tmp/caesium-linux-arm64.smoke-ok
           retention-days: 1
           compression-level: 0
 
@@ -685,7 +777,20 @@ jobs:
     runs-on: ubuntu-24.04
     environment: Docker
     timeout-minutes: 30
+    # Scoped to this job only: the test jobs stay on the default read-only
+    # token. `contents: write` is what `gh release create` needs.
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v6
+      - name: Verify chart appVersion matches the pushed tag
+        run: |
+          grep -q "^appVersion: \"${GITHUB_REF_NAME}\"$" helm/caesium/Chart.yaml || {
+            echo "helm/caesium/Chart.yaml appVersion does not equal the pushed tag ${GITHUB_REF_NAME}:"
+            grep '^appVersion:' helm/caesium/Chart.yaml
+            echo "Every v* tag bumps Chart.yaml appVersion to the tag (and version per semver) in the same PR."
+            exit 1
+          }
       - uses: actions/download-artifact@v8
         with:
           name: release-amd64
@@ -702,6 +807,40 @@ jobs:
         with:
           name: release-reagents-arm64
           path: /tmp
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-cli-amd64
+          path: /tmp/cli
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-cli-arm64
+          path: /tmp/cli
+      # Verify only - this runner is amd64 and must never execute the arm64
+      # binary. The proof that each binary runs on a bare host was produced
+      # natively by its own build job (the .smoke-ok markers below).
+      - name: Verify CLI smoke markers and checksums
+        run: |
+          set -euo pipefail
+          cd /tmp/cli
+          for arch in amd64 arm64; do
+            bin="caesium-linux-${arch}"
+            marker="${bin}.smoke-ok"
+            test -f "$bin" || { echo "missing $bin"; exit 1; }
+            test -f "$marker" || {
+              echo "missing $marker - the $arch build job did not smoke-test its binary"
+              exit 1
+            }
+            expected="$(sed -n 's/^sha256=//p' "$marker")"
+            actual="$(sha256sum "$bin" | awk '{print $1}')"
+            if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+              echo "sha256 mismatch for $bin: marker='$expected' actual='$actual'"
+              exit 1
+            fi
+            echo "verified $bin ($actual)"
+            cat "$marker"
+          done
+          sha256sum caesium-linux-amd64 caesium-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
       - name: Load release images
         run: |
           gunzip -c /tmp/release-amd64.tar.gz | docker load
@@ -730,3 +869,63 @@ jobs:
               caesiumcloud/$role:${IMAGE_TAG}-arm64
             docker manifest push caesiumcloud/$role:${IMAGE_TAG}
           done
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          IMAGE_TAG=${{ env.IMAGE_TAG }}
+          amd64_digest="$(docker inspect --format '{{index .RepoDigests 0}}' caesiumcloud/caesium:${IMAGE_TAG}-amd64)"
+          arm64_digest="$(docker inspect --format '{{index .RepoDigests 0}}' caesiumcloud/caesium:${IMAGE_TAG}-arm64)"
+          cat > /tmp/release-notes.md <<EOF
+          ## Install
+
+          ### CLI binary (Linux only)
+
+          \`caesium-linux-amd64\` and \`caesium-linux-arm64\` are **statically
+          linked** executables: they need no shared libraries and run on any
+          Linux host of the matching architecture. Verify against
+          \`SHA256SUMS\`, then:
+
+          \`\`\`sh
+          curl -fsSLo caesium https://github.com/${GITHUB_REPOSITORY}/releases/download/${IMAGE_TAG}/caesium-linux-\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          chmod +x caesium && sudo mv caesium /usr/local/bin/caesium
+          caesium --help
+          \`\`\`
+
+          There is **no macOS or Windows binary**: the toolchain builds
+          \`GOOS=linux\` against a CGO dqlite. On macOS run the CLI through the
+          container image instead — \`just tag=${IMAGE_TAG} cli\` writes a
+          wrapper to \`./.tmp/caesium-cli/caesium\`.
+
+          Each binary was smoke-tested **natively on its own architecture's
+          runner** (\`ubuntu-24.04\` / \`ubuntu-24.04-arm\`, no emulation) inside
+          a plain \`ubuntu:24.04\` container carrying none of the caesium
+          runtime libraries: \`caesium --help\` and \`caesium job lint\` both
+          succeed there.
+
+          ### Container image
+
+          \`\`\`sh
+          docker pull caesiumcloud/caesium:${IMAGE_TAG}
+          \`\`\`
+
+          | Platform | Digest |
+          |---|---|
+          | linux/amd64 | \`${amd64_digest}\` |
+          | linux/arm64 | \`${arm64_digest}\` |
+
+          ### Helm
+
+          \`helm/caesium\` \`appVersion\` is pinned to \`${IMAGE_TAG}\`, so an
+          un-overridden \`helm install caesium ./helm/caesium\` deploys this
+          release.
+          EOF
+          gh release create "${IMAGE_TAG}" \
+            --verify-tag \
+            --generate-notes \
+            --title "${IMAGE_TAG}" \
+            --notes-file /tmp/release-notes.md \
+            /tmp/cli/caesium-linux-amd64 \
+            /tmp/cli/caesium-linux-arm64 \
+            /tmp/cli/SHA256SUMS
