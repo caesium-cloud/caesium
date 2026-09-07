@@ -1431,9 +1431,17 @@ binary to download (Ledger L14).
       `release-cli-amd64` / `release-cli-arm64` with a `.smoke-ok` marker
       (sha256 + runner arch). Review-only (cannot run before a `v*` tag): the
       `publish` job's marker/sha256 verification, `SHA256SUMS`, job-scoped
-      `permissions: contents: write`, and `gh release create --verify-tag
-      --generate-notes` with the Linux-only / static-artifact release-notes
-      template — validated with `actionlint` (no new findings).
+      `permissions: contents: write`, and `gh release create --verify-tag`
+      with the Linux-only / static-artifact release-notes template —
+      validated with `actionlint` (no new findings). Review fixes (W2, after
+      the substitute adversarial review): the release step no longer passes
+      `--generate-notes` (on a first release GitHub generates "What's
+      Changed" from the repository's first commit and a body over 125,000
+      characters 422s *after* the images are public) and is idempotent (a
+      re-run re-uploads the assets with `--clobber` instead of failing on an
+      existing release); the smoke also runs `caesium job diff`, which opens
+      the embedded dqlite catalog (`CAESIUM_DATABASE_PATH`) — the cgo path
+      the static link exists for; `--help` and `job lint` are pure Go.
 - [x] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
       host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
       (defaulting to the latest release tag resolved with
@@ -1454,7 +1462,10 @@ binary to download (Ledger L14).
       caesium-linux-<arch>`), and otherwise writes a wrapper script. The
       wrapper uses `--entrypoint /bin/caesium` (the plan's literal
       `… <image> caesium "$@"` would pass `caesium` as *argv[1]* to the
-      image's `/bin/caesium` ENTRYPOINT), plus `--network host`,
+      image's `/bin/caesium` ENTRYPOINT), plus `--network host` on Linux
+      (on macOS Docker Desktop's host network is the VM's, so the wrapper
+      maps `host.docker.internal` to the host gateway instead and prints the
+      `http://host.docker.internal:8080` hint — a W2 review fix),
       `-v "$PWD":/work -w /work`, `--user $(id -u):$(id -g)` so writes to the
       working directory land as the host user, and a `CAESIUM_*` env
       passthrough. A locally present image skips the pull, so the recipe is
