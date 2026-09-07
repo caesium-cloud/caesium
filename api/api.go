@@ -46,7 +46,10 @@ var apiServer struct {
 // authenticated TLS listener (see dispatch.InternalServer) so the public API
 // can remain plain HTTP behind the operator's proxy.
 func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, providers SSOProviders, wakeupHandler InternalWakeupHandler) error {
-	e := echo.New()
+	// Echo 5.3 registers implicit 404 handlers on groups (v4-style). Keep the
+	// previous v5.0 behavior: unknown /v1 paths are not synthetic routes that
+	// inherit group middleware (and therefore RBAC).
+	e := echo.NewWithConfig(echo.Config{NoGroupAutoRegister404Routes: true})
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
 
@@ -258,8 +261,7 @@ func credentialLoginRateLimit(limiter *auth.RateLimiter) echo.MiddlewareFunc {
 
 func credentialLoginFailed(err error, status int) bool {
 	if err != nil {
-		var he *echo.HTTPError
-		if errors.As(err, &he) {
+		if he, ok := errors.AsType[*echo.HTTPError](err); ok {
 			return he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden
 		}
 		return false
