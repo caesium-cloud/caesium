@@ -609,7 +609,7 @@ func (s *IntegrationTestSuite) requireEscalationEvent(incidentID, wantSummary st
 		"incident %s escalated but nothing reached the event stream", incidentID)
 }
 
-// TestApprovedActionRedriveRecoversAfterCrash gives the approval redrive sweeper
+// TestIncidentApprovedActionRedriveRecoversAfterCrash gives the approval redrive sweeper
 // its only integration coverage.
 //
 // The decision commits in its own transaction and the dispatch runs after it, so
@@ -624,7 +624,7 @@ func (s *IntegrationTestSuite) requireEscalationEvent(incidentID, wantSummary st
 // updated_at old enough to clear the redrive grace) and its effect undone,
 // directly in the catalog. That is precisely the on-disk state a crash between
 // commit and dispatch leaves behind.
-func (s *IntegrationTestSuite) TestApprovedActionRedriveRecoversAfterCrash() {
+func (s *IntegrationTestSuite) TestIncidentApprovedActionRedriveRecoversAfterCrash() {
 	s.requireAuthLane()
 
 	proposal := s.driveTier3SkipTaskProposal("approval-redrive")
@@ -678,7 +678,7 @@ func (s *IntegrationTestSuite) TestApprovedActionRedriveRecoversAfterCrash() {
 		"a redriven action must still name the human who approved it")
 }
 
-// TestApplyJobdefPatchCannotEditItsOwnPolicy is the self-modification refusal.
+// TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy is the self-modification refusal.
 //
 // `metadata.remediation` is persisted and IS the input to the effective-playbook
 // resolver, so a patch that edits it is the agent rewriting the policy that
@@ -687,7 +687,7 @@ func (s *IntegrationTestSuite) TestApprovedActionRedriveRecoversAfterCrash() {
 // no-op hands the agent a wider allowlist for every later proposal. The refusal
 // must therefore hold at the point of EXECUTION, after a human has approved —
 // which is what this drives.
-func (s *IntegrationTestSuite) TestApplyJobdefPatchCannotEditItsOwnPolicy() {
+func (s *IntegrationTestSuite) TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy() {
 	s.requireAuthLane()
 
 	alias := fmt.Sprintf("policy-selfedit-%d", time.Now().UnixNano())

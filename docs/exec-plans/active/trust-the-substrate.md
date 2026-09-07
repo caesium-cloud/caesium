@@ -1118,7 +1118,7 @@ guard.
       Review round 2 (PR #390): the claim is now pinned deterministically
       (`TestClaimApprovedIsOnceOnly` — deleting it fails to compile) plus a real
       two-goroutine race, and the sweeper has integration coverage
-      (`TestApprovedActionRedriveRecoversAfterCrash` strands a real approved
+      (`TestIncidentApprovedActionRedriveRecoversAfterCrash` strands a real approved
       action in the catalog and asserts the LIVE sweeper redrives it).
       `ActionOps.Escalate` now returns `routed` — publishing is not delivery, and
       the subscriber silently drops an event no `NotificationPolicy` matches, so
