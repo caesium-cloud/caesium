@@ -195,17 +195,23 @@ jobs:
             docker run --rm \
               -v /tmp/caesium-linux-amd64:/usr/local/bin/caesium:ro \
               -v "$PWD/docs/examples:/examples:ro" \
+              -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
               ubuntu:24.04 caesium "$@"
           }
           run_cli --help
           run_cli job lint --path /examples/minimal.job.yaml
+          # `job diff` opens the embedded dqlite catalog (CAESIUM_DATABASE_PATH,
+          # a fresh single-node store) - the cgo dqlite/sqlite path the static
+          # link exists for. --help and job lint are pure Go and would pass
+          # even if that link were broken.
+          run_cli job diff --path /examples/minimal.job.yaml
           sha="$(sha256sum /tmp/caesium-linux-amd64 | awk '{print $1}')"
           {
             echo "binary=caesium-linux-amd64"
             echo "sha256=${sha}"
             echo "runner_arch=$(uname -m)"
             echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' (native, no emulation)"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium job diff' (opens the embedded dqlite catalog; native, no emulation)"
           } > /tmp/caesium-linux-amd64.smoke-ok
           cat /tmp/caesium-linux-amd64.smoke-ok
       - uses: actions/upload-artifact@v7
@@ -417,17 +423,23 @@ jobs:
             docker run --rm \
               -v /tmp/caesium-linux-arm64:/usr/local/bin/caesium:ro \
               -v "$PWD/docs/examples:/examples:ro" \
+              -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
               ubuntu:24.04 caesium "$@"
           }
           run_cli --help
           run_cli job lint --path /examples/minimal.job.yaml
+          # `job diff` opens the embedded dqlite catalog (CAESIUM_DATABASE_PATH,
+          # a fresh single-node store) - the cgo dqlite/sqlite path the static
+          # link exists for. --help and job lint are pure Go and would pass
+          # even if that link were broken.
+          run_cli job diff --path /examples/minimal.job.yaml
           sha="$(sha256sum /tmp/caesium-linux-arm64 | awk '{print $1}')"
           {
             echo "binary=caesium-linux-arm64"
             echo "sha256=${sha}"
             echo "runner_arch=$(uname -m)"
             echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' (native, no emulation)"
+            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium job diff' (opens the embedded dqlite catalog; native, no emulation)"
           } > /tmp/caesium-linux-arm64.smoke-ok
           cat /tmp/caesium-linux-arm64.smoke-ok
       - uses: actions/upload-artifact@v7
@@ -921,11 +933,20 @@ jobs:
           un-overridden \`helm install caesium ./helm/caesium\` deploys this
           release.
           EOF
-          gh release create "${IMAGE_TAG}" \
-            --verify-tag \
-            --generate-notes \
-            --title "${IMAGE_TAG}" \
-            --notes-file /tmp/release-notes.md \
-            /tmp/cli/caesium-linux-amd64 \
-            /tmp/cli/caesium-linux-arm64 \
-            /tmp/cli/SHA256SUMS
+          # No --generate-notes: on a first release GitHub would generate
+          # "What's Changed" from the repository's first commit, and a body over
+          # 125,000 characters makes the API return 422 - after the images above
+          # are already public. The hand-written notes are the release notes.
+          # Idempotent: the image pushes above are not, so a re-run of this job
+          # must not fail on "release already exists" - it re-uploads the assets.
+          assets=(/tmp/cli/caesium-linux-amd64 /tmp/cli/caesium-linux-arm64 /tmp/cli/SHA256SUMS)
+          if gh release view "${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "release ${IMAGE_TAG} already exists; re-uploading assets with --clobber"
+            gh release upload "${IMAGE_TAG}" --clobber "${assets[@]}"
+          else
+            gh release create "${IMAGE_TAG}" \
+              --verify-tag \
+              --title "${IMAGE_TAG}" \
+              --notes-file /tmp/release-notes.md \
+              "${assets[@]}"
+          fi

@@ -289,7 +289,16 @@ cli:
     for name in \$(env | sed -n 's/^\(CAESIUM_[A-Za-z0-9_]*\)=.*/\1/p'); do
         env_flags="\$env_flags -e \$name"
     done
-    exec {{ container_cli }} run --rm --network host \\
+    # Linux: host networking, so --server http://localhost:8080 reaches a server
+    # on this host. macOS/other: Docker Desktop's host network is the VM's, not
+    # the Mac's, so map host.docker.internal to the host gateway instead and
+    # address the server as http://host.docker.internal:8080.
+    if [ "\$(uname -s)" = "Linux" ]; then
+        net_flags="--network host"
+    else
+        net_flags="--add-host host.docker.internal:host-gateway"
+    fi
+    exec {{ container_cli }} run --rm \$net_flags \\
         \$env_flags \\
         -v "\$PWD":/work -w /work \\
         --user "\$(id -u):\$(id -g)" \\
@@ -298,6 +307,9 @@ cli:
     WRAPPER
     chmod +x "$out_dir/caesium"
     echo "Wrote a ${image} CLI wrapper to:"
+    if [ "$(uname -s)" != "Linux" ]; then
+        echo "note: on $(uname -s) the wrapper cannot use host networking; address a server on this machine as http://host.docker.internal:8080"
+    fi
     echo "  $out_dir/caesium"
 
 unit-test: builder-full
