@@ -1,6 +1,6 @@
 # Closed-Loop Orchestration — The Arc
 
-Last updated: 2026-09-05
+Last updated: 2026-09-07
 
 > Status: **Umbrella arc (active).** This document is the program-level source
 > of truth for the next several execution plans. It is **not** itself a wave
@@ -109,7 +109,7 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
-| 0 trust-the-substrate | 0 | — | |
+| 0 trust-the-substrate | 1 | #390 (`fd164f3`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2 = D, E, N-1..N-4, H-2 floor |
 | 1 data-circuit-breaker | 0 | — | |
 | 2 resource-right-sizing | 0 | — | |
 | 3 backtesting | 0 | — | |

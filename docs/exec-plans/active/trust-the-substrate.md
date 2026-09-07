@@ -1,6 +1,6 @@
 # Trust the Substrate — Plan 0 of the Closed-Loop Arc
 
-Last updated: 2026-09-05
+Last updated: 2026-09-07
 
 > Status: **Active — Plan 0 of [`closed-loop-arc.md`](closed-loop-arc.md).** Not started.
 
@@ -102,26 +102,115 @@ does not hunt for missing artifacts:**
   explainability item, with `TestIncidentApprovalWhyExplains` as its
   integration scenario.
 
-## Progress (as of 2026-09-05)
+## Progress (as of 2026-09-07)
 
-No implementation waves have shipped yet. The plan was published with the
-recon of 2026-09-04 re-verified at `48497e9` on 2026-09-05; the first wave is
-the next eligible run of the `exec-plan-wave` skill against this doc
-(suggested W1: Streams A, B, C, F with H-1 first — C4 → C7 → C3 → C8 is the
-one serial chain inside W1; W2: Streams D, E, N-3, then N-1/N-2 as a serial
-tail; E4 and N-4 last).
+Wave 1 shipped Streams A, B, C, F and H-1 (plus the time-budget half of H-2)
+across eight PRs, 2026-09-06 → 2026-09-07. Every PR passed the orchestrator's
+scope-aware integration gate before merge (lint + unit + the lanes its diff
+touches), and the two PRs the review bot did not review (#392, #390's fix
+commits) got a substitute adversarial review that found real P1s. Wave 2
+(Streams D, E, N-1..N-4 and the guard half of H-2) is the next eligible run.
+
+### Wave 1 — Substrate true and auth surface real (2026-09-06/07)
+
+- **α / H-1** — [#386](https://github.com/caesium-cloud/caesium/pull/386)
+  `e0f05be`. The agent-auth lane executes its scenarios (was 0 in 0.068 s →
+  5, now 29 after the C streams) with a `--- PASS` floor
+  (`agent_integration_min_pass`). Two things the item missed: the runner also
+  needs `CAESIUM_AUTH_KEY_HASH_SECRET`, and `pkg/db.Connection()` in the
+  runner would `log.Fatal` on the shared netns (replaced by a dqlite-client
+  gorm handle). Review: greptile 5/5, no findings.
+- **δ / F1–F2** — [#387](https://github.com/caesium-cloud/caesium/pull/387)
+  `a32413c`. `api/gql`, `internal/task`, `pkg/client`, `pkg/bytes`,
+  `pkg/compare` removed; `go.mod` tidied. One P2 declined with rationale
+  (`/gql` now falls to the SPA catch-all like any unknown path; keeping the
+  literal would fail AC 6).
+- **H-2 (time-budget half)** — [#389](https://github.com/caesium-cloud/caesium/pull/389)
+  `3bd2870`, orchestrator fix-forward: every integration `go test` line now
+  passes `-timeout 30m` (the default lane had reached 520 s of Go's 600 s
+  default and CI was failing on the timeout, L12). The `--- PASS` floor half
+  of H-2 remains open.
+- **γ / B1–B3** — [#388](https://github.com/caesium-cloud/caesium/pull/388)
+  `949276c`. Lineage facet written nested with a real-write-path round-trip
+  test; `models.Task` JSON tags (five fields, L6 corrected — two `test/`
+  helpers were real consumers); freshness consumed view captured
+  **synchronously at run creation** through a `StartParamsEnricher` seam in
+  `internal/run/store.go` (three review rounds: the async `run_started`
+  snapshot was replaced; a read error now omits the view rather than writing
+  `{}`; the start-time view lives under its own key so
+  `hasActiveOrQueuedRun`'s dedupe on the derivation-time key is untouched).
+  The lane caught a real deadlock in the first cut (the event router creates
+  runs over its own open write transaction — the enricher must read through
+  the store's own handle; pinned by `TestStartRunEnricherReadsTheStoresOwnHandle`).
+- **ζ / C1, C2, C5, C6** — [#391](https://github.com/caesium-cloud/caesium/pull/391)
+  `deb7540`. Scoped-key `whoami` allowed for API-key principals only; auth
+  key/audit CLI + REST scenarios; the scoped allow/deny matrix (13 rows); the
+  default-lane gap scenarios. Three shipped bugs found by driving the real
+  surface: every `caesium auth`/`backfill` command printed to **stderr**
+  (`auth key create > key.txt` lost the one-time key), `job apply` sent no
+  `Authorization` header, `run retry-callbacks` had no `--server` mode. One
+  P1 (prose + JSON on stdout) fixed by making stdout exactly one JSON value
+  across `backfill` and `auth`. Follow-up [#393](https://github.com/caesium-cloud/caesium/pull/393)
+  `f35b9ba` skips `TestRunRetryCallbacksCLI` on the kind lane (the in-cluster
+  server cannot reach the test process's callback receiver).
+- **β / A1–A5** — [#392](https://github.com/caesium-cloud/caesium/pull/392)
+  `192f604`. Failed plain tasks advance their successors in the SQL lane;
+  run cancellation reaches the container on both lanes (local cancel
+  registry; worker per-tick claim inspector — L3's `RowsAffected` premise was
+  wrong because batched renewal only fires near lease expiry). The substitute
+  adversarial review found 2 P1s + 2 P2s, all fixed with red-before proof:
+  trigger-originated runs (cron/http/event/webhook) were still uncancellable
+  (registration moved inside `job.Run`); `retryTask` lacked a terminal guard
+  and resurrected a cancelled row; the worker's `continue`-policy descendant
+  sweep ignored trigger rules; a failed fan-out producer released its
+  consumer's unexpanded template row (now skipped with a reason). A Go
+  `select` race between `taskCtx.Done()` and the wait result left ~half of
+  cancelled containers orphaned (surfaced on arm64; fixed via `abandonAtom`).
+  A2 deviation: under `CAESIUM_TASK_FAILURE_POLICY=halt` no lane dispatches a
+  tolerant consumer after a failure (both lanes agree, by design); A2 asserts
+  the release and the byte-exact rule skip, and asserts execution under
+  `continue` — the `halt` semantics are an N-3 item.
+- **ε / C3, C4, C7, C8** — [#390](https://github.com/caesium-cloud/caesium/pull/390)
+  `fd164f3`. The tier-3 approval pipeline is wired at both ends: proposal →
+  `ApprovalRequest` + `awaiting_approval` (one transaction), human approve →
+  execute (`ExecuteApproved` behind a conditional claim, plus a leader-gated
+  `ApprovalRedriver`), `skip_task` / `override_schema_gate` / direct
+  `apply_jobdef_patch` dispatch, `TypeAgentActionExecuted` rendered by the
+  task-scoped `why`. Greptile 0/5 with five P1s on the first commit, all
+  fixed (job-scoped playbook fail-closed; atomic approval; session container
+  stop; redrive; delivered escalation), then a substitute review of the fix
+  found one more P1 — an approved patch could rewrite the job's own
+  `metadata.remediation` — now refused (`ErrPatchAltersRemediation`) with the
+  field added to the diff vocabulary; playbook nil-vs-empty semantics made
+  explicit (`Narrow` → `Override`; the shipped `triage-only` profile's
+  `allow: []` had decoded as unconstrained). 29 agent-lane scenarios incl.
+  `TestIncidentApprovedActionRedriveRecoversAfterCrash` and
+  `TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy`.
+
+**Flakes classified (not merge-blocking):** `no such vfs` in
+`internal/trigger/event` (×4, re-run green; D1(c)); the pre-#389 10-minute
+default-lane timeout (fixed); `TestFanOutHTTPRetryPartition` on owner-memory
+(L12 family); one owner-memory `TestFanOutReplayOverrideReexecutesRecordedGroup`
+stall traced to the owner dispatch loop re-dispatching a completed producer
+against a full worker pool (pre-existing, N-3).
+
+**Wave-1 process notes:** parallel worktree agents share one Docker daemon —
+every server lane runs under a host `mkdir` lock with a PID-first owner line
+reclaimed only when the owner is dead (an unconditional reclaim stole a live
+lock twice and produced two rounds of `connection refused` false failures).
+Three Opus session-limit kills cost ~6 h; cap concurrent Opus streams at 3.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Scheduler correctness in the SQL lane — failed-plain-task advancement, run-cancel reaches the container | **P0** | Not started |
-| B | Data-plane truth — lineage facet shape, `Task` JSON tags, freshness consumed-snapshot timing | **P0** | Not started |
-| C | Auth surface end-to-end on the (widened, de-hollowed) auth lane; the tier-3 approval pipeline wired at both ends (proposal → `ApprovalRequest`, approve → execute, direct `apply_jobdef_patch` route), and its explainability item (C8) | **P0** | Not started |
+| A | Scheduler correctness in the SQL lane — failed-plain-task advancement, run-cancel reaches the container | **P0** | **Shipped** (W1, #392) |
+| B | Data-plane truth — lineage facet shape, `Task` JSON tags, freshness consumed-snapshot timing | **P0** | **Shipped** (W1, #388) |
+| C | Auth surface end-to-end on the (widened, de-hollowed) auth lane; the tier-3 approval pipeline wired at both ends (proposal → `ApprovalRequest`, approve → execute, direct `apply_jobdef_patch` route), and its explainability item (C8) | **P0** | **Shipped** (W1, #391 + #390) |
 | D | CI gates merges and master is honestly green | P1 | Not started |
 | E | Release & install — `v0.1.0`, per-arch CLI binaries, `just cli`, chart versioning | P1 | Not started |
-| F | Dead scaffolding — `api/gql`, `internal/task`, `pkg/client`, `pkg/bytes`, `pkg/compare` | P2 | Not started |
-| H | Harness — the auth lane that actually runs (H-1), lane time budgets + hollow-lane guard (H-2) | **P0** | Not started |
+| F | Dead scaffolding — `api/gql`, `internal/task`, `pkg/client`, `pkg/bytes`, `pkg/compare` | P2 | **Shipped** (W1, #387) |
+| H | Harness — the auth lane that actually runs (H-1), lane time budgets + hollow-lane guard (H-2) | **P0** | H-1 **Shipped** (W1, #386); H-2 time budgets shipped (#389), pass-floor half open |
 | N | README verbs + install, `docs/getting-started.md`, `docs/README.md` split, filed follow-ups, close-out | P1 | Not started |
 
 ## Streams
