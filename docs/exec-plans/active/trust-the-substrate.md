@@ -1386,7 +1386,7 @@ names (L12).
       rather than sleeping past the boundary.
       *(helm)* The lane's two W1 reds (`TestRunRetryCallbacksCLI`) were fixed by
       #393 — nothing left to do there.
-- [ ] D2. Add required status checks and write the CI runbook. Run
+- [x] D2. Add required status checks and write the CI runbook. Run
       `gh api -X PATCH repos/caesium-cloud/caesium/branches/master/protection/required_status_checks`
       (or `PUT …/protection` with the full body) with `checks` =
       `lint`, `unit-test`, `unit-test-arm64`, `ui-test`, `ui-e2e`,
@@ -1413,6 +1413,20 @@ names (L12).
       in `docs/README.md` in the same PR (`TestDocsREADMEIndexesEveryTopLevelDoc`).
       Files: new `docs/ci.md`, `docs/README.md`. Depends on: D1 + H-2 (the
       required lanes must be green first).
+
+      **Done (W2-δ):** `docs/ci.md` written and indexed in `docs/README.md`;
+      the PATCH command, JSON body, and verify command are recorded in
+      `docs/ci.md` §1 and mirrored in `.tmp/d2-required-checks.sh` (untracked
+      scratch). Filed [#425](https://github.com/caesium-cloud/caesium/issues/425)
+      for the `integration-up-distributed`/`-owner-memory`/`-agent`
+      `CAESIUM_CACHE_ENABLED`/`RUN_QUEUE_ENABLED`/`RATE_LIMIT_PRUNER_ENABLED`/
+      `FANOUT_MAX_PARTITIONS` drift found by recon and re-verified at this
+      PR's HEAD (573edfe); §2/§5 of `docs/ci.md` cite it. The actual
+      `protection/required_status_checks` PATCH is **not** executed by this
+      PR — it depends on D1 (PR #422, open at the time of this PR) and H-2
+      landing so the required lanes are honestly green first; the
+      orchestrator runs it after #422 merges and records the result in
+      `## Progress`.
 - [x] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
       and add `ui/test-results/` to `.gitignore`; add a `clean-worktrees`
       justfile recipe (appended at the end of the file) that runs
