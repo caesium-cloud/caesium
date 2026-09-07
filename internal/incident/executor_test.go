@@ -24,14 +24,35 @@ type fakeOps struct {
 	rerun            []rerunCall
 	notify           []notifyCall
 	escalate         []escalateCall
-	setPaused        []pauseCall
-	clearCache       []cacheCall
-	suppress         []time.Time
-	extendSLA        []extendCall
-	replay           []uuid.UUID
+	// escalateRouted is what the fake reports for "a notification policy carried
+	// this"; false by default so a test must opt in to claiming delivery.
+	escalateRouted bool
+	setPaused      []pauseCall
+	clearCache     []cacheCall
+	suppress       []time.Time
+	extendSLA      []extendCall
+	replay         []uuid.UUID
+	skipTask       []skipTaskCall
+	overrideGate   []uuid.UUID
+	applyPatch     []applyPatchCall
 
 	retryErr error
 	rerunID  uuid.UUID
+	// applyPatchErr forces the jobdef apply to fail so the approved-action
+	// failure path is exercised.
+	applyPatchErr error
+}
+
+type skipTaskCall struct {
+	runID  uuid.UUID
+	taskID uuid.UUID
+	reason string
+}
+
+type applyPatchCall struct {
+	jobID      uuid.UUID
+	definition json.RawMessage
+	dryRun     bool
 }
 
 type rerunCall struct {
@@ -79,9 +100,9 @@ func (f *fakeOps) Notify(_ context.Context, channel, message string) error {
 	f.notify = append(f.notify, notifyCall{channel: channel, message: message})
 	return nil
 }
-func (f *fakeOps) Escalate(_ context.Context, incidentID uuid.UUID, channel, summary string) error {
+func (f *fakeOps) Escalate(_ context.Context, incidentID uuid.UUID, channel, summary string) (bool, error) {
 	f.escalate = append(f.escalate, escalateCall{incidentID: incidentID, channel: channel, summary: summary})
-	return nil
+	return f.escalateRouted, nil
 }
 func (f *fakeOps) SetJobPaused(_ context.Context, jobID uuid.UUID, paused bool) error {
 	f.setPaused = append(f.setPaused, pauseCall{jobID: jobID, paused: paused})
@@ -98,6 +119,21 @@ func (f *fakeOps) SuppressDownstreamAlerts(_ context.Context, _ uuid.UUID, until
 func (f *fakeOps) ExtendSLAOnce(_ context.Context, runID uuid.UUID, extend time.Duration) error {
 	f.extendSLA = append(f.extendSLA, extendCall{runID: runID, extend: extend})
 	return nil
+}
+func (f *fakeOps) SkipTask(_ context.Context, runID, taskID uuid.UUID, reason string) error {
+	f.skipTask = append(f.skipTask, skipTaskCall{runID: runID, taskID: taskID, reason: reason})
+	return nil
+}
+func (f *fakeOps) OverrideSchemaGateOnce(_ context.Context, runID uuid.UUID) error {
+	f.overrideGate = append(f.overrideGate, runID)
+	return nil
+}
+func (f *fakeOps) ApplyJobdefPatch(_ context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
+	f.applyPatch = append(f.applyPatch, applyPatchCall{jobID: jobID, definition: definition, dryRun: dryRun})
+	if f.applyPatchErr != nil {
+		return nil, f.applyPatchErr
+	}
+	return json.RawMessage(`{"alias":"demo","empty":false}`), nil
 }
 
 // seedIncident opens an incident with a remediation-target run so run-scoped
@@ -502,4 +538,136 @@ func TestSnoozeRetryRearmGivesUpAtCeiling(t *testing.T) {
 		Where("incident_id = ? AND type = ? AND status = ?", inc.ID, ActionTypeSnoozeRetry, models.AgentActionStatusFailed).
 		Count(&gaveUp).Error)
 	require.Equal(t, int64(1), gaveUp)
+}
+
+// --- Playbook resolution semantics (review follow-up, PR #390) --------------
+
+// TestPlaybookNilVsEmptyAllow pins the distinction the whole policy model rests
+// on. Conflating them is how the shipped "zero risk" triage-only profile granted
+// every tier-1 action, and how combining two playbooks silently widened tier 2.
+func TestPlaybookNilVsEmptyAllow(t *testing.T) {
+	t.Run("nil allow is unconfigured: tier defaults apply", func(t *testing.T) {
+		pb := Playbook{}
+		require.Nil(t, pb.Allow)
+		require.Equal(t, decisionExecute, pb.decide(ActionTypeRetryFromFailure, TierAutonomous),
+			"tier 1 defaults autonomous when no allowlist is configured")
+		require.Equal(t, decisionDeny, pb.decide(ActionTypePauseJob, TierGated),
+			"tier 2 still needs an explicit allow")
+		require.Equal(t, decisionApprove, pb.decide(ActionTypeSkipTask, TierApproval))
+	})
+
+	t.Run("empty allow is configured: it grants nothing", func(t *testing.T) {
+		pb := Playbook{Allow: map[string]bool{}}
+		require.Equal(t, decisionDeny, pb.decide(ActionTypeRetryFromFailure, TierAutonomous),
+			"`allow: []` says allow nothing — including tier 1")
+		require.Equal(t, decisionDeny, pb.decide(ActionTypePauseJob, TierGated))
+	})
+
+	t.Run("decoder preserves the distinction", func(t *testing.T) {
+		require.Nil(t, DecodePlaybook([]byte(`{"autonomy":{}}`)).Allow,
+			"an absent allow key is unconfigured")
+		configured := DecodePlaybook([]byte(`{"autonomy":{"allow":[]}}`))
+		require.NotNil(t, configured.Allow, "a present `allow: []` is configured")
+		require.Empty(t, configured.Allow)
+		require.Equal(t, decisionDeny, configured.decide(ActionTypeEscalate, TierAutonomous))
+	})
+
+	t.Run("a configured allowlist governs at every tier below approval", func(t *testing.T) {
+		pb := DecodePlaybook([]byte(`{"autonomy":{"allow":["pause_job"]}}`))
+		require.Equal(t, decisionExecute, pb.decide(ActionTypePauseJob, TierGated),
+			"a tier-2 action is autonomous when explicitly allowed")
+		require.Equal(t, decisionDeny, pb.decide(ActionTypeRetryFromFailure, TierAutonomous),
+			"a configured allowlist that omits a tier-1 action denies it")
+	})
+}
+
+// TestPlaybookOverride covers resolving a job's authored autonomy block over its
+// profile's defaults. The job block may GRANT as well as narrow — that is the
+// design's `metadata.remediation` overriding profile defaults — and is safe only
+// because an agent cannot edit it (ErrPatchAltersRemediation).
+func TestPlaybookOverride(t *testing.T) {
+	t.Run("a nil job allow inherits the profile", func(t *testing.T) {
+		profile := Playbook{Allow: map[string]bool{ActionTypeRetryFromFailure: true}}
+		got := profile.Override(Playbook{})
+		require.Equal(t, profile.Allow, got.Allow)
+	})
+
+	t.Run("a configured job allow replaces the profile's", func(t *testing.T) {
+		profile := Playbook{Allow: map[string]bool{ActionTypeRetryFromFailure: true}}
+		got := profile.Override(Playbook{Allow: map[string]bool{ActionTypePauseJob: true}})
+		require.Equal(t, decisionExecute, got.decide(ActionTypePauseJob, TierGated))
+		require.Equal(t, decisionDeny, got.decide(ActionTypeRetryFromFailure, TierAutonomous),
+			"an authored job policy replaces, so what it omits is not allowed")
+	})
+
+	t.Run("an unconfigured profile plus a job allow grants at tier 2", func(t *testing.T) {
+		// The case the old Narrow got wrong: an empty base read as "unconstrained"
+		// and was replaced by the job list, which WIDENED tier 2 relative to the
+		// base's own verdict. Under Override this is intended and explicit.
+		base := Playbook{}
+		require.Equal(t, decisionDeny, base.decide(ActionTypePauseJob, TierGated))
+
+		got := base.Override(Playbook{Allow: map[string]bool{ActionTypePauseJob: true}})
+		require.Equal(t, decisionExecute, got.decide(ActionTypePauseJob, TierGated),
+			"a job that authors pause_job into its allowlist grants it deliberately")
+	})
+
+	t.Run("a job allow of [] revokes everything the profile granted", func(t *testing.T) {
+		profile := Playbook{Allow: map[string]bool{ActionTypeRetryFromFailure: true}}
+		got := profile.Override(Playbook{Allow: map[string]bool{}})
+		require.Equal(t, decisionDeny, got.decide(ActionTypeRetryFromFailure, TierAutonomous))
+	})
+
+	t.Run("require-approval is a union: the stricter side wins", func(t *testing.T) {
+		profile := Playbook{RequireApproval: map[string]bool{ActionTypeRetryFromFailure: true}}
+		got := profile.Override(Playbook{RequireApproval: map[string]bool{ActionTypePauseJob: true}})
+		require.Equal(t, decisionApprove, got.decide(ActionTypeRetryFromFailure, TierAutonomous),
+			"a job block may not drop a gate its profile imposes")
+		require.Equal(t, decisionApprove, got.decide(ActionTypePauseJob, TierGated))
+	})
+
+	t.Run("param overrides replace or inherit", func(t *testing.T) {
+		profile := Playbook{ParamOverrides: map[string][]string{"region": {"us-east-1"}}}
+		require.Equal(t, profile.ParamOverrides, profile.Override(Playbook{}).ParamOverrides)
+
+		got := profile.Override(Playbook{ParamOverrides: map[string][]string{"tier": {"gold"}}})
+		require.NoError(t, validateParamOverrides(map[string]string{"tier": "gold"}, got.ParamOverrides))
+		require.Error(t, validateParamOverrides(map[string]string{"region": "us-east-1"}, got.ParamOverrides),
+			"a replaced whitelist no longer carries the profile's keys")
+	})
+}
+
+// TestDenyAllPlaybookPermitsNothing: the fail-closed policy used when a job's
+// DECLARED remediation policy cannot be resolved. It must be distinguishable
+// from the zero Playbook, which still lets tier 0/1 run autonomously.
+func TestDenyAllPlaybookPermitsNothing(t *testing.T) {
+	deny := DenyAllPlaybook()
+	require.NotNil(t, deny.Allow, "denial is a CONFIGURED empty allowlist, not an unconfigured one")
+	require.Equal(t, decisionDeny, deny.decide(ActionTypeRetryFromFailure, TierAutonomous))
+	require.Equal(t, decisionDeny, deny.decide(ActionTypePauseJob, TierGated))
+	require.Equal(t, decisionApprove, deny.decide(ActionTypeSkipTask, TierApproval),
+		"tier 3 still terminates at a human rather than being denied outright")
+
+	require.Equal(t, decisionExecute, Playbook{}.decide(ActionTypeRetryFromFailure, TierAutonomous),
+		"the zero Playbook means unconfigured, not denied")
+}
+
+// TestPlaybookDocumentRoundTripsForTheBundle: the triage bundle shows the agent
+// the resolved policy, so "configured but empty" must not render as "absent".
+func TestPlaybookDocumentRoundTripsForTheBundle(t *testing.T) {
+	require.JSONEq(t, `{"autonomy":{}}`, string(Playbook{}.Document()),
+		"an unconfigured playbook advertises no allowlist")
+	require.JSONEq(t, `{"autonomy":{"allow":[]}}`, string(DenyAllPlaybook().Document()),
+		"a deny-all playbook must be visibly deny-all, not visibly unconfigured")
+
+	pb := Playbook{
+		Allow:           map[string]bool{ActionTypePauseJob: true, ActionTypeEscalate: true},
+		RequireApproval: map[string]bool{ActionTypeRetryFromFailure: true},
+	}
+	require.JSONEq(t,
+		`{"autonomy":{"allow":["escalate","pause_job"],"requireApproval":["retry_from_failure"]}}`,
+		string(pb.Document()), "keys are sorted so a bundle served twice is byte-identical")
+
+	// The document a resolved playbook renders must decode back to the same policy.
+	require.Equal(t, pb, DecodePlaybook(pb.Document()))
 }

@@ -27,9 +27,15 @@ type JobSpec struct {
 	Alias       string            `json:"alias"`
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
-	Trigger     TriggerSpec       `json:"trigger"`
-	Callbacks   []CallbackSpec    `json:"callbacks"`
-	Steps       []StepSpec        `json:"steps"`
+	// Remediation participates in diffing because it is ENFORCED policy, not
+	// documentation: it is what resolves the agent's effective playbook. A
+	// remediation-only change that rendered as "no changes" would let an approver
+	// wave through a policy edit believing nothing changed — and the same diff is
+	// what an ApprovalRequest shows a human.
+	Remediation *schema.MetadataRemediation `json:"remediation,omitempty"`
+	Trigger     TriggerSpec                 `json:"trigger"`
+	Callbacks   []CallbackSpec              `json:"callbacks"`
+	Steps       []StepSpec                  `json:"steps"`
 }
 
 type TriggerSpec struct {
@@ -55,6 +61,7 @@ func FromDefinition(def *schema.Definition) JobSpec {
 		Alias:       def.Metadata.Alias,
 		Labels:      cloneStringMap(def.Metadata.Labels),
 		Annotations: cloneStringMap(def.Metadata.Annotations),
+		Remediation: def.Metadata.Remediation,
 		Trigger: TriggerSpec{
 			Type:          def.Trigger.Type,
 			Configuration: cloneAnyMap(def.Trigger.Configuration),
@@ -109,6 +116,13 @@ func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, e
 		Alias:       job.Alias,
 		Labels:      jsonMapToStringMap(job.Labels),
 		Annotations: jsonMapToStringMap(job.Annotations),
+	}
+	if len(job.Remediation) > 0 {
+		var remediation schema.MetadataRemediation
+		if err := json.Unmarshal(job.Remediation, &remediation); err != nil {
+			return JobSpec{}, fmt.Errorf("job %s remediation: %w", job.ID, err)
+		}
+		spec.Remediation = &remediation
 	}
 
 	var trigger models.Trigger

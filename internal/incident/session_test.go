@@ -36,6 +36,10 @@ type fakeEngine struct {
 	logs       string
 	createdEnv map[string]string
 	stopped    bool
+	// stopReqs records every Stop, so a test can assert WHICH container was
+	// stopped and how many times — `stopped` alone cannot tell a session's own
+	// container from any other.
+	stopReqs []atom.EngineStopRequest
 }
 
 func (e *fakeEngine) Get(*atom.EngineGetRequest) (atom.Atom, error)     { return nil, nil }
@@ -47,7 +51,13 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 func (e *fakeEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 	return &fakeAtom{id: req.ID, result: e.result}, nil
 }
-func (e *fakeEngine) Stop(*atom.EngineStopRequest) error { e.stopped = true; return nil }
+func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
+	e.stopped = true
+	if req != nil {
+		e.stopReqs = append(e.stopReqs, *req)
+	}
+	return nil
+}
 func (e *fakeEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(e.logs)), nil
 }
@@ -402,4 +412,114 @@ func TestSupervisorFinalizeOnCancelledContext(t *testing.T) {
 	require.Len(t, creds.revoked, 1)
 	require.NotNil(t, got.TokenID)
 	require.Equal(t, *got.TokenID, creds.revoked[0])
+}
+
+// --- EndSession stops the container (review follow-up, PR #390) --------------
+
+// TestEndSessionStopsContainerAndIsIdempotent pins the two halves of ending a
+// session for a pending approval: the container actually stops, and a later
+// finalization cannot overwrite the ended state.
+//
+// Marking the row succeeded and revoking the credential while leaving the
+// container running is the worst of both: the agent keeps burning model tokens
+// against a revoked key for the rest of the session timeout, which is precisely
+// what "no idle container while a human decides" exists to prevent.
+func TestEndSessionStopsContainerAndIsIdempotent(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ctx := context.Background()
+
+	tr := mkTrigger(t, db)
+	jobID := mkJob(t, db, tr, "vendor-stop")
+	store := NewStore(db)
+	inc, _, err := store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "extract", Class: ClassUnknown})
+	require.NoError(t, err)
+
+	profile := &models.AgentProfile{ID: uuid.New(), Name: "triage-stop", Image: "caesium/triage:latest", Engine: models.AtomEngineDocker}
+	require.NoError(t, db.Create(profile).Error)
+
+	tokenID := uuid.New()
+	session := &models.AgentSession{
+		ID:          uuid.New(),
+		IncidentID:  inc.ID,
+		ProfileID:   &profile.ID,
+		Engine:      models.AtomEngineDocker,
+		ContainerID: "atom-live",
+		TokenID:     &tokenID,
+		State:       models.AgentSessionStateRunning,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(session).Error)
+
+	creds := &fakeCreds{}
+	engine := &fakeEngine{result: atom.Success}
+	sup := NewSupervisor(db, creds, func(context.Context, models.AtomEngine) (atom.Engine, error) {
+		return engine, nil
+	}, SupervisorConfig{SessionTimeout: time.Minute})
+
+	require.NoError(t, sup.EndSession(ctx, session.ID))
+
+	require.Len(t, engine.stopReqs, 1, "ending a session must stop its container")
+	require.Equal(t, "atom-live", engine.stopReqs[0].ID)
+	require.True(t, engine.stopReqs[0].Force)
+	require.Len(t, creds.revoked, 1)
+
+	var got models.AgentSession
+	require.NoError(t, db.First(&got, "id = ?", session.ID).Error)
+	require.Equal(t, models.AgentSessionStateSucceeded, got.State)
+
+	// The supervisor's own execute() finalizes the same row when its engine.Wait
+	// unblocks — the stop we just issued is what unblocks it, and the engine
+	// reports a kill, so an unguarded write would rewrite this clean end as a
+	// phantom timeout. First terminal write wins.
+	sup.finalize(&got, models.AgentSessionStateTimedOut, "killed", session.TokenID)
+
+	require.NoError(t, db.First(&got, "id = ?", session.ID).Error)
+	require.Equal(t, models.AgentSessionStateSucceeded, got.State,
+		"a later finalization must not overwrite an already-ended session")
+	require.Equal(t, "killed", got.SessionLog,
+		"the losing finalization still owns the transcript: nothing else ever writes it, "+
+			"and it is what a human reads while deciding the approval")
+
+	// Ending an already-terminal session is a no-op on the container: whoever
+	// finalized it first owned stopping it.
+	require.NoError(t, sup.EndSession(ctx, session.ID))
+	require.Len(t, engine.stopReqs, 1, "an already-ended session must not be stopped twice")
+}
+
+// TestEndSessionWithoutContainerIsQuiet: a session that never launched a
+// container has nothing to stop, and must not error trying.
+func TestEndSessionWithoutContainerIsQuiet(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ctx := context.Background()
+
+	tr := mkTrigger(t, db)
+	jobID := mkJob(t, db, tr, "vendor-nocontainer")
+	store := NewStore(db)
+	inc, _, err := store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "extract", Class: ClassUnknown})
+	require.NoError(t, err)
+
+	session := &models.AgentSession{
+		ID:         uuid.New(),
+		IncidentID: inc.ID,
+		Engine:     models.AtomEngineDocker,
+		State:      models.AgentSessionStatePending,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(session).Error)
+
+	engine := &fakeEngine{result: atom.Success}
+	sup := NewSupervisor(db, &fakeCreds{}, func(context.Context, models.AtomEngine) (atom.Engine, error) {
+		return engine, nil
+	}, SupervisorConfig{SessionTimeout: time.Minute})
+
+	require.NoError(t, sup.EndSession(ctx, session.ID))
+	require.Empty(t, engine.stopReqs)
+
+	var got models.AgentSession
+	require.NoError(t, db.First(&got, "id = ?", session.ID).Error)
+	require.Equal(t, models.AgentSessionStateSucceeded, got.State)
 }

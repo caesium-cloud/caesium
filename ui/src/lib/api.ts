@@ -308,7 +308,17 @@ export interface Incident {
   updated_at: string;
 }
 
-export type AgentActionStatus = "proposed" | "approved" | "rejected" | "executed" | "failed" | string;
+// `executing` is the claim an approved tier-3 action holds while it dispatches.
+// A row left in it by a process death is a visible stuck state a human resolves —
+// it is deliberately never auto-redriven (see internal/incident/redrive.go).
+export type AgentActionStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "executing"
+  | "executed"
+  | "failed"
+  | string;
 export type AgentActionActor = "policy" | "agent" | "human" | string;
 
 export interface AgentAction {

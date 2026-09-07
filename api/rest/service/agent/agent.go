@@ -53,13 +53,17 @@ func (s *Service) Incident(id uuid.UUID) (*models.Incident, error) {
 	return &inc, nil
 }
 
-// Bundle assembles the triage bundle for an incident. The effective profile
-// (whose playbook is surfaced) is resolved best-effort from the bootstrap
-// default-profile env; the remediation-block → profile resolution lands with
-// Stream E's declarative policy and supersedes this once available.
+// Bundle assembles the triage bundle for an incident.
+//
+// The playbook it surfaces comes from iincident.ResolvePlaybook — the SAME
+// resolver the action executor enforces with. Briefing the agent from the
+// bootstrap default profile (what this did before) while judging its proposals
+// against the job-scoped policy meant the two disagreed: the agent could plan
+// correctly from its brief and still be denied, or believe it was constrained
+// when it was not.
 func (s *Service) Bundle(id uuid.UUID) (*iincident.Bundle, error) {
-	profile := s.defaultProfile()
-	b, err := iincident.BuildBundle(s.ctx, s.db, id, profile)
+	playbook := iincident.ResolvePlaybook(s.ctx, s.db, id, env.Variables().AgentDefaultProfile)
+	b, err := iincident.BuildBundle(s.ctx, s.db, id, &playbook)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrIncidentNotFound
@@ -77,17 +81,4 @@ func (s *Service) AllowedJobs(id uuid.UUID) ([]string, error) {
 // Note appends a free-text finding to the incident timeline.
 func (s *Service) Note(inc *models.Incident, text string) (*models.AgentAction, error) {
 	return iincident.RecordNote(s.ctx, s.db, inc.ID, nil, inc.Namespace, text)
-}
-
-// defaultProfile resolves the bootstrap default agent profile by name, or nil.
-func (s *Service) defaultProfile() *models.AgentProfile {
-	name := env.Variables().AgentDefaultProfile
-	if name == "" {
-		return nil
-	}
-	var profile models.AgentProfile
-	if err := s.db.WithContext(s.ctx).First(&profile, "name = ?", name).Error; err != nil {
-		return nil
-	}
-	return &profile
 }

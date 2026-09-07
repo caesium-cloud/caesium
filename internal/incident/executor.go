@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -35,6 +36,23 @@ const (
 type Executor struct {
 	store *Store
 	ops   ActionOps
+
+	// bus and eventStore carry the approval/execution lifecycle onto the shared
+	// event stream. Both are optional (nil in unit tests); when eventStore is set
+	// the event is PERSISTED first and then published, mirroring the notification
+	// watcher's persistAndPublish, so `approval_requested` /
+	// `agent_action_executed` survive a restart and are queryable from
+	// /v1/events rather than existing only as an in-memory fan-out.
+	bus        event.Bus
+	eventStore *event.Store
+}
+
+// SetEventSink wires the process event bus and the durable event store onto the
+// executor. Wired once at startup (cmd/start/start.go) behind the remediation
+// master gate; nil-safe, so a test executor simply emits nothing.
+func (e *Executor) SetEventSink(bus event.Bus, store *event.Store) {
+	e.bus = bus
+	e.eventStore = store
 }
 
 // NewExecutor constructs an executor over the incident store and the action
@@ -62,18 +80,147 @@ var ErrActionNotPermitted = errors.New("incident: action not permitted by playbo
 var ErrRetryDeferred = errors.New("incident: retry deferred; retry once the condition clears")
 
 // Playbook is the effective, resolved remediation policy the executor enforces
-// for one incident. Stream E produces it from metadata.remediation overriding
-// the AgentProfile defaults; here it is purely the enforcement input. A zero
-// Playbook (no Allow/RequireApproval) means "unconfigured": tier 0/1 actions
-// default autonomous, tier 2 requires explicit allow, tier 3 always approval.
+// for one incident. It is produced by resolving `metadata.remediation` over the
+// AgentProfile defaults (Playbook.Override); here it is purely the enforcement
+// input.
+//
+// NIL AND EMPTY MEAN DIFFERENT THINGS, and the distinction is the whole policy
+// model — read it before touching decide():
+//
+//   - Allow == nil       → NOT CONFIGURED. Tier defaults apply: tier 0/1 is
+//     autonomous, tier 2 needs an explicit allow (so it is
+//     denied), tier 3 always goes to a human.
+//   - Allow != nil       → CONFIGURED ALLOWLIST, and it governs at EVERY tier
+//     below 3. An action runs autonomously if and only if
+//     it is listed. An empty non-nil map therefore allows
+//     NOTHING — which is what `allow: []` in a playbook
+//     document plainly says, and what the shipped
+//     `triage-only` profile relies on.
+//
+// Conflating the two is how a "zero risk" profile ends up granting every tier-1
+// action, and how combining two playbooks can silently widen tier 2.
 type Playbook struct {
-	// Allow is the set of action types the agent may take autonomously.
+	// Allow is the configured set of action types the agent may take
+	// autonomously; nil means unconfigured (see above), not empty.
 	Allow map[string]bool
 	// RequireApproval forces listed action types through the approval gate even
 	// if their tier would otherwise be autonomous.
 	RequireApproval map[string]bool
-	// ParamOverrides whitelists rerun_with_params keys → allowed values.
+	// ParamOverrides whitelists rerun_with_params keys → allowed values; nil
+	// means unconfigured, and an unconfigured whitelist denies every key.
 	ParamOverrides map[string][]string
+}
+
+// playbookDocument mirrors the JSON shape stored on AgentProfile.Playbook (see
+// agentprofile.SeedDefaults) and the `metadata.remediation` block in
+// pkg/jobdef.RemediationAutonomy, so one decoder serves both: the profile-level
+// document and the job-level block now persisted on models.Job.Remediation.
+// N-3 (not built): pkg/jobdef.RemediationAutonomy also carries `perClass`
+// (per-failure-class narrowing). Nothing decodes it here, so a job that narrows
+// autonomy per class is currently enforced as if the block named no classes.
+// Wiring it means threading the incident's class into decide(); filed as a
+// follow-up rather than smuggled into a review-fix commit.
+type playbookDocument struct {
+	Autonomy struct {
+		Allow           []string            `json:"allow"`
+		ParamOverrides  map[string][]string `json:"paramOverrides"`
+		RequireApproval []string            `json:"requireApproval"`
+	} `json:"autonomy"`
+}
+
+// DecodePlaybook parses a stored playbook document into the enforcement input.
+// An empty or malformed document yields the zero Playbook (unconfigured; tier 3
+// still → approval), never a permissive one.
+//
+// A PRESENT BUT EMPTY `allow: []` decodes to a configured, empty allowlist —
+// "allow nothing" — not to nil. That is the difference between a profile that
+// declined to configure autonomy and one that deliberately grants none; the
+// shipped `triage-only` profile depends on it.
+func DecodePlaybook(raw []byte) Playbook {
+	if len(raw) == 0 {
+		return Playbook{}
+	}
+	var doc playbookDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		log.Warn("incident: could not decode playbook; falling back to the default policy", "error", err)
+		return Playbook{}
+	}
+	pb := Playbook{ParamOverrides: doc.Autonomy.ParamOverrides}
+	if doc.Autonomy.Allow != nil {
+		pb.Allow = make(map[string]bool, len(doc.Autonomy.Allow))
+		for _, a := range doc.Autonomy.Allow {
+			pb.Allow[a] = true
+		}
+	}
+	if doc.Autonomy.RequireApproval != nil {
+		pb.RequireApproval = make(map[string]bool, len(doc.Autonomy.RequireApproval))
+		for _, a := range doc.Autonomy.RequireApproval {
+			pb.RequireApproval[a] = true
+		}
+	}
+	return pb
+}
+
+// Override resolves a job's authored `metadata.remediation.autonomy` block over
+// the AgentProfile playbook it names, returning the effective policy. The
+// receiver is the PROFILE (the default); the argument is the JOB block.
+//
+// The job block is an AUTHORED POLICY, so it may GRANT as well as narrow — the
+// design's `metadata.remediation` overrides profile defaults, and its canonical
+// example declares a wider allowlist than the profile it names. That is safe
+// because the block is human-authored and an agent may not edit it:
+// ErrPatchAltersRemediation refuses any `apply_jobdef_patch` that would change
+// it. Without that refusal this method would be a privilege-escalation path,
+// which is exactly why the two ship together.
+//
+// Per field, honouring the nil-vs-empty rule on Playbook:
+//   - Allow: a configured job list REPLACES the profile's (grant or narrow, as
+//     authored); a nil job list inherits the profile's. `allow: []` is a
+//     configured list that grants nothing.
+//   - ParamOverrides: same replace-or-inherit rule.
+//   - RequireApproval: a UNION, and the one field where the stricter side always
+//     wins. Removing an approval gate is the single edit that can only reduce
+//     safety, and nothing in the design asks a job to do it, so a profile's gate
+//     survives a job block that omits it.
+func (pb Playbook) Override(job Playbook) Playbook {
+	out := Playbook{
+		Allow:          pb.Allow,
+		ParamOverrides: pb.ParamOverrides,
+	}
+	if job.Allow != nil {
+		out.Allow = job.Allow
+	}
+	if job.ParamOverrides != nil {
+		out.ParamOverrides = job.ParamOverrides
+	}
+
+	if pb.RequireApproval != nil || job.RequireApproval != nil {
+		out.RequireApproval = make(map[string]bool, len(pb.RequireApproval)+len(job.RequireApproval))
+		for action, required := range pb.RequireApproval {
+			if required {
+				out.RequireApproval[action] = true
+			}
+		}
+		for action, required := range job.RequireApproval {
+			if required {
+				out.RequireApproval[action] = true
+			}
+		}
+	}
+
+	return out
+}
+
+// DenyAllPlaybook is the fail-closed policy: no action type is autonomously
+// permitted at any tier, so every proposal is either denied or routed to a
+// human. It is what a caller uses when a job's DECLARED policy cannot be
+// resolved — substituting any other policy there would enforce something the
+// job did not ask for, in the widening direction.
+//
+// It is a CONFIGURED, empty allowlist, which is why it is not the zero Playbook:
+// the zero value means unconfigured and still lets tier 0/1 run autonomously.
+func DenyAllPlaybook() Playbook {
+	return Playbook{Allow: map[string]bool{}}
 }
 
 // decision is the executor's routing verdict for one action.
@@ -86,12 +233,21 @@ const (
 )
 
 // allowsAutonomous reports whether an action type may run autonomously under the
-// playbook's allow list. An empty allow list means unconfigured — tier 0/1
-// default autonomous — so it returns true; a non-empty list is the
-// server-enforced allowlist and governs.
-func (pb Playbook) allowsAutonomous(actionType string) bool {
-	if len(pb.Allow) == 0 {
-		return true
+// playbook's allow list, for a tier below the approval gate.
+//
+// It is the SINGLE reading of the allowlist — every tier consults this one
+// function, so nil-vs-empty cannot mean one thing at tier 1 and another at
+// tier 2 (it used to: an unconfigured playbook read as "allow" at tier 1 via a
+// len==0 check and as "deny" at tier 2 via a bare map lookup, which is how
+// combining two playbooks could silently widen tier 2).
+//
+//   - Allow == nil (unconfigured) → the TIER DEFAULT decides: tier 0/1 is
+//     autonomous, tier 2 is not.
+//   - Allow != nil (configured)   → membership decides, at every tier. An empty
+//     configured allowlist grants nothing.
+func (pb Playbook) allowsAutonomous(actionType string, tier int) bool {
+	if pb.Allow == nil {
+		return tier <= TierAutonomous
 	}
 	return pb.Allow[actionType]
 }
@@ -106,15 +262,7 @@ func (pb Playbook) decide(actionType string, tier int) decision {
 	if tier >= TierApproval {
 		return decisionApprove
 	}
-	if tier <= TierAutonomous {
-		// Tier 0/1 default autonomous, still subject to the allowlist if present.
-		if pb.allowsAutonomous(actionType) {
-			return decisionExecute
-		}
-		return decisionDeny
-	}
-	// Tier 2: autonomous only if explicitly allowed.
-	if pb.Allow[actionType] {
+	if pb.allowsAutonomous(actionType, tier) {
 		return decisionExecute
 	}
 	return decisionDeny
@@ -174,10 +322,21 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 		})
 		return action, fmt.Errorf("%w: %s", ErrActionNotPermitted, req.Type)
 	case decisionApprove:
-		// Recorded as proposed; the tier-3 approval flow (Stream D / B4) creates
-		// the ApprovalRequest and resolves it. No execution here.
+		// Tier 3 (or a playbook-forced approval): record the proposal, create the
+		// ApprovalRequest a human decides on, park the incident in
+		// awaiting_approval, and end the agent session so no container idles while
+		// a human thinks. NOTHING executes here — ExecuteApproved is the only path
+		// that dispatches a tier-3 action, and only after a recorded decision.
 		e.observe(action)
-		e.mirrorAudit(ctx, action, "proposed")
+		e.mirrorAudit(ctx, action, "proposed", "")
+		approval, err := e.requestApproval(ctx, inc, action)
+		if err != nil {
+			// The approval row is the ONLY way a human can act on this proposal, so
+			// failing to create it must not look like a successful proposal.
+			e.finish(ctx, action, models.AgentActionStatusFailed, map[string]any{"error": err.Error()})
+			return action, err
+		}
+		e.endSessionForApproval(ctx, req.SessionID, inc, approval)
 		return action, nil
 	}
 
@@ -245,6 +404,14 @@ func (e *Executor) newAction(inc *models.Incident, req ActionRequest, tier int, 
 // finish stamps a terminal status + result on an action, emits the metric, and
 // mirrors tier-2/3 executions into the audit log.
 func (e *Executor) finish(ctx context.Context, action *models.AgentAction, status models.AgentActionStatus, result any) {
+	e.finishAs(ctx, action, status, result, "")
+}
+
+// finishAs is finish with an explicit audit-log actor. auditActor is empty for
+// the autonomous path (the audit row then names the action's own actor) and
+// carries "human:<decider>" for an approved execution, so the audit spine
+// records WHO approved the mutation, not merely that an agent proposed it.
+func (e *Executor) finishAs(ctx context.Context, action *models.AgentAction, status models.AgentActionStatus, result any, auditActor string) {
 	action.Status = status
 	action.Result = encodeJSON(result)
 	action.UpdatedAt = time.Now().UTC()
@@ -259,7 +426,7 @@ func (e *Executor) finish(ctx context.Context, action *models.AgentAction, statu
 		log.Warn("incident: failed to update action status", "action_id", action.ID, "error", err)
 	}
 	e.observe(action)
-	e.mirrorAudit(ctx, action, string(status))
+	e.mirrorAudit(ctx, action, string(status), auditActor)
 }
 
 // observe increments caesium_agent_actions_total for this action.
@@ -272,7 +439,7 @@ func (e *Executor) observe(action *models.AgentAction) {
 // mirrorAudit writes tier-2/3 executions into AuditLog (design Security Posture:
 // "AuditLog entries mirror tier 2/3 executions"). Tier 0/1 rows live only in the
 // AgentAction timeline.
-func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, outcome string) {
+func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, outcome, auditActor string) {
 	if action.Tier < TierGated {
 		return
 	}
@@ -281,10 +448,14 @@ func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, 
 	if action.Status == models.AgentActionStatusRejected {
 		return
 	}
+	actor := "agent:" + string(action.Actor)
+	if auditActor != "" {
+		actor = auditActor
+	}
 	entry := &models.AuditLog{
 		ID:           uuid.New(),
 		Timestamp:    time.Now().UTC(),
-		Actor:        "agent:" + string(action.Actor),
+		Actor:        actor,
 		Action:       "agent.action." + action.Type,
 		ResourceType: "incident",
 		ResourceID:   action.IncidentID.String(),

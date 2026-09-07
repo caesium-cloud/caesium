@@ -841,3 +841,66 @@ func TestDagTopologyHash(t *testing.T) {
 	h5 := dagTopologyHash(stepsNewCmd, successors)
 	require.NotEqual(t, h1, h5, "command change must produce a different hash")
 }
+
+// TestApplyPersistsRemediationPolicy pins that `metadata.remediation` survives
+// the apply. It is the difference between a job's agent policy being lintable
+// and being ENFORCEABLE: the action executor resolves the effective playbook
+// from this column, so dropping it here (as the mapping used to) silently judged
+// every agent proposal by the deployment-wide default profile instead.
+func (s *ImporterTestSuite) TestApplyPersistsRemediationPolicy() {
+	const withPolicy = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: remediation-policy
+  remediation:
+    profile: triage-only
+    classes: [transient_infra]
+    autonomy:
+      allow: [retry_from_failure]
+      requireApproval: [pause_job]
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+`
+	def, err := schema.Parse([]byte(withPolicy))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var jobModel models.Job
+	s.Require().NoError(s.db.First(&jobModel, "id = ?", job.ID).Error)
+	s.Require().NotEmpty(jobModel.Remediation)
+
+	var stored schema.MetadataRemediation
+	s.Require().NoError(json.Unmarshal(jobModel.Remediation, &stored))
+	s.Equal("triage-only", stored.Profile)
+	s.Require().NotNil(stored.Autonomy)
+	s.Equal([]string{"retry_from_failure"}, stored.Autonomy.Allow)
+	s.Equal([]string{"pause_job"}, stored.Autonomy.RequireApproval)
+
+	// Removing the block must REVOKE the policy, not leave the previous — and
+	// possibly wider — one in force.
+	withoutPolicy := strings.Replace(withPolicy, `
+  remediation:
+    profile: triage-only
+    classes: [transient_infra]
+    autonomy:
+      allow: [retry_from_failure]
+      requireApproval: [pause_job]`, "", 1)
+	def, err = schema.Parse([]byte(withoutPolicy))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	// Read the column directly: scanning into the already-populated jobModel would
+	// leave the previous value in place for a NULL column and hide the bug.
+	var remediation sql.NullString
+	s.Require().NoError(s.db.Raw("SELECT remediation FROM jobs WHERE id = ?", job.ID).Row().Scan(&remediation))
+	s.False(remediation.Valid, "removing the remediation block must clear the persisted policy, got %q", remediation.String)
+}

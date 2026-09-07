@@ -674,6 +674,7 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_AGENT_MAX_CONCURRENT_SESSIONS=1 \
         -e CAESIUM_AGENT_SESSION_TIMEOUT=45s \
         -e CAESIUM_AGENT_INCIDENT_COOLDOWN=1s \
+        -e CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL=5s \
         -e CAESIUM_API_EXTERNAL_URL={{ agent_api_external_url }} \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \

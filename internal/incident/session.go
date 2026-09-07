@@ -301,18 +301,28 @@ func (s *Supervisor) execute(ctx context.Context, session *models.AgentSession, 
 		return session
 	}
 
-	// Mark running with the container/atom identity for the UI.
+	// Mark running with the container/atom identity for the UI. Guarded like every
+	// other state write: a session EndSession already terminated while this one
+	// was still pending must not be resurrected to running — and since that
+	// session's row carried no container id yet, stopping the container we just
+	// created is now this call's job.
 	started := time.Now().UTC()
-	session.State = models.AgentSessionStateRunning
 	session.ContainerID = a.ID()
+	if !s.persistActive(ctx, session, map[string]any{
+		"state":        models.AgentSessionStateRunning,
+		"container_id": session.ContainerID,
+		"started_at":   started,
+		"updated_at":   started,
+	}) {
+		log.Info("incident: agent session was ended before its container started; stopping it",
+			"session_id", session.ID, "container_id", session.ContainerID)
+		s.stopContainer(session)
+		s.revoke(tokenID)
+		return session
+	}
+	session.State = models.AgentSessionStateRunning
 	session.StartedAt = &started
 	session.UpdatedAt = started
-	s.persist(ctx, session, map[string]any{
-		"state":        session.State,
-		"container_id": session.ContainerID,
-		"started_at":   session.StartedAt,
-		"updated_at":   session.UpdatedAt,
-	})
 
 	// Wall-clock budget: the wait context is bounded so a runaway agent is
 	// forcibly stopped and recorded timed_out rather than burning tokens forever.
@@ -369,27 +379,137 @@ func (s *Supervisor) captureLogs(engine atom.Engine, atomID string, since time.T
 	return string(buf)
 }
 
+// stopContainerTimeout bounds the detached container stop. Generous enough for a
+// real engine call, short enough that a wedged engine cannot pin a goroutine.
+const stopContainerTimeout = 30 * time.Second
+
+// EndSession terminates a still-active agent session and revokes its scoped
+// credential. It is the "no idle container burning tokens while a human decides"
+// half of the tier-3 approval flow (design-agent-in-the-loop.md, Approval
+// gates): once a proposal parks the incident in awaiting_approval, the session
+// that made it has nothing left to do.
+//
+// The state write is CONDITIONAL on the session still being pending/running, so
+// it can never rewrite a session the supervisor's own execute() already
+// finalized — the two race by construction (the agent is mid-HTTP-call to the
+// API when this runs). Token revocation is unconditional and idempotent: a
+// credential that outlives its session is the thing worth being paranoid about.
+//
+// Winning that conditional write also makes this call responsible for the
+// CONTAINER. Marking the row succeeded and revoking the credential without
+// stopping the container leaves the agent running — burning model tokens against
+// a revoked key for the rest of the session timeout, which is precisely the cost
+// this method exists to avoid. The container is stopped through the same
+// atom.Engine handle execute() uses, resolved from the row's own engine and
+// container id.
+func (s *Supervisor) EndSession(ctx context.Context, sessionID uuid.UUID) error {
+	if s == nil || sessionID == uuid.Nil {
+		return nil
+	}
+	var session models.AgentSession
+	if err := s.db.WithContext(ctx).First(&session, "id = ?", sessionID).Error; err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	res := s.db.WithContext(ctx).
+		Model(&models.AgentSession{}).
+		Where("id = ? AND state IN ?", sessionID, []models.AgentSessionState{
+			models.AgentSessionStatePending,
+			models.AgentSessionStateRunning,
+		}).
+		Updates(map[string]any{
+			"state":        models.AgentSessionStateSucceeded,
+			"completed_at": now,
+			"updated_at":   now,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Already terminal: execute() finalized it (and stopped its container)
+		// first. Revoking again is harmless; stopping is not ours to do.
+		s.revoke(session.TokenID)
+		return nil
+	}
+
+	s.stopContainer(&session)
+	s.revoke(session.TokenID)
+	return nil
+}
+
+// stopContainer stops a session's container through its engine. Best-effort and
+// never fatal: the session row is already terminal by the time this runs, and a
+// container that outlives it is reaped by the engine's own lifecycle. A session
+// with no recorded container id never launched one.
+//
+// It runs on a DETACHED context, like finalize's persistence does and for the
+// same reason: EndSession is reached from an HTTP request (an agent proposing a
+// tier-3 action), and stopping a container is a blocking call to the engine. On
+// the caller's context a client disconnect or a shutdown would cancel the stop
+// midway and leak the very container this exists to reap — the session row would
+// read `succeeded` while the agent kept burning tokens.
+func (s *Supervisor) stopContainer(session *models.AgentSession) {
+	if session.ContainerID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), stopContainerTimeout)
+	defer cancel()
+
+	engine, err := s.newEngine(ctx, session.Engine)
+	if err != nil || engine == nil {
+		log.Warn("incident: could not resolve engine to stop agent container",
+			"session_id", session.ID, "container_id", session.ContainerID, "error", err)
+		return
+	}
+	if err := engine.Stop(&atom.EngineStopRequest{ID: session.ContainerID, Force: true}); err != nil {
+		log.Warn("incident: failed to stop agent container for ended session",
+			"session_id", session.ID, "container_id", session.ContainerID, "error", err)
+	}
+}
+
 // finalize writes the terminal state + session log and revokes the scoped token
 // so the credential dies with the session. It runs on a DETACHED context (not
 // the caller's, which may be cancelled by shutdown or a client disconnect) so
 // termination and — critically — token revocation always complete: a cancelled
 // parent context must never leave the session non-terminal or leak a live
 // agent credential.
+// The state write is IDEMPOTENT — guarded on the session still being
+// pending/running. EndSession and execute() finalize the same row by
+// construction: EndSession stops the container, which unblocks execute()'s
+// engine.Wait, whose terminal disposition is then `timed_out` (the engine did
+// kill it). Writing that unconditionally would rewrite the `succeeded` row
+// EndSession just committed, turning a clean approval-driven end into a phantom
+// timeout in the audit trail. First terminal write wins.
 func (s *Supervisor) finalize(session *models.AgentSession, state models.AgentSessionState, logText string, tokenID *uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	completed := time.Now().UTC()
-	session.State = state
-	session.SessionLog = logText
-	session.CompletedAt = &completed
-	session.UpdatedAt = completed
-	s.persist(ctx, session, map[string]any{
+	updated := s.persistActive(ctx, session, map[string]any{
 		"state":        state,
 		"session_log":  logText,
-		"completed_at": session.CompletedAt,
-		"updated_at":   session.UpdatedAt,
+		"completed_at": completed,
+		"updated_at":   completed,
 	})
+	if updated {
+		session.State = state
+		session.SessionLog = logText
+		session.CompletedAt = &completed
+		session.UpdatedAt = completed
+		s.revoke(tokenID)
+		return
+	}
+
+	// The row is already terminal (EndSession got here first). Its STATE is not
+	// ours to rewrite, but the transcript is: the log was captured by this call
+	// and nothing else will ever write it, so an ended-for-approval session would
+	// otherwise lose the agent's reasoning — the very thing a human is about to
+	// read while deciding.
+	if logText != "" {
+		s.persist(ctx, session, map[string]any{"session_log": logText, "updated_at": completed})
+		session.SessionLog = logText
+	}
 	s.revoke(tokenID)
 }
 
@@ -400,6 +520,24 @@ func (s *Supervisor) persist(ctx context.Context, session *models.AgentSession, 
 		Updates(updates).Error; err != nil {
 		log.Warn("incident: failed to persist agent session", "session_id", session.ID, "error", err)
 	}
+}
+
+// persistActive writes updates only while the session is still pending/running,
+// reporting whether the write landed. It is the guard that makes every terminal
+// transition once-only.
+func (s *Supervisor) persistActive(ctx context.Context, session *models.AgentSession, updates map[string]any) bool {
+	res := s.db.WithContext(ctx).
+		Model(&models.AgentSession{}).
+		Where("id = ? AND state IN ?", session.ID, []models.AgentSessionState{
+			models.AgentSessionStatePending,
+			models.AgentSessionStateRunning,
+		}).
+		Updates(updates)
+	if res.Error != nil {
+		log.Warn("incident: failed to persist agent session", "session_id", session.ID, "error", res.Error)
+		return false
+	}
+	return res.RowsAffected > 0
 }
 
 func (s *Supervisor) revoke(tokenID *uuid.UUID) {

@@ -17,9 +17,16 @@ import (
 // route (and is scope-checked by the middleware); the agent supplies the action
 // type and its params.
 type ActionRequest struct {
-	IncidentID uuid.UUID       `json:"-"`
-	Type       string          `json:"type"`
-	Params     json.RawMessage `json:"params,omitempty"`
+	IncidentID uuid.UUID `json:"-"`
+	// TokenID is the API key that authenticated this request, set by the
+	// controller and never by the client. An agent session's credential is minted
+	// per session and recorded on AgentSession.TokenID, so this is what identifies
+	// WHICH session proposed the action — the audit spine links the row to the
+	// container that made it, and the approval flow ends that session (not merely
+	// the newest one on the incident) while a human decides.
+	TokenID *uuid.UUID      `json:"-"`
+	Type    string          `json:"type"`
+	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 // ActionResult is what the actions endpoint returns: the recorded AgentAction
@@ -33,32 +40,35 @@ type ActionResult struct {
 // the surface level (deep validation is the executor's job).
 var ErrUnknownActionType = errors.New("agent: action type is required")
 
-// ActionExecutor is Stream B's server-side action executor. It validates a typed
-// action against the effective playbook, executes tier-1/2 actions, routes
-// tier-3 through the approval gate, and records the AgentAction audit row with
-// the correct actor/tier/status.
+// ActionExecutor is the server-side action executor: it validates a typed action
+// against the effective playbook, executes tier-1/2 actions, routes tier-3
+// through the approval gate (creating the ApprovalRequest a human decides on),
+// and records the AgentAction audit row with the correct actor/tier/status.
 //
-// CROSS-PR SEAM: Stream B (internal/incident/executor.go) ships this in a
-// sibling PR; the orchestrator sequences B before C at merge. Until an executor
-// is registered via SetActionExecutor, ProposeAction degrades to recording a
-// `proposed` AgentAction row (the audit spine) and returning it — the tool
-// surface is live and auditable, and B's executor takes over the execution
-// semantics when wired.
+// It is registered at startup by cmd/start (an adapter over
+// internal/incident.Executor), inside the CAESIUM_AGENT_REMEDIATION_ENABLED
+// master gate.
 type ActionExecutor interface {
 	ExecuteAgentAction(ctx context.Context, req ActionRequest) (*ActionResult, error)
 }
 
-// executor is the process-wide registered action executor (nil until Stream B
-// wires one at startup).
+// executor is the process-wide registered action executor.
 var executor ActionExecutor
 
-// SetActionExecutor registers Stream B's action executor. Wired once at startup.
+// SetActionExecutor registers the server-side action executor. Wired once at
+// startup (cmd/start/start.go, behind the remediation master gate).
 func SetActionExecutor(e ActionExecutor) { executor = e }
 
-// ProposeAction records/executes a typed action for an incident. When Stream B's
-// executor is registered it delegates entirely (execution + audit). Otherwise it
-// records a `proposed` AgentAction row so the timeline and audit spine work and
-// the endpoint is exercisable end-to-end; the executor supersedes this.
+// ProposeAction records/executes a typed action for an incident. It delegates
+// entirely to the registered executor (validation, tier routing, approval-gate
+// creation, execution, audit).
+//
+// The executor-nil fallback below records a bare `proposed` AgentAction with NO
+// tier evaluation and NO ApprovalRequest. It exists only so this package's unit
+// tests can exercise the surface without constructing the whole incident
+// executor, and for a server that never enabled remediation. Do not rely on it
+// as a product path: a tier-3 action recorded through it is unapprovable,
+// because nothing created the approval row.
 func (s *Service) ProposeAction(inc *models.Incident, req ActionRequest) (*ActionResult, error) {
 	req.Type = strings.TrimSpace(req.Type)
 	if req.Type == "" {

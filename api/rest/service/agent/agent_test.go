@@ -66,11 +66,15 @@ func TestProposeActionRequiresType(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnknownActionType)
 }
 
-// fakeExecutor stands in for Stream B's executor and records delegation.
-type fakeExecutor struct{ called bool }
+// fakeExecutor stands in for the incident action executor and records delegation.
+type fakeExecutor struct {
+	called bool
+	calls  []ActionRequest
+}
 
 func (f *fakeExecutor) ExecuteAgentAction(_ context.Context, req ActionRequest) (*ActionResult, error) {
 	f.called = true
+	f.calls = append(f.calls, req)
 	return &ActionResult{Action: &models.AgentAction{IncidentID: req.IncidentID, Type: req.Type, Status: models.AgentActionStatusExecuted}, Disposition: "executed"}, nil
 }
 
@@ -86,10 +90,22 @@ func TestProposeActionDelegatesToRegisteredExecutor(t *testing.T) {
 	SetActionExecutor(exec)
 
 	svc := &Service{ctx: context.Background(), db: db}
-	res, err := svc.ProposeAction(inc, ActionRequest{Type: "retry_from_failure"})
+	res, err := svc.ProposeAction(inc, ActionRequest{Type: " retry_from_failure "})
 	require.NoError(t, err)
 	require.True(t, exec.called)
 	require.Equal(t, "executed", res.Disposition)
+
+	// The wired path delegates ENTIRELY: no fallback row is written here, so the
+	// executor owns tier evaluation, playbook enforcement, and the approval gate.
+	// A duplicate row from this fallback is what would make a tier-3 proposal
+	// unapprovable (trust-the-substrate ledger L9).
+	require.Len(t, exec.calls, 1)
+	require.Equal(t, "retry_from_failure", exec.calls[0].Type, "the type must be trimmed before delegation")
+	require.Equal(t, inc.ID, exec.calls[0].IncidentID, "the incident id comes from the route, never the body")
+
+	var count int64
+	require.NoError(t, db.Model(&models.AgentAction{}).Where("incident_id = ?", inc.ID).Count(&count).Error)
+	require.Equal(t, int64(0), count, "the executor-nil fallback must not also write a row when an executor is wired")
 }
 
 func TestHistoryEnforcesAllowlist(t *testing.T) {

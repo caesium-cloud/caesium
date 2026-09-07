@@ -117,6 +117,14 @@ type WhyExplanation struct {
 	Baseline WhyBaseline `json:"baseline"`
 	Diff     *BlobDiff   `json:"diff,omitempty"`
 
+	// Remediation lists the APPROVED remediation actions that changed this task's
+	// outcome — a `skip_task` that skipped it, or an `override_schema_gate` that
+	// suppressed its output-schema enforcement. Without it, a task that reads
+	// "skipped" or a schema violation that never fired is an unexplainable state:
+	// the DAG says nothing happened and the reason lives in an incident timeline
+	// the operator has no pointer to. Omitted when there is none.
+	Remediation []WhyRemediation `json:"remediation,omitempty"`
+
 	// Group is populated ONLY for a fanned step explained without a partition
 	// selector: the aggregate answer over all N instances. It is omitted for an
 	// unfanned task and for a single selected instance, so unfanned output is
@@ -159,6 +167,34 @@ type WhyGroup struct {
 	// spec 4.3 exists to prevent, and an operator who does not yet know the
 	// partition keys reaches the group form first.
 	Notes []string `json:"notes,omitempty"`
+}
+
+// WhyRemediation is one approved, executed remediation action attributed to the
+// explained task or its run — the "approved by <decider>, executed at <ts>"
+// provenance (trust-the-substrate C8).
+//
+// Every field is read from already-persisted state: the AgentAction audit row
+// and the ApprovalRequest that authorised it. Nothing here is inferred.
+type WhyRemediation struct {
+	// ActionID is the AgentAction audit row.
+	ActionID uuid.UUID `json:"actionId"`
+	// IncidentID is the incident whose timeline carries the full evidence.
+	IncidentID uuid.UUID `json:"incidentId"`
+	// Type is the catalog action type ("skip_task", "override_schema_gate").
+	Type string `json:"type"`
+	// Tier is the action's tier (3 for everything approval-gated).
+	Tier int `json:"tier"`
+	// ApprovedBy is the operator identity recorded on the approval decision.
+	ApprovedBy string `json:"approvedBy,omitempty"`
+	// ApprovedAt is when the human decided.
+	ApprovedAt *time.Time `json:"approvedAt,omitempty"`
+	// ExecutedAt is when the approved action actually ran.
+	ExecutedAt *time.Time `json:"executedAt,omitempty"`
+	// Reason is the operator-supplied justification, when one was given.
+	Reason string `json:"reason,omitempty"`
+	// Scope is "task" when the action targeted this specific task and "run" when
+	// it applied to the whole run (an override_schema_gate covers every task).
+	Scope string `json:"scope"`
 }
 
 // WhyGroupFailure names the instance a fanned group's failure is attributed to.
@@ -224,6 +260,7 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 	if subject == nil {
 		exp := newWhyGroupExplanation(runID, jobRun.JobID, taskID, taskName, instances)
 		exp.Trigger = s.loadTrigger(ctx, &jobRun)
+		exp.Remediation = s.loadRemediation(ctx, &jobRun, taskID)
 		exp.Summary = summarize(exp)
 		return exp, nil
 	}
@@ -243,6 +280,7 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 	}
 
 	exp.Trigger = s.loadTrigger(ctx, &jobRun)
+	exp.Remediation = s.loadRemediation(ctx, &jobRun, subject.TaskID)
 
 	baselineBlob, baseline, err := s.resolveBaseline(ctx, subject, jobRun.JobID, jobRun.StartedAt)
 	if err != nil {
@@ -625,6 +663,12 @@ func summarize(exp *WhyExplanation) string {
 // which is what every renderer — the CLI table, `--json`, and the Console's
 // server-summary panel — shows first.
 func withNotes(exp *WhyExplanation, summary string) string {
+	// Approved-remediation provenance goes FIRST among the qualifiers: when a
+	// human decision changed this task's outcome, that is the answer to "why",
+	// and every cache-diff clause after it is secondary.
+	if prov := summarizeRemediation(exp.Remediation); prov != "" {
+		summary += "; " + prov
+	}
 	notes := explanationNotes(exp)
 	if len(notes) == 0 {
 		return summary

@@ -342,6 +342,15 @@ type Environment struct {
 	// CAESIUM_AGENT_DEFAULT_PROFILE optionally names a bootstrap AgentProfile the
 	// session supervisor launches and whose playbook the triage bundle surfaces.
 	AgentDefaultProfile string `envconfig:"AGENT_DEFAULT_PROFILE" default:""`
+	// CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL is how often the leader sweeps for
+	// approved tier-3 actions that were never dispatched (a process death between
+	// the decision commit and the execute). Default 30s.
+	AgentApprovalRedriveInterval time.Duration `envconfig:"AGENT_APPROVAL_REDRIVE_INTERVAL" default:"30s"`
+	// CAESIUM_AGENT_APPROVAL_REDRIVE_GRACE is how long an approved action must
+	// have sat before the sweep picks it up. It exists so the sweep does not race
+	// the synchronous dispatch that normally follows a decision; it must
+	// comfortably exceed one dispatch. Default 2m.
+	AgentApprovalRedriveGrace time.Duration `envconfig:"AGENT_APPROVAL_REDRIVE_GRACE" default:"2m"`
 }
 
 // SSOEnabled reports whether any SSO provider is configured.

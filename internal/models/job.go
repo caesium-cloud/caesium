@@ -33,10 +33,17 @@ type Job struct {
 	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
 	ReplaySafe       bool           `gorm:"not null;default:false" json:"replay_safe"`
 	CacheConfig      datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
-	Paused           bool           `gorm:"not null;default:false" json:"paused"`
-	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
-	CreatedAt        time.Time      `gorm:"not null" json:"created_at"`
-	UpdatedAt        time.Time      `gorm:"not null" json:"updated_at"`
+	// Remediation persists the job's `metadata.remediation` block verbatim (see
+	// pkg/jobdef.MetadataRemediation). It is what makes a job's agent policy
+	// ENFORCEABLE rather than merely lintable: the action executor resolves the
+	// effective playbook from this column, so a job that narrows what the agent
+	// may do autonomously is evaluated under its own policy instead of the
+	// deployment-wide default profile. Empty means "the job declared no policy".
+	Remediation datatypes.JSON `gorm:"type:json" json:"remediation,omitempty"`
+	Paused      bool           `gorm:"not null;default:false" json:"paused"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	CreatedAt   time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt   time.Time      `gorm:"not null" json:"updated_at"`
 
 	LatestRun *JobRun `gorm:"-" json:"latest_run,omitempty"`
 }

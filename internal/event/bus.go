@@ -70,6 +70,28 @@ const (
 	TypeIncidentStatusChanged Type = "incident_status_changed"
 	TypeAgentActionRecorded   Type = "agent_action_recorded"
 	TypeApprovalRequested     Type = "approval_requested"
+	// TypeAgentActionExecuted is emitted when an approved tier-3 action actually
+	// RUNS (trust-the-substrate C8). It is deliberately distinct from
+	// TypeAgentActionRecorded, which the approvals controller emits at DECISION
+	// time and which therefore says nothing about whether the action executed or
+	// what it did. This one carries the decider, the action type/tier, and the
+	// result summary, so "approved by X at T, executed at T'" is reconstructable
+	// from the event stream alone.
+	TypeAgentActionExecuted Type = "agent_action_executed"
+	// TypeIncidentEscalated is emitted when a remediation ESCALATES — an agent or
+	// a deterministic rule handed the incident to a human, either directly
+	// (the `escalate` action) or because an approved change could not be applied
+	// where it was approved (a git-synced job's jobdef patch, which degrades to an
+	// escalation carrying the rendered diff).
+	//
+	// It exists because escalation must be DELIVERED, not merely recorded. An
+	// escalation that only writes an AgentAction row and a log line contacts
+	// nobody, which is the one outcome an escalation cannot have. Routing it as an
+	// event puts it through the ordinary NotificationPolicy → channel machinery,
+	// so a team pages or Slacks on it with no new plumbing, and it stays queryable
+	// from /v1/events afterwards. The payload carries the incident, the requested
+	// channel, and the rendered summary/diff.
+	TypeIncidentEscalated Type = "incident_escalated"
 )
 
 // Event represents a system event.

@@ -443,6 +443,15 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	if err != nil {
 		return nil, nil, fmt.Errorf("metadata.rateLimits: %w", err)
 	}
+	// The remediation block is persisted, not merely validated: it is the ONLY
+	// way the action executor can evaluate an agent proposal under the job's own
+	// policy. Dropping it here (as this mapping used to) meant every proposal was
+	// judged by the deployment-wide default profile, so a job that narrowed the
+	// autonomous allowlist was silently widened back to the default's.
+	remediation, err := marshalOptionalJSON(def.Metadata.Remediation)
+	if err != nil {
+		return nil, nil, fmt.Errorf("metadata.remediation: %w", err)
+	}
 
 	if existing == nil {
 		jobModel := &models.Job{
@@ -461,6 +470,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 			SchemaValidation: def.Metadata.SchemaValidation,
 			ReplaySafe:       def.Metadata.ReplaySafe,
 			CacheConfig:      cacheConfig,
+			Remediation:      remediation,
 		}
 		applyJobProvenance(jobModel, opts)
 		if err := tx.Create(jobModel).Error; err != nil {
@@ -483,23 +493,28 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	existing.SchemaValidation = def.Metadata.SchemaValidation
 	existing.ReplaySafe = def.Metadata.ReplaySafe
 	existing.CacheConfig = cacheConfig
+	existing.Remediation = remediation
 	applyJobProvenance(existing, opts)
 
 	updates := map[string]any{
-		"alias":                existing.Alias,
-		"trigger_id":           existing.TriggerID,
-		"labels":               existing.Labels,
-		"annotations":          existing.Annotations,
-		"max_parallel_tasks":   existing.MaxParallelTasks,
-		"task_timeout":         existing.TaskTimeout,
-		"run_timeout":          existing.RunTimeout,
-		"priority":             existing.Priority,
-		"concurrency":          existing.Concurrency,
-		"rate_limits":          existing.RateLimits,
-		"sla":                  existing.SLA,
-		"schema_validation":    existing.SchemaValidation,
-		"replay_safe":          existing.ReplaySafe,
-		"cache_config":         existing.CacheConfig,
+		"alias":              existing.Alias,
+		"trigger_id":         existing.TriggerID,
+		"labels":             existing.Labels,
+		"annotations":        existing.Annotations,
+		"max_parallel_tasks": existing.MaxParallelTasks,
+		"task_timeout":       existing.TaskTimeout,
+		"run_timeout":        existing.RunTimeout,
+		"priority":           existing.Priority,
+		"concurrency":        existing.Concurrency,
+		"rate_limits":        existing.RateLimits,
+		"sla":                existing.SLA,
+		"schema_validation":  existing.SchemaValidation,
+		"replay_safe":        existing.ReplaySafe,
+		"cache_config":       existing.CacheConfig,
+		// Written unconditionally (nil when the block is removed) so deleting the
+		// remediation block from a job actually revokes the policy rather than
+		// leaving the previous, possibly wider, one in force.
+		"remediation":          existing.Remediation,
 		"provenance_source_id": existing.ProvenanceSourceID,
 		"provenance_repo":      existing.ProvenanceRepo,
 		"provenance_ref":       existing.ProvenanceRef,
