@@ -1277,7 +1277,7 @@ Arc convention 8 assumes required status checks exist. They do not (Ledger
 L13), and 6 of the last 17 master runs are red for reasons the ledger already
 names (L12).
 
-- [ ] D1. Fix or quarantine the root causes in L12. (a) `TestFanOutHTTPRetryPartition`
+- [x] D1. Fix or quarantine the root causes in L12. (a) `TestFanOutHTTPRetryPartition`
       on owner-memory: confirm #384 (`48497e9`) fixed it by reading the three
       master runs after it; if it recurs, bisect `internal/run/store.go`
       `RetryPartition`'s outstanding re-seed (`partitionRetryOutstandingTx`)
@@ -1305,6 +1305,87 @@ names (L12).
       `.github/workflows/ci.yml` (`podman-integration-test` env block),
       `internal/trigger/event/*_test.go`, `test/event_cli_test.go` (the
       `openIntegrationCatalogDB` helper). Depends on: H-2 for the timeout half of L12.
+      **Done (W2-α):** all five entries fixed, none quarantined — no new
+      `t.Skip`-behind-an-issue anywhere.
+      *(a)* #384 did **not** fix it: it recurred on master run 34062579647
+      (commit `192f604`, job 101565958611). Root cause is not
+      `partitionRetryOutstandingTx` at all — it is how the store discards the
+      owner's cached state. `Store.invalidateRunState` called
+      `OwnerManager.Drop`, and Drop's contract is to force a final checkpoint of
+      the state it is discarding: on this path, precisely the "run is complete"
+      snapshot the retry just invalidated. That snapshot is durable until the
+      `DeleteCheckpoints` that follows, and the dropped pointer is not marked
+      stale, so an in-flight completion can write it again afterwards. Either
+      copy makes the next recovery reconstruct a complete run, and a recovery
+      never learns that a row *stopped* being terminal. Fixed by invalidating
+      through `OwnerManager.Release` (which marks the state stale, deletes the
+      checkpoints while still holding the run, then forgets it — the ordering
+      its own doc comment already called load-bearing), and by adding a per-run
+      invalidation epoch so a `Recover`/`Adopt` that was already rebuilding when
+      the retry landed cannot publish its pre-retry view over the top
+      (`put` refuses it, the rebuild retries off the current rows, and the
+      generation checkpoint is written only after a successful publish). Three
+      deterministic regression tests in `internal/run/owner_invalidation_test.go`;
+      the first one fails against the old `Drop` path, verified. Adversarial
+      review then found three more windows on the same seam, all fixed with
+      their own regression tests: `Recover`'s post-publish checkpoint used a raw
+      `writer.Force` that bypassed the `stale` flag; `Drop` forgot the run
+      *before* forcing its final checkpoint, so a retry in that gap had nothing
+      to mark stale and its delete preceded the write; and the per-run epoch
+      counter was ABA-prone (reset to zero on publish), now a manager-wide
+      monotonic stamp that `Drop` deliberately does not advance — `Drop` is this
+      owner letting go of a run it just checkpointed, not a claim that the rows
+      moved, so stamping there would only force spurious rebuilds and leak an
+      entry per run ever owned.
+      *(b)* Podman was green on all 8 recent master runs, so nothing to
+      reproduce. Diffing the lane's own `docker run -e` block against
+      `integration-up` found two envs missing — `CAESIUM_DATABASE_SHARDS=4` and
+      `CAESIUM_FANOUT_MAX_PARTITIONS=8` — both added, with a comment on the step
+      saying the block must stay a superset of `integration-up`.
+      *(c)* Real fix, no quarantine, and it was not a test bug.
+      `go-dqlite`'s package `init()` puts SQLite into **single-thread** mode
+      process-wide (`go-dqlite/v3/config.go`), which disables the mutexes that
+      make `sqlite3_initialize()` safe to call concurrently — and every binary
+      here also drives SQLite directly through `mattn/go-sqlite3`. Two
+      `t.Parallel()` tests opening their first connection in a fresh process
+      race that initialization and the loser sees an unpopulated VFS list, which
+      SQLite reports as `no such vfs: ` with an EMPTY name. Reproduced locally
+      at ~1 in 40 fresh `-race` processes of `./internal/trigger/event/`
+      (`-count=N` inside one process never shows it: only the first open is at
+      risk). Fixed in `pkg/dqlite/threading.go` with the remedy go-dqlite
+      documents for exactly this case — `ConfigMultiThread()` in an `init()`
+      that runs after go-dqlite's and before anything opens a database — so it
+      is fixed for every package, not just this one. `pkg/dqlite/threading_test.go`
+      asserts the switch actually took (`sqlite3_config` returns SQLITE_MISUSE if
+      something initialized SQLite first).
+      *(d)* Now **13** call sites across 11 files (`incident_approval_test.go`
+      added two since this item was written). The skip is a single
+      `requireDirectCatalogAccess()` inside `openIntegrationCatalogDB`, keyed on
+      the existing `CAESIUM_TEST_ENGINE` discriminator — no new env var. It
+      fires only on `kubernetes` (server in-cluster, dqlite binds POD_IP, only
+      :8080 is port-forwarded); podman shares the server's netns
+      (`--network=container:caesium-server-podman`) and the docker lanes use
+      `--network=host`, so default/distributed/owner-memory/infra/agent are
+      untouched — the agent lane's `TestAgentMCPToolsListBundleAndIncidentScope`
+      still reaches the catalog through this helper and still counts toward
+      `agent_integration_min_pass`. It deliberately does not skip on mere
+      unreachability: a dqlite that stops listening on a docker lane must stay a
+      loud failure.
+      *(e)* `TestFanOutLocalCancelledMidFlightStillResolvesPendingSiblings`
+      (master run 34136265000, job 101788657387) — **test-timing assumption, not
+      a limiter race.** `ratelimit.Limiter` is a FIXED-window limiter bucketing
+      on `now.Truncate(window)` floored at a minute, so "2 per minute admits
+      exactly two of these four partitions" only holds while the whole dispatch
+      pass stays inside one bucket. The failing log shows three instances
+      starting at 15:12:00.020/.022/.062 with only partition `d` parked: the
+      pass straddled `:00`, the bucket rolled, and the fresh bucket admitted two
+      more. Fixed by pinning the limiter's clock from `runFanOutInBackground`
+      through a new unexported `job.rateLimitClock` seam (alongside the existing
+      `beforeComplete` seam, and carried into a replacement engine the same
+      way), which makes all four rate-limited fan-out tests boundary-independent
+      rather than sleeping past the boundary.
+      *(helm)* The lane's two W1 reds (`TestRunRetryCallbacksCLI`) were fixed by
+      #393 — nothing left to do there.
 - [ ] D2. Add required status checks and write the CI runbook. Run
       `gh api -X PATCH repos/caesium-cloud/caesium/branches/master/protection/required_status_checks`
       (or `PUT …/protection` with the full body) with `checks` =
@@ -1332,7 +1413,7 @@ names (L12).
       in `docs/README.md` in the same PR (`TestDocsREADMEIndexesEveryTopLevelDoc`).
       Files: new `docs/ci.md`, `docs/README.md`. Depends on: D1 + H-2 (the
       required lanes must be green first).
-- [ ] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
+- [x] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
       and add `ui/test-results/` to `.gitignore`; add a `clean-worktrees`
       justfile recipe (appended at the end of the file) that runs
       `git worktree prune` and removes `.claude/worktrees/*` checkouts whose
@@ -1341,6 +1422,21 @@ names (L12).
       motivated it. Files: `.gitignore`, `justfile` (new recipe at EOF).
       *The README Codecov badge (`branch=develop` → `master`) is bullet (c)
       of N-1 — `README.md` has exactly one editor in W2.*
+      **Done (W2-α):** `ui/test-results/.last-run.json` untracked and
+      `ui/test-results/` ignored; `just clean-worktrees` appended at EOF with a
+      `force := "false"` variable above it (`just force=true clean-worktrees`
+      deletes). A checkout is removable when it is clean AND its work landed —
+      reachable from master, tree-identical to master, or (the case that matters
+      for this repo's squash-merge workflow, where a branch's commits never
+      become master's ancestors) a merged pull request for its branch via `gh`.
+      It resolves the MAIN worktree from any checkout, so it also works from
+      inside an agent lane. Two review hardenings: a checkout sitting exactly on
+      the master tip is never removable (a freshly-branched agent matches both
+      "reachable from master" and "tree identical to master"), and the `gh` path
+      requires the merged PR's `headRefOid` to equal the checkout's HEAD, so a
+      branch carrying newer unmerged commits is kept. Dry run only on this host,
+      with sibling lanes live: 3 removable, 9 kept — every live sibling
+      correctly held back.
 
 ### Stream E — Release & install
 

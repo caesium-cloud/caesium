@@ -171,7 +171,45 @@ func (s *IntegrationTestSuite) TestEventAndTriggerCLIWithWebhookReceiptLog() {
 	s.Equal(receipt.HTTPRunsStarted, persisted.HTTPRunsStarted)
 }
 
+// requireDirectCatalogAccess skips the calling test on the lanes where the
+// server's dqlite port is not reachable from the test process.
+//
+// Reaching the catalog directly only works when the runner shares a network
+// namespace with the server, because dqlite binds CAESIUM_NODE_ADDRESS and is
+// never published:
+//
+//   - default / distributed / owner-memory / infra / agent lanes (`just
+//     integration-*`, CAESIUM_TEST_ENGINE unset or "docker"): the runner
+//     container runs with --network=host or the server's netns. REACHABLE.
+//   - podman lane (CAESIUM_TEST_ENGINE=podman): ci.yml runs the test container
+//     with `--network=container:caesium-server-podman`. REACHABLE.
+//   - helm/kind lane (CAESIUM_TEST_ENGINE=kubernetes): the server is a pod, it
+//     binds POD_IP, and only :8080 is port-forwarded. NOT reachable.
+//
+// The skip lives HERE, in the one helper every direct-catalog test funnels
+// through, rather than at each of the thirteen call sites: hand-copied guards
+// are exactly how most of them silently drifted. A call site that only wants to
+// drop ONE assertion (and keep running the rest of its scenario) still checks
+// s.engineType itself and returns before it gets here — see
+// requireContractAckRecorded and TestWebhookReceiptPersistsAndCLIListsIt above.
+//
+// It deliberately does NOT skip when the address is merely unreachable on a lane
+// that should have it: a dqlite that stopped listening on the docker lanes is a
+// regression, and it must fail loudly instead of turning into a green skip.
+func (s *IntegrationTestSuite) requireDirectCatalogAccess() {
+	s.T().Helper()
+	if s.engineType == "kubernetes" {
+		s.T().Skipf(
+			"direct catalog access needs the server's network namespace: dqlite binds POD_IP under "+
+				"CAESIUM_TEST_ENGINE=%s and only :8080 is port-forwarded; covered on the docker + podman lanes",
+			s.engineType)
+	}
+}
+
 func (s *IntegrationTestSuite) openIntegrationCatalogDB() *sql.DB {
+	s.T().Helper()
+	s.requireDirectCatalogAccess()
+
 	nodeAddress := strings.TrimSpace(os.Getenv("CAESIUM_NODE_ADDRESS"))
 	if nodeAddress == "" {
 		nodeAddress = "127.0.0.1:9001"

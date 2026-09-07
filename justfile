@@ -1047,3 +1047,92 @@ k8s-hydrate:
         --network=host \
         -v {{ repo_dir }}/docs/examples-k8s:/examples:ro \
         {{ local_image_ref }}:{{ tag }} job apply --server http://host.docker.internal:{{ port }} --path /examples
+
+# Whether `clean-worktrees` actually deletes. Default is a dry run:
+#   just clean-worktrees              # list what would go
+#   just force=true clean-worktrees   # delete it
+force := "false"
+
+# Prune the agent worktrees under .claude/worktrees/.
+#
+# Parallel exec-plan waves leave one `git worktree` per sub-agent behind. By
+# 2026-09-07 there were 18 checkouts under .claude/worktrees/ — roughly 675k
+# lines of duplicated tree — long after every one of their branches had been
+# squash-merged into master. Nothing removed them, because `git worktree prune`
+# only drops entries whose directory is already gone.
+#
+# A checkout is removable when it has no uncommitted changes AND its work has
+# landed on master: reachable from master (a real merge or fast-forward), a tree
+# identical to master, or a merged pull request whose merged head is EXACTLY this
+# checkout's HEAD. That last check is what covers this repo's squash-merge
+# workflow, where a branch's commits never become master's ancestors; comparing
+# against the PR's merged head (not just "a merged PR exists for this branch") is
+# what stops a branch with newer, unmerged commits from being deleted.
+#
+# A checkout sitting exactly ON the master tip is never removable, whatever the
+# other tests say: that is a freshly-branched agent that has not committed yet,
+# and both "reachable from master" and "tree identical to master" match it.
+#
+# Everything else is reported and left alone — a live agent's lane is never
+# someone else's to delete. The recipe runs from any checkout: it always operates
+# on the MAIN worktree's .claude/worktrees/.
+clean-worktrees:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    self="$(git -C "{{ repo_dir }}" rev-parse --show-toplevel)"
+    main_wt="$(git -C "{{ repo_dir }}" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
+    cd "$main_wt" || exit 1
+    git worktree prune
+    have_gh=no
+    command -v gh >/dev/null 2>&1 && have_gh=yes
+    master_tip="$(git rev-parse master)"
+    removable=0
+    kept=0
+    for wt in .claude/worktrees/*/; do
+        [ -d "$wt" ] || continue
+        dir="$(cd "$wt" && pwd)"
+        if [ "$dir" = "$self" ]; then
+            echo "KEEP    $wt (this checkout)"
+            kept=$((kept + 1))
+            continue
+        fi
+        branch="$(git -C "$dir" symbolic-ref --quiet --short HEAD || echo '(detached)')"
+        if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+            echo "KEEP    $wt [$branch] uncommitted changes"
+            kept=$((kept + 1))
+            continue
+        fi
+        head="$(git -C "$dir" rev-parse HEAD)"
+        if [ "$head" = "$master_tip" ]; then
+            echo "KEEP    $wt [$branch] sitting on the master tip (nothing committed yet)"
+            kept=$((kept + 1))
+            continue
+        fi
+        landed=""
+        if git merge-base --is-ancestor "$head" master 2>/dev/null; then
+            landed="reachable from master"
+        elif git diff --quiet master "$head" 2>/dev/null; then
+            landed="tree identical to master"
+        elif [ "$have_gh" = yes ] && [ "$branch" != "(detached)" ]; then
+            merged_head="$(gh pr list --state merged --head "$branch" --limit 1 --json headRefOid --jq '.[].headRefOid' 2>/dev/null)"
+            if [ -n "$merged_head" ] && [ "$merged_head" = "$head" ]; then
+                landed="merged pull request at this exact HEAD"
+            fi
+        fi
+        if [ -n "$landed" ]; then
+            echo "REMOVE  $wt [$branch] ($landed)"
+            removable=$((removable + 1))
+            if [ "{{ force }}" = "true" ]; then
+                git worktree remove --force "$dir"
+            fi
+        else
+            echo "KEEP    $wt [$branch] not landed on master"
+            kept=$((kept + 1))
+        fi
+    done
+    echo
+    if [ "{{ force }}" != "true" ]; then
+        echo "dry run: $removable removable, $kept kept. Re-run with 'just force=true clean-worktrees' to delete."
+    else
+        echo "removed $removable worktree(s), kept $kept."
+    fi

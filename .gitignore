@@ -57,3 +57,8 @@ reagents/testdata/**/.terraform/
 reagents/testdata/**/terraform.tfstate
 reagents/testdata/**/terraform.tfstate.backup
 reagents/testdata/**/tf.plan
+
+# Playwright's run journal, written by `just ui-e2e*` into the working tree.
+# `ui/test-results/.last-run.json` was tracked for a while, so every e2e run
+# dirtied the tree; it is generated output and belongs to nobody's diff.
+ui/test-results/
