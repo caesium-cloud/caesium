@@ -1840,7 +1840,7 @@ binary to download (Ledger L14).
       per E1/E2/E4, and the gap is called out in the PR body rather than the
       README. (c) Codecov badge dropped outright (no `codecov` upload step
       in `ci.yml` at all, not just a stale branch) — reason given in the PR
-      body. (d) `alpine:3.20` → `alpine:3.23` in the Quick Start job.
+      body. (d) the stale `3.20` base-image tag → `alpine:3.23` in the Quick Start job.
       (e) `grep -niE 'graphql|/gql' README.md` was already empty (F1 had
       landed) — nothing to change. `just lint` and `just unit-test`
       (incl. `TestPinnedContainerImageVersionsAreConsistent`,
