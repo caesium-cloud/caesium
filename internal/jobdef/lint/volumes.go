@@ -3,6 +3,7 @@ package lint
 import (
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -529,7 +530,7 @@ func conflictingStepGroups(entries []writeEntry, ordering dagOrdering) [][]strin
 		}
 	}
 
-	for i := 0; i < len(entries); i++ {
+	for i := range entries {
 		for j := i + 1; j < len(entries); j++ {
 			if entries[i].step == entries[j].step {
 				continue
@@ -604,10 +605,8 @@ func isSegmentPrefix(prefix, full []string) bool {
 }
 
 func appendUniqueStep(steps []string, name string) []string {
-	for _, s := range steps {
-		if s == name {
-			return steps
-		}
+	if slices.Contains(steps, name) {
+		return steps
 	}
 	return append(steps, name)
 }

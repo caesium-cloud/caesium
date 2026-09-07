@@ -276,7 +276,7 @@ func TestDiff_OversizedBlobDegrades(t *testing.T) {
 	// persisted blob carries an oversized marker.
 	big := map[string]map[string]string{}
 	huge := map[string]string{}
-	for i := 0; i < 5000; i++ {
+	for i := range 5000 {
 		huge[padKey(i)] = padKey(i)
 	}
 	big["step"] = huge
@@ -298,7 +298,7 @@ func TestDiff_OversizedBlobDegrades(t *testing.T) {
 func TestDiff_VersionMismatchDegrades(t *testing.T) {
 	// Force a version mismatch by editing the decoded JSON's blobVersion.
 	base := blobFor(t, cache.HashInput{TaskName: "t", Image: "a"})
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(base, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

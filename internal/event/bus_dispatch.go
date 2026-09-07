@@ -170,7 +170,7 @@ func (s *Store) MarkBusDispatched(ctx context.Context, events ...Event) error {
 	return s.db.WithContext(ctx).
 		Model(&models.ExecutionEvent{}).
 		Where("sequence IN ? AND bus_dispatch_pending = ?", sequences, true).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"bus_dispatch_pending": false,
 			"bus_dispatched_at":    now,
 		}).Error

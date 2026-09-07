@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 
@@ -114,12 +115,7 @@ func containsScopedJob(allowed []string, jobAlias string) bool {
 	}
 
 	jobAlias = strings.TrimSpace(jobAlias)
-	for _, alias := range allowed {
-		if alias == jobAlias {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, jobAlias)
 }
 
 // JobAliasByID resolves the job alias for a job identifier.

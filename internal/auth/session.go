@@ -253,10 +253,7 @@ func (s *SessionStore) flushSeen(ctx context.Context) {
 	}
 	now := s.nowUTC()
 	for start := 0; start < len(ids); start += sessionFlushBatchSize {
-		end := start + sessionFlushBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
+		end := min(start+sessionFlushBatchSize, len(ids))
 		if err := s.db.WithContext(ctx).Model(&models.Session{}).Where("id IN ?", ids[start:end]).Updates(map[string]any{
 			"last_seen_at":    now,
 			"idle_expires_at": now.Add(s.idleTTL),

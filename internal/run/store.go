@@ -655,12 +655,12 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func decodeCacheConfig(raw []byte) interface{} {
+func decodeCacheConfig(raw []byte) any {
 	if len(raw) == 0 {
 		return nil
 	}
 
-	var decoded interface{}
+	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil
 	}
@@ -1482,7 +1482,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	}
 
 	envCache := cache.ConfigFromEnv()
-	jobCacheConfig := interface{}(nil)
+	jobCacheConfig := any(nil)
 	if jobFound {
 		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
 	}
@@ -1534,10 +1534,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					}
 				}
 
-				maxAttempts := task.Retries + 1
-				if maxAttempts < 1 {
-					maxAttempts = 1
-				}
+				maxAttempts := max(task.Retries+1, 1)
 
 				schemaValidation := ""
 				if jobFound && len(task.OutputSchema) > 0 {
@@ -1955,7 +1952,7 @@ func (s *Store) StartTask(runID, taskRef uuid.UUID, runtimeID string) error {
 			}
 			result := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":                 string(TaskStatusRunning),
 					"runtime_id":             runtimeID,
 					"started_at":             now,
@@ -2047,7 +2044,7 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 				return capErr
 			}
 			where := "id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
-			whereArgs := []interface{}{row.ID, string(TaskStatusPending), ownerGeneration, now}
+			whereArgs := []any{row.ID, string(TaskStatusPending), ownerGeneration, now}
 			if trustOwnerReadiness {
 				where = "id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
 			}
@@ -2055,7 +2052,7 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			whereArgs = append(whereArgs, capArgs...)
 			result := tx.Model(&models.TaskRun{}).
 				Where(where, whereArgs...).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":                 string(TaskStatusRunning),
 					"claimed_by":             workerNode,
 					"claim_expires_at":       leaseExpiry,
@@ -2170,7 +2167,7 @@ func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, owne
 		result := s.db.Model(&models.TaskRun{}).
 			Where("id = ? AND claimed_by = ? AND status = ? AND (owner_generation = ? OR owner_generation = 0)",
 				row.ID, claimedBy, string(TaskStatusRunning), ownerGeneration).
-			Updates(map[string]interface{}{
+			Updates(map[string]any{
 				"status":           string(TaskStatusPending),
 				"claimed_by":       "",
 				"claim_expires_at": nil,
@@ -2240,7 +2237,7 @@ func (s *Store) RateLimitTask(ctx context.Context, runID, taskRef uuid.UUID, ret
 		}
 		result := s.db.WithContext(ctx).Model(&models.TaskRun{}).
 			Where("id = ? AND status IN ?", row.ID, []string{string(TaskStatusPending), string(TaskStatusRunning)}).
-			Updates(map[string]interface{}{
+			Updates(map[string]any{
 				"status":                 string(TaskStatusPending),
 				"claimed_by":             "",
 				"claim_expires_at":       nil,
@@ -2314,7 +2311,7 @@ func (s *Store) StartTaskClaimed(runID, taskRef uuid.UUID, runtimeID, claimedBy 
 			}
 			result := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning)).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"runtime_id":             runtimeID,
 					"started_at":             now,
 					"rate_limit_retry_after": nil,
@@ -2504,7 +2501,7 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
 
-			updates := map[string]interface{}{
+			updates := map[string]any{
 				"status":                  string(TaskStatusCached),
 				"completed_at":            now,
 				"result":                  result,
@@ -2737,7 +2734,7 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskRef uuid.UUID, snapshot *TaskLogS
 
 	return s.db.Model(&models.TaskRun{}).
 		Where("id = ?", row.ID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"log_text":      snapshot.Text,
 			"log_truncated": snapshot.Truncated,
 		}).Error
@@ -3145,7 +3142,7 @@ func (s *Store) markInstanceSkippedFromTx(tx *gorm.DB, runID uuid.UUID, row *mod
 	if len(fromStatuses) == 0 {
 		fromStatuses = []string{string(TaskStatusPending)}
 	}
-	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, "status IN ?", []interface{}{fromStatuses}, nil, pendingEvents, counts)
+	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, "status IN ?", []any{fromStatuses}, nil, pendingEvents, counts)
 }
 
 // markInstanceCancelledBeforeStartTx resolves one instance skipped only while it
@@ -3171,7 +3168,7 @@ func (s *Store) markInstanceSkippedFromTx(tx *gorm.DB, runID uuid.UUID, row *mod
 //     leaving it would report a duration for work that never happened.
 func (s *Store) markInstanceCancelledBeforeStartTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
 	predSQL, predArgs := cancellableBeforeStartPredicate()
-	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, predSQL, predArgs, map[string]interface{}{
+	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, predSQL, predArgs, map[string]any{
 		"claimed_by":       "",
 		"claim_expires_at": nil,
 		"started_at":       nil,
@@ -3187,8 +3184,8 @@ func (s *Store) markInstanceSkippedWhereTx(
 	row *models.TaskRun,
 	reason string,
 	predSQL string,
-	predArgs []interface{},
-	extraUpdates map[string]interface{},
+	predArgs []any,
+	extraUpdates map[string]any,
 	pendingEvents *[]event.Event,
 	counts *dbWriteCounts,
 ) (bool, error) {
@@ -3199,7 +3196,7 @@ func (s *Store) markInstanceSkippedWhereTx(
 	if err != nil {
 		return false, err
 	}
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"status":                  string(TaskStatusSkipped),
 		"completed_at":            time.Now().UTC(),
 		"error":                   reason,
@@ -3210,11 +3207,9 @@ func (s *Store) markInstanceSkippedWhereTx(
 		"cache_expires_at":        nil,
 		"partition_retry_pending": false,
 	}
-	for k, v := range extraUpdates {
-		updates[k] = v
-	}
+	maps.Copy(updates, extraUpdates)
 	result := tx.Model(&models.TaskRun{}).
-		Where("id = ? AND "+predSQL, append([]interface{}{row.ID}, predArgs...)...).
+		Where("id = ? AND "+predSQL, append([]any{row.ID}, predArgs...)...).
 		Updates(updates)
 	if result.Error != nil {
 		return false, result.Error
@@ -3364,7 +3359,7 @@ func predecessorTaskRunsTx(tx *gorm.DB, runID uuid.UUID, refs []predecessorRef, 
 	}
 	q := tx.Where("job_run_id = ? AND task_id IN ?", runID, ids).Order("partition_index ASC")
 	if len(columns) > 0 {
-		cols := make([]interface{}, 0, len(columns)-1)
+		cols := make([]any, 0, len(columns)-1)
 		for _, c := range columns[1:] {
 			cols = append(cols, c)
 		}
@@ -3585,7 +3580,7 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
 
-			updates := map[string]interface{}{
+			updates := map[string]any{
 				"status":                  string(status),
 				"completed_at":            now,
 				"result":                  result,
@@ -3935,7 +3930,7 @@ func (s *Store) CompleteTaskOwner(
 				return ErrTaskClaimMismatch
 			}
 
-			updates := map[string]interface{}{
+			updates := map[string]any{
 				"status":                  string(status),
 				"completed_at":            now,
 				"result":                  result,
@@ -4023,7 +4018,7 @@ func (s *Store) CompleteTaskOwner(
 						}
 						seq = allocated
 					}
-					skipUpdates := map[string]interface{}{
+					skipUpdates := map[string]any{
 						"status":                  string(TaskStatusSkipped),
 						"completed_at":            now,
 						"error":                   sk.Reason,
@@ -4322,7 +4317,7 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
 			resultUpdate := updateQuery.
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":                  string(TaskStatusFailed),
 					"completed_at":            now,
 					"error":                   errMsg,
@@ -4561,7 +4556,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// second call a no-op so run_completed/run_failed events fire once.
 			res := tx.Model(&models.JobRun{}).
 				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed), string(StatusCancelled)}).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":       string(status),
 					"completed_at": now,
 					"error":        errMsg,
@@ -4749,7 +4744,7 @@ func (s *Store) cancelRunTx(tx *gorm.DB, runID uuid.UUID, reason string) (*cance
 	}
 	res := tx.Model(&models.JobRun{}).
 		Where("id = ? AND status = ?", runID, string(StatusRunning)).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":       string(StatusCancelled),
 			"completed_at": now,
 			"error":        reason,
@@ -4763,7 +4758,7 @@ func (s *Store) cancelRunTx(tx *gorm.DB, runID uuid.UUID, reason string) (*cance
 
 	taskRes := tx.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":                  string(TaskStatusCancelled),
 			"completed_at":            now,
 			"error":                   reason,
@@ -4860,7 +4855,7 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status": string(TaskStatusPending),
 			// Clear the claim too, so a new owner taking over a run can re-claim
 			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
@@ -6002,7 +5997,7 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 // returns ErrMaxConcurrentRunsReached and leaves the run terminal.
 func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
 	unconditional := func() error {
-		return tx.Model(jobRun).Updates(map[string]interface{}{
+		return tx.Model(jobRun).Updates(map[string]any{
 			"status":       string(StatusRunning),
 			"completed_at": nil,
 			"error":        "",
@@ -6101,8 +6096,8 @@ func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
 //     that closed on the previous attempt.
 //
 // A retried instance must be indistinguishable from one that has never run.
-func retryResetColumns() map[string]interface{} {
-	return map[string]interface{}{
+func retryResetColumns() map[string]any {
+	return map[string]any{
 		// Scheduling.
 		"status":           string(TaskStatusPending),
 		"completed_at":     nil,
@@ -6591,7 +6586,7 @@ func (s *Store) AbandonPartitionRetries(runID uuid.UUID, taskRunIDs []uuid.UUID,
 			result := tx.Model(&models.TaskRun{}).
 				Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
 					runID, taskRunIDs, string(TaskStatusPending), true).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":                  string(TaskStatusSkipped),
 					"error":                   reason,
 					"completed_at":            now,

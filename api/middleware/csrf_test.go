@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,7 +13,7 @@ import (
 
 func newMiddlewareContext(method, target string, headers map[string]string) *echo.Context {
 	e := echo.New()
-	req := httptest.NewRequest(method, target, nil)
+	req := httptest.NewRequestWithContext(context.Background(), method, target, nil)
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}

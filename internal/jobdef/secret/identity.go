@@ -57,7 +57,7 @@ func ParseIdentityKeyring(currentKeyID, raw string) (*IdentityKeyring, error) {
 		return nil, nil
 	}
 	keys := map[string][]byte{}
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -81,15 +81,15 @@ func ParseIdentityKeyring(currentKeyID, raw string) (*IdentityKeyring, error) {
 }
 
 func decodeIdentityKey(value string) ([]byte, error) {
-	if strings.HasPrefix(value, "base64:") {
-		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, "base64:"))
+	if after, ok := strings.CutPrefix(value, "base64:"); ok {
+		decoded, err := base64.StdEncoding.DecodeString(after)
 		if err != nil {
 			return nil, err
 		}
 		return decoded, nil
 	}
-	if strings.HasPrefix(value, "hex:") {
-		decoded, err := hex.DecodeString(strings.TrimPrefix(value, "hex:"))
+	if after, ok := strings.CutPrefix(value, "hex:"); ok {
+		decoded, err := hex.DecodeString(after)
 		if err != nil {
 			return nil, err
 		}

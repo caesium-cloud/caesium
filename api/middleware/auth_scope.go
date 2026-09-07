@@ -329,7 +329,7 @@ func parseApplyAliasesForScope(c *echo.Context) ([]string, bool, error) {
 	return aliases, payload.Prune, nil
 }
 
-func decodeScopedBody(c *echo.Context, target interface{}) error {
+func decodeScopedBody(c *echo.Context, target any) error {
 	bodyBytes, err := readAndRestoreBody(c)
 	if err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -75,7 +76,7 @@ func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definit
 		nodes = append(nodes, triggerChainNode{
 			alias:         alias,
 			triggerType:   strings.TrimSpace(defs[idx].Trigger.Type),
-			configuration: cloneAnyMap(defs[idx].Trigger.Configuration),
+			configuration: cloneMap(defs[idx].Trigger.Configuration),
 		})
 	}
 
@@ -331,10 +332,8 @@ func addTriggerChainEdge(graph map[string][]string, from, to string) {
 	if _, ok := graph[from]; !ok {
 		graph[from] = nil
 	}
-	for _, existing := range graph[from] {
-		if existing == to {
-			return
-		}
+	if slices.Contains(graph[from], to) {
+		return
 	}
 	graph[from] = append(graph[from], to)
 }

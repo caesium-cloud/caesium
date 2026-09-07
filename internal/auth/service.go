@@ -445,7 +445,7 @@ func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, n
 // currently supported for the bootstrap path.
 func (s *Service) withBootstrapRetry(fn func() (int64, error)) (int64, error) {
 	var lastErr error
-	for attempt := 0; attempt < bootstrapRetryAttempts; attempt++ {
+	for attempt := range bootstrapRetryAttempts {
 		rowsAffected, err := fn()
 		if err == nil {
 			return rowsAffected, nil
@@ -464,7 +464,7 @@ func (s *Service) withBootstrapRetry(fn func() (int64, error)) (int64, error) {
 // withReadRetry retries read-only operations that fail due to transient DB lock errors.
 func (s *Service) withReadRetry(fn func() error) error {
 	var lastErr error
-	for attempt := 0; attempt < bootstrapRetryAttempts; attempt++ {
+	for attempt := range bootstrapRetryAttempts {
 		err := fn()
 		if err == nil {
 			return nil

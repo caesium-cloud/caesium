@@ -28,29 +28,29 @@ func (f fakeImageAPIClient) ImageInspect(_ context.Context, _ string, _ ...clien
 }
 
 func TestResolver_CachesWithinTTL(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	fn := func(_ context.Context, _ string) (string, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return "sha256:abc", nil
 	}
 	r := NewResolver(WithEngineDigestFunc(models.AtomEngineDocker, fn))
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 		require.NoError(t, err)
 		assert.Equal(t, "sha256:abc", got)
 	}
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "resolution should be cached within the TTL")
+	assert.Equal(t, int32(1), calls.Load(), "resolution should be cached within the TTL")
 }
 
 func TestResolver_ZeroTTLAlwaysReresolves(t *testing.T) {
 	// The core fix for the moved-tag integration failure: a ttl of 0 must skip
 	// the positive cache so each check re-resolves and a moved tag is detected
 	// immediately.
-	var calls int32
+	var calls atomic.Int32
 	digests := []string{"sha256:first", "sha256:second", "sha256:third"}
 	fn := func(_ context.Context, _ string) (string, error) {
-		n := atomic.AddInt32(&calls, 1)
+		n := calls.Add(1)
 		return digests[n-1], nil
 	}
 	r := NewResolver(WithEngineDigestFunc(models.AtomEngineDocker, fn))
@@ -60,14 +60,14 @@ func TestResolver_ZeroTTLAlwaysReresolves(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, got, "call %d must re-resolve, not serve a cached digest", i+1)
 	}
-	assert.Equal(t, int32(3), atomic.LoadInt32(&calls), "ttl=0 must re-resolve on every call")
+	assert.Equal(t, int32(3), calls.Load(), "ttl=0 must re-resolve on every call")
 }
 
 func TestResolver_ReresolvesAfterTTL(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	digests := []string{"sha256:first", "sha256:second"}
 	fn := func(_ context.Context, _ string) (string, error) {
-		n := atomic.AddInt32(&calls, 1)
+		n := calls.Add(1)
 		return digests[n-1], nil
 	}
 
@@ -87,7 +87,7 @@ func TestResolver_ReresolvesAfterTTL(t *testing.T) {
 	got, err = r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 	require.NoError(t, err)
 	assert.Equal(t, "sha256:second", got)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
+	assert.Equal(t, int32(2), calls.Load())
 }
 
 func TestResolver_AlreadyPinnedReferenceSkipsResolution(t *testing.T) {
@@ -114,24 +114,24 @@ func TestResolver_BackendErrorFallsBack(t *testing.T) {
 }
 
 func TestResolver_NegativeCachingAvoidsReprobe(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	fn := func(_ context.Context, _ string) (string, error) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		return "", errors.New("registry unreachable")
 	}
 	r := NewResolver(WithEngineDigestFunc(models.AtomEngineDocker, fn))
 
 	// Several checks in quick succession must hit the backend only once: the
 	// failure is negatively cached so an unreachable registry is not hammered.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 		assert.ErrorIs(t, err, ErrDigestUnavailable)
 	}
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "a failed resolution must be negatively cached, not re-probed every check")
+	assert.Equal(t, int32(1), calls.Load(), "a failed resolution must be negatively cached, not re-probed every check")
 }
 
 func TestResolver_NegativeCacheExpires(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	results := []struct {
 		digest string
 		err    error
@@ -140,7 +140,7 @@ func TestResolver_NegativeCacheExpires(t *testing.T) {
 		{"sha256:recovered", nil},
 	}
 	fn := func(_ context.Context, _ string) (string, error) {
-		n := atomic.AddInt32(&calls, 1)
+		n := calls.Add(1)
 		res := results[n-1]
 		return res.digest, res.err
 	}
@@ -160,14 +160,14 @@ func TestResolver_NegativeCacheExpires(t *testing.T) {
 	now = now.Add(30 * time.Second)
 	_, err = r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", posTTL)
 	assert.ErrorIs(t, err, ErrDigestUnavailable)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "negative entry must still be valid at 30s")
+	assert.Equal(t, int32(1), calls.Load(), "negative entry must still be valid at 30s")
 
 	// Past the 1m negative cap: re-resolve, and a recovered registry now hits.
 	now = now.Add(2 * time.Minute)
 	got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", posTTL)
 	require.NoError(t, err)
 	assert.Equal(t, "sha256:recovered", got)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
+	assert.Equal(t, int32(2), calls.Load())
 }
 
 func TestNegativeTTL(t *testing.T) {

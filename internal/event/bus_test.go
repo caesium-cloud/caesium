@@ -34,8 +34,7 @@ func noRecv(t *testing.T, ch <-chan Event) {
 
 func TestPublishSubscribeBasic(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -61,8 +60,7 @@ func TestPublishSubscribeBasic(t *testing.T) {
 
 func TestFilterByType(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{Types: []Type{TypeRunStarted}})
 	require.NoError(t, err)
@@ -78,8 +76,7 @@ func TestFilterByType(t *testing.T) {
 
 func TestFilterByJobID(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	targetJobID := uuid.New()
 	otherJobID := uuid.New()
@@ -98,8 +95,7 @@ func TestFilterByJobID(t *testing.T) {
 
 func TestFilterByRunID(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	targetRunID := uuid.New()
 	otherRunID := uuid.New()
@@ -118,8 +114,7 @@ func TestFilterByRunID(t *testing.T) {
 
 func TestQuarantinedEventsExcludedByDefault(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	defaultCh, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -137,8 +132,7 @@ func TestQuarantinedEventsExcludedByDefault(t *testing.T) {
 
 func TestFilterCombination(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	targetJobID := uuid.New()
 
@@ -164,8 +158,7 @@ func TestFilterCombination(t *testing.T) {
 
 func TestEmptyFilterMatchesAll(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -189,8 +182,7 @@ func TestEmptyFilterMatchesAll(t *testing.T) {
 
 func TestMultipleSubscribers(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	jobID := uuid.New()
 
@@ -215,15 +207,14 @@ func TestMultipleSubscribers(t *testing.T) {
 
 func TestEventDropWhenBufferFull(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
 
 	// Publish more events than the subscriber buffer can hold without reading;
 	// this should not deadlock or panic.
-	for i := 0; i < defaultSubscriberBuffer+1; i++ {
+	for range defaultSubscriberBuffer + 1 {
 		b.Publish(Event{Type: TypeLogChunk, Timestamp: time.Now()})
 	}
 
@@ -260,8 +251,7 @@ func TestSubscribeAfterPublish(t *testing.T) {
 
 	b.Publish(Event{Type: TypeJobCreated, Timestamp: time.Now()})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -271,8 +261,7 @@ func TestSubscribeAfterPublish(t *testing.T) {
 
 func TestConcurrentPublishSafety(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -282,10 +271,10 @@ func TestConcurrentPublishSafety(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
-			for j := 0; j < eventsPerGoroutine; j++ {
+			for range eventsPerGoroutine {
 				b.Publish(Event{Type: TypeLogChunk, Timestamp: time.Now()})
 			}
 		}()
@@ -323,9 +312,7 @@ func TestConcurrentSubscribeUnsubscribe(t *testing.T) {
 	publishCtx, publishCancel := context.WithCancel(context.Background())
 	defer publishCancel()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-publishCtx.Done():
@@ -334,12 +321,12 @@ func TestConcurrentSubscribeUnsubscribe(t *testing.T) {
 				b.Publish(Event{Type: TypeLogChunk, Timestamp: time.Now()})
 			}
 		}
-	}()
+	})
 
 	// Goroutines subscribing and unsubscribing
 	var subWg sync.WaitGroup
 	subWg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer subWg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
@@ -349,7 +336,7 @@ func TestConcurrentSubscribeUnsubscribe(t *testing.T) {
 				return
 			}
 			// Read a few events
-			for j := 0; j < 5; j++ {
+			for range 5 {
 				select {
 				case <-ch:
 				case <-time.After(100 * time.Millisecond):
@@ -368,8 +355,7 @@ func TestConcurrentSubscribeUnsubscribe(t *testing.T) {
 
 func TestEventFieldsPreserved(t *testing.T) {
 	b := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)

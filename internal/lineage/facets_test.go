@@ -20,7 +20,7 @@ func TestCaesiumExecutionFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestCaesiumDAGFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestCaesiumProvenanceFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

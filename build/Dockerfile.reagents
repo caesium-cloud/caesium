@@ -61,7 +61,7 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # Stage: build — compiles every role binary from the nested reagents module.
 # ---------------------------------------------------------------------------
-FROM golang:1.25.6-alpine3.23 AS build
+FROM golang:1.27.1-alpine3.23 AS build
 
 RUN apk add --no-cache ca-certificates git
 COPY --from=tf-binary /usr/local/bin/terraform /usr/local/bin/terraform
@@ -109,7 +109,7 @@ ENV GOOS= \
 # stage itself keeps CGO on for `go test -race`).
 RUN apk add --no-cache gcc musl-dev && \
     CGO_ENABLED=0 GOBIN="$(go env GOPATH)/bin" \
-      go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.4.0
+      go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 WORKDIR /bld/caesium/reagents
 
 # ---------------------------------------------------------------------------

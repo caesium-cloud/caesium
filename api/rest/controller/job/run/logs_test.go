@@ -39,7 +39,7 @@ func stubInstances(t *testing.T, instances []*runstorage.TaskRun) *bool {
 func fanOutInstances(n int) []*runstorage.TaskRun {
 	values := []string{"a", "b", "c", "d"}
 	out := make([]*runstorage.TaskRun, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out = append(out, &runstorage.TaskRun{
 			ID:             uuid.New(),
 			Status:         runstorage.TaskStatusSucceeded,
@@ -223,7 +223,7 @@ func (r *lazyErrorReader) Close() error             { r.closed = true; return ni
 func newLogContext(t *testing.T) (*echo.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	return e.NewContext(req, rec), rec
 }

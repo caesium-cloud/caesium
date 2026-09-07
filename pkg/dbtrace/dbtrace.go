@@ -65,7 +65,7 @@ func Recent(limit int) []Statement {
 		start += len(recent.buf)
 	}
 	start += recent.count - limit
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		idx := (start + i) % len(recent.buf)
 		out = append(out, recent.buf[idx])
 	}

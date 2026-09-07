@@ -85,7 +85,6 @@ func TestValidateKeyRevoked(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrKeyRevoked)
 }
 
-
 func TestValidateKeyExpired(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	defer testutil.CloseDB(db)
@@ -372,15 +371,13 @@ func TestBootstrapConcurrentCreatesSingleAdminKey(t *testing.T) {
 	errs := make(chan error, workers)
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
 			plaintext, err := svc.Bootstrap()
 			errs <- err
 			results <- plaintext
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)

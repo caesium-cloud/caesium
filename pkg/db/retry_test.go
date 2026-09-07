@@ -17,12 +17,12 @@ import (
 // It embeds a real *sql.DB so BeginTx returns a genuine *sql.Tx.
 type countingConnPool struct {
 	db          *sql.DB
-	execAttempt int32
+	execAttempt atomic.Int32
 	failBefore  int32
 	failErr     error
 
 	// BeginTx fails its first beginFailBefore calls with beginErr, then succeeds.
-	beginAttempt    int32
+	beginAttempt    atomic.Int32
 	beginFailBefore int32
 	beginErr        error
 }
@@ -31,26 +31,26 @@ func (c *countingConnPool) PrepareContext(ctx context.Context, query string) (*s
 	return c.db.PrepareContext(ctx, query)
 }
 
-func (c *countingConnPool) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	if n := atomic.AddInt32(&c.execAttempt, 1); n <= c.failBefore {
+func (c *countingConnPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if n := c.execAttempt.Add(1); n <= c.failBefore {
 		return nil, c.failErr
 	}
 	return c.db.ExecContext(ctx, query, args...)
 }
 
-func (c *countingConnPool) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	if n := atomic.AddInt32(&c.execAttempt, 1); n <= c.failBefore {
+func (c *countingConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if n := c.execAttempt.Add(1); n <= c.failBefore {
 		return nil, c.failErr
 	}
 	return c.db.QueryContext(ctx, query, args...)
 }
 
-func (c *countingConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+func (c *countingConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return c.db.QueryRowContext(ctx, query, args...)
 }
 
 func (c *countingConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	if n := atomic.AddInt32(&c.beginAttempt, 1); n <= c.beginFailBefore {
+	if n := c.beginAttempt.Add(1); n <= c.beginFailBefore {
 		return nil, c.beginErr
 	}
 	return c.db.BeginTx(ctx, opts)
@@ -76,7 +76,7 @@ func TestRetryConnPoolRetriesAutocommitContention(t *testing.T) {
 
 	_, err := rp.ExecContext(context.Background(), "SELECT 1")
 	require.NoError(t, err)
-	require.Equal(t, int32(3), atomic.LoadInt32(&pool.execAttempt),
+	require.Equal(t, int32(3), pool.execAttempt.Load(),
 		"expected 2 contention failures to be retried, succeeding on attempt 3")
 }
 
@@ -88,7 +88,7 @@ func TestRetryConnPoolDoesNotRetryNonContention(t *testing.T) {
 
 	_, err := rp.QueryContext(context.Background(), "SELECT 1")
 	require.Error(t, err)
-	require.Equal(t, int32(1), atomic.LoadInt32(&pool.execAttempt),
+	require.Equal(t, int32(1), pool.execAttempt.Load(),
 		"non-contention errors must not be retried")
 }
 
@@ -107,7 +107,7 @@ func TestRetryConnPoolBeginTxReturnsRawTx(t *testing.T) {
 
 	// The returned value is a *sql.Tx, which does not carry the retry wrapper.
 	require.IsType(t, &sql.Tx{}, tx)
-	_, isRetry := interface{}(tx).(*retryConnPool)
+	_, isRetry := any(tx).(*retryConnPool)
 	require.False(t, isRetry, "BeginTx must not return a retry-wrapped pool")
 }
 
@@ -128,9 +128,9 @@ func TestRetryConnPoolBeginTxRetriesPoisonedConnection(t *testing.T) {
 	t.Cleanup(func() { _ = tx.Rollback() })
 
 	require.IsType(t, &sql.Tx{}, tx, "BeginTx must still return a raw *sql.Tx")
-	require.Equal(t, int32(3), atomic.LoadInt32(&pool.beginAttempt),
+	require.Equal(t, int32(3), pool.beginAttempt.Load(),
 		"BEGIN should be retried past 2 poisoned failures and succeed on attempt 3")
-	require.Equal(t, int32(2), atomic.LoadInt32(&pool.execAttempt),
+	require.Equal(t, int32(2), pool.execAttempt.Load(),
 		"each of the 2 poisoned BEGINs should trigger exactly one best-effort ROLLBACK clear")
 }
 
@@ -144,9 +144,9 @@ func TestRetryConnPoolBeginTxDoesNotRetryNonContention(t *testing.T) {
 
 	_, err := rp.BeginTx(context.Background(), nil)
 	require.Error(t, err)
-	require.Equal(t, int32(1), atomic.LoadInt32(&pool.beginAttempt),
+	require.Equal(t, int32(1), pool.beginAttempt.Load(),
 		"a non-contention BEGIN error must not be retried")
-	require.Equal(t, int32(0), atomic.LoadInt32(&pool.execAttempt),
+	require.Equal(t, int32(0), pool.execAttempt.Load(),
 		"no ROLLBACK clear on a non-poisoned error")
 }
 
@@ -189,7 +189,7 @@ func TestInTransactionStatementNotIndividuallyRetried(t *testing.T) {
 	_, autocommitWrapped := gdb.ConnPool.(*retryConnPool)
 	require.True(t, autocommitWrapped)
 
-	var connPoolInsideTx interface{}
+	var connPoolInsideTx any
 	require.NoError(t, gdb.Transaction(func(tx *gorm.DB) error {
 		connPoolInsideTx = tx.Statement.ConnPool
 		return nil
@@ -267,20 +267,20 @@ func TestRWSplitRoutesReadsAndWrites(t *testing.T) {
 
 	_, err := sp.ExecContext(context.Background(), "CREATE TABLE IF NOT EXISTS t (id INTEGER)")
 	require.NoError(t, err)
-	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.execAttempt), "write must hit the write pool")
-	require.Equal(t, int32(0), atomic.LoadInt32(&readPool.execAttempt), "write must not hit the read pool")
+	require.Equal(t, int32(1), writePool.execAttempt.Load(), "write must hit the write pool")
+	require.Equal(t, int32(0), readPool.execAttempt.Load(), "write must not hit the read pool")
 
 	rows, err := sp.QueryContext(context.Background(), "SELECT 1")
 	require.NoError(t, err)
 	require.NoError(t, rows.Close())
-	require.Equal(t, int32(1), atomic.LoadInt32(&readPool.execAttempt), "read must hit the read pool")
-	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.execAttempt), "read must not touch the write pool")
+	require.Equal(t, int32(1), readPool.execAttempt.Load(), "read must hit the read pool")
+	require.Equal(t, int32(1), writePool.execAttempt.Load(), "read must not touch the write pool")
 
 	tx, err := sp.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
 	require.NoError(t, tx.Rollback())
-	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.beginAttempt), "transactions must begin on the write pool")
-	require.Equal(t, int32(0), atomic.LoadInt32(&readPool.beginAttempt), "transactions must not begin on the read pool")
+	require.Equal(t, int32(1), writePool.beginAttempt.Load(), "transactions must begin on the write pool")
+	require.Equal(t, int32(0), readPool.beginAttempt.Load(), "transactions must not begin on the read pool")
 }
 
 // TestRWSplitCloseClosesBothPools proves Close releases both pools — the read

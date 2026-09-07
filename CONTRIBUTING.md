@@ -19,7 +19,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 | Tool | Purpose | Install |
 |---|---|---|
-| Go ≥ 1.25 | Backend development | [go.dev](https://go.dev/dl/) |
+| Go ≥ 1.27 | Backend development | [go.dev](https://go.dev/dl/) |
 | Node.js ≥ 20 | UI development | [nodejs.org](https://nodejs.org/) |
 | Docker | Building images, running integration tests | [docs.docker.com](https://docs.docker.com/get-docker/) |
 | just | Task runner for all build/test commands | `brew install just` or [casey/just](https://github.com/casey/just) |

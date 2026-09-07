@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -269,9 +270,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// Build merged env for hashing, excluding volatile per-run vars.
 		// atomSpec.Env is already ${CAESIUM_PARAM_*}-interpolated above.
 		mergedEnv := make(map[string]string, len(atomSpec.Env))
-		for k, v := range atomSpec.Env {
-			mergedEnv[k] = v
-		}
+		maps.Copy(mergedEnv, atomSpec.Env)
 		outputEnv, outputEnvErr := pkgtask.BuildOutputEnv(predOutputs)
 		if outputEnvErr != nil {
 			log.Error("failed to build predecessor output env for cache identity", "task_id", taskRun.TaskID, "error", outputEnvErr)
@@ -281,9 +280,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return
 		}
 		if len(outputEnv) > 0 {
-			for k, v := range outputEnv {
-				mergedEnv[k] = v
-			}
+			maps.Copy(mergedEnv, outputEnv)
 		}
 
 		// When digest pinning is on, resolve the image tag to its content
@@ -441,14 +438,8 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 	}
 
-	maxAttempts := taskRun.MaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-	currentAttempt := taskRun.Attempt
-	if currentAttempt < 1 {
-		currentAttempt = 1
-	}
+	maxAttempts := max(taskRun.MaxAttempts, 1)
+	currentAttempt := max(taskRun.Attempt, 1)
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
@@ -744,18 +735,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 || taskRun.PartitionValue != "" {
 		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv)+2)
-		for k, v := range spec.Env {
-			merged[k] = v
-		}
-		for k, v := range paramEnv {
-			merged[k] = v
-		}
-		for k, v := range outputEnv {
-			merged[k] = v
-		}
-		for k, v := range partitionEnv(taskRun, fanOut) {
-			merged[k] = v
-		}
+		maps.Copy(merged, spec.Env)
+		maps.Copy(merged, paramEnv)
+		maps.Copy(merged, outputEnv)
+		maps.Copy(merged, partitionEnv(taskRun, fanOut))
 		spec.Env = merged
 	}
 
@@ -830,8 +813,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
 		if parseErr != nil {
-			var pe *pkgtask.PartitionError
-			if errors.As(parseErr, &pe) {
+			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 				return nil, parseErr
 			}
 			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)

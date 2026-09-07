@@ -1,6 +1,8 @@
 package run
 
 import (
+	"slices"
+
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 )
@@ -89,12 +91,7 @@ func SatisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
 		return true
 
 	case jobdefschema.TriggerRuleOneSuccess:
-		for _, s := range predStatuses {
-			if IsTerminalSuccess(s) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(predStatuses, IsTerminalSuccess)
 
 	default:
 		// Unknown rule: default to all_success behaviour.

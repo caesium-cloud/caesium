@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"slices"
 	"time"
 
 	whysvc "github.com/caesium-cloud/caesium/api/rest/service/why"
@@ -126,10 +127,5 @@ func (s *Service) incidentJobAlias(jobID uuid.UUID) (string, error) {
 // "unrestricted", so a scoped agent token with an empty frozen list can read no
 // cross-job context (only the incident's own job, handled by the caller).
 func jobInAllowlist(jobAlias string, allowed []string) bool {
-	for _, a := range allowed {
-		if a == jobAlias {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, jobAlias)
 }

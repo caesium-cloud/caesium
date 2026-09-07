@@ -72,33 +72,33 @@ func formatEmailSubject(p Payload) string {
 
 func formatEmailBody(p Payload) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Event: %s\n", friendlyEventName(p.EventType)))
+	fmt.Fprintf(&b, "Event: %s\n", friendlyEventName(p.EventType))
 	if p.JobAlias != "" {
-		b.WriteString(fmt.Sprintf("Job: %s\n", p.JobAlias))
+		fmt.Fprintf(&b, "Job: %s\n", p.JobAlias)
 	}
-	b.WriteString(fmt.Sprintf("Job ID: %s\n", p.JobID))
+	fmt.Fprintf(&b, "Job ID: %s\n", p.JobID)
 	if p.RunID.String() != "00000000-0000-0000-0000-000000000000" {
-		b.WriteString(fmt.Sprintf("Run ID: %s\n", p.RunID))
+		fmt.Fprintf(&b, "Run ID: %s\n", p.RunID)
 	}
 	if p.TaskID.String() != "00000000-0000-0000-0000-000000000000" {
-		b.WriteString(fmt.Sprintf("Task ID: %s\n", p.TaskID))
+		fmt.Fprintf(&b, "Task ID: %s\n", p.TaskID)
 	}
-	b.WriteString(fmt.Sprintf("Timestamp: %s\n", p.Timestamp.Format(time.RFC3339)))
+	fmt.Fprintf(&b, "Timestamp: %s\n", p.Timestamp.Format(time.RFC3339))
 	if p.Error != "" {
-		b.WriteString(fmt.Sprintf("\nError:\n%s\n", p.Error))
+		fmt.Fprintf(&b, "\nError:\n%s\n", p.Error)
 	}
 	return b.String()
 }
 
 func buildMIMEMessage(from string, to []string, subject, body string) []byte {
 	var msg strings.Builder
-	msg.WriteString(fmt.Sprintf("From: %s\r\n", sanitizeHeader(from)))
+	fmt.Fprintf(&msg, "From: %s\r\n", sanitizeHeader(from))
 	sanitizedTo := make([]string, len(to))
 	for i, addr := range to {
 		sanitizedTo[i] = sanitizeHeader(addr)
 	}
-	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(sanitizedTo, ", ")))
-	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject)))
+	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(sanitizedTo, ", "))
+	fmt.Fprintf(&msg, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
 	msg.WriteString("\r\n")

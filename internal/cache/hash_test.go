@@ -499,7 +499,7 @@ func TestCanonicalJSON_OversizedDegrades(t *testing.T) {
 	// distinct steps, each emitting a ~1 KB value (~200 KB total > 64 KB).
 	in.PredecessorOutputs = map[string]map[string]string{}
 	big := strings.Repeat("x", 1024)
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		step := "step-" + strconv.Itoa(i)
 		in.PredecessorOutputs[step] = map[string]string{"out": big}
 	}
@@ -939,7 +939,7 @@ func TestCompute_PartitionIdentityStillDeterministic(t *testing.T) {
 	in.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	in.PartitionAttributes = map[string]string{"root": "models", "materialization": "table", "region": "eu"}
 	first := in.Compute()
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		assert.Equal(t, first, in.Compute())
 	}
 }
@@ -1078,7 +1078,7 @@ func TestCanonicalJSON_OversizedChainMarksExclusion(t *testing.T) {
 	in := baseInput()
 	in.Chain = ChainValues
 	in.Env = make(map[string]string, 4096)
-	for i := 0; i < 4096; i++ {
+	for i := range 4096 {
 		in.Env["VAR_"+strconv.Itoa(i)] = strings.Repeat("x", 64)
 	}
 	data, err := canonicalBlob(t, in)
@@ -1215,7 +1215,7 @@ func TestCompute_ValuesChainFramingStillDeterministic(t *testing.T) {
 		"account": {"account_id": "1234", "org": "acme"},
 	}
 	first := in.Compute()
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		assert.Equal(t, first, in.Compute())
 	}
 }

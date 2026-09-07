@@ -59,12 +59,12 @@ type StepSpec struct {
 func FromDefinition(def *schema.Definition) JobSpec {
 	return JobSpec{
 		Alias:       def.Metadata.Alias,
-		Labels:      cloneStringMap(def.Metadata.Labels),
-		Annotations: cloneStringMap(def.Metadata.Annotations),
+		Labels:      cloneMap(def.Metadata.Labels),
+		Annotations: cloneMap(def.Metadata.Annotations),
 		Remediation: def.Metadata.Remediation,
 		Trigger: TriggerSpec{
 			Type:          def.Trigger.Type,
-			Configuration: cloneAnyMap(def.Trigger.Configuration),
+			Configuration: cloneMap(def.Trigger.Configuration),
 		},
 		Callbacks: copyCallbacks(def.Callbacks),
 		Steps:     copySteps(def.Steps),
@@ -270,16 +270,9 @@ func isYAML(path string) bool {
 	return ext == ".yaml" || ext == ".yml"
 }
 
-func cloneStringMap(in map[string]string) map[string]string {
+func cloneMap[K comparable, V any](in map[K]V) map[K]V {
 	if in == nil {
-		return map[string]string{}
-	}
-	return maps.Clone(in)
-}
-
-func cloneAnyMap(in map[string]any) map[string]any {
-	if in == nil {
-		return map[string]any{}
+		return map[K]V{}
 	}
 	return maps.Clone(in)
 }
@@ -292,7 +285,7 @@ func copyCallbacks(cbs []schema.Callback) []CallbackSpec {
 	for _, cb := range cbs {
 		result = append(result, CallbackSpec{
 			Type:          cb.Type,
-			Configuration: cloneAnyMap(cb.Configuration),
+			Configuration: cloneMap(cb.Configuration),
 		})
 	}
 	return result
@@ -308,7 +301,7 @@ func copySteps(steps []schema.Step) []StepSpec {
 			Engine:       step.Engine,
 			Image:        step.Image,
 			Command:      slices.Clone(step.Command),
-			OutputSchema: cloneAnyMap(step.OutputSchema),
+			OutputSchema: cloneMap(step.OutputSchema),
 		})
 	}
 	return result

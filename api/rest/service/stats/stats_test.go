@@ -61,7 +61,7 @@ func (s *StatsSuite) TestSuccessRateComputedCorrectly() {
 
 	// 3 succeeded, 1 failed = 75%
 	now := time.Now().UTC()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		completed := now.Add(-time.Duration(i) * time.Minute)
 		s.createJobRun(jobID, "succeeded", now.Add(-time.Duration(i+1)*time.Minute), &completed)
 	}
@@ -99,7 +99,7 @@ func (s *StatsSuite) TestTopFailingJobsRanked() {
 	now := time.Now().UTC()
 
 	// jobA fails 3 times
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		completed := now.Add(-time.Duration(i) * time.Minute)
 		s.createJobRun(jobA, "failed", now.Add(-time.Duration(i+1)*time.Minute), &completed)
 	}

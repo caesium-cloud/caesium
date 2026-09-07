@@ -48,7 +48,7 @@ func (s *AgentProfileSuite) TestCreateGetListUpdateDelete() {
 	created, err := svc.Create(&CreateRequest{
 		Name:  "test-profile",
 		Image: "example/agent:latest",
-		Limits: map[string]interface{}{
+		Limits: map[string]any{
 			"cpu": "1",
 		},
 		SecretRefs: map[string]string{

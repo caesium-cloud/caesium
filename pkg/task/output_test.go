@@ -139,7 +139,7 @@ func TestParseOutput_SizeLimit(t *testing.T) {
 	// Build output that exceeds 64KB using many small entries (to avoid
 	// scanner line-length limits).
 	var sb strings.Builder
-	for i := 0; i < 700; i++ {
+	for i := range 700 {
 		key := fmt.Sprintf("key_%04d", i)
 		val := strings.Repeat("x", 100)
 		fmt.Fprintf(&sb, "##caesium::output {\"%s\": \"%s\"}\n", key, val)
@@ -652,7 +652,7 @@ func TestAggregateFanInOutputs_EmptyGroup(t *testing.T) {
 func TestAggregateFanInOutputs_OversizedReturnsError(t *testing.T) {
 	byPartition := make(map[string]map[string]string, 64)
 	blob := strings.Repeat("x", 2048)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		byPartition[fmt.Sprintf("p%03d", i)] = map[string]string{"payload": blob}
 	}
 

@@ -88,13 +88,7 @@ func StartWebhookEventRetentionPruner(ctx context.Context, store *WebhookEventSt
 		return
 	}
 
-	interval := defaultIngestRetentionPruneInterval
-	if retention < interval {
-		interval = retention
-	}
-	if interval < minIngestRetentionPruneInterval {
-		interval = minIngestRetentionPruneInterval
-	}
+	interval := max(min(retention, defaultIngestRetentionPruneInterval), minIngestRetentionPruneInterval)
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()

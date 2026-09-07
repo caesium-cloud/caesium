@@ -271,7 +271,6 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 			return err
 		}
 		for _, def := range fileDefs {
-			def := def
 			desiredAliases = append(desiredAliases, def.Metadata.Alias)
 			defs = append(defs, def)
 			plans = append(plans, applyFilePlan{def: &def, opts: opts})

@@ -91,7 +91,7 @@ func TestRegisterMetricsPublicWhenAuthDisabled(t *testing.T) {
 	e := echo.New()
 	registerMetrics(e, env.Environment{AuthMode: "none"}, nil, nil, nil, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 
@@ -116,12 +116,12 @@ func TestRegisterMetricsProtectedWhenAuthEnabled(t *testing.T) {
 	e := echo.New()
 	registerMetrics(e, env.Environment{AuthMode: "api-key"}, svc, auditor, limiter, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
 	req.Header.Set("Authorization", "Bearer "+resp.Plaintext)
 	rec = httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -152,13 +152,13 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 	e := echo.New()
 	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	req = httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	req.Header.Set("X-CSRF-Token", sess.CSRFToken)
 	rec = httptest.NewRecorder()
@@ -197,7 +197,7 @@ func TestRegisterSSORoutesBearerLogoutSkipsCSRFAndKeepsCredentials(t *testing.T)
 	e := echo.New()
 	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey.Plaintext)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: sessionToken})
 	rec := httptest.NewRecorder()
@@ -251,7 +251,7 @@ func TestRegisterSSORoutesWhoamiReturnsSessionCSRF(t *testing.T) {
 	e := echo.New()
 	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/whoami", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
@@ -362,14 +362,14 @@ func TestRegisterSSORoutesRateLimitsLDAPCredentialFailures(t *testing.T) {
 		SSOProviders{LDAP: noopCredentialAuthenticator{}},
 	)
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	req.RemoteAddr = "198.51.100.10:1234"
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	req = httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	req.RemoteAddr = "198.51.100.10:1234"
 	rec = httptest.NewRecorder()
@@ -418,14 +418,14 @@ func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
 		gotTTL = ttl
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.False(t, called.Load())
 
-	req = httptest.NewRequest(http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec = httptest.NewRecorder()
@@ -447,7 +447,7 @@ func performRequest(t *testing.T, handler echo.HandlerFunc, method, path string)
 	t.Helper()
 
 	e := echo.New()
-	req := httptest.NewRequest(method, path, nil)
+	req := httptest.NewRequestWithContext(context.Background(), method, path, nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 

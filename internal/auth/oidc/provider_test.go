@@ -24,7 +24,7 @@ func TestBeginBuildsAuthURLAndStateCookie(t *testing.T) {
 	issuer := newMockIssuer(t, "roles")
 	provider := newTestProvider(t, issuer, "roles")
 
-	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil)
 	rec := httptest.NewRecorder()
 	redirectURL, err := provider.Begin(rec, req, "https://app.example.com/jobs?limit=10#run-1")
 	require.NoError(t, err)
@@ -63,12 +63,12 @@ func TestClearStateCookiePreservesCookiePolicy(t *testing.T) {
 	provider.cookieSecure = true
 
 	setRec := httptest.NewRecorder()
-	_, err := provider.Begin(setRec, httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil), "/")
+	_, err := provider.Begin(setRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil), "/")
 	require.NoError(t, err)
 	setCookie := requireCookie(t, setRec.Result(), DefaultStateCookieName)
 
 	clearRec := httptest.NewRecorder()
-	provider.ClearStateCookie(clearRec, httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/callback", nil))
+	provider.ClearStateCookie(clearRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "https://app.example.com/auth/sso/oidc/callback", nil))
 	clearCookie := requireCookie(t, clearRec.Result(), DefaultStateCookieName)
 
 	assert.Equal(t, setCookie.Name, clearCookie.Name)
@@ -86,7 +86,7 @@ func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 	provider := newTestProvider(t, issuer, "groups")
 
 	rec := httptest.NewRecorder()
-	_, err := provider.Begin(rec, httptest.NewRequest(http.MethodGet, "/", nil), "https://evil.example.com/jobs")
+	_, err := provider.Begin(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil), "https://evil.example.com/jobs")
 	require.ErrorIs(t, err, ErrInvalidReturnTo)
 	assert.Empty(t, rec.Result().Cookies())
 }
@@ -98,7 +98,7 @@ func TestCompleteWithReturnToValidatesCallback(t *testing.T) {
 	stateCookie, state := beginForCallback(t, provider, "/runs/abc")
 	issuer.nextNonce = state.Nonce
 
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -125,7 +125,7 @@ func TestCompleteRejectsStateMismatch(t *testing.T) {
 	provider := newTestProvider(t, issuer, "groups")
 
 	stateCookie, _ := beginForCallback(t, provider, "/")
-	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/callback?code=good-code&state=wrong", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "https://app.example.com/auth/sso/oidc/callback?code=good-code&state=wrong", nil)
 	req.AddCookie(stateCookie)
 
 	_, _, err := provider.CompleteWithReturnTo(req)
@@ -168,7 +168,7 @@ func TestCompleteRejectsInvalidStateCookieBeforeExchange(t *testing.T) {
 
 			stateCookie, state := beginForCallback(t, provider, "/")
 			stateCookie = tt.prepare(provider, stateCookie, state)
-			req := httptest.NewRequest(
+			req := httptest.NewRequestWithContext(context.Background(),
 				http.MethodGet,
 				"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 				nil,
@@ -206,7 +206,7 @@ func TestCompleteRejectsEarlyCallbackErrorsBeforeStateCookie(t *testing.T) {
 			issuer := newMockIssuer(t, "groups")
 			provider := newTestProvider(t, issuer, "groups")
 
-			req := httptest.NewRequest(http.MethodGet, tt.rawURL, nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, tt.rawURL, nil)
 			req.AddCookie(&http.Cookie{Name: DefaultStateCookieName, Value: "not-a-valid-state-cookie"})
 
 			_, _, err := provider.CompleteWithReturnTo(req)
@@ -222,7 +222,7 @@ func TestCompleteRejectsNonceMismatch(t *testing.T) {
 
 	stateCookie, state := beginForCallback(t, provider, "/")
 	issuer.nextNonce = "different-nonce"
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -240,7 +240,7 @@ func TestCompleteRejectsExpiredIDToken(t *testing.T) {
 	stateCookie, state := beginForCallback(t, provider, "/")
 	issuer.nextNonce = state.Nonce
 	issuer.nextExpiry = time.Now().Add(-time.Hour)
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -258,7 +258,7 @@ func TestCompleteRejectsAudienceMismatch(t *testing.T) {
 	stateCookie, state := beginForCallback(t, provider, "/")
 	issuer.nextNonce = state.Nonce
 	issuer.nextAudience = "different-client"
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -298,7 +298,7 @@ func TestCompleteRejectsMissingOrBlankSubject(t *testing.T) {
 			stateCookie, state := beginForCallback(t, provider, "/")
 			issuer.nextNonce = state.Nonce
 			tt.prepare(issuer)
-			req := httptest.NewRequest(
+			req := httptest.NewRequestWithContext(context.Background(),
 				http.MethodGet,
 				"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 				nil,
@@ -320,7 +320,7 @@ func TestCompleteRejectsAuthorizedPartyMismatchForMultipleAudiences(t *testing.T
 	issuer.nextNonce = state.Nonce
 	issuer.nextAudiences = []string{"caesium", "api-client"}
 	issuer.nextAuthorizedParty = "different-client"
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -339,7 +339,7 @@ func TestCompleteRejectsMissingAuthorizedPartyForMultipleAudiences(t *testing.T)
 	stateCookie, state := beginForCallback(t, provider, "/")
 	issuer.nextNonce = state.Nonce
 	issuer.nextAudiences = []string{"caesium", "api-client"}
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -359,7 +359,7 @@ func TestCompleteRejectsAuthorizedPartyMismatchForSingleAudience(t *testing.T) {
 	stateCookie, state := beginForCallback(t, provider, "/")
 	issuer.nextNonce = state.Nonce
 	issuer.nextAuthorizedParty = "different-client"
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodGet,
 		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
 		nil,
@@ -388,7 +388,7 @@ func beginForCallback(t *testing.T, provider *Provider, returnTo string) (*http.
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	_, err := provider.Begin(rec, httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil), returnTo)
+	_, err := provider.Begin(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil), returnTo)
 	require.NoError(t, err)
 
 	cookie := requireCookie(t, rec.Result(), DefaultStateCookieName)

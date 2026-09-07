@@ -71,7 +71,7 @@ func (ctrl *Controller) CreateKey(c *echo.Context) error {
 		ResourceID:   resp.Key.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"role":        req.Role,
 			"description": req.Description,
 		},

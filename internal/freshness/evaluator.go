@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,12 +152,7 @@ func (e *Evaluator) Run(ctx context.Context) {
 }
 
 func (e *Evaluator) isReactiveType(t event.Type) bool {
-	for _, rt := range e.reactiveTypes {
-		if t == rt {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.reactiveTypes, t)
 }
 
 func (e *Evaluator) subscribeReactive(ctx context.Context) (<-chan event.Event, error) {
