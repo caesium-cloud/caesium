@@ -810,7 +810,7 @@ func TestFanOutPartitionRetryAbandonFailureDoesNotChainReplacements(t *testing.T
 		if tx.Statement == nil || tx.Statement.Table != "task_runs" {
 			return
 		}
-		if dest, ok := tx.Statement.Dest.(map[string]interface{}); ok {
+		if dest, ok := tx.Statement.Dest.(map[string]any); ok {
 			if status, ok := dest["status"].(string); ok && status == string(run.TaskStatusSkipped) {
 				_ = tx.AddError(errors.New("simulated abandonment failure"))
 			}

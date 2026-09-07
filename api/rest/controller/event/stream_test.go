@@ -1,6 +1,7 @@
 package event
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,7 @@ func TestBuildFilterIncludesQuarantineOnlyForAccessibleRun(t *testing.T) {
 	scopeJSON, err := json.Marshal(models.KeyScope{Jobs: []string{"alpha"}})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
 	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Role: models.RoleViewer, Scope: scopeJSON})
@@ -40,7 +41,7 @@ func TestBuildFilterIncludesQuarantineOnlyForAccessibleRun(t *testing.T) {
 
 func TestBuildFilterAllowsRunScopedQuarantineWhenAuthDisabled(t *testing.T) {
 	runID := uuid.New()
-	req := httptest.NewRequest(http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
 
@@ -60,7 +61,7 @@ func TestBuildFilterRejectsQuarantineForOutOfScopeRun(t *testing.T) {
 	scopeJSON, err := json.Marshal(models.KeyScope{Jobs: []string{"beta"}})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
 	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Role: models.RoleViewer, Scope: scopeJSON})

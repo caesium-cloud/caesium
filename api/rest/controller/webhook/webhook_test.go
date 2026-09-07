@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,7 +79,7 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 	triggerID := uuid.New()
 	jobID := uuid.New()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	rec := httptest.NewRecorder()
 
@@ -89,9 +90,7 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 	runs := make(chan map[string]string, 1)
 	runner := func(ctx context.Context, j *models.Job, params map[string]string) error {
 		copied := make(map[string]string, len(params))
-		for k, v := range params {
-			copied[k] = v
-		}
+		maps.Copy(copied, params)
 		runs <- copied
 		return nil
 	}
@@ -159,7 +158,7 @@ func TestReceiveWithServicesRecordsWebhookReceipt(t *testing.T) {
 
 	triggerID := uuid.New()
 	jobID := uuid.New()
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	req.Header.Set("X-Caesium-Event-Source", "github")
 	rec := httptest.NewRecorder()
@@ -220,7 +219,7 @@ func TestReceiveWithServicesContinuesWhenWebhookBridgeFails(t *testing.T) {
 	runs := make(chan struct{}, 1)
 	before := metrictestutil.CounterValue(t, metrics.EventBridgeFailuresTotal, "webhook")
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	rec := httptest.NewRecorder()
 
@@ -279,7 +278,7 @@ func TestReceiveWithServicesRoutesWebhookBeforeHTTPJobs(t *testing.T) {
 		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	req.Header.Set("X-Caesium-Event-Source", "github")
 	rec := httptest.NewRecorder()
@@ -323,7 +322,7 @@ func TestReceiveWithServicesRoutesWebhookBeforeHTTPJobs(t *testing.T) {
 func TestReceiveWithServicesRejectsInvalidSignature(t *testing.T) {
 	require.NoError(t, env.Process())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer wrong-secret")
 	rec := httptest.NewRecorder()
 
@@ -364,7 +363,7 @@ func TestReceiveWithServicesRejectsOversizedBody(t *testing.T) {
 	t.Setenv("CAESIUM_WEBHOOK_MAX_BODY_SIZE", "8B")
 	require.NoError(t, env.Process())
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	rec := httptest.NewRecorder()
 
 	e := echo.New()
@@ -394,7 +393,7 @@ func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
 	webhookRateLimiters = authmw.NewIPRateLimiters(15*time.Minute, webhookRateLimitConfig)
 
 	newContext := func() *echo.Context {
-		req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 		req.Header.Set("Authorization", "Bearer top-secret")
 		req.RemoteAddr = "203.0.113.8:1234"
 		rec := httptest.NewRecorder()
@@ -438,7 +437,7 @@ func TestReceiveWithServicesRecordsMetricOnInvalidSignature(t *testing.T) {
 
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "invalid_signature")
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"main"}`))
 	req.Header.Set("Authorization", "Bearer wrong-secret")
 	rec := httptest.NewRecorder()
 
@@ -484,7 +483,7 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 	_, _ = mac.Write([]byte(body))
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", sig)
 	req.Header.Set("X-Webhook-Timestamp", ts)
 	rec := httptest.NewRecorder()
@@ -529,7 +528,7 @@ func TestReceiveWithServicesNoMetricWhenOneTriggerAccepts(t *testing.T) {
 
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/multi/path", strings.NewReader(`{"ref":"main"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/multi/path", strings.NewReader(`{"ref":"main"}`))
 	req.Header.Set("Authorization", "Bearer correct-secret")
 	rec := httptest.NewRecorder()
 

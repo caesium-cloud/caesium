@@ -65,7 +65,7 @@ type AuditEntry struct {
 	ResourceID   string
 	SourceIP     string
 	Outcome      string
-	Metadata     map[string]interface{}
+	Metadata     map[string]any
 }
 
 // Log writes an audit entry to the database.

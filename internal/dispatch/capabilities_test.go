@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -32,7 +33,7 @@ func (c *capableSubmitter) Capabilities() []string {
 
 func getCapabilities(t *testing.T, h *Handler) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/internal/capabilities", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/internal/capabilities", nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	w := httptest.NewRecorder()
 	h.HandleCapabilities(w, req)
@@ -81,7 +82,7 @@ func TestHandleCapabilities_RequiresTheBearerToken(t *testing.T) {
 	_, _, h := setupHandler(t)
 	h = h.WithWorkerSubmitter(&capableSubmitter{})
 
-	req := httptest.NewRequest(http.MethodGet, "/internal/capabilities", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/internal/capabilities", nil)
 	w := httptest.NewRecorder()
 	h.HandleCapabilities(w, req)
 	require.Equal(t, http.StatusUnauthorized, w.Code)

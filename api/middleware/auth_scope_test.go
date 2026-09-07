@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,7 +27,7 @@ func TestMiddlewareWhoamiAllowsScopedAPIKey(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/whoami", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	var principal *auth.Principal
@@ -54,7 +55,7 @@ func TestMiddlewareWhoamiAllowsUnscopedAPIKey(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/whoami", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	rec, err := callMiddleware(t, svc, auditor, limiter, req, whoamiRoute, nil, nil)
@@ -70,7 +71,7 @@ func TestMiddlewareWhoamiDeniesAgentSessionToken(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := mintAgentKey(t, svc, uuid.New(), []string{"alpha"})
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/whoami", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	called := false
@@ -100,7 +101,7 @@ func TestMiddlewareScopedKeyStillDeniedOnUnrelatedGlobalRoute(t *testing.T) {
 		{Path: "/v1/system/nodes", Method: http.MethodGet},
 		{Path: "/auth/logout", Method: http.MethodPost},
 	} {
-		req := httptest.NewRequest(route.Method, route.Path, nil)
+		req := httptest.NewRequestWithContext(context.Background(), route.Method, route.Path, nil)
 		req.Header.Set("Authorization", "Bearer "+key)
 
 		_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)

@@ -16,7 +16,7 @@ import (
 func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	const taskCount = 8
 	queue := newSharedTaskQueue(taskCount)
-	for i := 0; i < taskCount; i++ {
+	for range taskCount {
 		queue.enqueue(&models.TaskRun{
 			ID:     uuid.New(),
 			TaskID: uuid.New(),
@@ -26,7 +26,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var completed int32
+	var completed atomic.Int32
 	var mu sync.Mutex
 	processed := make(map[uuid.UUID]int, taskCount)
 	execErrs := make(chan error, taskCount)
@@ -43,7 +43,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		}
 
 		time.Sleep(2 * time.Millisecond)
-		if atomic.AddInt32(&completed, 1) == taskCount {
+		if completed.Add(1) == taskCount {
 			cancel()
 		}
 	}
@@ -55,7 +55,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	go func() { workerErrs <- workerA.Run(ctx) }()
 	go func() { workerErrs <- workerB.Run(ctx) }()
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case workerErr := <-workerErrs:
 			require.NoError(t, workerErr)
@@ -69,7 +69,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		require.NoError(t, execErr)
 	}
 
-	require.Equal(t, int32(taskCount), atomic.LoadInt32(&completed))
+	require.Equal(t, int32(taskCount), completed.Load())
 }
 
 type sharedTaskQueue struct {

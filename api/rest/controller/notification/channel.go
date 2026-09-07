@@ -88,13 +88,13 @@ func DeleteChannel(c *echo.Context) error {
 // channelView is the API response for a notification channel with
 // sensitive config fields redacted.
 type channelView struct {
-	ID        uuid.UUID              `json:"id"`
-	Name      string                 `json:"name"`
-	Type      models.ChannelType     `json:"type"`
-	Config    map[string]interface{} `json:"config"`
-	Enabled   bool                   `json:"enabled"`
-	CreatedAt time.Time              `json:"created_at"`
-	UpdatedAt time.Time              `json:"updated_at"`
+	ID        uuid.UUID          `json:"id"`
+	Name      string             `json:"name"`
+	Type      models.ChannelType `json:"type"`
+	Config    map[string]any     `json:"config"`
+	Enabled   bool               `json:"enabled"`
+	CreatedAt time.Time          `json:"created_at"`
+	UpdatedAt time.Time          `json:"updated_at"`
 }
 
 // sensitiveKeys are config keys whose values must be redacted in API responses.
@@ -109,7 +109,7 @@ var sensitiveKeys = map[string]struct{}{
 }
 
 func redactChannel(ch models.NotificationChannel) channelView {
-	cfg := make(map[string]interface{})
+	cfg := make(map[string]any)
 	if len(ch.Config) > 0 {
 		_ = json.Unmarshal(ch.Config, &cfg)
 	}

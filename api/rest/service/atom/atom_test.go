@@ -72,7 +72,7 @@ func (s *AtomSuite) TestListWithEngineFilter() {
 }
 
 func (s *AtomSuite) TestListWithPagination() {
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		s.createAtom("docker", "alpine:3.23", []string{"echo"})
 	}
 

@@ -102,8 +102,7 @@ func TestListSinceExcludesQuarantineByDefault(t *testing.T) {
 func TestPublishAndMarkBusDispatchedPublishesAndMarksEvent(t *testing.T) {
 	s := openStore(t)
 	bus := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := bus.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -141,8 +140,7 @@ func TestPublishAndMarkBusDispatchedPublishesAndMarksEvent(t *testing.T) {
 func TestPublishAndMarkBusDispatchedDefersWhenScoped(t *testing.T) {
 	s := openStore(t)
 	bus := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := bus.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -173,8 +171,7 @@ func TestPublishAndMarkBusDispatchedDefersWhenScoped(t *testing.T) {
 func TestBusDispatcherDispatchOncePublishesPendingEvent(t *testing.T) {
 	s := openStore(t)
 	bus := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch, err := bus.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
@@ -322,7 +319,7 @@ func TestLatestSequence(t *testing.T) {
 	require.Equal(t, uint64(0), seq)
 
 	// After appending events, returns the highest sequence.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		evt := &Event{Type: TypeRunStarted, JobID: uuid.New()}
 		tx := s.db.Begin()
 		require.NoError(t, s.AppendTx(tx, evt))

@@ -114,7 +114,7 @@ func emitWithLog(t *testing.T, phase func(context.Context, config, *protocol.Emi
 
 func markerLines(s string) []string {
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.HasPrefix(line, "##caesium::") {
 			out = append(out, line)
 		}

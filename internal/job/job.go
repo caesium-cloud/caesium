@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -556,7 +557,7 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 		if attempt >= 2 {
 			// Bounded like the normal completion path: the last word is a
 			// hand-off (itself retried), never a return that strands a retry.
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				if j.handOffPendingPartitionRetries(store, runID, j.params) {
 					return
 				}
@@ -1041,7 +1042,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// transiently, and a refusal can be stale by the time it is
 				// examined, so alternate hand-off and completion a few times
 				// before conceding the run to an operator.
-				for i := 0; i < 3; i++ {
+				for range 3 {
 					if j.handOffPendingPartitionRetries(store, runID, snapshot.Params) {
 						return
 					}
@@ -1438,15 +1439,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 		if len(paramEnv) > 0 || len(extraEnv) > 0 {
 			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
-			for k, v := range spec.Env {
-				merged[k] = v
-			}
-			for k, v := range paramEnv {
-				merged[k] = v
-			}
-			for k, v := range extraEnv {
-				merged[k] = v
-			}
+			maps.Copy(merged, spec.Env)
+			maps.Copy(merged, paramEnv)
+			maps.Copy(merged, extraEnv)
 			spec.Env = merged
 		}
 
@@ -1564,8 +1559,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
 				if parseErr != nil {
-					var pe *pkgtask.PartitionError
-					if errors.As(parseErr, &pe) {
+					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
 							return "", nil, nil, nil, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
@@ -1741,12 +1735,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return cacheCfg, taskHashInputArgs{}, nil, err
 		}
 		mergedEnv := make(map[string]string, len(interpolatedEnv)+len(outputEnv))
-		for k, v := range interpolatedEnv {
-			mergedEnv[k] = v
-		}
-		for k, v := range outputEnv {
-			mergedEnv[k] = v
-		}
+		maps.Copy(mergedEnv, interpolatedEnv)
+		maps.Copy(mergedEnv, outputEnv)
 
 		var predHashes []string
 		for _, predID := range predecessors[taskID] {
@@ -1921,10 +1911,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// which is what the distributed worker runs on (taskRun.MaxAttempts).
 		// Reading taskModel.Retries here would give a retried run a different
 		// budget per lane after a `job apply` changed `retries:`.
-		maxAttempts := runner.maxAttempts
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		maxAttempts := max(runner.maxAttempts, 1)
 		meta := make(map[uuid.UUID]instanceMeta, len(group.Instances))
 		for _, inst := range group.Instances {
 			meta[inst.TaskRunID] = instanceMeta{partition: inst.Partition, maxAttempt: maxAttempts}
@@ -1999,12 +1986,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 				partEnv[jobdefschema.FanOutPartitionJSONEnv] = string(raw)
 			}
 			extra := make(map[string]string, len(outputEnv)+len(partEnv))
-			for k, v := range outputEnv {
-				extra[k] = v
-			}
-			for k, v := range partEnv {
-				extra[k] = v
-			}
+			maps.Copy(extra, outputEnv)
+			maps.Copy(extra, partEnv)
 
 			// Per-partition identity: the shared args plus this instance's
 			// partition fields. The partition env above is deliberately NOT part
@@ -2733,10 +2716,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		// Frozen on the row, exactly as the distributed worker reads it — see
 		// the identical note in runFannedGroup.
-		maxAttempts := runner.maxAttempts
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		maxAttempts := max(runner.maxAttempts, 1)
 
 		var lastErr error
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -3332,10 +3312,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			cached := 0
 			cancelled := 0
 
-			liveCount := len(snapshot.Tasks)
-			if liveCount < taskCount {
-				liveCount = taskCount
-			}
+			liveCount := max(len(snapshot.Tasks), taskCount)
 
 			// readyPending counts rows the dispatcher can still pick up right
 			// now: pending with every predecessor resolved. It is the difference

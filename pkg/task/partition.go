@@ -25,8 +25,7 @@ func asPartitionError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var pe *PartitionError
-	if errors.As(err, &pe) {
+	if _, ok := errors.AsType[*PartitionError](err); ok {
 		return err
 	}
 	return &PartitionError{Msg: err.Error()}

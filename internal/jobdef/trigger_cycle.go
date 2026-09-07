@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -331,10 +332,8 @@ func addTriggerChainEdge(graph map[string][]string, from, to string) {
 	if _, ok := graph[from]; !ok {
 		graph[from] = nil
 	}
-	for _, existing := range graph[from] {
-		if existing == to {
-			return
-		}
+	if slices.Contains(graph[from], to) {
+		return
 	}
 	graph[from] = append(graph[from], to)
 }

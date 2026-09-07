@@ -624,7 +624,6 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, watch := range watches {
-		watch := watch
 		runAsync(func() {
 			log.Info("starting job definition git sync", "url", watch.Source.URL, "ref", watch.Source.Ref, "once", watch.Once, "interval", watch.Interval)
 			opts := git.WatchOptions{Source: watch.Source, Interval: watch.Interval, Once: watch.Once}
@@ -643,10 +642,7 @@ func start(cmd *cobra.Command, args []string) error {
 	// worker attached.
 	var distributedWorker *worker.Worker
 	if vars.WorkerEnabled && distributedMode {
-		poolSize := vars.WorkerPoolSize
-		if poolSize < 1 {
-			poolSize = 1
-		}
+		poolSize := max(vars.WorkerPoolSize, 1)
 
 		log.Info(
 			"launching distributed worker",

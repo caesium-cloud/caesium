@@ -171,7 +171,7 @@ func drainRun(t *testing.T, f *fanOutFailoverFixture, mgr *OwnerManager, node st
 	t.Helper()
 	readyCounts := make(map[uuid.UUID]int)
 	const maxRounds = 30
-	for round := 0; round < maxRounds; round++ {
+	for round := range maxRounds {
 		ready := mgr.ReadyForDispatch(f.runID)
 		require.NotEmpty(t, ready, "round %d: the run stalled — nothing is dispatchable and the run is not complete", round)
 		for _, dt := range ready {

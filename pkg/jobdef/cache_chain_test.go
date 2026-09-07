@@ -115,7 +115,7 @@ func TestNormalizeCacheChain(t *testing.T) {
 }
 
 func TestValidate_RejectsUnknownCacheChain(t *testing.T) {
-	def := func(stepCache, metaCache interface{}) *Definition {
+	def := func(stepCache, metaCache any) *Definition {
 		return &Definition{
 			APIVersion: APIVersionV1,
 			Kind:       KindJob,
@@ -150,7 +150,7 @@ func TestValidate_RejectsUnknownCacheChain(t *testing.T) {
 }
 
 // TestParse_CacheChainRoundTrip proves the key survives the real YAML path:
-// `cache` is an interface{}, so a chain declared in a manifest only reaches the
+// `cache` is an any, so a chain declared in a manifest only reaches the
 // resolver if yaml.v3 decodes the block as map[string]any.
 func TestParse_CacheChainRoundTrip(t *testing.T) {
 	manifest := []byte(`apiVersion: v1

@@ -3,6 +3,7 @@ package jobdef
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"regexp"
@@ -119,7 +120,7 @@ type Metadata struct {
 	// ReplaySafe marks every step in this job as eligible for quarantined replay.
 	// The effective per-step value is snapshotted onto TaskRun when the task runs.
 	ReplaySafe                   bool              `yaml:"replaySafe,omitempty" json:"replaySafe,omitempty"`
-	Cache                        interface{}       `yaml:"cache,omitempty" json:"cache"`
+	Cache                        any               `yaml:"cache,omitempty" json:"cache"`
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
@@ -601,7 +602,7 @@ type Step struct {
 	// Datasets declares the datasets this step consumes and produces. It is
 	// scheduling metadata for freshness and does not affect the cache hash.
 	Datasets       *StepDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
-	Cache          interface{}   `yaml:"cache,omitempty" json:"cache"`
+	Cache          any           `yaml:"cache,omitempty" json:"cache"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -614,8 +615,8 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		Image                        string                    `yaml:"image"`
 		Command                      []string                  `yaml:"command"`
 		NodeSelector                 map[string]string         `yaml:"nodeSelector"`
-		Next                         interface{}               `yaml:"next"`
-		DependsOn                    interface{}               `yaml:"dependsOn"`
+		Next                         any                       `yaml:"next"`
+		DependsOn                    any                       `yaml:"dependsOn"`
 		Retries                      int                       `yaml:"retries"`
 		RetryDelay                   time.Duration             `yaml:"retryDelay"`
 		RetryBackoff                 bool                      `yaml:"retryBackoff"`
@@ -631,7 +632,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		OutputSchema                 map[string]any            `yaml:"outputSchema"`
 		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
 		Datasets                     *StepDatasets             `yaml:"datasets"`
-		Cache                        interface{}               `yaml:"cache"`
+		Cache                        any                       `yaml:"cache"`
 		container.Spec               `yaml:",inline"`
 	}
 
@@ -712,7 +713,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		OutputSchema                 map[string]any            `json:"outputSchema"`
 		InputSchema                  map[string]map[string]any `json:"inputSchema"`
 		Datasets                     *StepDatasets             `json:"datasets"`
-		Cache                        interface{}               `json:"cache"`
+		Cache                        any                       `json:"cache"`
 		container.Spec               `json:",inline"`
 	}
 
@@ -842,7 +843,7 @@ func validateCacheConfigs(d *Definition) error {
 	return nil
 }
 
-func validateCacheChainValue(path string, raw interface{}) error {
+func validateCacheChainValue(path string, raw any) error {
 	m, ok := raw.(map[string]any)
 	if !ok {
 		return nil
@@ -1853,9 +1854,7 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 			if k8sSpec.PodAnnotations == nil {
 				k8sSpec.PodAnnotations = make(map[string]string, len(step.PodAnnotations))
 			}
-			for k, v := range step.PodAnnotations {
-				k8sSpec.PodAnnotations[k] = v
-			}
+			maps.Copy(k8sSpec.PodAnnotations, step.PodAnnotations)
 		}
 		if step.AutomountServiceAccountToken != nil {
 			k8sSpec.AutomountServiceAccountToken = cloneBoolPtr(step.AutomountServiceAccountToken)
@@ -1959,9 +1958,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
+	maps.Copy(out, values)
 	return out
 }
 
@@ -2161,7 +2158,7 @@ func ensureUnique(entries []string, field string) error {
 	return nil
 }
 
-func normalizeInterfaceList(value interface{}) ([]string, error) {
+func normalizeInterfaceList(value any) ([]string, error) {
 	switch v := value.(type) {
 	case nil:
 		return nil, nil
@@ -2170,7 +2167,7 @@ func normalizeInterfaceList(value interface{}) ([]string, error) {
 			return nil, nil
 		}
 		return []string{strings.TrimSpace(v)}, nil
-	case []interface{}:
+	case []any:
 		result := make([]string, 0, len(v))
 		for idx, item := range v {
 			str, ok := item.(string)
@@ -2307,7 +2304,7 @@ type CacheConfig struct {
 // CAESIUM_CACHE_DIGEST_TTL defaults; a job- or step-level cache entry overrides
 // them. Resolution is layered env -> job -> step so the most specific
 // declaration wins for each field.
-func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration, envPinDigests bool, envDigestTTL time.Duration) CacheConfig {
+func ResolveCacheConfig(stepCache, metaCache any, envEnabled bool, envTTL time.Duration, envPinDigests bool, envDigestTTL time.Duration) CacheConfig {
 	cfg := CacheConfig{
 		Enabled:    envEnabled,
 		TTL:        envTTL,
@@ -2324,7 +2321,7 @@ func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTT
 	return cfg
 }
 
-func applyCache(cfg *CacheConfig, raw interface{}) {
+func applyCache(cfg *CacheConfig, raw any) {
 	switch v := raw.(type) {
 	case bool:
 		cfg.Enabled = v

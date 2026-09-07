@@ -25,11 +25,11 @@ var _ expiredClaimReclaimer = (*run.Store)(nil)
 // postJSONTo posts a JSON body to a handler with an explicit bearer token.  The
 // shared postJSON helper hardcodes testToken; the loop-driven tests here run
 // against a handler that must accept the loop's own token.
-func postJSONTo(t *testing.T, handler http.HandlerFunc, token string, body interface{}) *httptest.ResponseRecorder {
+func postJSONTo(t *testing.T, handler http.HandlerFunc, token string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(b))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -43,7 +43,7 @@ func killWorkerHoldingClaim(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID) 
 	t.Helper()
 	require.NoError(t, db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"claim_expires_at": time.Now().UTC().Add(-time.Minute),
 			"runtime_id":       "container-abc",
 		}).Error)

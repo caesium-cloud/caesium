@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -324,12 +325,8 @@ func (c Config) withDefaults() Config {
 
 func (c Config) mergedParams(params map[string]string) map[string]string {
 	merged := make(map[string]string, len(c.DefaultParams)+len(params))
-	for k, v := range c.DefaultParams {
-		merged[k] = v
-	}
-	for k, v := range params {
-		merged[k] = v
-	}
+	maps.Copy(merged, c.DefaultParams)
+	maps.Copy(merged, params)
 	return merged
 }
 
@@ -461,9 +458,7 @@ func cloneParams(params map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	out := make(map[string]string, len(params))
-	for k, v := range params {
-		out[k] = v
-	}
+	maps.Copy(out, params)
 	return out
 }
 

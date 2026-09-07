@@ -330,7 +330,7 @@ func newPartitionsFixture(t *testing.T, instances int) *partitionsFixture {
 	}).Error)
 
 	rows := make([]models.TaskRun, 0, instances)
-	for i := 0; i < instances; i++ {
+	for i := range instances {
 		rows = append(rows, models.TaskRun{
 			ID: uuid.New(), JobRunID: runID, TaskID: taskID, AtomID: atomID,
 			Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`,
@@ -369,7 +369,7 @@ func (f *partitionsFixture) call(t *testing.T, query string) (*httptest.Response
 		target += "?" + query
 	}
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.SetPathValues(echo.PathValues{
@@ -395,7 +395,7 @@ func (f *partitionsFixture) retry(t *testing.T, index int) error {
 	target := fmt.Sprintf("/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry",
 		f.jobID, f.runID, f.taskID, index)
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, target, nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.SetPathValues(echo.PathValues{

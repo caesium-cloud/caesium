@@ -672,7 +672,7 @@ func TestFanOutOrderedChainCompletesUnderMaxParallelOne(t *testing.T) {
 		Where("job_run_id = ? AND task_id = ?", f.runID, f.consumer.ID).
 		Update("outstanding_predecessors", gorm.Expr("outstanding_predecessors - 1")).Error)
 
-	for step := 0; step < 3; step++ {
+	for range 3 {
 		var ready []models.TaskRun
 		require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ? AND status = ? AND outstanding_predecessors = 0",
 			f.runID, f.consumer.ID, string(TaskStatusPending)).

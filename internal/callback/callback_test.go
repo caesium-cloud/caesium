@@ -181,10 +181,10 @@ func TestRetryFailedCallbacks(t *testing.T) {
 	require.NoError(t, store.CompleteTask(runEntry.ID, task.ID, "success", nil, nil))
 	require.NoError(t, store.Complete(runEntry.ID, nil))
 
-	var attempt int32
+	var attempt atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = r.Body.Close() }()
-		if atomic.AddInt32(&attempt, 1) == 1 {
+		if attempt.Add(1) == 1 {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}

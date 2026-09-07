@@ -277,8 +277,7 @@ func ExecuteShell(ctx context.Context, env *Envelope, opts ShellExecuteOptions) 
 		Warnings:        env.Warnings,
 	}
 	if err := opts.ShellRunner.RunShell(ctx, req); err != nil {
-		var shellExit *ShellExitError
-		if errors.As(err, &shellExit) {
+		if shellExit, ok := errors.AsType[*ShellExitError](err); ok {
 			result.ExitCode = shellExit.Code
 			result.Error = shellExit.Error()
 			return result, nil

@@ -283,7 +283,7 @@ AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)
 AND job_run_id IN (SELECT id FROM job_runs WHERE status = ?)
 RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS claim_job_id`
 
-	args := []interface{}{
+	args := []any{
 		c.nodeID,
 		leaseExpiry,
 		string(run.TaskStatusRunning),
@@ -381,7 +381,7 @@ func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun,
 	return &evt, nil
 }
 
-func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, []interface{}, error) {
+func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, []any, error) {
 	column := tableAlias + ".node_selector"
 	jsonExpr, valueExpr, keyExpr := sqliteNodeSelectorJSONExprs(column)
 	switch dialect {
@@ -405,7 +405,7 @@ func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, 
 	}
 	sort.Strings(keys)
 
-	args := make([]interface{}, 0, len(keys)*3)
+	args := make([]any, 0, len(keys)*3)
 	inPlaceholders := make([]string, 0, len(keys))
 	caseParts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -482,7 +482,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			// liveLeaseGuard binds one parameter (now); it trails the three
 			// static args.
 			expiredWhere := "job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND " + liveLeaseGuard
-			expiredArgs := []interface{}{runningRunIDs, string(run.TaskStatusRunning), now, now}
+			expiredArgs := []any{runningRunIDs, string(run.TaskStatusRunning), now, now}
 
 			var expired []models.TaskRun
 			if err := tx.Where(expiredWhere, expiredArgs...).Find(&expired).Error; err != nil {
@@ -491,7 +491,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 
 			result := tx.Model(&models.TaskRun{}).
 				Where(expiredWhere, expiredArgs...).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":           string(run.TaskStatusPending),
 					"claimed_by":       "",
 					"claim_expires_at": nil,
@@ -655,7 +655,7 @@ func derefUUID(id *uuid.UUID) uuid.UUID {
 
 func ParseNodeLabels(raw string) map[string]string {
 	values := map[string]string{}
-	for _, entry := range strings.Split(raw, ",") {
+	for entry := range strings.SplitSeq(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue

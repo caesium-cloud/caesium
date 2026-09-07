@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -424,9 +425,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 	}
 
 	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -451,7 +450,7 @@ func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure,
 				ResourceID:   f.triggerID,
 				SourceIP:     sourceIP,
 				Outcome:      auth.OutcomeDenied,
-				Metadata: map[string]interface{}{
+				Metadata: map[string]any{
 					"path":   path,
 					"reason": f.reason,
 				},

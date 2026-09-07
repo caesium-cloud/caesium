@@ -289,7 +289,7 @@ func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 	// N distinct supervisors (distinct mutexes, distinct minters), one shared DB.
 	supers := make([]*Supervisor, n)
 	credsList := make([]*fakeCreds, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		credsList[i] = &fakeCreds{}
 		supers[i] = NewSupervisor(db, credsList[i], func(context.Context, models.AtomEngine) (atom.Engine, error) {
 			return &blockingEngine{release: release}, nil
@@ -301,7 +301,7 @@ func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 		err     error
 	}
 	results := make(chan outcome, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sup := supers[i]
 		go func() {
 			sess, err := sup.Dispatch(ctx, inc, profile)

@@ -143,9 +143,9 @@ func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 }
 
 type CreateRequest struct {
-	Alias         string                 `json:"alias"`
-	Type          string                 `json:"type"`
-	Configuration map[string]interface{} `json:"configuration"`
+	Alias         string         `json:"alias"`
+	Type          string         `json:"type"`
+	Configuration map[string]any `json:"configuration"`
 }
 
 func (r *CreateRequest) ConfigurationString() (string, error) {
@@ -188,8 +188,8 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 }
 
 type UpdateRequest struct {
-	Alias         *string                `json:"alias,omitempty"`
-	Configuration map[string]interface{} `json:"configuration,omitempty"`
+	Alias         *string        `json:"alias,omitempty"`
+	Configuration map[string]any `json:"configuration,omitempty"`
 }
 
 func (t *triggerService) Update(id uuid.UUID, req *UpdateRequest) (*models.Trigger, error) {
@@ -241,10 +241,10 @@ func (t *triggerService) Delete(id uuid.UUID) error {
 	return nil
 }
 
-func validateTriggerRequest(triggerType models.TriggerType, configuration map[string]interface{}) error {
+func validateTriggerRequest(triggerType models.TriggerType, configuration map[string]any) error {
 	cfg := configuration
 	if cfg == nil {
-		cfg = map[string]interface{}{}
+		cfg = map[string]any{}
 	}
 	return jobdefschema.ValidateTriggerSpec(&jobdefschema.Trigger{
 		Type:          string(triggerType),

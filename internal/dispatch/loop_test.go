@@ -346,7 +346,7 @@ func TestDispatchLoop_BatchCap(t *testing.T) {
 	const totalTasks = 200
 	const batchSize = 64
 
-	for i := 0; i < totalTasks; i++ {
+	for range totalTasks {
 		insertPendingTask(t, store, runID, uuid.New())
 	}
 
@@ -466,7 +466,7 @@ func TestDispatchLoop_RoundRobin(t *testing.T) {
 	runID := uuid.New()
 	_, err := ls.AcquireLease(context.Background(), runID, ownerNodeID, 30*time.Second)
 	require.NoError(t, err)
-	for i := 0; i < numTasks; i++ {
+	for range numTasks {
 		insertPendingTask(t, store, runID, uuid.New())
 	}
 

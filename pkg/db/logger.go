@@ -29,19 +29,19 @@ func (l *zapLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return &zapLogger{level: level}
 }
 
-func (l *zapLogger) Info(_ context.Context, msg string, data ...interface{}) {
+func (l *zapLogger) Info(_ context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Info {
 		log.Info(fmt.Sprintf(msg, data...), "source", "gorm")
 	}
 }
 
-func (l *zapLogger) Warn(_ context.Context, msg string, data ...interface{}) {
+func (l *zapLogger) Warn(_ context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Warn {
 		log.Warn(fmt.Sprintf(msg, data...), "source", "gorm")
 	}
 }
 
-func (l *zapLogger) Error(_ context.Context, msg string, data ...interface{}) {
+func (l *zapLogger) Error(_ context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Error {
 		log.Error(fmt.Sprintf(msg, data...), "source", "gorm")
 	}
@@ -56,7 +56,7 @@ func (l *zapLogger) Trace(_ context.Context, begin time.Time, fc func() (sql str
 	sql, rows := fc()
 	dbtrace.Record(sql, rows, elapsed, err)
 
-	fields := []interface{}{
+	fields := []any{
 		"source", "gorm",
 		"duration", elapsed.String(),
 		"rows", rows,

@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -143,7 +144,7 @@ func callMiddlewareWithDeps(
 func TestMiddlewareSkipsHealthEndpoint(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
 	rec, err := callMiddleware(t, svc, auditor, limiter, req, nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -152,7 +153,7 @@ func TestMiddlewareSkipsHealthEndpoint(t *testing.T) {
 func TestMiddlewareRejectsMissingAuth(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
 
@@ -164,7 +165,7 @@ func TestMiddlewareRejectsMissingAuth(t *testing.T) {
 func TestMiddlewareRejectsInvalidToken(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer csk_live_invalid123")
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -177,7 +178,7 @@ func TestMiddlewareRejectsInvalidToken(t *testing.T) {
 func TestMiddlewareAcceptsValidToken(t *testing.T) {
 	_, svc, auditor, limiter, key := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.NoError(t, err)
@@ -187,7 +188,7 @@ func TestMiddlewareAcceptsValidToken(t *testing.T) {
 func TestMiddlewareStoresAuthInContext(t *testing.T) {
 	_, svc, auditor, limiter, key := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	var capturedKey *models.APIKey
@@ -244,7 +245,7 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 	require.NoError(t, err)
 
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
@@ -295,7 +296,7 @@ func TestAuthAcceptsSessionCookieWithCSRFOnUnsafeMethod(t *testing.T) {
 	token, sess, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	req.Header.Set("X-CSRF-Token", sess.CSRFToken)
 
@@ -319,7 +320,7 @@ func TestAuthBearerPrecedenceExemptsSessionCSRF(t *testing.T) {
 	db, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleOperator, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: "bad-session-token"})
 
@@ -354,7 +355,7 @@ func TestAuthRejectsMalformedAuthorizationEvenWithSessionCookie(t *testing.T) {
 	token, _, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 
@@ -399,8 +400,8 @@ func TestAuthRejectsInvalidSessionCookieRecordsFailureAndAudit(t *testing.T) {
 		CookieName: "caesium_session",
 	}
 
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	for range 2 {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 		req.RemoteAddr = "203.0.113.10:1234"
 		req.AddCookie(&http.Cookie{Name: "caesium_session", Value: "bad-session-token"})
 		_, err := callMiddlewareWithDeps(t, deps, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
@@ -435,7 +436,7 @@ func TestAuthRejectsBadSessionCSRFRecordsFailureAndAudit(t *testing.T) {
 	token, _, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.RemoteAddr = "203.0.113.11:1234"
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	_, err = callMiddlewareWithDeps(t, authmw.AuthDeps{
@@ -488,7 +489,7 @@ func TestMiddlewareRejectsExpiredKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+resp.Plaintext)
 	_, err = callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -513,7 +514,7 @@ func TestMiddlewareRejectsRevokedKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, svc.RevokeKey(resp.Key.ID))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+resp.Plaintext)
 	_, err = callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -526,7 +527,7 @@ func TestMiddlewareRejectsRevokedKey(t *testing.T) {
 func TestMiddlewareRejectsBadAuthorizationFormat(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -544,13 +545,13 @@ func TestMiddlewareRateLimiting(t *testing.T) {
 	auditor := auth.NewAuditLogger(db)
 	limiter := auth.NewRateLimiter(2, time.Minute)
 
-	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	for range 3 {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 		req.Header.Set("Authorization", "Bearer csk_live_badkey")
 		_, _ = callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer csk_live_badkey")
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -569,13 +570,13 @@ func TestMiddlewareRBACViewerCannotWrite(t *testing.T) {
 	limiter := auth.NewRateLimiter(10, time.Minute)
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/jobs", nil)
+	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err = callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodPost}, nil, nil)
 	require.Error(t, err)
@@ -589,7 +590,7 @@ func TestMiddlewareNormalisesNamedRouteParams(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/job-1/runs/run-2", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs/job-1/runs/run-2", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -612,7 +613,7 @@ func TestMiddlewareRejectsUnknownProtectedRoute(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleAdmin, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/unknown", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/unknown", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/unknown", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -626,7 +627,7 @@ func TestMiddlewareScopedListInjectsAliases(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha", "beta"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	var aliases []string
@@ -653,7 +654,7 @@ func TestMiddlewareScopedJobRouteAllowsInScopeAlias(t *testing.T) {
 	jobID, _, _ := seedJobFixtures(t, db, "alpha")
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+jobID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs/"+jobID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -674,7 +675,7 @@ func TestMiddlewareScopedJobRouteRejectsOutOfScopeAlias(t *testing.T) {
 	jobID, _, _ := seedJobFixtures(t, db, "alpha")
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"beta"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+jobID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs/"+jobID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(
 		t,
@@ -699,7 +700,7 @@ func TestMiddlewareScopedQueueCancelAllowsInScopeOperatorAndAudits(t *testing.T)
 	queueID := uuid.New()
 	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -737,7 +738,7 @@ func TestMiddlewareScopedQueueCancelRejectsOutOfScopeOperator(t *testing.T) {
 	queueID := uuid.New()
 	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"beta"}})
 
-	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(
 		t,
@@ -773,7 +774,7 @@ func TestMiddlewareQueueCancelRequiresOperator(t *testing.T) {
 	queueID := uuid.New()
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(
 		t,
@@ -809,7 +810,7 @@ func TestMiddlewareScopedRunRouteAllowsInScopeAlias(t *testing.T) {
 	jobID, runID, _ := seedJobFixtures(t, db, "alpha")
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+jobID.String()+"/runs/"+runID.String(), nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs/"+jobID.String()+"/runs/"+runID.String(), nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -832,7 +833,7 @@ func TestMiddlewareScopedCreateRejectsOutOfScopeAlias(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"beta"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"beta"}`))
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodPost}, nil, nil)
 	require.Error(t, err)
@@ -846,7 +847,7 @@ func TestMiddlewareScopedJobdefApplyRejectsPrune(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(
+	req := httptest.NewRequestWithContext(context.Background(),
 		http.MethodPost,
 		"/v1/jobdefs/apply",
 		strings.NewReader(`{"definitions":[{"metadata":{"alias":"alpha"}}],"prune":true}`),
@@ -864,7 +865,7 @@ func TestMiddlewareScopedGlobalRouteRejected(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/stats", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/stats", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/stats", Method: http.MethodGet}, nil, nil)
 	require.Error(t, err)
@@ -878,7 +879,7 @@ func TestMiddlewareLineageImpactAllowsUnscopedViewer(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/lineage/impact", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/lineage/impact", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -898,7 +899,7 @@ func TestMiddlewareLineageImpactRejectsScopedViewerWithSpecificMessage(t *testin
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/lineage/impact", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/lineage/impact", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(
 		t,
@@ -922,7 +923,7 @@ func TestMiddlewareContractsGraphAllowsUnscopedViewer(t *testing.T) {
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/contracts/graph", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/contracts/graph", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	rec, err := callMiddleware(
 		t,
@@ -942,7 +943,7 @@ func TestMiddlewareContractsGraphRejectsScopedViewerWithSpecificMessage(t *testi
 	_, svc, auditor, limiter, _ := setupAuth(t)
 	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/contracts/graph", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/contracts/graph", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	_, err := callMiddleware(
 		t,
@@ -964,7 +965,7 @@ func TestMiddlewareContractsGraphRejectsScopedViewerWithSpecificMessage(t *testi
 
 func TestGetAuthKeyReturnsNilWhenNotSet(t *testing.T) {
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
@@ -974,7 +975,7 @@ func TestGetAuthKeyReturnsNilWhenNotSet(t *testing.T) {
 
 func TestGetPrincipal(t *testing.T) {
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 

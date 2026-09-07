@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -695,9 +696,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 	}
 
 	cloned := make(map[string]string, len(labels))
-	for key, value := range labels {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, labels)
 	return cloned
 }
 

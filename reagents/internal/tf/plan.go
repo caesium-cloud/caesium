@@ -346,12 +346,10 @@ func sanitizeDecodeError(op string, err error) error {
 	if err == nil {
 		return nil
 	}
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
+	if syntaxErr, ok := errors.AsType[*json.SyntaxError](err); ok {
 		return fmt.Errorf("%s: response is not valid JSON (syntax error at byte offset %d)", op, syntaxErr.Offset)
 	}
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) {
+	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 		field := typeErr.Field
 		if field == "" {
 			field = "(root)"

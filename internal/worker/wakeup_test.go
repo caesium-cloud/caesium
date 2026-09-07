@@ -16,8 +16,7 @@ func TestSubscribeWakeups_NilBus(t *testing.T) {
 }
 
 func TestSubscribeWakeups_WakesOnTaskReady(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	b := event.New()
 	ch := SubscribeWakeups(ctx, b)
@@ -27,8 +26,7 @@ func TestSubscribeWakeups_WakesOnTaskReady(t *testing.T) {
 }
 
 func TestSubscribeWakeups_WakesOnTaskLeaseExpired(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	b := event.New()
 	ch := SubscribeWakeups(ctx, b)
@@ -38,8 +36,7 @@ func TestSubscribeWakeups_WakesOnTaskLeaseExpired(t *testing.T) {
 }
 
 func TestSubscribeWakeups_WakesOnRunStarted(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	b := event.New()
 	ch := SubscribeWakeups(ctx, b)
@@ -49,8 +46,7 @@ func TestSubscribeWakeups_WakesOnRunStarted(t *testing.T) {
 }
 
 func TestSubscribeWakeups_WakesOnExternalSignal(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	signaler := NewWakeupSignaler()
 	ch := SubscribeWakeups(ctx, nil, signaler.C())
@@ -60,8 +56,7 @@ func TestSubscribeWakeups_WakesOnExternalSignal(t *testing.T) {
 }
 
 func TestSubscribeWakeups_IgnoresIrrelevantEvents(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	b := event.New()
 	ch := SubscribeWakeups(ctx, b)
@@ -77,14 +72,13 @@ func TestSubscribeWakeups_IgnoresIrrelevantEvents(t *testing.T) {
 }
 
 func TestSubscribeWakeups_Coalesces(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	b := event.New()
 	ch := SubscribeWakeups(ctx, b)
 
 	// Publish several events rapidly.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		b.Publish(event.Event{Type: event.TypeTaskReady})
 	}
 

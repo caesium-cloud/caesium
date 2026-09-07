@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"runtime"
 	"slices"
@@ -133,7 +134,7 @@ type Envelope struct {
 	JobAlias            string             `json:"job_alias,omitempty"`
 	BaselineRunID       string             `json:"baseline_run_id,omitempty"`
 	ReplaySafe          bool               `json:"replay_safe"`
-	CapturedAt          time.Time          `json:"captured_at,omitempty"`
+	CapturedAt          time.Time          `json:"captured_at"`
 	Image               string             `json:"image"`
 	RecordedImage       string             `json:"recorded_image,omitempty"`
 	ResolvedImageDigest string             `json:"resolved_image_digest,omitempty"`
@@ -272,9 +273,7 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 	processedSecretEnv := make(map[string]struct{})
 
 	mergedParams := make(map[string]string, len(desc.Run.Params)+len(opts.SetParams))
-	for key, value := range desc.Run.Params {
-		mergedParams[key] = value
-	}
+	maps.Copy(mergedParams, desc.Run.Params)
 	for _, assignment := range opts.SetParams {
 		if strings.TrimSpace(assignment.Key) == "" {
 			return nil, fmt.Errorf("--set key cannot be empty")
@@ -456,11 +455,9 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 			Image:        env.Image,
 			Command:      slices.Clone(env.Command),
 			OutputSchema: cloneAnyMap(desc.Schema.OutputSchema),
-			Spec: container.Spec{
-				Env:     cloneStringMap(env.Env),
-				WorkDir: env.WorkDir,
-				Mounts:  slices.Clone(env.Mounts),
-			},
+			Env:          cloneStringMap(env.Env),
+			WorkDir:      env.WorkDir,
+			Mounts:       slices.Clone(env.Mounts),
 		}},
 	}
 }
@@ -1050,9 +1047,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
+	maps.Copy(out, values)
 	return out
 }
 
@@ -1061,9 +1056,7 @@ func cloneAnyMap(values map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
+	maps.Copy(out, values)
 	return out
 }
 

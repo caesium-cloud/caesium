@@ -246,13 +246,13 @@ func TestGenesisRaceIsIdempotent(t *testing.T) {
 	const contenders = 8
 
 	provisioners := make([]*Provisioner, contenders)
-	for i := 0; i < contenders; i++ {
+	for i := range contenders {
 		provisioners[i] = newTestProvisioner(t, store, "node-race-"+string(rune('a'+i))+":9001", testToken, leader, newFakeClock(now))
 	}
 	start := make(chan struct{})
 	errs := make(chan error, contenders)
 	var wg sync.WaitGroup
-	for i := 0; i < contenders; i++ {
+	for i := range contenders {
 		wg.Add(1)
 		go func(p *Provisioner) {
 			defer wg.Done()

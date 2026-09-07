@@ -58,8 +58,7 @@ func Post(c *echo.Context) error {
 
 	req, err := decodePostRequest(c)
 	if err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large").Wrap(err)
 		}
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)

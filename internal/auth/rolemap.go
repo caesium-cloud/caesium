@@ -20,7 +20,7 @@ type RoleMapper struct {
 // default role. Entries split on the last '=' so LDAP DNs can be used as keys.
 func NewRoleMapper(mapping, defaultRole string) (*RoleMapper, error) {
 	m := &RoleMapper{byGroup: map[string]models.Role{}}
-	for _, entry := range strings.Split(mapping, ";") {
+	for entry := range strings.SplitSeq(mapping, ";") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue

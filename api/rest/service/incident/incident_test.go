@@ -175,7 +175,7 @@ func TestConcurrentDecideRaceHasSingleWinner(t *testing.T) {
 		winner  models.ApprovalDecision
 	)
 	start := make(chan struct{})
-	for i := 0; i < racers; i++ {
+	for i := range racers {
 		decision := models.ApprovalDecisionApproved
 		if i%2 == 1 {
 			decision = models.ApprovalDecisionRejected

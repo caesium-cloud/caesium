@@ -36,7 +36,7 @@ func TestBeginCreatesTrackedRedirect(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	redirectURL, err := provider.Begin(rec, req, "/runs?status=failed#latest")
 	require.NoError(t, err)
 
@@ -68,7 +68,7 @@ func TestBeginSetsSecurePostStateCookieSameSiteNone(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
@@ -101,14 +101,14 @@ func TestClearStateCookiePreservesCookiePolicy(t *testing.T) {
 			require.NoError(t, err)
 
 			setRec := httptest.NewRecorder()
-			_, err = provider.Begin(setRec, httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil), "/")
+			_, err = provider.Begin(setRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil), "/")
 			require.NoError(t, err)
 			setCookies := setRec.Result().Cookies()
 			require.Len(t, setCookies, 1)
 			require.Equal(t, tt.sameSite, setCookies[0].SameSite)
 
 			clearRec := httptest.NewRecorder()
-			provider.ClearStateCookie(clearRec, httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", nil))
+			provider.ClearStateCookie(clearRec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/saml/acs", nil))
 			clearCookies := clearRec.Result().Cookies()
 			require.Len(t, clearCookies, 1)
 
@@ -135,7 +135,7 @@ func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, req, "https://evil.example.com/runs")
 
 	require.ErrorIs(t, err, ErrInvalidReturnTo)
@@ -163,12 +163,12 @@ func TestCompleteRejectsRelayStateMismatchBeforeParsingResponse(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
 	body := "RelayState=wrong&SAMLResponse=not-a-real-response"
-	acsReq := httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
+	acsReq := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
 	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	acsReq.AddCookie(rec.Result().Cookies()[0])
 
@@ -186,21 +186,21 @@ func TestCompleteRejectsTamperedStateCookieBeforeParsingResponse(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
 	cookies := rec.Result().Cookies()
 	require.NotEmpty(t, cookies)
 	cookie := cookies[0]
-	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
+	stateReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/acs", nil)
 	stateReq.AddCookie(cookie)
 	state, err := provider.readStateCookie(stateReq)
 	require.NoError(t, err)
 
 	cookie.Value += "tampered"
 	body := "RelayState=" + state.RelayState + "&SAMLResponse=not-a-real-response"
-	acsReq := httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
+	acsReq := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
 	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	acsReq.AddCookie(cookie)
 
@@ -223,21 +223,21 @@ func TestCompleteRejectsExpiredStateCookieBeforeParsingResponse(t *testing.T) {
 	provider.now = func() time.Time { return now }
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/login", nil)
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
 	cookies := rec.Result().Cookies()
 	require.NotEmpty(t, cookies)
 	cookie := cookies[0]
-	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
+	stateReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/sso/saml/acs", nil)
 	stateReq.AddCookie(cookie)
 	state, err := provider.readStateCookie(stateReq)
 	require.NoError(t, err)
 
 	provider.now = func() time.Time { return now.Add(time.Minute + time.Second) }
 	body := "RelayState=" + state.RelayState + "&SAMLResponse=not-a-real-response"
-	acsReq := httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
+	acsReq := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
 	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	acsReq.AddCookie(cookie)
 

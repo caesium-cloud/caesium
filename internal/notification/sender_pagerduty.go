@@ -83,13 +83,13 @@ type pdEvent struct {
 }
 
 type pdPayload struct {
-	Summary   string            `json:"summary"`
-	Source    string            `json:"source"`
-	Severity  string            `json:"severity"`
-	Timestamp string            `json:"timestamp,omitempty"`
-	Component string            `json:"component,omitempty"`
-	Group     string            `json:"group,omitempty"`
-	CustomDetails map[string]interface{} `json:"custom_details,omitempty"`
+	Summary       string         `json:"summary"`
+	Source        string         `json:"source"`
+	Severity      string         `json:"severity"`
+	Timestamp     string         `json:"timestamp,omitempty"`
+	Component     string         `json:"component,omitempty"`
+	Group         string         `json:"group,omitempty"`
+	CustomDetails map[string]any `json:"custom_details,omitempty"`
 }
 
 func buildPagerDutyEvent(cfg pagerdutyConfig, p Payload) pdEvent {
@@ -117,7 +117,7 @@ func buildPagerDutyEvent(cfg pagerdutyConfig, p Payload) pdEvent {
 	// Dedup key prevents duplicate pages for the same run failure.
 	dedupKey := fmt.Sprintf("caesium-%s-%s-%s", p.EventType, p.JobID, p.RunID)
 
-	details := map[string]interface{}{
+	details := map[string]any{
 		"event_type": string(p.EventType),
 		"job_id":     p.JobID.String(),
 		"run_id":     p.RunID.String(),

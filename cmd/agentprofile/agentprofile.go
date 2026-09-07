@@ -133,24 +133,24 @@ var applyCmd = &cobra.Command{
 }
 
 type profileFile struct {
-	ID         string                 `json:"id,omitempty" yaml:"id,omitempty"`
-	Name       *string                `json:"name,omitempty" yaml:"name,omitempty"`
-	Image      *string                `json:"image,omitempty" yaml:"image,omitempty"`
-	Engine     *string                `json:"engine,omitempty" yaml:"engine,omitempty"`
-	Limits     map[string]interface{} `json:"limits,omitempty" yaml:"limits,omitempty"`
-	SecretRefs map[string]string      `json:"secret_refs,omitempty" yaml:"secret_refs,omitempty"`
-	Budgets    map[string]interface{} `json:"budgets,omitempty" yaml:"budgets,omitempty"`
-	Playbook   map[string]interface{} `json:"playbook,omitempty" yaml:"playbook,omitempty"`
+	ID         string            `json:"id,omitempty" yaml:"id,omitempty"`
+	Name       *string           `json:"name,omitempty" yaml:"name,omitempty"`
+	Image      *string           `json:"image,omitempty" yaml:"image,omitempty"`
+	Engine     *string           `json:"engine,omitempty" yaml:"engine,omitempty"`
+	Limits     map[string]any    `json:"limits,omitempty" yaml:"limits,omitempty"`
+	SecretRefs map[string]string `json:"secret_refs,omitempty" yaml:"secret_refs,omitempty"`
+	Budgets    map[string]any    `json:"budgets,omitempty" yaml:"budgets,omitempty"`
+	Playbook   map[string]any    `json:"playbook,omitempty" yaml:"playbook,omitempty"`
 }
 
 type profileRequest struct {
-	Name       *string                `json:"name,omitempty"`
-	Image      *string                `json:"image,omitempty"`
-	Engine     *string                `json:"engine,omitempty"`
-	Limits     map[string]interface{} `json:"limits,omitempty"`
-	SecretRefs map[string]string      `json:"secret_refs,omitempty"`
-	Budgets    map[string]interface{} `json:"budgets,omitempty"`
-	Playbook   map[string]interface{} `json:"playbook,omitempty"`
+	Name       *string           `json:"name,omitempty"`
+	Image      *string           `json:"image,omitempty"`
+	Engine     *string           `json:"engine,omitempty"`
+	Limits     map[string]any    `json:"limits,omitempty"`
+	SecretRefs map[string]string `json:"secret_refs,omitempty"`
+	Budgets    map[string]any    `json:"budgets,omitempty"`
+	Playbook   map[string]any    `json:"playbook,omitempty"`
 }
 
 func (p profileFile) toRequest() profileRequest {

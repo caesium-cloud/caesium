@@ -82,7 +82,6 @@ func TestFireWithParamsSkipAndErrorOutcomes(t *testing.T) {
 
 	t.Run("malformed trigger depth starts new chain", func(t *testing.T) {
 		for _, rawDepth := range []string{"not-a-number", "-1"} {
-			rawDepth := rawDepth
 			t.Run(rawDepth, func(t *testing.T) {
 				listJobsCalled := false
 				trig, err := New(triggerModel,

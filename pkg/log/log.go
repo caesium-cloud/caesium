@@ -84,42 +84,42 @@ func Buffer() *RingBuffer {
 // Debug logs a debug message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Debug(msg string, kv ...interface{}) {
+func Debug(msg string, kv ...any) {
 	zap.S().Debugw(msg, kv...)
 }
 
 // Info logs an info message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Info(msg string, kv ...interface{}) {
+func Info(msg string, kv ...any) {
 	zap.S().Infow(msg, kv...)
 }
 
 // Warn logs a warning message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Warn(msg string, kv ...interface{}) {
+func Warn(msg string, kv ...any) {
 	zap.S().Warnw(msg, kv...)
 }
 
 // Error logs an error message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Error(msg string, kv ...interface{}) {
+func Error(msg string, kv ...any) {
 	zap.S().Errorw(msg, kv...)
 }
 
 // Panic logs a panic message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Panic(msg string, kv ...interface{}) {
+func Panic(msg string, kv ...any) {
 	zap.S().Panicw(msg, kv...)
 }
 
 // Fatal logs a fatal message. Refer to:
 // https://godoc.org/go.uber.org/zap
 // for more details.
-func Fatal(msg string, kv ...interface{}) {
+func Fatal(msg string, kv ...any) {
 	zap.S().Fatalw(msg, kv...)
 }
 

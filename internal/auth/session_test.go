@@ -179,7 +179,7 @@ func TestSessionFlushSeenBatchesLargeUpdates(t *testing.T) {
 	now := time.Now().UTC()
 	sessions := make([]models.Session, 0, sessionFlushBatchSize+5)
 	store := NewSessionStore(db, WithSessionTTLs(time.Hour, 24*time.Hour))
-	for i := 0; i < sessionFlushBatchSize+5; i++ {
+	for range sessionFlushBatchSize + 5 {
 		id := uuid.New()
 		sessions = append(sessions, models.Session{
 			ID:                id,

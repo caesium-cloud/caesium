@@ -66,7 +66,7 @@ func (s *LogTestSuite) TestLog() {
 	assert.Equal(s.T(), Clean("Hello World\n"), "hello world")
 }
 
-func capture(logFunc func(string, ...interface{}), msg string, kv ...interface{}) string {
+func capture(logFunc func(string, ...any), msg string, kv ...any) string {
 	var buffer bytes.Buffer
 
 	oldLogger := zap.S()

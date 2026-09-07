@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 	"testing"
 
@@ -47,12 +48,7 @@ func (b *topoBuilder) build() RunTopology {
 }
 
 func contains(ids []uuid.UUID, want uuid.UUID) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, want)
 }
 
 func TestLiveAndReplayTraversalAgree(t *testing.T) {

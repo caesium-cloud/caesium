@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	stdhttp "net/http"
 	"strconv"
 	"strings"
@@ -255,9 +256,7 @@ func cloneParams(params map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	out := make(map[string]string, len(params))
-	for k, v := range params {
-		out[k] = v
-	}
+	maps.Copy(out, params)
 	return out
 }
 

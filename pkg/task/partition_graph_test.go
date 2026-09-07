@@ -89,7 +89,7 @@ func TestValidatePartitionGraph_DanglingKey(t *testing.T) {
 func TestValidatePartitionGraph_FanOfDepth1(t *testing.T) {
 	parts := make([]Partition, 0, 1024)
 	parts = append(parts, Partition{Key: "root"})
-	for i := 0; i < 1023; i++ {
+	for i := range 1023 {
 		parts = append(parts, Partition{Key: fmt.Sprintf("p%d", i), DependsOn: []string{"root"}})
 	}
 	g, err := ValidatePartitionGraph(parts)

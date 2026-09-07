@@ -66,10 +66,7 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	offset := p.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(p.Offset, 0)
 
 	q := s.db.WithContext(s.ctx).Model(&models.Incident{})
 	if p.Status != "" {

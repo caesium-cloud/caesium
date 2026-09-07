@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -264,13 +265,7 @@ func policyFilterMatches(p models.NotificationPolicy, evt event.Event) bool {
 	}
 
 	if len(filter.JobIDs) > 0 {
-		found := false
-		for _, id := range filter.JobIDs {
-			if id == evt.JobID {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(filter.JobIDs, evt.JobID)
 		if !found {
 			return false
 		}
@@ -404,8 +399,8 @@ func extractJobAlias(evt event.Event) string {
 }
 
 // ChannelConfigMap extracts the channel's config as a raw map.
-func ChannelConfigMap(ch models.NotificationChannel) (map[string]interface{}, error) {
-	var m map[string]interface{}
+func ChannelConfigMap(ch models.NotificationChannel) (map[string]any, error) {
+	var m map[string]any
 	if err := json.Unmarshal(ch.Config, &m); err != nil {
 		return nil, err
 	}

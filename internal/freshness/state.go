@@ -149,7 +149,7 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 		res AdvanceResult
 		err error
 	)
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for range maxAttempts {
 		res, err = s.advanceTx(ctx, in)
 		if err == nil {
 			return res, nil
@@ -251,7 +251,7 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		}
 		res = applyContract(&authoritative, in)
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
-			updates := map[string]interface{}{
+			updates := map[string]any{
 				"watermark":        authoritative.Watermark,
 				"watermark_run_at": authoritative.WatermarkRunAt,
 				"advanced_at":      authoritative.AdvancedAt,

@@ -291,7 +291,7 @@ func (s *SSOController) recordProviderLoginFailure(c *echo.Context, provider, ac
 		Action:   action,
 		SourceIP: c.RealIP(),
 		Outcome:  outcome,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": provider,
 			"reason":   reason,
 			"method":   c.Request().Method,
@@ -314,7 +314,7 @@ func (s *SSOController) recordLogout(c *echo.Context, outcome string, sess *mode
 		Action:   iauth.ActionAuthLogout,
 		SourceIP: c.RealIP(),
 		Outcome:  outcome,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"method": c.Request().Method,
 			"path":   c.Request().URL.Path,
 		},
@@ -337,7 +337,7 @@ func (s *SSOController) recordAPIKeyLogoutNoop(c *echo.Context, principal *iauth
 		ResourceType: "api_key",
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"method": c.Request().Method,
 			"path":   c.Request().URL.Path,
 			"noop":   true,
@@ -360,7 +360,7 @@ func (s *SSOController) recordSessionRevoked(c *echo.Context, sess *models.Sessi
 		ResourceID:   sess.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": sess.AuthMethod,
 			"method":   c.Request().Method,
 			"path":     c.Request().URL.Path,

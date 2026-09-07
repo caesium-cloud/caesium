@@ -288,7 +288,7 @@ func Migrate() (err error) {
 	return nil
 }
 
-func migrateModels(conn *gorm.DB, models ...interface{}) error {
+func migrateModels(conn *gorm.DB, models ...any) error {
 	for _, model := range models {
 		if err := conn.AutoMigrate(model); err != nil {
 			return err
@@ -297,8 +297,8 @@ func migrateModels(conn *gorm.DB, models ...interface{}) error {
 	return nil
 }
 
-func hotPathModels() []interface{} {
-	return []interface{}{
+func hotPathModels() []any {
+	return []any{
 		&models.JobRun{},
 		&models.TaskRun{},
 		&models.CallbackRun{},

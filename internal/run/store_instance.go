@@ -190,7 +190,7 @@ func (s *Store) SkipTaskInstance(runID, taskRunID uuid.UUID, reason string) erro
 		return s.db.Transaction(func(tx *gorm.DB) error {
 			result := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND job_run_id = ? AND status NOT IN ?", taskRunID, runID, terminalTaskStatuses()).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":                  string(TaskStatusSkipped),
 					"error":                   reason,
 					"completed_at":            now,

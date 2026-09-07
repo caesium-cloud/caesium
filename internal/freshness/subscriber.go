@@ -406,7 +406,7 @@ func decodeOutput(raw datatypes.JSON) map[string]string {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var typed map[string]interface{}
+	var typed map[string]any
 	if err := dec.Decode(&typed); err != nil {
 		return nil
 	}

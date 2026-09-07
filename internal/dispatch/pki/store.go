@@ -141,7 +141,7 @@ func (s *Store) MarkEnrollmentSigned(ctx context.Context, id string, caGeneratio
 	result := s.db.WithContext(ctx).
 		Model(&models.InternalNodeEnrollment{}).
 		Where("id = ? AND status = ?", id, EnrollmentStatusPending).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"ca_generation": caGeneration,
 			"cert_pem":      certPEM,
 			"status":        EnrollmentStatusSigned,
@@ -160,7 +160,7 @@ func (s *Store) MarkEnrollmentRejected(ctx context.Context, id string, signedAt 
 	result := s.db.WithContext(ctx).
 		Model(&models.InternalNodeEnrollment{}).
 		Where("id = ? AND status = ?", id, EnrollmentStatusPending).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":    EnrollmentStatusRejected,
 			"signed_at": signedAt.UTC(),
 		})
