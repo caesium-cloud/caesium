@@ -1427,7 +1427,6 @@ names (L12).
       landing so the required lanes are honestly green first; the
       orchestrator runs it after #422 merges and records the result in
       `## Progress`.
-- [ ] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
 - [x] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
       and add `ui/test-results/` to `.gitignore`; add a `clean-worktrees`
       justfile recipe (appended at the end of the file) that runs
