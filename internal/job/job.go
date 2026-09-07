@@ -154,6 +154,17 @@ type job struct {
 	// lets race regressions interleave RetryPartition deterministically without
 	// database locks/sleeps.
 	beforeComplete func(uuid.UUID)
+	// rateLimitClock is an unexported test seam for the rate limiter's clock.
+	// Production leaves it nil and the limiter reads the wall clock.
+	//
+	// ratelimit.Limiter is a FIXED-window limiter: it buckets on
+	// now.Truncate(window), floored at one minute. A test that asserts "a
+	// 2-per-minute rule admits exactly two of these four partitions" therefore
+	// only holds while the whole dispatch pass stays inside one minute bucket —
+	// a pass that straddles :00 gets a fresh bucket and admits two more. Under
+	// `-race` that is a real, if rare, source of "the limiter admitted three".
+	// Pinning the clock removes the boundary instead of sleeping past it.
+	rateLimitClock func() time.Time
 	// partitionRetryReplacementFor names the retry-reset instances a
 	// replacement engine (startReplacementRun) was started to drive. It bounds
 	// the completion fence: a replacement that still leaves THOSE instances
@@ -517,10 +528,13 @@ func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, tas
 			withPartitionRetryReplacement(taskRunIDs),
 		)
 		if engine, ok := replacement.(*job); ok {
-			// Test seam only; production leaves it nil. Carrying it lets a
-			// regression interleave a retry with the replacement's own
-			// shutdown window.
+			// Test seams only; production leaves both nil. Carrying
+			// beforeComplete lets a regression interleave a retry with the
+			// replacement's own shutdown window; carrying rateLimitClock keeps
+			// the replacement's admission decisions in the same fixed window as
+			// the engine that spawned it.
 			engine.beforeComplete = j.beforeComplete
+			engine.rateLimitClock = j.rateLimitClock
 		}
 		if err := replacement.Run(runCtx); err != nil {
 			log.Error("partition retry replacement run failure", "id", j.id, "run_id", runID, "error", err)
@@ -1800,7 +1814,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}, predHashByID, nil
 	}
 
-	rateLimiter := ratelimit.NewLimiter(store.DB())
+	var limiterOpts []ratelimit.Option
+	if j.rateLimitClock != nil {
+		limiterOpts = append(limiterOpts, ratelimit.WithClock(j.rateLimitClock))
+	}
+	rateLimiter := ratelimit.NewLimiter(store.DB(), limiterOpts...)
 
 	// acquireRateLimitFor consumes one rate-limit token for ONE UNIT OF WORK.
 	//

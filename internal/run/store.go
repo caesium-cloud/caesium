@@ -246,10 +246,18 @@ type Store struct {
 // runStateInvalidator is the seam a cached in-memory run state exposes so the
 // store can discard it when a run is RE-OPENED.
 //
-// Only Drop is needed: rebuilding is lazy. The dispatch loop recovers a run it
-// does not own on its next tick, and that rebuild reads the current rows.
+// Release, not Drop. Rebuilding is lazy — the dispatch loop recovers a run it
+// does not own on its next tick, and that rebuild reads the current rows — but
+// HOW the cached copy goes matters. Drop force-writes a final checkpoint of the
+// state it is discarding (OwnerManager.Drop), which on this path is precisely
+// the stale "this run is complete" snapshot the retry just invalidated; a
+// recovery tick landing between that write and the DeleteCheckpoints below
+// restores it and the reopened run never dispatches again. Release marks the
+// state stale first so nothing can checkpoint it, deletes the checkpoints while
+// the run is still held, and only then forgets it — the ordering its own doc
+// comment calls load-bearing.
 type runStateInvalidator interface {
-	Drop(runID uuid.UUID)
+	Release(runID uuid.UUID) error
 }
 
 // SetRunStateCache registers the in-memory run state layered over this store.
@@ -275,20 +283,31 @@ func (s *Store) SetRunStateCache(inv runStateInvalidator) {
 // times out. Meanwhile the pull-path claimer will not touch it either, because
 // the run still holds a live lease and liveLeaseGuardSQL defers to the owner.
 //
-// Dropping the state is half the fix. The run's CHECKPOINT is the same snapshot
-// made durable, and recovery restores from it before replaying the terminal tail
-// — so a rebuild that consulted a checkpoint written when the run was complete
-// would reconstruct exactly the stale state that was just discarded. The tail
-// cannot correct it either: a reset row stops being terminal, and
-// TerminalTaskRunsSince reports rows that ARE terminal, never rows that stopped
-// being so. Both copies go, and recovery replays from the task_runs rows, which
-// are the system of record.
+// Discarding the state is half the fix. The run's CHECKPOINT is the same
+// snapshot made durable, and recovery restores from it before replaying the
+// terminal tail — so a rebuild that consulted a checkpoint written when the run
+// was complete would reconstruct exactly the stale state that was just
+// discarded. The tail cannot correct it either: a reset row stops being
+// terminal, and TerminalTaskRunsSince reports rows that ARE terminal, never rows
+// that stopped being so. Both copies go, and recovery replays from the
+// task_runs rows, which are the system of record.
+//
+// Release is what removes both copies without opening a window between them
+// (see runStateInvalidator). DeleteCheckpoints still runs afterwards, and is not
+// redundant: Release is a no-op for a run this node is not currently tracking —
+// a completed run the owner already dropped, say — and that run's durable
+// checkpoint still says complete.
 func (s *Store) invalidateRunState(runID uuid.UUID) {
 	if s == nil {
 		return
 	}
 	if inv := s.runStateCache.Load(); inv != nil && *inv != nil {
-		(*inv).Drop(runID)
+		if err := (*inv).Release(runID); err != nil {
+			// The run is kept, marked stale, so it can never checkpoint again;
+			// the checkpoint delete below is the second chance at the durable
+			// half.
+			log.Warn("run: failed to release cached run state for re-opened run", "run_id", runID, "error", err)
+		}
 	}
 	if err := s.DeleteCheckpoints(runID); err != nil {
 		// Best effort: a surviving checkpoint delays the retry until the lease

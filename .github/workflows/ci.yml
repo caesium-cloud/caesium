@@ -615,6 +615,10 @@ jobs:
       - name: Pre-pull job images via Podman
         run: podman pull alpine:3.23
       - name: Start Caesium with Podman engine
+        # This lane starts its OWN server rather than going through
+        # `just integration-up`, so it silently drifts red whenever a feature
+        # adds env there and not here. Keep this block a superset of
+        # `integration-up`'s `-e` flags (justfile) plus the podman-only ones.
         run: |
           PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
           docker run -d --name caesium-server-podman \
@@ -637,6 +641,8 @@ jobs:
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
             -e CAESIUM_CACHE_ENABLED=true \
+            -e CAESIUM_DATABASE_SHARDS=4 \
+            -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
       - name: Extract caesium CLI
