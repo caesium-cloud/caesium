@@ -1277,7 +1277,7 @@ Arc convention 8 assumes required status checks exist. They do not (Ledger
 L13), and 6 of the last 17 master runs are red for reasons the ledger already
 names (L12).
 
-- [ ] D1. Fix or quarantine the root causes in L12. (a) `TestFanOutHTTPRetryPartition`
+- [x] D1. Fix or quarantine the root causes in L12. (a) `TestFanOutHTTPRetryPartition`
       on owner-memory: confirm #384 (`48497e9`) fixed it by reading the three
       master runs after it; if it recurs, bisect `internal/run/store.go`
       `RetryPartition`'s outstanding re-seed (`partitionRetryOutstandingTx`)
@@ -1305,6 +1305,87 @@ names (L12).
       `.github/workflows/ci.yml` (`podman-integration-test` env block),
       `internal/trigger/event/*_test.go`, `test/event_cli_test.go` (the
       `openIntegrationCatalogDB` helper). Depends on: H-2 for the timeout half of L12.
+      **Done (W2-α):** all five entries fixed, none quarantined — no new
+      `t.Skip`-behind-an-issue anywhere.
+      *(a)* #384 did **not** fix it: it recurred on master run 34062579647
+      (commit `192f604`, job 101565958611). Root cause is not
+      `partitionRetryOutstandingTx` at all — it is how the store discards the
+      owner's cached state. `Store.invalidateRunState` called
+      `OwnerManager.Drop`, and Drop's contract is to force a final checkpoint of
+      the state it is discarding: on this path, precisely the "run is complete"
+      snapshot the retry just invalidated. That snapshot is durable until the
+      `DeleteCheckpoints` that follows, and the dropped pointer is not marked
+      stale, so an in-flight completion can write it again afterwards. Either
+      copy makes the next recovery reconstruct a complete run, and a recovery
+      never learns that a row *stopped* being terminal. Fixed by invalidating
+      through `OwnerManager.Release` (which marks the state stale, deletes the
+      checkpoints while still holding the run, then forgets it — the ordering
+      its own doc comment already called load-bearing), and by adding a per-run
+      invalidation epoch so a `Recover`/`Adopt` that was already rebuilding when
+      the retry landed cannot publish its pre-retry view over the top
+      (`put` refuses it, the rebuild retries off the current rows, and the
+      generation checkpoint is written only after a successful publish). Three
+      deterministic regression tests in `internal/run/owner_invalidation_test.go`;
+      the first one fails against the old `Drop` path, verified. Adversarial
+      review then found three more windows on the same seam, all fixed with
+      their own regression tests: `Recover`'s post-publish checkpoint used a raw
+      `writer.Force` that bypassed the `stale` flag; `Drop` forgot the run
+      *before* forcing its final checkpoint, so a retry in that gap had nothing
+      to mark stale and its delete preceded the write; and the per-run epoch
+      counter was ABA-prone (reset to zero on publish), now a manager-wide
+      monotonic stamp that `Drop` deliberately does not advance — `Drop` is this
+      owner letting go of a run it just checkpointed, not a claim that the rows
+      moved, so stamping there would only force spurious rebuilds and leak an
+      entry per run ever owned.
+      *(b)* Podman was green on all 8 recent master runs, so nothing to
+      reproduce. Diffing the lane's own `docker run -e` block against
+      `integration-up` found two envs missing — `CAESIUM_DATABASE_SHARDS=4` and
+      `CAESIUM_FANOUT_MAX_PARTITIONS=8` — both added, with a comment on the step
+      saying the block must stay a superset of `integration-up`.
+      *(c)* Real fix, no quarantine, and it was not a test bug.
+      `go-dqlite`'s package `init()` puts SQLite into **single-thread** mode
+      process-wide (`go-dqlite/v3/config.go`), which disables the mutexes that
+      make `sqlite3_initialize()` safe to call concurrently — and every binary
+      here also drives SQLite directly through `mattn/go-sqlite3`. Two
+      `t.Parallel()` tests opening their first connection in a fresh process
+      race that initialization and the loser sees an unpopulated VFS list, which
+      SQLite reports as `no such vfs: ` with an EMPTY name. Reproduced locally
+      at ~1 in 40 fresh `-race` processes of `./internal/trigger/event/`
+      (`-count=N` inside one process never shows it: only the first open is at
+      risk). Fixed in `pkg/dqlite/threading.go` with the remedy go-dqlite
+      documents for exactly this case — `ConfigMultiThread()` in an `init()`
+      that runs after go-dqlite's and before anything opens a database — so it
+      is fixed for every package, not just this one. `pkg/dqlite/threading_test.go`
+      asserts the switch actually took (`sqlite3_config` returns SQLITE_MISUSE if
+      something initialized SQLite first).
+      *(d)* Now **13** call sites across 11 files (`incident_approval_test.go`
+      added two since this item was written). The skip is a single
+      `requireDirectCatalogAccess()` inside `openIntegrationCatalogDB`, keyed on
+      the existing `CAESIUM_TEST_ENGINE` discriminator — no new env var. It
+      fires only on `kubernetes` (server in-cluster, dqlite binds POD_IP, only
+      :8080 is port-forwarded); podman shares the server's netns
+      (`--network=container:caesium-server-podman`) and the docker lanes use
+      `--network=host`, so default/distributed/owner-memory/infra/agent are
+      untouched — the agent lane's `TestAgentMCPToolsListBundleAndIncidentScope`
+      still reaches the catalog through this helper and still counts toward
+      `agent_integration_min_pass`. It deliberately does not skip on mere
+      unreachability: a dqlite that stops listening on a docker lane must stay a
+      loud failure.
+      *(e)* `TestFanOutLocalCancelledMidFlightStillResolvesPendingSiblings`
+      (master run 34136265000, job 101788657387) — **test-timing assumption, not
+      a limiter race.** `ratelimit.Limiter` is a FIXED-window limiter bucketing
+      on `now.Truncate(window)` floored at a minute, so "2 per minute admits
+      exactly two of these four partitions" only holds while the whole dispatch
+      pass stays inside one bucket. The failing log shows three instances
+      starting at 15:12:00.020/.022/.062 with only partition `d` parked: the
+      pass straddled `:00`, the bucket rolled, and the fresh bucket admitted two
+      more. Fixed by pinning the limiter's clock from `runFanOutInBackground`
+      through a new unexported `job.rateLimitClock` seam (alongside the existing
+      `beforeComplete` seam, and carried into a replacement engine the same
+      way), which makes all four rate-limited fan-out tests boundary-independent
+      rather than sleeping past the boundary.
+      *(helm)* The lane's two W1 reds (`TestRunRetryCallbacksCLI`) were fixed by
+      #393 — nothing left to do there.
 - [ ] D2. Add required status checks and write the CI runbook. Run
       `gh api -X PATCH repos/caesium-cloud/caesium/branches/master/protection/required_status_checks`
       (or `PUT …/protection` with the full body) with `checks` =
@@ -1332,7 +1413,7 @@ names (L12).
       in `docs/README.md` in the same PR (`TestDocsREADMEIndexesEveryTopLevelDoc`).
       Files: new `docs/ci.md`, `docs/README.md`. Depends on: D1 + H-2 (the
       required lanes must be green first).
-- [ ] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
+- [x] D3. Repository hygiene: `git rm --cached ui/test-results/.last-run.json`
       and add `ui/test-results/` to `.gitignore`; add a `clean-worktrees`
       justfile recipe (appended at the end of the file) that runs
       `git worktree prune` and removes `.claude/worktrees/*` checkouts whose
@@ -1341,13 +1422,28 @@ names (L12).
       motivated it. Files: `.gitignore`, `justfile` (new recipe at EOF).
       *The README Codecov badge (`branch=develop` → `master`) is bullet (c)
       of N-1 — `README.md` has exactly one editor in W2.*
+      **Done (W2-α):** `ui/test-results/.last-run.json` untracked and
+      `ui/test-results/` ignored; `just clean-worktrees` appended at EOF with a
+      `force := "false"` variable above it (`just force=true clean-worktrees`
+      deletes). A checkout is removable when it is clean AND its work landed —
+      reachable from master, tree-identical to master, or (the case that matters
+      for this repo's squash-merge workflow, where a branch's commits never
+      become master's ancestors) a merged pull request for its branch via `gh`.
+      It resolves the MAIN worktree from any checkout, so it also works from
+      inside an agent lane. Two review hardenings: a checkout sitting exactly on
+      the master tip is never removable (a freshly-branched agent matches both
+      "reachable from master" and "tree identical to master"), and the `gh` path
+      requires the merged PR's `headRefOid` to equal the checkout's HEAD, so a
+      branch carrying newer unmerged commits is kept. Dry run only on this host,
+      with sibling lanes live: 3 removable, 9 kept — every live sibling
+      correctly held back.
 
 ### Stream E — Release & install
 
 The README's first sentence is "single self-contained binary"; there is no
 binary to download (Ledger L14).
 
-- [ ] E1. Extend the `publish` job to create a GitHub Release with per-arch
+- [x] E1. Extend the `publish` job to create a GitHub Release with per-arch
       CLI binaries **that run on a bare Linux host**. The executable in the
       release image is **dynamically linked** — `CGO_ENABLED=1` in
       `build/Dockerfile.build`, and `build/Dockerfile`'s builder stage
@@ -1406,7 +1502,46 @@ binary to download (Ledger L14).
       test + `release-cli-<arch>` artifact; `publish`: marker/sha verification
       + release). The two build jobs are also edited by H-2 (timeouts) —
       sequence H-2 first, E1 rebases (both additive steps).
-- [ ] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
+      **Done (W2-β):** path (a) — the **static** artifact shipped; the
+      bundled-libs fallback (c) was not needed and no issue was filed.
+      `build/Dockerfile` gained a `cli-static` stage (`FROM builder`, so it
+      reuses the builder image CI already loads and only the link differs);
+      `build/Dockerfile.build`'s dqlite stage now configures
+      `--enable-static` and installs `sqlite-static`/`libuv-static`/
+      `lz4-static`. Link line:
+      `-tags "libsqlite3,containers_image_openpgp" -ldflags "-s -w -linkmode
+      external -extldflags '-static -luv -llz4 -lsqlite3 -lm'"`. Two
+      link failures had to be resolved and are recorded in the stage
+      comments: (i) `libgpgme.a` does not resolve on musl
+      (`undefined reference to gpgrt_lock_lock` /
+      `gpg_err_code_from_syserror` — the dynamic build gets those through
+      `libgpgme.so`'s `DT_NEEDED`; Alpine ships no `gpgme-static`), fixed with
+      the `containers_image_openpgp` tag (pure-Go OpenPGP; only container-image
+      *signature verification* differs, which caesium does not use);
+      (ii) a static `libdqlite.a` has no `DT_NEEDED`, so `-luv -llz4
+      -lsqlite3` are appended explicitly. The stage fails unless `ldd` shows no
+      `=>` lines **and** `file` reports "statically linked". CI-proven: both
+      `build-and-integration-test` and `build-and-integration-test-arm64` build
+      the binary, smoke it natively (`ubuntu:24.04`, `caesium --help` +
+      `caesium job lint --path docs/examples/minimal.job.yaml`) and upload
+      `release-cli-amd64` / `release-cli-arm64` with a `.smoke-ok` marker
+      (sha256 + runner arch). Review-only (cannot run before a `v*` tag): the
+      `publish` job's marker/sha256 verification, `SHA256SUMS`, job-scoped
+      `permissions: contents: write`, and `gh release create --verify-tag`
+      with the Linux-only / static-artifact release-notes template —
+      validated with `actionlint` (no new findings). Review fixes (W2, after
+      the substitute adversarial review): the release step no longer passes
+      `--generate-notes` (on a first release GitHub generates "What's
+      Changed" from the repository's first commit and a body over 125,000
+      characters 422s *after* the images are public) and is idempotent (a
+      re-run re-uploads the assets with `--clobber` instead of failing on an
+      existing release); the smoke also runs a bounded `caesium start` (which
+      opens and migrates the embedded dqlite catalog under
+      `CAESIUM_DATABASE_PATH`) and drives `caesium job apply` against it over
+      HTTP in the same bare container — the cgo dqlite/sqlite path the static
+      link exists for; `--help` and `job lint` are pure Go and prove nothing
+      about that link. Verified locally on arm64 before CI.
+- [x] E2. Add a `cli` justfile recipe that yields a **runnable** CLI on the
       host: `just tag=v0.1.0 cli` pulls `caesiumcloud/caesium:{{tag}}`
       (defaulting to the latest release tag resolved with
       `gh release view --json tagName` when `tag` is `latest`) and writes
@@ -1420,7 +1555,28 @@ binary to download (Ledger L14).
       builder container. On Linux, `just cli` prefers the E1 static binary
       from the release when present. Place the recipe directly after
       `push-multiarch`. Files: `justfile`.
-- [ ] E3. Version the Helm chart with the release. Set
+      **Done (W2-β):** recipe added directly after `push-multiarch`. It
+      resolves `tag=latest` through `gh release view --json tagName`, prefers
+      the E1 static asset on Linux (`gh release download --pattern
+      caesium-linux-<arch>`), and otherwise writes a wrapper script. The
+      wrapper uses `--entrypoint /bin/caesium` (the plan's literal
+      `… <image> caesium "$@"` would pass `caesium` as *argv[1]* to the
+      image's `/bin/caesium` ENTRYPOINT), plus `--network host` on Linux
+      (on macOS Docker Desktop's host network is the VM's, so the wrapper
+      maps `host.docker.internal` to the host gateway instead and prints the
+      `http://host.docker.internal:8080` hint — a W2 review fix),
+      `-v "$PWD":/work -w /work`, `--user $(id -u):$(id -g)` so writes to the
+      working directory land as the host user, and a `CAESIUM_*` env
+      passthrough. A locally present image skips the pull, so the recipe is
+      testable offline. Verified: `just cli` refuses with "no published GitHub
+      release yet"; `just tag=v9.9.9-nope cli` refuses with the Docker Hub
+      hint; `just tag=v0.0.0-w2local cli` (a local retag of
+      `caesiumcloud/caesium:latest`) writes the wrapper and both
+      `./.tmp/caesium-cli/caesium --help` and `… job lint --path
+      docs/examples/minimal.job.yaml` succeed. `.tmp/` was already gitignored.
+      Not wired: container-executing subcommands (`caesium dev`) would also
+      need the Docker socket mounted.
+- [x] E3. Version the Helm chart with the release. Set
       `helm/caesium/Chart.yaml` `appVersion: "v0.1.0"` (from `"latest"`);
       **leave `version` at `0.1.0`** — it is already `0.1.0` (Ledger L14), so
       the first release needs no chart-version bump, and bumping it here would
@@ -1432,6 +1588,19 @@ binary to download (Ledger L14).
       the `image.tag` row. Files: `helm/caesium/Chart.yaml`,
       `.github/workflows/ci.yml` (`publish` job — same PR as E1 or rebased
       after it), `docs/kubernetes-deployment.md`. Depends on: E1.
+      **Done (W2-β):** `appVersion: "v0.1.0"`, `version` left at `0.1.0`. The
+      `publish` job now checks out the repo and fails on
+      `appVersion` ≠ `$GITHUB_REF_NAME` before anything is pushed. **image.tag
+      audit (the kind lane cannot go red on merge):** every lane that actually
+      installs the chart already overrides the tag — CI's
+      `helm-integration-test` passes `--set image.tag=${IMAGE_TAG}-amd64`, and
+      `just k8s-distributed` sets both `image.repository` and `image.tag` to
+      its local-registry dev tag. `just helm-lint` and `just helm-template`
+      only lint/render (no pull), and `just helm-test` runs `helm test` against
+      an already-installed release. Nothing needed fixing. The rule and the
+      "override `image.tag` unless you are deploying a published release"
+      guidance are documented in `docs/kubernetes-deployment.md` (Quick Start
+      and Configuration Reference).
 - [ ] E4. Cut `v0.1.0`. The tag push is the **user's action**; the item is
       the checklist around it: E1–E3 merged; **every job in `publish.needs`
       (`.github/workflows/ci.yml`) green on the tagged commit** — a strictly
@@ -1575,7 +1744,7 @@ binary to download (Ledger L14).
       The floor lives in the new `agent_integration_min_pass` justfile variable
       (`CAESIUM_AGENT_INTEGRATION_MIN_PASS`, default `3`) so H-2 can reuse the
       shape per lane; verified failing at `99` and passing at `3`.
-- [ ] H-2. Give every lane an explicit time budget and the hollow-lane guard.
+- [x] H-2. Give every lane an explicit time budget and the hollow-lane guard.
       *W1 orchestrator fix-forward: the time-budget half landed early (every
       integration `go test` line now passes `-timeout 30m` — default, agent,
       podman recipes and CI's kind/podman jobs) because the default lane had
@@ -1597,6 +1766,36 @@ binary to download (Ledger L14).
       `integration-test-infra`), `.github/workflows/ci.yml`
       (`helm-integration-test`, `podman-integration-test`,
       `build-and-integration-test*` `timeout-minutes`).
+      **Done (floor half, W2):** added the same H-1(d) shape
+      (`-v`, tee to a log, `grep -cE '^[[:space:]]*--- PASS:
+      TestIntegrationTestSuite/'`, fail-below-floor with server-log dump,
+      print-count-on-success) to the three remaining lanes that filter with
+      `-run`. Observed count on a green run / chosen floor (roughly half,
+      minimum 3) / env var: `integration-test-distributed` **41** scenarios
+      (incl. nested subtests) / floor **20** / `CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS`;
+      `integration-test-owner-memory` **28** / floor **14** /
+      `CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS`; `integration-test-infra`
+      floor **6** (half of the 12 `TestInfra*` scenarios the `-run` pattern
+      matches) / `CAESIUM_INFRA_INTEGRATION_MIN_PASS` — chosen as a static
+      estimate because the local infra lane run hit Docker Desktop's VM
+      running out of disk (`no space left on device` building the Terraform
+      layer and git-cloning fixtures) before any real signal; per the item's
+      own escape hatch this relied on CI, which confirmed all **12/12**
+      `TestInfra*` scenarios PASS on both `build-and-integration-test-infra`
+      and `-infra-arm64` for this PR. Both `-distributed` and `-owner-memory`
+      were confirmed red at `..._MIN_PASS=99` against the saved green-run
+      log (41 and 28 are both < 99), and CI reproduced the same 41/28 counts
+      on both arches; `-owner-memory` also hit the pre-existing
+      `TestFanOutHTTPRetryPartition` flake once (D1(a), sibling W2-α) with
+      every other scenario green, distinct from a hollow-lane failure.
+      `integration-test-agent` already had its floor from H-1. The
+      helm and podman CI jobs run an unfiltered `go test ./test/
+      -tags=integration` (no `-run`), so per the item's own carve-out they
+      get no floor — only the four `-run`-filtered lanes do. `timeout-minutes`
+      on `build-and-integration-test-distributed`/`-owner-memory` (45m vs.
+      `-timeout 30m`) and `-infra`/`-infra-arm64` (60m vs. `-timeout 20m`,
+      generous because `build-reagents` runs first) were already consistent
+      from the W1 fix-forward; nothing needed raising.
 
 ## Navigational / Organizational Improvements
 
