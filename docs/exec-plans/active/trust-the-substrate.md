@@ -1813,7 +1813,7 @@ binary to download (Ledger L14).
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. `README.md` — the sole README editor in W2. (a) Add a section
+- [x] N-1. `README.md` — the sole README editor in W2. (a) Add a section
       **"Beyond scheduling — what you can ask Caesium"** between `## Why
       Caesium` and `## Local Developer Experience`, one line + doc link each
       for: `caesium why` (per-task causal explainer — `docs/design-data-plane-memory.md`),
@@ -1839,6 +1839,26 @@ binary to download (Ledger L14).
       if F1 has not already (F1 runs in W1). Keep the sovereignty pitch as
       the close — the loop-led rewrite is the arc's closing wave (Tell it),
       not this item. Files: `README.md`. Depends on: E1 + E2 + F1.
+      **Done (W2):** all five verbs/verb-groups in (a) verified against their
+      `cmd/<verb>/` `Use:` strings and every linked doc path confirmed to
+      exist — no spelling differed from the plan text (`why`, `blame`,
+      `run diff`, `run replay`, `reproduce`, `receipt get`, `verify`,
+      `contract check|graph`, `dataset status|list|advance`, `backfill`,
+      `incident`). (b) Step 0 written as: Linux — `curl`/`chmod +x`/`sha256sum
+      -c SHA256SUMS`/move to `/usr/local/bin` from the (not-yet-cut)
+      `v0.1.0` release; macOS/Docker-available — `just tag=v0.1.0 cli`
+      (E2, also not yet merged as of this PR) with the
+      `host.docker.internal:8080` callout; `just run` kept as the
+      from-source path. The `v0.1.0` release and the `cli` justfile recipe
+      do not exist yet in this worktree — both are documented as designed
+      per E1/E2/E4, and the gap is called out in the PR body rather than the
+      README. (c) Codecov badge dropped outright (no `codecov` upload step
+      in `ci.yml` at all, not just a stale branch) — reason given in the PR
+      body. (d) the stale `3.20` base-image tag → `alpine:3.23` in the Quick Start job.
+      (e) `grep -niE 'graphql|/gql' README.md` was already empty (F1 had
+      landed) — nothing to change. `just lint` and `just unit-test`
+      (incl. `TestPinnedContainerImageVersionsAreConsistent`,
+      `TestDocsREADMEIndexesEveryTopLevelDoc`) pass.
 - [ ] N-2. Onboarding. New `docs/getting-started.md`: install (step 0 from
       N-1, by digest per E4) → `caesium start` in a container / `just run`
       → first job (`docs/examples/*.job.yaml`, pinned `alpine:3.23`) with
