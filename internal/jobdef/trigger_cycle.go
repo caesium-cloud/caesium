@@ -76,7 +76,7 @@ func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definit
 		nodes = append(nodes, triggerChainNode{
 			alias:         alias,
 			triggerType:   strings.TrimSpace(defs[idx].Trigger.Type),
-			configuration: cloneAnyMap(defs[idx].Trigger.Configuration),
+			configuration: cloneMap(defs[idx].Trigger.Configuration),
 		})
 	}
 

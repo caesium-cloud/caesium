@@ -296,7 +296,7 @@ func BuildShellRequest(env *Envelope, platform string) ShellRequest {
 	return ShellRequest{
 		Image:    env.Image,
 		Shell:    DefaultShell,
-		Env:      cloneStringMap(env.Env),
+		Env:      cloneMap(env.Env),
 		Mounts:   slices.Clone(env.Mounts),
 		WorkDir:  env.WorkDir,
 		Platform: strings.TrimSpace(platform),

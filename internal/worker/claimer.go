@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
+	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -647,10 +648,7 @@ func isClaimContentionErr(err error) bool {
 }
 
 func derefUUID(id *uuid.UUID) uuid.UUID {
-	if id == nil {
-		return uuid.Nil
-	}
-	return *id
+	return ptr.Deref(id)
 }
 
 func ParseNodeLabels(raw string) map[string]string {

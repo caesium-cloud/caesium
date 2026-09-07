@@ -13,6 +13,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -47,7 +48,7 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 
 	decls := make([]models.DatasetDeclaration, 0)
 	skipWhenFresh := schema.SkipWhenFreshEnabled(def.Metadata.Datasets)
-	skipWhenFreshPtr := boolPtr(skipWhenFresh)
+	skipWhenFreshPtr := ptr.Of(skipWhenFresh)
 
 	if def.Metadata.Datasets != nil {
 		for i := range def.Metadata.Datasets.Sources {
@@ -144,11 +145,6 @@ func marshalInlineSchema(value map[string]any) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func boolPtr(value bool) *bool {
-	v := value
-	return &v
 }
 
 func marshalArrivalBinding(arrival *schema.Arrival) (datatypes.JSON, error) {

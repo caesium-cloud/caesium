@@ -454,8 +454,8 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 			Engine:       pkgjobdef.EngineDocker,
 			Image:        env.Image,
 			Command:      slices.Clone(env.Command),
-			OutputSchema: cloneAnyMap(desc.Schema.OutputSchema),
-			Env:          cloneStringMap(env.Env),
+			OutputSchema: cloneMap(desc.Schema.OutputSchema),
+			Env:          cloneMap(env.Env),
 			WorkDir:      env.WorkDir,
 			Mounts:       slices.Clone(env.Mounts),
 		}},
@@ -472,7 +472,7 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error
 			continue
 		}
 		name := firstNonEmpty(pred.TaskName, pred.TaskID)
-		byName[name] = cloneStringMap(outputs)
+		byName[name] = cloneMap(outputs)
 		used[pred.TaskID] = struct{}{}
 	}
 	for id, outputs := range desc.DAG.PredecessorOutputs {
@@ -482,7 +482,7 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error
 		if _, ok := used[id]; ok {
 			continue
 		}
-		byName[id] = cloneStringMap(outputs)
+		byName[id] = cloneMap(outputs)
 		warnings = append(warnings, Warning{
 			Code:    WarningOutputMissingName,
 			Message: fmt.Sprintf("predecessor output %s had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env", id),
@@ -1042,22 +1042,11 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
+func cloneMap[K comparable, V any](values map[K]V) map[K]V {
 	if len(values) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(values))
-	maps.Copy(out, values)
-	return out
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(values))
-	maps.Copy(out, values)
-	return out
+	return maps.Clone(values)
 }
 
 func durationString(d time.Duration) string {

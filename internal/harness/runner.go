@@ -690,14 +690,11 @@ func sortedMapKeys(values map[string]string) []string {
 	return keys
 }
 
-func cloneLabels(labels map[string]string) map[string]string {
+func cloneLabels[K comparable, V any](labels map[K]V) map[K]V {
 	if len(labels) == 0 {
-		return map[string]string{}
+		return map[K]V{}
 	}
-
-	cloned := make(map[string]string, len(labels))
-	maps.Copy(cloned, labels)
-	return cloned
+	return maps.Clone(labels)
 }
 
 func combinedError(runError string, execErr error) string {

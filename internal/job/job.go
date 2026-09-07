@@ -37,6 +37,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -80,13 +81,21 @@ var ErrLocalQuarantinedReplayUnsupported = errors.New("replay requires the descr
 // run-start reads guarded here are side-effect-free (or abort without
 // committing on contention), so re-running the whole call is safe. A cancelled
 // context stops the loop and returns the last error.
-func retryOnContention(ctx context.Context, fn func() error) error {
+// contentionRetrier retries idempotent work that fails on transient dqlite
+// contention. Do is a generic method so callers can return a value from the
+// retried function instead of closing over an outer variable.
+type contentionRetrier struct {
+	backoffs []time.Duration
+}
+
+func (r contentionRetrier) Do[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
 	for attempt := 0; ; attempt++ {
-		err := fn()
-		if err == nil || !dqlite.IsContentionError(err) || attempt >= len(runStartReadBackoffs) {
-			return err
+		value, err := fn()
+		if err == nil || !dqlite.IsContentionError(err) || attempt >= len(r.backoffs) {
+			return value, err
 		}
-		base := runStartReadBackoffs[attempt]
+		base := r.backoffs[attempt]
 		d := base
 		if maxJitter := int64(base / 5); maxJitter > 0 {
 			d = base - time.Duration(rand.Int64N(maxJitter+1))
@@ -98,10 +107,21 @@ func retryOnContention(ctx context.Context, fn func() error) error {
 			// Return the cancellation, not the dqlite error, so the run's
 			// failure reason is a clear cancellation rather than a misleading
 			// "checkpoint in progress".
-			return ctx.Err()
+			return zero, ctx.Err()
 		case <-timer.C:
 		}
 	}
+}
+
+func retryOnContention(ctx context.Context, fn func() error) error {
+	_, err := retryOnContentionDo(ctx, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	return err
+}
+
+func retryOnContentionDo[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	return contentionRetrier{backoffs: runStartReadBackoffs}.Do(ctx, fn)
 }
 
 func waitForHaltedDispatchResult(results <-chan taskResult, wait time.Duration) (taskResult, bool) {
@@ -681,12 +701,10 @@ func buildLocalRunners(
 				// exactly where it was before this map was built from the rows:
 				// scheduling THAT task reports "missing runner", while a retry
 				// whose retired task already succeeded still completes.
-				var frozenAtom *models.Atom
-				if err := retryOnContention(ctx, func() error {
-					var e error
-					frozenAtom, e = svc.Get(taskState.AtomID)
-					return e
-				}); err != nil {
+				frozenAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+					return svc.Get(taskState.AtomID)
+				})
+				if err != nil {
 					if !errors.Is(err, gorm.ErrRecordNotFound) {
 						return err
 					}
@@ -844,8 +862,8 @@ func unmarshalConcurrency(raw []byte) *jobdefschema.Concurrency {
 	if len(raw) == 0 {
 		return nil
 	}
-	var v *jobdefschema.Concurrency
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := jsonutil.Unmarshal[*jobdefschema.Concurrency](raw)
+	if err != nil {
 		log.Warn("failed to unmarshal job concurrency metadata", "error", err)
 		return nil
 	}
@@ -856,8 +874,8 @@ func unmarshalRateLimits(raw []byte) []jobdefschema.RateLimit {
 	if len(raw) == 0 {
 		return nil
 	}
-	var v []jobdefschema.RateLimit
-	if err := json.Unmarshal(raw, &v); err != nil {
+	v, err := jsonutil.Unmarshal[[]jobdefschema.RateLimit](raw)
+	if err != nil {
 		log.Warn("failed to unmarshal job rate limit metadata", "error", err)
 		return nil
 	}
@@ -980,12 +998,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return store.Start(j.id, j.triggerID, startOpts...)
 	}
 
-	var snapshot *run.JobRun
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		snapshot, e = resolveRun()
-		return e
-	}); err != nil {
+	snapshot, err := retryOnContentionDo(ctx, resolveRun)
+	if err != nil {
 		if errors.Is(err, run.ErrRunSkipped) || errors.Is(err, run.ErrRunQueued) {
 			return nil
 		}
@@ -1086,15 +1100,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return runErr
 	}
 
-	var tasks models.Tasks
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		tasks, e = j.taskServiceFactory(ctx).List(&task.ListRequest{
+	tasks, err := retryOnContentionDo(ctx, func() (models.Tasks, error) {
+		return j.taskServiceFactory(ctx).List(&task.ListRequest{
 			JobID:   j.id.String(),
 			OrderBy: []string{"position", "created_at"},
 		})
-		return e
-	}); err != nil {
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}
@@ -1124,12 +1136,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 		triggerRuleByTask[t.ID] = rule
 
-		var modelAtom *models.Atom
-		if err := retryOnContention(ctx, func() error {
-			var e error
-			modelAtom, e = svc.Get(t.AtomID)
-			return e
-		}); err != nil {
+		modelAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+			return svc.Get(t.AtomID)
+		})
+		if err != nil {
 			runErr = err
 			return err
 		}
@@ -1137,15 +1147,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 		atomsByTask[t.ID] = modelAtom
 	}
 
-	var edges models.TaskEdges
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		edges, e = j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
+	edges, err := retryOnContentionDo(ctx, func() (models.TaskEdges, error) {
+		return j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
 			JobID:   j.id.String(),
 			OrderBy: []string{"created_at"},
 		})
-		return e
-	}); err != nil {
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}
@@ -1209,12 +1217,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	var currentRun *run.JobRun
-	if err := retryOnContention(ctx, func() error {
-		var e error
-		currentRun, e = store.Get(runID)
-		return e
-	}); err != nil {
+	currentRun, err := retryOnContentionDo(ctx, func() (*run.JobRun, error) {
+		return store.Get(runID)
+	})
+	if err != nil {
 		runErr = err
 		return err
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1844,8 +1845,8 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 	if step.Engine == EngineKubernetes {
 		k8sSpec := &container.KubernetesSpec{
 			ServiceAccountName:           strings.TrimSpace(d.Metadata.ServiceAccountName),
-			PodAnnotations:               cloneStringMap(d.Metadata.PodAnnotations),
-			AutomountServiceAccountToken: cloneBoolPtr(d.Metadata.AutomountServiceAccountToken),
+			PodAnnotations:               cloneMap(d.Metadata.PodAnnotations),
+			AutomountServiceAccountToken: ptr.Clone(d.Metadata.AutomountServiceAccountToken),
 		}
 		if strings.TrimSpace(step.ServiceAccountName) != "" {
 			k8sSpec.ServiceAccountName = strings.TrimSpace(step.ServiceAccountName)
@@ -1857,7 +1858,7 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 			maps.Copy(k8sSpec.PodAnnotations, step.PodAnnotations)
 		}
 		if step.AutomountServiceAccountToken != nil {
-			k8sSpec.AutomountServiceAccountToken = cloneBoolPtr(step.AutomountServiceAccountToken)
+			k8sSpec.AutomountServiceAccountToken = ptr.Clone(step.AutomountServiceAccountToken)
 		}
 		if step.Kueue != nil {
 			k8sSpec.QueueName = strings.TrimSpace(step.Kueue.QueueName)
@@ -1893,7 +1894,7 @@ func resolveVolumeMount(name string, source VolumeSource, mount VolumeMount) (co
 		if source.Tmpfs != nil {
 			resolved.Tmpfs = &container.TmpfsOptions{
 				SizeBytes: source.Tmpfs.SizeBytes,
-				Mode:      cloneIntPtr(source.Tmpfs.Mode),
+				Mode:      ptr.Clone(source.Tmpfs.Mode),
 			}
 		}
 	case "pvc":
@@ -1926,15 +1927,15 @@ func convertClaimTemplate(source *ClaimTemplate) *container.KubernetesClaimTempl
 		StorageClass: strings.TrimSpace(source.StorageClass),
 		Size:         strings.TrimSpace(source.Size),
 		AccessMode:   accessMode,
-		Labels:       cloneStringMap(source.Labels),
-		Annotations:  cloneStringMap(source.Annotations),
+		Labels:       cloneMap(source.Labels),
+		Annotations:  cloneMap(source.Annotations),
 	}
 }
 
 func cloneContainerSpec(spec container.Spec) container.Spec {
 	out := spec
 	if len(spec.Env) > 0 {
-		out.Env = cloneStringMap(spec.Env)
+		out.Env = cloneMap(spec.Env)
 	}
 	if len(spec.Mounts) > 0 {
 		out.Mounts = slices.Clone(spec.Mounts)
@@ -1945,21 +1946,19 @@ func cloneContainerSpec(spec container.Spec) container.Spec {
 	if spec.Kubernetes != nil {
 		out.Kubernetes = &container.KubernetesSpec{
 			ServiceAccountName:           spec.Kubernetes.ServiceAccountName,
-			PodAnnotations:               cloneStringMap(spec.Kubernetes.PodAnnotations),
-			AutomountServiceAccountToken: cloneBoolPtr(spec.Kubernetes.AutomountServiceAccountToken),
+			PodAnnotations:               cloneMap(spec.Kubernetes.PodAnnotations),
+			AutomountServiceAccountToken: ptr.Clone(spec.Kubernetes.AutomountServiceAccountToken),
 			QueueName:                    spec.Kubernetes.QueueName,
 		}
 	}
 	return out
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
+func cloneMap[K comparable, V any](values map[K]V) map[K]V {
 	if len(values) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(values))
-	maps.Copy(out, values)
-	return out
+	return maps.Clone(values)
 }
 
 func cloneAnyMap(values map[string]any) (map[string]any, error) {
@@ -1975,22 +1974,6 @@ func cloneAnyMap(values map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func cloneBoolPtr(value *bool) *bool {
-	if value == nil {
-		return nil
-	}
-	out := *value
-	return &out
-}
-
-func cloneIntPtr(value *int) *int {
-	if value == nil {
-		return nil
-	}
-	out := *value
-	return &out
 }
 
 // DeriveStepSuccessors builds the adjacency list for the provided steps.
