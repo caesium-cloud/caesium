@@ -9,6 +9,7 @@ This directory separates current-source operator documentation from forward-look
 - [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
 - [backfill.md](backfill.md): Backfill behavior across API, CLI, and UI.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Distributed execution configuration, rollout, and troubleshooting.
+- [ci.md](ci.md): CI runbook — required-to-merge vs. required-to-publish status checks, the job matrix, per-lane server env, and the release procedure for `v*` tags.
 - [sso-authentication.md](sso-authentication.md): Native OIDC, SAML, and LDAP SSO configuration.
 - [database-sharding.md](database-sharding.md): Phase 4 database shard layout, routing contract, and constraints.
 - [open_lineage.md](open_lineage.md): OpenLineage configuration, transports, and observability.
