@@ -316,7 +316,7 @@ func (s *Supervisor) execute(ctx context.Context, session *models.AgentSession, 
 	}) {
 		log.Info("incident: agent session was ended before its container started; stopping it",
 			"session_id", session.ID, "container_id", session.ContainerID)
-		s.stopContainer(ctx, session)
+		s.stopContainer(session)
 		s.revoke(tokenID)
 		return session
 	}
@@ -379,6 +379,10 @@ func (s *Supervisor) captureLogs(engine atom.Engine, atomID string, since time.T
 	return string(buf)
 }
 
+// stopContainerTimeout bounds the detached container stop. Generous enough for a
+// real engine call, short enough that a wedged engine cannot pin a goroutine.
+const stopContainerTimeout = 30 * time.Second
+
 // EndSession terminates a still-active agent session and revokes its scoped
 // credential. It is the "no idle container burning tokens while a human decides"
 // half of the tier-3 approval flow (design-agent-in-the-loop.md, Approval
@@ -429,7 +433,7 @@ func (s *Supervisor) EndSession(ctx context.Context, sessionID uuid.UUID) error 
 		return nil
 	}
 
-	s.stopContainer(ctx, &session)
+	s.stopContainer(&session)
 	s.revoke(session.TokenID)
 	return nil
 }
@@ -438,10 +442,20 @@ func (s *Supervisor) EndSession(ctx context.Context, sessionID uuid.UUID) error 
 // never fatal: the session row is already terminal by the time this runs, and a
 // container that outlives it is reaped by the engine's own lifecycle. A session
 // with no recorded container id never launched one.
-func (s *Supervisor) stopContainer(ctx context.Context, session *models.AgentSession) {
+//
+// It runs on a DETACHED context, like finalize's persistence does and for the
+// same reason: EndSession is reached from an HTTP request (an agent proposing a
+// tier-3 action), and stopping a container is a blocking call to the engine. On
+// the caller's context a client disconnect or a shutdown would cancel the stop
+// midway and leak the very container this exists to reap — the session row would
+// read `succeeded` while the agent kept burning tokens.
+func (s *Supervisor) stopContainer(session *models.AgentSession) {
 	if session.ContainerID == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), stopContainerTimeout)
+	defer cancel()
+
 	engine, err := s.newEngine(ctx, session.Engine)
 	if err != nil || engine == nil {
 		log.Warn("incident: could not resolve engine to stop agent container",

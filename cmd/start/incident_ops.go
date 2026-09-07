@@ -12,6 +12,7 @@ import (
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/run"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -110,14 +111,21 @@ func (o *incidentActionOps) Notify(_ context.Context, _, _ string) error {
 // that reached nobody is recorded `failed` instead of claiming a human was
 // contacted. Logging and returning success — what this did before — recorded
 // `route=escalate` on a page nobody ever received.
-func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, channel, summary string) error {
+//
+// The returned `routed` closes the remaining half of that gap. Publishing is not
+// delivery: the notification subscriber drops an event no NotificationPolicy
+// matches, silently. So this reports whether any enabled policy would carry the
+// escalation, and dispatch records it on the action row. A deployment with the
+// event type unrouted still gets a durable, queryable escalation — it just no
+// longer reads as a completed page.
+func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, channel, summary string) (bool, error) {
 	if o.bus == nil && o.eventStore == nil {
-		return fmt.Errorf("%w: no event sink is wired, so an escalation cannot be delivered", errIncidentOpNotWired)
+		return false, fmt.Errorf("%w: no event sink is wired, so an escalation cannot be delivered", errIncidentOpNotWired)
 	}
 
 	var inc models.Incident
 	if err := o.db.WithContext(ctx).First(&inc, "id = ?", incidentID).Error; err != nil {
-		return fmt.Errorf("incident: load incident for escalation: %w", err)
+		return false, fmt.Errorf("incident: load incident for escalation: %w", err)
 	}
 
 	payload := map[string]any{
@@ -145,7 +153,7 @@ func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, 
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("incident: encode escalation payload: %w", err)
+		return false, fmt.Errorf("incident: encode escalation payload: %w", err)
 	}
 
 	evt := event.Event{
@@ -164,17 +172,38 @@ func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, 
 		if err := o.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			return o.eventStore.AppendTx(tx, &evt)
 		}); err != nil {
-			return fmt.Errorf("incident: persist escalation event: %w", err)
+			return false, fmt.Errorf("incident: persist escalation event: %w", err)
 		}
 	}
 	event.PublishAndMarkBusDispatched(ctx, o.bus, o.eventStore, evt)
 
+	// Ask the SAME matcher the subscriber uses whether anything will carry this.
+	// A failure to answer is reported as not-routed rather than as an escalation
+	// failure: the event is already durable, and overstating delivery is the one
+	// outcome to avoid.
+	routed := false
+	policies, err := notification.MatchPolicies(ctx, o.db, evt)
+	if err != nil {
+		log.Warn("incident: could not determine escalation routing",
+			"incident_id", incidentID, "error", err)
+	} else {
+		routed = len(policies) > 0
+	}
+	if !routed {
+		log.Warn("incident: escalation raised but no notification policy routes it; nobody was paged",
+			"incident_id", incidentID,
+			"channel", channel,
+			"event_type", string(event.TypeIncidentEscalated),
+		)
+	}
+
 	log.Warn("incident: escalation raised",
 		"incident_id", incidentID,
 		"channel", channel,
+		"routed", routed,
 		"summary", summary,
 	)
-	return nil
+	return routed, nil
 }
 
 func (o *incidentActionOps) SetJobPaused(_ context.Context, _ uuid.UUID, _ bool) error {

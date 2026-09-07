@@ -159,11 +159,11 @@ func TestUnresolvableJobPolicyDeniesEverything(t *testing.T) {
 	incidentID := mkIncidentForJob(t, db, "dangling-job", `{"profile":"no-such-profile"}`)
 
 	pb := exec.playbook(context.Background(), incidentID)
-	// A NON-EMPTY Allow map is what makes this a denial rather than the
-	// unconfigured default: the executor reads an empty map as "unconstrained"
-	// (tier 0/1 autonomous), so denying everything requires a configured map that
-	// matches nothing.
-	require.NotEmpty(t, pb.Allow, "denial must be expressed as a configured allowlist, not an empty one")
+	// A NON-NIL Allow map is what makes this a denial rather than the unconfigured
+	// default: nil means "not configured" (tier 0/1 autonomous), while a
+	// configured-but-empty allowlist grants nothing at any tier.
+	require.NotNil(t, pb.Allow, "denial must be expressed as a configured allowlist, not an unconfigured one")
+	require.Empty(t, pb.Allow, "the deny-all allowlist names no action")
 	require.False(t, pb.Allow[tier2Action])
 	require.False(t, pb.Allow["retry_from_failure"],
 		"an unresolvable declared policy must permit nothing autonomously, not even tier 1")

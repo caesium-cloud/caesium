@@ -33,6 +33,12 @@ import (
 // is the approvals service's conditional `decision = pending` update.
 var ErrActionNotApproved = errors.New("incident: action is not approved")
 
+// N-3 (not built): a SECOND pending approval on one incident becomes unlistable
+// once the first is decided — deciding moves the incident out of
+// awaiting_approval, and the approvals feed lists what is parked there. Today
+// nothing creates two (a proposal parks the incident and the session ends), but
+// a future concurrent-session cap above 1 would. Filed as a follow-up.
+//
 // ErrIncidentNotApprovable is returned when a tier-3 proposal is made against an
 // incident that cannot be parked in awaiting_approval — it is terminal, or a
 // human already advanced it past the point where an agent proposal is meaningful.

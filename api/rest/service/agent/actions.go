@@ -17,9 +17,16 @@ import (
 // route (and is scope-checked by the middleware); the agent supplies the action
 // type and its params.
 type ActionRequest struct {
-	IncidentID uuid.UUID       `json:"-"`
-	Type       string          `json:"type"`
-	Params     json.RawMessage `json:"params,omitempty"`
+	IncidentID uuid.UUID `json:"-"`
+	// TokenID is the API key that authenticated this request, set by the
+	// controller and never by the client. An agent session's credential is minted
+	// per session and recorded on AgentSession.TokenID, so this is what identifies
+	// WHICH session proposed the action — the audit spine links the row to the
+	// container that made it, and the approval flow ends that session (not merely
+	// the newest one on the incident) while a human decides.
+	TokenID *uuid.UUID      `json:"-"`
+	Type    string          `json:"type"`
+	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 // ActionResult is what the actions endpoint returns: the recorded AgentAction

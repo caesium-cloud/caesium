@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -389,9 +390,15 @@ func SeedDefaults(ctx context.Context, conn *gorm.DB) error {
 		return err
 	}
 
+	// `allow` is a CONFIGURED list, so it grants exactly what it names and nothing
+	// else — which is what makes this profile "zero risk". It used to be `[]`,
+	// which decoded to an unconfigured allowlist and therefore granted EVERY
+	// tier-1 action (retry, rerun, quarantine…) under a profile documented as
+	// read-only. `escalate` is the one action the profile is meant to permit; the
+	// read-only context/bundle endpoints are not playbook-governed actions at all.
 	playbook, err := json.Marshal(map[string]interface{}{
 		"autonomy": map[string]interface{}{
-			"allow": []string{},
+			"allow": []string{incident.ActionTypeEscalate},
 		},
 		"escalation": map[string]interface{}{
 			"after": "15m",

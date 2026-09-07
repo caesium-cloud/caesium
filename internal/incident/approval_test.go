@@ -9,8 +9,10 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -463,4 +465,134 @@ func TestProposalParksIncidentAndCreatesApprovalTogether(t *testing.T) {
 	require.NoError(t, db.First(&parked, "id = ?", inc.ID).Error)
 	require.Equal(t, models.IncidentStatusAwaitingApproval, parked.Status,
 		"an approval a human can decide requires its incident parked awaiting one")
+}
+
+// --- Self-modification refusal (review follow-up round 2, PR #390) -----------
+
+// remediationPatch builds a minimal valid definition for a job alias, optionally
+// carrying a remediation block.
+func remediationPatch(alias string, remediation *schema.MetadataRemediation) json.RawMessage {
+	def := schema.Definition{
+		APIVersion: "v1",
+		Kind:       "Job",
+		Metadata:   schema.Metadata{Alias: alias, Remediation: remediation},
+		Trigger: schema.Trigger{
+			Type:          "cron",
+			Configuration: map[string]any{"cron": "0 * * * *"},
+		},
+		Steps: []schema.Step{{Name: "gate", Image: "busybox:1.36.1"}},
+	}
+	encoded, err := json.Marshal(def)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func triageOnlyBlock() *schema.MetadataRemediation {
+	return &schema.MetadataRemediation{Profile: "triage-only", Classes: []string{"unknown"}}
+}
+
+// TestApplyJobdefPatchRefusesEditingItsOwnPolicy is the privilege-escalation
+// guard. Since `metadata.remediation` is persisted and resolves the effective
+// playbook, a patch that edits it is the agent rewriting the policy that governs
+// the agent — the design's "may not modify playbooks, profiles", one indirection
+// out. A human approving a diff that looks like a no-op must not be able to
+// grant it.
+func TestApplyJobdefPatchRefusesEditingItsOwnPolicy(t *testing.T) {
+	enableAuthMode(t)
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
+
+	jobID := inc.JobID
+	var job models.Job
+	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
+		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+
+	widened := &schema.MetadataRemediation{
+		Profile: "triage-only",
+		Classes: []string{"unknown"},
+		Autonomy: &schema.RemediationAutonomy{
+			Allow: []string{ActionTypePauseJob, ActionTypeRerunWithParams},
+		},
+	}
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: remediationPatch(job.Alias, widened)},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "erin@example.com", "")
+
+	_, err = exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrPatchAltersRemediation)
+
+	require.Empty(t, ops.applyPatch, "a policy-editing patch must never reach the importer")
+	require.Empty(t, ops.escalate, "nor be laundered through the escalate route")
+
+	var recorded models.AgentAction
+	require.NoError(t, db.First(&recorded, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, recorded.Status)
+
+	// And the stored policy is untouched.
+	var after models.Job
+	require.NoError(t, db.First(&after, "id = ?", jobID).Error)
+	require.NotContains(t, string(after.Remediation), ActionTypePauseJob)
+}
+
+// TestApplyJobdefPatchRefusesRemovingItsOwnPolicy: dropping the block entirely is
+// the same escalation by another route — a job with no policy inherits the
+// deployment default, which may be wider than the one it replaced.
+func TestApplyJobdefPatchRefusesRemovingItsOwnPolicy(t *testing.T) {
+	enableAuthMode(t)
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
+
+	jobID := inc.JobID
+	var job models.Job
+	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
+		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: remediationPatch(job.Alias, nil)},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "erin@example.com", "")
+
+	_, err = exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrPatchAltersRemediation)
+	require.Empty(t, ops.applyPatch)
+}
+
+// TestApplyJobdefPatchAllowsAnUnchangedPolicy: the refusal must not block the
+// ordinary case. A patch that carries the job's existing block verbatim — which
+// is what a whole-document proposal for a job WITH a policy always looks like —
+// applies normally.
+func TestApplyJobdefPatchAllowsAnUnchangedPolicy(t *testing.T) {
+	enableAuthMode(t)
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
+
+	jobID := inc.JobID
+	var job models.Job
+	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
+		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: remediationPatch(job.Alias, triageOnlyBlock())},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "erin@example.com", "")
+
+	_, err = exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	require.Len(t, ops.applyPatch, 1, "an unchanged policy must not block a legitimate patch")
 }

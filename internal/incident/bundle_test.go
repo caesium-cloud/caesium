@@ -10,7 +10,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"gorm.io/datatypes"
 )
 
 func TestBuildBundleAssemblesAndScrubs(t *testing.T) {
@@ -55,16 +54,11 @@ func TestBuildBundleAssemblesAndScrubs(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	profile := &models.AgentProfile{
-		ID:       uuid.New(),
-		Name:     "triage",
-		Image:    "caesium/triage:latest",
-		Engine:   models.AtomEngineDocker,
-		Playbook: datatypes.JSON([]byte(`{"allow":["retry_from_failure"]}`)),
-	}
-	require.NoError(t, db.Create(profile).Error)
+	// The bundle surfaces the EFFECTIVE resolved policy, so the assertion below
+	// is on what the executor would enforce — not on a raw profile document.
+	playbook := Playbook{Allow: map[string]bool{ActionTypeRetryFromFailure: true}}
 
-	bundle, err := BuildBundle(ctx, db, inc.ID, profile)
+	bundle, err := BuildBundle(ctx, db, inc.ID, &playbook)
 	require.NoError(t, err)
 
 	require.Equal(t, inc.ID, bundle.Incident.ID)
@@ -80,7 +74,8 @@ func TestBuildBundleAssemblesAndScrubs(t *testing.T) {
 	// The frozen allowlist and the effective playbook ride along.
 	require.Equal(t, []string{"vendor-x"}, bundle.LineageImpact.AllowedJobs)
 	require.True(t, bundle.LineageImpact.Frozen)
-	require.JSONEq(t, `{"allow":["retry_from_failure"]}`, string(bundle.Playbook))
+	require.JSONEq(t, `{"autonomy":{"allow":["retry_from_failure"]}}`, string(bundle.Playbook),
+		"the bundle must brief the agent with the resolved policy the executor enforces")
 
 	// Run history includes the seeded run.
 	require.NotEmpty(t, bundle.RunHistory)
@@ -104,5 +99,5 @@ func TestBuildBundleIncludesPriorNotes(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, bundle.Notes, 1)
 	require.Equal(t, "vendor file late again", bundle.Notes[0].Text)
-	require.True(t, strings.TrimSpace(string(bundle.Playbook)) == "", "no profile → no playbook")
+	require.True(t, strings.TrimSpace(string(bundle.Playbook)) == "", "no resolved playbook → no playbook")
 }

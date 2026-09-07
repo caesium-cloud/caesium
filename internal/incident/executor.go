@@ -80,17 +80,34 @@ var ErrActionNotPermitted = errors.New("incident: action not permitted by playbo
 var ErrRetryDeferred = errors.New("incident: retry deferred; retry once the condition clears")
 
 // Playbook is the effective, resolved remediation policy the executor enforces
-// for one incident. Stream E produces it from metadata.remediation overriding
-// the AgentProfile defaults; here it is purely the enforcement input. A zero
-// Playbook (no Allow/RequireApproval) means "unconfigured": tier 0/1 actions
-// default autonomous, tier 2 requires explicit allow, tier 3 always approval.
+// for one incident. It is produced by resolving `metadata.remediation` over the
+// AgentProfile defaults (Playbook.Override); here it is purely the enforcement
+// input.
+//
+// NIL AND EMPTY MEAN DIFFERENT THINGS, and the distinction is the whole policy
+// model — read it before touching decide():
+//
+//   - Allow == nil       → NOT CONFIGURED. Tier defaults apply: tier 0/1 is
+//     autonomous, tier 2 needs an explicit allow (so it is
+//     denied), tier 3 always goes to a human.
+//   - Allow != nil       → CONFIGURED ALLOWLIST, and it governs at EVERY tier
+//     below 3. An action runs autonomously if and only if
+//     it is listed. An empty non-nil map therefore allows
+//     NOTHING — which is what `allow: []` in a playbook
+//     document plainly says, and what the shipped
+//     `triage-only` profile relies on.
+//
+// Conflating the two is how a "zero risk" profile ends up granting every tier-1
+// action, and how combining two playbooks can silently widen tier 2.
 type Playbook struct {
-	// Allow is the set of action types the agent may take autonomously.
+	// Allow is the configured set of action types the agent may take
+	// autonomously; nil means unconfigured (see above), not empty.
 	Allow map[string]bool
 	// RequireApproval forces listed action types through the approval gate even
 	// if their tier would otherwise be autonomous.
 	RequireApproval map[string]bool
-	// ParamOverrides whitelists rerun_with_params keys → allowed values.
+	// ParamOverrides whitelists rerun_with_params keys → allowed values; nil
+	// means unconfigured, and an unconfigured whitelist denies every key.
 	ParamOverrides map[string][]string
 }
 
@@ -98,6 +115,11 @@ type Playbook struct {
 // agentprofile.SeedDefaults) and the `metadata.remediation` block in
 // pkg/jobdef.RemediationAutonomy, so one decoder serves both: the profile-level
 // document and the job-level block now persisted on models.Job.Remediation.
+// N-3 (not built): pkg/jobdef.RemediationAutonomy also carries `perClass`
+// (per-failure-class narrowing). Nothing decodes it here, so a job that narrows
+// autonomy per class is currently enforced as if the block named no classes.
+// Wiring it means threading the incident's class into decide(); filed as a
+// follow-up rather than smuggled into a review-fix commit.
 type playbookDocument struct {
 	Autonomy struct {
 		Allow           []string            `json:"allow"`
@@ -107,8 +129,13 @@ type playbookDocument struct {
 }
 
 // DecodePlaybook parses a stored playbook document into the enforcement input.
-// An empty or malformed document yields the zero Playbook (tier 3 → approval),
-// never a permissive one.
+// An empty or malformed document yields the zero Playbook (unconfigured; tier 3
+// still → approval), never a permissive one.
+//
+// A PRESENT BUT EMPTY `allow: []` decodes to a configured, empty allowlist —
+// "allow nothing" — not to nil. That is the difference between a profile that
+// declined to configure autonomy and one that deliberately grants none; the
+// shipped `triage-only` profile depends on it.
 func DecodePlaybook(raw []byte) Playbook {
 	if len(raw) == 0 {
 		return Playbook{}
@@ -119,13 +146,13 @@ func DecodePlaybook(raw []byte) Playbook {
 		return Playbook{}
 	}
 	pb := Playbook{ParamOverrides: doc.Autonomy.ParamOverrides}
-	if len(doc.Autonomy.Allow) > 0 {
+	if doc.Autonomy.Allow != nil {
 		pb.Allow = make(map[string]bool, len(doc.Autonomy.Allow))
 		for _, a := range doc.Autonomy.Allow {
 			pb.Allow[a] = true
 		}
 	}
-	if len(doc.Autonomy.RequireApproval) > 0 {
+	if doc.Autonomy.RequireApproval != nil {
 		pb.RequireApproval = make(map[string]bool, len(doc.Autonomy.RequireApproval))
 		for _, a := range doc.Autonomy.RequireApproval {
 			pb.RequireApproval[a] = true
@@ -134,79 +161,55 @@ func DecodePlaybook(raw []byte) Playbook {
 	return pb
 }
 
-// Narrow combines two playbooks so the RESULT IS NEVER WIDER THAN EITHER — the
-// only safe direction when a job-level policy meets its profile's. It is how a
-// job's `metadata.remediation.autonomy` block constrains the AgentProfile
-// playbook it names: neither document can grant what the other withholds.
+// Override resolves a job's authored `metadata.remediation.autonomy` block over
+// the AgentProfile playbook it names, returning the effective policy. The
+// receiver is the PROFILE (the default); the argument is the JOB block.
 //
-// Per field, following the enforcement semantics in decide/allowsAutonomous:
-//   - Allow: an EMPTY set means "unconstrained" (tier 0/1 default autonomous),
-//     so narrowing empty with a list yields the list, and two lists intersect.
-//   - RequireApproval: a union — either side may force the approval gate.
-//   - ParamOverrides: a missing key is denied, so keys intersect; per key an
-//     empty value list means "any value", so it yields to the other side's list
-//     and two lists intersect.
-func (pb Playbook) Narrow(other Playbook) Playbook {
-	out := Playbook{}
-
-	switch {
-	case len(pb.Allow) == 0:
-		out.Allow = other.Allow
-	case len(other.Allow) == 0:
-		out.Allow = pb.Allow
-	default:
-		out.Allow = make(map[string]bool)
-		for action := range pb.Allow {
-			if pb.Allow[action] && other.Allow[action] {
-				out.Allow[action] = true
-			}
-		}
-		// An intersection that empties out must NOT read as "unconstrained": two
-		// disjoint allowlists agree on nothing, so keep a sentinel that allows no
-		// action rather than collapsing to the permissive empty set.
-		if len(out.Allow) == 0 {
-			out.Allow = map[string]bool{allowNothingSentinel: false}
-		}
+// The job block is an AUTHORED POLICY, so it may GRANT as well as narrow — the
+// design's `metadata.remediation` overrides profile defaults, and its canonical
+// example declares a wider allowlist than the profile it names. That is safe
+// because the block is human-authored and an agent may not edit it:
+// ErrPatchAltersRemediation refuses any `apply_jobdef_patch` that would change
+// it. Without that refusal this method would be a privilege-escalation path,
+// which is exactly why the two ship together.
+//
+// Per field, honouring the nil-vs-empty rule on Playbook:
+//   - Allow: a configured job list REPLACES the profile's (grant or narrow, as
+//     authored); a nil job list inherits the profile's. `allow: []` is a
+//     configured list that grants nothing.
+//   - ParamOverrides: same replace-or-inherit rule.
+//   - RequireApproval: a UNION, and the one field where the stricter side always
+//     wins. Removing an approval gate is the single edit that can only reduce
+//     safety, and nothing in the design asks a job to do it, so a profile's gate
+//     survives a job block that omits it.
+func (pb Playbook) Override(job Playbook) Playbook {
+	out := Playbook{
+		Allow:          pb.Allow,
+		ParamOverrides: pb.ParamOverrides,
+	}
+	if job.Allow != nil {
+		out.Allow = job.Allow
+	}
+	if job.ParamOverrides != nil {
+		out.ParamOverrides = job.ParamOverrides
 	}
 
-	if len(pb.RequireApproval) > 0 || len(other.RequireApproval) > 0 {
-		out.RequireApproval = make(map[string]bool, len(pb.RequireApproval)+len(other.RequireApproval))
+	if pb.RequireApproval != nil || job.RequireApproval != nil {
+		out.RequireApproval = make(map[string]bool, len(pb.RequireApproval)+len(job.RequireApproval))
 		for action, required := range pb.RequireApproval {
 			if required {
 				out.RequireApproval[action] = true
 			}
 		}
-		for action, required := range other.RequireApproval {
+		for action, required := range job.RequireApproval {
 			if required {
 				out.RequireApproval[action] = true
 			}
 		}
 	}
 
-	switch {
-	case len(pb.ParamOverrides) == 0:
-		out.ParamOverrides = other.ParamOverrides
-	case len(other.ParamOverrides) == 0:
-		out.ParamOverrides = pb.ParamOverrides
-	default:
-		out.ParamOverrides = make(map[string][]string)
-		for key, mine := range pb.ParamOverrides {
-			theirs, ok := other.ParamOverrides[key]
-			if !ok {
-				continue
-			}
-			out.ParamOverrides[key] = intersectValues(mine, theirs)
-		}
-	}
-
 	return out
 }
-
-// allowNothingSentinel is an action type no catalog entry can ever use, so an
-// Allow map containing only it is non-empty (hence "configured") while matching
-// nothing. It makes "these two policies allow nothing in common" expressible in
-// a map whose emptiness already means the opposite.
-const allowNothingSentinel = "\x00none"
 
 // DenyAllPlaybook is the fail-closed policy: no action type is autonomously
 // permitted at any tier, so every proposal is either denied or routed to a
@@ -214,37 +217,10 @@ const allowNothingSentinel = "\x00none"
 // resolved — substituting any other policy there would enforce something the
 // job did not ask for, in the widening direction.
 //
-// It is deliberately distinct from the zero Playbook, which means "unconfigured"
-// and still lets tier 0/1 run autonomously.
+// It is a CONFIGURED, empty allowlist, which is why it is not the zero Playbook:
+// the zero value means unconfigured and still lets tier 0/1 run autonomously.
 func DenyAllPlaybook() Playbook {
-	return Playbook{Allow: map[string]bool{allowNothingSentinel: false}}
-}
-
-// intersectValues intersects two rerun_with_params value whitelists, treating an
-// empty list as "any value" (so it yields to the other side).
-func intersectValues(a, b []string) []string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	seen := make(map[string]struct{}, len(b))
-	for _, v := range b {
-		seen[v] = struct{}{}
-	}
-	out := make([]string, 0, len(a))
-	for _, v := range a {
-		if _, ok := seen[v]; ok {
-			out = append(out, v)
-		}
-	}
-	// An empty intersection must deny every value, not admit every value, so
-	// return a list that matches nothing rather than the "any value" empty list.
-	if len(out) == 0 {
-		return []string{allowNothingSentinel}
-	}
-	return out
+	return Playbook{Allow: map[string]bool{}}
 }
 
 // decision is the executor's routing verdict for one action.
@@ -257,12 +233,21 @@ const (
 )
 
 // allowsAutonomous reports whether an action type may run autonomously under the
-// playbook's allow list. An empty allow list means unconfigured — tier 0/1
-// default autonomous — so it returns true; a non-empty list is the
-// server-enforced allowlist and governs.
-func (pb Playbook) allowsAutonomous(actionType string) bool {
-	if len(pb.Allow) == 0 {
-		return true
+// playbook's allow list, for a tier below the approval gate.
+//
+// It is the SINGLE reading of the allowlist — every tier consults this one
+// function, so nil-vs-empty cannot mean one thing at tier 1 and another at
+// tier 2 (it used to: an unconfigured playbook read as "allow" at tier 1 via a
+// len==0 check and as "deny" at tier 2 via a bare map lookup, which is how
+// combining two playbooks could silently widen tier 2).
+//
+//   - Allow == nil (unconfigured) → the TIER DEFAULT decides: tier 0/1 is
+//     autonomous, tier 2 is not.
+//   - Allow != nil (configured)   → membership decides, at every tier. An empty
+//     configured allowlist grants nothing.
+func (pb Playbook) allowsAutonomous(actionType string, tier int) bool {
+	if pb.Allow == nil {
+		return tier <= TierAutonomous
 	}
 	return pb.Allow[actionType]
 }
@@ -277,15 +262,7 @@ func (pb Playbook) decide(actionType string, tier int) decision {
 	if tier >= TierApproval {
 		return decisionApprove
 	}
-	if tier <= TierAutonomous {
-		// Tier 0/1 default autonomous, still subject to the allowlist if present.
-		if pb.allowsAutonomous(actionType) {
-			return decisionExecute
-		}
-		return decisionDeny
-	}
-	// Tier 2: autonomous only if explicitly allowed.
-	if pb.Allow[actionType] {
+	if pb.allowsAutonomous(actionType, tier) {
 		return decisionExecute
 	}
 	return decisionDeny

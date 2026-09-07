@@ -144,11 +144,17 @@ type BundleNoteHint struct {
 
 const bundleRunHistoryLimit = 20
 
-// BuildBundle assembles the triage bundle for an incident. profile is the
-// effective agent profile (may be nil), whose Playbook is surfaced so the agent
-// plans within policy; when nil the Playbook is omitted. The failing task's log
-// tail is scrubbed by the A5 scrubber before it enters the bundle.
-func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, profile *models.AgentProfile) (*Bundle, error) {
+// BuildBundle assembles the triage bundle for an incident. playbook is the
+// EFFECTIVE resolved policy (ResolvePlaybook), surfaced so the agent plans
+// within the policy that will actually be enforced on its proposals.
+//
+// It takes the resolved Playbook rather than an AgentProfile on purpose: the
+// bundle used to surface the raw profile document while the executor enforced
+// the job-scoped resolution, so the brief and the enforcement disagreed — an
+// agent could plan correctly from its brief and still be denied, or believe it
+// was constrained when it was not. The failing task's log tail is scrubbed by
+// the A5 scrubber before it enters the bundle.
+func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playbook *Playbook) (*Bundle, error) {
 	var inc models.Incident
 	if err := db.WithContext(ctx).First(&inc, "id = ?", incidentID).Error; err != nil {
 		return nil, err
@@ -173,8 +179,8 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, profile
 		},
 		GeneratedAt: time.Now().UTC(),
 	}
-	if profile != nil {
-		b.Playbook = profile.Playbook
+	if playbook != nil {
+		b.Playbook = datatypes.JSON(playbook.Document())
 	}
 
 	// Failing task detail (scrubbed log tail).

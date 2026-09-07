@@ -608,3 +608,162 @@ func (s *IntegrationTestSuite) requireEscalationEvent(incidentID, wantSummary st
 	s.Require().Fail("no incident_escalated event was delivered",
 		"incident %s escalated but nothing reached the event stream", incidentID)
 }
+
+// TestApprovedActionRedriveRecoversAfterCrash gives the approval redrive sweeper
+// its only integration coverage.
+//
+// The decision commits in its own transaction and the dispatch runs after it, so
+// a process death in between strands the action `approved` forever: nothing
+// retried it, and re-approving is refused by the pending-only guard. The
+// ApprovalRedriver is the recovery path, and a leader-gated background sweep is
+// exactly the kind of thing that passes unit tests while being unwired in
+// production — so this drives the REAL sweeper on the live server.
+//
+// The crash is simulated the only way a black-box test can: after a real
+// approval has executed, the action row is put back to `approved` (with an
+// updated_at old enough to clear the redrive grace) and its effect undone,
+// directly in the catalog. That is precisely the on-disk state a crash between
+// commit and dispatch leaves behind.
+func (s *IntegrationTestSuite) TestApprovedActionRedriveRecoversAfterCrash() {
+	s.requireAuthLane()
+
+	proposal := s.driveTier3SkipTaskProposal("approval-redrive")
+
+	out, err := s.runCLIStdout(s.incidentCLIArgs("approve", proposal.incidentID,
+		"--approval", proposal.approvalID, "--reason", "redrive coverage")...)
+	s.Require().NoError(err, "caesium incident approve failed:\n%s", out)
+
+	detail := s.incidentDetail(proposal.incidentID)
+	s.Require().Equal("executed", requireActionByID(s, detail, proposal.actionID).Status,
+		"the synchronous post-decision execute must run first; the redrive is the recovery path")
+
+	conn := s.openIntegrationCatalogGorm()
+
+	// Strand the action exactly as a crash between the decision commit and the
+	// dispatch would: `approved`, no execution recorded, aged past the grace.
+	stranded := time.Now().UTC().Add(-time.Hour)
+	s.Require().NoError(conn.Exec(
+		`UPDATE agent_actions SET status = ?, result = NULL, updated_at = ? WHERE id = ?`,
+		"approved", stranded, proposal.actionID).Error)
+
+	// Undo the effect too, so "the sweeper ran it" is observable rather than
+	// inferred from a row that was already skipped.
+	s.Require().NoError(conn.Exec(
+		`UPDATE task_runs SET status = ?, error = ?, completed_at = NULL WHERE job_run_id = ?`,
+		"failed", "caesium approval lane gate step", proposal.runID).Error)
+
+	// The leader-gated sweeper must find it and dispatch it. The lane runs the
+	// sweeper on a 5s interval (CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL).
+	s.Require().Eventually(func() bool {
+		redriven := s.incidentDetail(proposal.incidentID)
+		for _, a := range redriven.Actions {
+			if a.ID == proposal.actionID {
+				return a.Status == "executed"
+			}
+		}
+		return false
+	}, 90*time.Second, 2*time.Second,
+		"the approval redrive sweeper must execute an approved action that was never dispatched")
+
+	// The remediation actually happened again — the row moving is not the point,
+	// the effect is.
+	s.awaitTaskStatus(proposal.jobID, proposal.runID, "skipped", 60*time.Second)
+
+	// The redriven execution still credits the recorded HUMAN decision: the
+	// decider is read from the ApprovalRequest, never from whoever dispatched.
+	final := requireActionByID(s, s.incidentDetail(proposal.incidentID), proposal.actionID)
+	var result map[string]any
+	s.Require().NoError(json.Unmarshal(final.Result, &result))
+	s.Require().NotEmpty(result["approved_by"],
+		"a redriven action must still name the human who approved it")
+}
+
+// TestApplyJobdefPatchCannotEditItsOwnPolicy is the self-modification refusal.
+//
+// `metadata.remediation` is persisted and IS the input to the effective-playbook
+// resolver, so a patch that edits it is the agent rewriting the policy that
+// governs the agent. The attack is quiet: propose a byte-identical definition
+// plus a permissive remediation block, and a human approving what looks like a
+// no-op hands the agent a wider allowlist for every later proposal. The refusal
+// must therefore hold at the point of EXECUTION, after a human has approved —
+// which is what this drives.
+func (s *IntegrationTestSuite) TestApplyJobdefPatchCannotEditItsOwnPolicy() {
+	s.requireAuthLane()
+
+	alias := fmt.Sprintf("policy-selfedit-%d", time.Now().UnixNano())
+	def := failingJobDefinition(alias, s.engineType)
+	def.Metadata.Remediation = &schema.MetadataRemediation{
+		Profile: "triage-only",
+		Classes: []string{"unknown"},
+	}
+	s.applyDefinition(def)
+
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	s.awaitRun(job.ID, runID, runTimeout)
+	incident := s.awaitIncidentForJobTask(job.ID, "gate", 60*time.Second)
+	token := s.mintAgentSessionToken(incident.ID, alias)
+
+	// The patch: same job, but the agent grants itself every tier-2 action.
+	escalated := def
+	escalated.Metadata.Remediation = &schema.MetadataRemediation{
+		Profile: "triage-only",
+		Classes: []string{"unknown"},
+		Autonomy: &schema.RemediationAutonomy{
+			Allow: []string{"pause_job", "rerun_with_params", "clear_cache_entry"},
+		},
+	}
+	patch, err := json.Marshal(escalated)
+	s.Require().NoError(err)
+
+	status, body := s.postWithToken(
+		fmt.Sprintf("%s/v1/agent/incidents/%s/actions", s.caesiumURL, incident.ID),
+		token,
+		map[string]any{
+			"type":   "apply_jobdef_patch",
+			"params": map[string]any{"definition": json.RawMessage(patch)},
+		})
+	s.Require().Equal(http.StatusAccepted, status, string(body))
+
+	var proposal struct {
+		Action approvalAction `json:"action"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &proposal))
+
+	detail := s.awaitIncidentStatus(incident.ID, "awaiting_approval", 30*time.Second)
+	var pending approvalRequest
+	for _, a := range detail.Approvals {
+		if a.ActionID == proposal.Action.ID && a.Decision == "pending" {
+			pending = a
+			break
+		}
+	}
+	s.Require().NotEmpty(pending.ID, "no pending approval for the policy-editing patch")
+
+	// A human approves it — the refusal must not depend on the human noticing.
+	out, err := s.runCLIStdout(s.incidentCLIArgs("approve", incident.ID,
+		"--approval", pending.ID, "--reason", "looks like a no-op")...)
+	s.Require().NoError(err, "caesium incident approve failed:\n%s", out)
+
+	executed := requireActionByID(s, s.incidentDetail(incident.ID), proposal.Action.ID)
+	s.Require().Equal("failed", executed.Status,
+		"an approved patch that edits the job's own remediation policy must be refused, not applied")
+	var result map[string]any
+	s.Require().NoError(json.Unmarshal(executed.Result, &result))
+	s.Require().Contains(fmt.Sprint(result["error"]), "metadata.remediation",
+		"the refusal must name what it refused: %v", result)
+
+	// The job's policy is unchanged on the server.
+	var jobs []struct {
+		Alias       string          `json:"alias"`
+		Remediation json.RawMessage `json:"remediation"`
+	}
+	s.getJSON("/v1/jobs", &jobs)
+	for _, j := range jobs {
+		if j.Alias != alias {
+			continue
+		}
+		s.Require().NotContains(string(j.Remediation), "pause_job",
+			"the agent must not have widened its own allowlist")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -24,6 +25,14 @@ func Actions(c *echo.Context) error {
 	var req agentsvc.ActionRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
+	// The authenticated key identifies the PROPOSING SESSION (an agent session's
+	// credential is minted per session and recorded on AgentSession.TokenID).
+	// Taken from the request context, never from the body, so an agent cannot
+	// attribute its proposal to another session.
+	if key := authmw.GetAuthKey(c); key != nil {
+		id := key.ID
+		req.TokenID = &id
 	}
 
 	svc := agentsvc.New(c.Request().Context())

@@ -886,7 +886,23 @@ guard.
       block still inherits `CAESIUM_AGENT_DEFAULT_PROFILE`; a job whose DECLARED
       profile cannot be resolved gets `incident.DenyAllPlaybook()`, never the
       default's allowlist.
-      Review follow-up (PR #390): `requestApproval` creates the `ApprovalRequest`
+      Review round 2 (PR #390): persisting the block made it a privilege-escalation
+      surface, so `dispatchApplyJobdefPatch` now refuses — before the provenance
+      router, so BOTH routes are covered — any patch whose `metadata.remediation`
+      differs from the live `job.Remediation` (`ErrPatchAltersRemediation`, action
+      recorded `failed`). An agent may not edit the policy that governs it. With
+      that boundary in place the job block is treated as an AUTHORED policy that
+      may grant as well as narrow, matching the design: `Playbook.Narrow` became
+      `Playbook.Override` (job allow REPLACES, requireApproval unions). The
+      nil-vs-empty distinction is now explicit and single-sourced through
+      `allowsAutonomous(actionType, tier)` — nil means unconfigured (tier
+      defaults), non-nil governs at every tier — which also fixes the shipped
+      `triage-only` profile, whose `allow: []` decoded as unconstrained and
+      therefore granted every tier-1 action under a "zero risk" profile (it now
+      declares `allow: [escalate]`). `internal/jobdef/diff.JobSpec` gained
+      `Remediation` so `caesium job diff` and the rendered approval diff show a
+      remediation-only change instead of "no changes".
+      Review round 2 (PR #390): `requestApproval` creates the `ApprovalRequest`
       and parks the incident in ONE transaction. Parking used to be best-effort,
       so a proposal against a terminal or concurrently-advanced incident could
       commit an approval no feed lists and no human can decide. It now fails
@@ -1099,6 +1115,17 @@ guard.
       once the escalation is actually on the stream, never for a page nobody
       received. `incidentActionOps` therefore takes the bus + event store
       (`newIncidentActionOps(conn, bus, eventStore)`).
+      Review round 2 (PR #390): the claim is now pinned deterministically
+      (`TestClaimApprovedIsOnceOnly` — deleting it fails to compile) plus a real
+      two-goroutine race, and the sweeper has integration coverage
+      (`TestApprovedActionRedriveRecoversAfterCrash` strands a real approved
+      action in the catalog and asserts the LIVE sweeper redrives it).
+      `ActionOps.Escalate` now returns `routed` — publishing is not delivery, and
+      the subscriber silently drops an event no `NotificationPolicy` matches, so
+      an unrouted escalation records `routed:false` with a warn log instead of
+      reading as a completed page. The triage bundle and the executor now share
+      one resolver (`incident.ResolvePlaybook`), so the policy the agent is
+      briefed with is the policy enforced on its proposals.
       Review follow-up (PR #390): `ExecuteApproved` now CLAIMS the action with a
       conditional `approved → executing` UPDATE
       (`models.AgentActionStatusExecuting`), so dispatch is once-only across the

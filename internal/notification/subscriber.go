@@ -195,13 +195,25 @@ func (s *Subscriber) loadChannels(ctx context.Context, policies []models.Notific
 // event type and whose filters match the event. Uses a SQL-level filter on
 // event type to reduce the rows loaded from the database.
 func (s *Subscriber) matchPolicies(ctx context.Context, evt event.Event) ([]models.NotificationPolicy, error) {
+	return MatchPolicies(ctx, s.db, evt)
+}
+
+// MatchPolicies returns the enabled policies that would deliver evt.
+//
+// Exported because delivery is not always fire-and-forget: an escalation must be
+// able to report whether anything will actually route it, rather than recording
+// itself as delivered into a deployment with no matching policy
+// (cmd/start/incident_ops.go Escalate). Sharing this function is what keeps that
+// answer honest — a separate re-implementation would drift from the filters the
+// subscriber actually applies.
+func MatchPolicies(ctx context.Context, db *gorm.DB, evt event.Event) ([]models.NotificationPolicy, error) {
 	var candidates []models.NotificationPolicy
 	// Filter at the SQL level: only load policies whose event_types JSON
 	// contains the event type string. This is a substring match on the
 	// JSON column — not exact, but it eliminates the vast majority of
 	// non-matching rows. The in-memory policyMatchesEvent check below
 	// is the authoritative filter.
-	if err := s.db.WithContext(ctx).
+	if err := db.WithContext(ctx).
 		Where("enabled = ? AND event_types LIKE ?", true, "%"+string(evt.Type)+"%").
 		Find(&candidates).Error; err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package incident
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -149,8 +151,12 @@ type ActionOps interface {
 	QuarantineReplay(ctx context.Context, runID uuid.UUID, set map[string]string) (json.RawMessage, error)
 	// Notify posts a structured update to a notification channel.
 	Notify(ctx context.Context, channel, message string) error
-	// Escalate pages a channel with an RCA summary.
-	Escalate(ctx context.Context, incidentID uuid.UUID, channel, summary string) error
+	// Escalate pages a channel with an RCA summary, reporting whether the
+	// escalation was actually ROUTED to a notification channel. An escalation
+	// that reached nobody is still recorded (the event is persisted and
+	// queryable), but it must never be reported as delivered — routed=false is
+	// how the action row says "raised, but no policy carried it".
+	Escalate(ctx context.Context, incidentID uuid.UUID, channel, summary string) (routed bool, err error)
 	// SetJobPaused pauses/unpauses a job (Job.Paused).
 	SetJobPaused(ctx context.Context, jobID uuid.UUID, paused bool) error
 	// ClearCacheEntry deletes a task's cache entry.
@@ -317,10 +323,14 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 		if e.ops == nil {
 			return nil, errNoOps
 		}
-		if err := e.ops.Escalate(ctx, inc.ID, params.Channel, params.Summary); err != nil {
+		routed, err := e.ops.Escalate(ctx, inc.ID, params.Channel, params.Summary)
+		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"channel": params.Channel, "escalated": true}, nil
+		// routed distinguishes "a channel received this" from "the event exists".
+		// Recording only escalated:true let an escalation nobody could receive
+		// read as a completed page.
+		return map[string]any{"channel": params.Channel, "escalated": true, "routed": routed}, nil
 
 	case ActionTypeRerunWithParams:
 		if len(params.Overrides) == 0 {
@@ -501,6 +511,23 @@ var ErrAuthModeNone = errors.New("incident: apply_jobdef_patch refused: an auth 
 // proposed definition.
 var ErrPatchDefinitionRequired = errors.New("incident: apply_jobdef_patch requires a definition")
 
+// ErrPatchAltersRemediation refuses any jobdef patch that would change the
+// job's own `metadata.remediation` block.
+//
+// This is the security boundary that makes a job-level playbook trustworthy at
+// all. Since the block is persisted and IS the input to the effective-playbook
+// resolver, a patch that edits it is the agent rewriting the policy that governs
+// the agent — the design's "the agent may not modify playbooks, profiles" rule,
+// one indirection out. The attack is quiet: propose a byte-identical definition
+// plus a permissive `metadata.remediation`, and a human approving what looks
+// like a no-op hands the agent a wider allowlist for every later proposal.
+//
+// The refusal is unconditional and covers BOTH provenance routes, so it holds
+// whether the patch is applied directly or (for a git-synced job) rendered and
+// escalated. A human editing the block through `caesium job apply` is unaffected;
+// only the agent's own action surface is refused.
+var ErrPatchAltersRemediation = errors.New("incident: apply_jobdef_patch may not change metadata.remediation: an agent may not edit the policy that governs it")
+
 // dispatchApplyJobdefPatch is the provenance router for the tier-3 jobdef patch.
 //
 // It is enforced SERVER-SIDE and the agent cannot choose the route: for a job
@@ -532,6 +559,12 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
 	}
 
+	// Refuse a self-modifying patch BEFORE the provenance router, so neither the
+	// direct route nor the escalate route can carry a policy edit.
+	if err := refuseRemediationEdit(job.Remediation, params.Definition); err != nil {
+		return nil, err
+	}
+
 	if gitSynced(&job) {
 		diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, params.Definition, true)
 		if err != nil {
@@ -541,7 +574,8 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		if summary == "" {
 			summary = fmt.Sprintf("approved jobdef patch for git-synced job %q cannot be applied directly; apply it in the source repository", job.Alias)
 		}
-		if err := e.ops.Escalate(ctx, inc.ID, params.Channel, summary+"\n"+string(diff)); err != nil {
+		routed, err := e.ops.Escalate(ctx, inc.ID, params.Channel, summary+"\n"+string(diff))
+		if err != nil {
 			return nil, err
 		}
 		out := map[string]any{
@@ -549,6 +583,7 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 			"job_alias": job.Alias,
 			"route":     routeEscalate,
 			"applied":   false,
+			"routed":    routed,
 			"reason":    "job has authoritative git provenance; a direct apply would be reverted by the next sync",
 		}
 		if len(diff) > 0 {
@@ -571,6 +606,75 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		out["diff"] = diff
 	}
 	return out, nil
+}
+
+// refuseRemediationEdit returns ErrPatchAltersRemediation when a proposed
+// definition's `metadata.remediation` differs from the one the job currently
+// carries. Both sides are canonicalised through the same typed struct, so key
+// order and whitespace cannot manufacture a difference.
+//
+// It deliberately does NOT validate the whole definition: that is the importer's
+// job (ApplyJobdefPatch calls Validate before applying), and duplicating it here
+// would refuse a policy-identical patch with a schema error from the wrong layer.
+// The consequence is that a block differing only in un-normalised whitespace
+// reads as a change and is refused — the fail-safe direction, and unreachable in
+// practice since the agent proposes the document it was briefed with.
+//
+// A definition that cannot be parsed at all is refused rather than admitted:
+// "unreadable" must not mean "unchanged".
+func refuseRemediationEdit(stored datatypes.JSON, definition json.RawMessage) error {
+	var def schema.Definition
+	if err := json.Unmarshal(definition, &def); err != nil {
+		return fmt.Errorf("incident: decode proposed job definition: %w", err)
+	}
+
+	current, err := canonicalRemediation(stored)
+	if err != nil {
+		return fmt.Errorf("incident: decode stored remediation policy: %w", err)
+	}
+	proposed, err := canonicalRemediation(marshalRemediation(def.Metadata.Remediation))
+	if err != nil {
+		return fmt.Errorf("incident: encode proposed remediation policy: %w", err)
+	}
+	if !bytes.Equal(current, proposed) {
+		return fmt.Errorf("%w (current %s, proposed %s)",
+			ErrPatchAltersRemediation, remediationForMessage(current), remediationForMessage(proposed))
+	}
+	return nil
+}
+
+// canonicalRemediation re-encodes a remediation block through its typed struct so
+// two semantically identical documents compare byte-equal. An absent block
+// canonicalises to nil, which equals another absent block.
+func canonicalRemediation(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var block schema.MetadataRemediation
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return nil, err
+	}
+	return json.Marshal(block)
+}
+
+func marshalRemediation(block *schema.MetadataRemediation) []byte {
+	if block == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(block)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// remediationForMessage renders a canonical block for the refusal message,
+// naming the absent case rather than printing empty bytes.
+func remediationForMessage(canonical []byte) string {
+	if len(canonical) == 0 {
+		return "none"
+	}
+	return string(canonical)
 }
 
 // Patch routes recorded on the action result so the timeline says which half of

@@ -81,7 +81,10 @@ func TestEscalatePublishesNotifiableEvent(t *testing.T) {
 	ops := newIncidentActionOps(db, bus, store)
 
 	const summary = "approved jobdef patch cannot be applied to a git-synced job\n{\"alias\":\"vendor-ingest\"}"
-	require.NoError(t, ops.Escalate(ctx, incidentID, "pagerduty-oncall", summary))
+	routed, err := ops.Escalate(ctx, incidentID, "pagerduty-oncall", summary)
+	require.NoError(t, err)
+	require.False(t, routed,
+		"with no NotificationPolicy for incident_escalated, the escalation must not claim delivery")
 
 	// Published onto the bus the notification subscriber consumes...
 	require.Len(t, bus.published, 1)
@@ -123,6 +126,7 @@ func TestEscalateWithoutEventSinkFails(t *testing.T) {
 	incidentID, _ := seedEscalationIncident(t, db)
 	ops := newIncidentActionOps(db, nil, nil)
 
-	require.Error(t, ops.Escalate(context.Background(), incidentID, "pagerduty-oncall", "summary"),
+	_, err := ops.Escalate(context.Background(), incidentID, "pagerduty-oncall", "summary")
+	require.Error(t, err,
 		"an escalation with no delivery path must not be recorded as executed")
 }
