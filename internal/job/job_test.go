@@ -100,15 +100,14 @@ func captureJobLogs(t *testing.T, fn func()) string {
 	t.Helper()
 
 	var buffer bytes.Buffer
-	oldLogger := zap.S()
-	zap.ReplaceGlobals(zap.New(
+	restore := zap.ReplaceGlobals(zap.New(
 		zapcore.NewCore(
 			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
 			zapcore.AddSync(&buffer),
 			zapcore.DebugLevel,
 		),
 	))
-	defer zap.ReplaceGlobals(oldLogger.Desugar())
+	defer restore()
 
 	fn()
 	return buffer.String()

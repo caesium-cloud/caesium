@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	ErrInvalidChannel       = errors.New("invalid notification channel")
-	ErrChannelNameConflict  = errors.New("channel name conflict")
-	ErrInvalidPolicy        = errors.New("invalid notification policy")
-	ErrPolicyNameConflict   = errors.New("policy name conflict")
+	ErrInvalidChannel      = errors.New("invalid notification channel")
+	ErrChannelNameConflict = errors.New("channel name conflict")
+	ErrInvalidPolicy       = errors.New("invalid notification policy")
+	ErrPolicyNameConflict  = errors.New("policy name conflict")
 )
 
 // Service manages notification channels and policies.
@@ -61,32 +61,32 @@ type ListRequest struct {
 }
 
 type CreateChannelRequest struct {
-	Name    string                 `json:"name"`
-	Type    models.ChannelType     `json:"type"`
-	Config  map[string]interface{} `json:"config"`
-	Enabled *bool                  `json:"enabled,omitempty"`
+	Name    string             `json:"name"`
+	Type    models.ChannelType `json:"type"`
+	Config  map[string]any     `json:"config"`
+	Enabled *bool              `json:"enabled,omitempty"`
 }
 
 type UpdateChannelRequest struct {
-	Name    *string                `json:"name,omitempty"`
-	Config  map[string]interface{} `json:"config,omitempty"`
-	Enabled *bool                  `json:"enabled,omitempty"`
+	Name    *string        `json:"name,omitempty"`
+	Config  map[string]any `json:"config,omitempty"`
+	Enabled *bool          `json:"enabled,omitempty"`
 }
 
 type CreatePolicyRequest struct {
-	Name       string   `json:"name"`
-	ChannelID  uuid.UUID `json:"channel_id"`
-	EventTypes []string `json:"event_types"`
-	Filters    map[string]interface{} `json:"filters,omitempty"`
-	Enabled    *bool    `json:"enabled,omitempty"`
+	Name       string         `json:"name"`
+	ChannelID  uuid.UUID      `json:"channel_id"`
+	EventTypes []string       `json:"event_types"`
+	Filters    map[string]any `json:"filters,omitempty"`
+	Enabled    *bool          `json:"enabled,omitempty"`
 }
 
 type UpdatePolicyRequest struct {
-	Name       *string  `json:"name,omitempty"`
-	ChannelID  *uuid.UUID `json:"channel_id,omitempty"`
-	EventTypes []string `json:"event_types,omitempty"`
-	Filters    map[string]interface{} `json:"filters,omitempty"`
-	Enabled    *bool    `json:"enabled,omitempty"`
+	Name       *string        `json:"name,omitempty"`
+	ChannelID  *uuid.UUID     `json:"channel_id,omitempty"`
+	EventTypes []string       `json:"event_types,omitempty"`
+	Filters    map[string]any `json:"filters,omitempty"`
+	Enabled    *bool          `json:"enabled,omitempty"`
 }
 
 // --- Channel CRUD ---
@@ -157,7 +157,7 @@ func (s *service) UpdateChannel(id uuid.UUID, req *UpdateChannelRequest) (*model
 		return nil, err
 	}
 
-	updates := map[string]interface{}{}
+	updates := map[string]any{}
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -288,7 +288,7 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 		return nil, err
 	}
 
-	updates := map[string]interface{}{}
+	updates := map[string]any{}
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)

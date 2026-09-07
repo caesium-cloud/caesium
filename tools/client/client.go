@@ -22,7 +22,7 @@ func main() {
 	query := os.Args[1]
 
 	buf, err := json.Marshal(
-		map[string]interface{}{
+		map[string]any{
 			"timings": true,
 			"queries": []string{query},
 		},

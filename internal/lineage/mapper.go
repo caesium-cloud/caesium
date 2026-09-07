@@ -62,12 +62,12 @@ type taskRunPayload struct {
 	// OutputSchema is the task's declared JSON Schema for its outputs, stored
 	// as a raw JSON blob (map[string]any shape).  Non-nil when the step declares
 	// outputSchema in the job manifest.
-	OutputSchema map[string]interface{} `json:"output_schema,omitempty"`
+	OutputSchema map[string]any `json:"output_schema,omitempty"`
 
 	// InputSchema maps predecessor step names to JSON Schema fragments
 	// describing which keys this step consumes.  Non-nil when the step declares
 	// inputSchema in the job manifest.
-	InputSchema map[string]map[string]interface{} `json:"input_schema,omitempty"`
+	InputSchema map[string]map[string]any `json:"input_schema,omitempty"`
 }
 
 type jobRecord struct {
@@ -129,7 +129,7 @@ func (m *mapper) mapRunStart(evt event.Event) (*RunEvent, error) {
 
 	jobAlias := m.resolveJobAlias(evt.JobID, payload.JobAlias)
 
-	runFacets := map[string]interface{}{
+	runFacets := map[string]any{
 		"caesium_dag": CaesiumDAGFacet{
 			BaseFacet:    newCaesiumBaseFacet("CaesiumDAGFacet"),
 			TotalTasks:   len(payload.Tasks),
@@ -172,7 +172,7 @@ func (m *mapper) mapRunComplete(evt event.Event) (*RunEvent, error) {
 		SchemaURL: schemaURL,
 		Run: Run{
 			RunID:  evt.RunID,
-			Facets: map[string]interface{}{},
+			Facets: map[string]any{},
 		},
 		Job: Job{
 			Namespace: m.namespace,
@@ -192,7 +192,7 @@ func (m *mapper) mapRunFail(evt event.Event) (*RunEvent, error) {
 
 	jobAlias := m.resolveJobAlias(evt.JobID, payload.JobAlias)
 
-	runFacets := map[string]interface{}{}
+	runFacets := map[string]any{}
 	if payload.Error != "" {
 		runFacets["errorMessage"] = ErrorMessageFacet{
 			BaseFacet:           newBaseFacet(errorFacetSchema),
@@ -391,7 +391,7 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 
 // --- Helpers ---
 
-func (m *mapper) addExecutionFacet(facets map[string]interface{}, payload taskRunPayload) {
+func (m *mapper) addExecutionFacet(facets map[string]any, payload taskRunPayload) {
 	facets["caesium_execution"] = CaesiumExecutionFacet{
 		BaseFacet: newCaesiumBaseFacet("CaesiumExecutionFacet"),
 		Engine:    payload.Engine,
@@ -402,8 +402,8 @@ func (m *mapper) addExecutionFacet(facets map[string]interface{}, payload taskRu
 	}
 }
 
-func (m *mapper) buildParentFacet(parentRunID uuid.UUID, parentJobName string) map[string]interface{} {
-	return map[string]interface{}{
+func (m *mapper) buildParentFacet(parentRunID uuid.UUID, parentJobName string) map[string]any {
+	return map[string]any{
 		"parent": ParentRunFacet{
 			BaseFacet: newBaseFacet(parentFacetSchema),
 			Run:       ParentRunRef{RunID: parentRunID},
@@ -462,8 +462,8 @@ func buildSourceCodeFacet(entry jobCacheEntry) SourceCodeLocationFacet {
 	}
 }
 
-func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]interface{} {
-	facets := map[string]interface{}{
+func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]any {
+	facets := map[string]any{
 		"jobType": JobTypeFacet{
 			BaseFacet:      newBaseFacet(jobTypeFacetSchema),
 			ProcessingType: "BATCH",
@@ -531,13 +531,13 @@ func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
 		payload.TaskName = rec.Name
 	}
 	if payload.OutputSchema == nil && len(rec.OutputSchema) > 0 {
-		var os map[string]interface{}
+		var os map[string]any
 		if json.Unmarshal(rec.OutputSchema, &os) == nil {
 			payload.OutputSchema = os
 		}
 	}
 	if payload.InputSchema == nil && len(rec.InputSchema) > 0 {
-		var is map[string]map[string]interface{}
+		var is map[string]map[string]any
 		if json.Unmarshal(rec.InputSchema, &is) == nil {
 			payload.InputSchema = is
 		}
@@ -631,7 +631,7 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 		for _, key := range outputKeys {
 			value := payload.Output[key]
 			datasetName := datasetNameFromValue(jobAlias, stepName, key, value)
-			facets := map[string]interface{}{
+			facets := map[string]any{
 				"caesium_dataset": CaesiumDatasetFacet{
 					BaseFacet:  newCaesiumBaseFacet("CaesiumDatasetFacet"),
 					StepName:   stepName,
@@ -648,7 +648,7 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 	} else if len(payload.OutputSchema) > 0 {
 		// Declared schema but no path-like outputs: emit a synthetic dataset so
 		// the step appears in the lineage graph.
-		facets := map[string]interface{}{
+		facets := map[string]any{
 			"caesium_dataset": CaesiumDatasetFacet{
 				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
 				StepName:  stepName,
@@ -677,7 +677,7 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 	sort.Strings(predNames)
 	for _, predStepName := range predNames {
 		schema := payload.InputSchema[predStepName]
-		facets := map[string]interface{}{
+		facets := map[string]any{
 			"caesium_dataset": CaesiumDatasetFacet{
 				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
 				StepName:  predStepName,
@@ -777,8 +777,8 @@ func looksLikeDatasetRef(v string) bool {
 	if len(v) > 255 {
 		return false
 	}
-	dotIdx := strings.IndexByte(v, '.')
-	if dotIdx < 0 {
+	found := strings.Contains(v, ".")
+	if !found {
 		return false // no dot at all
 	}
 	if strings.ContainsAny(v, " \t\n\r") {

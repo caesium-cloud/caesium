@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"maps"
 	"sort"
 	"strings"
 
@@ -574,9 +575,7 @@ func framedPredecessorOutputs(outputs map[string]map[string]string) map[string]m
 	framed := make(map[string]map[string]string, len(outputs))
 	for name, kv := range outputs {
 		inner := make(map[string]string, len(kv))
-		for k, v := range kv {
-			inner[k] = v
-		}
+		maps.Copy(inner, kv)
 		framed[name] = inner
 	}
 	return framed

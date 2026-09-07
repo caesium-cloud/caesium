@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/suite"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -20,8 +19,8 @@ func TestKubernetesResolverSuite(t *testing.T) {
 
 func (s *KubernetesResolverSuite) TestResolveDefaultNamespace() {
 	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "jobs", ResourceVersion: "42"},
-		Data:       map[string][]byte{"password": []byte("hunter2")},
+		Name: "git-creds", Namespace: "jobs", ResourceVersion: "42",
+		Data: map[string][]byte{"password": []byte("hunter2")},
 	})
 
 	r := NewKubernetesResolverWithClient(client, "jobs")
@@ -37,8 +36,8 @@ func (s *KubernetesResolverSuite) TestResolveDefaultNamespace() {
 
 func (s *KubernetesResolverSuite) TestResolveExplicitNamespace() {
 	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "infra"},
-		Data:       map[string][]byte{"token": []byte("abc")},
+		Name: "git-creds", Namespace: "infra",
+		Data: map[string][]byte{"token": []byte("abc")},
 	})
 
 	r := NewKubernetesResolverWithClient(client, "default")

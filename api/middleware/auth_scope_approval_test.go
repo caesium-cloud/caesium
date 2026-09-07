@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,12 +17,12 @@ import (
 // approvalRoute builds the RouteInfo + path values for the tier-3 approve route.
 func approvalRoute(incidentID, approvalID uuid.UUID) (*echo.RouteInfo, echo.PathValues) {
 	return &echo.RouteInfo{
-			Path:   "/v1/incidents/:id/approvals/:approval_id/approve",
-			Method: http.MethodPost,
-		}, echo.PathValues{
-			{Name: "id", Value: incidentID.String()},
-			{Name: "approval_id", Value: approvalID.String()},
-		}
+		Path:   "/v1/incidents/:id/approvals/:approval_id/approve",
+		Method: http.MethodPost,
+	}, echo.PathValues{
+		{Name: "id", Value: incidentID.String()},
+		{Name: "approval_id", Value: approvalID.String()},
+	}
 }
 
 // TestMiddlewareApprovalRouteRejectsAgentToken is the D1 security proof: a token
@@ -47,7 +48,7 @@ func TestMiddlewareApprovalRouteRejectsAgentToken(t *testing.T) {
 
 	approvalID := uuid.New()
 	route, pv := approvalRoute(incidentID, approvalID)
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/v1/incidents/"+incidentID.String()+"/approvals/"+approvalID.String()+"/approve", nil)
 	req.Header.Set("Authorization", "Bearer "+resp.Plaintext)
 
@@ -84,7 +85,7 @@ func TestMiddlewareApprovalRouteDeniesMintedAgentKeyAtRBAC(t *testing.T) {
 
 	approvalID := uuid.New()
 	route, pv := approvalRoute(incidentID, approvalID)
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/v1/incidents/"+incidentID.String()+"/approvals/"+approvalID.String()+"/approve", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
@@ -115,7 +116,7 @@ func TestMiddlewareApprovalRouteAllowsUnscopedOperator(t *testing.T) {
 
 	incidentID, approvalID := uuid.New(), uuid.New()
 	route, pv := approvalRoute(incidentID, approvalID)
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/v1/incidents/"+incidentID.String()+"/approvals/"+approvalID.String()+"/approve", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 

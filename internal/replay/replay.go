@@ -898,9 +898,7 @@ func computeDescriptorInstanceHash(
 	if err != nil {
 		return "", err
 	}
-	for k, v := range outputEnv {
-		env[k] = v
-	}
+	maps.Copy(env, outputEnv)
 	command := append([]string(nil), desc.Runtime.Command...)
 	if len(command) == 0 && strings.TrimSpace(desc.Runtime.CommandRaw) != "" {
 		command = []string{desc.Runtime.CommandRaw}
@@ -1270,10 +1268,7 @@ func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority
 		return models.TaskRun{}, fmt.Errorf("replay: encode command for step %q: %w", plan.base.taskName, err)
 	}
 
-	maxAttempts := desc.Runtime.RetryCount + 1
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+	maxAttempts := max(desc.Runtime.RetryCount+1, 1)
 	record := models.TaskRun{
 		ID:                      uuid.New(),
 		JobRunID:                replayID,

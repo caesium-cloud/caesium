@@ -44,11 +44,11 @@ func (s *TriggerSuite) svc() *triggerService {
 
 func (s *TriggerSuite) createTrigger(triggerType, alias string) *models.Trigger {
 	svc := s.svc()
-	config := map[string]interface{}{
+	config := map[string]any{
 		"schedule": "* * * * *",
 	}
 	if triggerType == string(models.TriggerTypeHTTP) {
-		config = map[string]interface{}{
+		config = map[string]any{
 			"path": "/hooks/" + alias,
 		}
 	}
@@ -66,7 +66,7 @@ func (s *TriggerSuite) createHTTPTrigger(alias, path string) *models.Trigger {
 	trigger, err := svc.Create(&CreateRequest{
 		Alias: alias,
 		Type:  string(models.TriggerTypeHTTP),
-		Configuration: map[string]interface{}{
+		Configuration: map[string]any{
 			"path": path,
 		},
 	})
@@ -79,9 +79,9 @@ func (s *TriggerSuite) createEventTrigger(alias, eventType string) *models.Trigg
 	trigger, err := svc.Create(&CreateRequest{
 		Alias: alias,
 		Type:  string(models.TriggerTypeEvent),
-		Configuration: map[string]interface{}{
-			"events": []interface{}{
-				map[string]interface{}{"type": eventType},
+		Configuration: map[string]any{
+			"events": []any{
+				map[string]any{"type": eventType},
 			},
 		},
 	})
@@ -108,7 +108,7 @@ func (s *TriggerSuite) TestListByType() {
 }
 
 func (s *TriggerSuite) TestListWithPagination() {
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		s.createTrigger(string(models.TriggerTypeCron), "trigger-"+uuid.NewString())
 	}
 
@@ -186,7 +186,7 @@ func (s *TriggerSuite) TestCreateCron() {
 	trigger, err := s.svc().Create(&CreateRequest{
 		Alias: "daily-cron",
 		Type:  string(models.TriggerTypeCron),
-		Configuration: map[string]interface{}{
+		Configuration: map[string]any{
 			"schedule": "0 0 * * *",
 		},
 	})
@@ -201,7 +201,7 @@ func (s *TriggerSuite) TestCreateHTTP() {
 	trigger, err := s.svc().Create(&CreateRequest{
 		Alias: "webhook",
 		Type:  string(models.TriggerTypeHTTP),
-		Configuration: map[string]interface{}{
+		Configuration: map[string]any{
 			"path": "/hooks/webhook",
 		},
 	})
@@ -217,7 +217,7 @@ func (s *TriggerSuite) TestCreateRejectsDuplicateAlias() {
 	_, err := s.svc().Create(&CreateRequest{
 		Alias: "duplicate-alias",
 		Type:  string(models.TriggerTypeHTTP),
-		Configuration: map[string]interface{}{
+		Configuration: map[string]any{
 			"path": "/hooks/second",
 		},
 	})
@@ -234,7 +234,7 @@ func (s *TriggerSuite) TestCreateRejectsBareFreshnessTrigger() {
 	_, err := s.svc().Create(&CreateRequest{
 		Alias:         "bare-freshness",
 		Type:          string(models.TriggerTypeFreshness),
-		Configuration: map[string]interface{}{},
+		Configuration: map[string]any{},
 	})
 	s.Require().Error(err)
 	s.True(errors.Is(err, ErrInvalidTriggerRequest))
@@ -245,7 +245,7 @@ func (s *TriggerSuite) TestUpdateHTTPConfigurationRefreshesNormalizedPath() {
 	created := s.createHTTPTrigger("webhook", "/hooks/original")
 
 	updated, err := s.svc().Update(created.ID, &UpdateRequest{
-		Configuration: map[string]interface{}{
+		Configuration: map[string]any{
 			"path": "/v1/hooks/updated/path",
 		},
 	})

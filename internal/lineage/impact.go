@@ -171,7 +171,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 	// small in practice (one arm per distinct dataset at this depth level).
 	orArms := make([]string, len(frontier))
 	// subArgs holds the placeholder values for the subquery's WHERE clause.
-	subArgs := make([]interface{}, 0, len(frontier)*2)
+	subArgs := make([]any, 0, len(frontier)*2)
 	for i, f := range frontier {
 		orArms[i] = "(namespace = ? AND name = ?)"
 		subArgs = append(subArgs, f.namespace, f.name)
@@ -186,7 +186,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 	// subquery.  Args: 'output' for ld.direction, then subArgs for the
 	// embedded subquery placeholders.
 	outerWhere := "ld.direction = ? AND ld.task_run_id IN (" + subquery + ")"
-	queryArgs := append([]interface{}{"output"}, subArgs...)
+	queryArgs := append([]any{"output"}, subArgs...)
 
 	type outputRow struct {
 		Namespace        string

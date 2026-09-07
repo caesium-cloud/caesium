@@ -1,6 +1,7 @@
 package http
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -48,12 +49,8 @@ func (c Config) withDefaults() Config {
 
 func (c Config) mergedParams(params map[string]string) map[string]string {
 	merged := make(map[string]string, len(c.DefaultParams)+len(params))
-	for k, v := range c.DefaultParams {
-		merged[k] = v
-	}
-	for k, v := range params {
-		merged[k] = v
-	}
+	maps.Copy(merged, c.DefaultParams)
+	maps.Copy(merged, params)
 	return merged
 }
 

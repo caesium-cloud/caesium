@@ -105,23 +105,23 @@ type ListRequest struct {
 }
 
 type CreateRequest struct {
-	Name       string                 `json:"name"`
-	Image      string                 `json:"image"`
-	Engine     models.AtomEngine      `json:"engine,omitempty"`
-	Limits     map[string]interface{} `json:"limits,omitempty"`
-	SecretRefs map[string]string      `json:"secret_refs,omitempty"`
-	Budgets    map[string]interface{} `json:"budgets,omitempty"`
-	Playbook   map[string]interface{} `json:"playbook,omitempty"`
+	Name       string            `json:"name"`
+	Image      string            `json:"image"`
+	Engine     models.AtomEngine `json:"engine,omitempty"`
+	Limits     map[string]any    `json:"limits,omitempty"`
+	SecretRefs map[string]string `json:"secret_refs,omitempty"`
+	Budgets    map[string]any    `json:"budgets,omitempty"`
+	Playbook   map[string]any    `json:"playbook,omitempty"`
 }
 
 type UpdateRequest struct {
-	Name       *string                `json:"name,omitempty"`
-	Image      *string                `json:"image,omitempty"`
-	Engine     *models.AtomEngine     `json:"engine,omitempty"`
-	Limits     map[string]interface{} `json:"limits,omitempty"`
-	SecretRefs map[string]string      `json:"secret_refs,omitempty"`
-	Budgets    map[string]interface{} `json:"budgets,omitempty"`
-	Playbook   map[string]interface{} `json:"playbook,omitempty"`
+	Name       *string            `json:"name,omitempty"`
+	Image      *string            `json:"image,omitempty"`
+	Engine     *models.AtomEngine `json:"engine,omitempty"`
+	Limits     map[string]any     `json:"limits,omitempty"`
+	SecretRefs map[string]string  `json:"secret_refs,omitempty"`
+	Budgets    map[string]any     `json:"budgets,omitempty"`
+	Playbook   map[string]any     `json:"playbook,omitempty"`
 }
 
 // --- CRUD ---
@@ -211,7 +211,7 @@ func (s *service) Update(id uuid.UUID, req *UpdateRequest) (*models.AgentProfile
 		return nil, err
 	}
 
-	updates := map[string]interface{}{}
+	updates := map[string]any{}
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -348,7 +348,7 @@ func ensureNameAvailable(q *gorm.DB, name string, excludeID uuid.UUID) error {
 	}
 }
 
-func marshalJSONMap(m map[string]interface{}) (datatypes.JSON, error) {
+func marshalJSONMap(m map[string]any) (datatypes.JSON, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
@@ -396,11 +396,11 @@ func SeedDefaults(ctx context.Context, conn *gorm.DB) error {
 	// tier-1 action (retry, rerun, quarantine…) under a profile documented as
 	// read-only. `escalate` is the one action the profile is meant to permit; the
 	// read-only context/bundle endpoints are not playbook-governed actions at all.
-	playbook, err := json.Marshal(map[string]interface{}{
-		"autonomy": map[string]interface{}{
+	playbook, err := json.Marshal(map[string]any{
+		"autonomy": map[string]any{
 			"allow": []string{incident.ActionTypeEscalate},
 		},
-		"escalation": map[string]interface{}{
+		"escalation": map[string]any{
 			"after": "15m",
 		},
 	})

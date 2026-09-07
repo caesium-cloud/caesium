@@ -127,7 +127,7 @@ func TestParseMarkers_CountCapFails(t *testing.T) {
 
 func TestParseMarkers_ObjectByteCapFails(t *testing.T) {
 	attrs := make([]string, 0, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		attrs = append(attrs, fmt.Sprintf(`"a%d":"%s"`, i, strings.Repeat("x", 300)))
 	}
 	logs := strings.NewReader(fmt.Sprintf(`##caesium::partitions [{"key":"big",%s}]
@@ -140,7 +140,7 @@ func TestParseMarkers_ObjectByteCapFails(t *testing.T) {
 
 func TestParseMarkers_AttributeCountCapFails(t *testing.T) {
 	attrs := make([]string, 0, MaxPartitionAttributes+1)
-	for i := 0; i < MaxPartitionAttributes+1; i++ {
+	for i := range MaxPartitionAttributes + 1 {
 		attrs = append(attrs, fmt.Sprintf(`"k%d":"v"`, i))
 	}
 	logs := strings.NewReader(fmt.Sprintf(`##caesium::partitions [{"key":"a",%s}]
@@ -154,7 +154,7 @@ func TestParseMarkers_AttributeCountCapFails(t *testing.T) {
 func TestParseMarkers_ListByteCapFails(t *testing.T) {
 	// 1024 keys of ~200B each exceed 256KB normalized.
 	parts := make([]string, 0, 1024)
-	for i := 0; i < 1024; i++ {
+	for i := range 1024 {
 		parts = append(parts, fmt.Sprintf("%q", fmt.Sprintf("k%04d-%s", i, strings.Repeat("z", 240))))
 	}
 	logs := strings.NewReader(fmt.Sprintf("##caesium::partitions [%s]\n", strings.Join(parts, ",")))
@@ -180,7 +180,7 @@ func TestPartitionCanonicalJSON_StringForm(t *testing.T) {
 
 func TestParseMarkers_1025ExceedsDefaultCap(t *testing.T) {
 	parts := make([]string, 0, 1025)
-	for i := 0; i < 1025; i++ {
+	for i := range 1025 {
 		parts = append(parts, fmt.Sprintf(`"p%d"`, i))
 	}
 	logs := strings.NewReader(fmt.Sprintf("##caesium::partitions [%s]\n", strings.Join(parts, ",")))

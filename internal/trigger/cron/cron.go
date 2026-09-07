@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,7 @@ func New(t *models.Trigger) (*Cron, error) {
 			models.TriggerTypeCron)
 	}
 
-	m := map[string]interface{}{}
+	m := map[string]any{}
 
 	if err := json.Unmarshal([]byte(t.Configuration), &m); err != nil {
 		return nil, err
@@ -219,9 +220,7 @@ func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 
 func (c *Cron) scheduledRunParams(logicalDate time.Time) map[string]string {
 	params := make(map[string]string, len(c.defaultParams)+1)
-	for k, v := range c.defaultParams {
-		params[k] = v
-	}
+	maps.Copy(params, c.defaultParams)
 
 	date := logicalDate
 	if c.location != nil {
@@ -241,7 +240,7 @@ func (c *Cron) ID() uuid.UUID {
 // using times anchored to the returned location so that date boundaries respect
 // the job's configured timezone.
 func ParseSchedule(configuration string) (cron.Schedule, *time.Location, error) {
-	m := map[string]interface{}{}
+	m := map[string]any{}
 	if err := json.Unmarshal([]byte(configuration), &m); err != nil {
 		return nil, nil, fmt.Errorf("cron: invalid trigger configuration: %w", err)
 	}
@@ -274,7 +273,7 @@ func ParseSchedule(configuration string) (cron.Schedule, *time.Location, error) 
 	return sched, loc, nil
 }
 
-func extractExpression(cfg map[string]interface{}) (string, error) {
+func extractExpression(cfg map[string]any) (string, error) {
 	candidates := []string{"expression", "cron", "schedule"}
 	for _, key := range candidates {
 		if raw, ok := cfg[key]; ok && raw != nil {
@@ -286,7 +285,7 @@ func extractExpression(cfg map[string]interface{}) (string, error) {
 	return "", fmt.Errorf("cron trigger configuration missing expression/cron field")
 }
 
-func extractLocation(cfg map[string]interface{}) (*time.Location, error) {
+func extractLocation(cfg map[string]any) (*time.Location, error) {
 	raw, ok := cfg["timezone"]
 	if !ok || raw == nil {
 		return nil, nil
@@ -307,7 +306,7 @@ func extractLocation(cfg map[string]interface{}) (*time.Location, error) {
 	}
 }
 
-func extractCatchup(cfg map[string]interface{}) (bool, error) {
+func extractCatchup(cfg map[string]any) (bool, error) {
 	raw, ok := cfg["catchup"]
 	if !ok || raw == nil {
 		return false, nil
@@ -320,14 +319,14 @@ func extractCatchup(cfg map[string]interface{}) (bool, error) {
 	}
 }
 
-func extractDefaultParams(cfg map[string]interface{}) (map[string]string, error) {
+func extractDefaultParams(cfg map[string]any) (map[string]string, error) {
 	raw, ok := cfg["defaultParams"]
 	if !ok || raw == nil {
 		return nil, nil
 	}
 
 	switch v := raw.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		out := make(map[string]string, len(v))
 		for key, val := range v {
 			switch s := val.(type) {

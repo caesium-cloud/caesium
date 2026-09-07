@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func mustMarshal(t *testing.T, v interface{}) json.RawMessage {
+func mustMarshal(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -534,10 +534,10 @@ func TestTaskStartWithDeclaredOutputSchema(t *testing.T) {
 	m := newMapper("caesium-test", nil)
 	payload := testTaskRunPayload()
 	payload.TaskName = "transform"
-	payload.OutputSchema = map[string]interface{}{
+	payload.OutputSchema = map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"row_count": map[string]interface{}{"type": "integer"},
+		"properties": map[string]any{
+			"row_count": map[string]any{"type": "integer"},
 		},
 	}
 
@@ -574,11 +574,11 @@ func TestTaskStartWithInputSchema(t *testing.T) {
 	m := newMapper("caesium-test", nil)
 	payload := testTaskRunPayload()
 	payload.TaskName = "load"
-	payload.InputSchema = map[string]map[string]interface{}{
+	payload.InputSchema = map[string]map[string]any{
 		"transform": {
 			"type": "object",
-			"properties": map[string]interface{}{
-				"row_count": map[string]interface{}{"type": "integer"},
+			"properties": map[string]any{
+				"row_count": map[string]any{"type": "integer"},
 			},
 		},
 	}
@@ -781,7 +781,7 @@ func TestDatasetsOrderIsDeterministic(t *testing.T) {
 		"a_path": "/data/a.parquet",
 		"m_path": "/data/m.parquet",
 	}
-	payload.InputSchema = map[string]map[string]interface{}{
+	payload.InputSchema = map[string]map[string]any{
 		"zebra":  {"type": "object"},
 		"alpha":  {"type": "object"},
 		"middle": {"type": "object"},

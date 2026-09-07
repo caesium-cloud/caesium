@@ -19,12 +19,12 @@ func TestRunEventSerialization(t *testing.T) {
 		SchemaURL: schemaURL,
 		Run: Run{
 			RunID:  runID,
-			Facets: map[string]interface{}{},
+			Facets: map[string]any{},
 		},
 		Job: Job{
 			Namespace: "caesium-prod",
 			Name:      "my_pipeline",
-			Facets:    map[string]interface{}{},
+			Facets:    map[string]any{},
 		},
 		Inputs:  []Dataset{},
 		Outputs: []Dataset{},
@@ -35,7 +35,7 @@ func TestRunEventSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -50,12 +50,12 @@ func TestRunEventSerialization(t *testing.T) {
 		t.Errorf("schemaURL = %v, want %v", parsed["schemaURL"], schemaURL)
 	}
 
-	run := parsed["run"].(map[string]interface{})
+	run := parsed["run"].(map[string]any)
 	if run["runId"] != runID.String() {
 		t.Errorf("run.runId = %v, want %v", run["runId"], runID.String())
 	}
 
-	job := parsed["job"].(map[string]interface{})
+	job := parsed["job"].(map[string]any)
 	if job["namespace"] != "caesium-prod" {
 		t.Errorf("job.namespace = %v, want caesium-prod", job["namespace"])
 	}
@@ -78,7 +78,7 @@ func TestParentRunFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -90,12 +90,12 @@ func TestParentRunFacetSerialization(t *testing.T) {
 		t.Error("_schemaURL must be present")
 	}
 
-	run := parsed["run"].(map[string]interface{})
+	run := parsed["run"].(map[string]any)
 	if run["runId"] != parentRunID.String() {
 		t.Errorf("run.runId = %v, want %v", run["runId"], parentRunID.String())
 	}
 
-	job := parsed["job"].(map[string]interface{})
+	job := parsed["job"].(map[string]any)
 	if job["namespace"] != "caesium-prod" {
 		t.Errorf("job.namespace = %v, want caesium-prod", job["namespace"])
 	}
@@ -114,7 +114,7 @@ func TestErrorMessageFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestJobTypeFacetSerialization(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

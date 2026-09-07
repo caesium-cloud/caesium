@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -125,12 +126,7 @@ func (c Config) normalize() (Config, error) {
 }
 
 func containsScope(scopes []string, target string) bool {
-	for _, scope := range scopes {
-		if scope == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(scopes, target)
 }
 
 func deriveRedirectURL(publicBaseURL string) (string, error) {

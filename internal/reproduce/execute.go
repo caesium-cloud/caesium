@@ -277,8 +277,7 @@ func ExecuteShell(ctx context.Context, env *Envelope, opts ShellExecuteOptions) 
 		Warnings:        env.Warnings,
 	}
 	if err := opts.ShellRunner.RunShell(ctx, req); err != nil {
-		var shellExit *ShellExitError
-		if errors.As(err, &shellExit) {
+		if shellExit, ok := errors.AsType[*ShellExitError](err); ok {
 			result.ExitCode = shellExit.Code
 			result.Error = shellExit.Error()
 			return result, nil
@@ -297,7 +296,7 @@ func BuildShellRequest(env *Envelope, platform string) ShellRequest {
 	return ShellRequest{
 		Image:    env.Image,
 		Shell:    DefaultShell,
-		Env:      cloneStringMap(env.Env),
+		Env:      cloneMap(env.Env),
 		Mounts:   slices.Clone(env.Mounts),
 		WorkDir:  env.WorkDir,
 		Platform: strings.TrimSpace(platform),

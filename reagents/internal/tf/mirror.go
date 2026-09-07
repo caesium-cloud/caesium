@@ -267,7 +267,7 @@ func parseInlineHashList(value string) ([]string, error) {
 		return nil, nil
 	}
 	var out []string
-	for _, part := range strings.Split(inner, ",") {
+	for part := range strings.SplitSeq(inner, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue

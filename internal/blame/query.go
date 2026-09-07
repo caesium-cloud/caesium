@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef"
@@ -269,8 +270,8 @@ func firstCommitIndex(snaps []models.DagSnapshot, commit string) (int, bool) {
 }
 
 func lastCommitIndex(snaps []models.DagSnapshot, commit string) (int, bool) {
-	for i := len(snaps) - 1; i >= 0; i-- {
-		if snaps[i].GitCommit == commit {
+	for i, snap := range slices.Backward(snaps) {
+		if snap.GitCommit == commit {
 			return i, true
 		}
 	}

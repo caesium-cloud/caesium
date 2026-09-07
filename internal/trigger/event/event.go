@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -324,12 +325,8 @@ func (c Config) withDefaults() Config {
 
 func (c Config) mergedParams(params map[string]string) map[string]string {
 	merged := make(map[string]string, len(c.DefaultParams)+len(params))
-	for k, v := range c.DefaultParams {
-		merged[k] = v
-	}
-	for k, v := range params {
-		merged[k] = v
-	}
+	maps.Copy(merged, c.DefaultParams)
+	maps.Copy(merged, params)
 	return merged
 }
 
@@ -456,15 +453,11 @@ func descendJSONPath(current any, segment string) (any, bool) {
 	}
 }
 
-func cloneParams(params map[string]string) map[string]string {
+func cloneParams[K comparable, V any](params map[K]V) map[K]V {
 	if len(params) == 0 {
-		return map[string]string{}
+		return map[K]V{}
 	}
-	out := make(map[string]string, len(params))
-	for k, v := range params {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(params)
 }
 
 func fireOutcomeErrors(outcomes []FireOutcome) string {

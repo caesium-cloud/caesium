@@ -67,8 +67,7 @@ func TestCancelRegistryNilRunIDIsANoOp(t *testing.T) {
 // cancelRunTx and therefore the same event — reach the executor.
 func TestSubscribeRunCancellationsCancelsOnEvent(t *testing.T) {
 	bus := event.New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	SubscribeRunCancellations(ctx, bus)
 
 	runID := uuid.New()
@@ -117,8 +116,7 @@ func TestRunLocalCancelStopsAtom(t *testing.T) {
 			bus := event.New()
 			store.SetBus(bus)
 
-			subCtx, stopSub := context.WithCancel(context.Background())
-			defer stopSub()
+			subCtx := t.Context()
 			SubscribeRunCancellations(subCtx, bus)
 
 			engine := newFakeEngine()

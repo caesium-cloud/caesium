@@ -233,7 +233,6 @@ func (d *DistributedWakeups) broadcast(ctx context.Context, msg WakeupMessage) {
 	}
 
 	for _, peer := range peers {
-		peer := peer
 		go func() {
 			d.postWakeup(ctx, peer, msg)
 		}()

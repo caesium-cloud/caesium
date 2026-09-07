@@ -357,10 +357,7 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 	// for every owned run. 16 is a soft cap that keeps slow workers from
 	// stalling the loop while not requiring a full worker-pool abstraction.
 	const maxConcurrent = 16
-	concurrency := len(tasks)
-	if concurrency > maxConcurrent {
-		concurrency = maxConcurrent
-	}
+	concurrency := min(len(tasks), maxConcurrent)
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
@@ -459,10 +456,7 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 	}
 
 	const maxConcurrent = 16
-	concurrency := len(ready)
-	if concurrency > maxConcurrent {
-		concurrency = maxConcurrent
-	}
+	concurrency := min(len(ready), maxConcurrent)
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 

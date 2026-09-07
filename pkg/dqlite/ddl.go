@@ -89,8 +89,8 @@ func (d *ddl) compile() string {
 func (d *ddl) addConstraint(name string, sql string) {
 	reg := regexp.MustCompile("^CONSTRAINT [\"`]?" + regexp.QuoteMeta(name) + "[\"` ]")
 
-	for i := 0; i < len(d.fields); i++ {
-		if reg.MatchString(d.fields[i]) {
+	for i, field := range d.fields {
+		if reg.MatchString(field) {
 			d.fields[i] = sql
 			return
 		}

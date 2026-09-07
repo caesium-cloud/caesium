@@ -46,7 +46,7 @@ type backfillRunSummary struct {
 func (s *IntegrationTestSuite) createBackfill(jobID string, start, end time.Time, maxConcurrent int, reprocess string) *backfillResponse {
 	s.T().Helper()
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"start":          start,
 		"end":            end,
 		"max_concurrent": maxConcurrent,
@@ -385,7 +385,7 @@ func (s *IntegrationTestSuite) TestBackfillValidationEndBeforeStart() {
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	job := s.requireJobByAlias(alias)
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"start": time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC),
 		"end":   time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), // end before start
 	}
@@ -426,7 +426,7 @@ steps:
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	job := s.requireJobByAlias(alias)
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"start": time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		"end":   time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC),
 	}
@@ -462,7 +462,7 @@ func (s *IntegrationTestSuite) TestBackfillValidationPausedJob() {
 	defer pauseResp.Body.Close()
 	s.Require().Equal(http.StatusOK, pauseResp.StatusCode)
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"start": time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		"end":   time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC),
 	}

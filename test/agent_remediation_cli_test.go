@@ -17,7 +17,7 @@ func (s *IntegrationTestSuite) TestAgentProfileCLIListJSONStdout() {
 	s.Require().NoError(err, "caesium agentprofile list --json failed:\n%s", profileOut)
 	s.Require().True(json.Valid([]byte(profileOut)), "caesium agentprofile list --json stdout was not clean JSON:\n%s", profileOut)
 
-	var profiles []map[string]interface{}
+	var profiles []map[string]any
 	s.Require().NoError(json.Unmarshal([]byte(profileOut), &profiles))
 }
 
@@ -33,10 +33,10 @@ func (s *IntegrationTestSuite) TestIncidentCLIListJSONStdout() {
 	s.Require().True(json.Valid([]byte(incidentOut)), "caesium incident list --json stdout was not clean JSON:\n%s", incidentOut)
 
 	var incidents struct {
-		Incidents []map[string]interface{} `json:"incidents"`
-		Total     int                      `json:"total"`
-		Limit     int                      `json:"limit"`
-		Offset    int                      `json:"offset"`
+		Incidents []map[string]any `json:"incidents"`
+		Total     int              `json:"total"`
+		Limit     int              `json:"limit"`
+		Offset    int              `json:"offset"`
 	}
 	s.Require().NoError(json.Unmarshal([]byte(incidentOut), &incidents))
 	s.Require().NotNil(incidents.Incidents, "incident list JSON must include incidents array")

@@ -71,7 +71,7 @@ func ValidateAgentProfileRefs(ctx context.Context, conn *gorm.DB, defs []schema.
 
 // findMissingNames returns the first name in want that has no matching row
 // (by the name column) in the given model's table, or "" if all resolve.
-func findMissingNames(ctx context.Context, conn *gorm.DB, model interface{}, want map[string]struct{}) (string, error) {
+func findMissingNames(ctx context.Context, conn *gorm.DB, model any, want map[string]struct{}) (string, error) {
 	if len(want) == 0 {
 		return "", nil
 	}

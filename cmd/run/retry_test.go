@@ -136,7 +136,7 @@ func TestRetrySinglePartitionUsesKeyedLookupNotPageScan(t *testing.T) {
 			// as the server does.
 			sawUnkeyedList = true
 			rows := make([]string, 0, 100)
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				rows = append(rows, fmt.Sprintf(`{"value":"p%d","index":%d,"status":"succeeded"}`, i, i))
 			}
 			_, _ = fmt.Fprintf(w, `{"partitions":[%s],"total":200,"limit":100,"offset":0,"next_offset":100}`,

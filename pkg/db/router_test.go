@@ -90,7 +90,7 @@ func TestRouterDistributesRunIDsAcrossShards(t *testing.T) {
 	require.NoError(t, err)
 
 	counts := make([]int, router.ShardCount())
-	for idx := 0; idx < 50; idx++ {
+	for idx := range 50 {
 		runID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("run-%02d", idx)))
 		counts[router.ShardForRunID(runID)]++
 	}

@@ -465,15 +465,15 @@ func (s *VolumesSuite) TestCheckVolumeWritersWarnsOnRawMountTypeVolume() {
 		Steps: parallel(
 			schema.Step{
 				Name: "writer-one",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/data"},
-				}},
+				},
 			},
 			schema.Step{
 				Name: "writer-two",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/other"},
-				}},
+				},
 			},
 		),
 	}
@@ -496,16 +496,16 @@ func (s *VolumesSuite) TestCheckVolumeWritersSilentOnOrderedRawMountWriters() {
 			{
 				Name: "writer-one",
 				Next: []string{"writer-two"},
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/data"},
-				}},
+				},
 			},
 			{
 				Name:      "writer-two",
 				DependsOn: []string{"writer-one"},
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/other"},
-				}},
+				},
 			},
 		},
 	}
@@ -521,15 +521,15 @@ func (s *VolumesSuite) TestCheckVolumeWritersSilentOnRawMountReadOnly() {
 		Steps: parallel(
 			schema.Step{
 				Name: "writer",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/data"},
-				}},
+				},
 			},
 			schema.Step{
 				Name: "reader",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/other", ReadOnly: true},
-				}},
+				},
 			},
 		),
 	}
@@ -545,15 +545,15 @@ func (s *VolumesSuite) TestCheckVolumeWritersIgnoresRawBindAndTmpfsMounts() {
 		Steps: parallel(
 			schema.Step{
 				Name: "step-one",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeBind, Source: "/host/data", Target: "/data"},
-				}},
+				},
 			},
 			schema.Step{
 				Name: "step-two",
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeTmpfs, Source: "/host/data", Target: "/data"},
-				}},
+				},
 			},
 		),
 	}
@@ -676,9 +676,9 @@ func (s *VolumesSuite) TestCheckVolumeWritersSilentOnFannedWriterWithMaxParallel
 				DependsOn:    []string{"discover"},
 				FanOut:       &schema.FanOut{From: "discover", MaxPartitions: 16, MaxParallel: 1},
 				VolumeMounts: []schema.VolumeMount{{Volume: "shared", Path: "/data"}},
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-raw", Target: "/raw"},
-				}},
+				},
 			},
 		},
 	}
@@ -890,9 +890,9 @@ func (s *VolumesSuite) TestCheckVolumeWritersWarnsOnFannedRawMountWriter() {
 				Name:      "process",
 				DependsOn: []string{"discover"},
 				FanOut:    &schema.FanOut{From: "discover", MaxPartitions: 16, MaxParallel: 4},
-				Spec: container.Spec{Mounts: []container.Mount{
+				Mounts: []container.Mount{
 					{Type: container.MountTypeVolume, Source: "shared-vol", Target: "/data"},
-				}},
+				},
 			},
 		},
 	}

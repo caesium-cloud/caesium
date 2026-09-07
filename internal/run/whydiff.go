@@ -488,7 +488,7 @@ func canonicalizeRaw(raw json.RawMessage) []byte {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return raw
 	}

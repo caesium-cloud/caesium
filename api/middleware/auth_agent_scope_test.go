@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,7 +31,7 @@ func TestAgentTokenReachesOwnIncidentAgentRoute(t *testing.T) {
 	incidentID := uuid.New()
 	key := mintAgentKey(t, svc, incidentID, []string{"alpha", "beta"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/agent/incidents/"+incidentID.String()+"/bundle", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/agent/incidents/"+incidentID.String()+"/bundle", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	var aliases []string
@@ -56,7 +57,7 @@ func TestAgentTokenDeniedOnOtherIncident(t *testing.T) {
 	incidentY := uuid.New()
 	key := mintAgentKey(t, svc, incidentX, []string{"alpha"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/agent/incidents/"+incidentY.String()+"/bundle", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/agent/incidents/"+incidentY.String()+"/bundle", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	_, err := callMiddleware(
@@ -80,7 +81,7 @@ func TestAgentTokenDeniedOnActionsOfOtherIncident(t *testing.T) {
 	incidentY := uuid.New()
 	key := mintAgentKey(t, svc, incidentX, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/agent/incidents/"+incidentY.String()+"/actions", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/agent/incidents/"+incidentY.String()+"/actions", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	_, err := callMiddleware(
@@ -116,7 +117,7 @@ func TestAgentTokenDeniedOnNonAgentRoutes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req := httptest.NewRequestWithContext(context.Background(), tc.method, tc.path, nil)
 			req.Header.Set("Authorization", "Bearer "+key)
 			_, err := callMiddleware(
 				t, svc, auditor, limiter, req,
@@ -139,7 +140,7 @@ func TestAgentTokenReachesContextRoute(t *testing.T) {
 	incidentID := uuid.New()
 	key := mintAgentKey(t, svc, incidentID, []string{"alpha"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/agent/incidents/"+incidentID.String()+"/context/history", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/agent/incidents/"+incidentID.String()+"/context/history", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	rec, err := callMiddleware(

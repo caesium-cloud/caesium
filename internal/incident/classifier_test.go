@@ -7,8 +7,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 )
 
-func intp(v int) *int { return &v }
-
 func TestClassifyStructuredSignals(t *testing.T) {
 	c := NewClassifier()
 	cases := []struct {
@@ -67,7 +65,7 @@ func TestClassifyLogFallsBackToErrorText(t *testing.T) {
 
 func TestClassifyExitCodeTable(t *testing.T) {
 	c := NewClassifier()
-	got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: intp(137)})
+	got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: new(137)})
 	if got != ClassOOM {
 		t.Fatalf("expected oom from exit 137, got %q", got)
 	}
@@ -77,7 +75,7 @@ func TestClassifyFallbackUnknown(t *testing.T) {
 	c := NewClassifier()
 	cases := []Signal{
 		{EventType: string(event.TypeTaskFailed)},
-		{EventType: string(event.TypeTaskFailed), Result: string(atom.Failure), ExitCode: intp(1)},
+		{EventType: string(event.TypeTaskFailed), Result: string(atom.Failure), ExitCode: new(1)},
 		{EventType: string(event.TypeRunFailed), LogTail: "some generic stack trace with no known signature"},
 	}
 	for i, sig := range cases {
@@ -102,7 +100,7 @@ func TestClassifyPrecedenceSchemaOverLog(t *testing.T) {
 
 func TestClassifierConfigurableRules(t *testing.T) {
 	c := NewClassifier().WithExitCodeRule(42, ClassDataUnavailable)
-	if got := c.Classify(Signal{Result: string(atom.Failure), ExitCode: intp(42)}); got != ClassDataUnavailable {
+	if got := c.Classify(Signal{Result: string(atom.Failure), ExitCode: new(42)}); got != ClassDataUnavailable {
 		t.Fatalf("custom exit-code rule not applied: got %q", got)
 	}
 	if _, err := c.WithLogRule(`(?i)deadlock detected`, ClassTransientInfra); err != nil {

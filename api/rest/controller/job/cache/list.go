@@ -48,7 +48,7 @@ func List(c *echo.Context) error {
 		items = append(items, resp)
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	return c.JSON(http.StatusOK, map[string]any{
 		"entries": items,
 	})
 }

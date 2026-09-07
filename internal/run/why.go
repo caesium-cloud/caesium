@@ -67,7 +67,7 @@ type WhyTrigger struct {
 	// will appear in the diff under "runParams.<key>".
 	Params map[string]string `json:"params,omitempty"`
 	// FiredAt is the run's start time.
-	FiredAt time.Time `json:"firedAt,omitempty"`
+	FiredAt time.Time `json:"firedAt"`
 }
 
 // WhyBaseline describes which run/entry the subject was diffed against, so the

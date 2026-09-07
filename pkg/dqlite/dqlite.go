@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,7 +81,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		// go-dqlite rejects SQL PRAGMA statements with SQLITE_AUTH; configure
 		// the busy timeout through its native node option instead.
 		supportsSQLPragmas = false
-		logFunc := func(l client.LogLevel, format string, a ...interface{}) {
+		logFunc := func(l client.LogLevel, format string, a ...any) {
 			// log info by default
 			fn := log.Info
 
@@ -135,9 +136,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		})
 	}
 
-	for k, v := range dialector.ClauseBuilders() {
-		db.ClauseBuilders[k] = v
-	}
+	maps.Copy(db.ClauseBuilders, dialector.ClauseBuilders())
 	return
 }
 
@@ -149,7 +148,7 @@ func databaseNameFromDSN(dsn string) string {
 	return name
 }
 
-func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...interface{})) (*dqliteapp.App, error) {
+func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any)) (*dqliteapp.App, error) {
 	if dqApp := currentApp.Load(); dqApp != nil {
 		return dqApp, nil
 	}
@@ -183,8 +182,8 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...int
 	return dqApp, nil
 }
 
-func dqliteLogFields(level client.LogLevel, msg string) []interface{} {
-	fields := []interface{}{"msg", msg, "source", "dqlite"}
+func dqliteLogFields(level client.LogLevel, msg string) []any {
+	fields := []any{"msg", msg, "source", "dqlite"}
 	if level == client.LogWarn && isUnknownDataTypeWarning(msg) {
 		fields = append(fields, "recent_db_statements", dbtrace.Recent(8))
 	}
@@ -344,14 +343,13 @@ func (dialector Dialector) DefaultValueOf(field *schema.Field) clause.Expression
 }
 
 func (dialector Dialector) Migrator(db *gorm.DB) gorm.Migrator {
-	return Migrator{migrator.Migrator{Config: migrator.Config{
+	return Migrator{migrator.Migrator{
 		DB:                          db,
 		Dialector:                   dialector,
-		CreateIndexAfterCreateTable: true,
-	}}}
+		CreateIndexAfterCreateTable: true}}
 }
 
-func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement, v interface{}) {
+func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement, v any) {
 	if err := writer.WriteByte('?'); err != nil {
 		panic(err)
 	}
@@ -385,7 +383,7 @@ func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
 	}
 }
 
-func (dialector Dialector) Explain(sql string, vars ...interface{}) string {
+func (dialector Dialector) Explain(sql string, vars ...any) string {
 	return logger.ExplainSQL(sql, nil, `"`, vars...)
 }
 

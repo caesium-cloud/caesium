@@ -128,7 +128,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// appendOccurrence finds no active row (ErrRecordNotFound); retry, and the
 	// now-free key lets the insert win instead of dropping the failure.
 	const maxOpenAttempts = 3
-	for attempt := 0; attempt < maxOpenAttempts; attempt++ {
+	for range maxOpenAttempts {
 		res := s.db.WithContext(ctx).
 			Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "active_dedupe_key"}},

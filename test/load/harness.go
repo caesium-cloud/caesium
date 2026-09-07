@@ -23,7 +23,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,7 +125,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration, engine string)
 	// Root task.
 	rootName := "task-root"
 	rootNexts := make([]string, 0, fanOut)
-	for w := 0; w < fanOut; w++ {
+	for w := range fanOut {
 		rootNexts = append(rootNexts, fmt.Sprintf("task-l1-w%d", w))
 	}
 	steps = append(steps, stepDef{
@@ -138,7 +138,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration, engine string)
 
 	// Middle layers.
 	for d := 1; d < depth-1; d++ {
-		for w := 0; w < fanOut; w++ {
+		for w := range fanOut {
 			name := fmt.Sprintf("task-l%d-w%d", d, w)
 			nextName := fmt.Sprintf("task-l%d-w%d", d+1, w)
 			var dependsOn []string
@@ -161,7 +161,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration, engine string)
 	// Final fan-in layer: one task per width lane collapsing into join.
 	joinDeps := make([]string, 0, fanOut)
 	lastLayerIdx := depth - 1
-	for w := 0; w < fanOut; w++ {
+	for w := range fanOut {
 		name := fmt.Sprintf("task-l%d-w%d", lastLayerIdx, w)
 		joinDeps = append(joinDeps, name)
 		var dependsOn []string
@@ -210,7 +210,7 @@ func newClient(base, apiKey string) *client {
 	}
 }
 
-func (c *client) do(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
+func (c *client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -318,7 +318,7 @@ func (c *client) fetchMetrics(ctx context.Context) (string, error) {
 // pairs that must all be present in the metric line.
 func parseCounter(text, metricName string, labels map[string]string) float64 {
 	var total float64
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
@@ -552,7 +552,6 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 	sem := make(chan struct{}, h.cfg.concurrency)
 
 	for _, j := range jobs {
-		j := j
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
@@ -755,7 +754,7 @@ func buildReport(
 	}
 
 	// End-to-end latency percentiles.
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	slices.Sort(durations)
 	if len(durations) > 0 {
 		r.endToEndP50 = durations[len(durations)/2]
 		r.endToEndP99 = durations[int(float64(len(durations))*0.99)]

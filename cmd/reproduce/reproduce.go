@@ -540,8 +540,7 @@ func readonlySuffix(arg string, readonly bool) string {
 }
 
 func commandExitCode(err error) int {
-	var exitErr *osexec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*osexec.ExitError](err); ok {
 		return exitErr.ExitCode()
 	}
 	return -1
@@ -673,8 +672,7 @@ func usageError(message string) error {
 
 // ExitCode extracts the process exit code requested by reproduce.
 func ExitCode(err error) (int, bool) {
-	var exitErr *exitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exitError](err); ok {
 		return exitErr.ExitCode(), true
 	}
 	return 0, false

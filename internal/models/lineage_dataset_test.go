@@ -14,7 +14,7 @@ func TestLineageDatasetFields(t *testing.T) {
 	id := uuid.New()
 	now := time.Now().UTC()
 
-	summary := map[string]interface{}{
+	summary := map[string]any{
 		"stepName":   "extract",
 		"outputKeys": []string{"output_path"},
 	}
@@ -53,7 +53,7 @@ func TestLineageDatasetFields(t *testing.T) {
 	}
 
 	// Verify the summary round-trips cleanly.
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal(d.FacetSummary, &parsed); err != nil {
 		t.Fatalf("unmarshal summary: %v", err)
 	}
