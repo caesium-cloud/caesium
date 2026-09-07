@@ -12,7 +12,6 @@
   <a href="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml"><img src="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
   <a href="https://pkg.go.dev/github.com/caesium-cloud/caesium"><img src="https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg" alt="Go Reference"></a>
   <a href="https://goreportcard.com/report/github.com/caesium-cloud/caesium"><img src="https://goreportcard.com/badge/github.com/caesium-cloud/caesium" alt="Go Report Card"></a>
-  <a href="https://codecov.io/gh/caesium-cloud/caesium"><img src="https://codecov.io/gh/caesium-cloud/caesium/branch/develop/graph/badge.svg?token=YXM50NU5GI" alt="Coverage"></a>
   <a href="https://github.com/caesium-cloud/caesium/releases"><img src="https://img.shields.io/github/release/caesium-cloud/caesium.svg" alt="Release"></a>
   <a href="https://hub.docker.com/r/caesiumcloud/caesium/"><img src="https://img.shields.io/docker/pulls/caesiumcloud/caesium?style=plastic" alt="Docker Pulls"></a>
 </p>
@@ -29,6 +28,22 @@ Most orchestrators force a trade-off Caesium refuses:
 - **vs. raw Kubernetes + Kueue + Argo** — they schedule containers but understand nothing about your data. Caesium adds content-addressed caching, typed data contracts between steps, lineage, backfills, and a local-to-prod dev loop on top of *any* container image — no SDK, no language lock-in.
 
 If you've searched for a *lightweight Airflow alternative with no database*, a *self-hosted orchestrator that doesn't need Postgres*, or an *air-gapped pipeline scheduler*, that's the gap Caesium fills. See [`docs/differentiation-strategy.md`](docs/differentiation-strategy.md) for the full positioning.
+
+## Beyond scheduling — what you can ask Caesium
+
+Caesium remembers every run, so you can interrogate it after the fact instead of re-reading logs:
+
+- **`caesium why <run-id> --task <task> --job-id <job-id>`** — the per-task causal explainer: why a task ran, was skipped, or failed. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
+- **`caesium blame <job-id-or-alias>`** — which change (jobdef, image, input) broke a run. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
+- **`caesium run diff <left-run> <right-run> --job-id <job-id>`** — compare two runs of the same job and see exactly what differed. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
+- **`caesium run replay <run-id> --job-id <job-id>`** — a quarantined, side-effect-free re-execution of a completed run for what-if analysis. See [docs/design-quarantined-replay.md](docs/design-quarantined-replay.md).
+- **`caesium reproduce <run-id> --job-id <job-id> --task <task>`** — rebuild one historical task locally on your own Docker daemon from its recorded execution descriptor. See [docs/reproduce.md](docs/reproduce.md).
+- **`caesium receipt get`** / **`caesium verify <receipt-file>`** — fetch and verify a signed, tamper-evident execution receipt for a task. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
+- **`caesium contract check|graph`** — validate and visualize cross-job schema contracts before they break downstream consumers. See [docs/design-contract-enforcement.md](docs/design-contract-enforcement.md).
+- **`caesium dataset status|list|advance`** — track dataset freshness and drive freshness-gated scheduling. See [docs/design-freshness-scheduling.md](docs/design-freshness-scheduling.md).
+- **`caesium backfill`** — replay a range of missed or historical schedule intervals. See [docs/backfill.md](docs/backfill.md).
+- **`caesium incident`** plus the agent runtime and its MCP tools — automated triage and tiered, approval-gated remediation of failed runs. See [docs/design-agent-in-the-loop.md](docs/design-agent-in-the-loop.md).
+- **Infra-deploy reagents** — model Terraform (or dbt, or any unit-pipeline tool) stacks as ordinary dependency-ordered Caesium DAGs, with unchanged stacks skipped and a shared provider cache warmed once. See [docs/infrastructure-deployment.md](docs/infrastructure-deployment.md).
 
 ## Local Developer Experience
 
@@ -66,6 +81,31 @@ caesium dev --once --path jobs/nightly-etl.job.yaml
 
 ## Quick Start
 
+### 0. Install the CLI
+
+**Linux** — download the static binary from the [`v0.1.0` release](https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0) (no shared-library dependencies, so it runs on a bare host):
+
+```bash
+curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/caesium-linux-amd64   # or caesium-linux-arm64
+curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+chmod +x caesium-linux-amd64
+sudo mv caesium-linux-amd64 /usr/local/bin/caesium
+```
+
+Linux only — there is no macOS or Windows binary; the toolchain builds `GOOS=linux` against CGO dqlite.
+
+**macOS, or anywhere Docker is available** — clone the repo and run the CLI inside the release image instead:
+
+```bash
+git clone https://github.com/caesium-cloud/caesium.git
+cd caesium
+just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs the CLI inside caesiumcloud/caesium:v0.1.0
+./.tmp/caesium-cli/caesium job lint --path jobs/
+```
+
+On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`. `just run` (see [Server Workflow](#server-workflow)) remains the from-source path for running the server itself.
+
 ### 1. Write a job definition
 
 ```yaml
@@ -80,13 +120,13 @@ trigger:
     timezone: "UTC"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo extracting"]
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo transforming"]
   - name: load
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo loading"]
 ```
 
