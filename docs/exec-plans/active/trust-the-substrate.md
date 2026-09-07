@@ -1859,7 +1859,7 @@ binary to download (Ledger L14).
       landed) — nothing to change. `just lint` and `just unit-test`
       (incl. `TestPinnedContainerImageVersionsAreConsistent`,
       `TestDocsREADMEIndexesEveryTopLevelDoc`) pass.
-- [ ] N-2. Onboarding. New `docs/getting-started.md`: install (step 0 from
+- [x] N-2. Onboarding. New `docs/getting-started.md`: install (step 0 from
       N-1, by digest per E4) → `caesium start` in a container / `just run`
       → first job (`docs/examples/*.job.yaml`, pinned `alpine:3.23`) with
       `caesium dev --once` → `caesium job apply` → trigger a run →
@@ -1872,6 +1872,28 @@ binary to download (Ledger L14).
       subdirectory references in backtick form
       (`TestDocsREADMEIndexesEveryTopLevelDoc`). Files: new
       `docs/getting-started.md`, `docs/README.md`. Depends on: D2 + N-1.
+      **Done:** `docs/getting-started.md` walks install (README step 0,
+      byte-identical) → run the server (`docker run … caesiumcloud/caesium:v0.1.0
+      start`, docker.sock + volume mounted, matching `build/Dockerfile`'s
+      release-stage `ENTRYPOINT` and `pkg/env/env.go`'s `CAESIUM_DATABASE_PATH`
+      default; `just run` given as the from-source alternative) → first job
+      (`docs/examples/minimal.job.yaml`'s three-step `alpine:3.23` DAG, shown
+      inline) with `caesium dev --once --path` → `caesium job apply --path …
+      --server` → trigger a run with the real verb `caesium run start --job-id
+      <job-id>` (job-id looked up via `curl .../v1/jobs | jq`, since `job apply`
+      doesn't print it) → `caesium why <run-id> --task extract --job-id <job-id>`
+      and `caesium receipt get --job-id <job-id> --run-id <run-id>`, both with
+      real flag names verified against `cmd/run/start.go`, `cmd/why/why.go`,
+      `cmd/receipt/get.go`. The digest line uses the placeholder
+      `caesiumcloud/caesium@sha256:<filled in by the v0.1.0 release — see
+      docs/ci.md § v0.1.0 image digests>` for E4 to fill in.
+      `docs/README.md` is split into **Use Caesium** (Get Started →
+      getting-started.md; Operator Reference — the former "Current Source of
+      Truth" list including `ci.md`; Load Testing) and **Design records**
+      (Strategy & Roadmap, Active Design Records, Active Exec Plans — the
+      `trust-the-substrate.md` bullet text unchanged, Archive); every
+      top-level `docs/*.md` (including the new `getting-started.md`) is
+      indexed exactly once and subdirectory references stay in backtick form.
 - [x] N-3. File the unfiled follow-ups as GitHub issues. The item produces
       the `gh issue create` commands (title, body with the citing plan and
       symbol, labels) in a scratch file the user runs; the PR records the

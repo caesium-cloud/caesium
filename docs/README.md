@@ -1,8 +1,20 @@
 # Caesium Documentation
 
-This directory separates current-source operator documentation from forward-looking design records. Completed, shipped, superseded, and historical records have been moved out of the active set into [`archive/`](archive/README.md).
+This directory separates how to use Caesium today from the design records
+that explain why it's built the way it is. Completed, shipped, superseded,
+and historical records have been moved out of the active set into
+[`archive/`](archive/README.md).
 
-## Current Source of Truth
+## Use Caesium
+
+Operator documentation, tours, and references for running Caesium and
+authoring pipelines against a real server.
+
+### Get Started
+
+- [getting-started.md](getting-started.md): Install the CLI, run the server, write and validate a job, apply it, trigger a run, and interrogate it with `why` and a reproducibility receipt.
+
+### Operator Reference
 
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, schema tooling, Git sync, and operational controls for job manifests.
 - [caesium-job-llm-reference.md](caesium-job-llm-reference.md): LLM authoring guide plus executable harness scenario format, including metrics and OpenLineage assertions.
@@ -19,13 +31,22 @@ This directory separates current-source operator documentation from forward-look
 - [infrastructure-deployment.md](infrastructure-deployment.md): Dependency-ordered Terraform (and other unit-pipeline binding) deployment via `cache.chain: values` and the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images.
 - [examples/](examples/): Example job manifests used by docs and conformance tests.
 
-## Strategy & Roadmap
+### Load Testing
+
+- [load-testing-history.md](load-testing-history.md): Consolidated Phase 0 → Phase 2B distributed-execution load-test history (replaces the former per-run `load-baseline-*` series).
+
+## Design records
+
+Positioning, in-flight designs, and the exec plans that implement them —
+where Caesium is going and why, not how to run it today.
+
+### Strategy & Roadmap
 
 - [differentiation-strategy.md](differentiation-strategy.md): Positioning thesis — the sovereignty-led funnel, why Caesium wins by constraint not comparison, and the kill-conditions that test it.
 - [sovereignty.md](sovereignty.md): Sovereignty proof-points — free vs. paywalled feature comparison (HA, RBAC, SSO, audit, lineage vs. Dagster+/Kestra Enterprise/Prefect Cloud) and a zero-dependency / air-gapped quickstart.
 - [roadmap.md](roadmap.md): Strategic vision, design principles, and the prioritized feature plan; Phase 5 is sequenced by the closed-loop arc listed under Active Exec Plans.
 
-## Active Design Records
+### Active Design Records
 
 Forward-looking or partially-shipped designs with open work. Each carries a `> Status:` banner near the top; CI enforces banners on the planning/historical records it tracks.
 
@@ -47,7 +68,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 - [design-dynamic-fanout.md](design-dynamic-fanout.md): Dynamic fan-out — runtime partition markers materialize data-proportional parallel task instances with per-partition caching (shipped; exec plan `exec-plans/completed/dynamic-fanout.md`).
 - [design-window-scheduling.md](design-window-scheduling.md): Deadline-window scheduling — run within a declared window, choosing the start via load/cost/carbon signals with a deadline-safe latest start (active — Plan 4 of the closed-loop arc; exec plan `exec-plans/active/window-scheduling.md`).
 
-## Active Exec Plans
+### Active Exec Plans
 
 Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans that have a design record are linked from that record above; plans whose design of record is a superpowers spec are listed here. All of the current plans belong to the closed-loop arc and run in the order below; the arc doc is the umbrella (not itself a wave target) and wins on cross-plan ordering, while each child plan (and its design record above) wins on how a stream is built.
 
@@ -60,10 +81,6 @@ Live execution plans with unchecked work, orchestrated wave-by-wave via the `exe
 
 Recently completed: `exec-plans/completed/infra-deploy.md` — DAG-native infrastructure deployment — `cache.chain: values` + `ttl: never` (the one core change), the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images implementing the generic unit-pipeline pattern with Terraform as the first binding, a multi-writer volume lint warning, reference manifests + mandatory drift job, and a Console proposal panel (drafted 2026-08-26; spec `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`).
 
-## Load Testing
-
-- [load-testing-history.md](load-testing-history.md): Consolidated Phase 0 → Phase 2B distributed-execution load-test history (replaces the former per-run `load-baseline-*` series).
-
-## Archive
+### Archive
 
 Completed, shipped, or historical records that are no longer the active source of truth live under [`archive/`](archive/README.md): shipped design docs (ARM64 build support, Helm/Kubernetes deployment, internal mTLS auto-provisioning, parallel job execution), completed plans (job-definition reconciliation, UI implementation), the original feature brainstorm, and early architecture history.
