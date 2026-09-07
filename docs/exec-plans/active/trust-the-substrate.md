@@ -1639,7 +1639,7 @@ binary to download (Ledger L14).
       subdirectory references in backtick form
       (`TestDocsREADMEIndexesEveryTopLevelDoc`). Files: new
       `docs/getting-started.md`, `docs/README.md`. Depends on: D2 + N-1.
-- [ ] N-3. File the unfiled follow-ups as GitHub issues. The item produces
+- [x] N-3. File the unfiled follow-ups as GitHub issues. The item produces
       the `gh issue create` commands (title, body with the citing plan and
       symbol, labels) in a scratch file the user runs; the PR records the
       resulting issue numbers in this item. Group as: **scheduler** —
@@ -1666,6 +1666,23 @@ binary to download (Ledger L14).
       RWX kind lane + podman lane coverage. Also file anything D1 quarantined
       and, from this plan's own recon, the darwin CLI binary (E1) if wanted.
       Files: this doc (issue numbers), scratch `gh` script (not committed).
+      **Done (W1 close, 2026-09-07) — filed as #395–#419**, each body citing
+      the deferring plan/doc and grep-verified symbols. Scheduler: #395
+      fairness/quotas, #396 queue-view/claim-order/cancelRunTx, #397 `park`
+      disposition, #398 local quarantined replay, #399 selective `replay
+      --set` re-run, #400 owner dispatch loop spins on a completed producer
+      (W1), #401 `halt` policy vs tolerant-rule successors (W1, A2), #402
+      dropped `run_cancelled` reconciliation (W1). Data plane: #403
+      partition-level freshness, #404 blame determinism/coverage/attribution,
+      #405 registry auth + Podman/k8s digest resolution (Plan 3 C1 depends on
+      it), #406 reproduce OQ #1/#4/#5, #407 manifest export endpoint, #408
+      `CallbackRun` enrichment. UI: #409 event-trigger UI plan, #410 lineage
+      follow-ups, #411 React Flow watermark. Platform: #412 node-affinity for
+      RWO volumes, #413 notification audit log, #414 dpm-ii H-4 CI tier, #415
+      infra-deploy RWX/podman lanes, #416 `perClass` narrowing unenforced
+      (W1), #417 second pending approval unlistable (W1), #418 darwin CLI,
+      #419 `TypeIncidentOpened` has no publisher (W1). B3 was fixed, not
+      filed; D1's quarantines are filed by D1 when it runs.
 - [ ] N-4. Close out (runs last). This item carries **all** of Plan 0's
       convention-7 close-out obligations (see the Source-Of-Truth Note's
       deviation list — N-1 here is the README rewrite, not the docs item).

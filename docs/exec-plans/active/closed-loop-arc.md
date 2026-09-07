@@ -342,7 +342,7 @@ Explicit decisions so they don't rot as prose inside archived plans:
   `design-task-templates.md` — DX breadth, outside the arc's thesis and the
   strategy doc's "do not build connector/plugin breadth" line; roadmap §2.2
   keeps the intent.
-- **To be filed as issues by Plan 0 N-3:** the ~20 deferred items recon found
+- **Filed as issues by Plan 0 N-3 (2026-09-07, #395–#419):** the ~20 deferred items recon found
   unfiled across completed plans — event-trigger UI follow-on, node-affinity
   for RWO volumes in distributed mode, local-executor quarantined replay,
   freshness consumed-snapshot timing, blame tiebreak determinism, registry-auth
