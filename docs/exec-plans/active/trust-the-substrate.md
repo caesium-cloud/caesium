@@ -1575,7 +1575,7 @@ binary to download (Ledger L14).
       The floor lives in the new `agent_integration_min_pass` justfile variable
       (`CAESIUM_AGENT_INTEGRATION_MIN_PASS`, default `3`) so H-2 can reuse the
       shape per lane; verified failing at `99` and passing at `3`.
-- [ ] H-2. Give every lane an explicit time budget and the hollow-lane guard.
+- [x] H-2. Give every lane an explicit time budget and the hollow-lane guard.
       *W1 orchestrator fix-forward: the time-budget half landed early (every
       integration `go test` line now passes `-timeout 30m` — default, agent,
       podman recipes and CI's kind/podman jobs) because the default lane had
@@ -1597,6 +1597,36 @@ binary to download (Ledger L14).
       `integration-test-infra`), `.github/workflows/ci.yml`
       (`helm-integration-test`, `podman-integration-test`,
       `build-and-integration-test*` `timeout-minutes`).
+      **Done (floor half, W2):** added the same H-1(d) shape
+      (`-v`, tee to a log, `grep -cE '^[[:space:]]*--- PASS:
+      TestIntegrationTestSuite/'`, fail-below-floor with server-log dump,
+      print-count-on-success) to the three remaining lanes that filter with
+      `-run`. Observed count on a green run / chosen floor (roughly half,
+      minimum 3) / env var: `integration-test-distributed` **41** scenarios
+      (incl. nested subtests) / floor **20** / `CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS`;
+      `integration-test-owner-memory` **28** / floor **14** /
+      `CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS`; `integration-test-infra`
+      floor **6** (half of the 12 `TestInfra*` scenarios the `-run` pattern
+      matches) / `CAESIUM_INFRA_INTEGRATION_MIN_PASS` — chosen as a static
+      estimate because the local infra lane run hit Docker Desktop's VM
+      running out of disk (`no space left on device` building the Terraform
+      layer and git-cloning fixtures) before any real signal; per the item's
+      own escape hatch this relied on CI, which confirmed all **12/12**
+      `TestInfra*` scenarios PASS on both `build-and-integration-test-infra`
+      and `-infra-arm64` for this PR. Both `-distributed` and `-owner-memory`
+      were confirmed red at `..._MIN_PASS=99` against the saved green-run
+      log (41 and 28 are both < 99), and CI reproduced the same 41/28 counts
+      on both arches; `-owner-memory` also hit the pre-existing
+      `TestFanOutHTTPRetryPartition` flake once (D1(a), sibling W2-α) with
+      every other scenario green, distinct from a hollow-lane failure.
+      `integration-test-agent` already had its floor from H-1. The
+      helm and podman CI jobs run an unfiltered `go test ./test/
+      -tags=integration` (no `-run`), so per the item's own carve-out they
+      get no floor — only the four `-run`-filtered lanes do. `timeout-minutes`
+      on `build-and-integration-test-distributed`/`-owner-memory` (45m vs.
+      `-timeout 30m`) and `-infra`/`-infra-arm64` (60m vs. `-timeout 20m`,
+      generous because `build-reagents` runs first) were already consistent
+      from the W1 fix-forward; nothing needed raising.
 
 ## Navigational / Organizational Improvements
 

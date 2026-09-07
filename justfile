@@ -52,8 +52,15 @@ agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTe
 # runner container never received; the recipe now counts `--- PASS` lines and
 # fails below this floor so a hollow lane can never be green again.
 agent_integration_min_pass := env("CAESIUM_AGENT_INTEGRATION_MIN_PASS", "3")
+# Same hollow-lane floor shape as agent_integration_min_pass (H-1), applied to
+# every other lane that filters with -run: a `-run` typo or a scenario that
+# starts skipping en masse must fail the recipe, not exit 0 having run
+# nothing. Chosen as roughly half the observed green-run PASS count.
+distributed_integration_min_pass := env("CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS", "20")
+owner_memory_integration_min_pass := env("CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS", "14")
 # Suite-qualified: a bare method name matches no test at all.
 infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
+infra_integration_min_pass := env("CAESIUM_INFRA_INTEGRATION_MIN_PASS", "6")
 # A deliberately fake deploy key. The infra lane resolves it through the real
 # secret://env provider and then asserts the value never reaches a task log —
 # it is a canary, not a credential, and it opens nothing.
@@ -276,7 +283,9 @@ integration-test-distributed:
     {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
-    if {{ container_cli }} run --rm --platform {{ platform }} \
+    log={{ repo_dir }}/.tmp/integration-test-distributed.log; \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
@@ -286,14 +295,24 @@ integration-test-distributed:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m'; then \
-      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
-    else \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
+    passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
+    passes=${passes:-0}; \
+    if [ "$rc" -ne 0 ]; then \
       echo "distributed integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ it_container }} || true; \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
-    fi
+    fi; \
+    if [ "$passes" -lt {{ distributed_integration_min_pass }} ]; then \
+      echo "distributed integration lane executed only $passes scenario(s), expected at least {{ distributed_integration_min_pass }}: the lane is hollow (guards skipped almost everything)"; \
+      {{ container_cli }} logs {{ it_container }} || true; \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
+    echo "distributed integration lane executed $passes scenario(s) (minimum {{ distributed_integration_min_pass }})"; \
+    {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
 
 integration-test-owner-memory:
     just tag={{ tag }} integration-up-owner-memory
@@ -305,7 +324,9 @@ integration-test-owner-memory:
     {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
-    if {{ container_cli }} run --rm --platform {{ platform }} \
+    log={{ repo_dir }}/.tmp/integration-test-owner-memory.log; \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
@@ -316,14 +337,24 @@ integration-test-owner-memory:
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m'; then \
-      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
-    else \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
+    passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
+    passes=${passes:-0}; \
+    if [ "$rc" -ne 0 ]; then \
       echo "owner-memory integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ it_container }} || true; \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
-    fi
+    fi; \
+    if [ "$passes" -lt {{ owner_memory_integration_min_pass }} ]; then \
+      echo "owner-memory integration lane executed only $passes scenario(s), expected at least {{ owner_memory_integration_min_pass }}: the lane is hollow (guards skipped almost everything)"; \
+      {{ container_cli }} logs {{ it_container }} || true; \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
+    echo "owner-memory integration lane executed $passes scenario(s) (minimum {{ owner_memory_integration_min_pass }})"; \
+    {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
 
 # The runner container is given the same CAESIUM_AUTH_MODE /
 # CAESIUM_AGENT_REMEDIATION_ENABLED / CAESIUM_AUTH_KEY_HASH_SECRET that
@@ -630,7 +661,9 @@ integration-test-infra:
     {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
     chmod +x "$cli_dir/caesium"; \
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
-    if {{ container_cli }} run --rm --platform {{ platform }} \
+    log={{ repo_dir }}/.tmp/integration-test-infra.log; \
+    rm -f "$log" "$log.rc"; \
+    { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-infra/caesium \
@@ -644,14 +677,24 @@ integration-test-infra:
         --network=container:{{ infra_it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v'; then \
-      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
-    else \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+    rc=$(cat "$log.rc"); \
+    passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
+    passes=${passes:-0}; \
+    if [ "$rc" -ne 0 ]; then \
       echo "infra integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ infra_it_container }} || true; \
       {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
-    fi
+    fi; \
+    if [ "$passes" -lt {{ infra_integration_min_pass }} ]; then \
+      echo "infra integration lane executed only $passes scenario(s), expected at least {{ infra_integration_min_pass }}: the lane is hollow (guards skipped almost everything)"; \
+      {{ container_cli }} logs {{ infra_it_container }} || true; \
+      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
+    echo "infra integration lane executed $passes scenario(s) (minimum {{ infra_integration_min_pass }})"; \
+    {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
 
 integration-up-agent: build-test build-triage-agent
     {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
