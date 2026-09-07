@@ -296,10 +296,7 @@ func normalizePagination(rawLimit, rawOffset int) (int, int) {
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	offset := rawOffset
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(rawOffset, 0)
 	return limit, offset
 }
 
@@ -438,10 +435,7 @@ func paginateStates(rows []models.DatasetState, limit, offset int) []models.Data
 	if offset >= len(rows) {
 		return []models.DatasetState{}
 	}
-	end := offset + limit
-	if end > len(rows) {
-		end = len(rows)
-	}
+	end := min(offset+limit, len(rows))
 	return rows[offset:end]
 }
 

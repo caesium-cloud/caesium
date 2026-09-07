@@ -91,7 +91,7 @@ func (ls *LeaseStore) AcquireExpiredLeases(ctx context.Context, newOwner string,
 	result := ls.db.WithContext(ctx).
 		Model(&models.RunLease{}).
 		Where("lease_expires_at <= ? AND owner_node <> ?", now, newOwner).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"owner_node":       newOwner,
 			"acquired_at":      now,
 			"lease_expires_at": now.Add(ttl),

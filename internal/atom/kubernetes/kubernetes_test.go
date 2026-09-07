@@ -34,9 +34,7 @@ func (m *mockKubernetesBackend) Create(ctx context.Context, pod *v1.Pod, opts me
 		return nil, args.Error(0)
 	}
 	return &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: pod.Name,
-		},
+		Name: pod.Name,
 	}, nil
 }
 
@@ -57,9 +55,7 @@ func (m *mockKubernetesBackend) Get(ctx context.Context, name string, opts metav
 		return nil, args.Error(0)
 	}
 	return &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		Name: name,
 	}, nil
 }
 
@@ -68,9 +64,7 @@ func (m *mockKubernetesBackend) List(ctx context.Context, opts metav1.ListOption
 	return &v1.PodList{
 		Items: []v1.Pod{
 			{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test_atom",
-				},
+				Name: "test_atom",
 			},
 		},
 	}, nil
@@ -107,14 +101,12 @@ var (
 func newPod(name string, status v1.PodStatus, createdAt, deletedAt time.Time) *v1.Pod {
 	return &v1.Pod{
 		Status: status,
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			CreationTimestamp: metav1.Time{
-				Time: createdAt,
-			},
-			DeletionTimestamp: &metav1.Time{
-				Time: deletedAt,
-			},
+		Name:   name,
+		CreationTimestamp: metav1.Time{
+			Time: createdAt,
+		},
+		DeletionTimestamp: &metav1.Time{
+			Time: deletedAt,
 		},
 	}
 }

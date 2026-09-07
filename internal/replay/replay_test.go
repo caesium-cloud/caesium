@@ -69,7 +69,7 @@ func newReplayFixture(t *testing.T) replayFixture {
 		Status:       string(run.StatusSucceeded),
 		Params:       mustJSON(t, map[string]string{"mode": "baseline"}),
 		StartedAt:    now,
-		CompletedAt:  ptr(now.Add(time.Second)),
+		CompletedAt:  new(now.Add(time.Second)),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}).Error)
@@ -722,8 +722,8 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		CacheVersion:            1,
 		ReplaySafe:              cfg.replaySafe,
 		ExecutionDescriptor:     encodedDescriptor,
-		StartedAt:               ptr(f.now),
-		CompletedAt:             ptr(f.now.Add(time.Second)),
+		StartedAt:               new(f.now),
+		CompletedAt:             new(f.now.Add(time.Second)),
 		CreatedAt:               f.now.Add(time.Duration(cfg.position) * time.Millisecond),
 		UpdatedAt:               f.now,
 	}
@@ -826,8 +826,4 @@ func mustJSONString(t *testing.T, v any) string {
 	data, err := json.Marshal(v)
 	require.NoError(t, err)
 	return string(data)
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }

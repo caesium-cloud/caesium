@@ -257,7 +257,7 @@ func recordCredentialFailure(c *echo.Context, d AuthDeps, ip, actor, reason stri
 		Action:   auth.ActionAuthDenied,
 		SourceIP: ip,
 		Outcome:  auth.OutcomeDenied,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"reason": reason,
 			"method": c.Request().Method,
 			"path":   c.Request().URL.Path,
@@ -296,7 +296,7 @@ func denyAccessWithMessage(
 ) error {
 	metrics.AuthRequestsTotal.WithLabelValues("denied", string(keyRole), c.Request().Method, routePath).Inc()
 
-	metadata := map[string]interface{}{
+	metadata := map[string]any{
 		"reason":     reason,
 		"method":     c.Request().Method,
 		"path":       routePath,
@@ -318,7 +318,7 @@ func denyAccessWithMessage(
 }
 
 func forbiddenMessage(err *echo.HTTPError) string {
-	// echo/v5 HTTPError.Message is a concrete string (not interface{} as in v4),
+	// echo/v5 HTTPError.Message is a concrete string (not any as in v4),
 	// so read it directly rather than type-asserting.
 	if err != nil && err.Message != "" {
 		return err.Message
@@ -347,7 +347,7 @@ func logSuccessfulAction(
 		Action:   action,
 		SourceIP: c.RealIP(),
 		Outcome:  auth.OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"method": c.Request().Method,
 			"path":   routePath,
 		},

@@ -78,7 +78,7 @@ func TestMigrateTaskRunUniquePartitionIndexIsIdempotent(t *testing.T) {
 	require.True(t, found)
 	require.True(t, indexIsUniqueOverPartitionIndex(before), "a fresh AutoMigrate already produces the new shape")
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, MigrateTaskRunUniquePartitionIndex(conn))
 		require.NoError(t, conn.AutoMigrate(&models.TaskRun{}))
 	}

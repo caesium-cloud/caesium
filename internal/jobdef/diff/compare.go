@@ -1,6 +1,8 @@
 package diff
 
 import (
+	"maps"
+
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
@@ -31,9 +33,7 @@ func Compare(desired, actual map[string]JobSpec) Diff {
 	}
 
 	remaining := make(map[string]JobSpec, len(actual))
-	for k, v := range actual {
-		remaining[k] = v
-	}
+	maps.Copy(remaining, actual)
 
 	for alias, spec := range desired {
 		if _, ok := remaining[alias]; !ok {

@@ -500,7 +500,7 @@ func TestLDAPLoginCompletesSSOAndSetsSessionCookie(t *testing.T) {
 
 	e := echo.New()
 	e.IPExtractor = echo.ExtractIPFromXFFHeader(echo.TrustIPRange(trustedProxy))
-	req := httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":" viewer ","password":"secret"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":" viewer ","password":"secret"}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	req.Header.Set("User-Agent", "ldap-test-agent")
 	req.Header.Set("X-Forwarded-For", "203.0.113.55")
@@ -827,7 +827,7 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	ctrl := NewSSO(sessions, nil, "caesium_session")
 	ctrl.SetAuditLogger(auditor)
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
@@ -883,7 +883,7 @@ func TestLogoutWithoutValidSessionOnlyClearsCookie(t *testing.T) {
 			ctrl := NewSSO(sessions, nil, "caesium_session")
 			ctrl.SetAuditLogger(auditor)
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 			if tt.token != "" {
 				req.AddCookie(&http.Cookie{Name: "caesium_session", Value: tt.token})
 			}
@@ -932,7 +932,7 @@ func TestLogoutReturnsErrorWhenSessionRevokeFails(t *testing.T) {
 
 	ctrl := NewSSO(sessions, nil, "caesium_session")
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
@@ -952,7 +952,7 @@ func TestLogoutClearsSecureCookieBehindHTTPSProxy(t *testing.T) {
 	require.NoError(t, err)
 	ctrl := NewSSO(nil, nil, "caesium_session", trustedProxy)
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
@@ -970,7 +970,7 @@ func TestLogoutIgnoresForwardedProtoFromUntrustedPeer(t *testing.T) {
 	require.NoError(t, err)
 	ctrl := NewSSO(nil, nil, "caesium_session", trustedProxy)
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", nil)
 	req.RemoteAddr = "203.0.113.12:12345"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()

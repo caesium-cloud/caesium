@@ -9,12 +9,12 @@ import (
 
 func TestPoolWaitsForSubmittedTasks(t *testing.T) {
 	pool := NewPool(2)
-	var completed int32
+	var completed atomic.Int32
 
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		if err := pool.Submit(context.Background(), func() {
 			time.Sleep(10 * time.Millisecond)
-			atomic.AddInt32(&completed, 1)
+			completed.Add(1)
 		}); err != nil {
 			t.Fatalf("submit failed: %v", err)
 		}
@@ -22,7 +22,7 @@ func TestPoolWaitsForSubmittedTasks(t *testing.T) {
 
 	pool.Wait()
 
-	if got := atomic.LoadInt32(&completed); got != 6 {
+	if got := completed.Load(); got != 6 {
 		t.Fatalf("expected 6 completed tasks, got %d", got)
 	}
 }

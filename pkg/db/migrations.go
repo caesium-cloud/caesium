@@ -75,16 +75,16 @@ func taskRunIndexDefinition(conn *gorm.DB) (string, bool, error) {
 	var (
 		definition string
 		query      string
-		args       []interface{}
+		args       []any
 	)
 	switch strings.ToLower(conn.Name()) {
 	case "postgres":
 		query = "SELECT COALESCE(indexdef, '') FROM pg_indexes WHERE tablename = 'task_runs' AND indexname = ?"
-		args = []interface{}{taskRunJobRunTaskIndexName}
+		args = []any{taskRunJobRunTaskIndexName}
 	default:
 		// dqlite, sqlite, sqlite3 — all sqlite_master-shaped.
 		query = "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'index' AND name = ?"
-		args = []interface{}{taskRunJobRunTaskIndexName}
+		args = []any{taskRunJobRunTaskIndexName}
 	}
 
 	rows, err := conn.Raw(query, args...).Rows()

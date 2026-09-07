@@ -1,12 +1,12 @@
 # -------- Stage 1: Compile dqlite (pinned, rarely changes) --------
-FROM golang:1.25.6-alpine3.23 AS dqlite
+FROM golang:1.27.1-alpine3.23 AS dqlite
 RUN apk add --no-cache \
     autoconf automake libtool \
     libuv-dev lz4-dev \
     make gcc g++ musl-dev linux-headers \
     sqlite-dev git \
     sqlite-static libuv-static lz4-static
-ARG DQLITE_REF=v1.18.5
+ARG DQLITE_REF=v1.18.7
 WORKDIR /bld
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
@@ -22,7 +22,7 @@ RUN autoreconf -i && \
     make -j$(nproc) install
 
 # -------- Stage 2: Lean builder for compiling the release binary --------
-FROM golang:1.25.6-alpine3.23 AS builder
+FROM golang:1.27.1-alpine3.23 AS builder
 RUN apk add --no-cache \
     ca-certificates git dumb-init \
     libuv-dev lz4-dev \
@@ -49,4 +49,4 @@ FROM builder AS builder-full
 COPY ui/package.json ui/package-lock.json ./ui/
 RUN npm ci --prefix ./ui && rm -rf ./ui/node_modules
 RUN apk add --no-cache curl && \
-    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
+    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.13.2

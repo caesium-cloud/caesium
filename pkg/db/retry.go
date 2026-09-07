@@ -127,7 +127,7 @@ func (p *retryConnPool) PrepareContext(ctx context.Context, query string) (*sql.
 	return p.pool.PrepareContext(ctx, query)
 }
 
-func (p *retryConnPool) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+func (p *retryConnPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var (
 		res sql.Result
 		err error
@@ -139,7 +139,7 @@ func (p *retryConnPool) ExecContext(ctx context.Context, query string, args ...i
 	return res, err
 }
 
-func (p *retryConnPool) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+func (p *retryConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	var (
 		rows *sql.Rows
 		err  error
@@ -151,7 +151,7 @@ func (p *retryConnPool) QueryContext(ctx context.Context, query string, args ...
 	return rows, err
 }
 
-func (p *retryConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+func (p *retryConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	// database/sql defers all errors from QueryRowContext to (*sql.Row).Scan,
 	// and *sql.Row has no exported constructor, so the decorator cannot inspect
 	// the result or re-run across the caller's Scan boundary. We therefore
@@ -302,15 +302,15 @@ func newRWSplitConnPool(writePool, readPool gorm.ConnPool) *rwSplitConnPool {
 	}
 }
 
-func (p *rwSplitConnPool) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+func (p *rwSplitConnPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return p.write.ExecContext(ctx, query, args...)
 }
 
-func (p *rwSplitConnPool) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+func (p *rwSplitConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	return p.read.QueryContext(ctx, query, args...)
 }
 
-func (p *rwSplitConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+func (p *rwSplitConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return p.read.QueryRowContext(ctx, query, args...)
 }
 

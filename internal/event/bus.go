@@ -3,6 +3,7 @@ package event
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 	"time"
 
@@ -182,13 +183,7 @@ func (b *bus) matches(filter Filter, e Event) bool {
 		return false
 	}
 	if len(filter.Types) > 0 {
-		found := false
-		for _, t := range filter.Types {
-			if t == e.Type {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(filter.Types, e.Type)
 		if !found {
 			return false
 		}

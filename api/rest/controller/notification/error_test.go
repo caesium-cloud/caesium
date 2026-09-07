@@ -72,7 +72,7 @@ func TestMaskString(t *testing.T) {
 func TestRedactChannel_SensitiveKeys(t *testing.T) {
 	// Verify that sensitive keys are masked in the response.
 	ch := channelView{
-		Config: map[string]interface{}{
+		Config: map[string]any{
 			"url":         "https://example.com/hook",
 			"password":    "supersecret123",
 			"routing_key": "R012345678901234",

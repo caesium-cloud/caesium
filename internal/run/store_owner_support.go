@@ -49,7 +49,7 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			// One predicate shared by the Find and the Updates so the two can
 			// never drift apart and reset a row the caller was never told about.
 			where := "job_run_id = ? AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND owner_generation <= ?"
-			args := []interface{}{runID, string(TaskStatusRunning), now, ownerGeneration}
+			args := []any{runID, string(TaskStatusRunning), now, ownerGeneration}
 
 			var expired []models.TaskRun
 			if err := tx.Where(where, args...).Find(&expired).Error; err != nil {
@@ -60,7 +60,7 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			}
 			res := tx.Model(&models.TaskRun{}).
 				Where(where, args...).
-				Updates(map[string]interface{}{
+				Updates(map[string]any{
 					"status":           string(TaskStatusPending),
 					"claimed_by":       "",
 					"claim_expires_at": nil,

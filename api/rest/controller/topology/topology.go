@@ -41,7 +41,7 @@ func Get(c *echo.Context) error {
 	}
 
 	svc := topsvc.Service(ctx)
-	var snap interface{}
+	var snap any
 
 	switch {
 	case c.QueryParam("snapshot") != "":
@@ -84,7 +84,7 @@ func History(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	return c.JSON(http.StatusOK, map[string]any{
 		"snapshots": snaps,
 	})
 }

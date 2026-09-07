@@ -49,7 +49,7 @@ func parseHeaders(raw string) map[string]string {
 	if raw == "" {
 		return headers
 	}
-	for _, pair := range strings.Split(raw, ",") {
+	for pair := range strings.SplitSeq(raw, ",") {
 		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(parts) == 2 {
 			headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])

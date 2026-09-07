@@ -120,7 +120,7 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		ResourceID:   sess.ID.String(),
 		SourceIP:     ip,
 		Outcome:      OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": method,
 			"role":     string(user.Role),
 		},
@@ -139,7 +139,7 @@ func (s *SSOService) auditUserProvisioned(ext *ExternalIdentity, method, ip stri
 		ResourceID:   user.ID.String(),
 		SourceIP:     ip,
 		Outcome:      OutcomeSuccess,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": method,
 			"issuer":   ext.Issuer,
 			"role":     string(user.Role),
@@ -153,7 +153,7 @@ func (s *SSOService) auditLoginDenied(ext *ExternalIdentity, method, ip, reason 
 		Action:   ActionAuthLoginDenied,
 		SourceIP: ip,
 		Outcome:  OutcomeDenied,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": method,
 			"reason":   reason,
 		},
@@ -166,7 +166,7 @@ func (s *SSOService) auditLoginError(ext *ExternalIdentity, method, ip, reason s
 		Action:   ActionAuthLogin,
 		SourceIP: ip,
 		Outcome:  OutcomeError,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]any{
 			"provider": method,
 			"reason":   reason,
 		},

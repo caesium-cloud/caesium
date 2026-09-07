@@ -43,7 +43,7 @@ func TestScheduledRunParamsOverridesUserLogicalDate(t *testing.T) {
 }
 
 func TestExtractExpressionPrefersExpression(t *testing.T) {
-	cfg := map[string]interface{}{
+	cfg := map[string]any{
 		"expression": "0 0 * * *",
 		"cron":       "ignored",
 	}
@@ -59,7 +59,7 @@ func TestExtractExpressionPrefersExpression(t *testing.T) {
 }
 
 func TestExtractExpressionFallsBack(t *testing.T) {
-	cfg := map[string]interface{}{
+	cfg := map[string]any{
 		"cron": "*/5 * * * *",
 	}
 
@@ -74,13 +74,13 @@ func TestExtractExpressionFallsBack(t *testing.T) {
 }
 
 func TestExtractExpressionError(t *testing.T) {
-	if _, err := extractExpression(map[string]interface{}{}); err == nil {
+	if _, err := extractExpression(map[string]any{}); err == nil {
 		t.Fatal("expected error when expression is missing")
 	}
 }
 
 func TestExtractLocationParsesTimezone(t *testing.T) {
-	loc, err := extractLocation(map[string]interface{}{"timezone": "UTC"})
+	loc, err := extractLocation(map[string]any{"timezone": "UTC"})
 	if err != nil {
 		t.Fatalf("extractLocation returned error: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestExtractLocationParsesTimezone(t *testing.T) {
 }
 
 func TestExtractLocationIgnoresEmpty(t *testing.T) {
-	loc, err := extractLocation(map[string]interface{}{"timezone": ""})
+	loc, err := extractLocation(map[string]any{"timezone": ""})
 	if err != nil {
 		t.Fatalf("extractLocation returned error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestExtractLocationIgnoresEmpty(t *testing.T) {
 }
 
 func TestExtractDefaultParamsReturnsNilWhenAbsent(t *testing.T) {
-	params, err := extractDefaultParams(map[string]interface{}{})
+	params, err := extractDefaultParams(map[string]any{})
 	if err != nil {
 		t.Fatalf("extractDefaultParams returned error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestExtractDefaultParamsReturnsNilWhenAbsent(t *testing.T) {
 }
 
 func TestExtractDefaultParamsReturnsNilWhenNilValue(t *testing.T) {
-	params, err := extractDefaultParams(map[string]interface{}{"defaultParams": nil})
+	params, err := extractDefaultParams(map[string]any{"defaultParams": nil})
 	if err != nil {
 		t.Fatalf("extractDefaultParams returned error: %v", err)
 	}
@@ -122,8 +122,8 @@ func TestExtractDefaultParamsReturnsNilWhenNilValue(t *testing.T) {
 }
 
 func TestExtractDefaultParamsParsesStringValues(t *testing.T) {
-	cfg := map[string]interface{}{
-		"defaultParams": map[string]interface{}{
+	cfg := map[string]any{
+		"defaultParams": map[string]any{
 			"date": "2026-03-10",
 			"env":  "staging",
 		},
@@ -143,7 +143,7 @@ func TestExtractDefaultParamsParsesStringValues(t *testing.T) {
 }
 
 func TestExtractDefaultParamsReturnsErrorForInvalidType(t *testing.T) {
-	cfg := map[string]interface{}{
+	cfg := map[string]any{
 		"defaultParams": "not-a-map",
 	}
 	if _, err := extractDefaultParams(cfg); err == nil {

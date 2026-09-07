@@ -13,7 +13,7 @@ func FuzzExtractExpression(f *testing.F) {
 	f.Add(`{"expression": ""}`)
 	f.Add(`not json at all`)
 	f.Fuzz(func(t *testing.T, data string) {
-		var cfg map[string]interface{}
+		var cfg map[string]any
 		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
 			// Not valid JSON — skip, we only fuzz the expression extraction logic.
 			return
@@ -30,7 +30,7 @@ func FuzzExtractLocation(f *testing.F) {
 	f.Add(`{"timezone": "invalid/zone"}`)
 	f.Add(`{}`)
 	f.Fuzz(func(t *testing.T, data string) {
-		var cfg map[string]interface{}
+		var cfg map[string]any
 		if err := json.Unmarshal([]byte(data), &cfg); err != nil {
 			return
 		}

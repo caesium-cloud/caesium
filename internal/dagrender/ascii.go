@@ -63,11 +63,8 @@ func Render(analysis *dag.Analysis, w io.Writer) error {
 		}
 	}
 
-	// Canvas dimensions.
-	canvasH := maxRows*3 + max(maxRows-1, 0) // 3 lines per box + 1 gap between rows
-	if canvasH < 3 {
-		canvasH = 3
-	}
+	// Canvas dimensions: 3 lines per box + 1 gap between rows.
+	canvasH := max(maxRows*3+max(maxRows-1, 0), 3)
 	c := newCanvas(x, canvasH)
 
 	// Draw boxes.

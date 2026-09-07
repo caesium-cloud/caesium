@@ -107,16 +107,16 @@ func Delete(c *echo.Context) error {
 // config it needs no redaction (the model comment on
 // internal/models.AgentProfile documents this invariant).
 type profileView struct {
-	ID         uuid.UUID              `json:"id"`
-	Name       string                 `json:"name"`
-	Image      string                 `json:"image"`
-	Engine     models.AtomEngine      `json:"engine"`
-	Limits     map[string]interface{} `json:"limits,omitempty"`
-	SecretRefs map[string]string      `json:"secret_refs,omitempty"`
-	Budgets    map[string]interface{} `json:"budgets,omitempty"`
-	Playbook   map[string]interface{} `json:"playbook,omitempty"`
-	CreatedAt  time.Time              `json:"created_at"`
-	UpdatedAt  time.Time              `json:"updated_at"`
+	ID         uuid.UUID         `json:"id"`
+	Name       string            `json:"name"`
+	Image      string            `json:"image"`
+	Engine     models.AtomEngine `json:"engine"`
+	Limits     map[string]any    `json:"limits,omitempty"`
+	SecretRefs map[string]string `json:"secret_refs,omitempty"`
+	Budgets    map[string]any    `json:"budgets,omitempty"`
+	Playbook   map[string]any    `json:"playbook,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
 }
 
 func toView(p models.AgentProfile) profileView {
@@ -129,7 +129,7 @@ func toView(p models.AgentProfile) profileView {
 		UpdatedAt: p.UpdatedAt,
 	}
 	if len(p.Limits) > 0 {
-		var m map[string]interface{}
+		var m map[string]any
 		if err := json.Unmarshal(p.Limits, &m); err == nil {
 			view.Limits = m
 		}
@@ -141,13 +141,13 @@ func toView(p models.AgentProfile) profileView {
 		}
 	}
 	if len(p.Budgets) > 0 {
-		var m map[string]interface{}
+		var m map[string]any
 		if err := json.Unmarshal(p.Budgets, &m); err == nil {
 			view.Budgets = m
 		}
 	}
 	if len(p.Playbook) > 0 {
-		var m map[string]interface{}
+		var m map[string]any
 		if err := json.Unmarshal(p.Playbook, &m); err == nil {
 			view.Playbook = m
 		}

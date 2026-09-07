@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -46,9 +47,7 @@ func TestStartRunPersistsEnrichedParams(t *testing.T) {
 	registerStartParamsEnricher(t, func(_ context.Context, _ *gorm.DB, id uuid.UUID, params map[string]string, _ bool) (map[string]string, error) {
 		sawJobID = id
 		out := map[string]string{"_consumed_watermarks": `{"raw.vendor_x":"vendor-key-1"}`}
-		for k, v := range params {
-			out[k] = v
-		}
+		maps.Copy(out, params)
 		return out, nil
 	})
 
@@ -162,9 +161,7 @@ func TestStartQueuedRunRefreshesEnrichedParams(t *testing.T) {
 	registerStartParamsEnricher(t, func(_ context.Context, _ *gorm.DB, _ uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error) {
 		sawFromQueue = append(sawFromQueue, fromQueue)
 		out := map[string]string{}
-		for k, v := range params {
-			out[k] = v
-		}
+		maps.Copy(out, params)
 		// The real enricher's rule: the value is a point-in-time observation, so
 		// it is re-taken on every creation of the run — including the promotion,
 		// which is the one that happens when the run truly begins. It owns this
@@ -225,9 +222,7 @@ func TestStartQueuedRunAppliesEnricherRetraction(t *testing.T) {
 
 	registerStartParamsEnricher(t, func(_ context.Context, _ *gorm.DB, _ uuid.UUID, params map[string]string, fromQueue bool) (map[string]string, error) {
 		out := map[string]string{}
-		for k, v := range params {
-			out[k] = v
-		}
+		maps.Copy(out, params)
 		if fromQueue {
 			// The re-read failed: retract the value taken at admission rather
 			// than let it stand in for the one this run actually started on.

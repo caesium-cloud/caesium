@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -153,15 +154,11 @@ func uuidPtr(id uuid.UUID) *uuid.UUID {
 	if id == uuid.Nil {
 		return nil
 	}
-	value := id
-	return &value
+	return ptr.Of(id)
 }
 
 func derefUUID(id *uuid.UUID) uuid.UUID {
-	if id == nil {
-		return uuid.Nil
-	}
-	return *id
+	return ptr.Deref(id)
 }
 
 func modelToEvent(row models.ExecutionEvent) Event {

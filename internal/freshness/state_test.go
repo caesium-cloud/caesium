@@ -12,8 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func tPtr(t time.Time) *time.Time { return &t }
-
 // t0 is a fixed base time so the ordering assertions are deterministic.
 var t0 = time.Date(2026, 7, 3, 4, 0, 0, 0, time.UTC)
 
@@ -38,117 +36,117 @@ func TestApplyContract(t *testing.T) {
 			in:       AdvanceInput{Name: "d", Watermark: "100", RunID: run, CompletedAt: t0},
 			want:     OutcomeAdvanced,
 			wantWM:   "100",
-			advanced: tPtr(t0),
+			advanced: new(t0),
 		},
 		{
 			name:     "numeric increase advances",
-			state:    models.DatasetState{Watermark: "100", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "100", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "200", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeAdvanced,
 			wantWM:   "200",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "numeric regression recorded, never advances",
-			state:    models.DatasetState{Watermark: "200", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "200", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "100", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeRegressionDropped,
 			wantWM:   "200",
-			advanced: tPtr(t0), // untouched
+			advanced: new(t0), // untouched
 		},
 		{
 			name:     "unchanged numeric value verifies, not advances",
-			state:    models.DatasetState{Watermark: "200", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "200", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "200", RunID: run, CompletedAt: t0.Add(2 * time.Hour)},
 			want:     OutcomeVerified,
 			wantWM:   "200",
-			advanced: tPtr(t0), // untouched
-			verified: tPtr(t0.Add(2 * time.Hour)),
+			advanced: new(t0), // untouched
+			verified: new(t0.Add(2 * time.Hour)),
 		},
 		{
 			name:     "RFC3339 increase advances",
-			state:    models.DatasetState{Watermark: "2026-07-03T04:00:00Z", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "2026-07-03T04:00:00Z", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "2026-07-03T05:00:00Z", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeAdvanced,
 			wantWM:   "2026-07-03T05:00:00Z",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "RFC3339 regression recorded, never advances",
-			state:    models.DatasetState{Watermark: "2026-07-03T05:00:00Z", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "2026-07-03T05:00:00Z", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "2026-07-03T04:00:00Z", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeRegressionDropped,
 			wantWM:   "2026-07-03T05:00:00Z",
-			advanced: tPtr(t0),
+			advanced: new(t0),
 		},
 		{
 			name:     "opaque SHA from a newer run advances",
-			state:    models.DatasetState{Watermark: "abc123", AdvancedAt: tPtr(t0), WatermarkRunAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "abc123", AdvancedAt: new(t0), WatermarkRunAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "def456", RunID: run, RunOrder: t0.Add(time.Hour), CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeAdvanced,
 			wantWM:   "def456",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "opaque SHA from an older run dropped out-of-order",
-			state:    models.DatasetState{Watermark: "def456", AdvancedAt: tPtr(t0.Add(time.Hour)), WatermarkRunAt: tPtr(t0.Add(time.Hour))},
+			state:    models.DatasetState{Watermark: "def456", AdvancedAt: new(t0.Add(time.Hour)), WatermarkRunAt: new(t0.Add(time.Hour))},
 			in:       AdvanceInput{Name: "d", Watermark: "abc123", RunID: run, RunOrder: t0, CompletedAt: t0},
 			want:     OutcomeOutOfOrderDropped,
 			wantWM:   "def456",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "unchanged opaque SHA verifies",
-			state:    models.DatasetState{Watermark: "abc123", AdvancedAt: tPtr(t0), WatermarkRunAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "abc123", AdvancedAt: new(t0), WatermarkRunAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "abc123", RunID: run, RunOrder: t0.Add(time.Hour), CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeVerified,
 			wantWM:   "abc123",
-			advanced: tPtr(t0),
-			verified: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0),
+			verified: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "degraded mode (no watermark key) refreshes verified_at",
-			state:    models.DatasetState{Watermark: "200", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "200", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "", RunID: run, CompletedAt: t0.Add(3 * time.Hour)},
 			want:     OutcomeVerified,
 			wantWM:   "200",
-			advanced: tPtr(t0),
-			verified: tPtr(t0.Add(3 * time.Hour)),
+			advanced: new(t0),
+			verified: new(t0.Add(3 * time.Hour)),
 		},
 		{
 			name:     "backfill run never advances even on a higher value",
-			state:    models.DatasetState{Watermark: "100", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "100", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "999", RunID: run, CompletedAt: t0.Add(time.Hour), Backfill: true},
 			want:     OutcomeBackfillDropped,
 			wantWM:   "100",
-			advanced: tPtr(t0),
+			advanced: new(t0),
 		},
 		{
 			name:     "opaque replacing an orderable value gates by run order",
-			state:    models.DatasetState{Watermark: "100", AdvancedAt: tPtr(t0), WatermarkRunAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "100", AdvancedAt: new(t0), WatermarkRunAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "sha-xyz", RunID: run, RunOrder: t0.Add(time.Hour), CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeAdvanced,
 			wantWM:   "sha-xyz",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			// 9007199254740992 = 2^53 (float64's last exactly-representable int);
 			// 2^53+1 rounds to 2^53 as a float64, so a float compare would tie.
 			// int64 parsing keeps them distinct -> a real advance.
 			name:     "large-int increase advances beyond float64 exact range",
-			state:    models.DatasetState{Watermark: "9007199254740992", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "9007199254740992", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "9007199254740993", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeAdvanced,
 			wantWM:   "9007199254740993",
-			advanced: tPtr(t0.Add(time.Hour)),
+			advanced: new(t0.Add(time.Hour)),
 		},
 		{
 			name:     "large-int regression dropped where float64 would tie",
-			state:    models.DatasetState{Watermark: "9007199254740993", AdvancedAt: tPtr(t0)},
+			state:    models.DatasetState{Watermark: "9007199254740993", AdvancedAt: new(t0)},
 			in:       AdvanceInput{Name: "d", Watermark: "9007199254740992", RunID: run, CompletedAt: t0.Add(time.Hour)},
 			want:     OutcomeRegressionDropped,
 			wantWM:   "9007199254740993",
-			advanced: tPtr(t0),
+			advanced: new(t0),
 		},
 	}
 
@@ -265,7 +263,7 @@ func TestAdvanceConcurrentSingleRow(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	errs := make([]error, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -304,7 +302,7 @@ func TestAdvanceRaceValueNotLost(t *testing.T) {
 		older = "1"
 		newer = "2"
 	)
-	for iter := 0; iter < 60; iter++ {
+	for iter := range 60 {
 		db := openRegistryDB(t)
 		s := NewStore(db)
 		ctx := context.Background()
@@ -365,7 +363,7 @@ func TestAdvanceConsumedTiedToWinningRun(t *testing.T) {
 		runID    uuid.UUID
 		consumed map[string]string
 	}
-	for iter := 0; iter < 60; iter++ {
+	for iter := range 60 {
 		db := openRegistryDB(t)
 		s := NewStore(db)
 		ctx := context.Background()

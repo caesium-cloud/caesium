@@ -86,6 +86,27 @@ func TestRetryOnContention_ExhaustsAndReturnsError(t *testing.T) {
 	}
 }
 
+func TestRetryOnContentionDo_ReturnsValue(t *testing.T) {
+	withFastRunStartBackoffs(t, 5)
+	calls := 0
+	got, err := retryOnContentionDo(context.Background(), func() (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("database is locked")
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("expected retried value, got %q", got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls)
+	}
+}
+
 func TestRetryOnContention_ContextCancelStops(t *testing.T) {
 	withFastRunStartBackoffs(t, 5)
 	ctx, cancel := context.WithCancel(context.Background())

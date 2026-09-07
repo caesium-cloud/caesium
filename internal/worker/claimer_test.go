@@ -105,7 +105,7 @@ func TestClaimerClaimNextSkipsUnexpiredAndReclaimsExpiredLease(t *testing.T) {
 		status:                  string(run.TaskStatusPending),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-old",
-		claimExpiresAt:          ptrTime(now.Add(-30 * time.Second)),
+		claimExpiresAt:          new(now.Add(-30 * time.Second)),
 		claimAttempt:            2,
 		createdAt:               now.Add(-2 * time.Minute),
 	})
@@ -113,7 +113,7 @@ func TestClaimerClaimNextSkipsUnexpiredAndReclaimsExpiredLease(t *testing.T) {
 		status:                  string(run.TaskStatusPending),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-live",
-		claimExpiresAt:          ptrTime(now.Add(10 * time.Minute)),
+		claimExpiresAt:          new(now.Add(10 * time.Minute)),
 		claimAttempt:            4,
 		createdAt:               now.Add(-3 * time.Minute),
 	})
@@ -158,7 +158,7 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-old",
-		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
+		claimExpiresAt:          new(now.Add(-time.Minute)),
 		claimAttempt:            2,
 		createdAt:               now.Add(-2 * time.Minute),
 	})
@@ -167,7 +167,7 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-live",
-		claimExpiresAt:          ptrTime(now.Add(2 * time.Minute)),
+		claimExpiresAt:          new(now.Add(2 * time.Minute)),
 		claimAttempt:            1,
 		createdAt:               now.Add(-2 * time.Minute),
 	})
@@ -332,7 +332,7 @@ func TestClaimerReclaimExpiredIgnoresNonRunningJobRuns(t *testing.T) {
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "node-old",
-		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
+		claimExpiresAt:          new(now.Add(-time.Minute)),
 		claimAttempt:            2,
 		jobRunStatus:            string(run.StatusFailed),
 		createdAt:               now.Add(-2 * time.Minute),
@@ -451,10 +451,6 @@ func seedRunLease(t *testing.T, db *gorm.DB, runID uuid.UUID, ownerNode string, 
 		LeaseExpiresAt: leaseExpiresAt,
 		Generation:     1,
 	}).Error)
-}
-
-func ptrTime(v time.Time) *time.Time {
-	return &v
 }
 
 // --- B0/B1 deferral tests ---
@@ -604,7 +600,7 @@ func TestClaimerReclaimExpiredSkipsLiveLeasedRun(t *testing.T) {
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "worker-old",
-		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
+		claimExpiresAt:          new(now.Add(-time.Minute)),
 		claimAttempt:            1,
 		createdAt:               now.Add(-2 * time.Minute),
 		jobRunID:                &runID,
@@ -636,7 +632,7 @@ func TestClaimerReclaimExpiredReclaimsExpiredLeaseRun(t *testing.T) {
 		status:                  string(run.TaskStatusRunning),
 		outstandingPredecessors: 0,
 		claimedBy:               "worker-old",
-		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
+		claimExpiresAt:          new(now.Add(-time.Minute)),
 		claimAttempt:            1,
 		createdAt:               now.Add(-2 * time.Minute),
 		jobRunID:                &runID,

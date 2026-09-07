@@ -47,6 +47,11 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 	mounted := make(map[string]struct{})
 	var missing []string
 	for _, route := range e.Router().Routes() {
+		// Echo 5.3 lists implicit group 404 handlers as echo_route_not_found.
+		// Those are not API endpoints and do not belong in endpointPolicy.
+		if route.Method == echo.RouteNotFound {
+			continue
+		}
 		if authmw.IsPublicAuthPath(route.Path) {
 			continue
 		}

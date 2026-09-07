@@ -17,7 +17,7 @@ func expireClaim(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID) {
 	t.Helper()
 	require.NoError(t, db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"claim_expires_at": time.Now().UTC().Add(-time.Minute),
 			"runtime_id":       "container-abc",
 		}).Error)

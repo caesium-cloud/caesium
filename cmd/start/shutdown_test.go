@@ -14,23 +14,23 @@ func TestShutdownCoordinatorIdempotentAndWaitsForAsync(t *testing.T) {
 	release := make(chan struct{})
 	finished := make(chan struct{})
 
-	var apiShutdowns int32
-	var internalShutdowns int32
-	var closeDBs int32
+	var apiShutdowns atomic.Int32
+	var internalShutdowns atomic.Int32
+	var closeDBs atomic.Int32
 
 	coordinator := newShutdownCoordinator(shutdownConfig{
 		cancel:      cancel,
 		gracePeriod: time.Second,
 		apiShutdown: func(context.Context) error {
-			atomic.AddInt32(&apiShutdowns, 1)
+			apiShutdowns.Add(1)
 			return nil
 		},
 		internalShutdown: func(context.Context) error {
-			atomic.AddInt32(&internalShutdowns, 1)
+			internalShutdowns.Add(1)
 			return nil
 		},
 		closeDB: func() error {
-			atomic.AddInt32(&closeDBs, 1)
+			closeDBs.Add(1)
 			return nil
 		},
 	})
@@ -87,13 +87,13 @@ func TestShutdownCoordinatorIdempotentAndWaitsForAsync(t *testing.T) {
 		}
 	}
 
-	if got := atomic.LoadInt32(&apiShutdowns); got != 1 {
+	if got := apiShutdowns.Load(); got != 1 {
 		t.Fatalf("api shutdown count = %d, want 1", got)
 	}
-	if got := atomic.LoadInt32(&internalShutdowns); got != 1 {
+	if got := internalShutdowns.Load(); got != 1 {
 		t.Fatalf("internal shutdown count = %d, want 1", got)
 	}
-	if got := atomic.LoadInt32(&closeDBs); got != 1 {
+	if got := closeDBs.Load(); got != 1 {
 		t.Fatalf("db close count = %d, want 1", got)
 	}
 }

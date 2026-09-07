@@ -227,7 +227,7 @@ func TestDiff_OversizedValuesBlobStillNamesExclusion(t *testing.T) {
 	oversized := func(predHash string) []byte {
 		in := chainInput(cache.ChainValues, predHash, "same")
 		in.Env = make(map[string]string, 4096)
-		for i := 0; i < 4096; i++ {
+		for i := range 4096 {
 			in.Env["VAR_"+strconv.Itoa(i)] = strings.Repeat("x", 64)
 		}
 		return blobFor(t, in)

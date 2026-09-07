@@ -188,7 +188,7 @@ func TestReplayConcurrentIdenticalRequestsReturnSingleReservation(t *testing.T) 
 	var wg sync.WaitGroup
 	results := make([]*Result, workers)
 	errs := make([]error, workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -205,7 +205,7 @@ func TestReplayConcurrentIdenticalRequestsReturnSingleReservation(t *testing.T) 
 	wg.Wait()
 
 	var replayID uuid.UUID
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		require.NoError(t, errs[i])
 		require.NotNil(t, results[i])
 		require.True(t, results[i].Run.Quarantine)
@@ -387,7 +387,7 @@ func TestReplayUniqueViolationWithoutFingerprintMatchReturnsInsertError(t *testi
 		TriggerType:  "replay",
 		TriggerAlias: "quarantined-replay",
 		StartedAt:    f.now,
-		CompletedAt:  servicePtr(f.now),
+		CompletedAt:  new(f.now),
 		CreatedAt:    f.now,
 		UpdatedAt:    f.now,
 	}).Error)
@@ -460,7 +460,7 @@ func newServiceReplayFixture(t *testing.T) serviceReplayFixture {
 		Status:       string(runstorage.StatusSucceeded),
 		Params:       serviceJSON(t, map[string]string{"mode": "baseline"}),
 		StartedAt:    now,
-		CompletedAt:  servicePtr(now.Add(time.Second)),
+		CompletedAt:  new(now.Add(time.Second)),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}).Error)
@@ -562,8 +562,8 @@ func (f serviceReplayFixture) seedTask(t *testing.T, replaySafe bool, result str
 		CacheVersion:        1,
 		ReplaySafe:          replaySafe,
 		ExecutionDescriptor: serviceJSON(t, desc),
-		StartedAt:           servicePtr(f.now),
-		CompletedAt:         servicePtr(f.now.Add(time.Second)),
+		StartedAt:           new(f.now),
+		CompletedAt:         new(f.now.Add(time.Second)),
 		CreatedAt:           f.now,
 		UpdatedAt:           f.now,
 	}).Error)
@@ -627,8 +627,4 @@ func serviceJSONString(t *testing.T, v any) string {
 	data, err := json.Marshal(v)
 	require.NoError(t, err)
 	return string(data)
-}
-
-func servicePtr[T any](v T) *T {
-	return &v
 }

@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // is rejected with 400 before any DB lookup occurs.
 func TestPostRunReturnsBadRequestForInvalidID(t *testing.T) {
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", strings.NewReader(""))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)

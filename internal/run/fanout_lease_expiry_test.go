@@ -74,7 +74,7 @@ func killWorkerHoldingInstanceClaim(t *testing.T, f *fanOutFixture, taskRunID uu
 	t.Helper()
 	require.NoError(t, f.db.Model(&models.TaskRun{}).
 		Where("id = ?", taskRunID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"claim_expires_at": time.Now().UTC().Add(-time.Minute),
 			"runtime_id":       "container-partition-c",
 		}).Error)

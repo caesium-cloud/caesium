@@ -22,7 +22,7 @@ func TestAuditLogWrite(t *testing.T) {
 		ResourceID:   "abc-123",
 		SourceIP:     "1.2.3.4",
 		Outcome:      auth.OutcomeSuccess,
-		Metadata:     map[string]interface{}{"role": "admin"},
+		Metadata:     map[string]any{"role": "admin"},
 	})
 	require.NoError(t, err)
 
@@ -50,7 +50,7 @@ func TestAuditQueryAll(t *testing.T) {
 	defer testutil.CloseDB(db)
 	auditor := auth.NewAuditLogger(db)
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		err := auditor.Log(auth.AuditEntry{
 			Actor:   "csk_live_test",
 			Action:  auth.ActionKeyCreate,
@@ -121,7 +121,7 @@ func TestAuditQueryLimit(t *testing.T) {
 	defer testutil.CloseDB(db)
 	auditor := auth.NewAuditLogger(db)
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_ = auditor.Log(auth.AuditEntry{Actor: "a", Action: "x", Outcome: auth.OutcomeSuccess})
 	}
 
@@ -135,7 +135,7 @@ func TestAuditQueryDefaultLimit(t *testing.T) {
 	defer testutil.CloseDB(db)
 	auditor := auth.NewAuditLogger(db)
 
-	for i := 0; i < 150; i++ {
+	for range 150 {
 		_ = auditor.Log(auth.AuditEntry{Actor: "a", Action: "x", Outcome: auth.OutcomeSuccess})
 	}
 
@@ -150,7 +150,7 @@ func TestAuditQueryOffset(t *testing.T) {
 	defer testutil.CloseDB(db)
 	auditor := auth.NewAuditLogger(db)
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_ = auditor.Log(auth.AuditEntry{Actor: "a", Action: "x", Outcome: auth.OutcomeSuccess})
 	}
 

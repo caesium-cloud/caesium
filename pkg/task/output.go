@@ -202,7 +202,7 @@ func validSHA256Ref(s string) bool {
 	if len(hex) != 64 {
 		return false
 	}
-	for i := 0; i < len(hex); i++ {
+	for i := range len(hex) {
 		c := hex[i]
 		switch {
 		case c >= '0' && c <= '9':
@@ -290,20 +290,20 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 		// trailing space) would otherwise miss it anyway. Docker multiplexed log
 		// lines may carry an 8-byte binary header; the marker still appears in
 		// the text portion.
-		if idx := strings.Index(line, outputRefMarker); idx >= 0 {
-			payload := strings.TrimSpace(line[idx+len(outputRefMarker):])
+		if _, after, ok := strings.Cut(line, outputRefMarker); ok {
+			payload := strings.TrimSpace(after)
 			if key, encoded, ok := parseOutputRefLine(payload, 0); ok {
 				result[key] = encoded
 			}
 			continue
 		}
 
-		idx := strings.Index(line, outputMarker)
-		if idx < 0 {
+		_, after, ok := strings.Cut(line, outputMarker)
+		if !ok {
 			continue
 		}
 
-		payload := strings.TrimSpace(line[idx+len(outputMarker):])
+		payload := strings.TrimSpace(after)
 		if payload == "" {
 			continue
 		}
@@ -344,12 +344,12 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		idx := strings.Index(line, branchMarker)
-		if idx < 0 {
+		_, after, ok := strings.Cut(line, branchMarker)
+		if !ok {
 			continue
 		}
 
-		name := strings.TrimSpace(line[idx+len(branchMarker):])
+		name := strings.TrimSpace(after)
 		if name == "" {
 			continue
 		}
@@ -447,27 +447,27 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 		// not contain the trailing-space "##caesium::output " stem, so the scalar
 		// branch below already wouldn't claim it; handling it explicitly keeps the
 		// two paths independent and self-documenting.
-		if idx := strings.Index(line, outputRefMarker); idx >= 0 {
-			payload := strings.TrimSpace(line[idx+len(outputRefMarker):])
+		if _, after, ok := strings.Cut(line, outputRefMarker); ok {
+			payload := strings.TrimSpace(after)
 			if key, encoded, ok := parseOutputRefLine(payload, maxRefBytes); ok {
 				output[key] = encoded
 			}
-		} else if idx := strings.Index(line, outputMarker); idx >= 0 {
+		} else if _, after, ok := strings.Cut(line, outputMarker); ok {
 			// Check for the scalar output marker (only when the line was not a
 			// reference; the two markers are mutually exclusive per line).
-			payload := strings.TrimSpace(line[idx+len(outputMarker):])
+			payload := strings.TrimSpace(after)
 			if payload != "" {
 				ingestOutputPayload(output, payload)
 			}
 		}
 
-		if idx := strings.Index(line, partitionsMarker); idx >= 0 {
-			payload := strings.TrimSpace(line[idx+len(partitionsMarker):])
+		if _, after, ok := strings.Cut(line, partitionsMarker); ok {
+			payload := strings.TrimSpace(after)
 			if err := parsePartitionsArrayLine(payload, acc); err != nil {
 				return nil, asPartitionError(err)
 			}
-		} else if idx := strings.Index(line, partitionMarker); idx >= 0 {
-			payload := line[idx+len(partitionMarker):]
+		} else if _, after, ok := strings.Cut(line, partitionMarker); ok {
+			payload := after
 			if err := parsePartitionLine(payload, acc); err != nil {
 				return nil, asPartitionError(err)
 			}
@@ -475,8 +475,8 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 
 		// Check for branch marker (same line could theoretically match both,
 		// but in practice markers are distinct).
-		if idx := strings.Index(line, branchMarker); idx >= 0 {
-			name := strings.TrimSpace(line[idx+len(branchMarker):])
+		if _, after, ok := strings.Cut(line, branchMarker); ok {
+			name := strings.TrimSpace(after)
 			if name != "" {
 				if _, ok := branchSeen[name]; !ok {
 					branchSeen[name] = struct{}{}

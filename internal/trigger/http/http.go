@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	stdhttp "net/http"
 	"strconv"
 	"strings"
@@ -250,15 +251,11 @@ func SetSecretResolver(resolver secret.Resolver) {
 	defaultSecretResolver = resolver
 }
 
-func cloneParams(params map[string]string) map[string]string {
+func cloneParams[K comparable, V any](params map[K]V) map[K]V {
 	if len(params) == 0 {
-		return map[string]string{}
+		return map[K]V{}
 	}
-	out := make(map[string]string, len(params))
-	for k, v := range params {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(params)
 }
 
 func parseConfig(raw string) (Config, error) {

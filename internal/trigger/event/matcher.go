@@ -63,7 +63,7 @@ func extractField(data []byte, fieldPath string) (string, bool) {
 	}
 
 	current := payload
-	for _, segment := range strings.Split(fieldPath, ".") {
+	for segment := range strings.SplitSeq(fieldPath, ".") {
 		segment = strings.TrimSpace(segment)
 		if segment == "" {
 			return "", false

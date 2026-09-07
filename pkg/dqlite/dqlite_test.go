@@ -53,7 +53,7 @@ func TestDqliteLogFieldsAttachRecentStatementsForUnknownDataTypeWarning(t *testi
 
 	fields := dqliteLogFields(client.LogWarn, "protocol warning: unknown data type: 0")
 
-	fieldMap := make(map[string]interface{}, len(fields)/2)
+	fieldMap := make(map[string]any, len(fields)/2)
 	for idx := 0; idx < len(fields)-1; idx += 2 {
 		key, ok := fields[idx].(string)
 		require.True(t, ok)

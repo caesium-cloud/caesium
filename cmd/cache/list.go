@@ -47,7 +47,7 @@ var listCmd = &cobra.Command{
 		// command sets no output writer), which left this command's JSON
 		// unpipeable and unassertable. Same fix as `caesium why`.
 		stdout := cmd.OutOrStdout()
-		var out interface{}
+		var out any
 		if err := json.Unmarshal(body, &out); err != nil {
 			_, _ = stdout.Write(body)
 			return nil

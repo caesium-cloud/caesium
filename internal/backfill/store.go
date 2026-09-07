@@ -74,7 +74,7 @@ func (s *Store) RequestCancel(id uuid.UUID) error {
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
-			Updates(map[string]interface{}{
+			Updates(map[string]any{
 				"cancel_requested_at": now,
 			}).Error
 	})
@@ -87,7 +87,7 @@ func (s *Store) MarkCancelled(id uuid.UUID) error {
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
-			Updates(map[string]interface{}{
+			Updates(map[string]any{
 				"status":       string(models.BackfillStatusCancelled),
 				"completed_at": now,
 			}).Error
@@ -103,7 +103,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
-			Updates(map[string]interface{}{
+			Updates(map[string]any{
 				"status":       string(status),
 				"completed_at": now,
 			}).Error
@@ -123,7 +123,7 @@ func (s *Store) AddProgress(id uuid.UUID, completedDelta, failedDelta int64) err
 	if completedDelta == 0 && failedDelta == 0 {
 		return nil
 	}
-	updates := make(map[string]interface{}, 2)
+	updates := make(map[string]any, 2)
 	if completedDelta != 0 {
 		updates["completed_runs"] = gorm.Expr("completed_runs + ?", completedDelta)
 	}

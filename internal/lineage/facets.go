@@ -53,7 +53,7 @@ type CaesiumSchemaFacet struct {
 	BaseFacet
 	// Schema is the raw JSON Schema object (map form) as declared in the job
 	// manifest's outputSchema / inputSchema field for this step.
-	Schema map[string]interface{} `json:"schema,omitempty"`
+	Schema map[string]any `json:"schema,omitempty"`
 }
 
 func newCaesiumBaseFacet(facetName string) BaseFacet {

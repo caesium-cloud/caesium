@@ -24,7 +24,7 @@ func TestGenerateKey(t *testing.T) {
 
 func TestGenerateKeyUniqueness(t *testing.T) {
 	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		plaintext, _, err := GenerateKey()
 		require.NoError(t, err)
 		require.False(t, seen[plaintext], "duplicate key generated")

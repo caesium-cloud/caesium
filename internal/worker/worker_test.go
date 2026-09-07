@@ -14,7 +14,7 @@ import (
 )
 
 func TestWorkerRunExecutesClaimedTasks(t *testing.T) {
-	var executed int32
+	var executed atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -26,7 +26,7 @@ func TestWorkerRunExecutesClaimedTasks(t *testing.T) {
 	}
 
 	worker := NewWorker(claimer, NewPool(2), time.Millisecond, func(_ context.Context, _ *models.TaskRun) {
-		if atomic.AddInt32(&executed, 1) == 2 {
+		if executed.Add(1) == 2 {
 			cancel()
 		}
 	})
@@ -35,13 +35,13 @@ func TestWorkerRunExecutesClaimedTasks(t *testing.T) {
 		t.Fatalf("worker run failed: %v", err)
 	}
 
-	if got := atomic.LoadInt32(&executed); got != 2 {
+	if got := executed.Load(); got != 2 {
 		t.Fatalf("expected 2 executed tasks, got %d", got)
 	}
 }
 
 func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
-	var executed int32
+	var executed atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -53,7 +53,7 @@ func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
 	}
 
 	worker := NewWorker(claimer, NewPool(1), time.Millisecond, func(_ context.Context, _ *models.TaskRun) {
-		atomic.AddInt32(&executed, 1)
+		executed.Add(1)
 		cancel()
 	})
 
@@ -61,7 +61,7 @@ func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
 		t.Fatalf("worker run failed: %v", err)
 	}
 
-	if got := atomic.LoadInt32(&executed); got != 1 {
+	if got := executed.Load(); got != 1 {
 		t.Fatalf("expected 1 executed task, got %d", got)
 	}
 }
@@ -71,11 +71,9 @@ func TestWorkerRunReclaimsWhenDueBeforeBusyClaimLoop(t *testing.T) {
 	defer cancel()
 
 	claimer := &reclaimingSequenceClaimer{
-		sequenceClaimer: sequenceClaimer{
-			responses: []claimerResponse{
-				{task: &models.TaskRun{ID: uuid.New()}},
-				{task: &models.TaskRun{ID: uuid.New()}},
-			},
+		responses: []claimerResponse{
+			{task: &models.TaskRun{ID: uuid.New()}},
+			{task: &models.TaskRun{ID: uuid.New()}},
 		},
 	}
 
@@ -88,7 +86,7 @@ func TestWorkerRunReclaimsWhenDueBeforeBusyClaimLoop(t *testing.T) {
 		t.Fatalf("worker run failed: %v", err)
 	}
 
-	if got := atomic.LoadInt32(&claimer.reclaims); got != 1 {
+	if got := claimer.reclaims.Load(); got != 1 {
 		t.Fatalf("expected 1 reclaim attempt, got %d", got)
 	}
 }
@@ -98,9 +96,7 @@ func TestWorkerRunSkipsReclaimWhenGateDenies(t *testing.T) {
 	defer cancel()
 
 	claimer := &reclaimingSequenceClaimer{
-		sequenceClaimer: sequenceClaimer{
-			responses: []claimerResponse{{task: &models.TaskRun{ID: uuid.New()}}},
-		},
+		responses: []claimerResponse{{task: &models.TaskRun{ID: uuid.New()}}},
 	}
 
 	worker := NewWorker(claimer, NewPool(1), time.Millisecond, func(_ context.Context, _ *models.TaskRun) {
@@ -115,7 +111,7 @@ func TestWorkerRunSkipsReclaimWhenGateDenies(t *testing.T) {
 		t.Fatalf("worker run failed: %v", err)
 	}
 
-	if got := atomic.LoadInt32(&claimer.reclaims); got != 0 {
+	if got := claimer.reclaims.Load(); got != 0 {
 		t.Fatalf("expected no reclaim attempt, got %d", got)
 	}
 }
@@ -154,11 +150,11 @@ func (s *sequenceClaimer) ClaimNext(context.Context) (*models.TaskRun, error) {
 
 type reclaimingSequenceClaimer struct {
 	sequenceClaimer
-	reclaims int32
+	reclaims atomic.Int32
 }
 
 func (s *reclaimingSequenceClaimer) ReclaimExpired(context.Context) error {
-	atomic.AddInt32(&s.reclaims, 1)
+	s.reclaims.Add(1)
 	return nil
 }
 
@@ -244,7 +240,7 @@ func TestBatchedRenewal_NInflightOneUpdate(t *testing.T) {
 	// Add 4 in-flight tasks that expire in 1 minute (< halfTTL = 2.5 min).
 	imminent := time.Now().Add(time.Minute)
 	ids := make(map[uuid.UUID]struct{}, 4)
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		task := makeTask(nodeID, imminent)
 		ids[task.ID] = struct{}{}
 		w.trackInFlight(task, nil)
@@ -280,7 +276,7 @@ func TestBatchedRenewal_SkipWhenNotNeeded(t *testing.T) {
 	nodeID := "node-a"
 	// Tasks expire in 4 minutes — well beyond halfTTL of 2.5 minutes.
 	distant := time.Now().Add(4 * time.Minute)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		w.trackInFlight(makeTask(nodeID, distant), nil)
 	}
 
@@ -417,7 +413,7 @@ func TestSubmitDispatched_BufferFull(t *testing.T) {
 	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Millisecond, nil).
 		WithInboundDispatch("tok")
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
 			t.Fatalf("submit %d should succeed (buffer not full yet), got %v", i, err)
 		}
@@ -486,7 +482,7 @@ func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	var executed int32
+	var executed atomic.Int32
 	claimer := &sequenceClaimer{
 		responses: []claimerResponse{
 			{task: &models.TaskRun{ID: uuid.New()}}, // pull-path task
@@ -494,7 +490,7 @@ func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
 	}
 	w := NewWorker(claimer, NewPool(2), 50*time.Millisecond,
 		func(_ context.Context, _ *models.TaskRun) {
-			if atomic.AddInt32(&executed, 1) == 2 {
+			if executed.Add(1) == 2 {
 				cancel()
 			}
 		}).WithInboundDispatch("tok")
@@ -507,7 +503,7 @@ func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
 	if err := w.Run(ctx); err != nil {
 		t.Fatalf("worker run failed: %v", err)
 	}
-	if got := atomic.LoadInt32(&executed); got != 2 {
+	if got := executed.Load(); got != 2 {
 		t.Fatalf("expected 2 executed tasks (1 dispatched + 1 ClaimNext'd), got %d", got)
 	}
 }
@@ -551,10 +547,10 @@ func TestWorkerDoesNotClaimWithoutPoolCapacity(t *testing.T) {
 
 	claimer := &countingClaimer{}
 	release := make(chan struct{})
-	var starts int32
+	var starts atomic.Int32
 
 	w := NewWorker(claimer, NewPool(1), time.Millisecond, func(context.Context, *models.TaskRun) {
-		atomic.AddInt32(&starts, 1)
+		starts.Add(1)
 		<-release
 	})
 
@@ -562,7 +558,7 @@ func TestWorkerDoesNotClaimWithoutPoolCapacity(t *testing.T) {
 	go func() { runErr <- w.Run(ctx) }()
 
 	waitFor(t, 2*time.Second, "first task to start", func() bool {
-		return atomic.LoadInt32(&starts) == 1
+		return starts.Load() == 1
 	})
 
 	// The single slot is now occupied for as long as we hold `release`. The
@@ -571,7 +567,7 @@ func TestWorkerDoesNotClaimWithoutPoolCapacity(t *testing.T) {
 	if got := claimer.count(); got != 1 {
 		t.Fatalf("worker issued %d claims while its only pool slot was busy; a claim must never outrun capacity", got)
 	}
-	if got := atomic.LoadInt32(&starts); got != 1 {
+	if got := starts.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 running task on a one-slot pool, got %d", got)
 	}
 

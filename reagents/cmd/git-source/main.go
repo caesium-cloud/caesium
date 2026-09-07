@@ -237,7 +237,7 @@ func treeDigest(ctx context.Context, git *gitRunner, sparse []string) (string, e
 	}
 
 	entries := make([]string, 0, 64)
-	for _, entry := range strings.Split(out, "\x00") {
+	for entry := range strings.SplitSeq(out, "\x00") {
 		if entry != "" {
 			entries = append(entries, entry)
 		}

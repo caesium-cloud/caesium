@@ -63,14 +63,14 @@ func (s *WorkerStatusSuite) TestStatusAggregatesClaimsAndExpirations() {
 		claimedBy:      "node-a",
 		status:         "running",
 		claimAttempt:   3,
-		claimExpiresAt: ptrTime(now.Add(2 * time.Minute)),
+		claimExpiresAt: new(now.Add(2 * time.Minute)),
 		updatedAt:      now.Add(-5 * time.Second),
 	})
 	s.seedTaskRun(taskRunSeed{
 		claimedBy:      "node-a",
 		status:         "running",
 		claimAttempt:   2,
-		claimExpiresAt: ptrTime(now.Add(-2 * time.Minute)),
+		claimExpiresAt: new(now.Add(-2 * time.Minute)),
 		updatedAt:      now.Add(-10 * time.Second),
 	})
 	s.seedTaskRun(taskRunSeed{
@@ -143,8 +143,4 @@ func (s *WorkerStatusSuite) seedTaskRun(in taskRunSeed) {
 	}
 
 	s.Require().NoError(s.db.Create(taskRun).Error)
-}
-
-func ptrTime(v time.Time) *time.Time {
-	return &v
 }

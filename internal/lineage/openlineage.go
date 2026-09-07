@@ -33,20 +33,20 @@ type RunEvent struct {
 }
 
 type Run struct {
-	RunID  uuid.UUID              `json:"runId"`
-	Facets map[string]interface{} `json:"facets,omitempty"`
+	RunID  uuid.UUID      `json:"runId"`
+	Facets map[string]any `json:"facets,omitempty"`
 }
 
 type Job struct {
-	Namespace string                 `json:"namespace"`
-	Name      string                 `json:"name"`
-	Facets    map[string]interface{} `json:"facets,omitempty"`
+	Namespace string         `json:"namespace"`
+	Name      string         `json:"name"`
+	Facets    map[string]any `json:"facets,omitempty"`
 }
 
 type Dataset struct {
-	Namespace string                 `json:"namespace"`
-	Name      string                 `json:"name"`
-	Facets    map[string]interface{} `json:"facets,omitempty"`
+	Namespace string         `json:"namespace"`
+	Name      string         `json:"name"`
+	Facets    map[string]any `json:"facets,omitempty"`
 }
 
 type BaseFacet struct {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"runtime"
 	"slices"
@@ -133,7 +134,7 @@ type Envelope struct {
 	JobAlias            string             `json:"job_alias,omitempty"`
 	BaselineRunID       string             `json:"baseline_run_id,omitempty"`
 	ReplaySafe          bool               `json:"replay_safe"`
-	CapturedAt          time.Time          `json:"captured_at,omitempty"`
+	CapturedAt          time.Time          `json:"captured_at"`
 	Image               string             `json:"image"`
 	RecordedImage       string             `json:"recorded_image,omitempty"`
 	ResolvedImageDigest string             `json:"resolved_image_digest,omitempty"`
@@ -272,9 +273,7 @@ func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions)
 	processedSecretEnv := make(map[string]struct{})
 
 	mergedParams := make(map[string]string, len(desc.Run.Params)+len(opts.SetParams))
-	for key, value := range desc.Run.Params {
-		mergedParams[key] = value
-	}
+	maps.Copy(mergedParams, desc.Run.Params)
 	for _, assignment := range opts.SetParams {
 		if strings.TrimSpace(assignment.Key) == "" {
 			return nil, fmt.Errorf("--set key cannot be empty")
@@ -455,12 +454,10 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 			Engine:       pkgjobdef.EngineDocker,
 			Image:        env.Image,
 			Command:      slices.Clone(env.Command),
-			OutputSchema: cloneAnyMap(desc.Schema.OutputSchema),
-			Spec: container.Spec{
-				Env:     cloneStringMap(env.Env),
-				WorkDir: env.WorkDir,
-				Mounts:  slices.Clone(env.Mounts),
-			},
+			OutputSchema: cloneMap(desc.Schema.OutputSchema),
+			Env:          cloneMap(env.Env),
+			WorkDir:      env.WorkDir,
+			Mounts:       slices.Clone(env.Mounts),
 		}},
 	}
 }
@@ -475,7 +472,7 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error
 			continue
 		}
 		name := firstNonEmpty(pred.TaskName, pred.TaskID)
-		byName[name] = cloneStringMap(outputs)
+		byName[name] = cloneMap(outputs)
 		used[pred.TaskID] = struct{}{}
 	}
 	for id, outputs := range desc.DAG.PredecessorOutputs {
@@ -485,7 +482,7 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error
 		if _, ok := used[id]; ok {
 			continue
 		}
-		byName[id] = cloneStringMap(outputs)
+		byName[id] = cloneMap(outputs)
 		warnings = append(warnings, Warning{
 			Code:    WarningOutputMissingName,
 			Message: fmt.Sprintf("predecessor output %s had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env", id),
@@ -1045,26 +1042,11 @@ func sortedKeys(values map[string]string) []string {
 	return keys
 }
 
-func cloneStringMap(values map[string]string) map[string]string {
+func cloneMap[K comparable, V any](values map[K]V) map[K]V {
 	if len(values) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
-	return out
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(values))
-	for k, v := range values {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(values)
 }
 
 func durationString(d time.Duration) string {

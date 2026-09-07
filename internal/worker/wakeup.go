@@ -66,7 +66,6 @@ func SubscribeWakeups(ctx context.Context, bus event.Bus, extra ...<-chan struct
 	}
 
 	for _, source := range extra {
-		source := source
 		if source == nil {
 			continue
 		}
