@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-07
 
-> Status: **Active — Plan 0 of [`closed-loop-arc.md`](closed-loop-arc.md).** Not started.
+> Status: **Active — Plan 0 of [`closed-loop-arc.md`](closed-loop-arc.md).** Waves 1–2 shipped (#386–#394, #421–#428); open: E4 (the user's `v0.1.0` tag push) and N-4 (close-out, after E4).
 
 Everything Caesium has shipped must become **true** (the default execution
 mode strands DAGs; lineage's `producing_step` is always empty; a cancelled run's
@@ -105,11 +105,17 @@ does not hunt for missing artifacts:**
 ## Progress (as of 2026-09-07)
 
 Wave 1 shipped Streams A, B, C, F and H-1 (plus the time-budget half of H-2)
-across eight PRs, 2026-09-06 → 2026-09-07. Every PR passed the orchestrator's
-scope-aware integration gate before merge (lint + unit + the lanes its diff
-touches), and the two PRs the review bot did not review (#392, #390's fix
-commits) got a substitute adversarial review that found real P1s. Wave 2
-(Streams D, E, N-1..N-4 and the guard half of H-2) is the next eligible run.
+across eight PRs, 2026-09-06 → 2026-09-07. Wave 2 shipped Streams D (D1–D3),
+E (E1–E3), the floor half of H-2, N-1 and N-2 across seven PRs
+(#421, #422, #424, #426, #427, #428 plus the branch-protection change) on
+2026-09-07, and applied the required status checks to `master`. Every PR
+passed the orchestrator's scope-aware integration gate on its exact head
+before merge; the review bot reviewed none of the wave-2 PRs, so each got a
+substitute Opus adversarial review (three P1s found and fixed in #422, three
+P2s in #424). What remains is E4 — the `v0.1.0` tag push, the user's action —
+and N-4, the close-out that depends on it. Acceptance criteria 4, 7 and 8 now
+hold (4's "last 5 master runs" clause is being accumulated post-merge);
+5 holds except for the release itself; 9 is N-4's.
 
 ### Wave 1 — Substrate true and auth surface real (2026-09-06/07)
 
@@ -200,6 +206,115 @@ reclaimed only when the owner is dead (an unconditional reclaim stole a live
 lock twice and produced two rounds of `connection refused` false failures).
 Three Opus session-limit kills cost ~6 h; cap concurrent Opus streams at 3.
 
+### Wave 2 — CI gates merges, a downloadable CLI, and the docs to find it (2026-09-07)
+
+- **γ / H-2 (floor half)** — [#421](https://github.com/caesium-cloud/caesium/pull/421)
+  `fa95e82`. The indentation-tolerant `--- PASS` floor from H-1 now guards
+  every `-run`-filtered lane: distributed (observed 41 incl. nested subtests,
+  floor 20), owner-memory (28 / 14), infra (12 / 6), via
+  `CAESIUM_{DISTRIBUTED,OWNER_MEMORY,INFRA}_INTEGRATION_MIN_PASS`. The helm
+  and podman jobs run the unfiltered suite and get no floor. Review fix: the
+  lanes `tee` their log instead of redirecting it, so a job-level timeout or
+  cancellation still streams diagnostics. Substitute Opus review: no P1.
+- **α / D1, D3** — [#422](https://github.com/caesium-cloud/caesium/pull/422)
+  `2505ccb`. All five L12 entries **fixed, none quarantined**. (a)
+  `TestFanOutHTTPRetryPartition` had recurred after #384 (run 34062579647);
+  the cause was not `partitionRetryOutstandingTx` but how the store discards
+  the owner's cached state — `invalidateRunState` went through `Drop`, whose
+  forced final checkpoint re-persisted the stale "complete" snapshot; it now
+  goes through `Release` (stale-mark → delete checkpoints → forget) with a
+  manager-wide monotonic invalidation stamp so a rebuild that raced the
+  retry is refused by `put` and rebuilt off the current rows. (b) podman's
+  inline server env lacked `CAESIUM_DATABASE_SHARDS=4` and
+  `CAESIUM_FANOUT_MAX_PARTITIONS=8` — added, with a superset-of-`integration-up`
+  comment. (c) `no such vfs` was a product bug: go-dqlite's `init()` puts
+  SQLite in single-thread mode process-wide, which disables the mutex around
+  `sqlite3_initialize()`; two parallel first opens through `mattn/go-sqlite3`
+  raced it. `pkg/dqlite/threading.go` switches to multi-thread mode after
+  go-dqlite's init (0 failures in 300 fresh `-race` processes, was ~1/40).
+  (d) `openIntegrationCatalogDB` skips lane-aware inside the helper
+  (`CAESIUM_TEST_ENGINE` = kubernetes/podman only), covering all 11 callers;
+  the agent lane still executes 29 scenarios. (e) the fan-out cancel test
+  admitted three of four partitions because `ratelimit.Limiter` is a fixed
+  window bucketed on `now.Truncate(window)` and the CI dispatch straddled
+  15:12:00; a test-only clock seam pins the bucket. Substitute Opus review
+  found three P1s in the first cut (a post-publish checkpoint bypassing the
+  stale guard; `Drop` forgetting before checkpointing; an epoch ABA from
+  deleting the counter) and, on the re-review, two hollow regression tests —
+  all fixed with fail-before/pass-after proof via `dropMidpoint` /
+  `recoverAfterPublish` test seams. D3: `ui/test-results/` untracked and
+  ignored; `just clean-worktrees` (dry-run by default, never removes a
+  master-tip checkout or a branch whose merged PR head differs from HEAD).
+- **β / E1–E3** — [#424](https://github.com/caesium-cloud/caesium/pull/424)
+  `8657faa`. Static-linked (path (a), no fallback needed) `caesium-linux-<arch>`
+  from a `cli-static` stage in `build/Dockerfile` (`--enable-static` dqlite,
+  `-tags libsqlite3,containers_image_openpgp`, `-extldflags '-static -luv
+  -llz4 -lsqlite3'`, stage fails unless `file` says statically linked);
+  each per-arch build job smoke-tests its own binary natively in a bare
+  `ubuntu:24.04` container — `--help`, `job lint`, and a bounded `caesium
+  start` serving `caesium job apply` from the embedded dqlite catalog (the
+  cgo path the static link exists for) — and uploads a `.smoke-ok` marker;
+  `publish` verifies markers + sha256, writes `SHA256SUMS`, and creates the
+  release idempotently (no `--generate-notes`: a first release would render
+  the whole history and a >125k body 422s after the images are already
+  public). `just tag=v0.1.0 cli` writes a wrapper (`--entrypoint
+  /bin/caesium`; `--network host` on Linux, `host.docker.internal` on macOS;
+  prefers the static release asset on Linux) and refuses unknown tags.
+  `Chart.yaml` `appVersion: "v0.1.0"` with a publish-time grep; every CI/k8s
+  path already sets `image.tag` explicitly. Both arch smoke jobs printed the
+  embedded-catalog OK line on the merged Go 1.27.1 / dqlite v1.18.7 head.
+  Substitute Opus review: no P1; three P2s fixed before merge.
+- **δ / D2** — [#426](https://github.com/caesium-cloud/caesium/pull/426)
+  `ae1c04c`. `docs/ci.md`: the required-to-merge list, the PATCH command,
+  why the flaky lanes stay non-required and the promotion criterion, the
+  required-to-merge vs required-to-publish (`publish.needs`, 16 jobs)
+  distinction, the job matrix, per-lane server env and the silent-drift rule
+  (known drift filed as #425), and the `v*` release procedure with a digest
+  table for E4. **Branch protection applied by the orchestrator after #422
+  merged**: `required_status_checks.checks` = `lint`, `unit-test`,
+  `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`,
+  `build-and-integration-test`, `build-and-integration-test-agent-auth`,
+  `strict: false` — verified byte-identical to AC 4 via `gh api`.
+- **ε / N-1** — [#427](https://github.com/caesium-cloud/caesium/pull/427)
+  `862b4d8`. "Beyond scheduling — what you can ask Caesium" (every verb
+  verified against its cobra `Use:`), Quick Start step 0 (static binary +
+  `SHA256SUMS`; `just tag=v0.1.0 cli` for macOS/Docker), Codecov badge
+  dropped (no upload step exists), `alpine:3.23`. The pinned-image guardrail
+  caught the plan note quoting the stale tag literally — reworded.
+- **ζ / N-2** — [#428](https://github.com/caesium-cloud/caesium/pull/428)
+  `8146b45`. `docs/getting-started.md` (install → server → first job →
+  apply → run → `why` / `receipt get`, byte-consistent with README) and
+  `docs/README.md` split into Use Caesium / Design records.
+
+**Not merged this wave:** E4 (the `v0.1.0` tag push — the user's action;
+checklist in the wave summary and `docs/ci.md` §6) and N-4 (close-out,
+depends on E4).
+
+**Flakes classified (not merge-blocking):** none new. The three L12
+signatures that fired during the wave (`TestFanOutHTTPRetryPartition` on
+owner-memory ×2 on pre-#422 heads, `no such vfs` ×0 after #422) are the ones
+#422 fixes. `TestDispatchRun_SQLModeReclaimsExpiredClaimAndCompletesRun`
+failed once in a local `-race` run on a Go-free diff (passes 3/3 in
+isolation; green in CI) — watch, unfiled.
+
+**Wave-2 process notes:** master moved under the wave (#423, Go 1.27.1 +
+modernize, 235 files) — every branch merged master before its gate, and the
+cached `caesium-builder:latest*` images (Go 1.25) had to be deleted and
+rebuilt or the gates would have tested with the wrong toolchain. Two
+lane-lock incidents, both the orchestrator's: an unconditional `rm -rf` of
+the lock during a re-launch stole a live lock, and a `git checkout master`
+in the main checkout mid-gate made #422's gate fail on a file only the PR
+branch had. A third was an agent acquiring the lock in one shell and running
+the lane in another (dead owner PID → correctly reclaimed → collision).
+Rules recorded in memory: acquire/run/release in ONE shell; never clear the
+lock unconditionally; while a gate is live, merge remotely only and defer
+`checkout master` until `GATE DONE`. The session rate limit (reset 3:40 pm)
+killed all three round-1 agents mid-wave; every stream had committed and
+pushed before its lane runs, so nothing was lost — the orchestrator merged
+master, applied the remaining review fixes itself, and re-gated. Docker's VM
+disk hit 100% mid-wave (~21 GB of BuildKit cache pruned; the remaining
+~55 GB of named volumes belong to other projects and were left alone).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -207,11 +322,11 @@ Three Opus session-limit kills cost ~6 h; cap concurrent Opus streams at 3.
 | A | Scheduler correctness in the SQL lane — failed-plain-task advancement, run-cancel reaches the container | **P0** | **Shipped** (W1, #392) |
 | B | Data-plane truth — lineage facet shape, `Task` JSON tags, freshness consumed-snapshot timing | **P0** | **Shipped** (W1, #388) |
 | C | Auth surface end-to-end on the (widened, de-hollowed) auth lane; the tier-3 approval pipeline wired at both ends (proposal → `ApprovalRequest`, approve → execute, direct `apply_jobdef_patch` route), and its explainability item (C8) | **P0** | **Shipped** (W1, #391 + #390) |
-| D | CI gates merges and master is honestly green | P1 | Not started |
-| E | Release & install — `v0.1.0`, per-arch CLI binaries, `just cli`, chart versioning | P1 | Not started |
+| D | CI gates merges and master is honestly green | P1 | **Shipped** (W2, #422 + #426; branch protection applied 2026-09-07) |
+| E | Release & install — `v0.1.0`, per-arch CLI binaries, `just cli`, chart versioning | P1 | E1–E3 **Shipped** (W2, #424); E4 open — the user's tag push |
 | F | Dead scaffolding — `api/gql`, `internal/task`, `pkg/client`, `pkg/bytes`, `pkg/compare` | P2 | **Shipped** (W1, #387) |
-| H | Harness — the auth lane that actually runs (H-1), lane time budgets + hollow-lane guard (H-2) | **P0** | H-1 **Shipped** (W1, #386); H-2 time budgets shipped (#389), pass-floor half open |
-| N | README verbs + install, `docs/getting-started.md`, `docs/README.md` split, filed follow-ups, close-out | P1 | Not started |
+| H | Harness — the auth lane that actually runs (H-1), lane time budgets + hollow-lane guard (H-2) | **P0** | **Shipped** — H-1 (W1, #386); H-2 time budgets (#389) + pass floors (W2, #421) |
+| N | README verbs + install, `docs/getting-started.md`, `docs/README.md` split, filed follow-ups, close-out | P1 | N-1 (#427), N-2 (#428), N-3 (#420) **Shipped**; N-4 open (after E4) |
 
 ## Streams
 
