@@ -56,12 +56,25 @@ func seedRateLimitedFanOutStep(t *testing.T, f *fanOutFixture, resource string, 
 // instances of a rate-limited group cannot become dispatchable until the fixed
 // window rolls (the limiter floors windows at one minute), so these tests
 // observe the admission decision and then cancel rather than waiting it out.
+//
+// The limiter's clock is PINNED here, and that is load-bearing rather than
+// tidy. ratelimit.Limiter buckets on now.Truncate(window) — a fixed window, not
+// a sliding one — so "a 2-per-minute rule admits exactly two of these four
+// partitions" is only true while the whole dispatch pass stays inside one
+// bucket. A pass that straddles a minute boundary opens a fresh bucket and
+// admits two MORE, which is how TestFanOutLocalCancelledMidFlightStillResolves-
+// PendingSiblings failed on master run 34136265000 with three instances started
+// and only one partition parked. Freezing the clock at a mid-bucket instant
+// removes the boundary; nothing here depends on the window ever rolling, and
+// the retry-after deadlines the rows carry still come from the real clock.
 func runFanOutInBackground(t *testing.T, f *fanOutFixture) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	frozen := time.Now().UTC().Truncate(time.Minute).Add(30 * time.Second)
 	go func() {
 		opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+		opts = append(opts, func(j *job) { j.rateLimitClock = func() time.Time { return frozen } })
 		done <- New(&models.Job{ID: f.jobID}, opts...).Run(ctx)
 	}()
 	return cancel, done

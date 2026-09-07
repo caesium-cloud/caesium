@@ -41,7 +41,69 @@ type OwnerManager struct {
 
 	mu   sync.Mutex
 	runs map[uuid.UUID]*ownedRun
+	// epochs stamps each run whose cached state has been INVALIDATED (Release)
+	// while a rebuild might have been in flight.
+	//
+	// Adopt and Recover do all their DB work OUTSIDE the manager lock, by
+	// design, so an invalidation can land in the middle of one: the store
+	// reopens a completed run, Release forgets it, and a rebuild that started
+	// before the retry committed then publishes its pre-retry (complete)
+	// snapshot on top — put is the last word, nothing drops it again, and the
+	// reopened run never dispatches. Snapshotting the stamp before the rebuild
+	// and refusing a put whose stamp has moved turns that race into one more
+	// rebuild off the current rows.
+	//
+	// The stamps come from epochSeq, a manager-wide monotonic counter, NOT a
+	// per-run count. A per-run count is ABA-prone: put deletes the entry on a
+	// successful publish, so the next invalidation would restart at 1 and a
+	// rebuild holding a stale snapshot of 1 would be accepted. A monotonic
+	// stamp is strictly greater than every snapshot ever taken, so a recreated
+	// entry can never match an older one.
+	//
+	// Drop deliberately does NOT stamp. Drop is the owner letting go of a run
+	// whose state it has just checkpointed, not a statement that the rows moved
+	// underneath it — a rebuild racing a Drop reads the same rows and is
+	// correct. Stamping there would (a) make ordinary completion churn force
+	// spurious rebuild retries, and rebuild is not free (it issues
+	// ResetInFlightTasks plus three scans), and (b) leave an entry for every run
+	// the process ever owned. As written, entries exist only between a retry's
+	// invalidation, and stamps are never cleared, so a run that has been retried
+	// keeps its (monotonically increasing) stamp for the life of the process.
+	epochs   map[uuid.UUID]uint64
+	epochSeq uint64
+
+	// dropMidpoint and recoverAfterPublish are unexported TEST SEAMS, nil in
+	// production, in the same spirit as job.beforeComplete.
+	//
+	// Both of the orderings this file depends on are windows between two
+	// statements: Drop's checkpoint and its forget, and Recover's publish and
+	// its checkpoint. A store-side invalidation landing inside either window is
+	// exactly the D1(a) hang, and a test that merely calls the two statements in
+	// sequence cannot tell a correct order from a broken one. These hooks let a
+	// test put the retry INSIDE the window, so reverting either ordering makes
+	// the test fail.
+	dropMidpoint        func(uuid.UUID)
+	recoverAfterPublish func(uuid.UUID)
 }
+
+// putOutcome reports what happened to a rebuilt run state offered to put.
+type putOutcome int
+
+const (
+	// putPublished: the state is now the manager's copy for this run.
+	putPublished putOutcome = iota
+	// putAlreadyTracked: another goroutine published first. Its copy is at
+	// least as fresh as this one, so this rebuild is discarded silently.
+	putAlreadyTracked
+	// putStale: the run was invalidated while this state was being built.
+	putStale
+)
+
+// maxRecoverAttempts bounds the invalidated-mid-rebuild retry. Two invalidations
+// racing one recovery is already pathological; more than this is a caller in a
+// loop, and the dispatch loop's next tick is a better place to try again than a
+// spin here.
+const maxRecoverAttempts = 3
 
 // defaultOwnerReclaimInterval is the floor between owner-side expired-claim
 // queries for one run.  The owner's in-memory lease bookkeeping triggers a reap
@@ -91,6 +153,7 @@ func NewOwnerManager(store *Store, cfg CheckpointConfig) *OwnerManager {
 		cfg:             cfg,
 		reclaimInterval: defaultOwnerReclaimInterval,
 		runs:            make(map[uuid.UUID]*ownedRun),
+		epochs:          make(map[uuid.UUID]uint64),
 	}
 	// This manager is a CACHE of the store's task_runs rows, so the store has to
 	// be able to invalidate it. Registering here rather than in the server
@@ -109,35 +172,84 @@ func (m *OwnerManager) get(runID uuid.UUID) (*ownedRun, bool) {
 	return or, ok
 }
 
-// put publishes a freshly-built ownedRun into the map.  Idempotent: if the run
-// is already tracked it keeps the existing entry and reports false.
-func (m *OwnerManager) put(runID uuid.UUID, or *ownedRun) bool {
+// invalidationEpoch snapshots a run's invalidation stamp (0 when it has none).
+// Take it BEFORE building a state and hand it back to put, which refuses a
+// state built across an invalidation.
+func (m *OwnerManager) invalidationEpoch(runID uuid.UUID) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.epochs[runID]
+}
+
+// stampInvalidationLocked marks a run invalidated with a fresh monotonic stamp.
+// m.mu must be held.
+func (m *OwnerManager) stampInvalidationLocked(runID uuid.UUID) {
+	m.epochSeq++
+	m.epochs[runID] = m.epochSeq
+}
+
+// forget removes a run from the map WITHOUT stamping it as invalidated — the
+// rows did not change, this owner is simply letting go. mu must NOT be held.
+func (m *OwnerManager) forget(runID uuid.UUID) (*ownedRun, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	or, ok := m.runs[runID]
+	delete(m.runs, runID)
+	return or, ok
+}
+
+// put publishes a freshly-built ownedRun into the map, unless the run was
+// invalidated after epoch was taken or another goroutine published first.
+// Idempotent: a second put for an already-tracked run keeps the existing entry.
+func (m *OwnerManager) put(runID uuid.UUID, or *ownedRun, epoch uint64) putOutcome {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.epochs[runID] != epoch {
+		return putStale
+	}
 	if _, ok := m.runs[runID]; ok {
-		return false
+		return putAlreadyTracked
 	}
 	m.runs[runID] = or
-	return true
+	// The stamp is deliberately KEPT. Deleting it here would reset the run to
+	// the "never invalidated" value of 0, and a rebuild that snapshotted 0
+	// before the first invalidation would then match again after an
+	// invalidate → publish → Drop cycle. Keeping it costs a map entry per
+	// RETRIED run — Drop does not stamp, so this is not one entry per run the
+	// process has owned — and makes the stamp strictly monotonic per run as
+	// well as manager-wide.
+	return putPublished
 }
 
 // Adopt seeds a fresh in-memory state for a run this node created and owns at
 // the given generation.  Topology is loaded from the catalog (outside any lock).
 // Idempotent: a second Adopt for an already-tracked run is a no-op.
 func (m *OwnerManager) Adopt(runID uuid.UUID, generation int64) error {
-	if _, ok := m.get(runID); ok {
-		return nil
+	for attempt := 1; ; attempt++ {
+		if _, ok := m.get(runID); ok {
+			return nil
+		}
+		epoch := m.invalidationEpoch(runID)
+		topo, err := m.store.LoadRunTopology(runID)
+		if err != nil {
+			return err
+		}
+		outcome := m.put(runID, &ownedRun{
+			state:  NewRunState(topo, 0),
+			writer: NewCheckpointWriter(m.store, runID, m.cfg),
+			gen:    generation,
+		}, epoch)
+		if outcome != putStale {
+			return nil
+		}
+		// Effectively unreachable: only a partition retry stamps a run, and a
+		// run being adopted was created moments ago and has nothing to retry.
+		// The loop exists so Adopt and Recover answer a stamp the same way
+		// rather than one of them silently publishing across it.
+		if attempt >= maxRecoverAttempts {
+			return fmt.Errorf("run owner: run %s was invalidated during %d adoption attempts", runID, attempt)
+		}
 	}
-	topo, err := m.store.LoadRunTopology(runID)
-	if err != nil {
-		return err
-	}
-	m.put(runID, &ownedRun{
-		state:  NewRunState(topo, 0),
-		writer: NewCheckpointWriter(m.store, runID, m.cfg),
-		gen:    generation,
-	})
-	return nil
 }
 
 // Recover rebuilds a run's in-memory state after a lease takeover: it loads the
@@ -145,14 +257,64 @@ func (m *OwnerManager) Adopt(runID uuid.UUID, generation int64) error {
 // reconstructs RunState.  All of this runs outside any manager lock (the run is
 // not yet published).  The RecoveryResult tells the caller which tasks are ready
 // and which running tasks were re-queued for dispatch.
+//
+// Because the rebuild holds no lock, a store-side invalidation (a partition
+// retry reopening this run) can land in the middle of it. The epoch snapshot
+// taken here is what stops the rebuild from publishing its now-obsolete view
+// over the top: put refuses it, and the loop rebuilds off the current rows.
+// The generation checkpoint is written only AFTER a successful publish, so a
+// refused rebuild leaves nothing durable behind either.
 func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResult, error) {
+	for attempt := 1; ; attempt++ {
+		epoch := m.invalidationEpoch(runID)
+		res, or, err := m.rebuild(runID, generation)
+		if err != nil {
+			return RecoveryResult{}, err
+		}
+		switch m.put(runID, or, epoch) {
+		case putStale:
+			if attempt >= maxRecoverAttempts {
+				return RecoveryResult{}, fmt.Errorf(
+					"run owner: run %s was invalidated during %d recovery attempts", runID, attempt)
+			}
+			log.Info("run owner: discarding a rebuild the store invalidated mid-flight",
+				"run_id", runID, "attempt", attempt)
+			continue
+		case putAlreadyTracked:
+			// Someone published first; their copy is at least as fresh.
+			return res, nil
+		}
+		// checkpointForce, NOT writer.Force: the epoch fences the in-memory
+		// half, but between the put above and this write a retry can Release
+		// this very run — marking it stale and deleting its checkpoints. A raw
+		// writer.Force ignores `stale` and would put a pre-retry "run is
+		// complete" snapshot back on disk AFTER the invalidation deleted it,
+		// which is the D1(a) hang again by a different road. checkpointForce is
+		// the writer that honours the flag (or.state is rs and or.gen is
+		// generation, so the arguments are the same).
+		if m.recoverAfterPublish != nil {
+			m.recoverAfterPublish(runID)
+		}
+		or.mu.Lock()
+		or.checkpointForce()
+		or.mu.Unlock()
+		log.Info("run owner: recovered run on takeover", "run_id", runID, "generation", generation,
+			"ready", len(res.Ready), "redispatch", len(res.ReDispatch), "complete", res.Complete)
+		return res, nil
+	}
+}
+
+// rebuild reconstructs a run's state from the durable rows without publishing
+// it. Split out of Recover so the publish decision — and the retry when an
+// invalidation races the rebuild — reads as one thing.
+func (m *OwnerManager) rebuild(runID uuid.UUID, generation int64) (RecoveryResult, *ownedRun, error) {
 	topo, err := m.store.LoadRunTopology(runID)
 	if err != nil {
-		return RecoveryResult{}, err
+		return RecoveryResult{}, nil, err
 	}
 	checkpoint, err := m.store.LatestFullCheckpoint(runID)
 	if err != nil {
-		return RecoveryResult{}, err
+		return RecoveryResult{}, nil, err
 	}
 	// Decide whether the checkpoint is usable BEFORE the tail query, not after.
 	// The tail is filtered by the checkpoint's sequence_high; RecoverRunState
@@ -176,13 +338,13 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	}
 	rows, err := m.store.TerminalTaskRunsSince(runID, afterSeq)
 	if err != nil {
-		return RecoveryResult{}, err
+		return RecoveryResult{}, nil, err
 	}
 	var allRows []models.TaskRun
 	var catalog []models.Task
 	if m.store != nil && m.store.DB() != nil {
 		if err := m.store.DB().Where("job_run_id = ?", runID).Find(&allRows).Error; err != nil {
-			return RecoveryResult{}, err
+			return RecoveryResult{}, nil, err
 		}
 		// The catalog rows carry fanOut (maxParallel, step name), which the
 		// checkpoint deliberately does not snapshot: two copies of one graph can
@@ -192,13 +354,13 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 		var jobRun models.JobRun
 		if err := m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
 			if err := m.store.DB().Where("job_id = ?", jobRun.JobID).Find(&catalog).Error; err != nil {
-				return RecoveryResult{}, err
+				return RecoveryResult{}, nil, err
 			}
 		}
 	}
 	rs, res, err := RecoverRunStateWithFanOut(topo, checkpoint, rows, allRows, catalog)
 	if err != nil {
-		return RecoveryResult{}, err
+		return RecoveryResult{}, nil, err
 	}
 	// Reset every DB row the dead owner left running back to pending (clearing
 	// the stale claim) so the new owner can re-dispatch+claim them.  Always run
@@ -214,12 +376,7 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 		writer: NewCheckpointWriter(m.store, runID, m.cfg),
 		gen:    generation,
 	}
-	// Persist a checkpoint stamped with the new generation immediately.
-	_ = or.writer.Force(rs, generation)
-	m.put(runID, or)
-	log.Info("run owner: recovered run on takeover", "run_id", runID, "generation", generation,
-		"ready", len(res.Ready), "redispatch", len(res.ReDispatch), "complete", res.Complete)
-	return res, nil
+	return res, or, nil
 }
 
 // Owns reports whether this node is tracking in-memory state for the run.
@@ -701,19 +858,28 @@ func (m *OwnerManager) jobAliasForRun(runID uuid.UUID) string {
 
 // Drop releases the run's in-memory state (on completion or lease loss).  A
 // final checkpoint is forced so a subsequent takeover replays the least tail.
+//
+// The checkpoint is written BEFORE the run is forgotten, and that order is
+// load-bearing against a concurrent partition retry. Forgetting first leaves a
+// window in which Release finds the run untracked, returns without marking it
+// stale and without deleting its checkpoints — and then this forced "run is
+// complete" snapshot lands after the store's DeleteCheckpoints and survives,
+// so the next recovery restores a complete run and never dispatches the reset
+// instance. Writing first means Release either still sees the run (marks it
+// stale, so this write is a no-op) or runs afterwards and deletes what was
+// written.
 func (m *OwnerManager) Drop(runID uuid.UUID) {
-	m.mu.Lock()
-	or, ok := m.runs[runID]
-	if ok {
-		delete(m.runs, runID)
-	}
-	m.mu.Unlock()
+	or, ok := m.get(runID)
 	if !ok {
 		return
 	}
 	or.mu.Lock()
 	or.checkpointForce()
 	or.mu.Unlock()
+	if m.dropMidpoint != nil {
+		m.dropMidpoint(runID)
+	}
+	m.forget(runID)
 }
 
 // Release forgets a run WITHOUT checkpointing its in-memory state and discards
@@ -731,6 +897,12 @@ func (m *OwnerManager) Drop(runID uuid.UUID) {
 func (m *OwnerManager) Release(runID uuid.UUID) error {
 	m.mu.Lock()
 	or, ok := m.runs[runID]
+	// Stamp the invalidation even when the run is NOT tracked. That case is
+	// not "nothing to do": a run that just completed was already dropped, and
+	// the dispatch loop's next tick is rebuilding it from the rows right now.
+	// That rebuild started before the reopen committed, so its view is the
+	// stale one and put has to refuse it.
+	m.stampInvalidationLocked(runID)
 	m.mu.Unlock()
 	if !ok {
 		return nil
@@ -744,8 +916,7 @@ func (m *OwnerManager) Release(runID uuid.UUID) error {
 		// it; the caller reports the error.
 		return err
 	}
-	m.mu.Lock()
-	delete(m.runs, runID)
-	m.mu.Unlock()
+	// Already stamped above, so this only removes the entry.
+	m.forget(runID)
 	return nil
 }
