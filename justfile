@@ -307,11 +307,10 @@ cli:
     WRAPPER
     chmod +x "$out_dir/caesium"
     echo "Wrote a ${image} CLI wrapper to:"
+    echo "  $out_dir/caesium"
     if [ "$(uname -s)" != "Linux" ]; then
         echo "note: on $(uname -s) the wrapper cannot use host networking; address a server on this machine as http://host.docker.internal:8080"
     fi
-    echo "  $out_dir/caesium"
-
 unit-test: builder-full
     {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
