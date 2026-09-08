@@ -144,10 +144,15 @@ type TaskRun struct {
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`
 	SchemaViolations []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
-	BranchSelections []string                  `json:"branch_selections,omitempty"`
-	Quarantine       bool                      `json:"quarantine"`
-	CacheHit         bool                      `json:"cache_hit"`
-	ReplaySafe       bool                      `json:"replay_safe"`
+	// DataViolations are the data-assertion verdicts the post-task evaluator
+	// recorded for this instance. Like SchemaViolations they are read surface:
+	// a warn-mode data violation never fails the run, so this is the only place
+	// an operator (or the UI) sees that a declared contract broke.
+	DataViolations   []DataViolation `json:"data_violations,omitempty"`
+	BranchSelections []string        `json:"branch_selections,omitempty"`
+	Quarantine       bool            `json:"quarantine"`
+	CacheHit         bool            `json:"cache_hit"`
+	ReplaySafe       bool            `json:"replay_safe"`
 	// The remaining frozen execution inputs. They are `json:"-"` because they
 	// are not API surface — they exist so the LOCAL executor can run a task from
 	// the same row the distributed worker runs it from (issue #354). The
@@ -2788,6 +2793,31 @@ func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgt
 		Update("schema_violations", datatypes.JSON(b)).Error
 }
 
+// SaveDataViolations persists data-assertion violations onto exactly one task
+// run, the data-quality mirror of SaveSchemaViolations. taskRef follows the
+// same TaskRun-primary-key-or-catalog-task-ID contract: a fan-out instance must
+// be addressed by its TaskRun ID, because assertions are evaluated PER
+// PARTITION and one bad partition must not make its N siblings look violating.
+func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataViolation) error {
+	if len(violations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(violations)
+	if err != nil {
+		return err
+	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("id = ?", row.ID).
+		Update("data_violations", datatypes.JSON(b)).Error
+}
+
 func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {
 	var task models.TaskRun
 	if err := s.db.
@@ -4430,6 +4460,10 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 			// would resurrect a terminal row.
 			return ErrTaskInstanceNotRetryable
 		}
+		// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
+		if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
+			return err
+		}
 		counts.addTaskRunStatus(1)
 
 		if s.eventStore != nil {
@@ -4852,24 +4886,91 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 	}
 }
 
+// ResetInFlightTasks re-pends every running row of a run so a new owner can
+// re-claim and re-execute it (owner takeover, run resumption after a restart).
+//
+// It is now a MULTI-STATEMENT transaction (its callers' error handling is
+// unchanged): the rows are re-EXECUTED, so the previous attempt's dataset
+// metrics must go with the reset exactly as they do on the retry paths — a
+// worker that died between the post-task seam's insert and its completion
+// report otherwise leaves attempt one's samples behind, and the re-execution
+// adds a second set to the same TaskRun row.
+//
+// Every statement keeps the `status = running` predicate the original
+// single-statement form carried, and the DELETE is scoped to the rows the
+// UPDATE actually matched (re-resolved under the post-reset predicate). That
+// matters only off dqlite: dqlite serializes writes onto a single connection,
+// so nothing can commit between these statements, but Postgres
+// (CAESIUM_DATABASE_TYPE=postgres) is an ordinary multi-connection pool at READ
+// COMMITTED, where a completion landing mid-transaction would otherwise let an
+// unguarded `WHERE id IN (...)` resurrect a terminal row to pending — the exact
+// class retryTask documents — and delete a succeeded row's legitimate sample.
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
-	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
-		Updates(map[string]any{
-			"status": string(TaskStatusPending),
-			// Clear the claim too, so a new owner taking over a run can re-claim
-			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
-			// owner's worker that held the claim is gone (its lease expired).
-			"claimed_by":             "",
-			"claim_expires_at":       nil,
-			"runtime_id":             "",
-			"started_at":             nil,
-			"rate_limit_retry_after": nil,
-			"cache_hit":              false,
-			"cache_origin_run_id":    nil,
-			"cache_created_at":       nil,
-			"cache_expires_at":       nil,
-		}).Error
+	return withStoreBusyRetry(func() error {
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			var ids []uuid.UUID
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
+				Pluck("id", &ids).Error; err != nil {
+				return err
+			}
+			if len(ids) == 0 {
+				return nil
+			}
+
+			for _, chunk := range chunkTaskRunIDs(ids) {
+				if err := tx.Model(&models.TaskRun{}).
+					// The status predicate is the guard, not the id list: a row
+					// that completed since the pluck is terminal and stays
+					// terminal.
+					Where("id IN ? AND status = ?", chunk, string(TaskStatusRunning)).
+					Updates(map[string]any{
+						"status": string(TaskStatusPending),
+						// Clear the claim too, so a new owner taking over a run can re-claim
+						// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
+						// owner's worker that held the claim is gone (its lease expired).
+						"claimed_by":             "",
+						"claim_expires_at":       nil,
+						"runtime_id":             "",
+						"started_at":             nil,
+						"rate_limit_retry_after": nil,
+						"cache_hit":              false,
+						"cache_origin_run_id":    nil,
+						"cache_created_at":       nil,
+						"cache_expires_at":       nil,
+					}).Error; err != nil {
+					return err
+				}
+			}
+
+			// Only the rows the reset actually landed on lose their samples: a
+			// row that slipped through to succeeded keeps its observation,
+			// which is legitimate baseline history.
+			reset, err := taskRunIDsWithStatusTx(tx, ids, TaskStatusPending)
+			if err != nil {
+				return err
+			}
+			return clearAttemptDatasetMetricsForTaskRunsTx(tx, reset)
+		})
+	})
+}
+
+// taskRunIDsWithStatusTx narrows an id list to the rows currently in `status`.
+// It is how the failover resets learn which rows their guarded UPDATE actually
+// matched, without a per-row round trip and without depending on a RETURNING
+// clause every supported dialect would have to implement.
+func taskRunIDsWithStatusTx(tx *gorm.DB, ids []uuid.UUID, status TaskStatus) ([]uuid.UUID, error) {
+	matched := make([]uuid.UUID, 0, len(ids))
+	for _, chunk := range chunkTaskRunIDs(ids) {
+		var found []uuid.UUID
+		if err := tx.Model(&models.TaskRun{}).
+			Where("id IN ? AND status = ?", chunk, string(status)).
+			Pluck("id", &found).Error; err != nil {
+			return nil, err
+		}
+		matched = append(matched, found...)
+	}
+	return matched, nil
 }
 
 func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
@@ -5303,6 +5404,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		var violations []pkgtask.SchemaViolation
 		if err := json.Unmarshal(model.SchemaViolations, &violations); err == nil {
 			task.SchemaViolations = violations
+		}
+	}
+
+	if len(model.DataViolations) > 0 {
+		var violations []DataViolation
+		if err := json.Unmarshal(model.DataViolations, &violations); err == nil {
+			task.DataViolations = violations
 		}
 	}
 
@@ -6119,6 +6227,7 @@ func retryResetColumns() map[string]any {
 		"log_text":                "",
 		"log_truncated":           false,
 		"schema_violations":       nil,
+		"data_violations":         nil,
 		"exit_code":               nil,
 		"rate_limit_retry_after":  nil,
 		"partition_retry_pending": false,
@@ -6388,6 +6497,10 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 			if err := tx.Model(&models.TaskRun{}).
 				Where("id = ?", row.ID).
 				Updates(updates).Error; err != nil {
+				return err
+			}
+			// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
+			if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
 				return err
 			}
 			counts.addTaskRunStatus(1)
@@ -6688,6 +6801,11 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
 				if err := tx.Model(tr).Where("id = ?", tr.ID).Updates(retryResetColumns()).Error; err != nil {
+					return err
+				}
+				// Same reset contract, other table — see
+				// clearAttemptDatasetMetricsTx.
+				if err := clearAttemptDatasetMetricsTx(tx, tr.ID); err != nil {
 					return err
 				}
 				resetInstances = append(resetInstances, resetInstance{id: tr.ID, taskID: tr.TaskID})

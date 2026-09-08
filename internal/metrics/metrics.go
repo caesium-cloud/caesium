@@ -269,6 +269,30 @@ var (
 		[]string{"dataset", "status"},
 	)
 
+	// DataAssertionsTotal counts data-assertion verdicts by their applied
+	// disposition. One sample is emitted per evaluated (task run, declared
+	// dataset): `pass` when every declared assertion on that dataset held, and
+	// otherwise one sample per RECORDED violation —
+	//
+	//   pass    — the dataset's declared contract held on this run.
+	//   seeding — a cold-start `deltaFromBaseline` verdict (fewer than
+	//             CAESIUM_BASELINE_MIN_SAMPLES clean samples): recorded,
+	//             warn-only, never escalated whatever onViolation says.
+	//   warn    — a violation recorded without failing the task
+	//             (onViolation: warn, and — until Stream C wires the breaker —
+	//             onViolation: hold).
+	//   fail    — a violation escalated into a red run (onViolation: fail).
+	//
+	// `hold` is reserved for Stream C, which turns the hold disposition into a
+	// DatasetHold instead of the warn it degrades to today.
+	DataAssertionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_data_assertions_total",
+			Help: "Total data-assertion verdicts by applied disposition (pass, seeding, warn, fail).",
+		},
+		[]string{"result"},
+	)
+
 	ContractFindingsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_contract_findings_total",
@@ -619,6 +643,7 @@ func Register() {
 			DatasetStalenessSeconds,
 			DatasetDerivationsTotal,
 			FreshnessViolationsTotal,
+			DataAssertionsTotal,
 			ContractFindingsTotal,
 			ContractBreaksBlockedTotal,
 			AuthRequestsTotal,

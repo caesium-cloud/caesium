@@ -49,6 +49,20 @@ type DatasetMetric struct {
 	// one numeric column — see pkg/task.DatasetMetricSample.
 	Value float64 `gorm:"not null" json:"value"`
 
+	// Violated marks a sample that broke the declared contract it was judged
+	// against — an ENFORCED (non-seeding) violation named this exact
+	// (dataset, metric). Such a sample is kept (Plan 3's backtest replays the
+	// bad history, and `caesium why` needs the observation the breaker
+	// rejected) but is excluded from the rolling baseline by
+	// run.cleanSampleQuery: a rejected value must never become the normal it
+	// is next compared against, or three warn-mode anomalies in a row would
+	// move the median far enough to silence the assertion during exactly the
+	// incident it exists to catch.
+	//
+	// A cold-start "seeding" verdict does NOT set it: that value was never
+	// really judged, only compared against a baseline too short to trust.
+	Violated bool `gorm:"not null;default:false" json:"violated"`
+
 	// CreatedAt is the sample time and the ordering key for the rolling
 	// baseline window, so it is the trailing column of the identity index.
 	CreatedAt time.Time `gorm:"not null;index:idx_dataset_metric_identity,priority:4" json:"created_at"`

@@ -218,6 +218,12 @@ type Environment struct {
 	// compute-on-read baseline summarises (median + p10/p90). There is no
 	// materialized baseline table; the window is a handful of small rows.
 	BaselineWindow int `envconfig:"BASELINE_WINDOW" default:"20"`
+	// BaselineMinSamples is the cold-start floor: below this many clean samples
+	// a `deltaFromBaseline` assertion is warn-only ("seeding") — it is recorded
+	// and surfaced, but never fails a task and never holds a dataset, because a
+	// median over one or two runs is not a baseline. Absolute min/max bounds are
+	// unaffected: they enforce from run one.
+	BaselineMinSamples int `envconfig:"BASELINE_MIN_SAMPLES" default:"5"`
 	// DatasetMetricRetention bounds how long DatasetMetric rows are kept. The
 	// pruner is only started when DataAssertionsEnabled is set.
 	DatasetMetricRetention time.Duration `envconfig:"DATASET_METRIC_RETENTION" default:"2160h"`

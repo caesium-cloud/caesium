@@ -415,6 +415,37 @@ func (p *ProducedDataset) EffectiveRelease() string {
 	return strings.TrimSpace(p.Release)
 }
 
+// EffectiveOnViolation returns the dispatch mode with the documented default
+// applied. Like Release, the zero value is preserved in the manifest (a
+// re-serialised definition must not gain a field the author never wrote) and
+// resolved here instead: assertions declared WITHOUT an explicit onViolation
+// record their violations and never fail a task, which is the same
+// safe-by-default direction schemaValidation takes.
+func (p *ProducedDataset) EffectiveOnViolation() string {
+	if p == nil {
+		return DatasetOnViolationWarn
+	}
+	return EffectiveOnViolation(p.OnViolation)
+}
+
+// EffectiveOnViolation resolves a raw (possibly empty or unpadded) onViolation
+// value to one of the DatasetOnViolation* constants. It takes the raw string
+// because the evaluator reads the value off the persisted registry row
+// (models.DatasetDeclaration.OnViolation), not off a parsed manifest — both
+// must default identically. An unrecognised value (apply-time validation
+// rejects those) is read as warn: recording a violation is always safe,
+// escalating one on a value nobody validated is not.
+func EffectiveOnViolation(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case DatasetOnViolationFail:
+		return DatasetOnViolationFail
+	case DatasetOnViolationHold:
+		return DatasetOnViolationHold
+	default:
+		return DatasetOnViolationWarn
+	}
+}
+
 // ConsumedDataset declares a dataset a step reads. Legacy YAML may use a plain
 // scalar name; the object form carries the consumer's required JSON Schema.
 type ConsumedDataset struct {

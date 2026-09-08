@@ -141,6 +141,13 @@ type TaskRun struct {
 	SchemaValidation string `gorm:"type:text;not null;default:''" json:"-"`
 	// SchemaViolations stores any output schema violations detected at runtime.
 	SchemaViolations datatypes.JSON `gorm:"type:json" json:"schema_violations,omitempty"`
+	// DataViolations stores any data-assertion violations the post-task
+	// evaluator recorded for this instance (run.DataViolation entries — the
+	// declared bound, the observed value and the baseline snapshot it was
+	// judged against). It is the data-quality parallel of SchemaViolations and,
+	// like it, is reset by retryResetColumns so a retried attempt never carries
+	// the previous attempt's verdicts. Struct tags are the schema; no migration.
+	DataViolations datatypes.JSON `gorm:"type:json" json:"data_violations,omitempty"`
 	// ExitCode is the raw process exit code the container/pod reported at task
 	// completion. Every engine folds this code into an atom.Result and discards
 	// it today; this column preserves it so the incident classifier can map

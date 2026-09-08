@@ -45,10 +45,12 @@ type BaselineStats struct {
 // callable with no executor and no live run.
 //
 // "Clean" today means the emitting task run neither was replay-quarantined nor
-// ended in anything but success — a what-if or a failed attempt must not move a
-// baseline. The design's third predicate, "non-held", joins in with the
-// DatasetHold model (Stream C1), which does not exist yet; cleanSampleQuery is
-// the single seam where that filter lands.
+// ended in anything but success, AND the sample itself did not break the
+// contract it was judged against (models.DatasetMetric.Violated) — a what-if, a
+// failed attempt or a rejected value must not move a baseline. The design's
+// remaining predicate, "non-held", joins in with the DatasetHold model (Stream
+// C1), which does not exist yet; cleanSampleQuery is the single seam where that
+// filter lands.
 func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, error) {
 	stats := &BaselineStats{
 		Namespace: namespace,
@@ -112,6 +114,7 @@ func cleanSampleQuery(ctx context.Context, conn *gorm.DB, namespace, name, metri
 		Where("dataset_metrics.name = ?", name).
 		Where("dataset_metrics.metric = ?", metric).
 		Where("dataset_metrics.created_at < ?", asOf.UTC()).
+		Where("dataset_metrics.violated = ?", false).
 		Where("task_runs.quarantine = ?", false).
 		Where("task_runs.status = ?", string(TaskStatusSucceeded))
 }

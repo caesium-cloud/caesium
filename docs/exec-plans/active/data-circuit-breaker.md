@@ -242,7 +242,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
-| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | Not started |
+| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **B1 in review** (W2, PR pending) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | Not started |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
@@ -543,7 +543,7 @@ The evaluator proper, feature-complete for teams that only want red runs. Fills 
 the `run.EvaluateDataAssertions` seam A4 created (in `internal/run/`, not the
 executors), so it never re-touches the executor call sites.
 
-- [ ] B1. Implement `run.EvaluateDataAssertions`: load rolling baselines (via A5's
+- [x] B1. Implement `run.EvaluateDataAssertions`: load rolling baselines (via A5's
       compute-on-read helper), evaluate each declared assertion — `min`/`max`
       absolute bounds enforce from run one; `deltaFromBaseline` compares against the
       median; a **missing declared metric is itself a violation** (a step that stops
@@ -580,6 +580,75 @@ executors), so it never re-touches the executor call sites.
       (`SaveDataViolations` + `DataViolations` column), `pkg/env/env.go`,
       `internal/metrics/metrics.go`.
       Depends on: A4 + A5.
+      *Shipped W2 (α).* The pure core is `run.EvaluateAssertions(dataset,
+      assertions, observed, baselines, minSamples, at) []DataViolation` in
+      `internal/run/data_assertions_eval.go`, with `run.EvaluateAssertion` for a
+      single spec and `run.AssertionMetrics` for "which metrics does this
+      contract read"; `EvaluateDataAssertions` is the I/O shell.
+      **Decisions:** (1) baselines are loaded BEFORE this run's samples are
+      inserted, which is what keeps a run out of its own baseline — together
+      with `Baseline`'s own `created_at < asOf` cut, and NOT with any assumption
+      about the TaskRun's status, which is still `running` at the seam on all
+      three executor paths (the worker calls it before `reportCompletion`).
+      Asserted, not assumed. (2) The seam no longer short-circuits on zero
+      samples: a step that emits nothing must still fail its declared contract,
+      at the cost of one indexed declarations read per succeeded task on a
+      flag-on lane. (3) `onViolation` unset defaults to `warn`
+      (`jobdef.EffectiveOnViolation`, beside `EffectiveRelease`). (4) A
+      `deltaFromBaseline` with NO baseline (nil/zero samples) or a zero median
+      yields no verdict rather than a fabricated breach; only a real breach on a
+      short baseline is recorded as `seeding`. (5) The declared `freshness`
+      assertion (`watermark` + `maxLag`) is evaluated here too — no plan item
+      claimed it, and leaving it inert would have been a silent no-op.
+      (6) `caesium_data_assertions_total{result}` labels are the APPLIED
+      disposition — `pass` (one per evaluated dataset whose contract held),
+      `seeding`, `warn`, `fail`; **`hold` is reserved for C1**, which today
+      counts as `warn`. (7) `run.TaskRun` gained `data_violations` on the task
+      read surface (mirroring `schema_violations`) and `retryResetColumns()`
+      clears it, so a retried attempt never carries the previous verdicts.
+      **Baseline hygiene (added after adversarial review).** A `fail` verdict is
+      itself an attempt failure, so the executors retry the same TaskRun row —
+      and the samples were already written. Two guards, both part of the ONE
+      reset contract now: `models.DatasetMetric` carries `Violated`, set when an
+      ENFORCED (non-seeding) violation named that exact (dataset, metric), and
+      `cleanSampleQuery` filters it out — so a rejected value is kept for Plan 3's
+      replay and for `caesium why` but never becomes the baseline it broke (this
+      also settles the warn-mode case, where three anomalies in a row would
+      otherwise move the median far enough to silence the assertion mid-incident);
+      and `clearAttemptDatasetMetricsTx` deletes the re-executed attempt's
+      samples on every path that resets a TaskRun row for another run of the
+      container — the five `retryResetColumns()` sites (`RetryTaskInstance`,
+      `RetryTaskClaimedInstance`, `retryTask`, `RetryPartition`,
+      `RetryFromFailure`) **and the two failover resets**, `ResetInFlightTasks`
+      (owner takeover, run resumption) and `ReclaimOwnerExpiredClaims` (worker
+      lease expiry), which do not go through that map. The pre-execution
+      re-pends (`ReleaseTaskClaim`, the rate-limit deferral) are deliberately
+      not covered: their attempt never reached the post-task seam. So one
+      logical run contributes one sample, and a metric emitted both with and
+      without a `dataset` selector is de-duplicated to the single row the single
+      verdict judged.
+      **Remaining gap (issue filed by the orchestrator):** `InsertDatasetMetrics`
+      has no claim fence, so a superseded worker can still write samples onto a
+      row it no longer owns, after a reclaim has cleared them. Every other
+      terminal write on the row is claim-fenced; this one is not.
+      **Starvation fallback, stated so C1/F3 inherit it deliberately:** because
+      rejected samples leave the baseline, a dataset that breaches an absolute
+      bound on EVERY run eventually has no clean history, and its
+      `deltaFromBaseline` assertion then yields no verdict instead of a breach.
+      Nothing goes silently green — the min/max bound that rejected every sample
+      is firing on every run.
+      **C1 note:** the design's third "clean" predicate (non-held) lands beside
+      the `violated` filter in `cleanSampleQuery`.
+      **Known limitation (issue filed by the orchestrator):** a truncated or
+      unreadable marker stream is indistinguishable from a missing metric — the
+      executors' `MetricsTruncated` flag is not threaded into the seam yet, so a
+      lost observation reads as "never emitted" and, under `onViolation: fail`,
+      reddens a run for an infrastructure reason. Documented on
+      `EvaluateDataAssertions`; closing it means widening the three executor call
+      sites. **`data_violation_recorded` has no incident consumer:** it reaches
+      the persisted event store and notification policies only —
+      `classifierFailureTypes` is untouched, and F1 keys data-quality incidents
+      off C1's `dataset_held`.
 
 ### Stream C — Circuit breaker: hold, admission gate, release, events (Phase 2 headline)
 

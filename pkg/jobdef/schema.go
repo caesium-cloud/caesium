@@ -273,6 +273,16 @@ func validateDatasetAssertionSurface(stepIdx, produceIdx int, p *ProducedDataset
 	return nil
 }
 
+// AssertionMetricName resolves the emitted metric key an assertion reads: the
+// explicit `metric:` when the author gave one, else the shorthand's default
+// (DefaultRowCountMetric / DefaultNullRateMetric). It is exported because the
+// post-task evaluator (internal/run) must resolve the metric key exactly as
+// apply-time validation did — one rule, one implementation — or a declared
+// assertion would silently read a different metric than the lint checked.
+func AssertionMetricName(spec *AssertionSpec, fallback string) string {
+	return assertionMetricName(spec, fallback)
+}
+
 // assertionMetricName resolves the emitted metric key an assertion reads: the
 // explicit `metric:` when the author gave one, else the shorthand's default.
 func assertionMetricName(spec *AssertionSpec, fallback string) string {
