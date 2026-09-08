@@ -166,6 +166,14 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		runtimeParams := cloneParams(mergedParams)
 		runRecord, err := t.runStoreFactory().StartWithContext(ctx, jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
 		if err != nil {
+			// The upstream-hold gate reports its own reason: it also returns
+			// ErrRunSkipped (ErrRunHeldUpstream wraps it), and telling an
+			// operator "max concurrency reached" when the truth is "a dataset
+			// you consume is held" sends them to the wrong dashboard.
+			if errors.Is(err, runstorage.ErrRunHeldUpstream) {
+				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "upstream dataset held"})
+				continue
+			}
 			if errors.Is(err, runstorage.ErrRunSkipped) {
 				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "max concurrency reached"})
 				continue

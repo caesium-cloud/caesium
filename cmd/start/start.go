@@ -171,6 +171,11 @@ func start(cmd *cobra.Command, args []string) error {
 		// the pruner is gated on the same master flag rather than a knob of its
 		// own (arc convention 1: one feature gate).
 		run.StartDatasetMetricRetentionPruner(ctx, db.Connection(), vars.DatasetMetricRetention)
+		// caesium_dataset_holds_active is a gauge over PERSISTED state, so it
+		// is seeded from the table here: a node that restarts while datasets
+		// are held would otherwise report zero until the next open or release
+		// moved it.
+		run.SyncDatasetHoldsActive(ctx, db.Connection())
 	}
 	if vars.RateLimitPrunerEnabled {
 		runAsync(func() {

@@ -243,7 +243,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 |--------|-------|----------|--------|
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **B1 in review** (W2, PR pending) |
-| C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | Not started |
+| C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **C1–C4 in review** (W3, PR pending) |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
@@ -655,7 +655,7 @@ executors), so it never re-touches the executor call sites.
 The headline drop: the dataset actually breaks the circuit. Builds on B's
 evaluator (adds the `hold` disposition) and gates run admission in the store.
 
-- [ ] C1. Add the `DatasetHold` model + register in `models.All`: namespace/name;
+- [x] C1. Add the `DatasetHold` model + register in `models.All`: namespace/name;
       `Status` (`active|released`) with a **partial-unique guard so at most one
       active hold per dataset**, enforced the way concurrency admission is (one
       conditional INSERT, leader-safe under dqlite's Raft serialization); held-by
@@ -681,7 +681,50 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       Files: new `internal/models/dataset_hold.go`, `internal/models/models.go`,
       `internal/run/data_assertions.go`, `internal/metrics/metrics.go`.
       Depends on: B1.
-- [ ] C2. Add the downstream **run-admission gate** in the run store: inside
+      *Shipped W3 (α).* `internal/models/dataset_hold.go` (registered after
+      `DatasetMetric` in `models.All`); the store lives in a new
+      `internal/run/dataset_hold.go` rather than inside `data_assertions.go`,
+      which is where the evaluator's `hold` branch calls it from.
+      **Decisions:** (1) the partial-unique guard is `active_key` — nullable,
+      `"<namespace>/<name>"` while active, NULL on release — so the open is one
+      `ON CONFLICT (active_key) DO NOTHING` insert with the same bounded
+      retry `incident.Store.OpenOrAppend` uses for the twin-released race.
+      Only the winning insert emits `dataset_held`, which is what makes
+      alert-once structural rather than a notification-side heuristic.
+      (2) The `reason` label on `caesium_dataset_holds_total` is the violated
+      ASSERTION KIND (`min|max|deltaFromBaseline|maxLag|missing`) — bounded by
+      construction, unlike a dataset name. (3) `caesium_dataset_holds_active` is
+      recomputed with a `COUNT` over the table after every open and release and
+      re-seeded at startup (`run.SyncDatasetHoldsActive`, called from
+      `cmd/start` beside the metric pruner), so a restart, a failover or a
+      release performed by another node cannot strand it — an in-process
+      counter survives none of those. It is seeded in `cmd/start`, NOT in
+      `api.registerMetrics`, which runs in unit tests with no database.
+      (4) A SEEDING verdict never holds, whatever `onViolation` says.
+      (5) `caesium_data_assertions_total` gains the `hold` label value B1
+      reserved. (6) The blast radius (`QueryImpact`, depth default) is frozen at
+      open like the incident manager's allowlist, and is empty — not an error —
+      when observed lineage records nothing for the declared name.
+      **Review fixes (adversarial review of the PR).** (a) The hold write now
+      runs inside `withStoreBusyRetryContext` like every other contended store
+      transaction, and a hold that still cannot be opened is **fail-closed**:
+      the task is FAILED rather than reported green, counted under
+      `caesium_dataset_holds_total{reason="open_failed"}` and logged at error.
+      A breaker that cannot trip must not pretend it did — the alternative was a
+      transient dqlite lock silently admitting every downstream consumer onto
+      rejected data. (b) The model gained `LastBreachAt` / `LastBreachRunID`,
+      advanced on every occurrence append while `HeldBy*` stay pinned to the
+      first open; C3's release guards read the former and `cleanSampleQuery`
+      reads the latter.
+      **Also landed here (B1's named seam):** `cleanSampleQuery` gained the
+      design's third "clean" predicate, non-held. A sample observed inside an
+      active hold window is excluded from the baseline, because a held dataset
+      is by declaration known-bad and letting its observations drift the median
+      is how a dataset returns from an incident with its assertions re-centred
+      on the incident. ONE exemption: the run recorded in `release_run_id`,
+      whose samples are the evidence the dataset recovered and which commits
+      them in the same transaction as the release.
+- [x] C2. Add the downstream **run-admission gate** in the run store: inside
       `Store.admit(tx, model, req)` (`internal/run/store.go`), resolve the consuming
       job's declared `consumes` list and query active `DatasetHold` rows **in the
       same transaction** that inserts the run. On a hit the default disposition is
@@ -757,7 +800,54 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       `internal/models/job.go` (the `OnUpstreamHold` column),
       `internal/metrics/metrics.go`.
       Depends on: C1 + A3.
-- [ ] C3. Add release semantics. **Clean run** — when a producing task finishes
+      *Shipped W3 (α).* `models.JobRun` gained `SkipReason`;
+      `models.JobRunStatusSkipped` / `run.StatusSkipped` are new and used ONLY
+      by this path (the concurrency skip's no-row behaviour is untouched).
+      `Store.admit` calls `admitDataHoldTx`
+      (`internal/run/dataset_hold_admission.go`) as its FIRST act, ahead of the
+      concurrency policy — a run that must not exist should not consume a slot,
+      take a queue position or replace a healthy run to be refused — and ahead
+      of the backfill early-return, so a backfill over held data is gated too.
+      **Decisions:** (1) the gate returns a new `admissionHeld` decision rather
+      than reusing `admissionSkipped`, because that decision's contract is "no
+      row exists" and this one's is "a complete terminal run exists and explains
+      itself". (2) `ErrRunHeldUpstream` WRAPS `ErrRunSkipped`, so all five
+      existing skip consumers (run POST controller, event-trigger firer, queue
+      dequeuer, local executor, freshness evaluator) keep behaving correctly
+      with no edit, while a caller that wants the reason can test the sentinel.
+      POST `/v1/jobs/:id/run` therefore still answers `202` with no body, which
+      is why the integration scenario reads the run out of history.
+      (3) `registerTasksTx` was factored out of `RegisterTasks` so the task rows
+      are created inside the admission transaction; it takes an `emitReady`
+      flag, and the gate passes false — every row it creates is terminal before
+      the transaction commits, so no task ever becomes ready and no dispatcher
+      or worker can observe one pending. (4) `policyOnly` (`AdmitRun`) is not
+      honoured by the gate: that flag means "only act if a concurrency policy
+      has something to say", and the breaker always has something to say.
+      **Verified claim (the plan asserted it; this is the check):** every run
+      entry path funnels through `startRun` → `admit` —
+      `Start`/`StartWithContext` (cron, HTTP, manual, chained and event
+      triggers), `AdmitRun`, `StartForBackfill`, `StartQueuedRun`. The ONLY
+      other writer of `models.JobRun` in the tree is
+      `internal/replay/replay.go`'s quarantined replay creation, which bypasses
+      admission deliberately and is excluded from this whole feature.
+      `caesium_runs_held_upstream_total{job_alias,dataset}` is the dedicated
+      counter; `caesium_run_skipped_total` gets the bounded literal reason
+      `dataset_hold` so it does not gain one series per dataset.
+      **Review fixes.** The "five skip consumers keep working unedited" claim
+      above was true but INCOMPLETE — there is a sixth, and it was wrong:
+      `internal/job/backfill.go` had no skip branch (it could not have needed
+      one before, because `admit` early-returned for backfills), so a backfill
+      over a held dataset counted every date as FAILED and marked the whole
+      backfill failed. Classification is now `backfillDateOutcome`, unit-tested,
+      and a refused date is `skipped` — neither a failure nor a progress count.
+      `internal/trigger/event` likewise reported a hold-gated skip as "max
+      concurrency reached"; it now names the real reason. And `skipped` joined
+      the terminal-run-status fence (`terminalRunStatuses`, read by
+      `CompleteIfActive`), so a terminal hold-skipped run can never be rewritten
+      to `succeeded` — the missing-terminal-guard shape that produced the
+      local-mode replace-cancel resurrection.
+- [x] C3. Add release semantics. **Clean run** — when a producing task finishes
       with all assertions passing, the evaluator releases any active hold on that
       dataset (`release_reason: clean_run`, recording the clearing run) in the same
       transaction that records the metrics; a clean run only releases holds on
@@ -802,7 +892,86 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       new `api/rest/controller/dataset/release.go`,
       `api/rest/service/dataset/`, `api/rest/bind/bind.go`.
       Depends on: C1.
-- [ ] C4. Add the bus event types `dataset_held`, `dataset_released`,
+      *Shipped W3 (α).* Clean-run release lives in
+      `releaseHoldsForCleanRun` (`internal/run/data_assertions.go`), which
+      inserts this task's `DatasetMetric` rows and closes the hold in ONE
+      transaction — "the dataset recovered" and "here is the evidence" must not
+      be separable. The human ack is `POST /v1/datasets/holds/:id/release`
+      (`api/rest/controller/dataset/release.go` +
+      `api/rest/service/dataset/release.go`, extending the existing package),
+      mounted inside `if env.Variables().DataAssertionsEnabled` in `Protected()`
+      and asserted absent flag-off by `TestProtectedGatesDatasetHoldReleaseRoute`
+      in `bind_test.go`.
+      **Decisions:** (1) **Open Question 6 — only the HOLDER's clean run
+      releases.** A hold records `HeldByJobID`; a clean run clears it only when
+      that job is the one running now. A second producer of the same name has
+      produced its own slice, not the one that broke, so letting it clear
+      another job's hold would reopen the circuit on evidence about different
+      data. The escape hatch for a genuinely multi-producer dataset is the
+      authenticated, audited human ack. (2) A "clean" contract is one with NO
+      recorded verdict at all — a `seeding` verdict does not release, because
+      the contract did not hold, it merely was not enforced. (3) `release:
+      manual` is honoured off the persisted `DatasetDeclaration.Release` column
+      via `jobdef.ProducedDataset.EffectiveRelease`, so A3's field is live.
+      (4) Fail-closed: with no auth mode active the endpoint answers **403
+      naming `CAESIUM_AUTH_MODE`** before it looks anything up, and
+      `ReleasedBy` is the middleware principal — never a placeholder. The
+      release is mirrored into `AuditLog` as `dataset.hold.release` with the
+      tolerance windows in its metadata. (5) The release UPDATE is guarded on
+      `status = active`, so a human ack racing a clean run resolves to exactly
+      one release and one event; the loser gets `ErrDatasetHoldNotActive` → 409.
+      **Review fixes — "the holder job ran clean" was not a sufficient test.**
+      The evaluator is per-INSTANCE, so a fanned producer whose partition 2
+      breached and whose partition 3 passed released the hold partition 2 had
+      just opened, and which partition finished last decided whether a broken
+      dataset stayed held; two concurrent runs of one job, and two steps of one
+      run producing the same name, were the same bug. `releasableHold` now adds
+      two conditions to the holder-job match: the releasing run must not BE the
+      run that last breached, and it must have STARTED after `LastBreachAt` —
+      evidence gathered before a breach cannot disprove it. Covered by
+      `TestCleanPartitionDoesNotReleaseItsOwnRunsHold` and
+      `TestRunStartedBeforeTheBreachDoesNotRelease`, both verified to FAIL
+      without the guards. (Unit-level by design: the three shapes are one code
+      path, and reproducing fan-out plus metrics markers plus assertions on a
+      live lane would add a fixture and container runs for no extra proof.)
+      Separately, "clean" now also requires the contract to have been fully
+      EVALUATED (`contractFullyEvaluated`): a `deltaFromBaseline` with no usable
+      history yields no verdict at all — not a seeding one — so a contract whose
+      only assertion is starved would otherwise release a hold having proved
+      nothing, which is reachable precisely while a dataset is held because the
+      non-held predicate removes the hold window's own samples
+      (`TestStarvedDeltaAssertionDoesNotRelease`). Both release transactions now
+      carry the busy-retry budget; the `AuditLog` row is written INSIDE the
+      release transaction, so a completed release cannot exist without its audit
+      record; and `tolerate` entries are validated at the endpoint (a known
+      assertion kind mapped to a positive Go duration, 400 otherwise) and
+      documented as **recorded but NOT yet consulted** — nothing suppresses a
+      breach inside a tolerance window in v1.
+      **Second-round review fixes.** (1) The recency guards are repeated inside
+      `releaseDatasetHoldTx`'s WHERE clause, not merely pre-checked: on Postgres
+      READ COMMITTED an occurrence appended between the read and the write is
+      invisible to the read, so a status-only guard would close a hold on
+      evidence predating a breach it was never told about
+      (`TestReleaseGuardIsInTheUpdatePredicate`). (2) The release test is now
+      per-ASSERTION rather than "no verdict at all", because the previous rule
+      let `release: auto` LATCH: a young dataset declaring `min` beside
+      `deltaFromBaseline` opens its hold on `min`, and thereafter records a
+      seeding delta verdict on every good run — while the hold itself keeps
+      those good samples out of the baseline, so the count can never grow past
+      seeding. The rule is now (a) no ENFORCED violation this run, and (b) every
+      assertion the HOLD recorded produced a real, non-violating verdict, via
+      the new pure `run.EvaluatedAssertions`. A seeding verdict on an assertion
+      that did not open the hold no longer blocks; an abstaining
+      `deltaFromBaseline` on the assertion that DID open it still does, and a
+      `missing`-opened hold is disproved by the metric arriving. (3) `evt` is
+      reset per busy-retry attempt beside `opened`, so a rolled-back winning
+      attempt can no longer publish a `dataset_held` with no row behind it —
+      alert-once stays structural. Plus: the fail-closed hold error is joined
+      with, not substituted for, a same-task `fail` verdict; `LastBreachAt` is
+      nullable so AutoMigrate can add it to a populated table; and the
+      cross-node Go-clock comparison behind the start-time guard is documented
+      on `releasableHold` rather than left reading as monotonic.
+- [x] C4. Add the bus event types `dataset_held`, `dataset_released`,
       `run_held_upstream` to `internal/event/bus.go`, flowing through the existing
       persisted-event store and the notification subscriber
       (`internal/notification/subscriber.go`) so policies route them like any
@@ -817,6 +986,22 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       and the observed/bound/baseline triple, so F1 does not need a second read.
       Files: `internal/event/bus.go`, `internal/notification/subscriber.go`.
       Depends on: C1 + C2 + C3 (the three emit sites).
+      *Shipped W3 (α).* All three types are in `internal/event/bus.go`, and all
+      three are APPENDED to the persisted event store (`eventStore.AppendTx`)
+      inside the transaction that wrote the state they describe, then published
+      on the bus after commit — so `/v1/events`, `caesium why` and the Console
+      see them, not just a live subscriber. `dataset_held` and
+      `dataset_released` are in `notification.notifiableTypes`;
+      `run_held_upstream` deliberately is NOT, because one held dataset can skip
+      many downstream runs and notifying per skipped run would turn one incident
+      into the alert storm alert-once exists to prevent.
+      **Payloads:** `run.DatasetHoldEvent` carries the hold id, `(namespace,
+      name)`, status, the violated assertion kind, the occurrence count, the
+      job alias/step, the downstream-impact size and the full `[]DataViolation`
+      (observed, bound, baseline median + sample count) — so F1 can open an
+      incident from the event alone, with no second read that could observe a
+      moved baseline. `run.RunHeldUpstreamEvent` carries the hold id, the
+      dataset, the skip reason and how many task rows were skipped.
 
 #### History — the former "Deferred: Phase 3 ergonomics & reach" note
 
@@ -1787,4 +1972,17 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
 6. **Multi-producer release (design open question 2).** Does a clean run of
    producer B release a hold opened by producer A? The design proposes "no — only
    the holder's clean run". C3 must implement one answer explicitly; record it.
+   **Answered 2026-09-08 (C3, W3-α): no — only the HOLDER's clean run
+   releases.** `DatasetHold.HeldByJobID` records the producing job, and
+   `releaseHoldsForCleanRun` clears a hold only when the job running now is that
+   job. The reasoning is that a second producer of the same dataset name has
+   re-produced its OWN slice, not the one that broke, so treating its clean
+   verdict as evidence about the held data would reopen the circuit on the
+   wrong observation — the exact failure mode the breaker exists to prevent.
+   The escape hatch for a genuinely multi-producer dataset is the human ack
+   (`POST /v1/datasets/holds/:id/release`), which is authenticated, audited and
+   attributable. Accepted cost: on such a dataset, if the job that broke it
+   never runs again, the hold needs a human. That is the safe direction, and it
+   is visible rather than silent. Covered by
+   `TestCleanRunOfAnotherProducerDoesNotRelease`.
 

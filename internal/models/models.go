@@ -58,6 +58,14 @@ var All = []any{
 	// written once at task completion — deliberately absent from
 	// hotPathModels()/hotTables, like LineageDataset.
 	&DatasetMetric{},
+	// dataset_holds is the circuit breaker's state (data-circuit-breaker C1):
+	// at most one ACTIVE hold per dataset, enforced by the nullable
+	// active_key unique index. Like DatasetMetric it is a low-volume catalog
+	// table — written at most once per dataset break — so it is absent from
+	// hotPathModels()/hotTables. It carries only soft job/run/task references
+	// (no FK constraints, matching Incident), so its position here is for
+	// readability rather than for AutoMigrate's FK ordering.
+	&DatasetHold{},
 	// Agent-in-the-loop remediation (Phase 0) incident substrate. These are
 	// append-mostly, low-volume catalog tables — NOT hot per-run tables, so they
 	// are deliberately absent from hotPathModels()/hotTables. Parents precede

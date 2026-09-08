@@ -22,6 +22,18 @@ var notifiableTypes = []event.Type{
 	event.TypeRunCompleted,
 	event.TypeTaskSucceeded,
 	event.TypeContractBreakDeclared,
+	// A held dataset is the data circuit breaker tripping: downstream runs stop
+	// until somebody looks. It is routable so a team pages on it with no new
+	// plumbing, and it is safe to page on precisely because the breaker emits it
+	// exactly once per hold (repeat breaches append an occurrence silently).
+	//
+	// run_held_upstream is deliberately ABSENT: one held dataset can skip many
+	// downstream runs, so notifying per skipped run would turn one incident into
+	// an alert storm. It is persisted and streamed, just not routed.
+	event.TypeDatasetHeld,
+	// The other half of the same story — a team that paged on the hold needs the
+	// all-clear, whether it came from a clean run or a human ack.
+	event.TypeDatasetReleased,
 	// An approved tier-3 remediation that actually ran is operator-visible news:
 	// somebody's job definition changed, a task was skipped, or a schema gate was
 	// bypassed. Routing it through the ordinary policy/channel machinery means a

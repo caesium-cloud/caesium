@@ -19,6 +19,40 @@ import (
 
 const backfillAcquirePollInterval = 250 * time.Millisecond
 
+// Outcomes of trying to create one backfill date's run. They double as the
+// caesium_backfill_runs_total result labels.
+const (
+	backfillDateStarted   = "started"
+	backfillDateSkipped   = "skipped"
+	backfillDateFailed    = "failed"
+	backfillDateSucceeded = "succeeded"
+)
+
+// backfillDateOutcome classifies what a StartForBackfill error means for one
+// date in the window.
+//
+// A REFUSED admission is not a failed date. The data circuit breaker's
+// upstream-hold gate sits AHEAD of admit's backfill early-return, so backfilling
+// a consumer of a held dataset returns ErrRunSkipped (which ErrRunHeldUpstream
+// wraps) for every date in the window. Counting those as failures would mark the
+// whole backfill failed and emit one `failed` sample per date, for runs the
+// operator's own safety policy deliberately stopped — and each one already left
+// a terminal `skipped` JobRun row carrying its reason, so nothing is lost by not
+// counting it here.
+//
+// ErrRunQueued cannot reach this path (a backfill run is never enqueued) but is
+// classified alongside it for the same reason: it did not fail.
+func backfillDateOutcome(err error) string {
+	switch {
+	case err == nil:
+		return backfillDateStarted
+	case errors.Is(err, runstore.ErrRunSkipped), errors.Is(err, runstore.ErrRunQueued):
+		return backfillDateSkipped
+	default:
+		return backfillDateFailed
+	}
+}
+
 // EnumerateLogicalDates returns all cron fire times in [start, end).
 // loc sets the timezone used when computing schedule boundaries; pass time.UTC
 // when the trigger has no timezone configured.
@@ -173,6 +207,11 @@ func RunBackfill(
 	var wg sync.WaitGroup
 	var failCount atomic.Int64
 	var completed atomic.Int64
+	// skipCount tracks dates admission refused on purpose (today: a consumed
+	// dataset is held). It is reported in the summary log but deliberately kept
+	// out of both the progress counters and the failed/succeeded verdict: a
+	// skipped date neither ran nor failed.
+	var skipCount atomic.Int64
 	cancelled := false
 
 	// Coalesce per-run progress into periodic batched writes. One UPDATE per run
@@ -237,12 +276,20 @@ func RunBackfill(
 		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
 		if err != nil {
 			sem.Release(1)
+			if backfillDateOutcome(err) == backfillDateSkipped {
+				log.Warn("backfill: date skipped by admission policy",
+					"backfill_id", b.ID, "logical_date", logicalDate,
+					"held_upstream", errors.Is(err, runstore.ErrRunHeldUpstream), "reason", err)
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateSkipped).Inc()
+				skipCount.Add(1)
+				continue
+			}
 			log.Error("backfill: failed to create run", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
 			failCount.Add(1)
 			continue
 		}
 
-		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "started").Inc()
+		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateStarted).Inc()
 
 		wg.Add(1)
 		runID := r.ID
@@ -258,10 +305,10 @@ func RunBackfill(
 			runErr := New(j, WithTriggerID(nil), WithParams(params)).Run(runCtx)
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
-				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "failed").Inc()
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
 				failCount.Add(1)
 			} else {
-				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "succeeded").Inc()
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateSucceeded).Inc()
 				completed.Add(1)
 			}
 		}(runID, logicalDate)
@@ -287,6 +334,11 @@ func RunBackfill(
 	// Only mark complete if the record is still running (not externally cancelled).
 	if running, err := bStore.IsRunning(b.ID); err != nil || !running {
 		return
+	}
+
+	if skipped := skipCount.Load(); skipped > 0 {
+		log.Warn("backfill: some dates were refused by admission policy and did not run",
+			"backfill_id", b.ID, "skipped", skipped, "completed", completed.Load(), "failed", failCount.Load())
 	}
 
 	if err := bStore.Complete(b.ID, failCount.Load() > 0); err != nil {

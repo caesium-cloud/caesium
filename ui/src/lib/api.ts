@@ -34,6 +34,13 @@ export interface JobRun {
   status: string;
   params?: Record<string, string>;
   error?: string;
+  /**
+   * Why a terminal `skipped` run never ran — today only
+   * "dataset_hold:<namespace>/<name>" from the data circuit breaker's admission
+   * gate. Empty on every other run. `status` is already `string`, so `skipped`
+   * needed no type change; this is the reason beside it.
+   */
+  skip_reason?: string;
   started_at: string;
   completed_at?: string;
   created_at: string;
