@@ -675,16 +675,15 @@ func (a *metricsAccumulator) finish() ([]DatasetMetricSample, bool) {
 // epoch seconds (fraction preserved) so a watermark is comparable with a lag
 // bound. Everything else — bools, nulls, objects, arrays, non-timestamp
 // strings — is dropped, mirroring scalarOutputValue's whitelist posture.
+//
+// There is deliberately no json.Number case: encoding/json decodes every number
+// into a map[string]any as float64, and DatasetMetric.Value is itself a float64,
+// so a UseNumber decoder would buy no precision it could store. An integer
+// beyond 2^53 is not representable anywhere in this pipeline.
 func metricSampleValue(v any) (float64, bool) {
 	switch val := v.(type) {
 	case float64:
 		return val, true
-	case json.Number:
-		f, err := val.Float64()
-		if err != nil {
-			return 0, false
-		}
-		return f, true
 	case string:
 		ts, err := time.Parse(time.RFC3339, strings.TrimSpace(val))
 		if err != nil {

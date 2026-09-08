@@ -858,11 +858,6 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	// Data-quality seam, beside schema validation and on the same instance row.
-	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
-		return nil, err
-	}
-
 	// Decide the attempt's outcome BEFORE any terminal write.
 	//
 	// A non-success engine result on a NON-FINAL attempt is a failed ATTEMPT, not
@@ -891,6 +886,20 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 			return nil, err
 		}
 		return partitions, failure
+	}
+
+	// Data-quality seam, on the same instance row as schema validation but
+	// deliberately BELOW the outcome decision and only on a SUCCEEDING attempt.
+	//
+	// A retry reuses this row (RetryTaskClaimedInstance keys on taskRun.ID), and
+	// run.Baseline's cleanliness filter reads the row's FINAL status — so
+	// recording on every attempt would let a failed attempt 1 emitting
+	// `rowCount: 0` and a succeeding attempt 2 both count as clean samples of the
+	// same run and poison the median. The local executor cannot produce that
+	// (its seam runs only when execErr == nil), and the two executors must
+	// baseline a job identically.
+	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
+		return nil, err
 	}
 
 	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
@@ -939,7 +948,8 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 
 // runDataAssertions records the dataset metrics THIS INSTANCE self-reported.
 // Like runSchemaValidation it keys on taskRun.ID, not taskRun.TaskID: a fanned
-// step has N sibling rows and each partition owns its own samples.
+// step has N sibling rows and each partition owns its own samples. Its caller
+// invokes it only on a succeeding attempt — see the comment at the call site.
 func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
 	if taskRun == nil {
 		return nil

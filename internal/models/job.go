@@ -30,9 +30,17 @@ type Job struct {
 	SLA                datatypes.JSON    `gorm:"type:json" json:"sla,omitempty"`
 	// SchemaValidation controls runtime output schema validation for this job's tasks.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
-	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
-	ReplaySafe       bool           `gorm:"not null;default:false" json:"replay_safe"`
-	CacheConfig      datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
+	SchemaValidation string `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
+	// OnUpstreamHold persists metadata.onUpstreamHold ("" = the "skip" default,
+	// or "run"). It is a scalar column for the same reason SchemaValidation is:
+	// the run-admission gate (data-circuit-breaker C2) decides inside a store
+	// transaction with no jobdef in hand, and re-parsing the stored definition on
+	// the admission hot path is not an option. It also keeps `caesium job diff`
+	// and the tier-3 ApprovalRequest diff honest — an enforced policy that
+	// rendered as "no changes" is how an approver waves through a policy edit.
+	OnUpstreamHold string         `gorm:"type:text;not null;default:''" json:"on_upstream_hold,omitempty"`
+	ReplaySafe     bool           `gorm:"not null;default:false" json:"replay_safe"`
+	CacheConfig    datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
 	// Remediation persists the job's `metadata.remediation` block verbatim (see
 	// pkg/jobdef.MetadataRemediation). It is what makes a job's agent policy
 	// ENFORCEABLE rather than merely lintable: the action executor resolves the

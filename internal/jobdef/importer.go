@@ -469,6 +469,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 			RateLimits:       rateLimits,
 			SLA:              marshalSLA(def.Metadata.SLA),
 			SchemaValidation: def.Metadata.SchemaValidation,
+			OnUpstreamHold:   def.Metadata.OnUpstreamHold,
 			ReplaySafe:       def.Metadata.ReplaySafe,
 			CacheConfig:      cacheConfig,
 			Remediation:      remediation,
@@ -492,6 +493,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	existing.RateLimits = rateLimits
 	existing.SLA = marshalSLA(def.Metadata.SLA)
 	existing.SchemaValidation = def.Metadata.SchemaValidation
+	existing.OnUpstreamHold = def.Metadata.OnUpstreamHold
 	existing.ReplaySafe = def.Metadata.ReplaySafe
 	existing.CacheConfig = cacheConfig
 	existing.Remediation = remediation
@@ -510,6 +512,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 		"rate_limits":        existing.RateLimits,
 		"sla":                existing.SLA,
 		"schema_validation":  existing.SchemaValidation,
+		"on_upstream_hold":   existing.OnUpstreamHold,
 		"replay_safe":        existing.ReplaySafe,
 		"cache_config":       existing.CacheConfig,
 		// Written unconditionally (nil when the block is removed) so deleting the
