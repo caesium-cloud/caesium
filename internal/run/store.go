@@ -144,6 +144,11 @@ type TaskRun struct {
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`
 	SchemaViolations []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
+	// DataViolations are the data-assertion verdicts the post-task evaluator
+	// recorded for this instance. Like SchemaViolations they are read surface:
+	// a warn-mode data violation never fails the run, so this is the only place
+	// an operator (or the UI) sees that a declared contract broke.
+	DataViolations   []DataViolation           `json:"data_violations,omitempty"`
 	BranchSelections []string                  `json:"branch_selections,omitempty"`
 	Quarantine       bool                      `json:"quarantine"`
 	CacheHit         bool                      `json:"cache_hit"`
@@ -2788,6 +2793,31 @@ func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgt
 		Update("schema_violations", datatypes.JSON(b)).Error
 }
 
+// SaveDataViolations persists data-assertion violations onto exactly one task
+// run, the data-quality mirror of SaveSchemaViolations. taskRef follows the
+// same TaskRun-primary-key-or-catalog-task-ID contract: a fan-out instance must
+// be addressed by its TaskRun ID, because assertions are evaluated PER
+// PARTITION and one bad partition must not make its N siblings look violating.
+func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataViolation) error {
+	if len(violations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(violations)
+	if err != nil {
+		return err
+	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("id = ?", row.ID).
+		Update("data_violations", datatypes.JSON(b)).Error
+}
+
 func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {
 	var task models.TaskRun
 	if err := s.db.
@@ -5306,6 +5336,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		}
 	}
 
+	if len(model.DataViolations) > 0 {
+		var violations []DataViolation
+		if err := json.Unmarshal(model.DataViolations, &violations); err == nil {
+			task.DataViolations = violations
+		}
+	}
+
 	if len(model.BranchSelections) > 0 {
 		var bs []string
 		if err := json.Unmarshal(model.BranchSelections, &bs); err == nil {
@@ -6119,6 +6156,7 @@ func retryResetColumns() map[string]any {
 		"log_text":                "",
 		"log_truncated":           false,
 		"schema_violations":       nil,
+		"data_violations":         nil,
 		"exit_code":               nil,
 		"rate_limit_retry_after":  nil,
 		"partition_retry_pending": false,

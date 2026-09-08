@@ -31,6 +31,7 @@ type runTaskResponse struct {
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`
 	SchemaViolations []schemaViolationResponse `json:"schema_violations,omitempty"`
+	DataViolations   []dataViolationResponse   `json:"data_violations,omitempty"`
 	Error            string                    `json:"error,omitempty"`
 	StartedAt        *time.Time                `json:"started_at,omitempty"`
 	PartitionCount   int                       `json:"partition_count,omitempty"`
@@ -40,6 +41,21 @@ type runTaskResponse struct {
 type schemaViolationResponse struct {
 	Key     string `json:"key"`
 	Message string `json:"message"`
+}
+
+// dataViolationResponse mirrors run.DataViolation as the task read surface
+// serialises it: the data-quality parallel of schema_violations, and the only
+// place a WARN-mode data violation is visible (the run stays green).
+type dataViolationResponse struct {
+	Dataset         string   `json:"dataset"`
+	Metric          string   `json:"metric"`
+	Assertion       string   `json:"assertion"`
+	Observed        *float64 `json:"observed,omitempty"`
+	Bound           *float64 `json:"bound,omitempty"`
+	BaselineMedian  *float64 `json:"baseline_median,omitempty"`
+	BaselineSamples int      `json:"baseline_samples,omitempty"`
+	Seeding         bool     `json:"seeding,omitempty"`
+	Message         string   `json:"message"`
 }
 
 // awaitRun polls GET /v1/jobs/:jobID/runs/:runID until the run reaches a

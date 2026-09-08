@@ -59,6 +59,14 @@ const (
 	// manager would otherwise never see the violation. In "fail" mode the task
 	// failure already carries the violations, so no separate event is emitted.
 	TypeSchemaViolationRecorded Type = "schema_violation_recorded"
+	// TypeDataViolationRecorded is the data-quality sibling of
+	// TypeSchemaViolationRecorded: a task's emitted ##caesium::metrics breached
+	// a declared assertion but the task did NOT fail (onViolation: warn, a
+	// cold-start "seeding" verdict, or — until Stream C wires the breaker —
+	// onViolation: hold). Exactly as with schema violations, an onViolation:
+	// fail breach fails the task and its task_failed event already carries the
+	// violations, so no separate event is emitted for it.
+	TypeDataViolationRecorded Type = "data_violation_recorded"
 	// TypeContractBreakDeclared is emitted when an operator intentionally
 	// acknowledges a breaking cross-job data contract for a bounded
 	// deprecation window.

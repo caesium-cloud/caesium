@@ -242,7 +242,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
-| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | Not started |
+| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **B1 in review** (W2, PR pending) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | Not started |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
@@ -543,7 +543,7 @@ The evaluator proper, feature-complete for teams that only want red runs. Fills 
 the `run.EvaluateDataAssertions` seam A4 created (in `internal/run/`, not the
 executors), so it never re-touches the executor call sites.
 
-- [ ] B1. Implement `run.EvaluateDataAssertions`: load rolling baselines (via A5's
+- [x] B1. Implement `run.EvaluateDataAssertions`: load rolling baselines (via A5's
       compute-on-read helper), evaluate each declared assertion — `min`/`max`
       absolute bounds enforce from run one; `deltaFromBaseline` compares against the
       median; a **missing declared metric is itself a violation** (a step that stops
@@ -580,6 +580,30 @@ executors), so it never re-touches the executor call sites.
       (`SaveDataViolations` + `DataViolations` column), `pkg/env/env.go`,
       `internal/metrics/metrics.go`.
       Depends on: A4 + A5.
+      *Shipped W2 (α).* The pure core is `run.EvaluateAssertions(dataset,
+      assertions, observed, baselines, minSamples, at) []DataViolation` in
+      `internal/run/data_assertions_eval.go`, with `run.EvaluateAssertion` for a
+      single spec and `run.AssertionMetrics` for "which metrics does this
+      contract read"; `EvaluateDataAssertions` is the I/O shell.
+      **Decisions:** (1) baselines are loaded BEFORE this run's samples are
+      inserted, which is what keeps a run out of its own baseline on the worker
+      path (where the row is already `succeeded` at the seam) — asserted, not
+      assumed. (2) The seam no longer short-circuits on zero samples: a step that
+      emits nothing must still fail its declared contract, at the cost of one
+      indexed declarations read per succeeded task on a flag-on lane.
+      (3) `onViolation` unset defaults to `warn`
+      (`jobdef.EffectiveOnViolation`, beside `EffectiveRelease`). (4) A
+      `deltaFromBaseline` with NO baseline (nil/zero samples) or a zero median
+      yields no verdict rather than a fabricated breach; only a real breach on a
+      short baseline is recorded as `seeding`. (5) The declared `freshness`
+      assertion (`watermark` + `maxLag`) is evaluated here too — no plan item
+      claimed it, and leaving it inert would have been a silent no-op.
+      (6) `caesium_data_assertions_total{result}` labels are the APPLIED
+      disposition — `pass` (one per evaluated dataset whose contract held),
+      `seeding`, `warn`, `fail`; **`hold` is reserved for C1**, which today
+      counts as `warn`. (7) `run.TaskRun` gained `data_violations` on the task
+      read surface (mirroring `schema_violations`) and `retryResetColumns()`
+      clears it, so a retried attempt never carries the previous verdicts.
 
 ### Stream C — Circuit breaker: hold, admission gate, release, events (Phase 2 headline)
 
