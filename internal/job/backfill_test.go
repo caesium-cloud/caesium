@@ -3,6 +3,8 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	backfillstore "github.com/caesium-cloud/caesium/internal/backfill"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/robfig/cron"
 	"github.com/stretchr/testify/require"
@@ -209,4 +212,39 @@ func TestWaitForBackfillSlotAcquiresPermit(t *testing.T) {
 	require.True(t, acquired)
 
 	sem.Release(1)
+}
+
+// TestBackfillDateOutcomeClassifiesARefusedAdmissionAsSkipped pins the one
+// classification the data circuit breaker changed.
+//
+// Before the upstream-hold gate, StartForBackfill could never return a skip:
+// admit early-returns for any run with a BackfillID. The gate sits ahead of that
+// early-return, so a backfill over a held dataset now refuses every date in the
+// window — and counting those as failures would mark the whole backfill failed
+// and emit one `failed` metric sample per date, for runs the breaker
+// deliberately stopped.
+func TestBackfillDateOutcomeClassifiesARefusedAdmissionAsSkipped(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"created", nil, backfillDateStarted},
+		{"held upstream", runstore.ErrRunHeldUpstream, backfillDateSkipped},
+		{"wrapped held upstream", fmt.Errorf("start: %w", runstore.ErrRunHeldUpstream), backfillDateSkipped},
+		{"concurrency skip", runstore.ErrRunSkipped, backfillDateSkipped},
+		{"queued", runstore.ErrRunQueued, backfillDateSkipped},
+		{"a real failure", errors.New("database is gone"), backfillDateFailed},
+		{"max concurrent runs", runstore.ErrMaxConcurrentRunsReached, backfillDateFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, backfillDateOutcome(tt.err))
+		})
+	}
+
+	// The sentinel really does wrap the generic skip — that is what keeps every
+	// other skip consumer working unedited.
+	require.ErrorIs(t, runstore.ErrRunHeldUpstream, runstore.ErrRunSkipped)
 }

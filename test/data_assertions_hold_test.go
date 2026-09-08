@@ -253,6 +253,11 @@ func (s *IntegrationTestSuite) TestDataAssertionsManualReleaseSurvivesACleanRun(
 func (s *IntegrationTestSuite) TestDataAssertionsRepeatBreachAppendsAnOccurrence() {
 	s.requireDataAssertionsLane()
 
+	// The catalog handle is opened FIRST: requireDirectCatalogAccess skips on
+	// the lanes without direct dqlite reach, and doing two real container runs
+	// before discovering that would burn a minute to reach a skip.
+	conn := s.openIntegrationCatalogGorm()
+
 	suffix := time.Now().UnixNano()
 	alias := fmt.Sprintf("integration-hold-repeat-%d", suffix)
 	dataset := fmt.Sprintf("integration.hold.repeat.%d", suffix)
@@ -260,8 +265,6 @@ func (s *IntegrationTestSuite) TestDataAssertionsRepeatBreachAppendsAnOccurrence
 	producer := s.applyHoldProducer(alias, dataset, "auto", 12)
 	s.runProducer(producer)
 	s.runProducer(producer)
-
-	conn := s.openIntegrationCatalogGorm()
 
 	var holds []models.DatasetHold
 	s.Require().Eventually(func() bool {
@@ -333,11 +336,26 @@ func (s *IntegrationTestSuite) TestHoldReleaseWithAPIKeyReopensTheGate() {
 	holdID := s.holdIDFromSkippedRun(held)
 
 	target := fmt.Sprintf("%v/v1/datasets/holds/%s/release", s.caesiumURL, holdID)
+	// The tolerance key is an ASSERTION KIND, not a metric name; the endpoint
+	// validates the grammar rather than storing whatever arrives.
 	body, err := json.Marshal(map[string]any{
 		"reason":   "source backfilled",
-		"tolerate": map[string]string{"rowCount": "24h"},
+		"tolerate": map[string]string{"min": "24h"},
 	})
 	s.Require().NoError(err)
+
+	// A malformed window is refused before anything is released.
+	badBody, err := json.Marshal(map[string]any{
+		"reason":   "source backfilled",
+		"tolerate": map[string]string{"min": "1 day"},
+	})
+	s.Require().NoError(err)
+	bad, err := s.doJSONRequest(http.MethodPost,
+		fmt.Sprintf("%v/v1/datasets/holds/%s/release", s.caesiumURL, holdID), bytes.NewReader(badBody))
+	s.Require().NoError(err)
+	bad.Body.Close()
+	s.Require().Equal(http.StatusBadRequest, bad.StatusCode,
+		"an unparseable tolerance window must be rejected, not stored")
 
 	resp, err := s.doJSONRequest(http.MethodPost, target, bytes.NewReader(body))
 	s.Require().NoError(err)

@@ -705,6 +705,17 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       reserved. (6) The blast radius (`QueryImpact`, depth default) is frozen at
       open like the incident manager's allowlist, and is empty — not an error —
       when observed lineage records nothing for the declared name.
+      **Review fixes (adversarial review of the PR).** (a) The hold write now
+      runs inside `withStoreBusyRetryContext` like every other contended store
+      transaction, and a hold that still cannot be opened is **fail-closed**:
+      the task is FAILED rather than reported green, counted under
+      `caesium_dataset_holds_total{reason="open_failed"}` and logged at error.
+      A breaker that cannot trip must not pretend it did — the alternative was a
+      transient dqlite lock silently admitting every downstream consumer onto
+      rejected data. (b) The model gained `LastBreachAt` / `LastBreachRunID`,
+      advanced on every occurrence append while `HeldBy*` stay pinned to the
+      first open; C3's release guards read the former and `cleanSampleQuery`
+      reads the latter.
       **Also landed here (B1's named seam):** `cleanSampleQuery` gained the
       design's third "clean" predicate, non-held. A sample observed inside an
       active hold window is excluded from the baseline, because a held dataset
@@ -823,6 +834,19 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       `caesium_runs_held_upstream_total{job_alias,dataset}` is the dedicated
       counter; `caesium_run_skipped_total` gets the bounded literal reason
       `dataset_hold` so it does not gain one series per dataset.
+      **Review fixes.** The "five skip consumers keep working unedited" claim
+      above was true but INCOMPLETE — there is a sixth, and it was wrong:
+      `internal/job/backfill.go` had no skip branch (it could not have needed
+      one before, because `admit` early-returned for backfills), so a backfill
+      over a held dataset counted every date as FAILED and marked the whole
+      backfill failed. Classification is now `backfillDateOutcome`, unit-tested,
+      and a refused date is `skipped` — neither a failure nor a progress count.
+      `internal/trigger/event` likewise reported a hold-gated skip as "max
+      concurrency reached"; it now names the real reason. And `skipped` joined
+      the terminal-run-status fence (`terminalRunStatuses`, read by
+      `CompleteIfActive`), so a terminal hold-skipped run can never be rewritten
+      to `succeeded` — the missing-terminal-guard shape that produced the
+      local-mode replace-cancel resurrection.
 - [x] C3. Add release semantics. **Clean run** — when a producing task finishes
       with all assertions passing, the evaluator releases any active hold on that
       dataset (`release_reason: clean_run`, recording the clearing run) in the same
@@ -896,6 +920,33 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       tolerance windows in its metadata. (5) The release UPDATE is guarded on
       `status = active`, so a human ack racing a clean run resolves to exactly
       one release and one event; the loser gets `ErrDatasetHoldNotActive` → 409.
+      **Review fixes — "the holder job ran clean" was not a sufficient test.**
+      The evaluator is per-INSTANCE, so a fanned producer whose partition 2
+      breached and whose partition 3 passed released the hold partition 2 had
+      just opened, and which partition finished last decided whether a broken
+      dataset stayed held; two concurrent runs of one job, and two steps of one
+      run producing the same name, were the same bug. `releasableHold` now adds
+      two conditions to the holder-job match: the releasing run must not BE the
+      run that last breached, and it must have STARTED after `LastBreachAt` —
+      evidence gathered before a breach cannot disprove it. Covered by
+      `TestCleanPartitionDoesNotReleaseItsOwnRunsHold` and
+      `TestRunStartedBeforeTheBreachDoesNotRelease`, both verified to FAIL
+      without the guards. (Unit-level by design: the three shapes are one code
+      path, and reproducing fan-out plus metrics markers plus assertions on a
+      live lane would add a fixture and container runs for no extra proof.)
+      Separately, "clean" now also requires the contract to have been fully
+      EVALUATED (`contractFullyEvaluated`): a `deltaFromBaseline` with no usable
+      history yields no verdict at all — not a seeding one — so a contract whose
+      only assertion is starved would otherwise release a hold having proved
+      nothing, which is reachable precisely while a dataset is held because the
+      non-held predicate removes the hold window's own samples
+      (`TestStarvedDeltaAssertionDoesNotRelease`). Both release transactions now
+      carry the busy-retry budget; the `AuditLog` row is written INSIDE the
+      release transaction, so a completed release cannot exist without its audit
+      record; and `tolerate` entries are validated at the endpoint (a known
+      assertion kind mapped to a positive Go duration, 400 otherwise) and
+      documented as **recorded but NOT yet consulted** — nothing suppresses a
+      breach inside a tolerance window in v1.
 - [x] C4. Add the bus event types `dataset_held`, `dataset_released`,
       `run_held_upstream` to `internal/event/bus.go`, flowing through the existing
       persisted-event store and the notification subscriber

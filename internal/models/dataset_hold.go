@@ -124,6 +124,19 @@ type DatasetHold struct {
 	// open is occurrence 1). Appends deliberately do NOT re-emit dataset_held.
 	OccurrenceCount int `gorm:"not null;default:1" json:"occurrence_count"`
 
+	// LastBreachAt / LastBreachRunID track the MOST RECENT breach folded into
+	// this hold, as distinct from HeldBy*, which stay pinned to the first open.
+	//
+	// The clean-run release reads these, not OpenedAt: releasing evidence must
+	// postdate the LATEST breach, or a run that started before an occurrence was
+	// appended could clear a hold on the strength of data observed earlier than
+	// the breach it is supposed to disprove. HeldByRunID stays the opener so
+	// run.cleanSampleQuery can keep excluding the opening run's samples — those
+	// were written just BEFORE OpenedAt, so a purely time-based window would
+	// miss them.
+	LastBreachAt    time.Time  `gorm:"not null;index" json:"last_breach_at"`
+	LastBreachRunID *uuid.UUID `gorm:"type:uuid;index" json:"last_breach_run_id,omitempty"`
+
 	// Tolerances records the per-assertion tolerance windows a human ack passed
 	// (`--tolerate <assertion>=<duration>`), marshalled as
 	// {"<assertion>": "<duration>"}. It is advisory evidence on the release, not

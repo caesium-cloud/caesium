@@ -21,17 +21,17 @@ const (
 )
 
 type JobRun struct {
-	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
-	Job          Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	BackfillID   *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
-	Backfill     *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
-	TriggerID    uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
-	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
-	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`
-	Status       string         `gorm:"type:text;index;not null" json:"status"`
-	Priority     int            `gorm:"not null;default:2" json:"priority"`
-	Error        string         `json:"error,omitempty"`
+	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID  `gorm:"type:uuid;index;not null" json:"job_id"`
+	Job          Job        `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	BackfillID   *uuid.UUID `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
+	Backfill     *Backfill  `gorm:"constraint:OnDelete:SET NULL" json:"-"`
+	TriggerID    uuid.UUID  `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType  string     `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias string     `gorm:"type:text" json:"trigger_alias"`
+	Status       string     `gorm:"type:text;index;not null" json:"status"`
+	Priority     int        `gorm:"not null;default:2" json:"priority"`
+	Error        string     `json:"error,omitempty"`
 	// SkipReason explains a run created directly in terminal `skipped` status.
 	// Today the only writer is the data circuit breaker's admission gate, which
 	// records "dataset_hold:<namespace>/<name>" — so run history answers *why*
@@ -40,9 +40,9 @@ type JobRun struct {
 	// The concurrency `skip` strategy deliberately does NOT write here: it
 	// creates no JobRun row at all (insertRunIfSlotTx simply does not insert),
 	// and that behaviour is unchanged.
-	SkipReason string `gorm:"type:text;not null;default:''" json:"skip_reason,omitempty"`
-	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-	Quarantine   bool           `gorm:"not null;default:false;index" json:"quarantine"`
+	SkipReason string         `gorm:"type:text;not null;default:''" json:"skip_reason,omitempty"`
+	Params     datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
+	Quarantine bool           `gorm:"not null;default:false;index" json:"quarantine"`
 	// ReplayFingerprint is the scoped, server-derived idempotency fingerprint
 	// for quarantined replay creation. It is nullable so ordinary runs do not
 	// participate in the unique index.

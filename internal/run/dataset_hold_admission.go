@@ -125,6 +125,17 @@ func (s *Store) admitDataHoldTx(tx *gorm.DB, model *models.JobRun) (*admissionRe
 // terminal before this transaction commits, so no worker or dispatcher can ever
 // observe them pending, and announcing readiness for work that will never be
 // claimed would be a lie in the event stream.
+//
+// COST, stated rather than discovered later: this is the most expensive refusal
+// in the store. registerTasksTx builds a full execution descriptor per catalog
+// task (a trigger read plus taskDescriptorEdgesTx each), and each row then costs
+// a nextTerminalSequenceTx and a task_skipped event insert — so a held consumer
+// with a 40-step DAG runs on the order of a hundred statements per refused
+// trigger, inside the transaction dqlite serialises. It is accepted because a
+// refusal is rare (it needs an active hold) and because the alternative — a run
+// with no task rows — is a shape no reader tolerates. If a deployment ever holds
+// a dataset feeding a large, frequently-triggered DAG, the cheaper shape is a
+// leaner descriptor for terminal-on-arrival rows, not fewer rows.
 func (s *Store) insertHeldRunTx(
 	tx *gorm.DB,
 	model *models.JobRun,

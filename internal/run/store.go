@@ -59,6 +59,23 @@ const (
 	TaskStatusCancelled TaskStatus = TaskStatus(models.TaskRunStatusCancelled)
 )
 
+// terminalRunStatuses is the single definition of "this run will not transition
+// again", used by the completion fences so a terminal row cannot be rewritten.
+//
+// `skipped` is in the list from the day the status exists: a hold-gated run is
+// terminal on arrival, and a fence that did not know that could rewrite it to
+// `succeeded` — leaving a skip_reason beside a success. That is the same
+// missing-terminal-guard shape that produced the local-mode replace-cancel
+// resurrection, and it is one line to not have.
+func terminalRunStatuses() []string {
+	return []string{
+		string(StatusSucceeded),
+		string(StatusFailed),
+		string(StatusCancelled),
+		string(StatusSkipped),
+	}
+}
+
 // IsTerminalSuccess returns true for task statuses that represent successful completion.
 func IsTerminalSuccess(status TaskStatus) bool {
 	return status == TaskStatusSucceeded || status == TaskStatusCached
@@ -204,31 +221,31 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID            uuid.UUID         `json:"id"`
-	JobID         uuid.UUID         `json:"job_id"`
-	JobAlias      string            `json:"job_alias,omitempty"`
-	JobLabels     map[string]string `json:"job_labels,omitempty"`
-	BackfillID    *uuid.UUID        `json:"backfill_id,omitempty"`
-	TriggerType   string            `json:"trigger_type,omitempty"`
-	TriggerAlias  string            `json:"trigger_alias,omitempty"`
-	Status        Status            `json:"status"`
-	Priority      int               `json:"priority"`
-	Params        map[string]string `json:"params,omitempty"`
-	Quarantine    bool              `json:"quarantine"`
-	StartedAt     time.Time         `json:"started_at"`
-	CompletedAt   *time.Time        `json:"completed_at,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	Error         string            `json:"error,omitempty"`
+	ID           uuid.UUID         `json:"id"`
+	JobID        uuid.UUID         `json:"job_id"`
+	JobAlias     string            `json:"job_alias,omitempty"`
+	JobLabels    map[string]string `json:"job_labels,omitempty"`
+	BackfillID   *uuid.UUID        `json:"backfill_id,omitempty"`
+	TriggerType  string            `json:"trigger_type,omitempty"`
+	TriggerAlias string            `json:"trigger_alias,omitempty"`
+	Status       Status            `json:"status"`
+	Priority     int               `json:"priority"`
+	Params       map[string]string `json:"params,omitempty"`
+	Quarantine   bool              `json:"quarantine"`
+	StartedAt    time.Time         `json:"started_at"`
+	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	Error        string            `json:"error,omitempty"`
 	// SkipReason explains a terminal `skipped` run — today only
 	// "dataset_hold:<namespace>/<name>" from the data circuit breaker's
 	// admission gate. Empty on every other run.
-	SkipReason    string            `json:"skip_reason,omitempty"`
-	Tasks         []*TaskRun        `json:"tasks"`
-	Callbacks     []*CallbackRun    `json:"callbacks"`
-	CacheHits     int               `json:"cache_hits"`
-	ExecutedTasks int               `json:"executed_tasks"`
-	TotalTasks    int               `json:"total_tasks"`
+	SkipReason    string         `json:"skip_reason,omitempty"`
+	Tasks         []*TaskRun     `json:"tasks"`
+	Callbacks     []*CallbackRun `json:"callbacks"`
+	CacheHits     int            `json:"cache_hits"`
+	ExecutedTasks int            `json:"executed_tasks"`
+	TotalTasks    int            `json:"total_tasks"`
 }
 
 type Store struct {
@@ -4736,7 +4753,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// from the triggering node's waitForRunCompletion; this keeps the
 			// second call a no-op so run_completed/run_failed events fire once.
 			res := tx.Model(&models.JobRun{}).
-				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed), string(StatusCancelled)}).
+				Where("id = ? AND status NOT IN ?", runID, terminalRunStatuses()).
 				Updates(map[string]any{
 					"status":       string(status),
 					"completed_at": now,

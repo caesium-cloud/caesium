@@ -62,27 +62,36 @@ func (s *Service) ReleaseHold(params ReleaseHoldParams) (*ReleaseHoldResult, err
 		return nil, ErrHoldReleaseUnauthenticated
 	}
 
+	// The success entry rides INSIDE the release transaction: an audit row
+	// written afterwards is a row a crash in between can lose, and "the hold was
+	// released and nobody knows by whom" is precisely the state an audit log
+	// exists to make impossible.
+	entry := s.holdReleaseAuditEntry(params, principal, "success")
+
 	store := runstore.Default()
 	hold, err := store.ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
 		ReleasedBy: principal,
 		Note:       strings.TrimSpace(params.Reason),
 		Tolerances: params.Tolerances,
+		Audit:      entry,
 	})
 	if err != nil {
-		s.auditHoldRelease(params, principal, "failure")
+		// A REFUSED release changed nothing, so its audit row cannot ride a
+		// committed transaction; it is written on its own, best-effort.
+		s.writeHoldReleaseAudit(s.holdReleaseAuditEntry(params, principal, "failure"))
 		return nil, err
 	}
 
-	s.auditHoldRelease(params, principal, "success")
+	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, entry.Outcome).Inc()
 	log.Info("dataset hold released by operator ack",
 		"hold_id", hold.ID, "dataset", hold.Name, "actor", principal)
 	return &ReleaseHoldResult{Hold: hold}, nil
 }
 
-// auditHoldRelease mirrors the release into AuditLog, the record of every
-// state-changing operator action. A hold release overrides an automated safety
-// decision, so it is exactly the kind of act the audit log exists for.
-func (s *Service) auditHoldRelease(params ReleaseHoldParams, principal, outcome string) {
+// holdReleaseAuditEntry builds the AuditLog row for one release attempt. A hold
+// release overrides an automated safety decision, so it is exactly the kind of
+// act the audit log exists for.
+func (s *Service) holdReleaseAuditEntry(params ReleaseHoldParams, principal, outcome string) *models.AuditLog {
 	metadata := map[string]any{"hold_id": params.HoldID.String()}
 	if len(params.Tolerances) > 0 {
 		metadata["tolerances"] = params.Tolerances
@@ -90,7 +99,7 @@ func (s *Service) auditHoldRelease(params ReleaseHoldParams, principal, outcome 
 	if reason := strings.TrimSpace(params.Reason); reason != "" {
 		metadata["reason"] = reason
 	}
-	entry := &models.AuditLog{
+	return &models.AuditLog{
 		ID:           uuid.New(),
 		Timestamp:    time.Now().UTC(),
 		Actor:        principal,
@@ -101,12 +110,17 @@ func (s *Service) auditHoldRelease(params ReleaseHoldParams, principal, outcome 
 		Outcome:      outcome,
 		Metadata:     encodeAuditMetadata(metadata),
 	}
+}
+
+// writeHoldReleaseAudit persists an audit row outside any transaction, for the
+// attempts that never got one (a refused or errored release).
+func (s *Service) writeHoldReleaseAudit(entry *models.AuditLog) {
 	if err := s.db.WithContext(s.ctx).Create(entry).Error; err != nil {
 		log.Warn("failed to write the dataset hold release audit entry",
-			"hold_id", params.HoldID, "error", err)
+			"hold_id", entry.ResourceID, "error", err)
 		return
 	}
-	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, outcome).Inc()
+	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, entry.Outcome).Inc()
 }
 
 // encodeAuditMetadata marshals the audit metadata, degrading to no metadata

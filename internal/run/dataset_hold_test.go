@@ -246,6 +246,144 @@ func TestCleanRunReleasesAutoHoldOnly(t *testing.T) {
 	}
 }
 
+// seedInstanceForRun adds a SECOND TaskRun instance to an EXISTING run of the
+// same catalog task — the shape a fanned step has: N instances, one run, one
+// TaskID, therefore one contract.
+func seedInstanceForRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, partition int) uuid.UUID {
+	t.Helper()
+
+	var task models.Task
+	require.NoError(t, db.Where("id = ?", taskID).First(&task).Error)
+
+	instanceID := uuid.New()
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID: instanceID, JobRunID: runID, TaskID: taskID, AtomID: task.AtomID,
+		Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: "[]",
+		Status: string(TaskStatusRunning), PartitionIndex: partition,
+	}).Error)
+	return instanceID
+}
+
+// TestCleanPartitionDoesNotReleaseItsOwnRunsHold is the fan-out correctness
+// case: this evaluator is per-INSTANCE, so partition 3 of a fanned step passing
+// says nothing about partition 2 of the same trigger having failed. Without a
+// run-identity guard, which partition happened to finish last would decide
+// whether a broken dataset stayed held.
+func TestCleanPartitionDoesNotReleaseItsOwnRunsHold(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, breachingInstance, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseAuto)
+
+	var breaching models.TaskRun
+	require.NoError(t, db.Where("id = ?", breachingInstance).First(&breaching).Error)
+	cleanInstance := seedInstanceForRun(t, db, breaching.JobRunID, taskID, 1)
+
+	// Partition 0 breaks the contract; partition 1 of the SAME run passes.
+	require.NoError(t, emitSamples(t, store, db, taskID, breachingInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1)
+
+	require.NoError(t, emitSamples(t, store, db, taskID, cleanInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000}))
+
+	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
+		"a clean partition must NOT release the hold another partition of its own run just opened")
+
+	// The reverse order is also safe: a clean partition evaluated FIRST finds no
+	// hold to release, and the breaching one opens it afterwards.
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Equal(t, breaching.JobRunID, *holds[0].LastBreachRunID)
+
+	// A genuinely LATER run of the same job still releases.
+	_, laterTaskID, laterInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
+	require.NoError(t, emitSamples(t, store, db, laterTaskID, laterInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000}))
+	assert.Empty(t, activeHolds(t, db, "warehouse/orders"),
+		"a later clean run of the holder job is exactly what release: auto promises")
+}
+
+// TestRunStartedBeforeTheBreachDoesNotRelease covers the concurrent-runs shape:
+// with concurrency.maxRuns > 1 an older, clean run can finish after a newer run
+// opened a hold. Evidence gathered before the breach cannot disprove it.
+func TestRunStartedBeforeTheBreachDoesNotRelease(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, olderInstance, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseAuto)
+
+	// Backdate the older run so it demonstrably predates the breach.
+	var older models.TaskRun
+	require.NoError(t, db.Where("id = ?", olderInstance).First(&older).Error)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", older.JobRunID).
+		Update("started_at", time.Now().UTC().Add(-time.Hour)).Error)
+
+	// A NEWER run breaks the dataset.
+	_, newerTaskID, newerInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
+	require.NoError(t, emitSamples(t, store, db, newerTaskID, newerInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1)
+
+	// The older run finishes clean, after the breach.
+	require.NoError(t, emitSamples(t, store, db, taskID, olderInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000}))
+
+	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
+		"a run that started before the breach cannot be the evidence that disproves it")
+}
+
+// TestStarvedDeltaAssertionDoesNotRelease pins the other half of "clean means
+// clean": a deltaFromBaseline with no usable history yields NO verdict, which
+// must not be read as a passing contract. Starvation is reachable precisely
+// while a dataset is held, because the non-held predicate removes the hold
+// window's samples.
+func TestStarvedDeltaAssertionDoesNotRelease(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+
+	// An absolute bound opens the hold; a deltaFromBaseline sits beside it with
+	// no history at all to evaluate against.
+	spec, err := json.Marshal(jobdef.DatasetAssertions{
+		RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)},
+		Custom: []jobdef.AssertionSpec{
+			{Metric: "dedup_ratio", DeltaFromBaseline: "50%"},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&models.DatasetDeclaration{
+		ID: uuid.New(), JobID: jobID, JobAlias: "alias", StepName: stepName,
+		Name: "warehouse/orders", Direction: models.DatasetDirectionProduces,
+		AssertionsJSON: string(spec), OnViolation: jobdef.DatasetOnViolationHold,
+		Release: jobdef.DatasetReleaseAuto,
+	}).Error)
+
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12},
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01}))
+	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1)
+
+	// A later run satisfies the absolute bound. Its deltaFromBaseline still has
+	// no clean history — every prior sample is inside the hold window — so the
+	// contract was not fully evaluated and must not release.
+	_, laterTaskID, laterInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
+	require.NoError(t, emitSamples(t, store, db, laterTaskID, laterInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000},
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01}))
+
+	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
+		"a starved deltaFromBaseline proves nothing; a contract that could not be evaluated must not release")
+}
+
 // TestCleanRunOfAnotherProducerDoesNotRelease answers plan Open Question 6:
 // only the HOLDER's clean run releases. A second job that also writes the
 // dataset has produced its own slice, not the one that broke.

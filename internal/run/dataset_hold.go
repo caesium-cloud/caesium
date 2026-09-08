@@ -24,6 +24,12 @@ import (
 // is an ordinary race, not a server fault.
 var ErrDatasetHoldNotActive = errors.New("run: dataset hold is not active")
 
+// HoldReasonOpenFailed is the caesium_dataset_holds_total label for a breach
+// whose hold could NOT be opened after the store's contention-retry budget. It
+// is not an assertion kind: it means the breaker itself failed, the task was
+// failed fail-closed instead, and the dataset is NOT held. Alert on it.
+const HoldReasonOpenFailed = "open_failed"
+
 // errDatasetHoldRace is the internal retry signal: the conditional insert lost
 // the race to a twin that was then released before the occurrence append could
 // find it, so the active key is free again and the insert should be re-tried.
@@ -133,12 +139,14 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 			Impact:          impact,
 			OccurrenceCount: 1,
 			OpenedAt:        now,
+			LastBreachAt:    now,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
 		if req.runID != uuid.Nil {
 			runID := req.runID
 			hold.HeldByRunID = &runID
+			hold.LastBreachRunID = &runID
 		}
 		if req.taskID != uuid.Nil {
 			taskID := req.taskID
@@ -154,46 +162,62 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 			existing models.DatasetHold
 			evt      *event.Event
 		)
-		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			res := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "active_key"}},
-				DoNothing: true,
-			}).Create(hold)
-			if res.Error != nil {
-				return res.Error
-			}
-			if res.RowsAffected == 1 {
-				opened = true
-				existing = *hold
-				appended, err := s.appendDatasetHoldEventTx(tx, event.TypeDatasetHeld, hold, impacted, req.violations)
-				if err != nil {
-					return err
+		// The breaker's own write goes through the shared contention-retry
+		// budget like every other store transaction. Without it a transient
+		// dqlite "database is locked" would mean the circuit silently does not
+		// trip for that breach — the violation recorded, no hold, and every
+		// downstream consumer admitted onto the bad data.
+		err := withStoreBusyRetryContext(ctx, func() error {
+			opened = false
+			return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				res := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "active_key"}},
+					DoNothing: true,
+				}).Create(hold)
+				if res.Error != nil {
+					return res.Error
 				}
-				evt = appended
-				return nil
-			}
+				if res.RowsAffected == 1 {
+					opened = true
+					existing = *hold
+					appended, err := s.appendDatasetHoldEventTx(tx, event.TypeDatasetHeld, hold, impacted, req.violations)
+					if err != nil {
+						return err
+					}
+					evt = appended
+					return nil
+				}
 
-			// Lost the race: fold this breach into the live hold as an
-			// occurrence. No event, no counter — the dataset is already broken
-			// and somebody has already been told.
-			update := tx.Model(&models.DatasetHold{}).
-				Where("active_key = ?", key).
-				Updates(map[string]any{
+				// Lost the race: fold this breach into the live hold as an
+				// occurrence. No event, no counter — the dataset is already broken
+				// and somebody has already been told.
+				appendUpdates := map[string]any{
 					"occurrence_count": gorm.Expr("occurrence_count + 1"),
 					"violations":       datatypes.JSON(violations),
 					"reason":           req.reason,
 					"updated_at":       now,
-				})
-			if update.Error != nil {
-				return update.Error
-			}
-			if update.RowsAffected == 0 {
-				// The twin was released between our conflict and this update,
-				// so the key is free; retry the insert rather than dropping the
-				// breach on the floor.
-				return errDatasetHoldRace
-			}
-			return tx.Where("active_key = ?", key).First(&existing).Error
+					// The LATEST breach moves; HeldBy* stay pinned to the first
+					// open. A clean run may only release evidence that postdates
+					// this, and never from this run.
+					"last_breach_at": now,
+				}
+				if req.runID != uuid.Nil {
+					appendUpdates["last_breach_run_id"] = req.runID
+				}
+				update := tx.Model(&models.DatasetHold{}).
+					Where("active_key = ?", key).
+					Updates(appendUpdates)
+				if update.Error != nil {
+					return update.Error
+				}
+				if update.RowsAffected == 0 {
+					// The twin was released between our conflict and this update,
+					// so the key is free; retry the insert rather than dropping the
+					// breach on the floor.
+					return errDatasetHoldRace
+				}
+				return tx.Where("active_key = ?", key).First(&existing).Error
+			})
 		})
 		if errors.Is(err, errDatasetHoldRace) {
 			continue
@@ -242,6 +266,10 @@ type datasetHoldReleaseRequest struct {
 	note       string
 	runID      uuid.UUID
 	tolerances map[string]string
+	// audit, when set, is written in the SAME transaction as the release. An
+	// audit row created afterwards is a row that a crash in between can lose,
+	// which is exactly the case an audit log exists to cover.
+	audit *models.AuditLog
 }
 
 // releaseDatasetHold closes one active hold by id and emits dataset_released.
@@ -258,20 +286,27 @@ func (s *Store) releaseDatasetHold(ctx context.Context, id uuid.UUID, req datase
 		released models.DatasetHold
 		evt      *event.Event
 	)
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, err := s.releaseDatasetHoldTx(tx, id, req, &released)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrDatasetHoldNotActive
-		}
-		appended, err := s.appendDatasetHoldEventTx(tx, event.TypeDatasetReleased, &released, 0, nil)
-		if err != nil {
-			return err
-		}
-		evt = appended
-		return nil
+	err := withStoreBusyRetryContext(ctx, func() error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			ok, err := s.releaseDatasetHoldTx(tx, id, req, &released)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrDatasetHoldNotActive
+			}
+			if req.audit != nil {
+				if err := tx.Create(req.audit).Error; err != nil {
+					return err
+				}
+			}
+			appended, err := s.appendDatasetHoldEventTx(tx, event.TypeDatasetReleased, &released, 0, nil)
+			if err != nil {
+				return err
+			}
+			evt = appended
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -445,6 +480,55 @@ func activeHoldForConsumerTx(tx *gorm.DB, jobID uuid.UUID) (*models.DatasetHold,
 	return &hold, nil
 }
 
+// releasableHold decides whether ONE clean verdict may close ONE active hold.
+//
+// Three conditions, and every one of them exists because a real ordering breaks
+// without it:
+//
+//   - The holder job must be the job running now (plan Open Question 6). A
+//     second producer of the same dataset name re-produced its own slice, not
+//     the one that broke.
+//   - The releasing run must not BE the run that last breached. This evaluator
+//     runs per instance, so partition 3 of a fanned step passing says nothing
+//     about partition 2 of the same trigger having failed — and two steps of one
+//     run producing the same name are the same shape. Without this, which
+//     partition finished last decided whether a broken dataset stayed held.
+//   - The releasing run must have STARTED after the last breach. Two concurrent
+//     runs of one job (concurrency.maxRuns > 1) otherwise let the older, cleaner
+//     run clear a hold the newer run opened while it was in flight: evidence
+//     gathered before the breach cannot disprove it.
+//
+// LastBreachAt/LastBreachRunID (not OpenedAt/HeldByRunID) are the reference
+// points, so an occurrence appended by a second run also has to be outlived.
+func releasableHold(hold *models.DatasetHold, contract declaredContract, runID uuid.UUID, startedAt time.Time) bool {
+	if hold == nil || hold.HeldByJobID != contract.jobID {
+		return false
+	}
+	if hold.LastBreachRunID != nil && *hold.LastBreachRunID == runID {
+		return false
+	}
+	// A run with no recorded start time cannot be shown to postdate the breach,
+	// so it does not release — the safe direction for a breaker.
+	if startedAt.IsZero() || !startedAt.After(hold.LastBreachAt) {
+		return false
+	}
+	return true
+}
+
+// runStartedAtTx reads one run's start time inside the caller's transaction.
+// Zero means "not resolvable", which releasableHold treats as "do not release".
+func runStartedAtTx(tx *gorm.DB, runID uuid.UUID) (time.Time, error) {
+	var row models.JobRun
+	err := tx.Select("id", "started_at").First(&row, "id = ?", runID).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	return row.StartedAt.UTC(), nil
+}
+
 // activeHoldsForDatasetsTx returns the active holds on the given dataset names,
 // keyed by name, inside the caller's transaction. Used by the clean-run release
 // path, which only ever asks about the datasets one task just re-produced.
@@ -503,6 +587,9 @@ type ReleaseHoldParams struct {
 	// Tolerances are the optional per-assertion tolerance windows
 	// (--tolerate <assertion>=<duration>), recorded as evidence on the release.
 	Tolerances map[string]string
+	// Audit is written in the SAME transaction as the release, so a completed
+	// release can never exist without its audit row.
+	Audit *models.AuditLog
 }
 
 // ReleaseHold acks one hold as a human. It is the exported entry point for
@@ -524,6 +611,7 @@ func (s *Store) ReleaseHold(ctx context.Context, id uuid.UUID, params ReleaseHol
 		by:         strings.TrimSpace(params.ReleasedBy),
 		note:       strings.TrimSpace(params.Note),
 		tolerances: params.Tolerances,
+		audit:      params.Audit,
 	})
 }
 

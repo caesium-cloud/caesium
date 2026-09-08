@@ -116,12 +116,16 @@ func BaselineWindow() int {
 //     next gets compared against, or three anomalies in a row would move the
 //     median far enough to silence the assertion mid-incident;
 //   - NOT HELD — a sample observed while the dataset was inside an active
-//     DatasetHold window. The design's third predicate, added with the breaker
-//     itself. While a dataset is held it is by declaration known-bad, so its
-//     observations are not "normal" even when a particular metric happened to
-//     satisfy its own bound; letting a hold window drift the baseline is how a
-//     dataset comes back from an incident with its assertions re-centred on the
-//     incident.
+//     DatasetHold window, OR emitted by the run that OPENED that hold. The
+//     design's third predicate, added with the breaker itself. While a dataset
+//     is held it is by declaration known-bad, so its observations are not
+//     "normal" even when a particular metric happened to satisfy its own bound;
+//     letting a hold window drift the baseline is how a dataset comes back from
+//     an incident with its assertions re-centred on the incident. The
+//     held_by_run_id arm is what makes that true of the breaching run itself:
+//     its samples are written moments BEFORE the hold opens (the evaluator
+//     persists, then dispatches), so a purely time-based window would keep every
+//     metric that run emitted except the one that was rejected.
 //
 // The releasing run is exempted (release_run_id): a clean-run release records
 // its samples and closes the hold in ONE transaction, so those samples are
@@ -146,7 +150,10 @@ func cleanSampleQuery(ctx context.Context, conn *gorm.DB, namespace, name, metri
 	SELECT 1 FROM dataset_holds
 	WHERE dataset_holds.namespace = dataset_metrics.namespace
 		AND dataset_holds.name = dataset_metrics.name
-		AND dataset_holds.opened_at <= dataset_metrics.created_at
+		AND (
+			dataset_holds.opened_at <= dataset_metrics.created_at
+			OR dataset_holds.held_by_run_id = task_runs.job_run_id
+		)
 		AND (dataset_holds.released_at IS NULL OR dataset_holds.released_at > dataset_metrics.created_at)
 		AND (dataset_holds.release_run_id IS NULL OR dataset_holds.release_run_id <> task_runs.job_run_id)
 )`)

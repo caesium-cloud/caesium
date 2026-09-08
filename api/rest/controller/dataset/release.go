@@ -3,9 +3,11 @@ package dataset
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
@@ -21,9 +23,52 @@ type releaseRequest struct {
 	// Reason is the operator's justification. Required: a hold release
 	// overrides the breaker, and "why" is the only thing the next reader has.
 	Reason string `json:"reason"`
-	// Tolerate maps an assertion name to a duration window, the body form of
+	// Tolerate maps an assertion kind to a Go duration window, the body form of
 	// the CLI's `--tolerate <assertion>=<dur>`.
+	//
+	// RECORDED, NOT YET ENFORCED (v1): the entries are validated here and
+	// persisted on the hold as evidence that the operator acked knowingly and
+	// for how long, but no evaluator consults them yet — a breach inside a
+	// tolerance window still re-opens the hold. Suppression is a follow-on. The
+	// grammar is validated rather than accepted verbatim so the field cannot
+	// quietly hold nonsense until the day something reads it.
 	Tolerate map[string]string `json:"tolerate,omitempty"`
+}
+
+// toleranceAssertions is the bounded set of assertion kinds a tolerance window
+// may name — the same enum DataViolation.Assertion carries.
+var toleranceAssertions = map[string]struct{}{
+	runstore.AssertionMin:               {},
+	runstore.AssertionMax:               {},
+	runstore.AssertionDeltaFromBaseline: {},
+	runstore.AssertionMaxLag:            {},
+	runstore.AssertionMissing:           {},
+}
+
+// validateTolerances checks the `--tolerate` grammar: a known assertion kind
+// mapped to a positive Go duration. An unparseable entry is a 400 rather than a
+// row nobody will be able to interpret later.
+func validateTolerances(raw map[string]string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(raw))
+	for assertion, window := range raw {
+		assertion = strings.TrimSpace(assertion)
+		if _, ok := toleranceAssertions[assertion]; !ok {
+			return nil, fmt.Errorf("tolerate: %q is not an assertion kind (one of min, max, deltaFromBaseline, maxLag, missing)", assertion)
+		}
+		window = strings.TrimSpace(window)
+		d, err := time.ParseDuration(window)
+		if err != nil {
+			return nil, fmt.Errorf("tolerate[%s]: %q is not a duration (e.g. 24h)", assertion, window)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("tolerate[%s]: %q must be a positive duration", assertion, window)
+		}
+		out[assertion] = window
+	}
+	return out, nil
 }
 
 // Release handles POST /v1/datasets/holds/:id/release — the human ack that
@@ -59,6 +104,11 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "reason is required")
 	}
 
+	tolerances, err := validateTolerances(body.Tolerate)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
 	principal := releasePrincipal(c)
 	if principal == "" {
 		return echo.NewHTTPError(http.StatusForbidden,
@@ -70,7 +120,7 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		Principal:  principal,
 		SourceIP:   c.RealIP(),
 		Reason:     reason,
-		Tolerances: body.Tolerate,
+		Tolerances: tolerances,
 	})
 	if err != nil {
 		switch {

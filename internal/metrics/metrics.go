@@ -297,6 +297,12 @@ var (
 	// breaches of an already-held dataset append an occurrence and are
 	// deliberately NOT counted here — this counter is the alert-once signal, so
 	// it must move exactly once per hold.
+	//
+	// One label value is not an assertion kind: `open_failed` counts a breach
+	// whose hold could not be written even after the store's contention-retry
+	// budget. The task is failed fail-closed in that case and the dataset is
+	// NOT held, so this series means "the breaker itself is broken" and is
+	// page-worthy on its own.
 	DatasetHoldsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_dataset_holds_total",
