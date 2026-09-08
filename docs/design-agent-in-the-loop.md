@@ -423,6 +423,33 @@ diff attached). Only jobs without authoritative git provenance take the
 direct `jobdefs/diff` + `apply` path. The agent cannot choose the route; the
 executor derives it from provenance.
 
+*Amended 2026-09-07 (Plan 1 N-2):* naming the two routes precisely, since
+[`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) Stream
+F builds the second one as new work.
+
+- **The direct route ships today** (trust-the-substrate C7,
+  `internal/incident/actions.go` `Executor.dispatchApplyJobdefPatch`): for a
+  job with **no** git provenance (`models.Job`'s `ProvenanceRepo` empty), an
+  approved patch applies directly via `jobdefs diff`/`apply`. It is refused
+  outright — `ErrPatchAltersRemediation` — if the proposed definition would
+  change the job's own `metadata.remediation` block; an agent may not edit
+  the policy that governs it.
+- **The Git-PR route is not yet shipped** —
+  [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md)
+  Stream F item **F3**. For a job with non-empty `ProvenanceRepo`, a new
+  `internal/incident/provenance.go` router branches from `ProvenanceRef`,
+  writes the rendered manifest at `ProvenancePath`, and opens a pull request
+  (GitHub first; the forge interface admits others) whose body carries the
+  incident id, the violated assertion, the observed/bound/baseline triple,
+  and the rendered diff. Credentials come from `CAESIUM_GIT_WRITE_CREDENTIALS`
+  (see [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)
+  § "Events, notifications, REST, env") — a grant separate from read-only
+  sync credentials. Until F3 lands, and whenever no credential entry matches
+  the job's repo once it has, a git-synced job's approved patch **degrades to
+  `escalate`** with the rendered diff attached — the behavior already shipped
+  today, which becomes the fallback rather than the only outcome once F3
+  merges.
+
 ### Declarative policy
 
 Job-level opt-in (`pkg/jobdef/definition.go` `Metadata` gains a field):

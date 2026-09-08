@@ -1058,7 +1058,7 @@ precedent for it is warn-mode schema validation, which publishes
       `docs/exec-plans/active/closed-loop-arc.md` (dashboard row only).
       Depends on: A5 + B1 + C4 + D2 + E2 + F5 (every stream's last item — this
       item runs last, in its own trailing wave).
-- [ ] N-2. **Amend the design docs for `CAESIUM_GIT_WRITE_CREDENTIALS` and the
+- [x] N-2. **Amend the design docs for `CAESIUM_GIT_WRITE_CREDENTIALS` and the
       Git-PR provenance route, before F3 lands.** The Source-Of-Truth Note forbids
       adding a config knob the design does not enumerate without amending the
       design first, and
@@ -1080,6 +1080,15 @@ precedent for it is warn-mode schema validation, which publishes
       Files: `docs/design-data-circuit-breaker.md`,
       `docs/design-agent-in-the-loop.md`.
       Depends on: (none — may land any time before F3).
+      **Done:** amended `docs/design-data-circuit-breaker.md` § "Events,
+      notifications, REST, env" (fifth env knob `CAESIUM_GIT_WRITE_CREDENTIALS`,
+      JSON shape modelled on `CAESIUM_JOBDEF_GIT_SOURCES`, separate-grant and
+      degrade-to-`escalate` semantics) and `docs/design-agent-in-the-loop.md`
+      where `apply_jobdef_patch`'s provenance routing is described (documented
+      both the shipped direct route — trust-the-substrate C7,
+      `ErrPatchAltersRemediation` — and the unshipped Git-PR route — Plan 1 F3,
+      `internal/incident/provenance.go`), each under a dated "Amended
+      2026-09-07 (Plan 1 N-2)" marker. F3 may now land.
 
 ## Sequencing & Dependencies
 

@@ -303,7 +303,31 @@ defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
   `CAESIUM_BASELINE_WINDOW=20`, `CAESIUM_BASELINE_MIN_SAMPLES=5`,
   `CAESIUM_DATASET_METRIC_RETENTION=2160h`. (No release-auth toggle: manual
   hold release is unconditionally disabled when `CAESIUM_AUTH_MODE=none` —
-  see Release semantics.)
+  see Release semantics; this is orthogonal to the Git-PR write grant below,
+  which gates a different action.)
+
+  *Amended 2026-09-07 (Plan 1 N-2):* a fifth env knob,
+  `CAESIUM_GIT_WRITE_CREDENTIALS`, backs the Git-PR provenance route of
+  `apply_jobdef_patch` (see
+  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)). Shape it
+  after the shipped `CAESIUM_JOBDEF_GIT_SOURCES` precedent
+  (`pkg/env/jobdef.go` `GitSources`/`GitSourceConfig`/`GitBasicAuth`, a
+  JSON-decoded `envconfig.Decoder`): a JSON array keyed by repo URL or
+  `source_id`, each entry carrying a forge kind (`github` first, the forge
+  interface admits others), an API base URL, and a token — direct or a
+  `secret://` ref, matching `GitBasicAuth`'s `PasswordRef` pattern.
+  **Write credentials are a separate grant from `CAESIUM_JOBDEF_GIT_SOURCES`'s
+  read-only sync credentials** — a source configured for sync is not
+  automatically writable, and vice versa. With no matching entry for a job's
+  provenance repo, the Git-PR route **degrades to `escalate`** carrying the
+  rendered diff rather than half-succeeding, and — like every tier-3 action —
+  it is refused outright under `CAESIUM_AUTH_MODE=none`. This knob is a
+  recorded deviation from this section's original four-knob enumeration; see
+  [`exec-plans/active/data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md)
+  § Source-Of-Truth Note for the authorization
+  ([`closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) § Synergies
+  assigns the Git-PR route to this plan's Stream F) and item **N-2** for this
+  amendment.
 
 ## CLI
 
