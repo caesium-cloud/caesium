@@ -22,9 +22,10 @@ const backfillAcquirePollInterval = 250 * time.Millisecond
 // Outcomes of trying to create one backfill date's run. They double as the
 // caesium_backfill_runs_total result labels.
 const (
-	backfillDateStarted = "started"
-	backfillDateSkipped = "skipped"
-	backfillDateFailed  = "failed"
+	backfillDateStarted   = "started"
+	backfillDateSkipped   = "skipped"
+	backfillDateFailed    = "failed"
+	backfillDateSucceeded = "succeeded"
 )
 
 // backfillDateOutcome classifies what a StartForBackfill error means for one
@@ -288,7 +289,7 @@ func RunBackfill(
 			continue
 		}
 
-		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "started").Inc()
+		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateStarted).Inc()
 
 		wg.Add(1)
 		runID := r.ID
@@ -304,10 +305,10 @@ func RunBackfill(
 			runErr := New(j, WithTriggerID(nil), WithParams(params)).Run(runCtx)
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
-				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "failed").Inc()
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
 				failCount.Add(1)
 			} else {
-				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "succeeded").Inc()
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateSucceeded).Inc()
 				completed.Add(1)
 			}
 		}(runID, logicalDate)

@@ -134,7 +134,12 @@ type DatasetHold struct {
 	// run.cleanSampleQuery can keep excluding the opening run's samples — those
 	// were written just BEFORE OpenedAt, so a purely time-based window would
 	// miss them.
-	LastBreachAt    time.Time  `gorm:"not null;index" json:"last_breach_at"`
+	// It is NULLABLE rather than NOT NULL so AutoMigrate can add it to a table
+	// that already has rows: SQLite refuses a NOT NULL ADD COLUMN without a
+	// constant default, and CURRENT_TIMESTAMP is not one. Every hold this
+	// version opens sets it; NULL means "written before this column existed",
+	// which readers resolve to OpenedAt (see run.datasetHoldLastBreach).
+	LastBreachAt    *time.Time `gorm:"index" json:"last_breach_at,omitempty"`
 	LastBreachRunID *uuid.UUID `gorm:"type:uuid;index" json:"last_breach_run_id,omitempty"`
 
 	// Tolerances records the per-assertion tolerance windows a human ack passed

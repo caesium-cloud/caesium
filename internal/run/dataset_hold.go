@@ -139,7 +139,7 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 			Impact:          impact,
 			OccurrenceCount: 1,
 			OpenedAt:        now,
-			LastBreachAt:    now,
+			LastBreachAt:    &now,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
@@ -168,7 +168,13 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 		// trip for that breach — the violation recorded, no hold, and every
 		// downstream consumer admitted onto the bad data.
 		err := withStoreBusyRetryContext(ctx, func() error {
+			// BOTH are reset per attempt. An attempt that won the insert, built
+			// its dataset_held event and then rolled back on a lock leaves no
+			// row and no persisted event behind; carrying that stale event into
+			// a later attempt that LOSES the race would publish a page for a
+			// hold this call never opened, with nothing in /v1/events behind it.
 			opened = false
+			evt = nil
 			return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 				res := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "active_key"}},
@@ -270,6 +276,18 @@ type datasetHoldReleaseRequest struct {
 	// audit row created afterwards is a row that a crash in between can lose,
 	// which is exactly the case an audit log exists to cover.
 	audit *models.AuditLog
+	// guardNotBreachRun and guardBreachBefore carry releasableHold's recency
+	// conditions INTO the UPDATE's WHERE clause. The clean-run path sets them;
+	// the human ack deliberately does not, because a person acking a hold is
+	// overriding the breaker's judgement on purpose and does not have to lose a
+	// race with it.
+	//
+	// They are what makes the release correct under Postgres READ COMMITTED,
+	// where an occurrence appended between the caller's read and this write is
+	// invisible to the read. Without them the release is a select-then-update —
+	// the very shape the hold-OPEN path is written to avoid.
+	guardNotBreachRun uuid.UUID
+	guardBreachBefore time.Time
 }
 
 // releaseDatasetHold closes one active hold by id and emits dataset_released.
@@ -287,6 +305,9 @@ func (s *Store) releaseDatasetHold(ctx context.Context, id uuid.UUID, req datase
 		evt      *event.Event
 	)
 	err := withStoreBusyRetryContext(ctx, func() error {
+		// Reset per attempt, for the same reason the open path does: a rolled
+		// back attempt's event must never outlive its transaction.
+		evt = nil
 		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			ok, err := s.releaseDatasetHoldTx(tx, id, req, &released)
 			if err != nil {
@@ -344,9 +365,21 @@ func (s *Store) releaseDatasetHoldTx(tx *gorm.DB, id uuid.UUID, req datasetHoldR
 		updates["tolerances"] = datatypes.JSON(encoded)
 	}
 
-	res := tx.Model(&models.DatasetHold{}).
-		Where("id = ? AND status = ?", id, models.DatasetHoldStatusActive).
-		Updates(updates)
+	guarded := tx.Model(&models.DatasetHold{}).
+		Where("id = ? AND status = ?", id, models.DatasetHoldStatusActive)
+	if req.guardNotBreachRun != uuid.Nil {
+		guarded = guarded.Where("(last_breach_run_id IS NULL OR last_breach_run_id <> ?)", req.guardNotBreachRun)
+	}
+	if !req.guardBreachBefore.IsZero() {
+		// NULL last_breach_at is a hold from before the column existed (see the
+		// model); it cannot be shown to postdate the release, so it is compared
+		// on opened_at instead.
+		guarded = guarded.Where(
+			"(CASE WHEN last_breach_at IS NULL THEN opened_at ELSE last_breach_at END) < ?",
+			req.guardBreachBefore.UTC())
+	}
+
+	res := guarded.Updates(updates)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -500,6 +533,21 @@ func activeHoldForConsumerTx(tx *gorm.DB, jobID uuid.UUID) (*models.DatasetHold,
 //
 // LastBreachAt/LastBreachRunID (not OpenedAt/HeldByRunID) are the reference
 // points, so an occurrence appended by a second run also has to be outlived.
+//
+// This function is the cheap PRE-FILTER only. The same two recency conditions
+// are repeated inside releaseDatasetHoldTx's WHERE clause, because a decision
+// taken from a row read earlier in the transaction is not binding under
+// Postgres READ COMMITTED.
+//
+// ON THE TIME COMPARISON: these are two Go wall clocks, not one monotonic
+// source. `JobRun.StartedAt` is stamped by whichever node started the run;
+// `LastBreachAt` by whichever node processed the breaching task's completion.
+// On a multi-node deployment with the run-starting node's clock ahead, a run
+// that genuinely predates a breach could satisfy this test. Two things bound
+// the damage: the run-identity guard covers the same-run case regardless of any
+// clock, and NTP-scale skew is small against the interval between a breach and
+// a later run of the same job. A monotonic ordering would need a shared
+// sequence, which is not worth a new coordination primitive here.
 func releasableHold(hold *models.DatasetHold, contract declaredContract, runID uuid.UUID, startedAt time.Time) bool {
 	if hold == nil || hold.HeldByJobID != contract.jobID {
 		return false
@@ -509,10 +557,20 @@ func releasableHold(hold *models.DatasetHold, contract declaredContract, runID u
 	}
 	// A run with no recorded start time cannot be shown to postdate the breach,
 	// so it does not release — the safe direction for a breaker.
-	if startedAt.IsZero() || !startedAt.After(hold.LastBreachAt) {
+	if startedAt.IsZero() || !startedAt.After(datasetHoldLastBreach(hold)) {
 		return false
 	}
 	return true
+}
+
+// datasetHoldLastBreach resolves a hold's most recent breach time. NULL means
+// the row predates the column, in which case the open IS the only breach this
+// version can prove — see models.DatasetHold.LastBreachAt.
+func datasetHoldLastBreach(hold *models.DatasetHold) time.Time {
+	if hold.LastBreachAt != nil {
+		return hold.LastBreachAt.UTC()
+	}
+	return hold.OpenedAt.UTC()
 }
 
 // runStartedAtTx reads one run's start time inside the caller's transaction.

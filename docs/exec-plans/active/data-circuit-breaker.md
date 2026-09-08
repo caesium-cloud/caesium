@@ -947,6 +947,30 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       assertion kind mapped to a positive Go duration, 400 otherwise) and
       documented as **recorded but NOT yet consulted** — nothing suppresses a
       breach inside a tolerance window in v1.
+      **Second-round review fixes.** (1) The recency guards are repeated inside
+      `releaseDatasetHoldTx`'s WHERE clause, not merely pre-checked: on Postgres
+      READ COMMITTED an occurrence appended between the read and the write is
+      invisible to the read, so a status-only guard would close a hold on
+      evidence predating a breach it was never told about
+      (`TestReleaseGuardIsInTheUpdatePredicate`). (2) The release test is now
+      per-ASSERTION rather than "no verdict at all", because the previous rule
+      let `release: auto` LATCH: a young dataset declaring `min` beside
+      `deltaFromBaseline` opens its hold on `min`, and thereafter records a
+      seeding delta verdict on every good run — while the hold itself keeps
+      those good samples out of the baseline, so the count can never grow past
+      seeding. The rule is now (a) no ENFORCED violation this run, and (b) every
+      assertion the HOLD recorded produced a real, non-violating verdict, via
+      the new pure `run.EvaluatedAssertions`. A seeding verdict on an assertion
+      that did not open the hold no longer blocks; an abstaining
+      `deltaFromBaseline` on the assertion that DID open it still does, and a
+      `missing`-opened hold is disproved by the metric arriving. (3) `evt` is
+      reset per busy-retry attempt beside `opened`, so a rolled-back winning
+      attempt can no longer publish a `dataset_held` with no row behind it —
+      alert-once stays structural. Plus: the fail-closed hold error is joined
+      with, not substituted for, a same-task `fail` verdict; `LastBreachAt` is
+      nullable so AutoMigrate can add it to a populated table; and the
+      cross-node Go-clock comparison behind the start-time guard is documented
+      on `releasableHold` rather than left reading as monotonic.
 - [x] C4. Add the bus event types `dataset_held`, `dataset_released`,
       `run_held_upstream` to `internal/event/bus.go`, flowing through the existing
       persisted-event store and the notification subscriber

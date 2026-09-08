@@ -293,8 +293,8 @@ func TestCleanPartitionDoesNotReleaseItsOwnRunsHold(t *testing.T) {
 	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
 		"a clean partition must NOT release the hold another partition of its own run just opened")
 
-	// The reverse order is also safe: a clean partition evaluated FIRST finds no
-	// hold to release, and the breaching one opens it afterwards.
+	// The hold records THIS run as the last breacher, which is the fact both
+	// guards turn on.
 	holds := activeHolds(t, db, "warehouse/orders")
 	require.Equal(t, breaching.JobRunID, *holds[0].LastBreachRunID)
 
@@ -338,50 +338,186 @@ func TestRunStartedBeforeTheBreachDoesNotRelease(t *testing.T) {
 		"a run that started before the breach cannot be the evidence that disproves it")
 }
 
-// TestStarvedDeltaAssertionDoesNotRelease pins the other half of "clean means
-// clean": a deltaFromBaseline with no usable history yields NO verdict, which
-// must not be read as a passing contract. Starvation is reachable precisely
-// while a dataset is held, because the non-held predicate removes the hold
-// window's samples.
+// declareProducesSpec writes a produced declaration carrying an arbitrary
+// assertion block under onViolation: hold.
+func declareProducesSpec(t *testing.T, db *gorm.DB, jobID uuid.UUID, stepName, name, release string, assertions jobdef.DatasetAssertions) {
+	t.Helper()
+	spec, err := json.Marshal(assertions)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&models.DatasetDeclaration{
+		ID: uuid.New(), JobID: jobID, JobAlias: "alias", StepName: stepName,
+		Name: name, Direction: models.DatasetDirectionProduces,
+		AssertionsJSON: string(spec), OnViolation: jobdef.DatasetOnViolationHold,
+		Release: release,
+	}).Error)
+}
+
+// TestSeedingVerdictBesideAPassingBoundStillReleases is the anti-latch case,
+// and it is the ordinary young-dataset shape rather than an exotic one.
+//
+// A dataset with three clean samples declares `min` AND `deltaFromBaseline`.
+// `min` opens the hold. Every later run then still records a SEEDING delta
+// verdict (three samples is below the cold-start floor) — while the hold itself
+// keeps those good samples out of the baseline, so the count can never grow.
+// If a seeding verdict blocked the release, `release: auto` would behave like
+// `release: manual` forever, with nothing telling the operator why.
+func TestSeedingVerdictBesideAPassingBoundStillReleases(t *testing.T) {
+	setDataAssertions(t, true)
+	setBaselineMinSamples(t, 5)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	// Three clean samples: real history, but below the cold-start floor.
+	base := time.Now().UTC().Add(-24 * time.Hour)
+	for i := range 3 {
+		_, _, seedRun, _ := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+		seedMetric(t, db, seedRun, "warehouse/orders", "rowCount", 5000, base.Add(time.Duration(i)*time.Minute))
+	}
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesSpec(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseAuto,
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000), DeltaFromBaseline: "50%"}})
+
+	// `min` breaks (enforceable) and opens the hold; the delta verdict on the
+	// same run is seeding, so it is NOT part of what the hold records.
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+	assert.Equal(t, AssertionMin, holds[0].Reason)
+
+	// A later run passes `min` but still trips the delta — seeding, therefore
+	// not enforced. The assertion that opened the hold has passed, so the hold
+	// must clear.
+	_, laterTaskID, laterInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
+	require.NoError(t, emitSamples(t, store, db, laterTaskID, laterInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 9000}))
+
+	violations := dataViolationsOf(t, db, laterInstance)
+	require.Len(t, violations, 1, "the delta verdict is still recorded")
+	assert.Equal(t, AssertionDeltaFromBaseline, violations[0].Assertion)
+	assert.True(t, violations[0].Seeding, "and it is seeding, therefore not enforced")
+
+	assert.Empty(t, activeHolds(t, db, "warehouse/orders"),
+		"a seeding verdict on an assertion that did NOT open the hold must not keep it held")
+}
+
+// TestStarvedDeltaAssertionDoesNotRelease is the other half: when the assertion
+// that OPENED the hold cannot be re-evaluated, silence is not a pass.
+//
+// A deltaFromBaseline needs clean history to say anything at all, so a
+// delta-opened hold whose history has since been pruned away would otherwise be
+// released by a run that proved nothing about the very check that broke.
 func TestStarvedDeltaAssertionDoesNotRelease(t *testing.T) {
+	setDataAssertions(t, true)
+	setBaselineMinSamples(t, 3)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	// Enough clean history for the delta to ENFORCE, which is what lets it open
+	// a hold in the first place.
+	base := time.Now().UTC().Add(-24 * time.Hour)
+	for i := range 4 {
+		_, _, seedRun, _ := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+		seedMetric(t, db, seedRun, "warehouse/orders", "rowCount", 10000, base.Add(time.Duration(i)*time.Minute))
+	}
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesSpec(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseAuto,
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{DeltaFromBaseline: "50%"}})
+
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+	require.Equal(t, AssertionDeltaFromBaseline, holds[0].Reason)
+
+	// The retention pruner erases the pre-hold window during a long hold — the
+	// pathological case the release rule's comment names. The next run now has
+	// nothing to compare against.
+	require.NoError(t, db.Where("created_at < ?", base.Add(time.Hour)).
+		Delete(&models.DatasetMetric{}).Error)
+
+	_, laterTaskID, laterInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
+	require.NoError(t, emitSamples(t, store, db, laterTaskID, laterInstance,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10000}))
+
+	assert.Empty(t, dataViolationsOf(t, db, laterInstance),
+		"the delta abstained: no history, so no verdict either way")
+	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
+		"an assertion that abstained has not been disproved; the hold waits for a human ack")
+}
+
+// TestReleaseGuardIsInTheUpdatePredicate proves the recency conditions are
+// enforced by the WRITE, not merely by the read that precedes it.
+//
+// Under Postgres READ COMMITTED an occurrence appended between the caller's
+// read and its update is invisible to the read, so a status-only guard would
+// close the hold on evidence that predates a breach it was never told about.
+// This test simulates exactly that interleaving: it reads a hold, lets a fresh
+// breach land, and then issues the release with the STALE values.
+func TestReleaseGuardIsInTheUpdatePredicate(t *testing.T) {
 	setDataAssertions(t, true)
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
 
 	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
-
-	// An absolute bound opens the hold; a deltaFromBaseline sits beside it with
-	// no history at all to evaluate against.
-	spec, err := json.Marshal(jobdef.DatasetAssertions{
-		RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)},
-		Custom: []jobdef.AssertionSpec{
-			{Metric: "dedup_ratio", DeltaFromBaseline: "50%"},
-		},
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.Create(&models.DatasetDeclaration{
-		ID: uuid.New(), JobID: jobID, JobAlias: "alias", StepName: stepName,
-		Name: "warehouse/orders", Direction: models.DatasetDirectionProduces,
-		AssertionsJSON: string(spec), OnViolation: jobdef.DatasetOnViolationHold,
-		Release: jobdef.DatasetReleaseAuto,
-	}).Error)
-
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseAuto)
 	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
-		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12},
-		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01}))
-	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1)
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
 
-	// A later run satisfies the absolute bound. Its deltaFromBaseline still has
-	// no clean history — every prior sample is inside the hold window — so the
-	// contract was not fully evaluated and must not release.
-	_, laterTaskID, laterInstance, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
-	require.NoError(t, emitSamples(t, store, db, laterTaskID, laterInstance,
-		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000},
-		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+	hold := holds[0]
 
-	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
-		"a starved deltaFromBaseline proves nothing; a contract that could not be evaluated must not release")
+	// What the releasing run read, and would have decided on: it started after
+	// the breach it knows about, and is not the run that made it.
+	staleStartedAt := datasetHoldLastBreach(&hold).Add(time.Second)
+	releasingRun := uuid.New()
+	require.True(t, releasableHold(&hold, declaredContract{jobID: jobID}, releasingRun, staleStartedAt),
+		"the pre-filter must say yes, or this test proves nothing about the UPDATE")
+
+	// …and then a concurrent breach lands, invisible to that read.
+	freshBreach := staleStartedAt.Add(time.Minute)
+	require.NoError(t, db.Model(&models.DatasetHold{}).Where("id = ?", hold.ID).
+		Updates(map[string]any{"last_breach_at": freshBreach, "occurrence_count": 2}).Error)
+
+	var released models.DatasetHold
+	ok, err := store.releaseDatasetHoldTx(db, hold.ID, datasetHoldReleaseRequest{
+		reason:            models.DatasetHoldReleaseCleanRun,
+		by:                "system",
+		runID:             releasingRun,
+		guardNotBreachRun: releasingRun,
+		guardBreachBefore: staleStartedAt,
+	}, &released)
+	require.NoError(t, err)
+	assert.False(t, ok, "the UPDATE must refuse a release whose evidence predates the newest breach")
+	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1)
+
+	// The same guard also refuses the run that made the breach, whatever it read.
+	ok, err = store.releaseDatasetHoldTx(db, hold.ID, datasetHoldReleaseRequest{
+		reason:            models.DatasetHoldReleaseCleanRun,
+		by:                "system",
+		guardNotBreachRun: *hold.LastBreachRunID,
+		guardBreachBefore: freshBreach.Add(time.Hour),
+	}, &released)
+	require.NoError(t, err)
+	assert.False(t, ok, "a run may not release a hold it last breached")
+
+	// A genuinely later, different run still releases — the guard is not a wall.
+	ok, err = store.releaseDatasetHoldTx(db, hold.ID, datasetHoldReleaseRequest{
+		reason:            models.DatasetHoldReleaseCleanRun,
+		by:                "system",
+		runID:             releasingRun,
+		guardNotBreachRun: releasingRun,
+		guardBreachBefore: freshBreach.Add(time.Hour),
+	}, &released)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Empty(t, activeHolds(t, db, "warehouse/orders"))
 }
 
 // TestCleanRunOfAnotherProducerDoesNotRelease answers plan Open Question 6:

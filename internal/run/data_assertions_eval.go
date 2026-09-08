@@ -242,6 +242,86 @@ func EvaluateAssertions(
 	return violations
 }
 
+// AssertionRef identifies one declared assertion: the metric it reads and the
+// kind of check it makes. It is the key the clean-run release matches a hold's
+// recorded violations against.
+type AssertionRef struct {
+	Metric    string `json:"metric"`
+	Assertion string `json:"assertion"`
+}
+
+// EvaluatedAssertions returns the declared assertions that produced a DEFINITE
+// verdict for this observation — that is, the ones that were actually decided,
+// whether they passed or broke. It excludes the ABSTENTIONS, which are the
+// whole reason this function exists:
+//
+//   - a metric the run never emitted (that is a `missing` violation, and every
+//     other check on that metric is skipped);
+//   - a `deltaFromBaseline` with no clean history, or a history whose median is
+//     exactly zero — evaluateDelta returns nil for both, so "no violation" there
+//     means "no opinion", not "passed".
+//
+// Pairing it with the run's violations is what lets the breaker distinguish
+// "this assertion is fine again" from "this assertion could not be checked".
+// It is pure, like the rest of this file, so Plan 3's backtest can ask the same
+// question of recorded history.
+//
+// The cold-start floor is deliberately NOT applied here: a seeding verdict is a
+// real evaluation that was merely not enforced, so it belongs in this set and
+// the caller decides what a seeding outcome means to it.
+func EvaluatedAssertions(
+	assertions *jobdef.DatasetAssertions,
+	observed map[string]float64,
+	baselines map[string]*BaselineStats,
+) []AssertionRef {
+	if assertions.IsEmpty() {
+		return nil
+	}
+
+	var refs []AssertionRef
+	add := func(spec *jobdef.AssertionSpec, metric string) {
+		if spec == nil || metric == "" {
+			return
+		}
+		if _, emitted := observed[metric]; !emitted {
+			return
+		}
+		if spec.Min != nil {
+			refs = append(refs, AssertionRef{Metric: metric, Assertion: AssertionMin})
+		}
+		if spec.Max != nil {
+			refs = append(refs, AssertionRef{Metric: metric, Assertion: AssertionMax})
+		}
+		if raw := strings.TrimSpace(spec.DeltaFromBaseline); raw != "" {
+			if _, err := jobdef.ParseDeltaFromBaseline(raw); err != nil {
+				return
+			}
+			// Exactly evaluateDelta's abstention conditions, kept beside it so
+			// the two cannot drift.
+			baseline := baselines[metric]
+			if baseline == nil || baseline.Samples == 0 || baseline.Median == 0 {
+				return
+			}
+			refs = append(refs, AssertionRef{Metric: metric, Assertion: AssertionDeltaFromBaseline})
+		}
+	}
+
+	add(assertions.RowCount, jobdef.AssertionMetricName(assertions.RowCount, jobdef.DefaultRowCountMetric))
+	add(assertions.NullRate, jobdef.AssertionMetricName(assertions.NullRate, jobdef.DefaultNullRateMetric))
+	if assertions.Freshness != nil {
+		watermark := strings.TrimSpace(assertions.Freshness.Watermark)
+		maxLag, err := time.ParseDuration(strings.TrimSpace(assertions.Freshness.MaxLag))
+		if _, emitted := observed[watermark]; watermark != "" && emitted && err == nil && maxLag > 0 {
+			refs = append(refs, AssertionRef{Metric: watermark, Assertion: AssertionMaxLag})
+		}
+	}
+	for i := range assertions.Custom {
+		spec := &assertions.Custom[i]
+		add(spec, strings.TrimSpace(spec.Metric))
+	}
+	return refs
+}
+
 // EvaluateAssertion evaluates ONE declared bound triple against one observation.
 // It is the smallest pure unit — side-effect free, no I/O — and is exported
 // alongside EvaluateAssertions so a caller holding a single spec (a backtest
