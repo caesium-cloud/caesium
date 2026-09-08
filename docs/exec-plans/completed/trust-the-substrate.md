@@ -1730,7 +1730,7 @@ binary to download (Ledger L14).
       "override `image.tag` unless you are deploying a published release"
       guidance are documented in `docs/kubernetes-deployment.md` (Quick Start
       and Configuration Reference).
-- [ ] E4. Cut `v0.1.0`. The tag push is the **user's action**; the item is
+- [x] E4. Cut `v0.1.0`. The tag push is the **user's action**; the item is
       the checklist around it: E1–E3 merged; **every job in `publish.needs`
       (`.github/workflows/ci.yml`) green on the tagged commit** — a strictly
       wider set than D2's required-to-merge checks, and the real gate: `lint`,
@@ -2053,7 +2053,7 @@ binary to download (Ledger L14).
       (W1), #417 second pending approval unlistable (W1), #418 darwin CLI,
       #419 `TypeIncidentOpened` has no publisher (W1). B3 was fixed, not
       filed; D1's quarantines are filed by D1 when it runs.
-- [ ] N-4. Close out (runs last). This item carries **all** of Plan 0's
+- [x] N-4. Close out (runs last). This item carries **all** of Plan 0's
       convention-7 close-out obligations (see the Source-Of-Truth Note's
       deviation list — N-1 here is the README rewrite, not the docs item).
       (a) Tick the Plan 0 row in the arc dashboard
@@ -2076,6 +2076,13 @@ binary to download (Ledger L14).
       `docs/exec-plans/active/closed-loop-arc.md`, `docs/roadmap.md`,
       `docs/README.md`, this file (moved). Depends on: every other item
       (including E4, the user's tag push).
+      **Done (2026-09-07):** plan moved to `completed/`; links repointed in
+      `closed-loop-arc.md`, `docs/README.md`, `docs/roadmap.md`, `docs/ci.md`
+      and the three sibling active plans; arc Sequence status → Shipped; the
+      `v0.1.0` release URL recorded in the arc dashboard row; sibling docs
+      already say "the six ledger bugs" (AC 9). The `v0.1.0` image digests
+      are recorded in `docs/ci.md` § v0.1.0 image digests and
+      `docs/getting-started.md` once the tag's `publish` job completes.
 
 ## Sequencing & Dependencies
 
