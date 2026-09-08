@@ -49,18 +49,20 @@ func DataAssertionsEnabled() bool {
 //     trip an assertion or (Stream C) open a hold;
 //  2. loads the step's declared produced datasets and their assertion specs off
 //     the registry (models.DatasetDeclaration), never by re-parsing the jobdef;
-//  3. loads the rolling baseline for every metric an assertion reads — BEFORE
-//     step 4, which is what keeps this run's own sample out of the baseline it
-//     is judged against (see loadAssertionBaselines);
-//  4. persists the emitted samples as DatasetMetric rows, INCLUDING metrics no
-//     assertion names yet — free baseline history for an assertion added later;
-//  5. evaluates the declared contract and dispatches the verdict.
+//  3. loads the rolling baseline for every metric a deltaFromBaseline assertion
+//     reads — BEFORE step 5, which is what keeps this run's own sample out of
+//     the baseline it is judged against (see loadAssertionBaselines);
+//  4. evaluates the declared contract through the pure core;
+//  5. persists the emitted samples as DatasetMetric rows — INCLUDING metrics no
+//     assertion names yet, free baseline history for an assertion added later —
+//     marking the ones an enforced violation rejected so they never become the
+//     baseline they broke;
+//  6. persists the verdicts and dispatches them.
 //
 // Dispatch mirrors schema validation exactly: `fail` returns an error the
 // executors escalate into a red run; `warn` persists the violations onto the
-// task run and publishes data_violation_recorded so the leader-gated incident
-// subscriber can see a non-failing breach. `hold` behaves as `warn` here and
-// logs that the breaker itself lands in Stream C.
+// task run and publishes data_violation_recorded. `hold` behaves as `warn` here
+// and logs that the breaker itself lands in Stream C.
 //
 // The signature is instance-aware on purpose: a fanned step has N TaskRun rows
 // per trigger and each must own its samples AND its verdict. See the fan-out
@@ -70,6 +72,16 @@ func DataAssertionsEnabled() bool {
 // infrastructure problem — a lost row, a failed metric insert, a corrupt
 // registry spec — is logged and swallowed, because losing an observation must
 // not turn a successful run red.
+//
+// KNOWN LIMITATION (tracked, not fixed here): a truncated or unreadable marker
+// stream is indistinguishable from a missing metric. Both executors tolerate a
+// log-read or parse failure by passing nil samples, and the marker parser's own
+// `MetricsTruncated` flag (pkg/task, MaxMetricsBytes) is not threaded into this
+// seam — so a lost observation currently reads as "the step never emitted this
+// metric" and, under onViolation: fail, turns a green run red for an
+// infrastructure reason rather than a data one. Closing it means widening the
+// three executor call sites to pass the flag, which is deliberately out of
+// scope for B1.
 func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, samples []pkgtask.DatasetMetricSample) error {
 	if !DataAssertionsEnabled() {
 		return nil
@@ -112,18 +124,22 @@ func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, sa
 	}
 
 	names := declaredDatasetNames(declarations)
+	namespaces := declaredNamespaces(declarations)
 	observed := observedByDataset(samples, names)
 	now := time.Now()
 
-	// Baselines are read BEFORE this run's samples are inserted. That is what
-	// makes "the current run never counts toward its own baseline" true on the
-	// worker path too, where the row may already be marked succeeded by the
-	// time a later attempt's samples land.
+	// Baselines are read BEFORE this run's samples are inserted, so a run can
+	// never be part of the baseline it is judged against. (Baseline's own
+	// `created_at < asOf` cut is the second guard; neither relies on the
+	// TaskRun's status, which at this seam is still `running` on all three
+	// executor paths.)
 	baselines := loadAssertionBaselines(ctx, store.db, contracts, now)
 
-	persistDatasetMetrics(ctx, store.db, row, runID, taskID, samples, names)
+	verdicts := evaluateContracts(contracts, observed, baselines, now)
 
-	return dispatchDataAssertions(store, runID, taskID, row, contracts, observed, baselines, now)
+	persistDatasetMetrics(ctx, store.db, row, runID, taskID, samples, names, namespaces, rejectedMetrics(verdicts))
+
+	return dispatchDataAssertions(store, runID, taskID, row, verdicts)
 }
 
 // declaredContract pairs a produced-dataset registry row with its decoded
@@ -134,6 +150,14 @@ type declaredContract struct {
 	namespace   string
 	assertions  *jobdef.DatasetAssertions
 	onViolation string
+}
+
+// datasetVerdict is one dataset's evaluated contract: the verdicts the pure
+// core returned, kept beside the contract that produced them so both the
+// sample-marking pass and the dispatch pass read the same result.
+type datasetVerdict struct {
+	contract   declaredContract
+	violations []DataViolation
 }
 
 // declaredContracts decodes the assertion spec off each produced declaration.
@@ -157,13 +181,9 @@ func declaredContracts(declarations []models.DatasetDeclaration) []declaredContr
 		if assertions.IsEmpty() {
 			continue
 		}
-		namespace := ""
-		if decl.Namespace != nil {
-			namespace = *decl.Namespace
-		}
 		contracts = append(contracts, declaredContract{
 			name:        decl.Name,
-			namespace:   namespace,
+			namespace:   declarationNamespace(decl),
 			assertions:  &assertions,
 			onViolation: jobdef.EffectiveOnViolation(decl.OnViolation),
 		})
@@ -171,10 +191,61 @@ func declaredContracts(declarations []models.DatasetDeclaration) []declaredContr
 	return contracts
 }
 
+// evaluateContracts runs the pure core once per declared contract. It performs
+// no I/O of its own, so the shell's entire decision surface is one call away
+// from the function Plan 3's backtest replays.
+func evaluateContracts(
+	contracts []declaredContract,
+	observed map[string]map[string]float64,
+	baselines map[string]map[string]*BaselineStats,
+	now time.Time,
+) []datasetVerdict {
+	if len(contracts) == 0 {
+		return nil
+	}
+	minSamples := BaselineMinSamples()
+	verdicts := make([]datasetVerdict, 0, len(contracts))
+	for _, contract := range contracts {
+		violations := EvaluateAssertions(contract.name, contract.assertions, observed[contract.name],
+			baselines[contract.name], minSamples, now)
+		for i := range violations {
+			violations[i].Namespace = contract.namespace
+		}
+		verdicts = append(verdicts, datasetVerdict{contract: contract, violations: violations})
+	}
+	return verdicts
+}
+
+// metricRef identifies one (dataset, metric) pair.
+type metricRef struct {
+	dataset string
+	metric  string
+}
+
+// rejectedMetrics is the set of (dataset, metric) pairs an ENFORCED violation
+// named. Their samples are recorded but flagged, so the value the breaker just
+// rejected never becomes the baseline it is next compared against. A seeding
+// verdict is deliberately absent: that value was compared against a baseline
+// too short to trust, so flagging it would discard honest history.
+func rejectedMetrics(verdicts []datasetVerdict) map[metricRef]struct{} {
+	rejected := make(map[metricRef]struct{})
+	for _, verdict := range verdicts {
+		for _, violation := range verdict.violations {
+			if !violation.Enforceable() {
+				continue
+			}
+			rejected[metricRef{dataset: violation.Dataset, metric: violation.Metric}] = struct{}{}
+		}
+	}
+	return rejected
+}
+
 // loadAssertionBaselines reads the rolling baseline for every (dataset, metric)
-// an assertion reads, as of `now`. A read error yields no baseline for that
-// metric, which the pure core reads as "no history": a deltaFromBaseline
-// assertion then produces no verdict at all rather than a fabricated breach.
+// a deltaFromBaseline assertion reads, as of `now`. Absolute bounds and the
+// freshness assertion need no history, so no query is issued for their metrics.
+// A read error yields no baseline for that metric, which the pure core reads as
+// "no history": a deltaFromBaseline assertion then produces no verdict at all
+// rather than a fabricated breach.
 func loadAssertionBaselines(ctx context.Context, conn *gorm.DB, contracts []declaredContract, now time.Time) map[string]map[string]*BaselineStats {
 	if len(contracts) == 0 {
 		return nil
@@ -182,7 +253,7 @@ func loadAssertionBaselines(ctx context.Context, conn *gorm.DB, contracts []decl
 	window := BaselineWindow()
 	baselines := make(map[string]map[string]*BaselineStats, len(contracts))
 	for _, contract := range contracts {
-		metricNames := AssertionMetrics(contract.assertions)
+		metricNames := BaselineMetrics(contract.assertions)
 		if len(metricNames) == 0 {
 			continue
 		}
@@ -221,9 +292,10 @@ func observedByDataset(samples []pkgtask.DatasetMetricSample, declared []string)
 	return observed
 }
 
-// persistDatasetMetrics writes the emitted samples as DatasetMetric rows. A
-// failure here is logged and swallowed — the observation is lost, the task is
-// not, and evaluation still runs on the in-memory samples.
+// persistDatasetMetrics writes the emitted samples as DatasetMetric rows,
+// flagging the ones an enforced violation rejected. A failure here is logged
+// and swallowed — the observation is lost, the task is not, and the verdict has
+// already been computed from the in-memory samples.
 func persistDatasetMetrics(
 	ctx context.Context,
 	conn *gorm.DB,
@@ -231,6 +303,8 @@ func persistDatasetMetrics(
 	runID, taskID uuid.UUID,
 	samples []pkgtask.DatasetMetricSample,
 	declared []string,
+	namespaces map[string]string,
+	rejected map[metricRef]struct{},
 ) {
 	if len(samples) == 0 {
 		return
@@ -241,13 +315,15 @@ func persistDatasetMetrics(
 		if !ok {
 			continue
 		}
+		_, violated := rejected[metricRef{dataset: name, metric: sample.Metric}]
 		rows = append(rows, models.DatasetMetric{
 			ID:        uuid.New(),
 			TaskRunID: row.ID,
-			Namespace: "",
+			Namespace: namespaces[name],
 			Name:      name,
 			Metric:    sample.Metric,
 			Value:     sample.Value,
+			Violated:  violated,
 		})
 	}
 	if len(rows) == 0 {
@@ -260,41 +336,34 @@ func persistDatasetMetrics(
 	log.Info("recorded dataset metrics", "run_id", runID, "task_id", taskID, "task_run_id", row.ID, "metrics", len(rows))
 }
 
-// dispatchDataAssertions evaluates every declared contract through the pure
-// core and applies the recorded verdicts: it persists them onto the task run,
-// counts them, and either escalates (fail) or publishes the non-failing event
-// (warn / hold / seeding).
+// dispatchDataAssertions applies the evaluated verdicts: it counts them,
+// persists them onto the task run, and either escalates (fail) or publishes the
+// non-failing event (warn / hold / seeding).
 func dispatchDataAssertions(
 	store *Store,
 	runID, taskID uuid.UUID,
 	row *models.TaskRun,
-	contracts []declaredContract,
-	observed map[string]map[string]float64,
-	baselines map[string]map[string]*BaselineStats,
-	now time.Time,
+	verdicts []datasetVerdict,
 ) error {
-	if len(contracts) == 0 {
+	if len(verdicts) == 0 {
 		return nil
 	}
 
-	minSamples := BaselineMinSamples()
 	var (
 		recorded []DataViolation
 		enforced []DataViolation
 		datasets []string
 	)
 
-	for _, contract := range contracts {
-		violations := EvaluateAssertions(contract.name, contract.assertions, observed[contract.name],
-			baselines[contract.name], minSamples, now)
-		if len(violations) == 0 {
+	for _, verdict := range verdicts {
+		contract := verdict.contract
+		if len(verdict.violations) == 0 {
 			metrics.DataAssertionsTotal.WithLabelValues(assertionResultPass).Inc()
 			continue
 		}
 
 		datasets = append(datasets, contract.name)
-		for _, violation := range violations {
-			violation.Namespace = contract.namespace
+		for _, violation := range verdict.violations {
 			escalates := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationFail
 			switch {
 			case !violation.Enforceable():
@@ -316,7 +385,7 @@ func dispatchDataAssertions(
 			"task_run_id", row.ID,
 			"dataset", contract.name,
 			"on_violation", contract.onViolation,
-			"violations", len(violations),
+			"violations", len(verdict.violations),
 		)
 		if contract.onViolation == jobdef.DatasetOnViolationHold {
 			// Recorded honestly rather than silently downgraded: the breaker
@@ -349,9 +418,14 @@ func dispatchDataAssertions(
 
 // publishDataViolationEvent emits data_violation_recorded for a non-failing
 // violation, the data-quality twin of publishSchemaViolationEvent: the task did
-// NOT fail, so nothing else would ever tell the leader-gated incident
-// subscriber that a declared contract broke. Best-effort; a nil store is a
-// no-op.
+// NOT fail, so nothing else records that a declared contract broke.
+//
+// Consumers today are the persisted event store (and therefore `caesium why`,
+// the run timeline and any NotificationPolicy matching on the type) — NOT the
+// leader-gated incident subscriber, whose classifierFailureTypes set is
+// unchanged by this item. The plan's incident entry point for data quality is
+// F1, and it keys off C1's `dataset_held`, not off this event. Best-effort; a
+// nil store is a no-op.
 func publishDataViolationEvent(store *Store, runID, taskID uuid.UUID, count int, datasets []string) {
 	if store == nil {
 		return
@@ -440,4 +514,28 @@ func declaredDatasetNames(declarations []models.DatasetDeclaration) []string {
 		names = append(names, declarations[i].Name)
 	}
 	return names
+}
+
+// declaredNamespaces maps each declared dataset name to the namespace its
+// registry row carries, so a persisted sample is written under the SAME
+// namespace the baseline read will later query it by. Getting these two out of
+// step would silently return zero samples for every namespaced dataset the day
+// namespaces are populated. An undeclared name (an explicit marker selector)
+// has no row and resolves to the empty namespace.
+func declaredNamespaces(declarations []models.DatasetDeclaration) map[string]string {
+	namespaces := make(map[string]string, len(declarations))
+	for i := range declarations {
+		namespaces[declarations[i].Name] = declarationNamespace(&declarations[i])
+	}
+	return namespaces
+}
+
+// declarationNamespace reads the nullable namespace off a registry row. Nil is
+// the v1 state and reads as the empty string, which is what both DatasetMetric
+// and Baseline use for an unnamespaced dataset.
+func declarationNamespace(decl *models.DatasetDeclaration) string {
+	if decl == nil || decl.Namespace == nil {
+		return ""
+	}
+	return *decl.Namespace
 }

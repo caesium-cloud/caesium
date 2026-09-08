@@ -586,12 +586,14 @@ executors), so it never re-touches the executor call sites.
       single spec and `run.AssertionMetrics` for "which metrics does this
       contract read"; `EvaluateDataAssertions` is the I/O shell.
       **Decisions:** (1) baselines are loaded BEFORE this run's samples are
-      inserted, which is what keeps a run out of its own baseline on the worker
-      path (where the row is already `succeeded` at the seam) — asserted, not
-      assumed. (2) The seam no longer short-circuits on zero samples: a step that
-      emits nothing must still fail its declared contract, at the cost of one
-      indexed declarations read per succeeded task on a flag-on lane.
-      (3) `onViolation` unset defaults to `warn`
+      inserted, which is what keeps a run out of its own baseline — together
+      with `Baseline`'s own `created_at < asOf` cut, and NOT with any assumption
+      about the TaskRun's status, which is still `running` at the seam on all
+      three executor paths (the worker calls it before `reportCompletion`).
+      Asserted, not assumed. (2) The seam no longer short-circuits on zero
+      samples: a step that emits nothing must still fail its declared contract,
+      at the cost of one indexed declarations read per succeeded task on a
+      flag-on lane. (3) `onViolation` unset defaults to `warn`
       (`jobdef.EffectiveOnViolation`, beside `EffectiveRelease`). (4) A
       `deltaFromBaseline` with NO baseline (nil/zero samples) or a zero median
       yields no verdict rather than a fabricated breach; only a real breach on a
@@ -604,6 +606,31 @@ executors), so it never re-touches the executor call sites.
       counts as `warn`. (7) `run.TaskRun` gained `data_violations` on the task
       read surface (mirroring `schema_violations`) and `retryResetColumns()`
       clears it, so a retried attempt never carries the previous verdicts.
+      **Baseline hygiene (added after adversarial review).** A `fail` verdict is
+      itself an attempt failure, so the executors retry the same TaskRun row —
+      and the samples were already written. Two guards, both part of the ONE
+      reset contract now: `models.DatasetMetric` carries `Violated`, set when an
+      ENFORCED (non-seeding) violation named that exact (dataset, metric), and
+      `cleanSampleQuery` filters it out — so a rejected value is kept for Plan 3's
+      replay and for `caesium why` but never becomes the baseline it broke (this
+      also settles the warn-mode case, where three anomalies in a row would
+      otherwise move the median far enough to silence the assertion mid-incident);
+      and `clearAttemptDatasetMetricsTx` deletes the retried attempt's samples
+      wherever `retryResetColumns()` is applied (`RetryTaskInstance`,
+      `RetryTaskClaimedInstance`, `retryTask`, `RetryPartition`,
+      `RetryFromFailure`), so one logical run contributes one sample.
+      **C1 note:** the design's third "clean" predicate (non-held) lands beside
+      the `violated` filter in `cleanSampleQuery`.
+      **Known limitation (issue filed by the orchestrator):** a truncated or
+      unreadable marker stream is indistinguishable from a missing metric — the
+      executors' `MetricsTruncated` flag is not threaded into the seam yet, so a
+      lost observation reads as "never emitted" and, under `onViolation: fail`,
+      reddens a run for an infrastructure reason. Documented on
+      `EvaluateDataAssertions`; closing it means widening the three executor call
+      sites. **`data_violation_recorded` has no incident consumer:** it reaches
+      the persisted event store and notification policies only —
+      `classifierFailureTypes` is untouched, and F1 keys data-quality incidents
+      off C1's `dataset_held`.
 
 ### Stream C — Circuit breaker: hold, admission gate, release, events (Phase 2 headline)
 

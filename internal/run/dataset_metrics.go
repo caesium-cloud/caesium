@@ -6,6 +6,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -26,6 +27,30 @@ func InsertDatasetMetrics(ctx context.Context, conn *gorm.DB, rows []models.Data
 		return nil
 	}
 	return conn.WithContext(ctx).Create(&rows).Error
+}
+
+// clearAttemptDatasetMetricsTx deletes the samples one TaskRun recorded for the
+// attempt that is about to be retried. It belongs to the SAME reset contract as
+// retryResetColumns and is called wherever that map is applied — the columns
+// live on task_runs, these rows live in another table, and both are the
+// previous attempt's evidence.
+//
+// Without it a retried instance double-counts: the retry paths reuse one
+// TaskRun row, so attempt 1's samples and attempt 2's samples both hang off it,
+// and when the row finally lands `succeeded` the baseline reads BOTH as clean
+// history of one logical run. That matters most for the case this feature
+// creates: an onViolation: fail verdict is itself an attempt failure, so the
+// value the breaker just rejected would come back as baseline history through
+// the very retry it triggered.
+//
+// Best-effort by design in one respect only: it runs inside the caller's
+// transaction, so a failure rolls the retry back rather than silently leaking
+// rows.
+func clearAttemptDatasetMetricsTx(tx *gorm.DB, taskRunID uuid.UUID) error {
+	if tx == nil || taskRunID == uuid.Nil {
+		return nil
+	}
+	return tx.Where("task_run_id = ?", taskRunID).Delete(&models.DatasetMetric{}).Error
 }
 
 // PruneDatasetMetrics deletes samples older than retention and returns how many

@@ -80,6 +80,12 @@ func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error
 				// would resurrect a terminal row.
 				return ErrTaskInstanceNotRetryable
 			}
+			// Same reset contract, other table: the previous attempt's dataset
+			// metrics must go with its columns, or the retried row carries two
+			// attempts' samples into one baseline.
+			if err := clearAttemptDatasetMetricsTx(tx, taskRunID); err != nil {
+				return err
+			}
 			counts.addTaskRunStatus(1)
 			return nil
 		})
@@ -149,6 +155,10 @@ func (s *Store) RetryTaskClaimedInstance(runID, taskRunID uuid.UUID, attempt int
 			}
 			if result.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
+			}
+			// Same reset contract, other table — see RetryTaskInstance.
+			if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
+				return err
 			}
 			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {

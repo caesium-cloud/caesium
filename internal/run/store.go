@@ -148,11 +148,11 @@ type TaskRun struct {
 	// recorded for this instance. Like SchemaViolations they are read surface:
 	// a warn-mode data violation never fails the run, so this is the only place
 	// an operator (or the UI) sees that a declared contract broke.
-	DataViolations   []DataViolation           `json:"data_violations,omitempty"`
-	BranchSelections []string                  `json:"branch_selections,omitempty"`
-	Quarantine       bool                      `json:"quarantine"`
-	CacheHit         bool                      `json:"cache_hit"`
-	ReplaySafe       bool                      `json:"replay_safe"`
+	DataViolations   []DataViolation `json:"data_violations,omitempty"`
+	BranchSelections []string        `json:"branch_selections,omitempty"`
+	Quarantine       bool            `json:"quarantine"`
+	CacheHit         bool            `json:"cache_hit"`
+	ReplaySafe       bool            `json:"replay_safe"`
 	// The remaining frozen execution inputs. They are `json:"-"` because they
 	// are not API surface — they exist so the LOCAL executor can run a task from
 	// the same row the distributed worker runs it from (issue #354). The
@@ -4460,6 +4460,10 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 			// would resurrect a terminal row.
 			return ErrTaskInstanceNotRetryable
 		}
+		// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
+		if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
+			return err
+		}
 		counts.addTaskRunStatus(1)
 
 		if s.eventStore != nil {
@@ -6428,6 +6432,10 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				Updates(updates).Error; err != nil {
 				return err
 			}
+			// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
+			if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
+				return err
+			}
 			counts.addTaskRunStatus(1)
 
 			if err := invalidateCheckpointsForRetryTx(tx, runID); err != nil {
@@ -6726,6 +6734,11 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
 				if err := tx.Model(tr).Where("id = ?", tr.ID).Updates(retryResetColumns()).Error; err != nil {
+					return err
+				}
+				// Same reset contract, other table — see
+				// clearAttemptDatasetMetricsTx.
+				if err := clearAttemptDatasetMetricsTx(tx, tr.ID); err != nil {
 					return err
 				}
 				resetInstances = append(resetInstances, resetInstance{id: tr.ID, taskID: tr.TaskID})

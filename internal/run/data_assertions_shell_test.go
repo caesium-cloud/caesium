@@ -105,8 +105,12 @@ func TestEvaluateDataAssertions_WarnRecordsTheViolationAndPublishesTheEvent(t *t
 	require.NotNil(t, violations[0].Observed)
 	assert.InDelta(t, 12, *violations[0].Observed, 0.001)
 
-	// The sample is still recorded: a violating run is history too.
-	assert.Len(t, metricRows(t, db), 1)
+	// The sample is still recorded — Plan 3's backtest replays the bad history
+	// and `caesium why` needs the value the breaker rejected — but it is
+	// FLAGGED, so it can never become the baseline it just broke.
+	rows := metricRows(t, db)
+	require.Len(t, rows, 1)
+	assert.True(t, rows[0].Violated)
 
 	select {
 	case evt := <-published:
@@ -236,11 +240,13 @@ func TestEvaluateDataAssertions_SeededDeltaEnforcesAndExcludesItsOwnSample(t *te
 	require.Len(t, violations, 1)
 	assert.False(t, violations[0].Seeding)
 
-	// The self-exclusion property, asserted rather than assumed: this task run
-	// is ALREADY marked succeeded (the distributed worker's state at the seam,
-	// which is the case where an inclusive query would bite) and it emitted
-	// rowCount: 10 — yet the baseline it was judged against holds exactly the
-	// five PRIOR samples, not six with a median dragged toward its own value.
+	// The self-exclusion property, asserted rather than assumed. The row is
+	// seeded `succeeded` deliberately: that is the ONE state in which an
+	// inclusive query would bite, since cleanSampleQuery keeps only succeeded
+	// rows (at the real seam every executor path is still `running` — the
+	// worker calls this before reportCompletion). Even so the baseline holds
+	// exactly the five PRIOR samples, not six with a median dragged toward its
+	// own value, because the read happens before the insert.
 	assert.Equal(t, 5, violations[0].BaselineSamples)
 	require.NotNil(t, violations[0].BaselineMedian)
 	assert.InDelta(t, 10000, *violations[0].BaselineMedian, 0.001)

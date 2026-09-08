@@ -142,6 +142,34 @@ func AssertionMetrics(assertions *jobdef.DatasetAssertions) []string {
 	return metrics
 }
 
+// BaselineMetrics returns the subset of AssertionMetrics whose evaluation
+// actually needs history: the metrics a `deltaFromBaseline` bound reads.
+// Absolute min/max bounds enforce from run one and the freshness assertion
+// measures lag from the evaluation instant, so neither needs a baseline — and
+// loading one for them would be an indexed read per succeeded task that nothing
+// consumes.
+func BaselineMetrics(assertions *jobdef.DatasetAssertions) []string {
+	if assertions.IsEmpty() {
+		return nil
+	}
+	metrics := make([]string, 0, 4)
+	add := func(spec *jobdef.AssertionSpec, metric string) {
+		if spec == nil || strings.TrimSpace(spec.DeltaFromBaseline) == "" {
+			return
+		}
+		if metric = strings.TrimSpace(metric); metric != "" {
+			metrics = append(metrics, metric)
+		}
+	}
+	add(assertions.RowCount, jobdef.AssertionMetricName(assertions.RowCount, jobdef.DefaultRowCountMetric))
+	add(assertions.NullRate, jobdef.AssertionMetricName(assertions.NullRate, jobdef.DefaultNullRateMetric))
+	for i := range assertions.Custom {
+		add(&assertions.Custom[i], assertions.Custom[i].Metric)
+	}
+	sort.Strings(metrics)
+	return metrics
+}
+
 // EvaluateAssertions is the PURE CORE of the data circuit breaker: it turns a
 // declared contract plus one run's observations into verdicts, and does
 // nothing else. It opens no transaction, writes no row, touches no hold, needs
@@ -351,7 +379,9 @@ func EvaluateFreshnessAssertion(dataset string, spec jobdef.FreshnessAssertion, 
 		return nil
 	}
 
-	watermark := time.Unix(int64(*observed), 0).UTC()
+	// Epoch seconds arrive as a float64 and may carry a fraction (pkg/task
+	// preserves it), so convert through nanoseconds rather than truncating.
+	watermark := time.Unix(0, int64(*observed*float64(time.Second))).UTC()
 	lag := at.UTC().Sub(watermark)
 	if lag <= maxLag {
 		return nil

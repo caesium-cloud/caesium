@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/caesium-cloud/caesium/internal/models"
 )
+
+// baselineMinSamples mirrors the server-side default of
+// CAESIUM_BASELINE_MIN_SAMPLES (run.DefaultBaselineMinSamples). No lane
+// overrides it; a lane that ever does must change it here too, and the constant
+// is the one place that decision is spelled instead of a literal 5 in three
+// assertions.
+const baselineMinSamples = 5
 
 // assertionsEvaluatorManifest builds a one-step job that emits
 // ##caesium::metrics and declares an assertion contract over the dataset it
@@ -95,20 +100,6 @@ func (s *IntegrationTestSuite) applyAssertionsJob(alias, manifest string) *jobSu
 	return job
 }
 
-// dataViolationsForRun reads the recorded verdicts off the run's task rows via
-// the catalog handle. It complements the REST read: the route surface is Stream
-// D's, so the row is the honest place to prove persistence.
-func (s *IntegrationTestSuite) dataViolationsForRun(runID string) []string {
-	s.T().Helper()
-
-	conn := s.openIntegrationCatalogGorm()
-	var raw []string
-	s.Require().NoError(conn.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND data_violations IS NOT NULL", runID).
-		Pluck("data_violations", &raw).Error)
-	return raw
-}
-
 // TestDataAssertionsWarnRecordsViolationOnAGreenRun drives the warn
 // disposition end to end: a real container emits a rowCount below the declared
 // min, the run still succeeds, and the violation is visible both on the task
@@ -140,9 +131,12 @@ func (s *IntegrationTestSuite) TestDataAssertionsWarnRecordsViolationOnAGreenRun
 	s.InDelta(12, *task.DataViolations[0].Observed, 0.001)
 	s.False(task.DataViolations[0].Seeding, "an absolute bound enforces from run one, cold start or not")
 
-	persisted := s.dataViolationsForRun(runID)
-	s.Require().NotEmpty(persisted, "the verdict is persisted on the task run, not just rendered")
-	s.Contains(persisted[0], dataset)
+	// The task read surface serialises TaskRun.data_violations straight off the
+	// row (internal/run.convertRunTaskModel), so the assertions above ARE the
+	// persistence proof. A direct catalog read would add nothing and would turn
+	// this scenario into a mid-test SKIP on the lanes without direct dqlite
+	// access (podman, kubernetes), which a lane-matrix reader would misread as
+	// "no coverage".
 }
 
 // TestDataAssertionsFailTurnsTheRunRed drives the fail disposition: a max
@@ -229,7 +223,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsColdStartDeltaIsSeedingOnly() {
 	s.Require().NotEmpty(task.DataViolations, "the seeding verdict is still recorded and surfaced")
 	s.Equal("deltaFromBaseline", task.DataViolations[0].Assertion)
 	s.True(task.DataViolations[0].Seeding, "the verdict must be marked seeding, not silently dropped")
-	s.Less(task.DataViolations[0].BaselineSamples, 5)
+	s.Less(task.DataViolations[0].BaselineSamples, baselineMinSamples)
 }
 
 // TestDataAssertionsSeededDeltaFailsTheRun is the other half of the cold-start
@@ -242,9 +236,9 @@ func (s *IntegrationTestSuite) TestDataAssertionsSeededDeltaFailsTheRun() {
 	alias := fmt.Sprintf("integration-assert-seeded-%d", suffix)
 	dataset := fmt.Sprintf("integration.assert.seeded.%d", suffix)
 
-	// CAESIUM_BASELINE_MIN_SAMPLES defaults to 5; seed exactly that many clean
-	// samples so the next verdict is enforced rather than seeding.
-	s.seedDatasetBaseline(alias, dataset, 10000, 5)
+	// Seed exactly CAESIUM_BASELINE_MIN_SAMPLES clean samples so the next
+	// verdict is enforced rather than seeding.
+	s.seedDatasetBaseline(alias, dataset, 10000, baselineMinSamples)
 
 	step, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": 10})
 	s.Require().NoError(err)
@@ -263,8 +257,11 @@ func (s *IntegrationTestSuite) TestDataAssertionsSeededDeltaFailsTheRun() {
 	s.Require().NotEmpty(task.DataViolations)
 	violation := task.DataViolations[0]
 	s.False(violation.Seeding, "past the floor the verdict enforces")
-	s.GreaterOrEqual(violation.BaselineSamples, 5)
 	s.Require().NotNil(violation.BaselineMedian)
-	s.InDelta(10000, *violation.BaselineMedian, 0.001,
-		"the baseline is the seeder's clean history, and excludes this run's own sample")
+	s.InDelta(10000, *violation.BaselineMedian, 0.001, "the baseline is the seeded clean history")
+	// EXACTLY the seeded samples: this run emitted a sixth, and counting it
+	// would read 6 here. An inequality would pass either way, which is how a
+	// self-exclusion assertion goes quietly inert.
+	s.Equal(baselineMinSamples, violation.BaselineSamples,
+		"the run's own sample must not count toward the baseline it is judged against")
 }
