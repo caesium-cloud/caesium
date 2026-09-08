@@ -248,14 +248,66 @@ func TestReclaimOwnerExpiredClaims_ClearsTheLostAttemptsSamples(t *testing.T) {
 	}).Error)
 	seedMetric(t, db, taskRunID, "warehouse/orders", "rowCount", 3, time.Now().Add(-time.Second))
 
+	// A row of ANOTHER run, equally expired, must be untouched: the reclaim is
+	// scoped to one run, and a delete that swept the table would pass without
+	// this fixture.
+	_, _, otherRunTaskID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", otherRunTaskID).Updates(map[string]any{
+		"claimed_by":       "worker-b",
+		"claim_expires_at": time.Now().UTC().Add(-time.Minute),
+		"owner_generation": 1,
+	}).Error)
+	seedMetric(t, db, otherRunTaskID, "warehouse/orders", "rowCount", 99, time.Now().Add(-time.Second))
+
 	reset, err := store.ReclaimOwnerExpiredClaims(taskRun.JobRunID, 1)
 	require.NoError(t, err)
 	require.Len(t, reset, 1)
-	assert.Empty(t, metricRows(t, db), "the lost attempt's samples are reset with its columns")
+
+	rows := metricRows(t, db)
+	require.Len(t, rows, 1, "only the reclaimed run's samples go")
+	assert.Equal(t, otherRunTaskID, rows[0].TaskRunID)
+}
+
+// TestReclaimOwnerExpiredClaims_LeavesASucceededRowAndItsSample is the P2-5
+// guard: off dqlite a completion can commit between the Find and the UPDATE, in
+// which case the UPDATE correctly skips the row and the DELETE must skip it
+// too — its sample is legitimate baseline history, not a lost attempt's.
+//
+// The interleaving itself cannot be staged in-process (one connection, one
+// transaction), so the property is asserted through the predicate that
+// implements it: a row that is not `running` is neither reclaimed nor cleared,
+// whichever side of the transaction it reached that state on.
+func TestReclaimOwnerExpiredClaims_LeavesASucceededRowAndItsSample(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	_, _, succeededID, _ := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+	var succeeded models.TaskRun
+	require.NoError(t, db.Where("id = ?", succeededID).First(&succeeded).Error)
+	// An expired claim it never got to release — exactly what a row that
+	// completed just as its lease lapsed looks like.
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", succeededID).Updates(map[string]any{
+		"claimed_by":       "worker-a",
+		"claim_expires_at": time.Now().UTC().Add(-time.Minute),
+		"owner_generation": 1,
+	}).Error)
+	seedMetric(t, db, succeededID, "warehouse/orders", "rowCount", 10000, time.Now().Add(-time.Second))
+
+	reset, err := store.ReclaimOwnerExpiredClaims(succeeded.JobRunID, 1)
+	require.NoError(t, err)
+	assert.Empty(t, reset, "a terminal row is not reclaimed")
+
+	var after models.TaskRun
+	require.NoError(t, db.Where("id = ?", succeededID).First(&after).Error)
+	assert.Equal(t, string(TaskStatusSucceeded), after.Status, "and stays terminal")
+	require.Len(t, metricRows(t, db), 1, "its sample is legitimate baseline history")
 }
 
 // TestResetInFlightTasks_ClearsTheLostAttemptsSamples covers the other failover
-// reset — owner takeover and run resumption after a restart.
+// reset — owner takeover and run resumption after a restart. The fixture holds
+// a succeeded sibling in the SAME run and a running row in another run, so a
+// delete that swept either would fail here.
 func TestResetInFlightTasks_ClearsTheLostAttemptsSamples(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -266,11 +318,59 @@ func TestResetInFlightTasks_ClearsTheLostAttemptsSamples(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 	seedMetric(t, db, taskRunID, "warehouse/orders", "rowCount", 3, time.Now().Add(-time.Second))
 
+	// A sibling of the same run that already completed: it is not in flight, so
+	// the reset must not resurrect it and must not take its sample. This is the
+	// P2-5 property at the level a single-connection test can reach — the
+	// UPDATE's `status = running` predicate is what makes it hold whichever
+	// side of the transaction the completion landed on.
+	sibling := models.TaskRun{
+		ID: uuid.New(), JobRunID: taskRun.JobRunID, TaskID: taskRun.TaskID, AtomID: taskRun.AtomID,
+		Engine: taskRun.Engine, Image: taskRun.Image, Command: "[]",
+		Status: string(TaskStatusSucceeded), PartitionIndex: 1,
+	}
+	require.NoError(t, db.Create(&sibling).Error)
+	seedMetric(t, db, sibling.ID, "warehouse/orders", "rowCount", 10000, time.Now().Add(-time.Second))
+
+	// And a running row of a DIFFERENT run, which the reset is not scoped to.
+	_, _, otherRunTaskID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	seedMetric(t, db, otherRunTaskID, "warehouse/orders", "rowCount", 99, time.Now().Add(-time.Second))
+
 	require.NoError(t, store.ResetInFlightTasks(taskRun.JobRunID))
 
 	var reset models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&reset).Error)
-	assert.Equal(t, string(TaskStatusPending), reset.Status, "the row is re-pended exactly as before")
+	assert.Equal(t, string(TaskStatusPending), reset.Status, "the in-flight row is re-pended exactly as before")
 	assert.Equal(t, "", reset.ClaimedBy)
-	assert.Empty(t, metricRows(t, db), "and its samples go with it")
+
+	var after models.TaskRun
+	require.NoError(t, db.Where("id = ?", sibling.ID).First(&after).Error)
+	assert.Equal(t, string(TaskStatusSucceeded), after.Status, "a terminal sibling is never resurrected")
+
+	rows := metricRows(t, db)
+	require.Len(t, rows, 2, "only the reset row's samples go")
+	survivors := []uuid.UUID{rows[0].TaskRunID, rows[1].TaskRunID}
+	assert.Contains(t, survivors, sibling.ID)
+	assert.Contains(t, survivors, otherRunTaskID)
+}
+
+// TestChunkTaskRunIDs pins the batching the failover path binds its `IN (...)`
+// lists with: a fanned run can hold thousands of rows, and the common case must
+// still be one statement.
+func TestChunkTaskRunIDs(t *testing.T) {
+	assert.Equal(t, [][]uuid.UUID{nil}, chunkTaskRunIDs(nil))
+
+	ids := make([]uuid.UUID, maxTaskRunIDsPerStatement)
+	assert.Len(t, chunkTaskRunIDs(ids), 1, "a list that fits is one statement")
+
+	ids = append(ids, uuid.New())
+	chunks := chunkTaskRunIDs(ids)
+	require.Len(t, chunks, 2)
+	assert.Len(t, chunks[0], maxTaskRunIDsPerStatement)
+	assert.Len(t, chunks[1], 1)
+
+	total := 0
+	for _, chunk := range chunks {
+		total += len(chunk)
+	}
+	assert.Equal(t, len(ids), total, "chunking never drops an id")
 }

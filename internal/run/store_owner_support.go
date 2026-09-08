@@ -77,11 +77,21 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			// retry paths' clearAttemptDatasetMetricsTx. A worker that died
 			// between the post-task seam's insert and its completion report
 			// would otherwise leave samples that the re-execution doubles.
+			//
+			// The delete follows what the UPDATE actually matched, not what the
+			// Find returned. Off dqlite (Postgres: a real connection pool at
+			// READ COMMITTED) a completion can land between the two, and the
+			// guarded UPDATE correctly skips that row — deleting its sample
+			// anyway would throw away a legitimate baseline observation.
 			expiredIDs := make([]uuid.UUID, 0, len(expired))
 			for i := range expired {
 				expiredIDs = append(expiredIDs, expired[i].ID)
 			}
-			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, expiredIDs); err != nil {
+			reclaimed, err := taskRunIDsWithStatusTx(tx, expiredIDs, TaskStatusPending)
+			if err != nil {
+				return err
+			}
+			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, reclaimed); err != nil {
 				return err
 			}
 
