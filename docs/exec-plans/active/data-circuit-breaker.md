@@ -173,15 +173,91 @@ decided.
 
 ## Progress (as of 2026-09-08)
 
-Wave 1 shipped Stream A (A1–A5), H-1 and N-2 across three PRs on
-2026-09-07/08. Every code PR passed the orchestrator's scope-aware
-integration gate on its exact head before merge (lint + unit + the default,
-agent, owner-memory and distributed lanes for #434; lint + unit + default lane
-for #433), and — the review bot having reviewed none of them — #434 got a
-substitute Opus adversarial review whose one P1 (the worker executor recorded
-metrics for failed, retried attempts) and one P2 (the new policy fields were
-invisible to `job diff` and the approval diff) were fixed before merge. Wave 2
-(Stream B) is the next eligible run.
+Three waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B) and
+Wave 3 (Stream C) — the observe → assert → hold half of the loop is live behind
+`CAESIUM_DATA_ASSERTIONS_ENABLED`. Every code PR passed the orchestrator's
+scope-aware integration gate on its exact final head before merge (lint + unit
++ the default, agent, owner-memory and distributed lanes), and — the review bot
+having reviewed none of them — every code PR got a substitute Opus adversarial
+review plus a scoped re-review of each fix commit; the reviews found one P1 per
+PR (see the wave entries), all fixed before merge. Next eligible: Stream D
+(operator surface), then E, then F one wave each, then N-1.
+
+### Wave 3 — Circuit breaker (2026-09-08)
+
+- **α / C1–C4** — [#439](https://github.com/caesium-cloud/caesium/pull/439)
+  `dc00f167`. `DatasetHold` (nullable `active_key` unique index ⇒ one active
+  hold per dataset via a conditional insert, occurrence count, violation +
+  impact JSON, `LastBreachAt`/`LastBreachRunID`, release fields, reserved
+  tenant/partition key); the `hold` disposition (task succeeds, hold opened or
+  appended, `dataset_held` emitted exactly once per hold, fail-closed: an open
+  that still fails after busy-retry returns the error and counts
+  `holds_total{reason="open_failed"}`); the admission gate inside `Store.admit`
+  (same transaction as the run insert; a hold-skipped run is a terminal
+  `skipped` `JobRun` row with `SkipReason dataset_hold:<ns>/<name>` and one
+  skipped `TaskRun` per catalog task, fanned steps as one template row;
+  `Job.OnUpstreamHold: run` bypasses; backfills are gated and count a refused
+  date as `skipped`, not failed); release by the holder job's clean run only
+  (Open Question 6 answered) with the recency guards in the UPDATE predicate,
+  `release: manual` honored, verdict-based per-assertion release so a young
+  dataset cannot latch; `POST /v1/datasets/holds/:id/release` mounted inside
+  the flag guard, 403 under `AUTH_MODE=none`, `RoleOperator` RBAC entry,
+  audited in the release transaction, tolerance windows validated but
+  recorded-not-consulted; events `dataset_held` / `dataset_released` /
+  `run_held_upstream` (no-notify) appended in the writing transaction;
+  metrics `caesium_dataset_holds_total{reason}`, `caesium_dataset_holds_active`
+  (COUNT-backed, seeded at start), `caesium_runs_held_upstream_total`.
+  **Review fixes (three rounds):** P1 — a passing sibling partition released
+  the hold its sibling had just opened (fixed with run-identity + start-time
+  guards); P2s — a hold-gated backfill counted every date as failed, the
+  terminal fence omitted `skipped`, no busy-retry on hold writes, a starved
+  `deltaFromBaseline` read as clean, a Postgres select-then-update race on
+  release, a permanent auto-release latch on young datasets, a duplicate
+  `dataset_held` publish on retry. **For D/E/F:** every new protected route
+  needs an `internal/auth/rbac.go` entry (`TestProtectedRoutesAllHaveAnRBACEntry`
+  enforces it); agent-lane scenarios must match the lane's `-run` pattern
+  (`TestHold…` is included); no hold READ route exists until D1, so one
+  scenario reads `dataset_holds` through the catalog handle (temporary, like
+  W1's); `run.DatasetHoldEvent` carries everything F1 needs to open an incident.
+
+### Wave 2 — Assertion evaluator (2026-09-08)
+
+- **α / B1** — [#436](https://github.com/caesium-cloud/caesium/pull/436)
+  `f0074124`. The pure exported core `run.EvaluateAssertions` (+
+  `EvaluateAssertion`, `EvaluateFreshnessAssertion`, `BaselineMetrics`) and
+  `EvaluateDataAssertions` as the I/O shell (declarations → baselines read
+  BEFORE the new samples are inserted → evaluate → `DatasetMetric.Violated`
+  marked for enforced violations → `SaveDataViolations` on the `TaskRun` →
+  dispatch); min/max from run one, `deltaFromBaseline` vs the median, a
+  missing declared metric is a violation, cold start below
+  `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) is seeding/warn-only; `warn`
+  persists + emits `data_violation_recorded`, `fail` returns the error the
+  executors already escalate; `caesium_data_assertions_total{result}`
+  (`pass|seeding|warn|fail`, `hold` added in W3). Retry and failover resets
+  (`retryResetColumns` sites, `ResetInFlightTasks`, `ReclaimOwnerExpiredClaims`)
+  clear the attempt's samples in-transaction with status predicates that stay
+  correct on Postgres. **Review fixes (three rounds):** P1 — a `fail`
+  verdict's samples persisted and became the baseline after a retry-then-
+  success; P2s — warn-mode samples polluted the baseline, failover resets
+  leaked samples, `ResetInFlightTasks` lost its status predicate on Postgres.
+  **Filed, not fixed:** [#437](https://github.com/caesium-cloud/caesium/issues/437)
+  (a truncated/unreadable marker stream reads as a missing metric) and
+  [#438](https://github.com/caesium-cloud/caesium/issues/438)
+  (`InsertDatasetMetrics` has no claim fence). Also learned: `just lint` runs
+  `go fmt .` on the root package only, so gofmt drift under `internal/` is not
+  caught locally — CI's lint job is the check.
+
+**Flakes classified (W2/W3):** none — no lane needed a re-run. CI on #436's
+head went red on `lint` and the distributed lane from Docker Hub token 500s
+during image builds; a re-run was green.
+
+**Process notes (W2/W3):** one Opus stream per wave, each with an Opus
+adversarial review and a scoped re-review per fix commit (three rounds each —
+every round found a real P2 the previous one had not); the orchestrator's
+four-lane gate was restarted after each fix commit so the merged head is the
+gated head. PR [#431](https://github.com/caesium-cloud/caesium/pull/431) (CI
+consolidation) merged mid-wave before #436; the lane recipes it reshaped were
+re-verified by W3's gate.
 
 ### Wave 1 — Observability substrate (2026-09-07/08)
 
@@ -242,8 +318,8 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
-| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **B1 in review** (W2, PR pending) |
-| C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **C1–C4 in review** (W3, PR pending) |
+| B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **Shipped** (W2, #436) |
+| C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
