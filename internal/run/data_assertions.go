@@ -20,12 +20,13 @@ import (
 )
 
 // Result labels for caesium_data_assertions_total. They are the applied
-// disposition, not the declared one: a `hold` declaration counts as `warn`
-// until Stream C turns it into a real DatasetHold.
+// disposition, not the declared one — a `hold` declaration whose verdict is
+// still seeding counts as `seeding`, not `hold`.
 const (
 	assertionResultPass    = "pass"
 	assertionResultSeeding = "seeding"
 	assertionResultWarn    = "warn"
+	assertionResultHold    = "hold"
 	assertionResultFail    = "fail"
 )
 
@@ -56,13 +57,19 @@ func DataAssertionsEnabled() bool {
 //  5. persists the emitted samples as DatasetMetric rows — INCLUDING metrics no
 //     assertion names yet, free baseline history for an assertion added later —
 //     marking the ones an enforced violation rejected so they never become the
-//     baseline they broke;
+//     baseline they broke, and, in the SAME transaction, releasing any hold this
+//     job's earlier breach opened on a dataset whose contract just passed
+//     cleanly (the clean-run release);
 //  6. persists the verdicts and dispatches them.
 //
-// Dispatch mirrors schema validation exactly: `fail` returns an error the
-// executors escalate into a red run; `warn` persists the violations onto the
-// task run and publishes data_violation_recorded. `hold` behaves as `warn` here
-// and logs that the breaker itself lands in Stream C.
+// Dispatch mirrors schema validation for two of the three modes: `fail` returns
+// an error the executors escalate into a red run; `warn` persists the
+// violations onto the task run and publishes data_violation_recorded. `hold` is
+// the circuit breaker: the task SUCCEEDS — the work is done, and failing it
+// would only invite a retry of the same data — and the DATASET is held instead,
+// so every downstream consumer is admitted straight to skipped until it is
+// released. The hold-open is an idempotent upsert, so a repeat breach appends
+// an occurrence instead of paging again.
 //
 // The signature is instance-aware on purpose: a fanned step has N TaskRun rows
 // per trigger and each must own its samples AND its verdict. See the fan-out
@@ -137,9 +144,10 @@ func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, sa
 
 	verdicts := evaluateContracts(contracts, observed, baselines, now)
 
-	persistDatasetMetrics(ctx, store.db, row, runID, taskID, samples, names, namespaces, rejectedMetrics(verdicts))
+	persistDatasetMetrics(ctx, store, row, runID, taskID, samples, names, namespaces,
+		rejectedMetrics(verdicts), cleanContracts(verdicts))
 
-	return dispatchDataAssertions(store, runID, taskID, row, verdicts)
+	return dispatchDataAssertions(ctx, store, runID, taskID, row, verdicts)
 }
 
 // declaredContract pairs a produced-dataset registry row with its decoded
@@ -150,6 +158,16 @@ type declaredContract struct {
 	namespace   string
 	assertions  *jobdef.DatasetAssertions
 	onViolation string
+	// release is produces[].release with its default applied: "auto" (the next
+	// clean producer run releases an active hold) or "manual" (the hold
+	// survives a clean run and needs a human ack).
+	release string
+	// jobID / jobAlias / stepName identify the PRODUCER. They come off the
+	// registry row that is already in hand, so opening a hold and deciding a
+	// clean-run release cost no extra read.
+	jobID    uuid.UUID
+	jobAlias string
+	stepName string
 }
 
 // datasetVerdict is one dataset's evaluated contract: the verdicts the pure
@@ -186,6 +204,10 @@ func declaredContracts(declarations []models.DatasetDeclaration) []declaredContr
 			namespace:   declarationNamespace(decl),
 			assertions:  &assertions,
 			onViolation: jobdef.EffectiveOnViolation(decl.OnViolation),
+			release:     (&jobdef.ProducedDataset{Release: decl.Release}).EffectiveRelease(),
+			jobID:       decl.JobID,
+			jobAlias:    decl.JobAlias,
+			stepName:    decl.StepName,
 		})
 	}
 	return contracts
@@ -292,21 +314,46 @@ func observedByDataset(samples []pkgtask.DatasetMetricSample, declared []string)
 	return observed
 }
 
+// cleanContracts is the set of contracts that passed with NO recorded verdict
+// at all — the clean runs that may release a hold.
+//
+// A "seeding" verdict deliberately does NOT count as clean: the contract did
+// not hold, it merely was not enforced because the baseline was too short. A
+// dataset does not get to leave the breaker on a verdict nobody trusted.
+func cleanContracts(verdicts []datasetVerdict) []declaredContract {
+	clean := make([]declaredContract, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		if len(verdict.violations) == 0 {
+			clean = append(clean, verdict.contract)
+		}
+	}
+	return clean
+}
+
 // persistDatasetMetrics writes the emitted samples as DatasetMetric rows,
-// flagging the ones an enforced violation rejected. A failure here is logged
-// and swallowed — the observation is lost, the task is not, and the verdict has
-// already been computed from the in-memory samples.
+// flagging the ones an enforced violation rejected, and releases the holds a
+// clean run just cleared — both in ONE transaction, because "the dataset
+// recovered" and "here is the evidence it recovered" must not be separable.
+//
+// A failure here is logged and swallowed — the observation is lost, the task is
+// not, and the verdict has already been computed from the in-memory samples.
 func persistDatasetMetrics(
 	ctx context.Context,
-	conn *gorm.DB,
+	store *Store,
 	row *models.TaskRun,
 	runID, taskID uuid.UUID,
 	samples []pkgtask.DatasetMetricSample,
 	declared []string,
 	namespaces map[string]string,
 	rejected map[metricRef]struct{},
+	clean []declaredContract,
 ) {
 	if len(samples) == 0 {
+		// A contract can pass with no samples only when it declares nothing
+		// that needs one; the release still has to happen.
+		if err := releaseHoldsForCleanRun(ctx, store, nil, runID, clean); err != nil {
+			log.Warn("failed to release dataset holds after a clean run", "run_id", runID, "task_id", taskID, "error", err)
+		}
 		return
 	}
 	// One row per (dataset, metric), last write wins — the SAME collapse
@@ -342,19 +389,118 @@ func persistDatasetMetrics(
 		})
 	}
 	if len(rows) == 0 {
+		if err := releaseHoldsForCleanRun(ctx, store, nil, runID, clean); err != nil {
+			log.Warn("failed to release dataset holds after a clean run", "run_id", runID, "task_id", taskID, "error", err)
+		}
 		return
 	}
-	if err := InsertDatasetMetrics(ctx, conn, rows); err != nil {
+	if err := releaseHoldsForCleanRun(ctx, store, rows, runID, clean); err != nil {
 		log.Warn("failed to persist dataset metrics", "run_id", runID, "task_id", taskID, "metrics", len(rows), "error", err)
 		return
 	}
 	log.Info("recorded dataset metrics", "run_id", runID, "task_id", taskID, "task_run_id", row.ID, "metrics", len(rows))
 }
 
+// releaseHoldsForCleanRun inserts this task's samples and, in the SAME
+// transaction, releases every active hold the clean contracts cleared.
+//
+// MULTI-PRODUCER (plan Open Question 6 / design open question 2, answered
+// here): only the HOLDER's clean run releases. A hold records HeldByJobID, and
+// a clean run releases it only when that job is the one running now. A second
+// job that also writes the dataset has not re-produced the slice that broke —
+// it has produced its own — so letting it clear somebody else's hold would
+// reopen the circuit on evidence about a different partition of the data. The
+// escape hatch for a genuinely multi-producer dataset is the human ack
+// (POST /v1/datasets/holds/:id/release), which is authenticated and audited.
+//
+// RELEASE POLICY: only a dataset declared `release: auto` (the default) is
+// auto-released. `release: manual` stays held until a human acks it, which is
+// exactly what A3's field promised and would otherwise ship inert.
+func releaseHoldsForCleanRun(
+	ctx context.Context,
+	store *Store,
+	rows []models.DatasetMetric,
+	runID uuid.UUID,
+	clean []declaredContract,
+) error {
+	eligible := make([]declaredContract, 0, len(clean))
+	names := make([]string, 0, len(clean))
+	namespaces := make(map[string]string, len(clean))
+	for _, contract := range clean {
+		if contract.release != jobdef.DatasetReleaseAuto {
+			continue
+		}
+		eligible = append(eligible, contract)
+		names = append(names, contract.name)
+		namespaces[contract.name] = contract.namespace
+	}
+
+	if len(rows) == 0 && len(eligible) == 0 {
+		return nil
+	}
+	if len(eligible) == 0 {
+		return InsertDatasetMetrics(ctx, store.db, rows)
+	}
+
+	var events []event.Event
+	err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(rows) > 0 {
+			if err := tx.Create(&rows).Error; err != nil {
+				return err
+			}
+		}
+		holds, err := activeHoldsForDatasetsTx(tx, namespaces, names)
+		if err != nil {
+			return err
+		}
+		if len(holds) == 0 {
+			return nil
+		}
+		for _, contract := range eligible {
+			hold, ok := holds[contract.name]
+			if !ok || hold.HeldByJobID != contract.jobID {
+				continue
+			}
+			var released models.DatasetHold
+			ok, err := store.releaseDatasetHoldTx(tx, hold.ID, datasetHoldReleaseRequest{
+				reason: models.DatasetHoldReleaseCleanRun,
+				by:     "system",
+				note:   "every declared assertion passed on a later run of the holding job",
+				runID:  runID,
+			}, &released)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			evt, err := store.appendDatasetHoldEventTx(tx, event.TypeDatasetReleased, &released, 0, nil)
+			if err != nil {
+				return err
+			}
+			if evt != nil {
+				events = append(events, *evt)
+			}
+			log.Info("dataset hold released by a clean run",
+				"dataset", contract.name, "hold_id", hold.ID, "run_id", runID)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(events) > 0 {
+		store.syncDatasetHoldsActiveGauge(ctx)
+		store.publishEvents(events...)
+	}
+	return nil
+}
+
 // dispatchDataAssertions applies the evaluated verdicts: it counts them,
 // persists them onto the task run, and either escalates (fail) or publishes the
 // non-failing event (warn / hold / seeding).
 func dispatchDataAssertions(
+	ctx context.Context,
 	store *Store,
 	runID, taskID uuid.UUID,
 	row *models.TaskRun,
@@ -378,19 +524,29 @@ func dispatchDataAssertions(
 		}
 
 		datasets = append(datasets, contract.name)
+		var breaking []DataViolation
 		for _, violation := range verdict.violations {
 			escalates := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationFail
+			holds := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationHold
 			switch {
 			case !violation.Enforceable():
+				// A seeding verdict never holds, whatever onViolation says: the
+				// baseline it was judged against was too short to trust, and
+				// breaking the circuit on it would stop a pipeline on a guess.
 				metrics.DataAssertionsTotal.WithLabelValues(assertionResultSeeding).Inc()
 			case escalates:
 				metrics.DataAssertionsTotal.WithLabelValues(assertionResultFail).Inc()
+			case holds:
+				metrics.DataAssertionsTotal.WithLabelValues(assertionResultHold).Inc()
 			default:
 				metrics.DataAssertionsTotal.WithLabelValues(assertionResultWarn).Inc()
 			}
 			recorded = append(recorded, violation)
 			if escalates {
 				enforced = append(enforced, violation)
+			}
+			if holds {
+				breaking = append(breaking, violation)
 			}
 		}
 
@@ -402,12 +558,8 @@ func dispatchDataAssertions(
 			"on_violation", contract.onViolation,
 			"violations", len(verdict.violations),
 		)
-		if contract.onViolation == jobdef.DatasetOnViolationHold {
-			// Recorded honestly rather than silently downgraded: the breaker
-			// (DatasetHold + the admission gate) is Stream C, and until it
-			// lands a hold declaration behaves exactly like warn.
-			log.Info("onViolation: hold recorded as a warning; the dataset hold itself lands with the circuit breaker",
-				"run_id", runID, "task_id", taskID, "dataset", contract.name)
+		if len(breaking) > 0 {
+			openHoldForContract(ctx, store, contract, row, runID, taskID, breaking)
 		}
 	}
 
@@ -429,6 +581,55 @@ func dispatchDataAssertions(
 
 	publishDataViolationEvent(store, runID, taskID, len(recorded), datasets)
 	return nil
+}
+
+// openHoldForContract breaks the circuit for one dataset: it opens (or appends
+// an occurrence to) the dataset's single active hold.
+//
+// The task is NOT failed. That is the whole point of the hold disposition — the
+// work ran to completion and the output exists; what is wrong is the DATA, and
+// a red task would only invite a retry that recomputes the same numbers. The
+// consequence lands on the dataset's consumers instead, at their admission gate.
+//
+// A failure here is logged and swallowed: the task succeeded, and it must not
+// be turned red because the breaker's own write failed. The verdicts are still
+// persisted on the task run either way.
+func openHoldForContract(
+	ctx context.Context,
+	store *Store,
+	contract declaredContract,
+	row *models.TaskRun,
+	runID, taskID uuid.UUID,
+	violations []DataViolation,
+) {
+	hold, opened, err := store.openOrAppendDatasetHold(ctx, datasetHoldRequest{
+		namespace:  contract.namespace,
+		name:       contract.name,
+		reason:     violations[0].Assertion,
+		jobID:      contract.jobID,
+		jobAlias:   contract.jobAlias,
+		runID:      runID,
+		taskID:     taskID,
+		taskRunID:  row.ID,
+		stepName:   contract.stepName,
+		violations: violations,
+	})
+	if err != nil {
+		log.Warn("failed to open a dataset hold for a breached contract; the violation is still recorded on the task run",
+			"run_id", runID, "task_id", taskID, "dataset", contract.name, "error", err)
+		return
+	}
+	if opened {
+		log.Warn("dataset held: downstream consumers will be skipped until it is released",
+			"run_id", runID, "task_id", taskID, "dataset", contract.name,
+			"hold_id", hold.ID, "assertion", hold.Reason, "release", contract.release)
+		return
+	}
+	// Alert-once: an already-held dataset breaking again is an occurrence, not
+	// a second page.
+	log.Info("dataset already held; recorded another occurrence",
+		"run_id", runID, "task_id", taskID, "dataset", contract.name,
+		"hold_id", hold.ID, "occurrences", hold.OccurrenceCount)
 }
 
 // publishDataViolationEvent emits data_violation_recorded for a non-failing

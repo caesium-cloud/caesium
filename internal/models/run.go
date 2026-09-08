@@ -10,7 +10,13 @@ import (
 )
 
 const (
-	JobRunStatusCancelled  = "cancelled"
+	JobRunStatusCancelled = "cancelled"
+	// JobRunStatusSkipped is a run that was created directly in a terminal
+	// state because admission refused it for a reason worth recording — today
+	// only the data circuit breaker's upstream-hold gate
+	// (data-circuit-breaker C2). It is deliberately NOT used by the
+	// concurrency skip strategy, which creates no row at all.
+	JobRunStatusSkipped    = "skipped"
 	TaskRunStatusCancelled = "cancelled"
 )
 
@@ -26,6 +32,15 @@ type JobRun struct {
 	Status       string         `gorm:"type:text;index;not null" json:"status"`
 	Priority     int            `gorm:"not null;default:2" json:"priority"`
 	Error        string         `json:"error,omitempty"`
+	// SkipReason explains a run created directly in terminal `skipped` status.
+	// Today the only writer is the data circuit breaker's admission gate, which
+	// records "dataset_hold:<namespace>/<name>" — so run history answers *why*
+	// nothing ran instead of showing an absence. It is empty on every other run.
+	//
+	// The concurrency `skip` strategy deliberately does NOT write here: it
+	// creates no JobRun row at all (insertRunIfSlotTx simply does not insert),
+	// and that behaviour is unchanged.
+	SkipReason string `gorm:"type:text;not null;default:''" json:"skip_reason,omitempty"`
 	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
 	Quarantine   bool           `gorm:"not null;default:false;index" json:"quarantine"`
 	// ReplayFingerprint is the scoped, server-derived idempotency fingerprint

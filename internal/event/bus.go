@@ -67,6 +67,37 @@ const (
 	// fail breach fails the task and its task_failed event already carries the
 	// violations, so no separate event is emitted for it.
 	TypeDataViolationRecorded Type = "data_violation_recorded"
+	// TypeDatasetHeld is the data circuit breaker's page-worthy event: a
+	// declared dataset broke its contract under onViolation: hold, the
+	// producing task SUCCEEDED, and the DATASET is now held — every downstream
+	// consumer is admitted straight to skipped until it is released.
+	//
+	// ALERT-ONCE IS STRUCTURAL: this is emitted by the atomic insert that opens
+	// the hold and by nothing else. A repeat breach of an already-held dataset
+	// increments the hold's occurrence counter and emits nothing, so a broken
+	// hourly job pages once rather than twenty-four times a day. Nothing in the
+	// notification layer has to de-duplicate.
+	//
+	// The payload carries the dataset (namespace, name), the hold id, the
+	// violated assertion and the observed/bound/baseline triple, so Stream F's
+	// incident entry point needs no second read.
+	TypeDatasetHeld Type = "dataset_held"
+	// TypeDatasetReleased is emitted when an active hold is closed — either by
+	// the holder's next clean producer run (release_reason: clean_run, only for
+	// a dataset declared `release: auto`) or by an authenticated human ack
+	// through POST /v1/datasets/holds/:id/release (release_reason: manual_ack).
+	TypeDatasetReleased Type = "dataset_released"
+	// TypeRunHeldUpstream is emitted when the admission gate refuses a run
+	// because a dataset the job declares under datasets.consumes is held. The
+	// run EXISTS — a row in terminal `skipped` status with its SkipReason and
+	// its skipped task rows — so run history explains itself.
+	//
+	// It defaults to NO-NOTIFY (it is absent from notification.notifiableTypes):
+	// one broken dataset can skip many downstream runs, and paging per skipped
+	// run is exactly the alert storm dataset_held's alert-once design avoids.
+	// It is still persisted and streamed, so the Console and `caesium why` see
+	// it.
+	TypeRunHeldUpstream Type = "run_held_upstream"
 	// TypeContractBreakDeclared is emitted when an operator intentionally
 	// acknowledges a breaking cross-job data contract for a bounded
 	// deprecation window.

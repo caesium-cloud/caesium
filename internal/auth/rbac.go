@@ -89,6 +89,15 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/datasets/:id/:id/derivations": models.RoleViewer,
 	"POST /v1/datasets/:id/:id/advance":    models.RoleRunner,
 
+	// Releasing a dataset hold (data-circuit-breaker C3) is an OPERATOR action,
+	// the same tier as approving a tier-3 remediation: it overrides an automated
+	// safety decision and lets downstream jobs run on data the breaker rejected.
+	// A runner that can trigger runs must not also be able to switch the breaker
+	// off. The route is only mounted when CAESIUM_DATA_ASSERTIONS_ENABLED is on;
+	// this entry is unconditional, because an unlisted route is denied as
+	// "unknown_route" (403) even to a valid admin key.
+	"POST /v1/datasets/holds/:id/release": models.RoleOperator,
+
 	// Agent tool surface (/v1/agent/*). Reachable by an unscoped operator/admin
 	// AND by an agent-session credential minted at the runner role; the
 	// per-incident binding is enforced separately by the deny-by-default scope

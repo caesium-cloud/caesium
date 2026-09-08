@@ -118,6 +118,13 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		{"PATCH", "/v1/agentprofiles/:id", models.RoleOperator},
 		{"DELETE", "/v1/agentprofiles/:id", models.RoleOperator},
 		{"POST", "/v1/jobs/:id/runs/:id/replay", models.RoleRunner},
+		{"GET", "/v1/datasets", models.RoleViewer},
+		{"POST", "/v1/datasets/:id/:id/advance", models.RoleRunner},
+		// A route that is bound but absent from this table is denied as
+		// "unknown_route" — a 403 that looks exactly like a role failure and is
+		// invisible to any test that runs with auth off. The hold-release route
+		// shipped that way once; this row is the regression guard.
+		{"POST", "/v1/datasets/holds/:id/release", models.RoleOperator},
 	}
 
 	for _, tt := range tests {

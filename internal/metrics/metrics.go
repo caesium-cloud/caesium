@@ -279,18 +279,55 @@ var (
 	//             CAESIUM_BASELINE_MIN_SAMPLES clean samples): recorded,
 	//             warn-only, never escalated whatever onViolation says.
 	//   warn    — a violation recorded without failing the task
-	//             (onViolation: warn, and — until Stream C wires the breaker —
-	//             onViolation: hold).
+	//             (onViolation: warn).
+	//   hold    — a violation that opened or appended to a DatasetHold
+	//             (onViolation: hold). The task still SUCCEEDS; the dataset is
+	//             what breaks.
 	//   fail    — a violation escalated into a red run (onViolation: fail).
-	//
-	// `hold` is reserved for Stream C, which turns the hold disposition into a
-	// DatasetHold instead of the warn it degrades to today.
 	DataAssertionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_data_assertions_total",
-			Help: "Total data-assertion verdicts by applied disposition (pass, seeding, warn, fail).",
+			Help: "Total data-assertion verdicts by applied disposition (pass, seeding, warn, hold, fail).",
 		},
 		[]string{"result"},
+	)
+
+	// DatasetHoldsTotal counts holds OPENED, by the bounded assertion kind that
+	// opened them (min, max, deltaFromBaseline, maxLag, missing). Repeat
+	// breaches of an already-held dataset append an occurrence and are
+	// deliberately NOT counted here — this counter is the alert-once signal, so
+	// it must move exactly once per hold.
+	DatasetHoldsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_dataset_holds_total",
+			Help: "Total dataset holds opened by the data circuit breaker, by violated assertion kind.",
+		},
+		[]string{"reason"},
+	)
+
+	// DatasetHoldsActive is the number of datasets currently held. It is a
+	// gauge over persisted state rather than an in-process counter: it is Set()
+	// from a COUNT of active dataset_holds rows after every open and release,
+	// and re-synced at startup (metrics.SyncDatasetHoldsActive), so a restart,
+	// a leader change, or a release performed by another node cannot leave it
+	// stranded at a stale value.
+	DatasetHoldsActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "caesium_dataset_holds_active",
+			Help: "Datasets currently held by the data circuit breaker.",
+		},
+	)
+
+	// RunsHeldUpstreamTotal counts runs the admission gate refused because a
+	// dataset the job declares under datasets.consumes is held. The dataset
+	// label is bounded by declared dataset names, exactly like
+	// DatasetStalenessSeconds.
+	RunsHeldUpstreamTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_runs_held_upstream_total",
+			Help: "Total runs admitted straight to skipped because a consumed dataset is held.",
+		},
+		[]string{"job_alias", "dataset"},
 	)
 
 	ContractFindingsTotal = prometheus.NewCounterVec(
@@ -644,6 +681,9 @@ func Register() {
 			DatasetDerivationsTotal,
 			FreshnessViolationsTotal,
 			DataAssertionsTotal,
+			DatasetHoldsTotal,
+			DatasetHoldsActive,
+			RunsHeldUpstreamTotal,
 			ContractFindingsTotal,
 			ContractBreaksBlockedTotal,
 			AuthRequestsTotal,

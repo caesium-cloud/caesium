@@ -42,6 +42,11 @@ const (
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
 	StatusCancelled Status = Status(models.JobRunStatusCancelled)
+	// StatusSkipped is a run created directly terminal because admission
+	// refused it for a reason worth keeping — today only the data circuit
+	// breaker's upstream-hold gate. The concurrency `skip` strategy does not
+	// use it: that path creates no row at all.
+	StatusSkipped Status = Status(models.JobRunStatusSkipped)
 )
 
 const (
@@ -215,6 +220,10 @@ type JobRun struct {
 	CreatedAt     time.Time         `json:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at"`
 	Error         string            `json:"error,omitempty"`
+	// SkipReason explains a terminal `skipped` run — today only
+	// "dataset_hold:<namespace>/<name>" from the data circuit breaker's
+	// admission gate. Empty on every other run.
+	SkipReason    string            `json:"skip_reason,omitempty"`
 	Tasks         []*TaskRun        `json:"tasks"`
 	Callbacks     []*CallbackRun    `json:"callbacks"`
 	CacheHits     int               `json:"cache_hits"`
@@ -458,9 +467,21 @@ var (
 )
 
 var (
-	ErrTaskClaimMismatch        = errors.New("run: task claim mismatch")
-	ErrRunSkipped               = errors.New("run: skipped by concurrency policy")
-	ErrRunQueued                = errors.New("run: queued by concurrency policy")
+	ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
+	ErrRunSkipped        = errors.New("run: skipped by concurrency policy")
+	ErrRunQueued         = errors.New("run: queued by concurrency policy")
+	// ErrRunHeldUpstream is returned when the data circuit breaker's admission
+	// gate refuses a run because a dataset the job declares under
+	// datasets.consumes is held.
+	//
+	// It WRAPS ErrRunSkipped on purpose: every existing caller (the run POST
+	// controller, the event-trigger firer, the queue dequeuer, the local
+	// executor, the freshness evaluator) already treats a skip as "nothing to
+	// execute, not an error", and that is exactly right here too. A caller that
+	// wants to say *why* can test for this sentinel specifically. Unlike the
+	// concurrency skip, this one leaves a JobRun row behind: terminal
+	// `skipped`, with a SkipReason and a full set of skipped task rows.
+	ErrRunHeldUpstream          = fmt.Errorf("run: %w: a consumed dataset is held", ErrRunSkipped)
 	ErrQueuedRunUnavailable     = errors.New("run: queued run already claimed or unavailable")
 	ErrQueuedRunNotFound        = errors.New("run: queued run not found")
 	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
@@ -516,6 +537,12 @@ const (
 	admissionSkipped
 	admissionFailed
 	admissionQueued
+	// admissionHeld is the data circuit breaker's verdict: a dataset this job
+	// consumes is held, so the run was created directly in terminal `skipped`
+	// with its task rows already skipped. It is distinct from admissionSkipped
+	// because that decision means "no row exists" and this one means "a
+	// complete, terminal run exists and explains itself".
+	admissionHeld
 )
 
 type cancelledRunInfo struct {
@@ -534,6 +561,11 @@ type admissionResult struct {
 	replaced           bool
 	cancelledRun       *cancelledRunInfo
 	cancelledRunEvents []event.Event
+	// heldBy is the active DatasetHold that refused the run (admissionHeld
+	// only), and heldEvents are the run_held_upstream + task_skipped events its
+	// transaction appended, for publication after commit.
+	heldBy     *models.DatasetHold
+	heldEvents []event.Event
 }
 
 type startRunRequest struct {
@@ -1039,6 +1071,30 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if model == nil {
 		return admissionResult{}, errors.New("run: admission requires a run model")
 	}
+
+	// The data circuit breaker's downstream gate runs FIRST, before any
+	// concurrency policy: a run that must not exist should not consume a slot,
+	// take a queue position, or replace a healthy run to do so.
+	//
+	// It is inside admit — and therefore inside the transaction that inserts the
+	// run — deliberately. Every entry point into a run funnels through
+	// startRun → admit: Start/StartWithContext (cron, HTTP, manual, chained and
+	// event triggers all route here), AdmitRun, StartForBackfill and
+	// StartQueuedRun (the queue dequeuer). Verified against the callers of
+	// startRun, and against every other writer of models.JobRun: the only one
+	// that bypasses admission is quarantined replay creation
+	// (internal/replay), which is a what-if that never touches real state and is
+	// excluded from the whole feature. One decision therefore covers them all,
+	// and a hold opened between a pre-check and the insert cannot slip a run
+	// through, because there is no pre-check.
+	held, err := s.admitDataHoldTx(tx, model)
+	if err != nil {
+		return admissionResult{}, err
+	}
+	if held != nil {
+		return *held, nil
+	}
+
 	cfg, ok, err := s.concurrencyConfigTx(tx, model.JobID)
 	if err != nil {
 		return admissionResult{}, err
@@ -1217,6 +1273,13 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				}
 				attemptAdmission.decision = admissionCreated
 			case admissionCreated:
+			case admissionHeld:
+				// The run EXISTS and is already terminal, with its task rows
+				// skipped in this same transaction. Its events ride out with
+				// the others and are published after commit; there is no
+				// run_started, because nothing started.
+				attemptEvents = append(attemptEvents, result.heldEvents...)
+				return nil
 			case admissionSkipped, admissionFailed, admissionQueued:
 				return nil
 			default:
@@ -1250,6 +1313,26 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	switch admission.decision {
 	case admissionNoPolicy:
 		return nil, nil
+	case admissionHeld:
+		// Publish before returning: unlike every other refusal this one wrote
+		// rows, and run_held_upstream + its task_skipped events are how the
+		// Console and the notification layer learn that they exist.
+		s.publishEvents(pendingEvents...)
+		hold := admission.heldBy
+		log.Warn("run admitted straight to skipped: a consumed dataset is held",
+			"job_id", req.jobID,
+			"job_alias", admission.jobAlias,
+			"run_id", model.ID,
+			"dataset", hold.Name,
+			"hold_id", hold.ID,
+		)
+		alias := metricJobAlias(req.jobID, admission.jobAlias)
+		// The reason label stays the bounded literal "dataset_hold"; the
+		// dataset itself is a separate label on the dedicated counter, so
+		// caesium_run_skipped_total does not gain one series per dataset.
+		metrics.RunSkippedTotal.WithLabelValues(alias, "dataset_hold").Inc()
+		metrics.RunsHeldUpstreamTotal.WithLabelValues(alias, hold.Name).Inc()
+		return nil, ErrRunHeldUpstream
 	case admissionSkipped:
 		reason := admission.skipReason
 		if reason == "" {
@@ -1449,47 +1532,27 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		metrics.TaskRegisterBatchSize.Observe(0)
 		return nil
 	}
-
-	type instanceKey struct {
-		taskID uuid.UUID
-		index  int
-	}
-	taskIDs := make([]uuid.UUID, 0, len(inputs))
-	seenInputKeys := make(map[instanceKey]struct{}, len(inputs))
 	for _, input := range inputs {
 		if input.Task == nil || input.Atom == nil {
 			return errors.New("run: task and atom must be provided")
 		}
-		key := instanceKey{taskID: input.Task.ID, index: input.PartitionIndex}
-		if _, ok := seenInputKeys[key]; ok {
-			continue
-		}
-		seenInputKeys[key] = struct{}{}
-		taskIDs = append(taskIDs, input.Task.ID)
 	}
 
 	var jobRun models.JobRun
 	if err := s.db.Select("id", "job_id", "params", "trigger_id", "trigger_type", "trigger_alias", "priority", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
 		return fmt.Errorf("run: job run %s not found: %w", runID, err)
 	}
-	jobID := jobRun.JobID
 	if !jobRun.Quarantine {
 		metrics.TaskRegisterBatchSize.Observe(float64(len(inputs)))
 	}
 
 	var job models.Job
 	jobFound := true
-	if err := s.db.Select("id", "alias", "labels", "annotations", "schema_validation", "cache_config", "replay_safe", "max_parallel_tasks", "task_timeout", "run_timeout", "sla").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := s.db.Select(registerTasksJobColumns[0], toAnySlice(registerTasksJobColumns[1:])...).First(&job, "id = ?", jobRun.JobID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		jobFound = false
-	}
-
-	envCache := cache.ConfigFromEnv()
-	jobCacheConfig := any(nil)
-	if jobFound {
-		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
 	}
 
 	var pendingEvents []event.Event
@@ -1498,144 +1561,11 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		counts.reset()
 		var attemptEvents []event.Event
 		err := s.db.Transaction(func(tx *gorm.DB) error {
-			var existingRows []struct {
-				TaskID         uuid.UUID
-				PartitionIndex int
-			}
-			if len(taskIDs) > 0 {
-				if err := tx.Model(&models.TaskRun{}).
-					Select("task_id", "partition_index").
-					Where("job_run_id = ? AND task_id IN ?", runID, taskIDs).
-					Find(&existingRows).Error; err != nil {
-					return err
-				}
-			}
-			existing := make(map[instanceKey]struct{}, len(existingRows))
-			for _, row := range existingRows {
-				existing[instanceKey{taskID: row.TaskID, index: row.PartitionIndex}] = struct{}{}
-			}
-
-			records := make([]models.TaskRun, 0, len(inputs))
-			readyEvents := make([]event.Event, 0, len(inputs))
-			seenNewKeys := make(map[instanceKey]struct{}, len(inputs))
-			for _, input := range inputs {
-				task := input.Task
-				atom := input.Atom
-				key := instanceKey{taskID: task.ID, index: input.PartitionIndex}
-				if _, ok := existing[key]; ok {
-					continue
-				}
-				if _, ok := seenNewKeys[key]; ok {
-					continue
-				}
-				seenNewKeys[key] = struct{}{}
-
-				command := atom.Command
-				if command == "" {
-					if cmd := atom.Cmd(); len(cmd) > 0 {
-						if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
-							command = string(encoded)
-						}
-					}
-				}
-
-				maxAttempts := max(task.Retries+1, 1)
-
-				schemaValidation := ""
-				if jobFound && len(task.OutputSchema) > 0 {
-					schemaValidation = job.SchemaValidation
-				}
-
-				resolvedCache := jobdefschema.ResolveCacheConfig(
-					decodeCacheConfig(task.CacheConfig),
-					jobCacheConfig,
-					envCache.Enabled,
-					envCache.TTL,
-					envCache.PinDigests,
-					envCache.DigestTTL,
-				)
-				replaySafe := task.ReplaySafe || atom.ReplaySafe
-				if jobFound && job.ReplaySafe {
-					replaySafe = true
-				}
-				descriptor, descriptorErr := s.initialTaskExecutionDescriptorTx(
-					tx,
-					jobRun,
-					job,
-					jobFound,
-					task,
-					atom,
-					input.OutstandingPredecessors,
-					resolvedCache,
-					replaySafe,
-				)
-				if descriptorErr != nil {
-					return descriptorErr
-				}
-
-				records = append(records, models.TaskRun{
-					ID:                      uuid.New(),
-					JobRunID:                runID,
-					TaskID:                  task.ID,
-					AtomID:                  task.AtomID,
-					Engine:                  atom.Engine,
-					Image:                   atom.Image,
-					Command:                 command,
-					Status:                  string(TaskStatusPending),
-					Priority:                jobRun.Priority,
-					NodeSelector:            maps.Clone(task.NodeSelector),
-					Attempt:                 1,
-					MaxAttempts:             maxAttempts,
-					PartitionIndex:          input.PartitionIndex,
-					OutstandingPredecessors: input.OutstandingPredecessors,
-					CacheEnabled:            resolvedCache.Enabled,
-					CacheTTL:                resolvedCache.TTL,
-					CacheVersion:            resolvedCache.Version,
-					ReplaySafe:              replaySafe,
-					CachePinDigests:         resolvedCache.PinDigests,
-					CacheDigestTTL:          resolvedCache.DigestTTL,
-					CacheChain:              resolvedCache.Chain,
-					CacheTTLNever:           resolvedCache.TTLNever,
-					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
-					SchemaValidation:        schemaValidation,
-					Quarantine:              jobRun.Quarantine,
-					ExecutionDescriptor:     descriptor,
-				})
-
-				if input.OutstandingPredecessors == 0 && s.eventStore != nil {
-					readyEvents = append(readyEvents, event.Event{
-						Type:       event.TypeTaskReady,
-						JobID:      jobID,
-						RunID:      runID,
-						TaskID:     task.ID,
-						Timestamp:  time.Now().UTC(),
-						Quarantine: jobRun.Quarantine,
-					})
-				}
-			}
-
-			if len(records) == 0 {
-				return nil
-			}
-			if err := tx.Create(&records).Error; err != nil {
+			events, _, err := s.registerTasksTx(tx, runID, jobRun, job, jobFound, inputs, true, &counts)
+			if err != nil {
 				return err
 			}
-			counts.addTaskRunInsert(len(records))
-			if len(readyEvents) > 0 {
-				eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
-				for _, evt := range readyEvents {
-					eventRecords = append(eventRecords, executionEventRecord(evt))
-				}
-				if err := tx.Create(&eventRecords).Error; err != nil {
-					return err
-				}
-				counts.addEventInsert(len(eventRecords))
-				for idx := range readyEvents {
-					readyEvents[idx].Sequence = eventRecords[idx].Sequence
-					readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
-				}
-				attemptEvents = readyEvents
-			}
+			attemptEvents = events
 			return nil
 		})
 		if err == nil {
@@ -1648,6 +1578,223 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		s.publishEvents(pendingEvents...)
 	}
 	return err
+}
+
+// toAnySlice widens a string column list for GORM's variadic Select, whose
+// first parameter is an interface{}.
+func toAnySlice(values []string) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+// registerTasksJobColumns are the job columns a TaskRun registration freezes
+// onto its rows. Named once so RegisterTasks and the hold-gated skipped-run
+// path (which registers its rows inside the admission transaction) read the
+// same set.
+var registerTasksJobColumns = []string{
+	"id", "alias", "labels", "annotations", "schema_validation", "cache_config",
+	"replay_safe", "max_parallel_tasks", "task_timeout", "run_timeout", "sla",
+}
+
+// registerTasksTx is the transactional body of RegisterTasks, factored out so a
+// caller that is ALREADY inside a store transaction can materialise a run's
+// task rows without a second transaction — specifically the data circuit
+// breaker's admission gate, which inserts a terminal `skipped` run and its task
+// rows in the one transaction that decided the run must not happen.
+//
+// emitReady controls the task_ready events. RegisterTasks passes true; the
+// hold-gated path passes false, because every row it creates is marked skipped
+// before the same transaction commits, so no task ever becomes ready and
+// announcing that it did would be a lie in the event stream.
+//
+// It returns the appended events (for publication after commit) and the rows it
+// inserted (so a caller can transition them without re-reading).
+func (s *Store) registerTasksTx(
+	tx *gorm.DB,
+	runID uuid.UUID,
+	jobRun models.JobRun,
+	job models.Job,
+	jobFound bool,
+	inputs []RegisterTaskInput,
+	emitReady bool,
+	counts *dbWriteCounts,
+) ([]event.Event, []models.TaskRun, error) {
+	type instanceKey struct {
+		taskID uuid.UUID
+		index  int
+	}
+	taskIDs := make([]uuid.UUID, 0, len(inputs))
+	seenInputKeys := make(map[instanceKey]struct{}, len(inputs))
+	for _, input := range inputs {
+		if input.Task == nil || input.Atom == nil {
+			return nil, nil, errors.New("run: task and atom must be provided")
+		}
+		key := instanceKey{taskID: input.Task.ID, index: input.PartitionIndex}
+		if _, ok := seenInputKeys[key]; ok {
+			continue
+		}
+		seenInputKeys[key] = struct{}{}
+		taskIDs = append(taskIDs, input.Task.ID)
+	}
+
+	jobID := jobRun.JobID
+	envCache := cache.ConfigFromEnv()
+	jobCacheConfig := any(nil)
+	if jobFound {
+		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
+	}
+
+	var attemptEvents []event.Event
+	var inserted []models.TaskRun
+	err := func() error {
+		var existingRows []struct {
+			TaskID         uuid.UUID
+			PartitionIndex int
+		}
+		if len(taskIDs) > 0 {
+			if err := tx.Model(&models.TaskRun{}).
+				Select("task_id", "partition_index").
+				Where("job_run_id = ? AND task_id IN ?", runID, taskIDs).
+				Find(&existingRows).Error; err != nil {
+				return err
+			}
+		}
+		existing := make(map[instanceKey]struct{}, len(existingRows))
+		for _, row := range existingRows {
+			existing[instanceKey{taskID: row.TaskID, index: row.PartitionIndex}] = struct{}{}
+		}
+
+		records := make([]models.TaskRun, 0, len(inputs))
+		readyEvents := make([]event.Event, 0, len(inputs))
+		seenNewKeys := make(map[instanceKey]struct{}, len(inputs))
+		for _, input := range inputs {
+			task := input.Task
+			atom := input.Atom
+			key := instanceKey{taskID: task.ID, index: input.PartitionIndex}
+			if _, ok := existing[key]; ok {
+				continue
+			}
+			if _, ok := seenNewKeys[key]; ok {
+				continue
+			}
+			seenNewKeys[key] = struct{}{}
+
+			command := atom.Command
+			if command == "" {
+				if cmd := atom.Cmd(); len(cmd) > 0 {
+					if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
+						command = string(encoded)
+					}
+				}
+			}
+
+			maxAttempts := max(task.Retries+1, 1)
+
+			schemaValidation := ""
+			if jobFound && len(task.OutputSchema) > 0 {
+				schemaValidation = job.SchemaValidation
+			}
+
+			resolvedCache := jobdefschema.ResolveCacheConfig(
+				decodeCacheConfig(task.CacheConfig),
+				jobCacheConfig,
+				envCache.Enabled,
+				envCache.TTL,
+				envCache.PinDigests,
+				envCache.DigestTTL,
+			)
+			replaySafe := task.ReplaySafe || atom.ReplaySafe
+			if jobFound && job.ReplaySafe {
+				replaySafe = true
+			}
+			descriptor, descriptorErr := s.initialTaskExecutionDescriptorTx(
+				tx,
+				jobRun,
+				job,
+				jobFound,
+				task,
+				atom,
+				input.OutstandingPredecessors,
+				resolvedCache,
+				replaySafe,
+			)
+			if descriptorErr != nil {
+				return descriptorErr
+			}
+
+			records = append(records, models.TaskRun{
+				ID:                      uuid.New(),
+				JobRunID:                runID,
+				TaskID:                  task.ID,
+				AtomID:                  task.AtomID,
+				Engine:                  atom.Engine,
+				Image:                   atom.Image,
+				Command:                 command,
+				Status:                  string(TaskStatusPending),
+				Priority:                jobRun.Priority,
+				NodeSelector:            maps.Clone(task.NodeSelector),
+				Attempt:                 1,
+				MaxAttempts:             maxAttempts,
+				PartitionIndex:          input.PartitionIndex,
+				OutstandingPredecessors: input.OutstandingPredecessors,
+				CacheEnabled:            resolvedCache.Enabled,
+				CacheTTL:                resolvedCache.TTL,
+				CacheVersion:            resolvedCache.Version,
+				ReplaySafe:              replaySafe,
+				CachePinDigests:         resolvedCache.PinDigests,
+				CacheDigestTTL:          resolvedCache.DigestTTL,
+				CacheChain:              resolvedCache.Chain,
+				CacheTTLNever:           resolvedCache.TTLNever,
+				OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
+				SchemaValidation:        schemaValidation,
+				Quarantine:              jobRun.Quarantine,
+				ExecutionDescriptor:     descriptor,
+			})
+
+			if emitReady && input.OutstandingPredecessors == 0 && s.eventStore != nil {
+				readyEvents = append(readyEvents, event.Event{
+					Type:       event.TypeTaskReady,
+					JobID:      jobID,
+					RunID:      runID,
+					TaskID:     task.ID,
+					Timestamp:  time.Now().UTC(),
+					Quarantine: jobRun.Quarantine,
+				})
+			}
+		}
+
+		if len(records) == 0 {
+			return nil
+		}
+		if err := tx.Create(&records).Error; err != nil {
+			return err
+		}
+		inserted = records
+		counts.addTaskRunInsert(len(records))
+		if len(readyEvents) > 0 {
+			eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
+			for _, evt := range readyEvents {
+				eventRecords = append(eventRecords, executionEventRecord(evt))
+			}
+			if err := tx.Create(&eventRecords).Error; err != nil {
+				return err
+			}
+			counts.addEventInsert(len(eventRecords))
+			for idx := range readyEvents {
+				readyEvents[idx].Sequence = eventRecords[idx].Sequence
+				readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
+			}
+			attemptEvents = readyEvents
+		}
+		return nil
+	}()
+	if err != nil {
+		return nil, nil, err
+	}
+	return attemptEvents, inserted, nil
 }
 
 func executionEventRecord(evt event.Event) models.ExecutionEvent {
@@ -5309,6 +5456,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 		CreatedAt:  model.CreatedAt,
 		UpdatedAt:  model.UpdatedAt,
 		Error:      model.Error,
+		SkipReason: model.SkipReason,
 	}
 
 	if len(model.Params) > 0 {

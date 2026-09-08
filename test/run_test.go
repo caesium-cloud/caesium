@@ -21,6 +21,9 @@ type runResponse struct {
 	Error      string            `json:"error,omitempty"`
 	Quarantine bool              `json:"quarantine"`
 	Params     map[string]string `json:"params,omitempty"`
+	// SkipReason is set only on a run created directly terminal by admission —
+	// today the data circuit breaker's upstream-hold gate.
+	SkipReason string            `json:"skip_reason,omitempty"`
 	Tasks      []runTaskResponse `json:"tasks"`
 }
 
