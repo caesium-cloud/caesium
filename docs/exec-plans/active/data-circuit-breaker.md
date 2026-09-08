@@ -932,7 +932,7 @@ precedent for it is warn-mode schema validation, which publishes
 
 ## Harness Strengthening
 
-- [ ] H-1. Ensure the integration server exercises the real assertion path: set
+- [x] H-1. Ensure the integration server exercises the real assertion path: set
       `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the `just integration-up` /
       `just integration-test` server (mirror the lineage
       `CAESIUM_OPEN_LINEAGE_ENABLED` precedent the `CLAUDE.md` gate calls out), pass
@@ -986,6 +986,35 @@ precedent for it is warn-mode schema validation, which publishes
       `ui-e2e-auth`), `helm/caesium/ci/test-values-k8s.yaml`,
       `.github/workflows/ci.yml`, `test/` harness helpers, `build/` (or `test/`)
       metrics-emitting fixture image.
+      **Done (W1-β):** `-e CAESIUM_DATA_ASSERTIONS_ENABLED=true` added next to
+      `CAESIUM_FRESHNESS_ENABLED=true` in all eight `justfile` server blocks
+      (`integration-up`, `integration-up-distributed`,
+      `integration-up-owner-memory`, `integration-up-agent`,
+      `integration-up-infra`, `integration-test-podman`, `ui-e2e`,
+      `ui-e2e-auth`), the three matching inline server blocks in
+      `.github/workflows/ci.yml` (`ui-e2e`, `ui-e2e-auth`,
+      `podman-integration-test`), and `helm/caesium/ci/test-values-k8s.yaml`.
+      Re-grepped `CAESIUM_FRESHNESS_ENABLED` after the edit — zero misses. The
+      justfile's local-dev-only `k8s-distributed` recipe (positional
+      `--set config.extraEnv[N]`, not part of the CI job matrix or any
+      `test/` scenario) was deliberately left untouched — out of this item's
+      scope and out of `docs/ci.md` §5's lane list. New
+      `test/data_assertions_lane_test.go` adds `requireDataAssertionsLane()`
+      (gates on live `GET /v1/system/features` `data_assertions_enabled`,
+      mirroring `requireAuthLane`'s pattern but keying off the server's own
+      report rather than a runner-side marker env, since H-1 enables the flag
+      on every lane rather than one dedicated lane) plus a self-test. New
+      `test/metrics_fixture_test.go` adds the metrics-emitting fixture:
+      `metricsProducerStep`/`metricsProducerStepForDataset` return a `steps:`
+      YAML entry on the canonical `alpine:3.23` image whose command echoes
+      `##caesium::metrics` marker lines, for Stream A/B/C scenarios to embed.
+      Pre-existing env drift on `integration-up-agent`/`integration-up-distributed`/
+      `integration-up-owner-memory`/`podman-integration-test` is tracked by
+      [issue #425](https://github.com/caesium-cloud/caesium/issues/425) and
+      intentionally not touched here. Did not add a low
+      `CAESIUM_BASELINE_MIN_SAMPLES` / short `CAESIUM_DATASET_METRIC_RETENTION`
+      — no scenario needs a tight window yet; Stream A/B/C add one if/when a
+      scenario requires it.
 
 ## Navigational / Organizational Improvements
 

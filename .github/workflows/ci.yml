@@ -522,6 +522,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -589,6 +590,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -777,6 +779,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \

@@ -557,6 +557,7 @@ integration-test-podman: build
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -602,6 +603,7 @@ integration-up: build-test
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -631,6 +633,7 @@ integration-up-distributed: build-test
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -671,6 +674,7 @@ integration-up-owner-memory: build-test
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -730,6 +734,7 @@ integration-up-infra: build-test build-reagents
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -816,6 +821,7 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -858,6 +864,7 @@ ui-e2e: build-release
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -899,6 +906,7 @@ ui-e2e-auth: build-release
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
