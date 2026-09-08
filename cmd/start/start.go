@@ -166,6 +166,12 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 	event.StartIngestRetentionPruner(ctx, event.NewIngestStore(db.Connection()), vars.EventRetention)
 	event.StartWebhookEventRetentionPruner(ctx, event.NewWebhookEventStore(db.Connection()), vars.WebhookEventRetention)
+	if vars.DataAssertionsEnabled {
+		// Dataset metrics are only written while the circuit breaker is on, so
+		// the pruner is gated on the same master flag rather than a knob of its
+		// own (arc convention 1: one feature gate).
+		run.StartDatasetMetricRetentionPruner(ctx, db.Connection(), vars.DatasetMetricRetention)
+	}
 	if vars.RateLimitPrunerEnabled {
 		runAsync(func() {
 			log.Info("launching rate limit token pruner", "interval", vars.RateLimitPruneInterval)

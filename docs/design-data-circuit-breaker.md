@@ -431,3 +431,21 @@ their own scenarios.
 4. **Tenancy.** When multi-tenancy (roadmap §3.1) lands, holds and the
    registry scope per namespace; models carry a nullable tenant column from
    day one, as agent-in-the-loop already commits to.
+5. **Fan-out assertion semantics** — *answered 2026-09-08 in Stream A item A4*
+   (`internal/run/data_assertions.go`). This design predates fan-out, so it
+   never said what a step with N `TaskRun` instances asserts on. **Decision:
+   per-partition, on both halves.** Samples are recorded per instance — each
+   fanned instance owns its `DatasetMetric` rows through its own task-run
+   reference, so a fanned producer contributes N samples per trigger and the
+   rolling baseline window counts partitions rather than triggers. Evaluation
+   (Stream B) is per-instance for the same reason: `EvaluateDataAssertions`
+   is called from the same post-task seam as `ValidateTaskOutputSchemaInstance`,
+   which is already per-instance, and the pipeline has no group-completion hook
+   that could own a dataset-level verdict. The N verdicts a fanned group can
+   produce do not become N holds: the one-active-hold-per-dataset upsert
+   (Stream C item C1) collapses them into a single hold whose occurrence
+   counter records the repeats — exactly the collapse a group aggregate would
+   otherwise need a new seam to achieve. **Accepted limitation:** an assertion
+   over a group AGGREGATE (total `rowCount` across partitions, say) is not
+   expressible in v1; a step that needs one must emit the aggregate itself
+   from a fan-in successor.

@@ -805,6 +805,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	var taskOutput map[string]string
 	var branchSelections []string
 	var partitions []pkgtask.Partition
+	var datasetMetrics []pkgtask.DatasetMetricSample
 	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
@@ -820,6 +821,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		} else if markers != nil {
 			taskOutput = markers.Output
 			partitions = markers.Partitions
+			datasetMetrics = markers.Metrics
+			if markers.MetricsTruncated {
+				log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
+					"task_id", taskRun.TaskID, "cap_bytes", pkgtask.MaxMetricsBytes)
+			}
 			if len(markers.Branches) > 0 {
 				branchSelections = markers.Branches
 			}
@@ -882,6 +888,20 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return partitions, failure
 	}
 
+	// Data-quality seam, on the same instance row as schema validation but
+	// deliberately BELOW the outcome decision and only on a SUCCEEDING attempt.
+	//
+	// A retry reuses this row (RetryTaskClaimedInstance keys on taskRun.ID), and
+	// run.Baseline's cleanliness filter reads the row's FINAL status — so
+	// recording on every attempt would let a failed attempt 1 emitting
+	// `rowCount: 0` and a succeeding attempt 2 both count as clean samples of the
+	// same run and poison the median. The local executor cannot produce that
+	// (its seam runs only when execErr == nil), and the two executors must
+	// baseline a job identically.
+	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
+		return nil, err
+	}
+
 	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
 		return nil, err
 	}
@@ -924,6 +944,17 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID,
 		output, taskRun.OutputSchema, taskRun.SchemaValidation,
 	)
+}
+
+// runDataAssertions records the dataset metrics THIS INSTANCE self-reported.
+// Like runSchemaValidation it keys on taskRun.ID, not taskRun.TaskID: a fanned
+// step has N sibling rows and each partition owns its own samples. Its caller
+// invokes it only on a succeeding attempt — see the comment at the call site.
+func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
+	if taskRun == nil {
+		return nil
+	}
+	return run.EvaluateDataAssertions(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, samples)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

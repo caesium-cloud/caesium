@@ -41,6 +41,10 @@ type Features struct {
 	AgentRemediationEnabled    bool   `json:"agent_remediation_enabled"`
 	FreshnessEnabled           bool   `json:"freshness_enabled"`
 	ContractEnforcementEnabled bool   `json:"contract_enforcement_enabled"`
+	// DataAssertionsEnabled reports the data circuit breaker's master gate
+	// (CAESIUM_DATA_ASSERTIONS_ENABLED). Off means no evaluator, no metrics
+	// persistence and no hold routes, so the console hides the gated surfaces.
+	DataAssertionsEnabled bool `json:"data_assertions_enabled"`
 }
 
 type Service struct {
@@ -132,5 +136,6 @@ func (s *Service) Features() (*Features, error) {
 		AgentRemediationEnabled:    v.AgentRemediationEnabled,
 		FreshnessEnabled:           v.FreshnessEnabled,
 		ContractEnforcementEnabled: contractsvc.Enabled(),
+		DataAssertionsEnabled:      v.DataAssertionsEnabled,
 	}, nil
 }

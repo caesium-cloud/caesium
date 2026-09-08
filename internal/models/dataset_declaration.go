@@ -77,6 +77,25 @@ type DatasetDeclaration struct {
 	// breaks. It is zero when unset and unused for consumed/source declarations.
 	SchemaVersion int `json:"schema_version,omitempty"`
 
+	// AssertionsJSON is the marshaled produces[].assertions block
+	// (pkg/jobdef.DatasetAssertions) — the declared data-quality contract the
+	// post-task evaluator checks emitted ##caesium::metrics against. Empty when
+	// no assertions are declared, and always empty for consumed/source
+	// declarations. It is spec, not state: the observations live in
+	// DatasetMetric and the breaker state in DatasetHold.
+	AssertionsJSON string `gorm:"type:text" json:"assertions_json,omitempty"`
+
+	// OnViolation is produces[].onViolation — one of "warn" (record only),
+	// "fail" (red run, exactly like schemaValidation: fail) or "hold" (the task
+	// succeeds and the DATASET is held). Empty means no dispatch is configured.
+	OnViolation string `gorm:"type:text;not null;default:''" json:"on_violation,omitempty"`
+
+	// Release is produces[].release — "auto" (default: the next clean producer
+	// run releases the hold) or "manual" (the hold survives a clean run and
+	// needs a human ack). Empty is read as "auto"; see
+	// pkg/jobdef.ProducedDataset.EffectiveRelease.
+	Release string `gorm:"type:text;not null;default:''" json:"release,omitempty"`
+
 	// SkipWhenFresh carries metadata.datasets.skipWhenFresh after defaulting.
 	// It is evaluated at the cron scheduling seam only and never affects a task's
 	// cache identity. Pointer form preserves an explicit false across GORM's

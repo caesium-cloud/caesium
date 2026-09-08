@@ -208,6 +208,20 @@ type Environment struct {
 	ContractEnforcement            string        `envconfig:"CONTRACT_ENFORCEMENT" default:""`
 	ContractDeprecationWindow      time.Duration `envconfig:"CONTRACT_DEPRECATION_WINDOW" default:"336h"`
 
+	// Data circuit breaker (design-data-circuit-breaker.md).
+	// DataAssertionsEnabled is the ONE master gate for the whole feature: off
+	// means no evaluator, no metrics persistence, no routes, and the jobdef
+	// `assertions`/`onViolation`/`release`/`onUpstreamHold` fields are refused at
+	// validation with a message naming this variable.
+	DataAssertionsEnabled bool `envconfig:"DATA_ASSERTIONS_ENABLED" default:"false"`
+	// BaselineWindow is how many recent clean samples per (dataset, metric) the
+	// compute-on-read baseline summarises (median + p10/p90). There is no
+	// materialized baseline table; the window is a handful of small rows.
+	BaselineWindow int `envconfig:"BASELINE_WINDOW" default:"20"`
+	// DatasetMetricRetention bounds how long DatasetMetric rows are kept. The
+	// pruner is only started when DataAssertionsEnabled is set.
+	DatasetMetricRetention time.Duration `envconfig:"DATASET_METRIC_RETENTION" default:"2160h"`
+
 	// Notification Watcher
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
 

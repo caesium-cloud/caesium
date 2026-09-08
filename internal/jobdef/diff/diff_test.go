@@ -149,6 +149,9 @@ func openDiffTestDB(t *testing.T) *gorm.DB {
 		&models.Atom{},
 		&models.Task{},
 		&models.Callback{},
+		// The declared registry carries the per-dataset assertion policy the
+		// spec now diffs (data-circuit-breaker A3).
+		&models.DatasetDeclaration{},
 	))
 	return db
 }

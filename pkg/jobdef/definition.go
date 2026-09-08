@@ -128,6 +128,13 @@ type Metadata struct {
 	// Datasets declares the external source datasets this job's steps consume.
 	// It is scheduling metadata for freshness and does not affect the cache hash.
 	Datasets *MetadataDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
+	// OnUpstreamHold decides what happens when this job is triggered while a
+	// dataset it consumes is held by the data circuit breaker: "skip" (the
+	// default — the run is admitted directly to terminal skipped with reason
+	// dataset_hold:<ns>/<name>) or "run" (proceed on held data anyway). Read via
+	// EffectiveOnUpstreamHold; it is admission metadata and does not affect the
+	// cache hash.
+	OnUpstreamHold string `yaml:"onUpstreamHold,omitempty" json:"onUpstreamHold,omitempty"`
 	// Remediation declares this job's opt-in to autonomous incident
 	// remediation (agent-in-the-loop-remediation Stream E): which
 	// AgentProfile to use, which failure classes are in scope, the tiered
@@ -136,6 +143,17 @@ type Metadata struct {
 	// scheduling/policy metadata, not a step-execution input, and does not
 	// affect the cache hash.
 	Remediation *MetadataRemediation `yaml:"remediation,omitempty" json:"remediation,omitempty"`
+}
+
+// EffectiveOnUpstreamHold returns metadata.onUpstreamHold with the documented
+// default applied. The unset value is preserved in the manifest and resolved
+// here, so a re-serialised definition never gains a field the author did not
+// write.
+func (m *Metadata) EffectiveOnUpstreamHold() string {
+	if m == nil || strings.TrimSpace(m.OnUpstreamHold) == "" {
+		return OnUpstreamHoldSkip
+	}
+	return strings.TrimSpace(m.OnUpstreamHold)
 }
 
 // Concurrency controls admission of new runs for the same job.
@@ -269,6 +287,84 @@ const (
 	DatasetSchemaFromOutput = "output"
 )
 
+// Data-assertion dispatch and release constants (design-data-circuit-breaker.md).
+// They are the canonical values persisted on the DatasetDeclaration registry and
+// read by the post-task assertion evaluator.
+const (
+	// DatasetOnViolationWarn records the violation without failing the task,
+	// exactly like metadata.schemaValidation: warn.
+	DatasetOnViolationWarn = "warn"
+	// DatasetOnViolationFail fails the task, exactly like schemaValidation: fail.
+	DatasetOnViolationFail = "fail"
+	// DatasetOnViolationHold lets the task SUCCEED — the work is done, and
+	// failing it would only invite a retry of the same data — but holds the
+	// dataset so downstream consumers are admitted straight to skipped.
+	DatasetOnViolationHold = "hold"
+
+	// DatasetReleaseAuto releases an active hold on the next clean producer run.
+	// It is the default when release is unset.
+	DatasetReleaseAuto = "auto"
+	// DatasetReleaseManual keeps the hold until a human acks it: a clean
+	// producer run does NOT release a manually-released dataset.
+	DatasetReleaseManual = "manual"
+
+	// OnUpstreamHoldSkip admits a run that consumes a held dataset directly to
+	// terminal `skipped` with reason dataset_hold:<ns>/<name>. It is the default.
+	OnUpstreamHoldSkip = "skip"
+	// OnUpstreamHoldRun opts a job out of the admission gate: it runs on held
+	// upstream data anyway.
+	OnUpstreamHoldRun = "run"
+
+	// DefaultRowCountMetric / DefaultNullRateMetric are the emitted
+	// ##caesium::metrics keys the named shorthand assertions read when the
+	// author does not override them with an explicit `metric:`.
+	DefaultRowCountMetric = "rowCount"
+	DefaultNullRateMetric = "nullRate"
+)
+
+// AssertionSpec is one declared data assertion: which emitted metric it reads
+// and the bounds that metric must satisfy. Min/Max are absolute bounds that
+// enforce from run one; DeltaFromBaseline is a percentage of the rolling median
+// ("50%") and is warn-only until the baseline has enough samples.
+//
+// Metric is optional for the named shorthands (rowCount defaults to
+// DefaultRowCountMetric, nullRate to DefaultNullRateMetric) and required for a
+// custom[] entry.
+type AssertionSpec struct {
+	Metric string   `yaml:"metric,omitempty" json:"metric,omitempty"`
+	Min    *float64 `yaml:"min,omitempty" json:"min,omitempty"`
+	Max    *float64 `yaml:"max,omitempty" json:"max,omitempty"`
+	// DeltaFromBaseline is a percentage string, e.g. "50%": |value − median of
+	// the last N clean samples| must be ≤ that percentage of the median. It is
+	// a string rather than a number so the design's `deltaFromBaseline: 50%`
+	// YAML round-trips through JSON unchanged.
+	DeltaFromBaseline string `yaml:"deltaFromBaseline,omitempty" json:"deltaFromBaseline,omitempty"`
+}
+
+// FreshnessAssertion bounds how far a dataset's watermark may lag. Watermark
+// names the emitted metric carrying an RFC3339 timestamp (stored as epoch
+// seconds); MaxLag is a Go duration.
+type FreshnessAssertion struct {
+	Watermark string `yaml:"watermark,omitempty" json:"watermark,omitempty"`
+	MaxLag    string `yaml:"maxLag,omitempty" json:"maxLag,omitempty"`
+}
+
+// DatasetAssertions is the declared data-quality contract on a produced
+// dataset. Every assertion reads a metric the step self-reports via
+// ##caesium::metrics; a declared metric that never arrives is itself a
+// violation, so an assertion cannot be silently disabled by not emitting.
+type DatasetAssertions struct {
+	RowCount  *AssertionSpec      `yaml:"rowCount,omitempty" json:"rowCount,omitempty"`
+	NullRate  *AssertionSpec      `yaml:"nullRate,omitempty" json:"nullRate,omitempty"`
+	Freshness *FreshnessAssertion `yaml:"freshness,omitempty" json:"freshness,omitempty"`
+	Custom    []AssertionSpec     `yaml:"custom,omitempty" json:"custom,omitempty"`
+}
+
+// IsEmpty reports whether the block declares nothing at all.
+func (a *DatasetAssertions) IsEmpty() bool {
+	return a == nil || (a.RowCount == nil && a.NullRate == nil && a.Freshness == nil && len(a.Custom) == 0)
+}
+
 // Watermark identifies the ##caesium::output key a producing step emits to
 // advance its dataset. It is not a JSONPath — it names an output key on the
 // existing zero-SDK output contract (echo '##caesium::output {"<key>": ...}').
@@ -296,6 +392,27 @@ type ProducedDataset struct {
 	MaxStaleness string `yaml:"maxStaleness,omitempty" json:"maxStaleness,omitempty"`
 	// Watermark names the output key this step emits to advance the dataset.
 	Watermark *Watermark `yaml:"watermark,omitempty" json:"watermark,omitempty"`
+	// Assertions is the declared data-quality contract the post-task evaluator
+	// checks the step's emitted ##caesium::metrics against
+	// (design-data-circuit-breaker.md). Like the SLO fields it is post-task
+	// evaluation metadata and never enters the cache identity hash.
+	Assertions *DatasetAssertions `yaml:"assertions,omitempty" json:"assertions,omitempty"`
+	// OnViolation dispatches an assertion violation: warn | fail | hold.
+	OnViolation string `yaml:"onViolation,omitempty" json:"onViolation,omitempty"`
+	// Release controls whether a clean producer run releases an active hold on
+	// this dataset: auto (default) | manual. Read via EffectiveRelease.
+	Release string `yaml:"release,omitempty" json:"release,omitempty"`
+}
+
+// EffectiveRelease returns the release mode with the documented default
+// applied. The zero value is deliberately preserved in the manifest (so a
+// re-serialised definition does not gain a field the author never wrote) and
+// resolved here instead.
+func (p *ProducedDataset) EffectiveRelease() string {
+	if p == nil || strings.TrimSpace(p.Release) == "" {
+		return DatasetReleaseAuto
+	}
+	return strings.TrimSpace(p.Release)
 }
 
 // ConsumedDataset declares a dataset a step reads. Legacy YAML may use a plain
@@ -1095,6 +1212,9 @@ func validateDatasets(d *Definition) error {
 					return err
 				}
 			}
+			if err := validateDatasetAssertionSurface(i, j, p); err != nil {
+				return err
+			}
 			p.SchemaFrom = schemaFrom
 			p.Name = name
 		}
@@ -1158,6 +1278,19 @@ func validateSchedulingMetadata(metadata *Metadata) (map[string]struct{}, error)
 				ConcurrencyStrategySkip,
 				ConcurrencyStrategyFail)
 		}
+	}
+
+	switch strings.TrimSpace(metadata.OnUpstreamHold) {
+	case "":
+	case OnUpstreamHoldSkip, OnUpstreamHoldRun:
+		// Arc convention 1: the field is inert with a clear message while the
+		// master gate is off, exactly like the freshness trigger gate.
+		if !dataAssertionsFeatureEnabled() {
+			return nil, fmt.Errorf("metadata.onUpstreamHold requires CAESIUM_DATA_ASSERTIONS_ENABLED=true")
+		}
+	default:
+		return nil, fmt.Errorf("metadata.onUpstreamHold %q must be one of [\"%s\",\"%s\"]",
+			metadata.OnUpstreamHold, OnUpstreamHoldSkip, OnUpstreamHoldRun)
 	}
 
 	resources := make(map[string]struct{}, len(metadata.RateLimits))
@@ -1240,6 +1373,15 @@ func ValidateTriggerSpec(t *Trigger, defs ...*Definition) error {
 
 func freshnessFeatureEnabled() bool {
 	enabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("CAESIUM_FRESHNESS_ENABLED")))
+	return err == nil && enabled
+}
+
+// dataAssertionsFeatureEnabled reports the data circuit breaker's master gate,
+// read the same way freshnessFeatureEnabled reads its own: pkg/jobdef is the
+// schema package and is linked into the CLI, so it consults the environment
+// directly rather than importing pkg/env's server-side config struct.
+func dataAssertionsFeatureEnabled() bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("CAESIUM_DATA_ASSERTIONS_ENABLED")))
 	return err == nil && enabled
 }
 

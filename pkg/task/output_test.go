@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -679,4 +680,114 @@ func TestAggregateFanInOutputs_JustUnderCapKeepsUserKeys(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, got, "payload")
 	assert.Equal(t, "1", got["PARTITION_COUNT"])
+}
+
+// --- ##caesium::metrics (data-circuit-breaker A1) ---------------------------
+
+func TestParseMarkers_MetricsMarker(t *testing.T) {
+	logs := strings.NewReader(strings.Join([]string{
+		"starting load",
+		`##caesium::metrics {"dataset":"warehouse/orders","rowCount":10400312,"null_rate":0.0003,"max_event_time":"2026-07-03T01:12:00Z"}`,
+		`##caesium::output {"path":"/data/out.parquet"}`,
+		"done",
+	}, "\n"))
+
+	markers, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.NotNil(t, markers)
+	assert.False(t, markers.MetricsTruncated)
+	assert.Equal(t, map[string]string{"path": "/data/out.parquet"}, markers.Output)
+
+	// Keys within one line are ingested in sorted order.
+	require.Len(t, markers.Metrics, 3)
+	assert.Equal(t, "max_event_time", markers.Metrics[0].Metric)
+	assert.Equal(t, "null_rate", markers.Metrics[1].Metric)
+	assert.Equal(t, "rowCount", markers.Metrics[2].Metric)
+	for _, m := range markers.Metrics {
+		assert.Equal(t, "warehouse/orders", m.Dataset)
+	}
+
+	ts, err := time.Parse(time.RFC3339, "2026-07-03T01:12:00Z")
+	require.NoError(t, err)
+	assert.Equal(t, float64(ts.Unix()), markers.Metrics[0].Value, "RFC3339 values are stored as epoch seconds")
+	assert.Equal(t, 0.0003, markers.Metrics[1].Value)
+	assert.Equal(t, float64(10400312), markers.Metrics[2].Value)
+}
+
+func TestParseMarkers_MetricsOmittedDatasetSelector(t *testing.T) {
+	markers, err := ParseMarkers(strings.NewReader(`##caesium::metrics {"rowCount":42}`))
+	require.NoError(t, err)
+	require.Len(t, markers.Metrics, 1)
+	// Resolving the empty selector to the step's sole declared dataset is the
+	// server's job (it needs the declared registry), not the parser's.
+	assert.Equal(t, "", markers.Metrics[0].Dataset)
+	assert.Equal(t, "rowCount", markers.Metrics[0].Metric)
+	assert.Equal(t, float64(42), markers.Metrics[0].Value)
+}
+
+func TestParseMarkers_MetricsLastWriteWinsPerDatasetMetric(t *testing.T) {
+	logs := strings.NewReader(strings.Join([]string{
+		`##caesium::metrics {"dataset":"a","rowCount":1}`,
+		`##caesium::metrics {"dataset":"b","rowCount":2}`,
+		`##caesium::metrics {"dataset":"a","rowCount":3}`,
+	}, "\n"))
+
+	markers, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.Len(t, markers.Metrics, 2, "(dataset, metric) is the merge key")
+	assert.Equal(t, DatasetMetricSample{Dataset: "a", Metric: "rowCount", Value: 3}, markers.Metrics[0])
+	assert.Equal(t, DatasetMetricSample{Dataset: "b", Metric: "rowCount", Value: 2}, markers.Metrics[1])
+}
+
+func TestParseMarkers_MetricsMalformedLinesSkippedLeniently(t *testing.T) {
+	logs := strings.NewReader(strings.Join([]string{
+		`##caesium::metrics not json at all`,
+		`##caesium::metrics {"dataset":{"nested":true},"rowCount":9}`,
+		`##caesium::metrics {"dataset":"a","ok":true,"missing":null,"obj":{},"arr":[],"text":"nope","rowCount":7}`,
+		`##caesium::output {"survives":"yes"}`,
+	}, "\n"))
+
+	markers, err := ParseMarkers(logs)
+	require.NoError(t, err, "a bad metrics line must never fail the parse")
+	assert.Equal(t, map[string]string{"survives": "yes"}, markers.Output)
+	require.Len(t, markers.Metrics, 1, "only the numeric value on the well-formed line is kept")
+	assert.Equal(t, DatasetMetricSample{Dataset: "a", Metric: "rowCount", Value: 7}, markers.Metrics[0])
+}
+
+func TestParseMarkers_MetricsCapIsSeparateFromOutputCap(t *testing.T) {
+	var b strings.Builder
+	for i := range 4000 {
+		fmt.Fprintf(&b, "##caesium::metrics {\"dataset\":\"warehouse/orders\",\"metric_%04d\":%d}\n", i, i)
+	}
+	b.WriteString(`##caesium::output {"path":"/data/out.parquet"}` + "\n")
+
+	markers, err := ParseMarkers(strings.NewReader(b.String()))
+	require.NoError(t, err)
+	assert.True(t, markers.MetricsTruncated, "an over-cap emitter is reported, not silently trimmed")
+	assert.NotEmpty(t, markers.Metrics)
+	assert.Less(t, len(markers.Metrics), 4000)
+	assert.Equal(t, map[string]string{"path": "/data/out.parquet"},
+		markers.Output, "a chatty metrics emitter must not evict real outputs")
+
+	cost := 0
+	for _, m := range markers.Metrics {
+		cost += len(m.Dataset) + len(m.Metric) + metricEntryOverheadBytes
+	}
+	assert.LessOrEqual(t, cost, MaxMetricsBytes)
+}
+
+func TestParseMarkers_MetricsDockerMultiplexedPrefix(t *testing.T) {
+	markers, err := ParseMarkers(strings.NewReader(
+		"\x01\x00\x00\x00\x00\x00\x00\x2a" + `##caesium::metrics {"dataset":"a","rowCount":5}`))
+	require.NoError(t, err)
+	require.Len(t, markers.Metrics, 1)
+	assert.Equal(t, float64(5), markers.Metrics[0].Value)
+}
+
+func TestCaptureMarkers_CarriesMetrics(t *testing.T) {
+	markers, err := CaptureMarkers(strings.NewReader(
+		`##caesium::metrics {"dataset":"a","rowCount":5}`+"\nhello\n"), 1024)
+	require.NoError(t, err)
+	require.Len(t, markers.Metrics, 1)
+	assert.Contains(t, markers.LogText, "hello")
 }
