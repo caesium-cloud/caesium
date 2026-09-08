@@ -1,6 +1,6 @@
 # Data Circuit Breaker — Dataset Holds & Statistical Assertions
 
-Last updated: 2026-09-05
+Last updated: 2026-09-08
 
 **Plan 1 of [`closed-loop-arc.md`](closed-loop-arc.md) — the data loop.** The arc
 closes a loop over the memory Caesium already keeps; this plan builds the data
@@ -171,35 +171,85 @@ decided.
 > plan reads the same `consumes` edges for its compatibility graph but does not
 > define registry structure.
 
-## Progress (as of 2026-09-05)
+## Progress (as of 2026-09-08)
 
-No implementation waves have shipped yet. The plan was published from
-[`design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md) alongside
-its Phase-4 companions (`contract-enforcement`, `freshness-scheduling`,
-`agent-in-the-loop-remediation`); it was **re-cut on 2026-09-05** as Plan 1 of
-[`closed-loop-arc.md`](closed-loop-arc.md): the registry race is resolved (all
-create-or-extend items are EXTEND), citations are refreshed to symbols, two
-sibling-driven shape requirements are imposed on B1 and A5, and the deferred Phase
-3 is pulled into scope as a new **Stream F**. **The first wave is the next
-eligible run of the `exec-plan-wave` skill against this doc — W1 (`A` + `H-1`)
-in the wave plan under `## Sequencing & Dependencies`.** The design's four phases (Phase 0
-Observe → Phase 1 Assert → Phase 2 Break the circuit → Phase 3 Ergonomics) map onto
-the streams below; of Phase 3, the `park` disposition alone remains deferred
-(parked at the arc level), and backtest evaluation of assertions moved to Plan 3.
+Wave 1 shipped Stream A (A1–A5), H-1 and N-2 across three PRs on
+2026-09-07/08. Every code PR passed the orchestrator's scope-aware
+integration gate on its exact head before merge (lint + unit + the default,
+agent, owner-memory and distributed lanes for #434; lint + unit + default lane
+for #433), and — the review bot having reviewed none of them — #434 got a
+substitute Opus adversarial review whose one P1 (the worker executor recorded
+metrics for failed, retried attempts) and one P2 (the new policy fields were
+invisible to `job diff` and the approval diff) were fixed before merge. Wave 2
+(Stream B) is the next eligible run.
+
+### Wave 1 — Observability substrate (2026-09-07/08)
+
+- **γ / N-2** — [#432](https://github.com/caesium-cloud/caesium/pull/432)
+  `ccb15e4`. `docs/design-data-circuit-breaker.md` § "Events, notifications,
+  REST, env" gains `CAESIUM_GIT_WRITE_CREDENTIALS` (JSON shape after
+  `CAESIUM_JOBDEF_GIT_SOURCES`; a separate write grant; degrade-to-`escalate`;
+  refused under `AUTH_MODE=none`) and `docs/design-agent-in-the-loop.md`
+  documents both `apply_jobdef_patch` routes (the shipped direct route,
+  `ErrPatchAltersRemediation`; the Git-PR route F3 builds). F3 may now land.
+- **β / H-1** — [#433](https://github.com/caesium-cloud/caesium/pull/433)
+  `dd755ea`. `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on every self-server lane
+  (eight justfile recipes, the three inline CI server blocks, the kind values
+  file); `requireDataAssertionsLane()` in `test/data_assertions_lane_test.go`
+  skips honestly off-lane; a reusable `alpine:3.23` metrics-emitting jobdef
+  fixture in `test/metrics_fixture_test.go` (no new image). All eleven
+  self-server CI jobs green on the branch. Issue #425's pre-existing env drift
+  is noted, not fixed here.
+- **α / A1–A5** — [#434](https://github.com/caesium-cloud/caesium/pull/434)
+  `06d6592`. The `##caesium::metrics` marker in the same `parseMarkers` scan
+  (own 16 KiB cap; overflow drops samples and sets `MetricsTruncated` rather
+  than evicting real outputs); `DatasetDeclaration` extended with
+  `AssertionsJSON`/`OnViolation`/`Release` and the new `DatasetMetric`
+  (CASCADE, catalog-only, env-gated retention pruner); `assertions` /
+  `onViolation` / `release` on `ProducedDataset` and `metadata.onUpstreamHold`
+  (inert with a named-flag message when off; `deltaFromBaseline` is a
+  percentage string with one exported parser; a declared-vs-observed lint
+  warning); `run.EvaluateDataAssertions` beside all three executor seams,
+  Phase-0 persist-only, quarantine excluded, never failing a task; the master
+  gate on `Environment` + `Features`; `Baseline(ctx, db, ns, name, metric,
+  window, asOf)` as the primary signature with a strict `asOf` cut.
+  **Decisions:** fan-out assertions are **per-partition on both halves**
+  (samples and evaluation per instance; C1's one-active-hold upsert collapses N
+  verdicts) — recorded as design Open Question 5; AC 1's route-based read
+  waits for D1 (the W1 scenario reads rows through the catalog helper); the
+  cache hash is untouched (a cached task is "no new sample"). **Citation
+  corrections:** no `rawStep` change was needed; the `consumes` lint needed no
+  change; `internal/freshness/registry.go` `BuildDeclarations` had to be
+  extended to persist the assertion spec (A2's file list named no writer).
+  **Review fixes:** the worker seam now runs only after a successful outcome
+  (a retried row's failed attempt was poisoning the median, and the local
+  executor could not reproduce it); `internal/jobdef/diff/spec.go` carries the
+  produced-dataset policy and `onUpstreamHold`, which required persisting
+  `models.Job.OnUpstreamHold` now — **C2 reads that column; it does not add
+  it**. Deferred to N-1: the generated schema-reference rows and the UI
+  `SystemFeatures` field. `caesium job apply` validates client-side, so an
+  operator applying an assertions manifest needs the flag in their shell too
+  (same as `trigger.type: freshness`).
+
+**Flakes classified:** none this wave.
+
+**Process notes:** three streams, three PRs, no lane-lock incidents; the
+orchestrator merged #433 and #432 first so Stream A could take the lane flag
+and the fixture from master instead of carrying a temporary justfile edit.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | Not started |
+| A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | Not started |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | Not started |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
-| H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | Not started |
+| H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
 | N-1 | Docs — roadmap Phase-4 flip, design banner, schema references + examples, README index, `docs/tour-data-loop.md`, arc dashboard row | — | Not started |
-| N-2 | Design amendment — add `CAESIUM_GIT_WRITE_CREDENTIALS` + the Git-PR provenance route to the design docs **before** F3 lands (Source-Of-Truth Note deviation) | — | Not started |
+| N-2 | Design amendment — add `CAESIUM_GIT_WRITE_CREDENTIALS` + the Git-PR provenance route to the design docs **before** F3 lands (Source-Of-Truth Note deviation) | — | **Shipped** (W1, #432) |
 | (parked) | `park` run disposition + release-drain | — | **Parked** at the arc level (see `closed-loop-arc.md` § Parked, archived, filed) |
 
 ## Streams

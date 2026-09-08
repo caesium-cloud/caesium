@@ -110,7 +110,7 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
 | 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; E4: `v0.1.0` released 2026-09-07 — https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0 (image digests in `docs/ci.md` § v0.1.0); N-4 closed out, plan archived to `completed/` |
-| 1 data-circuit-breaker | 0 | — | |
+| 1 data-circuit-breaker | 1 | #434 (`06d6592`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2 = B |
 | 2 resource-right-sizing | 0 | — | |
 | 3 backtesting | 0 | — | |
 | 4 window-scheduling | 0 | — | optional |
