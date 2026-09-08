@@ -5,54 +5,57 @@ package test
 import (
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
+	"os/exec"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
-// systemFeatures is the subset of GET /v1/system/features this stream cares
-// about. It is read through the real endpoint, not the env, so the assertion
-// proves the flag actually reaches the API surface.
-type systemFeatures struct {
-	DataAssertionsEnabled bool `json:"data_assertions_enabled"`
-}
-
-func (s *IntegrationTestSuite) dataAssertionsFeature() systemFeatures {
+// runCLIWithDataAssertions runs the CLI with CAESIUM_DATA_ASSERTIONS_ENABLED=true
+// added to its environment.
+//
+// `caesium job apply` validates the manifest CLIENT-side before it posts, and
+// pkg/jobdef gates the assertions surface on that variable exactly as it gates
+// `trigger.type: freshness` on CAESIUM_FRESHNESS_ENABLED — so an operator
+// applying a manifest with assertions sets the flag in their own shell too.
+// H-1 turns the flag on for every lane's SERVER; the test-runner container is a
+// separate process, so the scenario supplies it here rather than skipping.
+func (s *IntegrationTestSuite) runCLIWithDataAssertions(args ...string) {
 	s.T().Helper()
-	var features systemFeatures
-	s.getJSON("/v1/system/features", &features)
-	return features
-}
-
-// requireDataAssertionsEnabled skips loudly rather than failing when the lane's
-// server does not carry CAESIUM_DATA_ASSERTIONS_ENABLED=true. A lane without
-// the flag is honest about not covering the feature; it is not red.
-func (s *IntegrationTestSuite) requireDataAssertionsEnabled() {
-	s.T().Helper()
-	if !s.dataAssertionsFeature().DataAssertionsEnabled {
-		s.T().Skip("server reports data_assertions_enabled=false; set CAESIUM_DATA_ASSERTIONS_ENABLED=true on this lane's server (justfile integration-up) to cover the data circuit breaker")
-	}
+	cmd := exec.CommandContext(s.T().Context(), s.cliPath, args...)
+	cmd.Dir = s.projectRoot
+	cmd.Env = append(os.Environ(), "CAESIUM_DATA_ASSERTIONS_ENABLED=true")
+	output, err := cmd.CombinedOutput()
+	require.NoError(s.T(), err, "cli %v failed: %s", args, string(output))
 }
 
 // TestDataAssertionsMetricsPersisted drives the Phase 0 observability substrate
-// end to end on a live server: a step emits ##caesium::metrics from a real
-// container, and the samples land as DatasetMetric rows attributed to the
-// task run that emitted them, against the dataset the step declares.
+// end to end on a live server: a real container emits ##caesium::metrics, and
+// the samples land as DatasetMetric rows attributed to the task run that
+// emitted them, against the dataset the step declares.
 //
 // It reads the rows through the shared catalog handle rather than
-// GET /v1/datasets/:ns/:name/metrics, because that route is Stream D's (W4) and
-// does not exist yet; D1 replaces this read with the route-based check.
+// GET /v1/datasets/:ns/:name/metrics, because that route belongs to Stream D
+// (W4) and does not exist yet; D1 replaces this read with the route-based
+// check. Recorded as a deliberate, temporary deviation from acceptance
+// criterion 1.
 func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
-	s.requireDataAssertionsEnabled()
+	s.requireDataAssertionsLane()
 
 	suffix := time.Now().UnixNano()
 	alias := fmt.Sprintf("integration-metrics-%d", suffix)
 	dataset := fmt.Sprintf("integration.metrics.%d", suffix)
 	watermark := "2026-07-03T01:12:00Z"
 
-	dir := s.writeJobManifest(metricsProducerManifest(alias, dataset, watermark))
+	step, err := metricsProducerStepForDataset("load", dataset, map[string]any{
+		"rowCount":       10400312,
+		"dedup_ratio":    0.01,
+		"max_event_time": watermark,
+	})
+	s.Require().NoError(err)
+
+	dir := s.writeJobManifest(metricsProducerManifest(alias, dataset, step))
 	defer os.RemoveAll(dir)
 
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
@@ -61,7 +64,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 
 	runID := s.triggerRun(job.ID)
 	run := s.awaitRun(job.ID, runID, runTimeout)
-	s.Require().Equal("succeeded", run.Status, "the metrics emitter must succeed; metrics are observability, not enforcement")
+	s.Require().Equal("succeeded", run.Status, "a metrics emitter must succeed: Phase 0 observes, it does not enforce")
 
 	conn := s.openIntegrationCatalogGorm()
 
@@ -72,14 +75,14 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 			return false
 		}
 		return len(rows) == 3
-	}, 60*time.Second, 500*time.Millisecond, "expected 3 dataset_metrics rows for %s, saw %d", dataset, len(rows))
+	}, 60*time.Second, 500*time.Millisecond, "expected 3 dataset_metrics rows for %s", dataset)
 
 	byMetric := make(map[string]models.DatasetMetric, len(rows))
 	for _, row := range rows {
 		byMetric[row.Metric] = row
 		s.Equal(dataset, row.Name)
 		s.Equal("", row.Namespace, "namespace is reserved in v1")
-		s.NotEmpty(row.TaskRunID, "every sample attributes to the task run that emitted it")
+		s.NotEqual("", row.TaskRunID.String(), "every sample attributes to the task run that emitted it")
 	}
 
 	s.Require().Contains(byMetric, "rowCount")
@@ -105,26 +108,24 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 
 // TestDataAssertionsSchemaPersistsOnTheRegistry proves the declared assertion
 // spec survives the CLI → server → registry path and lands on the SAME
-// dataset_declarations row as the freshness SLO (one registry, no private copy).
-//
-// `caesium job apply` validates client-side, so the manifest is only accepted
-// when the RUNNER container also carries CAESIUM_DATA_ASSERTIONS_ENABLED=true —
-// that is the harness half (W1-β / H-1). Until it lands the scenario skips with
-// a message naming the gap instead of failing.
+// dataset_declarations row as the freshness SLO — one registry, no private copy.
 func (s *IntegrationTestSuite) TestDataAssertionsSchemaPersistsOnTheRegistry() {
-	s.requireDataAssertionsEnabled()
-	if enabled, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv("CAESIUM_DATA_ASSERTIONS_ENABLED"))); !enabled {
-		s.T().Skip("CAESIUM_DATA_ASSERTIONS_ENABLED is not set in the test-runner container, so `caesium job apply` would refuse the assertions block client-side; H-1 adds it to the runner env")
-	}
+	s.requireDataAssertionsLane()
 
 	suffix := time.Now().UnixNano()
 	alias := fmt.Sprintf("integration-assertions-%d", suffix)
 	dataset := fmt.Sprintf("integration.assertions.%d", suffix)
 
-	dir := s.writeJobManifest(assertionsProducerManifest(alias, dataset))
+	step, err := metricsProducerStepForDataset("load", dataset, map[string]any{
+		"rowCount":    10400312,
+		"dedup_ratio": 0.01,
+	})
+	s.Require().NoError(err)
+
+	dir := s.writeJobManifest(assertionsProducerManifest(alias, dataset, step))
 	defer os.RemoveAll(dir)
 
-	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	s.runCLIWithDataAssertions("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	job := s.requireJobByAlias(alias)
 	s.Require().NotNil(job)
 
@@ -141,13 +142,13 @@ func (s *IntegrationTestSuite) TestDataAssertionsSchemaPersistsOnTheRegistry() {
 	s.Contains(decl.AssertionsJSON, `"rowCount"`)
 	s.Contains(decl.AssertionsJSON, `"50%"`)
 	s.Contains(decl.AssertionsJSON, `"dedup_ratio"`)
-	// The SLO columns the freshness plan owns must still be on the same row.
+	// The SLO column the freshness plan owns must still be on the same row.
 	s.Equal("6h", decl.Freshness)
 }
 
-// metricsProducerManifest declares one produced dataset and emits three metrics
-// for it: a count, an undeclared ratio, and an RFC3339 watermark.
-func metricsProducerManifest(alias, dataset, watermark string) string {
+// metricsProducerManifest wraps H-1's metrics-emitting fixture step in a job
+// that declares the dataset the metrics belong to.
+func metricsProducerManifest(alias, dataset, step string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -158,19 +159,17 @@ trigger:
   configuration:
     expression: "0 0 31 2 *"
 steps:
-  - name: load
-    image: alpine:3.23
-    command: ["sh", "-c", "echo '##caesium::metrics {\"dataset\":\"%s\",\"rowCount\":10400312,\"dedup_ratio\":0.01,\"max_event_time\":\"%s\"}'"]
-    datasets:
+%s    datasets:
       produces:
         - name: %s
           freshness: 6h
-`, alias, dataset, watermark, dataset)
+`, alias, step, dataset)
 }
 
-// assertionsProducerManifest is the design's worked example in the shipped YAML
-// nesting: assertions + onViolation + release on a produced dataset.
-func assertionsProducerManifest(alias, dataset string) string {
+// assertionsProducerManifest is the design's worked example expressed in the
+// shipped YAML nesting: assertions + onViolation + release on a produced
+// dataset under steps[].datasets.produces.
+func assertionsProducerManifest(alias, dataset, step string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -181,10 +180,7 @@ trigger:
   configuration:
     expression: "0 0 31 2 *"
 steps:
-  - name: load
-    image: alpine:3.23
-    command: ["sh", "-c", "echo '##caesium::metrics {\"dataset\":\"%s\",\"rowCount\":10400312,\"dedup_ratio\":0.01}'"]
-    datasets:
+%s    datasets:
       produces:
         - name: %s
           freshness: 6h
@@ -194,5 +190,5 @@ steps:
               - {metric: dedup_ratio, max: 0.05}
           onViolation: hold
           release: manual
-`, alias, dataset, dataset)
+`, alias, step, dataset)
 }
