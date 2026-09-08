@@ -90,7 +90,7 @@ siblings (`freshness-scheduling` ≈ 4 waves / 11 PRs; `reproduce` ≈ 5 waves).
 
 | # | Plan | Slug | Loop | Size | Status |
 |---|---|---|---|---|---|
-| 0 | **Trust the substrate** — fix the six ledger bugs, **close the approval loop** (proposal → `ApprovalRequest` → approve → execute, with the direct `apply_jobdef_patch` route), de-hollow and widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, ship `docs/getting-started.md`, delete dead scaffolding, file the unfiled follow-ups | [`trust-the-substrate.md`](trust-the-substrate.md) | foundation | M–L (2–3 waves) | In progress — W1+W2 shipped; E4 + N-4 open |
+| 0 | **Trust the substrate** — fix the six ledger bugs, **close the approval loop** (proposal → `ApprovalRequest` → approve → execute, with the direct `apply_jobdef_patch` route), de-hollow and widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, ship `docs/getting-started.md`, delete dead scaffolding, file the unfiled follow-ups | [`trust-the-substrate.md`](../completed/trust-the-substrate.md) | foundation | M–L (2–3 waves) | Shipped (W1+W2, `v0.1.0` released 2026-09-07) |
 | 1 | **The data loop** — data circuit breaker **plus** its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance | [`data-circuit-breaker.md`](data-circuit-breaker.md) | data | XL (~4 waves) | Not started |
 | 2 | **The compute loop** — resource right-sizing with Stream E recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations | [`resource-right-sizing.md`](resource-right-sizing.md) | compute | XL (~4 waves) | Not started |
 | 3 | **The proof loop** — backtesting, after a design refresh (`internal/outputdiff` reuse; reconcile with the fan-out-aware replay core), **plus** proposal verification in the approval flow and assertion-threshold backtests | [`backtesting.md`](backtesting.md) | proof | XL (~4–5 waves) | Not started |
@@ -109,7 +109,7 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
-| 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; open: E4 (user tag push `v0.1.0`), N-4 close-out |
+| 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; E4: `v0.1.0` released 2026-09-07 — https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0 (image digests in `docs/ci.md` § v0.1.0); N-4 closed out, plan archived to `completed/` |
 | 1 data-circuit-breaker | 0 | — | |
 | 2 resource-right-sizing | 0 | — | |
 | 3 backtesting | 0 | — | |
@@ -369,7 +369,7 @@ Explicit decisions so they don't rot as prose inside archived plans:
 - [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — the
   positioning this arc extends (see its 2026-09 status update).
 - [`docs/roadmap.md`](../../roadmap.md) Phase 5 — the roadmap entry for this arc.
-- [`trust-the-substrate.md`](trust-the-substrate.md) — Plan 0.
+- [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — Plan 0.
 - [`data-circuit-breaker.md`](data-circuit-breaker.md) — Plan 1; design of
   record [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md).
 - [`resource-right-sizing.md`](resource-right-sizing.md) — Plan 2; design of

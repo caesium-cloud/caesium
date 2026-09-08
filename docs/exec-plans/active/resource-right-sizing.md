@@ -163,7 +163,7 @@ field-name disagreement.
 No implementation waves have shipped yet. The plan was re-cut on 2026-09-05
 against [`closed-loop-arc.md`](closed-loop-arc.md); the first wave is the next
 eligible run of the `exec-plan-wave` skill against this doc, and it may only run
-after Plan 0 ([`trust-the-substrate.md`](trust-the-substrate.md)) and Plan 1
+after Plan 0 ([`trust-the-substrate.md`](../completed/trust-the-substrate.md)) and Plan 1
 ([`data-circuit-breaker.md`](data-circuit-breaker.md)) — see the arc's
 § Cross-plan sequencing. The design doc's `> Status:` banner already points at
 this plan; N-1 flips it to "implemented" and ticks the arc dashboard row.
@@ -802,7 +802,7 @@ client-side (E1(c)).
       (e) Publish the `resource_recommendation_proposed` event C3 defines.
       **Cross-plan prerequisites (documented here, not on the `Depends on:`
       line, per the playbook's in-plan-ids rule):**
-      [`trust-the-substrate.md`](trust-the-substrate.md) **C4 + C7** — the
+      [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **C4 + C7** — the
       proposal → `ApprovalRequest` → approve → execute pipeline and the
       **direct** `apply_jobdef_patch` route — and
       [`data-circuit-breaker.md`](data-circuit-breaker.md) **F3**, the **Git-PR
@@ -989,7 +989,7 @@ Surfaces the backend through the jobs feature, gated on the `RightSizing`
       direct (non-git) `apply_jobdef_patch` route all work locally; nothing here
       needs a re-executing quarantined replay. **Cross-plan dependency, stated
       inline:** that lane is hollow today —
-      [`trust-the-substrate.md`](trust-the-substrate.md) **H-1** makes it real
+      [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1** makes it real
       and wide (its own Recon Ledger records why; do not re-derive it here) and
       **C4 + C7** wire the approval pipeline the scenario asserts; the Git-PR
       half additionally needs
@@ -1117,7 +1117,7 @@ the lane the note calls hypothetical already exists in `ci.yml`.
 ## Sequencing & Dependencies
 
 **Cross-plan order (the arc wins).** This plan runs **after Plan 0
-([`trust-the-substrate.md`](trust-the-substrate.md)) and Plan 1
+([`trust-the-substrate.md`](../completed/trust-the-substrate.md)) and Plan 1
 ([`data-circuit-breaker.md`](data-circuit-breaker.md))**. Two hard edges:
 
 - **Stream E after Plan 0 C4/C7 and after Plan 1 F3.** E1 depends on the
@@ -1449,7 +1449,7 @@ The plan is done when **all** of these hold:
   explainability row), § Shared conventions 1–8, § Cross-plan sequencing (the
   `internal/incident/` and executor conflict rows), and **arc acceptance
   criterion 3** govern this plan.
-- [`trust-the-substrate.md`](trust-the-substrate.md) — **Plan 0.** Its **C4**
+- [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — **Plan 0.** Its **C4**
   (proposal → `ApprovalRequest` → `awaiting_approval`), **C7** (approve →
   `ExecuteApproved` → `dispatch`, including the direct `apply_jobdef_patch`
   route) and **H-1** (the de-hollowed, widened auth lane) are hard prerequisites

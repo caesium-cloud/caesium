@@ -113,7 +113,7 @@ consecutive green `master` runs with no failure that is not a filed,
 non-quarantined issue. Promotion means three edits in the same PR: add the
 job id to the `checks` list in the PATCH body above and re-run the command,
 add it to this doc's "Required-to-merge checks" list, and update Acceptance
-Criterion 4 in `docs/exec-plans/active/trust-the-substrate.md` to match —
+Criterion 4 in `docs/exec-plans/completed/trust-the-substrate.md` to match —
 the three must never drift apart.
 
 `build-and-integration-test-distributed`,
@@ -278,10 +278,13 @@ exact diff and remediation.
 
 ### `v0.1.0` image digests
 
-Filled in by Stream E4 once the tag is cut.
+Recorded from `docker buildx imagetools inspect caesiumcloud/caesium:v0.1.0`
+after the tag's `publish` job (run 34180615494) on 2026-09-07. Release:
+<https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0>
+(`caesium-linux-amd64`, `caesium-linux-arm64`, `SHA256SUMS`).
 
 | Artifact | Digest |
 | --- | --- |
-| `caesiumcloud/caesium:v0.1.0` (multi-arch manifest) | _pending E4_ |
-| `caesiumcloud/caesium:v0.1.0` linux/amd64 | _pending E4_ |
-| `caesiumcloud/caesium:v0.1.0` linux/arm64 | _pending E4_ |
+| `caesiumcloud/caesium:v0.1.0` (multi-arch manifest) | `sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917` |
+| `caesiumcloud/caesium:v0.1.0` linux/amd64 | `sha256:d93d21e776665039bbf5cc3dc41be7a0b402ae9f2e83d446f2fb05a16d52288b` |
+| `caesiumcloud/caesium:v0.1.0` linux/arm64 | `sha256:56569860e7bfc33ca84998648a0d0d72bb87c35194299cb02f54da52104d932d` |

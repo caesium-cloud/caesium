@@ -1442,7 +1442,7 @@ The plan is done when **all** of these hold:
   [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md)
   — the incident runtime, action catalog, approval flow, and `apply_jobdef_patch`
   provenance router Stream F attaches to (see the verified-gap note in Stream F).
-- [`trust-the-substrate.md`](trust-the-substrate.md) — **Plan 0**; C4/C7 build the
+- [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — **Plan 0**; C4/C7 build the
   tier-3 proposal → `ApprovalRequest` → approve → execute pipeline (and the direct
   `apply_jobdef_patch` route) that F1/F2 consume, and H-1 widens the auth lane's
   `agent_integration_run` filter to

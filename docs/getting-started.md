@@ -32,7 +32,7 @@ On macOS, address a server running on the Mac as `http://host.docker.internal:80
 
 The `caesiumcloud/caesium:v0.1.0` image used above is also pullable by
 digest, if you want to pin exactly what you run:
-`caesiumcloud/caesium@sha256:<filled in by the v0.1.0 release — see docs/ci.md § v0.1.0 image digests>`.
+`caesiumcloud/caesium@sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917` (the `v0.1.0` multi-arch manifest; per-arch digests in `docs/ci.md` § `v0.1.0` image digests).
 
 > The rest of this walkthrough calls the binary `caesium`; substitute
 > `./.tmp/caesium-cli/caesium` if you're on the Docker-wrapped path.
