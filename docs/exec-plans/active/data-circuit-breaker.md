@@ -500,7 +500,7 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       after review, twice: the first wording left the run task-less; the second
       cited an update-only helper for rows that did not yet exist and left the
       fan-out shape undefined.)
-      **Depends inline on [`trust-the-substrate.md`](trust-the-substrate.md) Stream A**
+      **Depends inline on [`trust-the-substrate.md`](../completed/trust-the-substrate.md) Stream A**
       (the tolerant-rule stranding fix): until a failed plain task's successors
       advance correctly in the SQL lane, "downstream skipped because held" is not
       distinguishable from "downstream never dispatched", and the gate's integration
@@ -724,7 +724,7 @@ against the producer's job definition — and every one of those steps is
 `why`-explainable.
 
 **Cross-plan dependency, stated once and repeated per item.** F depends on
-[`trust-the-substrate.md`](trust-the-substrate.md) **C4** (proposal →
+[`trust-the-substrate.md`](../completed/trust-the-substrate.md) **C4** (proposal →
 `ApprovalRequest` + `awaiting_approval`) and **C7** (approve → execute, plus the
 *direct* `apply_jobdef_patch` route) and on its **H-1** (the de-hollowed, widened
 auth lane). Verified in the current tree (2026-09-05), that pipeline is **not
@@ -777,7 +777,7 @@ precedent for it is warn-mode schema validation, which publishes
       `internal/incident/store.go` (if `OpenParams` needs a non-failure shape),
       `test/` (auth-lane scenario). **Cross-plan blocker (documented inline, not in
       `Depends on:` per the draft-exec-plan PLAYBOOK):** the auth-lane scenario is
-      not runnable until [`trust-the-substrate.md`](trust-the-substrate.md) **H-1**
+      not runnable until [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1**
       makes that lane real — see `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: C1 + C4.
 - [ ] F2. Add `release_hold` to the action catalog and make it executable through
@@ -821,7 +821,7 @@ precedent for it is warn-mode schema validation, which publishes
       `get_context` needs a new `kind`), `api/rest/controller/agent/` (context
       handler), `cmd/start/start.go` (ops adapter), `test/` (auth-lane scenario).
       **Cross-plan blockers (documented inline, not in `Depends on:` per the
-      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](trust-the-substrate.md)
+      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](../completed/trust-the-substrate.md)
       **C4 + C7** (the proposal → `ApprovalRequest` → approve → execute pipeline,
       unwired today — see the stream preamble) and its **H-1** (the real auth lane
       the scenario runs on). See `## Sequencing & Dependencies` § Cross-PLAN order.
@@ -873,7 +873,7 @@ precedent for it is warn-mode schema validation, which publishes
       no-credential degrade-to-escalate path; the live-PR path is unit-tested
       against a fake forge — see Open Questions).
       **Cross-plan blocker (documented inline, not in `Depends on:` per the
-      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](trust-the-substrate.md)
+      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](../completed/trust-the-substrate.md)
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
@@ -976,7 +976,7 @@ precedent for it is warn-mode schema validation, which publishes
       the hold actually releases). **That lane runs in LOCAL execution mode**, so
       design these scenarios around cache-served / dry-run paths and never around a
       re-executing quarantined replay. **Depends inline on
-      [`trust-the-substrate.md`](trust-the-substrate.md) H-1**, which first makes
+      [`trust-the-substrate.md`](../completed/trust-the-substrate.md) H-1**, which first makes
       that lane real (today its test runner never receives `CAESIUM_AUTH_MODE`, so
       both scenarios skip and the recipe passes in 0.068s) and widens its `-run`
       pattern to include `TestHold*`/`TestIncident*` with a minimum `--- PASS`
@@ -1092,7 +1092,7 @@ precedent for it is warn-mode schema validation, which publishes
 here; the ordering it fixes and this plan honors:
 
 - **Plan 0 → Plan 1.** C3's 403-under-`AUTH_MODE=none` scenario and all of Stream F
-  need [`trust-the-substrate.md`](trust-the-substrate.md) **H-1** (real, widened
+  need [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1** (real, widened
   auth lane) and **C4/C7** (proposal → `ApprovalRequest` → approve → execute, plus
   the direct `apply_jobdef_patch` route). F3 builds the **Git-PR** route on top of
   C7's direct route; it does not rebuild the pipeline.
@@ -1368,7 +1368,7 @@ The plan is done when **all** of these hold:
 2. Pick an unchecked item under `## Streams` whose `Depends on:` line is satisfied
    (consult `## Sequencing & Dependencies`), including its **cross-plan**
    dependencies — Stream F and the auth-lane half of H-1 are not eligible until
-   [`trust-the-substrate.md`](trust-the-substrate.md) H-1 and C4/C7 have merged.
+   [`trust-the-substrate.md`](../completed/trust-the-substrate.md) H-1 and C4/C7 have merged.
 3. Re-grep before you edit. Every citation here is a **symbol**, not a line
    number, and the tree moves; if a symbol has moved or changed shape, fix the
    plan's citation in the same PR.
@@ -1389,7 +1389,7 @@ The plan is done when **all** of these hold:
   Shared conventions 1–8, the cross-plan file-conflict table, the Synergies row that
   puts Stream F in scope, and the parking decisions (`park` disposition) all live
   there. It wins on cross-plan ordering and on why something is in scope.
-- [`trust-the-substrate.md`](trust-the-substrate.md) — **Plan 0.** Stream A (the
+- [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — **Plan 0.** Stream A (the
   stranding fix C2's skip semantics depend on), C4/C7 (the approval pipeline and
   the direct `apply_jobdef_patch` route Stream F extends), H-1 (the real, widened
   auth lane every F scenario runs on).

@@ -113,7 +113,7 @@ consecutive green `master` runs with no failure that is not a filed,
 non-quarantined issue. Promotion means three edits in the same PR: add the
 job id to the `checks` list in the PATCH body above and re-run the command,
 add it to this doc's "Required-to-merge checks" list, and update Acceptance
-Criterion 4 in `docs/exec-plans/active/trust-the-substrate.md` to match —
+Criterion 4 in `docs/exec-plans/completed/trust-the-substrate.md` to match —
 the three must never drift apart.
 
 `build-and-integration-test-distributed`,

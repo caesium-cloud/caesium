@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-07
 
-> Status: **Active — Plan 0 of [`closed-loop-arc.md`](closed-loop-arc.md).** Waves 1–2 shipped (#386–#394, #421–#428); open: E4 (the user's `v0.1.0` tag push) and N-4 (close-out, after E4).
+> Status: **COMPLETE — Plan 0 of [`closed-loop-arc.md`](../active/closed-loop-arc.md).** Waves 1–2 shipped (#386–#394, #421–#429); `v0.1.0` released (E4) and closed out (N-4) on 2026-09-07. Archived here from `active/`.
 
 Everything Caesium has shipped must become **true** (the default execution
 mode strands DAGs; lineage's `producing_step` is always empty; a cancelled run's
@@ -73,7 +73,7 @@ not a substitute.
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/exec-plans/active/closed-loop-arc.md`](closed-loop-arc.md)
+When this plan and [`docs/exec-plans/active/closed-loop-arc.md`](../active/closed-loop-arc.md)
 disagree on **scope** (why an item exists, cross-plan ordering, what "done"
 means for the arc), the arc wins. When this plan and the **code** disagree on
 **mechanics** (a symbol name, a route verb, a lane's env), the code wins and the
@@ -2327,24 +2327,24 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`closed-loop-arc.md`](closed-loop-arc.md) — the umbrella arc; scope
+- [`closed-loop-arc.md`](../active/closed-loop-arc.md) — the umbrella arc; scope
   authority; shared conventions 1–8; the `0-A` rows of its file-conflict
   table; arc acceptance criterion 1.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 5 — the Plan 0 row.
 - `CLAUDE.md` § "End-to-end coverage is the gate" — the rule every C-stream
   and A2/A5/B scenario follows (CLI binary or live HTTP; stdout captured
   separately).
-- [`../completed/dynamic-fanout.md`](../completed/dynamic-fanout.md) and
+- [`../completed/dynamic-fanout.md`](dynamic-fanout.md) and
   PR #384 (`48497e9`) — where L1 was found; the route-completeness contract
   `resolveInstanceFailureTx` cites.
-- [`../completed/concurrency-priority-queues.md`](../completed/concurrency-priority-queues.md)
+- [`../completed/concurrency-priority-queues.md`](concurrency-priority-queues.md)
   and PR #275 (`14ec203`) — the replace-cancel resurrection fix whose
   message says it "does not kill the detached container" (L3).
-- [`../completed/data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md)
+- [`../completed/data-plane-memory-ui.md`](data-plane-memory-ui.md)
   — #250 (`RawJobTask` shim, L6) and #255 (`producing_step` descoped, L5).
-- [`../completed/freshness-scheduling.md`](../completed/freshness-scheduling.md)
+- [`../completed/freshness-scheduling.md`](freshness-scheduling.md)
   Stream B known limitation — L7.
-- [`../completed/agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md)
+- [`../completed/agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md)
   D1 — the approval flow whose creation half is missing (L9).
 - [`../../design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md),
   [`../../design-data-plane-memory.md`](../../design-data-plane-memory.md),
