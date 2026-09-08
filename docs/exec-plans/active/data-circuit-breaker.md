@@ -367,6 +367,17 @@ reviewed.
       BOTH the master flag and `CAESIUM_OPEN_LINEAGE_ENABLED` (with capture off
       there are no observed rows at all, so every declaration would be reported —
       noise, not signal).
+      **Adversarial-review fix (P2, same PR):** the new fields are ENFORCED
+      policy, so they are folded into the `caesium job diff` whitelist
+      (`internal/jobdef/diff/spec.go` `JobSpec`/`StepSpec`) — which is also the
+      diff a tier-3 `ApprovalRequest` shows a human. `onViolation`, `release` and
+      `assertions` diff per produced dataset (read back off the declared
+      registry), and `metadata.onUpstreamHold` diffs at job level. That required
+      persisting **`models.Job.OnUpstreamHold`** now (mirroring
+      `Job.SchemaValidation`, written by `internal/jobdef/importer.go`) rather
+      than leaving it manifest-only — otherwise every job declaring it would
+      report a permanent phantom diff. **Stream C2 should read that existing
+      column rather than adding it**; its own note asks for exactly this shape.
       **Cache-hash edge, as required:** nothing was added to
       `internal/cache/hash.go`; a cache-short-circuited task emits no fresh
       metrics, so the evaluator sees "no new sample" — no assertion, no baseline
@@ -418,13 +429,23 @@ reviewed.
       declarations make it ambiguous, and the sample is dropped with a log line
       naming the ambiguity rather than attributed arbitrarily.
       **Open Question 1 answered — fan-out is per-partition on both halves.**
-      Samples are recorded per instance (each fanned `TaskRun` owns its rows), and
-      evaluation in Stream B is per-instance too: the post-task pipeline has no
+      Samples are recorded per instance (each fanned `TaskRun` owns its rows) —
+      so a fanned producer's rolling baseline **window counts partitions, not
+      triggers** — and evaluation in Stream B is per-instance too: the post-task pipeline has no
       group-completion seam, and C1's one-active-hold-per-dataset upsert already
       collapses N verdicts into one hold with an occurrence count — the exact
       collapse a group aggregate would need a new seam to achieve. Accepted
       limitation: a group-AGGREGATE assertion is not expressible in v1. Recorded
       in `docs/design-data-circuit-breaker.md` § Open questions as item 5.
+      **Adversarial-review fix (P1, same PR):** in the distributed worker the
+      seam sits BELOW the attempt-outcome decision and runs only on a succeeding
+      attempt. A retry reuses the same row (`RetryTaskClaimedInstance` keys on
+      `taskRun.ID`) and `run.Baseline`'s cleanliness filter reads the row's FINAL
+      status, so recording on every attempt let a failed attempt-1 sample and its
+      succeeding retry both count as clean samples of one run — a poisoned median,
+      and a job that baselined differently on the two executors. Pinned by
+      `internal/worker/data_assertions_test.go`, which drives the real
+      `executeTask` path with a failing engine.
 - [x] A5. Add the master env gate `CAESIUM_DATA_ASSERTIONS_ENABLED` (default
       `false`) to the `Environment` struct in `pkg/env/env.go`, and surface it as a
       field on the `Features` struct in `api/rest/service/system/system.go` (so
@@ -1166,6 +1187,14 @@ precedent for it is warn-mode schema validation, which publishes
       `docs/exec-plans/active/closed-loop-arc.md` (dashboard row only).
       Depends on: A5 + B1 + C4 + D2 + E2 + F5 (every stream's last item — this
       item runs last, in its own trailing wave).
+      **Deferred here by W1-α (Stream A), for N-1 to pick up:** (a) the generated
+      schema reference — `internal/jobdef/report/report.go` is hand-written prose,
+      so the new `produces[].assertions`/`onViolation`/`release` and
+      `metadata.onUpstreamHold` rows must be ADDED there and the doc regenerated
+      the way `TestGeneratedSchemaReferenceIsCurrent` expects (the test is not
+      currently failing, because the generator's output did not change); (b)
+      `ui/src/lib/api.ts`'s `SystemFeatures` type needs the new
+      `data_assertions_enabled` field once Stream E renders a gated surface.
 - [x] N-2. **Amend the design docs for `CAESIUM_GIT_WRITE_CREDENTIALS` and the
       Git-PR provenance route, before F3 lands.** The Source-Of-Truth Note forbids
       adding a config knob the design does not enumerate without amending the

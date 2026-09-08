@@ -399,6 +399,7 @@ func copySteps(steps []schema.Step) []StepSpec {
 			Image:        step.Image,
 			Command:      slices.Clone(step.Command),
 			OutputSchema: cloneMap(step.OutputSchema),
+			Produces:     producedDatasetSpecs(step.Datasets),
 		})
 	}
 	return result
