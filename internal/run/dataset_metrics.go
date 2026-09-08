@@ -30,27 +30,50 @@ func InsertDatasetMetrics(ctx context.Context, conn *gorm.DB, rows []models.Data
 }
 
 // clearAttemptDatasetMetricsTx deletes the samples one TaskRun recorded for the
-// attempt that is about to be retried. It belongs to the SAME reset contract as
-// retryResetColumns and is called wherever that map is applied — the columns
-// live on task_runs, these rows live in another table, and both are the
-// previous attempt's evidence.
+// attempt that is about to run again. It belongs to the SAME reset contract as
+// retryResetColumns and is called wherever a row is reset for re-execution —
+// the columns live on task_runs, these rows live in another table, and both are
+// the previous attempt's evidence.
 //
-// Without it a retried instance double-counts: the retry paths reuse one
-// TaskRun row, so attempt 1's samples and attempt 2's samples both hang off it,
-// and when the row finally lands `succeeded` the baseline reads BOTH as clean
-// history of one logical run. That matters most for the case this feature
-// creates: an onViolation: fail verdict is itself an attempt failure, so the
-// value the breaker just rejected would come back as baseline history through
-// the very retry it triggered.
+// Without it a re-executed instance double-counts: every one of these paths
+// reuses ONE TaskRun row, so attempt 1's samples and attempt 2's samples both
+// hang off it, and when the row finally lands `succeeded` the baseline reads
+// BOTH as clean history of one logical run. Two families of caller:
 //
-// Best-effort by design in one respect only: it runs inside the caller's
-// transaction, so a failure rolls the retry back rather than silently leaking
-// rows.
+//   - the retries (retryResetColumns' five sites). This is the case the feature
+//     itself creates: an onViolation: fail verdict IS an attempt failure, so the
+//     value the breaker just rejected would come back as baseline history
+//     through the very retry it triggered.
+//   - the failover resets — ResetInFlightTasks (owner takeover, run resumption)
+//     and ReclaimOwnerExpiredClaims (worker lease expiry). A worker that dies
+//     between this seam's insert and reportCompletion leaves its samples on a
+//     row another worker then re-runs.
+//
+// Not covered, deliberately: the pre-execution re-pends (ReleaseTaskClaim, the
+// rate-limit deferral). Those re-pend a row whose attempt never reached the
+// post-task seam, so there is nothing to clear.
+//
+// KNOWN GAP (tracked as an issue, not closed here): InsertDatasetMetrics has no
+// claim fence, so a superseded worker can still write samples onto a row it no
+// longer owns AFTER a reclaim has cleared them. Every other terminal write on
+// the row is claim-fenced; this one is not.
+//
+// It runs inside the caller's transaction, so a failure rolls the reset back
+// rather than silently leaking rows.
 func clearAttemptDatasetMetricsTx(tx *gorm.DB, taskRunID uuid.UUID) error {
-	if tx == nil || taskRunID == uuid.Nil {
+	if taskRunID == uuid.Nil {
 		return nil
 	}
-	return tx.Where("task_run_id = ?", taskRunID).Delete(&models.DatasetMetric{}).Error
+	return clearAttemptDatasetMetricsForTaskRunsTx(tx, []uuid.UUID{taskRunID})
+}
+
+// clearAttemptDatasetMetricsForTaskRunsTx is the batch form, for the failover
+// resets that re-pend every in-flight row of a run in one statement.
+func clearAttemptDatasetMetricsForTaskRunsTx(tx *gorm.DB, taskRunIDs []uuid.UUID) error {
+	if tx == nil || len(taskRunIDs) == 0 {
+		return nil
+	}
+	return tx.Where("task_run_id IN ?", taskRunIDs).Delete(&models.DatasetMetric{}).Error
 }
 
 // PruneDatasetMetrics deletes samples older than retention and returns how many

@@ -4886,24 +4886,48 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 	}
 }
 
+// ResetInFlightTasks re-pends every running row of a run so a new owner can
+// re-claim and re-execute it (owner takeover, run resumption after a restart).
+//
+// It runs in a transaction and resolves the matched ids first, because the rows
+// are re-EXECUTED: the previous attempt's dataset metrics must go with the
+// reset, exactly as they do on the retry paths. A worker that died between the
+// post-task seam's insert and its completion report otherwise leaves attempt
+// one's samples behind, and the re-execution adds a second set to the same
+// TaskRun row — the same double-count clearAttemptDatasetMetricsTx exists to
+// prevent, arriving by failover instead of by retry.
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
-	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
-		Updates(map[string]any{
-			"status": string(TaskStatusPending),
-			// Clear the claim too, so a new owner taking over a run can re-claim
-			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
-			// owner's worker that held the claim is gone (its lease expired).
-			"claimed_by":             "",
-			"claim_expires_at":       nil,
-			"runtime_id":             "",
-			"started_at":             nil,
-			"rate_limit_retry_after": nil,
-			"cache_hit":              false,
-			"cache_origin_run_id":    nil,
-			"cache_created_at":       nil,
-			"cache_expires_at":       nil,
-		}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var ids []uuid.UUID
+		if err := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
+			Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if err := tx.Model(&models.TaskRun{}).
+			Where("id IN ?", ids).
+			Updates(map[string]any{
+				"status": string(TaskStatusPending),
+				// Clear the claim too, so a new owner taking over a run can re-claim
+				// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
+				// owner's worker that held the claim is gone (its lease expired).
+				"claimed_by":             "",
+				"claim_expires_at":       nil,
+				"runtime_id":             "",
+				"started_at":             nil,
+				"rate_limit_retry_after": nil,
+				"cache_hit":              false,
+				"cache_origin_run_id":    nil,
+				"cache_created_at":       nil,
+				"cache_expires_at":       nil,
+			}).Error; err != nil {
+			return err
+		}
+		return clearAttemptDatasetMetricsForTaskRunsTx(tx, ids)
+	})
 }
 
 func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {

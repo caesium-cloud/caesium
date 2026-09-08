@@ -109,9 +109,14 @@ func BaselineMinSamples() int {
 }
 
 // AssertionMetrics returns the sorted, de-duplicated set of emitted metric keys
-// a declared assertion block reads — the exact keys the evaluator needs a
-// baseline for and the exact keys whose absence is a violation. Apply-time
-// validation already guarantees one assertion per metric.
+// a declared assertion block reads — the keys whose absence is a violation.
+// Apply-time validation already guarantees one assertion per metric.
+//
+// It has no in-tree production caller today (the evaluator asks the pure core
+// directly, and baseline loading uses the narrower BaselineMetrics); it is kept
+// exported as the companion primitive to EvaluateAssertions, which Plan 3's
+// backtest needs to know which metrics of a recorded history a candidate
+// contract reads.
 func AssertionMetrics(assertions *jobdef.DatasetAssertions) []string {
 	if assertions.IsEmpty() {
 		return nil
@@ -310,6 +315,16 @@ func EvaluateAssertion(
 //
 // A verdict computed against a baseline SHORTER than minSamples is returned
 // with Seeding set: recorded and visible, never enforced.
+//
+// One consequence of the second case is worth stating plainly, because it is
+// the intended fallback rather than an oversight: samples rejected by an
+// enforced violation are excluded from the baseline (models.DatasetMetric
+// Violated), so a dataset that breaches an ABSOLUTE bound on every single run
+// eventually has no clean history at all — and its deltaFromBaseline assertion
+// then falls back to "no verdict" rather than reporting a breach. Nothing goes
+// silently green: the min/max bound that rejected every sample is still firing
+// on every run, which is the signal an operator acts on. A dataset whose delta
+// assertion has gone quiet is one whose absolute bounds are already screaming.
 func evaluateDelta(dataset, metric string, spec jobdef.AssertionSpec, value float64, baseline *BaselineStats, minSamples int) *DataViolation {
 	raw := strings.TrimSpace(spec.DeltaFromBaseline)
 	if raw == "" {

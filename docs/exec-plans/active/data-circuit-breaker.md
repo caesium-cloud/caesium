@@ -615,10 +615,28 @@ executors), so it never re-touches the executor call sites.
       replay and for `caesium why` but never becomes the baseline it broke (this
       also settles the warn-mode case, where three anomalies in a row would
       otherwise move the median far enough to silence the assertion mid-incident);
-      and `clearAttemptDatasetMetricsTx` deletes the retried attempt's samples
-      wherever `retryResetColumns()` is applied (`RetryTaskInstance`,
+      and `clearAttemptDatasetMetricsTx` deletes the re-executed attempt's
+      samples on every path that resets a TaskRun row for another run of the
+      container — the five `retryResetColumns()` sites (`RetryTaskInstance`,
       `RetryTaskClaimedInstance`, `retryTask`, `RetryPartition`,
-      `RetryFromFailure`), so one logical run contributes one sample.
+      `RetryFromFailure`) **and the two failover resets**, `ResetInFlightTasks`
+      (owner takeover, run resumption) and `ReclaimOwnerExpiredClaims` (worker
+      lease expiry), which do not go through that map. The pre-execution
+      re-pends (`ReleaseTaskClaim`, the rate-limit deferral) are deliberately
+      not covered: their attempt never reached the post-task seam. So one
+      logical run contributes one sample, and a metric emitted both with and
+      without a `dataset` selector is de-duplicated to the single row the single
+      verdict judged.
+      **Remaining gap (issue filed by the orchestrator):** `InsertDatasetMetrics`
+      has no claim fence, so a superseded worker can still write samples onto a
+      row it no longer owns, after a reclaim has cleared them. Every other
+      terminal write on the row is claim-fenced; this one is not.
+      **Starvation fallback, stated so C1/F3 inherit it deliberately:** because
+      rejected samples leave the baseline, a dataset that breaches an absolute
+      bound on EVERY run eventually has no clean history, and its
+      `deltaFromBaseline` assertion then yields no verdict instead of a breach.
+      Nothing goes silently green — the min/max bound that rejected every sample
+      is firing on every run.
       **C1 note:** the design's third "clean" predicate (non-held) lands beside
       the `violated` filter in `cleanSampleQuery`.
       **Known limitation (issue filed by the orchestrator):** a truncated or

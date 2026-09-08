@@ -309,13 +309,28 @@ func persistDatasetMetrics(
 	if len(samples) == 0 {
 		return
 	}
+	// One row per (dataset, metric), last write wins — the SAME collapse
+	// observedByDataset does when it builds the values the verdict is computed
+	// from. The marker accumulator keys on the literal (selector, metric), so a
+	// step that emits `{"dataset":"D","rowCount":5}` and `{"rowCount":7}` hands
+	// this seam two samples that both resolve to D: writing both would give one
+	// logical run two baseline samples for one metric, one of which no verdict
+	// ever judged (and which would still carry the other's Violated flag).
 	rows := make([]models.DatasetMetric, 0, len(samples))
+	index := make(map[metricRef]int, len(samples))
 	for _, sample := range samples {
 		name, ok := resolveSampleDataset(sample, declared)
 		if !ok {
 			continue
 		}
-		_, violated := rejected[metricRef{dataset: name, metric: sample.Metric}]
+		ref := metricRef{dataset: name, metric: sample.Metric}
+		_, violated := rejected[ref]
+		if at, seen := index[ref]; seen {
+			rows[at].Value = sample.Value
+			rows[at].Violated = violated
+			continue
+		}
+		index[ref] = len(rows)
 		rows = append(rows, models.DatasetMetric{
 			ID:        uuid.New(),
 			TaskRunID: row.ID,

@@ -72,6 +72,19 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			}
 			counts.addTaskRunStatus(int(res.RowsAffected))
 
+			// The reclaimed rows are re-EXECUTED, so the previous attempt's
+			// dataset metrics go with the reset — the failover twin of the
+			// retry paths' clearAttemptDatasetMetricsTx. A worker that died
+			// between the post-task seam's insert and its completion report
+			// would otherwise leave samples that the re-execution doubles.
+			expiredIDs := make([]uuid.UUID, 0, len(expired))
+			for i := range expired {
+				expiredIDs = append(expiredIDs, expired[i].ID)
+			}
+			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, expiredIDs); err != nil {
+				return err
+			}
+
 			if s.eventStore != nil {
 				for i := range expired {
 					evt, evtErr := s.recordTaskRunEventTx(tx, event.TypeTaskLeaseExpired, runID, &expired[i], &counts)

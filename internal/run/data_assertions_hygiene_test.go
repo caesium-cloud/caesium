@@ -200,3 +200,77 @@ func TestBaselineMetricsOnlyCoversDeltaAssertions(t *testing.T) {
 	// the "missing metric is a violation" set, a different question.
 	assert.Equal(t, []string{"dedup_ratio", "max_event_time", "nullRate", "rowCount"}, AssertionMetrics(assertions))
 }
+
+// TestEvaluateDataAssertions_DedupesOneSamplePerMetric pins that a metric
+// emitted twice for the same dataset — once with an explicit selector, once
+// relying on the sole-declared-dataset default — is ONE row, matching the one
+// verdict the evaluator computes from it. Two rows would give a single logical
+// run two baseline samples for one metric, one of them never judged.
+func TestEvaluateDataAssertions_DedupesOneSamplePerMetric(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+	declareProduces(t, db, jobID, stepName, "warehouse/orders")
+
+	var taskRun models.TaskRun
+	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5},
+		{Metric: "rowCount", Value: 7},
+	}))
+
+	rows := metricRows(t, db)
+	require.Len(t, rows, 1, "one (dataset, metric) is one sample")
+	assert.InDelta(t, 7, rows[0].Value, 0.001, "last write wins, as it does for the evaluated value")
+}
+
+// TestReclaimOwnerExpiredClaims_ClearsTheLostAttemptsSamples is the failover
+// twin of the retry test: a worker that dies between the seam's insert and its
+// completion report leaves samples on a row another worker then re-runs, so the
+// reclaim must take them with it or the baseline reads two sets of samples as
+// clean history of one logical run.
+func TestReclaimOwnerExpiredClaims_ClearsTheLostAttemptsSamples(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	_, _, taskRunID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	var taskRun models.TaskRun
+	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
+
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRunID).Updates(map[string]any{
+		"claimed_by":       "worker-a",
+		"claim_expires_at": time.Now().UTC().Add(-time.Minute),
+		"owner_generation": 1,
+	}).Error)
+	seedMetric(t, db, taskRunID, "warehouse/orders", "rowCount", 3, time.Now().Add(-time.Second))
+
+	reset, err := store.ReclaimOwnerExpiredClaims(taskRun.JobRunID, 1)
+	require.NoError(t, err)
+	require.Len(t, reset, 1)
+	assert.Empty(t, metricRows(t, db), "the lost attempt's samples are reset with its columns")
+}
+
+// TestResetInFlightTasks_ClearsTheLostAttemptsSamples covers the other failover
+// reset — owner takeover and run resumption after a restart.
+func TestResetInFlightTasks_ClearsTheLostAttemptsSamples(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	_, _, taskRunID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	var taskRun models.TaskRun
+	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
+	seedMetric(t, db, taskRunID, "warehouse/orders", "rowCount", 3, time.Now().Add(-time.Second))
+
+	require.NoError(t, store.ResetInFlightTasks(taskRun.JobRunID))
+
+	var reset models.TaskRun
+	require.NoError(t, db.Where("id = ?", taskRunID).First(&reset).Error)
+	assert.Equal(t, string(TaskStatusPending), reset.Status, "the row is re-pended exactly as before")
+	assert.Equal(t, "", reset.ClaimedBy)
+	assert.Empty(t, metricRows(t, db), "and its samples go with it")
+}
