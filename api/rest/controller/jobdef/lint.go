@@ -9,8 +9,11 @@ import (
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/lint"
+	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
 )
 
@@ -76,6 +79,19 @@ func Lint(c *echo.Context) error {
 	}
 	if len(resp.Errors) == 0 {
 		for _, msg := range lint.CheckVolumeWriters(req.Definitions) {
+			resp.Warnings = append(resp.Warnings, LintMessage{Message: msg})
+		}
+	}
+	// Declared-but-never-observed datasets (data-circuit-breaker A3). Gated on
+	// BOTH the circuit breaker's master flag (arc convention 1) and OpenLineage
+	// capture: with capture off there are no observed rows at all, so every
+	// declaration would be reported and the warning would be noise.
+	if len(resp.Errors) == 0 && env.Variables().DataAssertionsEnabled && env.Variables().OpenLineageEnabled {
+		msgs, err := lineage.CheckDeclaredDatasetsObserved(c.Request().Context(), db.Connection(), req.Definitions)
+		if err != nil {
+			log.Warn("declared-dataset observation check failed", "error", err)
+		}
+		for _, msg := range msgs {
 			resp.Warnings = append(resp.Warnings, LintMessage{Message: msg})
 		}
 	}
