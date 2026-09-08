@@ -94,20 +94,31 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 			if p.Watermark != nil {
 				watermarkKey = strings.TrimSpace(p.Watermark.Key)
 			}
+			// The data-circuit-breaker spec rides the SAME registry row as the
+			// freshness SLO (design-data-circuit-breaker.md: one registry, no
+			// private copy), so it is rebuilt from the manifest on every apply
+			// exactly like the schema and SLO columns.
+			assertionsJSON, err := marshalAssertions(p.Assertions)
+			if err != nil {
+				return nil, fmt.Errorf("steps[%d].datasets.produces[%d].assertions: %w", i, j, err)
+			}
 			decls = append(decls, models.DatasetDeclaration{
-				ID:            uuid.New(),
-				JobID:         jobID,
-				JobAlias:      alias,
-				StepName:      step.Name,
-				Name:          name,
-				Direction:     models.DatasetDirectionProduces,
-				SchemaJSON:    schemaJSON,
-				SchemaFrom:    strings.TrimSpace(p.SchemaFrom),
-				SchemaVersion: p.Version,
-				Freshness:     strings.TrimSpace(p.Freshness),
-				MaxStaleness:  strings.TrimSpace(p.MaxStaleness),
-				WatermarkKey:  watermarkKey,
-				SkipWhenFresh: skipWhenFreshPtr,
+				ID:             uuid.New(),
+				JobID:          jobID,
+				JobAlias:       alias,
+				StepName:       step.Name,
+				Name:           name,
+				Direction:      models.DatasetDirectionProduces,
+				SchemaJSON:     schemaJSON,
+				SchemaFrom:     strings.TrimSpace(p.SchemaFrom),
+				SchemaVersion:  p.Version,
+				Freshness:      strings.TrimSpace(p.Freshness),
+				MaxStaleness:   strings.TrimSpace(p.MaxStaleness),
+				WatermarkKey:   watermarkKey,
+				AssertionsJSON: assertionsJSON,
+				OnViolation:    strings.TrimSpace(p.OnViolation),
+				Release:        strings.TrimSpace(p.Release),
+				SkipWhenFresh:  skipWhenFreshPtr,
 			})
 		}
 		for j := range step.Datasets.Consumes {
@@ -134,6 +145,20 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 	}
 
 	return decls, nil
+}
+
+// marshalAssertions renders the declared assertion block for the registry
+// column. An empty block stores the empty string (not "null"), so a reader can
+// treat "no assertions" as a plain empty check.
+func marshalAssertions(value *schema.DatasetAssertions) (string, error) {
+	if value.IsEmpty() {
+		return "", nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func marshalInlineSchema(value map[string]any) (string, error) {

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -40,6 +41,18 @@ const (
 	//   ##caesium::branch full-refresh
 	branchMarker = "##caesium::branch "
 
+	// metricsMarker is the stdout line prefix a step uses to self-report the
+	// dataset metrics an assertion evaluates (design-data-circuit-breaker.md).
+	// Payload is a flat JSON object; the reserved "dataset" key selects the
+	// declared dataset the remaining keys describe:
+	//
+	//   ##caesium::metrics {"dataset":"warehouse/orders","rowCount":10400312,"max_event_time":"2026-07-03T01:12:00Z"}
+	//
+	// It shares no stem with outputMarker ("##caesium::output ") or
+	// partitionMarker, so its Cut is independent of the ordering the other
+	// markers need. See parseMarkers.
+	metricsMarker = "##caesium::metrics "
+
 	// MaxOutputBytes caps the total serialised size of collected outputs per
 	// task to prevent unbounded memory/DB usage.  Tasks that need to pass
 	// larger payloads should use shared storage and pass the reference via the
@@ -51,6 +64,14 @@ const (
 	// persists for completed tasks. This gives the UI a durable snapshot to
 	// search and review after the runtime itself has been cleaned up.
 	MaxLogSnapshotBytes = 1 << 20 // 1 MiB
+
+	// MaxMetricsBytes caps the collected ##caesium::metrics samples for one
+	// task. It is deliberately SEPARATE from MaxOutputBytes: sharing the 64 KiB
+	// output budget would let a chatty metrics emitter evict real outputs (and
+	// vice versa). Overflow drops the samples that do not fit and marks
+	// Markers.MetricsTruncated — it never fails the parse, because metrics are
+	// observability and the task's outputs must survive a noisy emitter.
+	MaxMetricsBytes = 16384 // 16 KiB
 )
 
 // outputRefVersion is the schema version of the canonical reference value
@@ -375,8 +396,13 @@ type Markers struct {
 	Output       map[string]string
 	Branches     []string
 	Partitions   []Partition
+	Metrics      []DatasetMetricSample
 	LogText      string
 	LogTruncated bool
+	// MetricsTruncated reports that at least one emitted metric was dropped
+	// because the collected samples exceeded MaxMetricsBytes. Outputs are
+	// unaffected: the two caps are independent by design.
+	MetricsTruncated bool
 }
 
 // ParseMarkers reads container log output in a single pass and extracts both
@@ -433,6 +459,7 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 	var branches []string
 	branchSeen := make(map[string]struct{})
 	acc := newPartitionAccumulator(maxPartitions)
+	metrics := newMetricsAccumulator()
 
 	reader := logs
 	if snapshot != nil {
@@ -473,6 +500,15 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 			}
 		}
 
+		// Dataset metrics share no stem with any other marker, so this Cut is
+		// order-independent. A malformed payload is skipped, never fatal: the
+		// task's real outputs must survive a bad metrics line.
+		if _, after, ok := strings.Cut(line, metricsMarker); ok {
+			if payload := strings.TrimSpace(after); payload != "" {
+				metrics.ingest(payload)
+			}
+		}
+
 		// Check for branch marker (same line could theoretically match both,
 		// but in practice markers are distinct).
 		if _, after, ok := strings.Cut(line, branchMarker); ok {
@@ -510,7 +546,154 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPart
 		return nil, err
 	}
 	result.Partitions = parts
+	result.Metrics, result.MetricsTruncated = metrics.finish()
 	return result, nil
+}
+
+// MetricDatasetKey is the reserved ##caesium::metrics payload key that selects
+// which declared dataset the line's remaining keys describe. Omitting it means
+// "the step's sole declared produced dataset"; that resolution needs the
+// declared registry and therefore happens server-side (internal/run), not here.
+const MetricDatasetKey = "dataset"
+
+// metricEntryOverheadBytes is the assumed per-sample JSON overhead (quoting,
+// separators and a serialised float) charged against MaxMetricsBytes on top of
+// the dataset and metric name lengths. The cap exists to bound memory for a
+// runaway emitter, so an approximation applied per entry — rather than
+// re-marshalling the whole set on every line, which is quadratic — is the right
+// trade.
+const metricEntryOverheadBytes = 32
+
+// DatasetMetricSample is one (dataset, metric, value) observation a step
+// self-reported via the ##caesium::metrics marker. Dataset is empty when the
+// emitter omitted the selector; Value carries RFC3339 timestamps as epoch
+// seconds so watermarks and counts share one numeric column.
+type DatasetMetricSample struct {
+	Dataset string  `json:"dataset,omitempty"`
+	Metric  string  `json:"metric"`
+	Value   float64 `json:"value"`
+}
+
+type metricKey struct {
+	dataset string
+	metric  string
+}
+
+// metricsAccumulator merges ##caesium::metrics lines with last-write-wins
+// semantics per (dataset, metric) while holding the collected set under
+// MaxMetricsBytes.
+type metricsAccumulator struct {
+	order     []metricKey
+	values    map[metricKey]float64
+	bytes     int
+	truncated bool
+}
+
+func newMetricsAccumulator() *metricsAccumulator {
+	return &metricsAccumulator{values: make(map[metricKey]float64)}
+}
+
+// ingest merges one marker payload. A malformed line is skipped leniently, the
+// same posture ParseOutput takes for a malformed ##caesium::output line: a
+// declared assertion whose metric never arrives is itself a violation, so a
+// dropped line is caught downstream rather than failing the task here.
+func (a *metricsAccumulator) ingest(payload string) {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		return
+	}
+
+	dataset := ""
+	if sel, ok := raw[MetricDatasetKey]; ok {
+		name, isString := sel.(string)
+		if !isString {
+			// A non-string selector is a malformed line, not a metric named
+			// "dataset": dropping the line keeps a typo from silently
+			// attributing samples to the wrong dataset.
+			return
+		}
+		dataset = strings.TrimSpace(name)
+	}
+
+	// Sort so a line that overflows the cap drops a deterministic subset.
+	names := make([]string, 0, len(raw))
+	for name := range raw {
+		if name == MetricDatasetKey {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		metric := strings.TrimSpace(name)
+		if metric == "" {
+			continue
+		}
+		value, ok := metricSampleValue(raw[name])
+		if !ok {
+			continue
+		}
+		a.set(metricKey{dataset: dataset, metric: metric}, value)
+	}
+}
+
+func (a *metricsAccumulator) set(key metricKey, value float64) {
+	if _, exists := a.values[key]; exists {
+		// Last write wins; an overwrite stores no new key, so it costs nothing
+		// against the cap.
+		a.values[key] = value
+		return
+	}
+	cost := len(key.dataset) + len(key.metric) + metricEntryOverheadBytes
+	if a.bytes+cost > MaxMetricsBytes {
+		a.truncated = true
+		return
+	}
+	a.bytes += cost
+	a.values[key] = value
+	a.order = append(a.order, key)
+}
+
+func (a *metricsAccumulator) finish() ([]DatasetMetricSample, bool) {
+	if len(a.order) == 0 {
+		return nil, a.truncated
+	}
+	samples := make([]DatasetMetricSample, 0, len(a.order))
+	for _, key := range a.order {
+		samples = append(samples, DatasetMetricSample{
+			Dataset: key.dataset,
+			Metric:  key.metric,
+			Value:   a.values[key],
+		})
+	}
+	return samples, a.truncated
+}
+
+// metricSampleValue coerces a decoded metric value to the float column
+// DatasetMetric stores. JSON numbers pass through; an RFC3339 string becomes
+// epoch seconds (fraction preserved) so a watermark is comparable with a lag
+// bound. Everything else — bools, nulls, objects, arrays, non-timestamp
+// strings — is dropped, mirroring scalarOutputValue's whitelist posture.
+func metricSampleValue(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case json.Number:
+		f, err := val.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	case string:
+		ts, err := time.Parse(time.RFC3339, strings.TrimSpace(val))
+		if err != nil {
+			return 0, false
+		}
+		return float64(ts.UTC().UnixNano()) / float64(time.Second), true
+	default:
+		return 0, false
+	}
 }
 
 type boundedSnapshotWriter struct {

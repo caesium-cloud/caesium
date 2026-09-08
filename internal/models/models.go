@@ -52,6 +52,12 @@ var All = []any{
 	// so both are deliberately absent from hotPathModels()/hotTables.
 	&DatasetState{},
 	&DatasetDerivation{},
+	// dataset_metrics is the self-reported metric history the data circuit
+	// breaker asserts against (data-circuit-breaker A2). It hangs off TaskRun
+	// (FK parent, listed far above) and is an observability/catalog table
+	// written once at task completion — deliberately absent from
+	// hotPathModels()/hotTables, like LineageDataset.
+	&DatasetMetric{},
 	// Agent-in-the-loop remediation (Phase 0) incident substrate. These are
 	// append-mostly, low-volume catalog tables — NOT hot per-run tables, so they
 	// are deliberately absent from hotPathModels()/hotTables. Parents precede
