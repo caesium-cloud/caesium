@@ -805,6 +805,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	var taskOutput map[string]string
 	var branchSelections []string
 	var partitions []pkgtask.Partition
+	var datasetMetrics []pkgtask.DatasetMetricSample
 	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
@@ -820,6 +821,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		} else if markers != nil {
 			taskOutput = markers.Output
 			partitions = markers.Partitions
+			datasetMetrics = markers.Metrics
+			if markers.MetricsTruncated {
+				log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
+					"task_id", taskRun.TaskID, "cap_bytes", pkgtask.MaxMetricsBytes)
+			}
 			if len(markers.Branches) > 0 {
 				branchSelections = markers.Branches
 			}
@@ -849,6 +855,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// Runtime schema validation: if the task declares an outputSchema and the job has
 	// schemaValidation enabled, validate the actual output against the schema.
 	if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
+		return nil, err
+	}
+
+	// Data-quality seam, beside schema validation and on the same instance row.
+	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
 		return nil, err
 	}
 
@@ -924,6 +935,16 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID,
 		output, taskRun.OutputSchema, taskRun.SchemaValidation,
 	)
+}
+
+// runDataAssertions records the dataset metrics THIS INSTANCE self-reported.
+// Like runSchemaValidation it keys on taskRun.ID, not taskRun.TaskID: a fanned
+// step has N sibling rows and each partition owns its own samples.
+func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
+	if taskRun == nil {
+		return nil
+	}
+	return run.EvaluateDataAssertions(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, samples)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
