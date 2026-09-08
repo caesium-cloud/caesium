@@ -214,7 +214,7 @@ pipelines. Largest blast radius (`pkg/task/output.go`, `internal/models/`,
 enforcement-free: it seeds baselines while the evaluator (B) and breaker (C) are
 reviewed.
 
-- [ ] A1. Add the `##caesium::metrics` marker to `pkg/task/output.go`: a fourth
+- [x] A1. Add the `##caesium::metrics` marker to `pkg/task/output.go`: a fourth
       marker beside `output`, `output-ref`, and `branch`, parsed in the same
       single-pass `parseMarkers` scan (marker stem check ordered so `metrics`
       doesn't collide with `output`). Payload is a flat JSON object; `dataset`
@@ -229,7 +229,23 @@ reviewed.
       the fan-out partition marker, so "fourth" means "a further marker in the same
       scan", not a literal ordinal — re-grep the marker table before editing.
       Files: `pkg/task/output.go` (+ `output_test.go`).
-- [ ] A2. **Extend** the shipped `DatasetDeclaration` registry model with the
+      **Done (W1-α):** `metricsMarker = "##caesium::metrics "` sits with the other
+      marker constants in `pkg/task/output.go`; it shares no stem with
+      `outputMarker`/`outputRefMarker`/`partitionMarker`, so its `strings.Cut` in
+      `parseMarkers` is order-independent (the marker table was re-grepped first,
+      as the refreshed note asks). `Markers` gains `Metrics []DatasetMetricSample`
+      and `MetricsTruncated bool`; `metricsAccumulator` merges lines
+      last-write-wins per `(dataset, metric)`, coerces JSON numbers and RFC3339
+      strings (stored as epoch seconds, fraction preserved) and drops everything
+      else, and skips malformed lines leniently. **Cap shape decided:** overflow
+      past `MaxMetricsBytes = 16 KiB` DROPS the samples that do not fit and sets
+      `MetricsTruncated` — it does not error, because `parseMarkers` returning an
+      error discards the task's real OUTPUTS too, which is precisely what a
+      separate cap exists to prevent. The cap is charged per entry
+      (`len(dataset) + len(metric) + 32`) rather than by re-marshalling the whole
+      set on every line, which would be quadratic; the goal is bounding memory for
+      a runaway emitter.
+- [x] A2. **Extend** the shipped `DatasetDeclaration` registry model with the
       assertion spec, and **add** the new `DatasetMetric` model. The registry race
       is decided: `internal/models/dataset_declaration.go` already exists
       (`DatasetDeclaration`, table `dataset_declarations`, keyed on `Name` with a
@@ -259,7 +275,21 @@ reviewed.
       new `internal/models/dataset_metric.go`, `internal/models/models.go`,
       `pkg/env/env.go`, `cmd/start/start.go`.
       Depends on: A1 (the marker the metrics come from).
-- [ ] A3. **Extend** the shipped jobdef dataset block with the assertion schema.
+      **Done (W1-α):** `DatasetDeclaration` gains `AssertionsJSON`, `OnViolation`
+      and `Release` beside the existing `SchemaJSON`/`SchemaFrom`/`SchemaVersion`;
+      no second registry model, no rename. New `internal/models/dataset_metric.go`
+      (`DatasetMetric`: `TaskRunID` with `constraint:OnDelete:CASCADE` like
+      `LineageDataset`, namespace/name/metric/float value/created-at), registered
+      in `models.All` after its FK parent and deliberately absent from
+      `hotPathModels()`. `CAESIUM_DATASET_METRIC_RETENTION` (default `2160h`) plus
+      `run.StartDatasetMetricRetentionPruner` (mirrors
+      `event.StartWebhookEventRetentionPruner`) started from `cmd/start/start.go`
+      under the master flag. **Citation correction:** the item's file list omits
+      the writer — nothing would ever populate the three new columns — so
+      `internal/freshness/registry.go` `BuildDeclarations` was extended to marshal
+      `produces[].assertions` onto the row it already builds. Without that, A2 and
+      A3 both ship inert.
+- [x] A3. **Extend** the shipped jobdef dataset block with the assertion schema.
       The shipped YAML shape is `steps[].datasets.produces[]` /
       `steps[].datasets.consumes[]` — the `StepDatasets` struct on `Step` in
       `pkg/jobdef/definition.go` (`type StepDatasets struct { Consumes
@@ -305,7 +335,43 @@ reviewed.
       `internal/jobdef/runtime/spec.go`, `cmd/job/` (lint path),
       `internal/lineage/` (declared-vs-observed check).
       Depends on: A2 (registry identity the schema references).
-- [ ] A4. Persist emitted metrics in the post-task pipeline: add a
+      **Done (W1-α):** `ProducedDataset` gains `Assertions *DatasetAssertions`,
+      `OnViolation` and `Release` (+ `EffectiveRelease()` for the `auto` default);
+      `Metadata` gains `OnUpstreamHold` (+ `EffectiveOnUpstreamHold()` for the
+      `skip` default). The assertion grammar follows the design's worked example:
+      `rowCount`/`nullRate` shorthands (each an `AssertionSpec` with an optional
+      `metric:` override plus `min`/`max`/`deltaFromBaseline`), `freshness`
+      (`watermark` + `maxLag`) and `custom[]`. `deltaFromBaseline` is a PERCENTAGE
+      STRING (`"50%"`, per the design's `deltaFromBaseline: 50%`), with one
+      exported parser — `jobdef.ParseDeltaFromBaseline` — so the evaluator cannot
+      interpret the grammar differently. Validation
+      (`validateDatasetAssertionSurface` in `pkg/jobdef/schema.go`, called from
+      `validateDatasets`) rejects an unknown disposition, an assertion with no
+      bound, `min > max`, a non-percentage delta, a `custom` entry without a
+      metric, an incomplete `freshness`, and two assertions on one metric; the
+      whole surface is refused with a message naming
+      `CAESIUM_DATA_ASSERTIONS_ENABLED=true` when the gate is off, mirroring
+      `freshnessFeatureEnabled()` in `validateTrigger`.
+      **Citation corrections:** (a) no `Step`/`rawStep` change was needed — the new
+      fields hang off `StepDatasets`, which `rawStep` already declares, and no new
+      step-level key was added; (b) `internal/jobdef/runtime/spec.go` needed NO
+      change — it carries container specs and the `fanOut` decode, and assertions
+      are post-task metadata that never reach a container spec; (c) the `consumes`
+      resolvability lint was left alone as instructed
+      (`internal/jobdef.ValidateDatasetGraph` → `freshness.ValidateGraph`, driven
+      by `cmd/job/lint.go` and the server lint) — no second check was added. The
+      declared-vs-observed check is new: `lineage.CheckDeclaredDatasetsObserved`
+      (`internal/lineage/declared.go`) reports declared produced datasets no task
+      run has ever emitted, surfaced as lint WARNINGS from
+      `api/rest/controller/jobdef.Lint` beside `lint.CheckVolumeWriters`, gated on
+      BOTH the master flag and `CAESIUM_OPEN_LINEAGE_ENABLED` (with capture off
+      there are no observed rows at all, so every declaration would be reported —
+      noise, not signal).
+      **Cache-hash edge, as required:** nothing was added to
+      `internal/cache/hash.go`; a cache-short-circuited task emits no fresh
+      metrics, so the evaluator sees "no new sample" — no assertion, no baseline
+      write, and explicitly not a violation.
+- [x] A4. Persist emitted metrics in the post-task pipeline: add a
       `run.EvaluateDataAssertions(...)` call site beside
       `run.ValidateTaskOutputSchema` / `run.ValidateTaskOutputSchemaInstance` in
       **both** executors (`internal/job/job.go`,
@@ -332,7 +398,34 @@ reviewed.
       Files: new `internal/run/data_assertions.go`, `internal/job/job.go`,
       `internal/worker/runtime_executor.go`.
       Depends on: A1 + A2 + A3.
-- [ ] A5. Add the master env gate `CAESIUM_DATA_ASSERTIONS_ENABLED` (default
+      **Done (W1-α):** `run.EvaluateDataAssertions(store, runID, taskID,
+      taskRunID, samples)` — the instance-aware signature — is called beside all
+      three shipped seams: `run.ValidateTaskOutputSchemaInstance` in
+      `internal/job/job.go`'s fanned path, `run.ValidateTaskOutputSchema` in its
+      unfanned path (which passes `uuid.Nil` and resolves through
+      `loadTaskRunByIDOrUnique`, exactly as `SaveSchemaViolations` does), and
+      `runtimeExecutor.runSchemaValidation`'s twin `runDataAssertions` in
+      `internal/worker/runtime_executor.go`. The samples reach those seams through
+      `Markers.Metrics`, which meant widening the local executor's `executeAtom`
+      closure by one return value. Phase 0 persists and nothing else — including
+      undeclared metrics — and returns `nil` on any persistence problem (an
+      observation must not turn a green run red); the `error` return exists for
+      Stream B's `fail` disposition, which the executors already escalate.
+      Quarantined runs record nothing. Dataset attribution: an explicit `dataset`
+      selector wins outright (declared or not — the emitter named it, and the row
+      is free history); an omitted selector resolves to the step's SOLE declared
+      produced dataset, read off `dataset_declarations`; zero or several
+      declarations make it ambiguous, and the sample is dropped with a log line
+      naming the ambiguity rather than attributed arbitrarily.
+      **Open Question 1 answered — fan-out is per-partition on both halves.**
+      Samples are recorded per instance (each fanned `TaskRun` owns its rows), and
+      evaluation in Stream B is per-instance too: the post-task pipeline has no
+      group-completion seam, and C1's one-active-hold-per-dataset upsert already
+      collapses N verdicts into one hold with an occurrence count — the exact
+      collapse a group aggregate would need a new seam to achieve. Accepted
+      limitation: a group-AGGREGATE assertion is not expressible in v1. Recorded
+      in `docs/design-data-circuit-breaker.md` § Open questions as item 5.
+- [x] A5. Add the master env gate `CAESIUM_DATA_ASSERTIONS_ENABLED` (default
       `false`) to the `Environment` struct in `pkg/env/env.go`, and surface it as a
       field on the `Features` struct in `api/rest/service/system/system.go` (so
       `GET /system/features` reports it and the UI can hide gated surfaces). Add the
@@ -357,6 +450,21 @@ reviewed.
       Files: `pkg/env/env.go`, `api/rest/service/system/system.go`, new
       `internal/run/baseline.go` (compute-on-read helper).
       Depends on: A2.
+      **Done (W1-α):** `CAESIUM_DATA_ASSERTIONS_ENABLED` (default `false`) and
+      `CAESIUM_BASELINE_WINDOW` (default `20`) on `Environment`;
+      `Features.DataAssertionsEnabled` appended additively and reported by
+      `GET /system/features` (asserted through the live endpoint on the
+      integration lane, not read back from the env). `internal/run/baseline.go`
+      ships `Baseline(ctx, db, ns, name, metric string, window int, asOf
+      time.Time)` as the PRIMARY signature — the `asOf` cut is not bolted on —
+      returning median + p10/p90 (linearly interpolated, which matters on a
+      20-sample window) plus the oldest-first raw values for the console
+      sparkline. It takes a `*gorm.DB` rather than a `*Store` and touches no run
+      state, so Plan 3's backtest can call it with no executor and no live run.
+      **One honest gap:** "clean" today means non-quarantined + succeeded (joined
+      on `task_runs`); the design's third predicate, non-HELD, needs
+      `DatasetHold`, which Stream C1 introduces — `cleanSampleQuery` is the single
+      seam where that filter lands, named in the doc comment so C1 cannot miss it.
 
 ### Stream B — Assertion evaluator: warn / fail (Phase 1)
 
@@ -1499,6 +1607,13 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    (which needs a group-completion seam the post-task pipeline does not have)? The
    design predates fan-out and does not say. Answer in A4 and record it in the
    design doc's Open Questions before C1 builds on it.
+   **Answered 2026-09-08 (A4, W1-α): per-partition on both halves.** Samples are
+   recorded per instance; evaluation is per-instance; C1's
+   one-active-hold-per-dataset upsert collapses N verdicts into one hold with an
+   occurrence count, so the "N possible holds" objection does not arise and no
+   group-completion seam is needed. A group-AGGREGATE assertion is out of scope
+   for v1. Recorded in `docs/design-data-circuit-breaker.md` § Open questions as
+   item 5.
 2. **`release_hold` tier (F2).** The design says "tier 2, tier 3 with tolerance
    windows", but `actionCatalog` is a static `map[string]int` consulted by
    `ActionTier(actionType)` — the tier cannot currently depend on params. Either
