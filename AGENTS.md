@@ -24,7 +24,7 @@ Caesium is a distributed job scheduler with declarative YAML DAG pipelines suppo
 - `just integration-test` – run tests in `./test` with `-tags=integration`.
 - `just hydrate` – load example jobs into running server.
 - Containerized builds are required: use `just build` (or `just builder` + `just run`). Avoid invoking `go build` directly on the host so the toolchain and CGO deps stay consistent.
-- CI runs in GitHub Actions (`.github/workflows/ci.yml`). The legacy `.circleci/` config is deprecated and will be removed.
+- CI runs in GitHub Actions (`.github/workflows/ci.yml`). See `docs/ci.md` for the job DAG, artifact flow, and merge-gate (`ci-ok`). The legacy `.circleci/` config is deprecated and will be removed.
 
 ## Local Development Workflow
 

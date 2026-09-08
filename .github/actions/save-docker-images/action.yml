@@ -1,0 +1,29 @@
+name: Save Docker images
+description: docker save the given images, zstd-compress, and upload as an artifact.
+
+inputs:
+  name:
+    description: Artifact name and tarball basename (without .tar.zst)
+    required: true
+  images:
+    description: Space-separated image references to save
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Save images
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v zstd >/dev/null || sudo apt-get install -y zstd
+        # zstd -1 is much faster than gzip for these tarballs; GitHub's
+        # artifact upload is then told not to compress again.
+        docker save ${{ inputs.images }} | zstd -T0 -1 -o "/tmp/${{ inputs.name }}.tar.zst"
+        ls -lh "/tmp/${{ inputs.name }}.tar.zst"
+    - uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.name }}
+        path: /tmp/${{ inputs.name }}.tar.zst
+        retention-days: 1
+        compression-level: 0
