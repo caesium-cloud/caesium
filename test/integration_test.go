@@ -232,7 +232,9 @@ steps:
 }
 
 func TestIntegrationTestSuite(t *testing.T) {
-	suite.Run(t, new(IntegrationTestSuite))
+	s := new(IntegrationTestSuite)
+	configureIntegrationShard(t, s)
+	suite.Run(t, s)
 }
 
 func (s *IntegrationTestSuite) writeJobManifest(contents string) string {

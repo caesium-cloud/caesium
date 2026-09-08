@@ -60,7 +60,7 @@ Key files:
 - `caesium.go` — binary entry point
 - `justfile` — all build, test, and dev commands
 - `.golangci.yml` — Go linter configuration
-- `.circleci/config.yml` — CI/CD pipeline (CircleCI)
+- `.github/workflows/ci.yml` — CI/CD pipeline (GitHub Actions; see `docs/ci.md`)
 
 ---
 

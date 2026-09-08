@@ -1,3 +1,4 @@
+# Keep integration test sources and embedded timing data in this context.
 justfile
 README.md
 LICENSE
@@ -9,7 +10,6 @@ build
 # COPYs this file, so it must remain in the build context.
 !build/triage-agent.sh
 tools
-**/*_test.go
 caesium
 
 .github

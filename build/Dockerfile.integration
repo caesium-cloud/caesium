@@ -1,0 +1,18 @@
+# A separate context ignore file includes the tests which product builds omit.
+ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
+FROM ${BUILDER_IMAGE} AS compile
+WORKDIR /bld/caesium
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    mkdir -p ui/dist /out && touch ui/dist/index.html && \
+    go test -c -tags=integration -o /out/caesium-integration.test ./test/
+# Copy the exact shared-library closure, including the custom dqlite build.
+RUN ldd /out/caesium-integration.test | tr -s '[:blank:]' '\n' | grep '^/' | \
+    xargs -I % sh -c 'mkdir -p /runtime$(dirname %); cp % /runtime%'
+
+FROM alpine:3.23 AS integration-runner
+RUN apk add --no-cache ca-certificates git tzdata libuv lz4-libs sqlite-libs gpgme
+COPY --from=compile /runtime/ /
+COPY --from=compile /out/caesium-integration.test /usr/local/bin/
+ENV CAESIUM_INTEGRATION_TEST_BINARY=/usr/local/bin/caesium-integration.test
+WORKDIR /bld/caesium

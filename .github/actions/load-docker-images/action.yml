@@ -1,0 +1,21 @@
+name: Load Docker images
+description: Download a zstd-compressed docker-save artifact and docker load it.
+
+inputs:
+  name:
+    description: Artifact name (must match a save-docker-images upload)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.name }}
+        path: /tmp
+    - name: Load images
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v zstd >/dev/null || sudo apt-get install -y zstd
+        zstd -d -c "/tmp/${{ inputs.name }}.tar.zst" | docker load

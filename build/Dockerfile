@@ -17,7 +17,6 @@ RUN cd ui && npm run build
 #    ui/node_modules and ui/dist are in .dockerignore so COPY won't clobber them.
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags="-s -w" -o /dist/bin/caesium ./
 
 # Collect dynamically linked libraries
@@ -67,7 +66,6 @@ RUN apk add --no-cache \
 # -luv/-llz4/-lsqlite3 are appended explicitly: go-dqlite's cgo directives only
 # pass -ldqlite and a static libdqlite.a has no DT_NEEDED to pull them in.
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
     go build -tags "libsqlite3,containers_image_openpgp" -trimpath \
         -ldflags="-s -w -linkmode external -extldflags '-static -luv -llz4 -lsqlite3 -lm'" \
         -o /cli/caesium ./

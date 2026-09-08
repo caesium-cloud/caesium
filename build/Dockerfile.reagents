@@ -79,7 +79,7 @@ COPY reagents/go.mod reagents/go.sum ./
 RUN go mod download
 
 COPY reagents/ ./
-RUN set -eu; \
+RUN --mount=type=cache,target=/root/.cache/go-build set -eu; \
     mkdir -p /out; \
     for role in git-source tf-discover tf-warm tf-runner; do \
       go build -trimpath -ldflags="-s -w" -o "/out/${role}" "./cmd/${role}"; \

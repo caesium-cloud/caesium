@@ -10,38 +10,55 @@ doc does not repeat that material, only the CI-specific wiring.
 
 ## 1. Required-to-merge checks
 
-Branch protection on `master` requires exactly these checks, `strict: false`:
+`ci-ok` is the aggregate merge gate to enable in branch protection. It
+always runs (`if: always()`), requires successful change detection, and
+rejects failed, cancelled, missing, or unexpectedly skipped required jobs.
+A skip is accepted only when the successful `changes` job explicitly
+reports that the job's paths were not touched. Missing filter outputs fail
+closed. `scripts/test_ci.py` verifies these selectors against the workflow.
 
-- `lint`
-- `unit-test`
-- `unit-test-arm64`
-- `ui-test`
-- `ui-e2e`
-- `ui-e2e-auth`
-- `build-and-integration-test`
-- `build-and-integration-test-agent-auth`
+Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 
-These names are the GitHub Actions job ids in `.github/workflows/ci.yml` —
-verified against a live run's check-runs (`gh api
-repos/caesium-cloud/caesium/commits/master/check-runs`), not guessed from the
-YAML alone.
+- `changes` and `ci-config` (workflow lint and CI regression checks)
+- `builder` / `builder-arm64` / `images` / `images-arm64` / `reagents`
+  (producers, including both native static CLI smoke tests)
+- `lint`, `unit-test`, `unit-test-arm64`
+- `ui-test`, `ui-e2e`, `ui-e2e-auth`
+- `integration` (all three Docker shards and the agent-auth lane)
 
-`ui-e2e-auth` is required — and not merely nice-to-have — because it is the
-**only** job in the whole workflow that exercises a scoped API key against
-`GET /auth/whoami` and asserts the 200 (`ui/e2e/auth/auth-smoke.spec.ts`, "a
-job-scoped key is denied the global whoami" pins the *deny* case, and the
-paired auth-mode assertion pins the *allow* case for a workspace-scoped key).
-No unit test, no other integration lane, and no other e2e project runs that
-request. If `ui-e2e-auth` is ever removed from required checks, that
-assertion silently stops gating merges.
+The existing `build-and-integration-test` and
+`build-and-integration-test-agent-auth` check names remain as lightweight,
+always-running checks over `changes`, `images`, and the `integration`
+matrix. Both reject an upstream failure or an unexpected skip. Existing
+branch protection therefore keeps working before `ci-ok` is enabled; no
+repository settings are changed by the workflow.
+
+`ui-e2e-auth` is in that set — and not merely nice-to-have — because it
+is the **only** job in the whole workflow that exercises a scoped API key
+against `GET /auth/whoami` and asserts the 200
+(`ui/e2e/auth/auth-smoke.spec.ts`, "a job-scoped key is denied the global
+whoami" pins the *deny* case, and the paired auth-mode assertion pins the
+*allow* case for a workspace-scoped key). No unit test, no other
+integration lane, and no other e2e project runs that request. If
+`ui-e2e-auth` is ever dropped from the `ci-ok` needs list, that assertion
+silently stops gating merges.
+
+`strict` controls whether the PR branch must be up to date with its base;
+it does not control skipped jobs. GitHub accepts a job skipped by an `if`
+condition as successful for branch protection. The aggregate gate checks
+whether each skip was expected. During migration, retain the existing
+`strict: false` policy; enable strict mode if desired when `ci-ok` becomes
+the sole required context.
 
 ### Command
 
 ```sh
+mkdir -p .tmp
 cat > .tmp/required-checks.json <<'EOF'
 {
   "strict": false,
   "checks": [
+    {"context": "ci-ok"},
     {"context": "lint"},
     {"context": "unit-test"},
     {"context": "unit-test-arm64"},
@@ -62,13 +79,31 @@ Checks-API app) is the current GitHub REST shape for
 `required_status_checks`; the legacy `contexts` array is deprecated and is
 not used here.
 
+End state, after `ci-ok` has been the merge gate on a handful of PRs:
+
+```sh
+mkdir -p .tmp
+cat > .tmp/required-checks.json <<'EOF'
+{
+  "strict": true,
+  "checks": [
+    {"context": "ci-ok"}
+  ]
+}
+EOF
+gh api -X PATCH repos/caesium-cloud/caesium/branches/master/protection/required_status_checks \
+  --input .tmp/required-checks.json
+```
+
 ### Verification
 
 ```sh
 gh api repos/caesium-cloud/caesium/branches/master/protection --jq '.required_status_checks.checks[].context'
 ```
 
-Expected output is the eight contexts above, in any order.
+Expected output includes `ci-ok` plus the existing eight contexts
+(transition), or only `ci-ok` (end state). The two legacy integration
+contexts aggregate the matrix; compilation lives in `images` / `reagents`.
 
 ## 2. Why distributed / owner-memory / podman / helm are not required yet
 
@@ -128,65 +163,175 @@ under the same criterion until they do.
 These are two different, deliberately different-sized sets. A green required
 set is **not** proof that a commit is safe to tag and publish.
 
-- **Required-to-merge** (§1 above, branch protection `required_status_checks`):
-  8 jobs. This is the fast, cheap gate every PR must clear.
+- **Required-to-merge** (§1 above, `ci-ok`): the fast gate every PR must
+  clear. Path filters may skip jobs that a given PR does not touch.
 - **Required-to-publish** (`publish.needs` in `.github/workflows/ci.yml`,
-  quoted verbatim below): 16 jobs. This is the full lane matrix, and it is
-  what actually runs before the `publish` job pushes images and cuts a
-  release — `publish` only triggers `if: startsWith(github.ref, 'refs/tags/v')`,
-  so it isn't itself a PR-merge gate.
+  quoted verbatim below): the full lane matrix, including image producers
+  and the engine/mode lanes. `publish` only triggers
+  `if: startsWith(github.ref, 'refs/tags/v')`, so it isn't itself a
+  PR-merge gate. Tag pushes do not path-filter (`changes` forces every
+  output to `true`).
 
 ```
+ci-ok
 lint
 unit-test
 unit-test-arm64
 ui-test
 ui-e2e
 ui-e2e-auth
-build-and-integration-test
-build-and-integration-test-distributed
-build-and-integration-test-owner-memory
-build-and-integration-test-agent-auth
-build-and-integration-test-infra
-build-and-integration-test-infra-arm64
-build-and-integration-test-arm64
+images
+images-arm64
+reagents
+reagents-arm64
+integration
+integration-extra
+integration-arm64
 helm-lint
 helm-integration-test
 podman-integration-test
 ```
 
-Concretely: a PR can merge into `master` on the strength of the 8
-required-to-merge checks alone, while `build-and-integration-test-distributed`,
-`-owner-memory`, `-infra`, `-infra-arm64`, `-arm64`, `helm-lint`,
-`helm-integration-test`, and `podman-integration-test` — exactly the lanes
-§2 leaves non-required — ran on that same commit but did not block the
-merge. Do not assume a green required set means `master`'s tip is taggable:
-before pushing a `v*` tag, check that every job in `publish.needs` is green
-on the commit you intend to tag (see §6).
+Concretely: a PR can merge into `master` on the strength of `ci-ok`
+alone, while `integration-extra` (distributed / owner-memory / infra),
+`integration-arm64`, `helm-lint`, `helm-integration-test`, and
+`podman-integration-test` — exactly the lanes §2 leaves non-required —
+may have run on that same commit but did not block the merge. Do not
+assume a green required set means `master`'s tip is taggable: before
+pushing a `v*` tag, check that every job in `publish.needs` is green on
+the commit you intend to tag (see §6). Arm64 product, reagents, and
+integration run on every PR in parallel with the amd64 twins; they are
+required-to-merge for the builder, product/static CLI smoke, and
+`unit-test-arm64`; the arm64 integration matrix remains optional.
 
-## 4. Job matrix
+## 4. Job matrix and artifact flow
+
+Triggers: `pull_request` to `master`, `push` to `master`, `v*` tags.
+Feature-branch pushes do **not** run CI (the PR event covers them). A
+`concurrency` group cancels superseded PR runs.
+
+Each compiled artifact is produced once per architecture and loaded by
+consumers. `CAESIUM_SKIP_IMAGE_BUILD=true` on the integration recipes
+reuses the loaded product images. A missing product or explicitly selected
+integration runner fails instead of rebuilding. Local runs compile current
+sources unless a precompiled runner is explicitly selected.
+
+```
+changes
+  ├─ ui-test
+  ├─ reagents ────────────────────── lint, unit-test (also need builder)
+  ├─ builder ─── images ─────────┬─ integration (3 Docker shards + agent-auth)
+  │                              ├─ ui-e2e, ui-e2e-auth (also need ui-test)
+  │                              ├─ helm/podman (3 full-suite shards each)
+  │                              └─ integration-extra (also needs reagents)
+  ├─ reagents-arm64 ───────────────────┐
+  └─ builder-arm64 ─┬─ unit-test-arm64  │
+                    └─ images-arm64 ───┴─ integration-arm64
+ci-config → workflow and gate regression checks
+ci-ok ← required-to-merge set
+publish ← tag only, needs the full matrix and ci-ok
+```
 
 | Job id | runs-on | needs | timeout (min) | justfile recipe(s) / inline | Server started |
 | --- | --- | --- | --- | --- | --- |
-| `builder` | ubuntu-24.04 | — | 30 | `builder`, `builder-full` | none |
-| `builder-arm64` | ubuntu-24.04-arm | — | 30 | `builder`, `builder-full` | none |
-| `lint` | ubuntu-24.04 | `builder` | 30 | `lint`, `reagents-lint` | none |
+| `changes` | ubuntu-24.04 | — | 5 | path filter (`dorny/paths-filter`) | none |
+| `builder` | ubuntu-24.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
+| `builder-arm64` | ubuntu-24.04-arm | `changes` | 30 | arm64 twin of the above | none |
+| `images` | ubuntu-24.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, CLI smoke | none |
+| `images-arm64` | ubuntu-24.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
+| `reagents` | ubuntu-24.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
+| `reagents-arm64` | ubuntu-24.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
+| `lint` | ubuntu-24.04 | `builder`, `reagents` | 30 | `lint`, `reagents-lint` (toolchain loaded, not rebuilt) | none |
 | `helm-lint` | ubuntu-24.04 | — | 10 | inline `helm lint`/`helm template` (mirrors justfile `helm-lint`/`helm-template`) | none |
-| `unit-test` | ubuntu-24.04 | `builder` | 30 | `unit-test`, `reagents-test` | none |
+| `unit-test` | ubuntu-24.04 | `builder`, `reagents` | 30 | `unit-test`, `reagents-test` | none |
 | `unit-test-arm64` | ubuntu-24.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
-| `ui-test` | ubuntu-24.04 | `builder` | 30 | `ui-lint`, `ui-test` | none |
-| `build-and-integration-test` | ubuntu-24.04 | `builder` | 45 | `build`, `integration-test` → `integration-up` | `integration-up` |
-| `build-and-integration-test-distributed` | ubuntu-24.04 | `builder` | 45 | `build`, `integration-test-distributed` → `integration-up-distributed` | `integration-up-distributed` |
-| `build-and-integration-test-owner-memory` | ubuntu-24.04 | `builder` | 45 | `build`, `integration-test-owner-memory` → `integration-up-owner-memory` | `integration-up-owner-memory` |
-| `build-and-integration-test-agent-auth` | ubuntu-24.04 | `builder` | 45 | `integration-test-agent` → `integration-up-agent` (no separate `build` step; the image comes from `build-test` inside the recipe) | `integration-up-agent` |
-| `build-and-integration-test-infra` | ubuntu-24.04 | `builder` | 60 | `integration-test-infra` → `integration-up-infra` | `integration-up-infra` |
-| `build-and-integration-test-infra-arm64` | ubuntu-24.04-arm | `builder-arm64` | 60 | arm64 twin of the above | `integration-up-infra` (arm64) |
-| `build-and-integration-test-arm64` | ubuntu-24.04-arm | `builder-arm64` | 45 | `build`, `integration-test` → `integration-up` | `integration-up` (arm64) |
-| `ui-e2e` | ubuntu-24.04 | `[ui-test, build-and-integration-test]` | 45 | none — inline `docker run` reusing the `release-amd64` artifact (mirrors, but is not generated from, the `ui-e2e` justfile recipe) | inline `docker run --name caesium-server` |
-| `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, build-and-integration-test]` | 45 | none — inline `docker run` (mirrors, but is not generated from, `ui-e2e-auth`) | inline `docker run --name caesium-server-auth` |
-| `helm-integration-test` | ubuntu-24.04 | `[build-and-integration-test, helm-lint]` | 60 | kind cluster + `helm install` with `helm/caesium/ci/test-values-k8s.yaml`, then inline `go test` | kind pod via the Helm chart |
-| `podman-integration-test` | ubuntu-24.04 | `[build-and-integration-test]` | 45 | none — inline `docker run` (mirrors, but is not generated from, `integration-test-podman`) | inline `docker run --name caesium-server-podman` |
+| `ui-test` | ubuntu-24.04 | `changes` | 30 | Node 22 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
+| `integration` | ubuntu-24.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
+| `integration-extra` | ubuntu-24.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
+| `integration-arm64` | ubuntu-24.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
+| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
+| `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
+| `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
+| `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
+| `ci-config` | ubuntu-24.04 | — | 5 | actionlint + `scripts/test_ci.py` | none |
+| `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-24.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
+| `ci-ok` | ubuntu-24.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
 | `publish` | ubuntu-24.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |
+
+Path-filter outputs (`changes.go` / `.ui` / `.helm` / `.reagents` / `.ci` /
+`.images`) decide which of the jobs above run on a pull request. `master`
+and `v*` tags force every output to `true`.
+
+Docker (amd64 and arm64), Podman, and Helm each retain the complete
+integration test package. Each engine uses three isolated servers/runners.
+`test/shard_test.go` discovers the same Test* methods as testify and assigns
+the longest scenarios first to the shard with the lowest estimated cost;
+every scenario belongs to exactly one shard, including newly added tests. Existing
+engine-specific skips remain unchanged. Top-level Go tests outside the
+suite run on every shard. Invalid or partial shard configuration fails;
+sharding cannot be combined with `-run` or `-testify.m` filters.
+
+For a local Docker shard:
+
+```sh
+CAESIUM_TEST_SHARD_INDEX=1 CAESIUM_TEST_SHARD_COUNT=3 just integration-test
+```
+
+Without those variables, local integration recipes run the full suite.
+Distributed / owner-memory / agent-auth / infra keep their existing mode
+filters and PASS floors. `-count=1` ensures a cached test result never
+replaces a live integration run.
+
+`test/shard_timings.json` contains scheduling estimates in milliseconds:
+the maximum duration across the four full-suite engine/architecture lanes
+in [run 34236365746](https://github.com/caesium-cloud/caesium/actions/runs/34236365746),
+with a 100 ms minimum. Missing or nonpositive hints receive a 1-second
+default; obsolete entries cannot add scenarios. Refresh hints from the
+top-level `--- PASS/SKIP: TestIntegrationTestSuite/TestName (Ns)` lines of
+all twelve successful shard logs, taking the maximum per method and
+updating the source run in `test/shard_test.go`. The timing file controls
+placement only; reflection controls coverage. Stable method-name and
+shard-index tie breaks keep assignments deterministic.
+
+The `product` Bake group also compiles `go test -c -tags=integration ./test/`
+once per native architecture, independently of the release/static CLI
+compiles. `build/Dockerfile.integration` packages that binary and its shared
+libraries in a small Alpine runner with Git. Its Dockerfile-specific ignore
+file includes test sources omitted by the product context. All 17 integration
+jobs download this runner instead of the full Go builder. Fixtures and the
+actual product CLI still come from the checkout and product image.
+`scripts/integration-test.sh` runs the binary from the `test/` directory,
+preserves mode filters/timeouts and exit status, and always runs the tests
+afresh with `-test.count=1`. The same script uses `go test` for normal local
+runs. Set `CAESIUM_INTEGRATION_RUNNER_IMAGE` only when deliberately reusing
+a runner built from the checkout being tested.
+
+CI uses `build/ci.docker-bake-cache.hcl` and the `bake-images` composite action
+to persist product and reagent layers with separate target/architecture
+GHA scopes. A Bake target context reuses the cached lean builder graph,
+so image producers no longer download the builder image. Go compilation
+and npm cache mounts are restored separately with `actions/cache` and
+`buildkit-cache-dance`; GHA layer exports alone do not preserve cache mounts.
+Compilation cache keys include the architecture, product/reagent group, and
+toolchain/dependency hashes. These snapshots refresh when dependencies or
+toolchains change; source-only commits reuse them without exporting another
+large Go cache. Prefix restores seed a new snapshot from the previous one.
+Go's content-addressed build cache validates source/toolchain changes; no
+integration test result cache is reused. Module downloads remain in the
+builder layers rather than being hidden by an initially empty cache mount.
+
+Reagent builds start directly after path selection: their Dockerfile uses
+its own Go toolchain, so it never needs the Caesium builder artifact.
+Runtime roles and the reagent toolchain are uploaded separately. Infra and
+publish download only the roles; lint and unit tests download only the
+toolchain. Arm64 builds only the runtime roles because no arm64 lane
+consumes the reagent lint/test toolchain. UI validation runs directly on Node 22
+without waiting for a Go builder. Sharding adds runner setup, but integration
+compilation is shared; compare both elapsed and total job minutes when tuning it.
+
+The Go filter includes test definitions, testdata, executable examples,
+and `.dockerignore`, so fixture-only changes cannot bypass validation.
+Pure Markdown documentation changes still avoid image builds.
 
 Per-lane `-run` filters, `-timeout` values, and PASS-floor variables
 (`*_integration_min_pass`) are execution-mode wiring, not CI wiring — see
@@ -203,11 +348,11 @@ automatically pick up new env a feature adds to those recipes — its
 PR, or the lane drifts until something it depends on breaks.
 
 Lanes that go through `just integration-up*`:
-`build-and-integration-test` (`integration-up`),
-`build-and-integration-test-distributed` (`integration-up-distributed`),
-`build-and-integration-test-owner-memory` (`integration-up-owner-memory`),
-`build-and-integration-test-infra`/`-infra-arm64` (`integration-up-infra`),
-`build-and-integration-test-agent-auth` (`integration-up-agent`).
+`integration` Docker (`integration-up`) and agent-auth (`integration-up-agent`),
+`integration-extra` distributed / owner-memory / infra,
+`integration-arm64` Docker / infra.
+CI sets `CAESIUM_SKIP_IMAGE_BUILD=true` and docker-loads the `images`
+job's artifacts first, so those recipes do not recompile.
 
 Lanes that set server env inline and do **not** go through any
 `integration-up*` recipe:
@@ -215,13 +360,15 @@ Lanes that set server env inline and do **not** go through any
 - `ui-e2e` and `ui-e2e-auth` — own inline `docker run` in `ci.yml`, closely
   mirroring but not generated from the `ui-e2e`/`ui-e2e-auth` justfile
   recipes (which exist for local dev and call `build-release`; CI reuses the
-  pre-built `release-amd64` artifact instead).
+  pre-built `product-amd64` artifact instead).
 - `podman-integration-test` — own inline `docker run` in `ci.yml`, mirroring
-  but not calling the `integration-test-podman` justfile recipe.
+  but not calling the `integration-test-podman` justfile recipe. The Go
+  invocation runs the full suite in three shards.
 - `helm-integration-test` — server env comes from Helm values
   (`helm/caesium/ci/test-values-k8s.yaml`), not from any `docker run -e`
   block or justfile recipe; env parity has to be checked in that values file
-  separately.
+  separately. After `helm test`, the Go invocation runs the full suite
+  across three shards.
 
 ### Known gap (re-verified at this doc's HEAD)
 

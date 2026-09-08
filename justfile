@@ -61,6 +61,14 @@ owner_memory_integration_min_pass := env("CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_P
 # Suite-qualified: a bare method name matches no test at all.
 infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
 infra_integration_min_pass := env("CAESIUM_INFRA_INTEGRATION_MIN_PASS", "6")
+# When true, product-image recipes (build / build-test / build-reagents /
+# build-triage-agent) skip if the tagged image already exists. CI sets this
+# after docker-loading the images job's artifacts so the integration lanes
+# never recompile. Local default is false: a stale image must not silently
+# skip a rebuild after you edit source.
+skip_image_build := env("CAESIUM_SKIP_IMAGE_BUILD", "false")
+# CI loads a small precompiled runner; local runs still compile current sources.
+integration_runner_image := env("CAESIUM_INTEGRATION_RUNNER_IMAGE", local_builder_ref + ":" + tag + "-full")
 # A deliberately fake deploy key. The infra lane resolves it through the real
 # secret://env provider and then asserts the value never reaches a task log —
 # it is a canary, not a credential, and it opens nothing.
@@ -81,7 +89,9 @@ validate-platform:
     fi
 
 builder: validate-platform
-    @if {{ container_cli }} image inspect {{ local_builder_ref }}:{{ tag }} >/dev/null 2>&1; then \
+    @if [ "{{ skip_image_build }}" = "true" ]; then \
+        echo "Skipping builder (CAESIUM_SKIP_IMAGE_BUILD=true); consumers verify their loaded images."; \
+    elif {{ container_cli }} image inspect {{ local_builder_ref }}:{{ tag }} >/dev/null 2>&1; then \
         echo "Builder image {{ local_builder_ref }}:{{ tag }} already exists, skipping build."; \
     else \
         {{ container_cli }} build --platform {{ platform }} \
@@ -103,11 +113,16 @@ builder-full: validate-platform
     fi
 
 build: builder
-    {{ container_cli }} build --platform {{ platform }} \
-        --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
-        --target release \
-        -t {{ local_image_ref }}:{{ tag }} \
-        -f {{ dockerfile }} .
+    @if [ "{{ skip_image_build }}" = "true" ]; then \
+        {{ container_cli }} image inspect {{ local_image_ref }}:{{ tag }} >/dev/null || exit 1; \
+        echo "Release image {{ local_image_ref }}:{{ tag }} already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
+            --target release \
+            -t {{ local_image_ref }}:{{ tag }} \
+            -f {{ dockerfile }} .; \
+    fi
 
 # Build for a specific platform (requires buildx + QEMU for cross-platform)
 build-cross target_platform:
@@ -134,24 +149,37 @@ build-multiarch:
         -f {{ dockerfile }} --push .
 
 build-release: builder
-    {{ container_cli }} build --platform {{ platform }} \
-        --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
-        --target release \
-        -t {{ local_image_ref }}:{{ tag }} \
-        -f {{ dockerfile }} .
+    @if [ "{{ skip_image_build }}" = "true" ] && {{ container_cli }} image inspect {{ local_image_ref }}:{{ tag }} >/dev/null 2>&1; then \
+        echo "Release image {{ local_image_ref }}:{{ tag }} already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
+            --target release \
+            -t {{ local_image_ref }}:{{ tag }} \
+            -f {{ dockerfile }} .; \
+    fi
 
 build-test: builder
-    {{ container_cli }} build --platform {{ platform }} \
-        --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
-        --target test \
-        -t {{ local_image_ref }}:{{ tag }}-test \
-        -f {{ dockerfile }} .
+    @if [ "{{ skip_image_build }}" = "true" ]; then \
+        {{ container_cli }} image inspect {{ local_image_ref }}:{{ tag }}-test >/dev/null || exit 1; \
+        echo "Test image {{ local_image_ref }}:{{ tag }}-test already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
+            --target test \
+            -t {{ local_image_ref }}:{{ tag }}-test \
+            -f {{ dockerfile }} .; \
+    fi
 
 build-triage-agent: validate-platform
-    {{ container_cli }} build --platform {{ platform }} \
-        -t {{ local_triage_agent_ref }}:{{ tag }} \
-        -t {{ triage_agent_image }}:latest \
-        -f build/Dockerfile.triage-agent .
+    @if [ "{{ skip_image_build }}" = "true" ] && {{ container_cli }} image inspect {{ local_triage_agent_ref }}:{{ tag }} >/dev/null 2>&1; then \
+        echo "Triage agent image {{ local_triage_agent_ref }}:{{ tag }} already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            -t {{ local_triage_agent_ref }}:{{ tag }} \
+            -t {{ triage_agent_image }}:latest \
+            -f build/Dockerfile.triage-agent .; \
+    fi
 
 # ---------------------------------------------------------------------------
 # The unit-pipeline reagents (docs/superpowers/specs/…-infrastructure-deployment…).
@@ -162,12 +190,16 @@ build-triage-agent: validate-platform
 
 # Build the reagent toolchain image (Go + golangci-lint + pinned terraform).
 reagents-toolchain: validate-platform
-    {{ container_cli }} build --platform {{ platform }} \
-        --build-arg TF_DIST={{ tf_dist }} \
-        --build-arg TF_VERSION={{ tf_version }} \
-        --target toolchain \
-        -t {{ local_reagent_toolchain_ref }}:{{ tag }} \
-        -f build/Dockerfile.reagents .
+    @if [ "{{ skip_image_build }}" = "true" ] && {{ container_cli }} image inspect {{ local_reagent_toolchain_ref }}:{{ tag }} >/dev/null 2>&1; then \
+        echo "Reagent toolchain image {{ local_reagent_toolchain_ref }}:{{ tag }} already exists, skipping build."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg TF_DIST={{ tf_dist }} \
+            --build-arg TF_VERSION={{ tf_version }} \
+            --target toolchain \
+            -t {{ local_reagent_toolchain_ref }}:{{ tag }} \
+            -f build/Dockerfile.reagents .; \
+    fi
 
 # gofmt + go vet + golangci-lint over the nested reagents module.
 reagents-lint: reagents-toolchain
@@ -200,6 +232,17 @@ reagents-test: reagents-toolchain
 build-reagents: validate-platform
     #!/usr/bin/env bash
     set -euo pipefail
+    missing=0
+    for role in git-source tf-discover tf-warm tf-runner; do
+        if ! {{ container_cli }} image inspect "{{ local_reagent_repo }}/$role:{{ tag }}" >/dev/null 2>&1; then
+            missing=1
+            break
+        fi
+    done
+    if [ "{{ skip_image_build }}" = "true" ] && [ "$missing" -eq 0 ]; then
+        echo "Reagent role images already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."
+        exit 0
+    fi
     for role in git-source tf-discover tf-warm tf-runner; do
         {{ container_cli }} build --platform {{ platform }} \
             --build-arg TF_DIST={{ tf_dist }} \
@@ -339,7 +382,16 @@ run: build
 rm:
     {{ container_cli }} rm -f caesium-server
 
-integration-test:
+# A selected precompiled runner must exist. Otherwise prepare the normal local
+# compiler image once, before starting any integration server.
+integration-runner: validate-platform
+    @if [ -n "${CAESIUM_INTEGRATION_RUNNER_IMAGE:-}" ]; then \
+        {{ container_cli }} image inspect {{ integration_runner_image }} >/dev/null; \
+    else \
+        just tag={{ tag }} builder-full; \
+    fi
+
+integration-test: integration-runner
     just tag={{ tag }} integration-up
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
@@ -353,12 +405,14 @@ integration-test:
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
+        -e CAESIUM_TEST_SHARD_INDEX \
+        -e CAESIUM_TEST_SHARD_COUNT \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
-        {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'; then \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh'; then \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
     else \
       echo "integration tests failed; caesium server logs:"; \
@@ -367,7 +421,7 @@ integration-test:
       exit 1; \
     fi
 
-integration-test-distributed:
+integration-test-distributed: integration-runner
     just tag={{ tag }} integration-up-distributed
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
@@ -388,8 +442,8 @@ integration-test-distributed:
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
-        {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -408,7 +462,7 @@ integration-test-distributed:
     echo "distributed integration lane executed $passes scenario(s) (minimum {{ distributed_integration_min_pass }})"; \
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
 
-integration-test-owner-memory:
+integration-test-owner-memory: integration-runner
     just tag={{ tag }} integration-up-owner-memory
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
@@ -430,8 +484,8 @@ integration-test-owner-memory:
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
-        {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)" -timeout 30m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -457,7 +511,7 @@ integration-test-owner-memory:
 # server answers 401 where the scenario expects 200.
 
 # Run the integration suite against an auth-enabled, remediation-enabled server.
-integration-test-agent:
+integration-test-agent: integration-runner
     just tag={{ tag }} integration-up-agent
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
@@ -510,8 +564,8 @@ integration-test-agent:
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ agent_it_container }} \
         -w {{ bld_dir }} \
-        {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 30m -v' >"$log" 2>&1 || rc=$?; \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "{{ agent_integration_run }}"' >"$log" 2>&1 || rc=$?; \
     cat "$log"; \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -543,7 +597,7 @@ integration-down-infra:
 # Requires Podman to be installed and the Podman socket to be active
 
 # (run: systemctl --user enable --now podman.socket).
-integration-test-podman: build
+integration-test-podman: build integration-runner
     #!/usr/bin/env bash
     set -euo pipefail
     PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
@@ -564,14 +618,22 @@ integration-test-podman: build
         -e CAESIUM_CACHE_ENABLED=true \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
+    cli_dir={{ repo_dir }}/.tmp/caesium-cli-podman
+    mkdir -p "$cli_dir"
+    trap 'rm -rf "$cli_dir"; docker rm -f caesium-server-podman >/dev/null 2>&1 || true' EXIT
+    docker cp caesium-server-podman:/bin/caesium "$cli_dir/caesium"
+    chmod +x "$cli_dir/caesium"
     if docker run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -e CAESIUM_TEST_ENGINE=podman \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-podman/caesium \
+        -e CAESIUM_TEST_SHARD_INDEX \
+        -e CAESIUM_TEST_SHARD_COUNT \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
-        --network=host \
+        --network=container:caesium-server-podman \
         -w {{ bld_dir }} \
-        {{ repo }}/{{ builder_image }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'; then
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh'; then
       docker rm -f caesium-server-podman >/dev/null 2>&1 || true
     else
       echo "integration tests (podman) failed; caesium server logs:"
@@ -750,7 +812,7 @@ integration-up-infra: build-test build-reagents
         {{ local_image_ref }}:{{ tag }}-test start
 
 # Run the TestInfra scenarios against the infra lane's server.
-integration-test-infra:
+integration-test-infra: integration-runner
     just tag={{ tag }} integration-up-infra
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli-infra; \
     rm -rf "$cli_dir"; \
@@ -775,8 +837,8 @@ integration-test-infra:
         -e CAESIUM_INFRA_DEPLOY_KEY_CANARY={{ infra_deploy_key_value }} \
         --network=container:{{ infra_it_container }} \
         -w {{ bld_dir }} \
-        {{ local_builder_ref }}:{{ tag }}-full \
-        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "{{ infra_integration_run }}" -test.timeout=20m' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -852,6 +914,15 @@ ui-test: builder-full
         -w {{ bld_dir }}/ui \
         {{ local_builder_ref }}:{{ tag }}-full \
         sh -c 'npm ci --prefer-offline && npm test && npm run build:ci'
+
+# Single npm ci covering lint + unit tests + production build. CI uses this
+# so the two recipes above do not each reinstall node_modules.
+ui-ci: builder-full
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }}/ui \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        sh -c 'npm ci --prefer-offline && npm run lint && npm test && npm run build:ci'
 
 ui-e2e: build-release
     @{{ container_cli }} rm -f caesium-server >/dev/null 2>&1 || true

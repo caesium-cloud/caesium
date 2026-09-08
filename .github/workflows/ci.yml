@@ -1,77 +1,367 @@
 name: CI
 
+# PRs run once (the pull_request event). Pushes to feature branches do not
+# duplicate that. master and v* tags still run the full workflow on push.
 on:
   push:
-    branches: ['**']
+    branches: [master]
     tags: ['v*']
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 env:
   IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+  CAESIUM_EVENT_INGEST_API_KEY: integration-test-key
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.set.outputs.go }}
+      ui: ${{ steps.set.outputs.ui }}
+      helm: ${{ steps.set.outputs.helm }}
+      reagents: ${{ steps.set.outputs.reagents }}
+      ci: ${{ steps.set.outputs.ci }}
+      images: ${{ steps.set.outputs.images }}
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - '**/testdata/**'
+              - 'test/**'
+              - 'docs/examples/**'
+              - 'docs/examples-k8s/**'
+              - '.dockerignore'
+              - 'go.mod'
+              - 'go.sum'
+              - 'build/**'
+              - 'justfile'
+              - '.golangci.yml'
+              - 'caesium.go'
+            ui:
+              - 'ui/**'
+            helm:
+              - 'helm/**'
+            reagents:
+              - 'reagents/**'
+              - 'build/Dockerfile.reagents'
+            ci:
+              - '.github/**'
+              - 'scripts/**'
+              - 'build/ci.docker-bake.hcl'
+              - 'justfile'
+      - id: set
+        env:
+          EVENT: ${{ github.event_name }}
+          GO: ${{ steps.filter.outputs.go }}
+          UI: ${{ steps.filter.outputs.ui }}
+          HELM: ${{ steps.filter.outputs.helm }}
+          REAGENTS: ${{ steps.filter.outputs.reagents }}
+          CI: ${{ steps.filter.outputs.ci }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            {
+              echo "go=true"
+              echo "ui=true"
+              echo "helm=true"
+              echo "reagents=true"
+              echo "ci=true"
+              echo "images=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          images=false
+          if [ "${GO:-false}" = true ] || [ "${UI:-false}" = true ] || [ "${HELM:-false}" = true ] || [ "${REAGENTS:-false}" = true ] || [ "${CI:-false}" = true ]; then
+            images=true
+          fi
+          {
+            echo "go=${GO:-false}"
+            echo "ui=${UI:-false}"
+            echo "helm=${HELM:-false}"
+            echo "reagents=${REAGENTS:-false}"
+            echo "ci=${CI:-false}"
+            echo "images=$images"
+          } >> "$GITHUB_OUTPUT"
+
+  ci-config:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install actionlint
+        run: |
+          curl -fsSL --retry 3 -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/actionlint-bin
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint-bin actionlint
+          echo /tmp/actionlint-bin >> "$GITHUB_PATH"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate workflow and CI contracts
+        run: |
+          actionlint .github/workflows/ci.yml
+          python3 -m pip install PyYAML==6.0.3
+          python3 -m unittest discover -s scripts -p 'test_ci.py' -v
+
   builder:
+    permissions:
+      contents: read
+      actions: read # Cache lookup; cache uploads use the Actions runtime token.
+    needs: [changes]
+    if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - name: Build builder images (amd64)
-        run: |
-          just tag=${{ env.IMAGE_TAG }}-amd64 builder
-          just tag=${{ env.IMAGE_TAG }}-amd64 builder-full
-      - name: Save builder images
-        run: |
-          docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64 \
-                      caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
-            | gzip > /tmp/builder-amd64.tar.gz
-      - uses: actions/upload-artifact@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.build
+          target: builder-full
+          load: true
+          provenance: false
+          sbom: false
+          tags: |
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64
+          cache-from: type=gha,scope=builder-linux-amd64
+          cache-to: type=gha,mode=max,scope=builder-linux-amd64,ignore-error=true
+          build-args: |
+            TARGETARCH=amd64
+      - uses: ./.github/actions/save-docker-images
         with:
           name: builder-amd64
-          path: /tmp/builder-amd64.tar.gz
-          retention-days: 1
-          compression-level: 0
+          images: >-
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full
 
   builder-arm64:
+    permissions:
+      contents: read
+      actions: read # Cache lookup; cache uploads use the Actions runtime token.
+    needs: [changes]
+    if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - name: Build builder images (arm64)
-        run: |
-          just tag=${{ env.IMAGE_TAG }}-arm64 builder
-          just tag=${{ env.IMAGE_TAG }}-arm64 builder-full
-      - name: Save builder images
-        run: |
-          docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64 \
-                      caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64-full \
-            | gzip > /tmp/builder-arm64.tar.gz
-      - uses: actions/upload-artifact@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.build
+          target: builder-full
+          load: true
+          provenance: false
+          sbom: false
+          tags: |
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64-full
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64
+          cache-from: type=gha,scope=builder-linux-arm64
+          cache-to: type=gha,mode=max,scope=builder-linux-arm64,ignore-error=true
+          build-args: |
+            TARGETARCH=arm64
+      - uses: ./.github/actions/save-docker-images
         with:
           name: builder-arm64
-          path: /tmp/builder-arm64.tar.gz
-          retention-days: 1
-          compression-level: 0
+          images: >-
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64-full
 
-  lint:
-    needs: builder
+  images:
+    permissions:
+      contents: read
+      actions: read # BuildKit cache lookup; uploads use the runtime token.
+    needs: [changes, builder]
+    if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/bake-images
+        with:
+          arch: amd64
+          targets: product
+          cache-group: product
+      - name: Build triage-agent
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
+      - name: Extract static CLI (amd64)
+        run: |
+          set -euo pipefail
+          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-amd64)"
+          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-amd64
+          docker rm -f "$ctr"
+          chmod +x /tmp/caesium-linux-amd64
+      - name: Bare-host smoke test (amd64, native)
+        run: scripts/ci-cli-smoke.sh /tmp/caesium-linux-amd64 amd64
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: product-amd64
+          images: >-
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64-test
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: triage-amd64
+          images: >-
+            caesiumcloud/triage-agent:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/triage-agent:latest
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: integration-runner-amd64
+          images: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-cli-amd64
+          path: |
+            /tmp/caesium-linux-amd64
+            /tmp/caesium-linux-amd64.smoke-ok
+          retention-days: 1
+          compression-level: 0
+
+  images-arm64:
+    permissions:
+      contents: read
+      actions: read
+    needs: [changes, builder-arm64]
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bake-images
+        with:
+          arch: arm64
+          targets: product
+          cache-group: product
+      - name: Extract static CLI (arm64)
+        run: |
+          set -euo pipefail
+          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-arm64)"
+          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-arm64
+          docker rm -f "$ctr"
+          chmod +x /tmp/caesium-linux-arm64
+      - name: Bare-host smoke test (arm64, native)
+        run: scripts/ci-cli-smoke.sh /tmp/caesium-linux-arm64 arm64
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: product-arm64
+          images: >-
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64-test
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: integration-runner-arm64
+          images: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-arm64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-cli-arm64
+          path: |
+            /tmp/caesium-linux-arm64
+            /tmp/caesium-linux-arm64.smoke-ok
+          retention-days: 1
+          compression-level: 0
+
+  # Parallel with `images`: lint/unit-test only need the reagent toolchain,
+  # and the infra lane needs the four role images. Keeping this off the
+  # product bake means Docker integration can start as soon as `images`
+  # finishes.
+  reagents:
+    permissions:
+      contents: read
+      actions: read
+    needs: [changes]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bake-images
+        with:
+          arch: amd64
+          targets: reagents
+          cache-group: reagents
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: reagents-amd64
+          images: >-
+            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-amd64
+            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-amd64
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: reagent-toolchain-amd64
+          images: caesiumcloud/caesium-reagent-toolchain:${{ env.IMAGE_TAG }}-amd64
+
+  reagents-arm64:
+    permissions:
+      contents: read
+      actions: read
+    needs: [changes]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/bake-images
+        with:
+          arch: arm64
+          targets: reagent-roles
+          cache-group: reagents
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: reagents-arm64
+          images: >-
+            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-arm64
+            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-arm64
+            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-arm64
+            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-arm64
+
+  lint:
+    needs: [changes, builder, reagents]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
         with:
           name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: reagent-toolchain-amd64
       - name: Lint
         run: just tag=${{ env.IMAGE_TAG }}-amd64 lint
-      # reagents/ is a separate Go module, so `./...` in the root module never
-      # reaches it. Without this step the reagents are unlinted.
       - name: Lint reagents module
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-lint
 
@@ -89,419 +379,189 @@ jobs:
         run: helm template caesium ./helm/caesium --values ./helm/caesium/ci/test-values.yaml
 
   unit-test:
-    needs: builder
+    needs: [changes, builder, reagents]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
           name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: reagent-toolchain-amd64
       - name: Unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
-      # Same reason as the lint job: the nested reagents module is invisible to
-      # the root module's ./... .
       - name: Reagents unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-test
 
   unit-test-arm64:
-    needs: builder-arm64
+    needs: [changes, builder-arm64]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
           name: builder-arm64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
       - name: Unit tests (arm64)
         run: just tag=${{ env.IMAGE_TAG }}-arm64 unit-test
 
   ui-test:
-    needs: builder
+    needs: [changes]
+    if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      - name: UI lint
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 ui-lint
-      - name: UI unit tests
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 ui-test
-
-  build-and-integration-test:
-    needs: builder
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      - name: Build release image (amd64)
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 build
-      - name: Integration tests (amd64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test
-      - name: Save release image
-        run: |
-          docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 \
-            | gzip > /tmp/release-amd64.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-amd64
-          path: /tmp/release-amd64.tar.gz
-          retention-days: 1
-          compression-level: 0
-      # --- Portable CLI artifact (Stream E1): built, smoke-tested and
-      # checksummed on this runner, which is natively amd64. `publish` only
-      # verifies the marker + sha256; it never executes either binary.
-      - name: Build static CLI binary (amd64)
-        run: |
-          set -euo pipefail
-          docker build \
-            --build-arg BUILDER_IMAGE=caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64 \
-            --target cli-static \
-            -t caesium-cli-static:${{ env.IMAGE_TAG }}-amd64 \
-            -f build/Dockerfile .
-          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-amd64)"
-          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-amd64
-          docker rm -f "$ctr"
-          chmod +x /tmp/caesium-linux-amd64
-      - name: Bare-host smoke test (amd64, native)
-        run: |
-          set -euo pipefail
-          # ubuntu:24.04 carries none of the caesium runtime libraries
-          # (libdqlite / libuv / lz4 / sqlite3) and a different libc than the
-          # build image: if the binary runs here it is genuinely self-contained.
-          run_cli() {
-            docker run --rm \
-              -v /tmp/caesium-linux-amd64:/usr/local/bin/caesium:ro \
-              -v "$PWD/docs/examples:/examples:ro" \
-              -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
-              ubuntu:24.04 caesium "$@"
-          }
-          run_cli --help
-          run_cli job lint --path /examples/minimal.job.yaml
-          # --help and job lint are pure Go and would pass even if the static
-          # cgo link were broken. This runs the server: `caesium start` opens
-          # the embedded dqlite catalog (a fresh single-node store under
-          # CAESIUM_DATABASE_PATH), migrates it, and serves `job apply` over
-          # HTTP - the dqlite/sqlite path the static link exists for. One
-          # container, because the server and the client must share it.
-          docker run --rm \
-            -v /tmp/caesium-linux-amd64:/usr/local/bin/caesium:ro \
-            -v "$PWD/docs/examples:/examples:ro" \
-            -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
-            ubuntu:24.04 sh -ec '
-              mkdir -p /tmp/caesium-db
-              (timeout 60 caesium start >/tmp/start.log 2>&1 || true) &
-              applied=0
-              for i in $(seq 1 55); do
-                if caesium job apply --path /examples/minimal.job.yaml --server http://127.0.0.1:8080 >/tmp/apply.log 2>&1; then applied=1; break; fi
-                sleep 1
-              done
-              cat /tmp/apply.log
-              [ "$applied" = 1 ] || { echo "job apply against the embedded server never succeeded:"; cat /tmp/start.log; exit 1; }
-              grep -q "migrating database" /tmp/start.log || echo "note: the start log did not contain the migration line (informational; apply succeeded)"
-              echo "OK: embedded dqlite catalog opened, migrated and served job apply"
-            '
-          sha="$(sha256sum /tmp/caesium-linux-amd64 | awk '{print $1}')"
-          {
-            echo "binary=caesium-linux-amd64"
-            echo "sha256=${sha}"
-            echo "runner_arch=$(uname -m)"
-            echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium start' serving 'caesium job apply' (embedded dqlite catalog opened+migrated; native, no emulation)"
-          } > /tmp/caesium-linux-amd64.smoke-ok
-          cat /tmp/caesium-linux-amd64.smoke-ok
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-cli-amd64
-          path: |
-            /tmp/caesium-linux-amd64
-            /tmp/caesium-linux-amd64.smoke-ok
-          retention-days: 1
-          compression-level: 0
-
-  build-and-integration-test-distributed:
-    needs: builder
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      - name: Build release image (amd64)
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 build
-      - name: Distributed integration tests (amd64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-distributed
-
-  build-and-integration-test-owner-memory:
-    needs: builder
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      - name: Build release image (amd64)
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 build
-      - name: Owner in-memory fan-out integration tests (amd64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-owner-memory
-
-  build-and-integration-test-agent-auth:
-    needs: builder
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      - name: Agent auth integration tests (amd64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-agent
-
-  build-and-integration-test-infra:
-    needs: builder
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-        id: setup-docker
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
-      # docker/setup-docker-action provisions its own daemon and switches the
-      # active docker context to it, so everything built/loaded in this job
-      # (including the git-source/tf-discover/tf-warm/tf-runner reagent images
-      # `integration-test-infra` builds via `build-reagents`) lands there rather
-      # than on the runner's stock /var/run/docker.sock. The infra server
-      # container bind-mounts CAESIUM_SOCK as its own docker socket to launch
-      # step containers, so it must point at that same daemon — otherwise it
-      # falls back to the stock socket, which has never seen the reagent images
-      # and tries (and fails) to pull caesiumcloud/<role> from the registry.
-      # Other lanes don't hit this because their fixture images (alpine,
-      # busybox, curl) are public and pull fine from either daemon.
-      - name: Infra reagent integration tests (amd64)
-        run: |
-          sock="${{ steps.setup-docker.outputs.sock }}"
-          CAESIUM_SOCK="${sock#unix://}" CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-infra
-      - name: Save reagent images
-        run: |
-          docker save \
-            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-amd64 \
-            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-amd64 \
-            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-amd64 \
-            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-amd64 \
-            | gzip > /tmp/release-reagents-amd64.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-reagents-amd64
-          path: /tmp/release-reagents-amd64.tar.gz
-          retention-days: 1
-          compression-level: 0
-
-  # Twin of build-and-integration-test-infra. Arm64 reagent artifacts for
-  # publish come from this job (same split as amd64).
-  build-and-integration-test-infra-arm64:
-    needs: builder-arm64
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-        id: setup-docker
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-arm64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
-      # docker/setup-docker-action provisions its own daemon and switches the
-      # active docker context to it, so everything built/loaded in this job
-      # (including the git-source/tf-discover/tf-warm/tf-runner reagent images
-      # `integration-test-infra` builds via `build-reagents`) lands there rather
-      # than on the runner's stock /var/run/docker.sock. The infra server
-      # container bind-mounts CAESIUM_SOCK as its own docker socket to launch
-      # step containers, so it must point at that same daemon — otherwise it
-      # falls back to the stock socket, which has never seen the reagent images
-      # and tries (and fails) to pull caesiumcloud/<role> from the registry.
-      # Other lanes don't hit this because their fixture images (alpine,
-      # busybox, curl) are public and pull fine from either daemon.
-      - name: Infra reagent integration tests (arm64)
-        run: |
-          sock="${{ steps.setup-docker.outputs.sock }}"
-          CAESIUM_SOCK="${sock#unix://}" CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-arm64 integration-test-infra
-      - name: Save reagent images
-        run: |
-          docker save \
-            caesiumcloud/git-source:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-discover:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-warm:${{ env.IMAGE_TAG }}-arm64 \
-            caesiumcloud/tf-runner:${{ env.IMAGE_TAG }}-arm64 \
-            | gzip > /tmp/release-reagents-arm64.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-reagents-arm64
-          path: /tmp/release-reagents-arm64.tar.gz
-          retention-days: 1
-          compression-level: 0
-
-  build-and-integration-test-arm64:
-    needs: builder-arm64
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - uses: docker/setup-docker-action@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: builder-arm64
-          path: /tmp
-      - name: Load builder images
-        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
-      - name: Build release image (arm64)
-        run: just tag=${{ env.IMAGE_TAG }}-arm64 build
-      - name: Integration tests (arm64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-arm64 integration-test
-      - name: Save release image
-        run: |
-          docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64 \
-            | gzip > /tmp/release-arm64.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-arm64
-          path: /tmp/release-arm64.tar.gz
-          retention-days: 1
-          compression-level: 0
-      # --- Portable CLI artifact (Stream E1): built, smoke-tested and
-      # checksummed on this runner, which is natively arm64. `publish` only
-      # verifies the marker + sha256; it never executes either binary.
-      - name: Build static CLI binary (arm64)
-        run: |
-          set -euo pipefail
-          docker build \
-            --build-arg BUILDER_IMAGE=caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64 \
-            --target cli-static \
-            -t caesium-cli-static:${{ env.IMAGE_TAG }}-arm64 \
-            -f build/Dockerfile .
-          ctr="$(docker create caesium-cli-static:${{ env.IMAGE_TAG }}-arm64)"
-          docker cp "$ctr":/cli/caesium /tmp/caesium-linux-arm64
-          docker rm -f "$ctr"
-          chmod +x /tmp/caesium-linux-arm64
-      - name: Bare-host smoke test (arm64, native)
-        run: |
-          set -euo pipefail
-          # ubuntu:24.04 carries none of the caesium runtime libraries
-          # (libdqlite / libuv / lz4 / sqlite3) and a different libc than the
-          # build image: if the binary runs here it is genuinely self-contained.
-          run_cli() {
-            docker run --rm \
-              -v /tmp/caesium-linux-arm64:/usr/local/bin/caesium:ro \
-              -v "$PWD/docs/examples:/examples:ro" \
-              -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
-              ubuntu:24.04 caesium "$@"
-          }
-          run_cli --help
-          run_cli job lint --path /examples/minimal.job.yaml
-          # --help and job lint are pure Go and would pass even if the static
-          # cgo link were broken. This runs the server: `caesium start` opens
-          # the embedded dqlite catalog (a fresh single-node store under
-          # CAESIUM_DATABASE_PATH), migrates it, and serves `job apply` over
-          # HTTP - the dqlite/sqlite path the static link exists for. One
-          # container, because the server and the client must share it.
-          docker run --rm \
-            -v /tmp/caesium-linux-arm64:/usr/local/bin/caesium:ro \
-            -v "$PWD/docs/examples:/examples:ro" \
-            -e CAESIUM_DATABASE_PATH=/tmp/caesium-db \
-            ubuntu:24.04 sh -ec '
-              mkdir -p /tmp/caesium-db
-              (timeout 60 caesium start >/tmp/start.log 2>&1 || true) &
-              applied=0
-              for i in $(seq 1 55); do
-                if caesium job apply --path /examples/minimal.job.yaml --server http://127.0.0.1:8080 >/tmp/apply.log 2>&1; then applied=1; break; fi
-                sleep 1
-              done
-              cat /tmp/apply.log
-              [ "$applied" = 1 ] || { echo "job apply against the embedded server never succeeded:"; cat /tmp/start.log; exit 1; }
-              grep -q "migrating database" /tmp/start.log || echo "note: the start log did not contain the migration line (informational; apply succeeded)"
-              echo "OK: embedded dqlite catalog opened, migrated and served job apply"
-            '
-          sha="$(sha256sum /tmp/caesium-linux-arm64 | awk '{print $1}')"
-          {
-            echo "binary=caesium-linux-arm64"
-            echo "sha256=${sha}"
-            echo "runner_arch=$(uname -m)"
-            echo "runner_os=${{ runner.os }}"
-            echo "smoke=ubuntu:24.04 'caesium --help' + 'caesium job lint' + 'caesium start' serving 'caesium job apply' (embedded dqlite catalog opened+migrated; native, no emulation)"
-          } > /tmp/caesium-linux-arm64.smoke-ok
-          cat /tmp/caesium-linux-arm64.smoke-ok
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-cli-arm64
-          path: |
-            /tmp/caesium-linux-arm64
-            /tmp/caesium-linux-arm64.smoke-ok
-          retention-days: 1
-          compression-level: 0
-
-  ui-e2e:
-    needs: [ui-test, build-and-integration-test]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
-        with:
-          name: release-amd64
-          path: /tmp
-      - name: Load release image
-        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: UI lint, unit tests, and production build
+        working-directory: ui
+        run: npm ci --prefer-offline && npm run lint && npm test && npm run build:ci
+
+  # Each full Docker shard owns a server. The two legacy required check names
+  # below aggregate this matrix so branch protection needs no immediate change.
+  integration:
+    name: integration (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
+    needs: [changes, images]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: docker
+            shard: 1
+            recipe: integration-test
+            load-triage: "false"
+            load-reagents: "false"
+            timeout: 45
+          - id: docker
+            shard: 2
+            recipe: integration-test
+            load-triage: "false"
+            load-reagents: "false"
+            timeout: 45
+          - id: docker
+            shard: 3
+            recipe: integration-test
+            load-triage: "false"
+            load-reagents: "false"
+            timeout: 45
+          - id: agent-auth
+            shard: ""
+            recipe: integration-test-agent
+            load-triage: "true"
+            load-reagents: "false"
+            timeout: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/run-integration
+        with:
+          arch: amd64
+          recipe: ${{ matrix.recipe }}
+          shard-index: ${{ matrix.shard }}
+          shard-count: ${{ matrix.id == 'docker' && '3' || '' }}
+          load-triage: ${{ matrix.load-triage }}
+          load-reagents: ${{ matrix.load-reagents }}
+
+  # Not required-to-merge (flake history, see docs/ci.md §2).
+  integration-extra:
+    name: integration-extra (${{ matrix.id }})
+    needs: [changes, images, reagents]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: distributed
+            recipe: integration-test-distributed
+            load-reagents: "false"
+            timeout: 45
+          - id: owner-memory
+            recipe: integration-test-owner-memory
+            load-reagents: "false"
+            timeout: 45
+          - id: infra
+            recipe: integration-test-infra
+            load-reagents: "true"
+            timeout: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/run-integration
+        with:
+          arch: amd64
+          recipe: ${{ matrix.recipe }}
+          load-reagents: ${{ matrix.load-reagents }}
+
+  integration-arm64:
+    name: integration-arm64 (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
+    needs: [changes, images-arm64, reagents-arm64]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: docker
+            shard: 1
+            recipe: integration-test
+            load-reagents: "false"
+            timeout: 45
+          - id: docker
+            shard: 2
+            recipe: integration-test
+            load-reagents: "false"
+            timeout: 45
+          - id: docker
+            shard: 3
+            recipe: integration-test
+            load-reagents: "false"
+            timeout: 45
+          - id: infra
+            shard: ""
+            recipe: integration-test-infra
+            load-reagents: "true"
+            timeout: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/run-integration
+        with:
+          arch: arm64
+          recipe: ${{ matrix.recipe }}
+          shard-index: ${{ matrix.shard }}
+          shard-count: ${{ matrix.id == 'docker' && '3' || '' }}
+          load-reagents: ${{ matrix.load-reagents }}
+
+  ui-e2e:
+    needs: [changes, ui-test, images]
+    if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: product-amd64
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
         run: |
           cd ui
@@ -554,20 +614,20 @@ jobs:
         run: docker rm -f caesium-server >/dev/null 2>&1 || true
 
   ui-e2e-auth:
-    needs: [ui-test, build-and-integration-test]
+    needs: [changes, ui-test, images]
+    if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-amd64
-          path: /tmp
-      - name: Load release image
-        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+          name: product-amd64
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
         run: |
           cd ui
@@ -635,23 +695,22 @@ jobs:
         run: docker rm -f caesium-server-auth >/dev/null 2>&1 || true
 
   helm-integration-test:
-    needs: [build-and-integration-test, helm-lint]
+    needs: [changes, images, helm-lint]
+    if: needs.changes.outputs.helm == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-amd64
-          path: /tmp
-      - uses: actions/download-artifact@v8
+          name: product-amd64
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load images
-        run: |
-          gunzip -c /tmp/release-amd64.tar.gz | docker load
-          gunzip -c /tmp/builder-amd64.tar.gz | docker load
+          name: integration-runner-amd64
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -712,19 +771,22 @@ jobs:
           docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
           docker rm -f "$ctr"
           chmod +x .tmp/caesium-cli/caesium
-      - name: Integration tests (Kubernetes)
+      - name: Full integration suite (Kubernetes, shard ${{ matrix.shard }}/3)
         run: |
+          set -euo pipefail
           docker run --rm \
-            -v $(pwd):/bld/caesium \
+            -v "$(pwd)":/bld/caesium \
+            -e CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }} \
+            -e CAESIUM_TEST_SHARD_COUNT=3 \
             -e CAESIUM_TEST_ENGINE=kubernetes \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=host \
             -w /bld/caesium \
-            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
-            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'
+            caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
+            sh scripts/integration-test.sh
       - name: Stop port-forward
         if: always()
-        run: kill $(cat /tmp/port-forward.pid) 2>/dev/null || true
+        run: kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
       - name: Dump logs on failure
         if: failure()
         run: |
@@ -733,23 +795,22 @@ jobs:
           kubectl describe pods -l cloud.caesium -A || true
 
   podman-integration-test:
-    needs: [build-and-integration-test]
+    needs: [changes, images]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-amd64
-          path: /tmp
-      - uses: actions/download-artifact@v8
+          name: product-amd64
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: builder-amd64
-          path: /tmp
-      - name: Load images
-        run: |
-          gunzip -c /tmp/release-amd64.tar.gz | docker load
-          gunzip -c /tmp/builder-amd64.tar.gz | docker load
+          name: integration-runner-amd64
       - name: Enable Podman socket
         run: |
           systemctl --user enable --now podman.socket
@@ -795,16 +856,19 @@ jobs:
           docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
           docker rm -f "$ctr"
           chmod +x .tmp/caesium-cli/caesium
-      - name: Integration tests (Podman)
+      - name: Full integration suite (Podman, shard ${{ matrix.shard }}/3)
         run: |
+          set -euo pipefail
           docker run --rm \
-            -v $(pwd):/bld/caesium \
+            -v "$(pwd)":/bld/caesium \
+            -e CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }} \
+            -e CAESIUM_TEST_SHARD_COUNT=3 \
             -e CAESIUM_TEST_ENGINE=podman \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=container:caesium-server-podman \
             -w /bld/caesium \
-            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
-            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 30m'
+            caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
+            sh scripts/integration-test.sh
       - name: Dump Caesium logs on failure
         if: failure()
         run: docker logs caesium-server-podman || true
@@ -812,30 +876,97 @@ jobs:
         if: always()
         run: docker rm -f caesium-server-podman || true
 
-  publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+  build-and-integration-test:
+    if: always()
+    needs: [changes, images, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify required integration matrix
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-ok.py changes images integration
+
+  build-and-integration-test-agent-auth:
+    if: always()
+    needs: [changes, images, integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify required integration matrix
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-ok.py changes images integration
+
+  # Merge gate. Failure/cancelled of any listed job fails the gate; skipped
+  # (path filter) is allowed. Include image producers so a failed `images`
+  # job cannot hide behind skipped integration consumers.
+  ci-ok:
+    if: always()
     needs:
+      - changes
+      - ci-config
+      - builder
+      - builder-arm64
+      - images
+      - images-arm64
+      - reagents
       - lint
       - unit-test
       - unit-test-arm64
       - ui-test
       - ui-e2e
       - ui-e2e-auth
-      - build-and-integration-test
-      - build-and-integration-test-distributed
-      - build-and-integration-test-owner-memory
-      - build-and-integration-test-agent-auth
-      - build-and-integration-test-infra
-      - build-and-integration-test-infra-arm64
-      - build-and-integration-test-arm64
+      - integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Evaluate merge gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 scripts/ci-ok.py \
+            changes \
+            ci-config \
+            builder \
+            builder-arm64 \
+            images \
+            images-arm64 \
+            reagents \
+            lint \
+            unit-test \
+            unit-test-arm64 \
+            ui-test \
+            ui-e2e \
+            ui-e2e-auth \
+            integration
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - ci-ok
+      - lint
+      - unit-test
+      - unit-test-arm64
+      - ui-test
+      - ui-e2e
+      - ui-e2e-auth
+      - images
+      - images-arm64
+      - reagents
+      - reagents-arm64
+      - integration
+      - integration-extra
+      - integration-arm64
       - helm-lint
       - helm-integration-test
       - podman-integration-test
     runs-on: ubuntu-24.04
     environment: Docker
     timeout-minutes: 30
-    # Scoped to this job only: the test jobs stay on the default read-only
-    # token. `contents: write` is what `gh release create` needs.
     permissions:
       contents: write
     steps:
@@ -848,22 +979,18 @@ jobs:
             echo "Every v* tag bumps Chart.yaml appVersion to the tag (and version per semver) in the same PR."
             exit 1
           }
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-amd64
-          path: /tmp
-      - uses: actions/download-artifact@v8
+          name: product-amd64
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-arm64
-          path: /tmp
-      - uses: actions/download-artifact@v8
+          name: product-arm64
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-reagents-amd64
-          path: /tmp
-      - uses: actions/download-artifact@v8
+          name: reagents-amd64
+      - uses: ./.github/actions/load-docker-images
         with:
-          name: release-reagents-arm64
-          path: /tmp
+          name: reagents-arm64
       - uses: actions/download-artifact@v8
         with:
           name: release-cli-amd64
@@ -872,9 +999,6 @@ jobs:
         with:
           name: release-cli-arm64
           path: /tmp/cli
-      # Verify only - this runner is amd64 and must never execute the arm64
-      # binary. The proof that each binary runs on a bare host was produced
-      # natively by its own build job (the .smoke-ok markers below).
       - name: Verify CLI smoke markers and checksums
         run: |
           set -euo pipefail
@@ -898,12 +1022,6 @@ jobs:
           done
           sha256sum caesium-linux-amd64 caesium-linux-arm64 > SHA256SUMS
           cat SHA256SUMS
-      - name: Load release images
-        run: |
-          gunzip -c /tmp/release-amd64.tar.gz | docker load
-          gunzip -c /tmp/release-arm64.tar.gz | docker load
-          gunzip -c /tmp/release-reagents-amd64.tar.gz | docker load
-          gunzip -c /tmp/release-reagents-arm64.tar.gz | docker load
       - name: Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
       - name: Push multi-arch manifest
@@ -978,12 +1096,6 @@ jobs:
           un-overridden \`helm install caesium ./helm/caesium\` deploys this
           release.
           EOF
-          # No --generate-notes: on a first release GitHub would generate
-          # "What's Changed" from the repository's first commit, and a body over
-          # 125,000 characters makes the API return 422 - after the images above
-          # are already public. The hand-written notes are the release notes.
-          # Idempotent: the image pushes above are not, so a re-run of this job
-          # must not fail on "release already exists" - it re-uploads the assets.
           assets=(/tmp/cli/caesium-linux-amd64 /tmp/cli/caesium-linux-arm64 /tmp/cli/SHA256SUMS)
           if gh release view "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "release ${IMAGE_TAG} already exists; re-uploading assets with --clobber"

@@ -1,0 +1,49 @@
+name: Run integration lane
+description: Load the pre-built images and run a just integration-* recipe without recompiling.
+
+inputs:
+  arch:
+    description: amd64 or arm64
+    required: true
+  recipe:
+    description: justfile recipe (integration-test, integration-test-agent, …)
+    required: true
+  load-triage:
+    description: Load the triage-agent image artifact
+    default: "false"
+  load-reagents:
+    description: Load the reagent role image artifact
+    default: "false"
+  shard-index:
+    description: One-based shard index (empty runs the unsharded suite)
+    default: ""
+  shard-count:
+    description: Total full-suite shards (empty runs the unsharded suite)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: taiki-e/install-action@just
+    - uses: ./.github/actions/load-docker-images
+      with:
+          name: integration-runner-${{ inputs.arch }}
+    - uses: ./.github/actions/load-docker-images
+      with:
+        name: product-${{ inputs.arch }}
+    - if: ${{ inputs.load-triage == 'true' }}
+      uses: ./.github/actions/load-docker-images
+      with:
+        name: triage-${{ inputs.arch }}
+    - if: ${{ inputs.load-reagents == 'true' }}
+      uses: ./.github/actions/load-docker-images
+      with:
+        name: reagents-${{ inputs.arch }}
+    - name: Run ${{ inputs.recipe }}
+      shell: bash
+      env:
+        CAESIUM_SKIP_IMAGE_BUILD: "true"
+        CAESIUM_INTEGRATION_RUNNER_IMAGE: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-${{ inputs.arch }}
+        CAESIUM_TEST_SHARD_INDEX: ${{ inputs.shard-index }}
+        CAESIUM_TEST_SHARD_COUNT: ${{ inputs.shard-count }}
+      run: just tag=${{ env.IMAGE_TAG }}-${{ inputs.arch }} ${{ inputs.recipe }}
