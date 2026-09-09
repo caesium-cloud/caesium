@@ -49,3 +49,47 @@ func (s *ImpactSuite) TestMapperPersistsDeclaredIdentityAlongsideArtifacts() {
 	s.Require().NoError(err)
 	s.Nil(mapped)
 }
+
+func (s *ImpactSuite) TestDelayedEventRejectsReplacementDeclarations() {
+	job, tr := s.createJobAndRun("delayed-consumer", "commit")
+	started := time.Now().UTC().Add(-time.Minute)
+	makeDeclarations := func(input, output string, created time.Time) []models.DatasetDeclaration {
+		return []models.DatasetDeclaration{
+			{ID: uuid.New(), JobID: job.ID, JobAlias: job.Alias, StepName: job.Alias + "-task", Name: input, Direction: models.DatasetDirectionConsumes, CreatedAt: created, UpdatedAt: created},
+			{ID: uuid.New(), JobID: job.ID, JobAlias: job.Alias, StepName: job.Alias + "-task", Name: output, Direction: models.DatasetDirectionProduces, CreatedAt: created, UpdatedAt: created},
+		}
+	}
+	old := makeDeclarations("old/input", "old/output", started.Add(-time.Second))
+	s.Require().NoError(s.db.Create(&old).Error)
+	payload := taskRunPayload{ID: tr.ID, JobRunID: tr.JobRunID, TaskID: tr.TaskID, StartedAt: &started}
+	evt := event.Event{Type: event.TypeTaskStarted, JobID: job.ID, RunID: tr.JobRunID, TaskID: tr.TaskID, Timestamp: started, Payload: marshalFacet(payload)}
+	m := newMapper("configured", s.db)
+	_, err := m.mapEvent(evt)
+	s.Require().NoError(err)
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Delete(&models.DatasetDeclaration{}).Error)
+	replacement := makeDeclarations("new/input", "new/output", started.Add(time.Second))
+	s.Require().NoError(s.db.Create(&replacement).Error)
+	evt.Type = event.TypeTaskSucceeded
+	evt.Timestamp = started.Add(2 * time.Second)
+	mapped, err := m.mapEvent(evt)
+	s.Require().NoError(err)
+	s.Empty(mapped.Inputs, "a later event still belongs to its original execution")
+	s.Empty(mapped.Outputs)
+	oldImpact, err := QueryImpact(s.ctx, s.db, "", "old/input", 0)
+	s.Require().NoError(err)
+	s.Require().Len(oldImpact.Downstream, 1)
+	s.Equal("old/output", oldImpact.Downstream[0].DatasetName)
+	newImpact, err := QueryImpact(s.ctx, s.db, "", "new/input", 0)
+	s.Require().NoError(err)
+	s.Empty(newImpact.Downstream)
+
+	// Legacy event payloads without started_at still use the original event
+	// timestamp, not the mapper's wall clock after the replacement apply.
+	payload.StartedAt = nil
+	evt.Timestamp = started
+	evt.Payload = marshalFacet(payload)
+	mapped, err = m.mapEvent(evt)
+	s.Require().NoError(err)
+	s.Empty(mapped.Inputs)
+	s.Empty(mapped.Outputs)
+}

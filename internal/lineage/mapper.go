@@ -38,18 +38,19 @@ type jobRunPayload struct {
 }
 
 type taskRunPayload struct {
-	ID        uuid.UUID `json:"id"`
-	JobRunID  uuid.UUID `json:"job_run_id"`
-	TaskID    uuid.UUID `json:"task_id"`
-	AtomID    uuid.UUID `json:"atom_id"`
-	Engine    string    `json:"engine"`
-	Image     string    `json:"image"`
-	Command   []string  `json:"command"`
-	RuntimeID string    `json:"runtime_id"`
-	Status    string    `json:"status"`
-	ClaimedBy string    `json:"claimed_by"`
-	Result    string    `json:"result"`
-	Error     string    `json:"error"`
+	ID        uuid.UUID  `json:"id"`
+	JobRunID  uuid.UUID  `json:"job_run_id"`
+	TaskID    uuid.UUID  `json:"task_id"`
+	AtomID    uuid.UUID  `json:"atom_id"`
+	Engine    string     `json:"engine"`
+	Image     string     `json:"image"`
+	Command   []string   `json:"command"`
+	RuntimeID string     `json:"runtime_id"`
+	Status    string     `json:"status"`
+	ClaimedBy string     `json:"claimed_by"`
+	Result    string     `json:"result"`
+	Error     string     `json:"error"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
 
 	// Output holds the structured key→value pairs emitted via ##caesium::output.
 	// Values may be file paths, table names, URIs, or scalar summaries.
@@ -233,7 +234,7 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
-	m.enrichTaskPayload(&payload)
+	m.enrichTaskPayload(&payload, evt.Timestamp)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -274,7 +275,7 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
-	m.enrichTaskPayload(&payload)
+	m.enrichTaskPayload(&payload, evt.Timestamp)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -315,7 +316,7 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
-	m.enrichTaskPayload(&payload)
+	m.enrichTaskPayload(&payload, evt.Timestamp)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -359,7 +360,7 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
-	m.enrichTaskPayload(&payload)
+	m.enrichTaskPayload(&payload, evt.Timestamp)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -522,7 +523,7 @@ func (taskRecord) TableName() string { return "tasks" }
 //
 // On any lookup failure it leaves the payload as-is — the worst case is the
 // pre-existing (degraded) behavior, never a wrong dataset.
-func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
+func (m *mapper) enrichTaskPayload(payload *taskRunPayload, asOf time.Time) {
 	if m.db == nil || payload.TaskID == uuid.Nil {
 		return
 	}
@@ -546,10 +547,18 @@ func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
 			payload.InputSchema = is
 		}
 	}
-	if rec.JobID != uuid.Nil && rec.Name != "" {
+	// Applying a new definition replaces registry rows but may retain task IDs.
+	// A delayed lifecycle event must never gain those new relationships. Use
+	// the execution's original start when present, otherwise the event's own
+	// timestamp; a missing timestamp cannot establish a declaration's age.
+	if payload.StartedAt != nil && !payload.StartedAt.IsZero() && (asOf.IsZero() || payload.StartedAt.Before(asOf)) {
+		asOf = *payload.StartedAt
+	}
+	if rec.JobID != uuid.Nil && rec.Name != "" && !asOf.IsZero() {
 		var declarations []models.DatasetDeclaration
 		if err := m.db.Where("job_id = ? AND step_name = ? AND direction IN ?",
 			rec.JobID, rec.Name, []string{models.DatasetDirectionProduces, models.DatasetDirectionConsumes}).
+			Where("created_at <= ? AND updated_at <= ?", asOf, asOf).
 			Order("namespace ASC, name ASC, direction ASC").Find(&declarations).Error; err == nil {
 			payload.declaredDatasets = declarations
 		}

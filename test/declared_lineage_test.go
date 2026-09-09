@@ -63,8 +63,8 @@ steps:
 	s.Require().Len(holds.Holds, 1)
 	s.Equal(graph.RootNamespace, holds.Holds[0].Namespace)
 	s.Equal(graph.RootName, holds.Holds[0].Name)
-	blocked := s.triggerRun(consumer.ID)
-	s.Equal("skipped", s.awaitRun(consumer.ID, blocked, 30*time.Second).Status)
+	blocked := s.triggerHeldRun(consumer.ID)
+	s.Equal("skipped", blocked.Status)
 
 	// Omission is distinct from the explicit empty registry namespace.
 	resp, err := s.doJSONRequest(http.MethodGet, s.caesiumURL+"/v1/lineage/impact?name="+url.QueryEscape(root), nil)
