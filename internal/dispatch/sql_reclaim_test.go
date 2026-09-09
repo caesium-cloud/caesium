@@ -224,12 +224,12 @@ func TestDispatchLoop_ReclaimClockIsThrottledAndBounded(t *testing.T) {
 	require.True(t, loop.dueForReclaim(runID, now.Add(ownerReclaimInterval)),
 		"the sweep resumes once the interval has elapsed")
 
-	loop.forgetUnownedReclaims(map[uuid.UUID]int64{runID: 1})
+	loop.forgetUnownedRuns(map[uuid.UUID]int64{runID: 1})
 	loop.reclaimMu.Lock()
 	require.Len(t, loop.lastReclaim, 1, "an owned run keeps its clock")
 	loop.reclaimMu.Unlock()
 
-	loop.forgetUnownedReclaims(map[uuid.UUID]int64{})
+	loop.forgetUnownedRuns(map[uuid.UUID]int64{})
 	loop.reclaimMu.Lock()
 	require.Empty(t, loop.lastReclaim, "a run this node no longer owns must not leak its clock")
 	loop.reclaimMu.Unlock()

@@ -423,6 +423,14 @@ func TestSubmitDispatched_BufferFull(t *testing.T) {
 	if !errors.Is(err, ErrInboundFull) {
 		t.Fatalf("expected ErrInboundFull on overflow, got %v", err)
 	}
+	// The dispatch handler recognises saturation through dispatch.ErrNoCapacity
+	// (it cannot import this package) and answers with the no_capacity reason
+	// code, which is what makes the owner back the task off instead of
+	// re-posting it every tick.  If the two sentinels ever drift apart, that
+	// rejection silently degrades to the generic 409 — so pin the identity.
+	if !errors.Is(err, dispatch.ErrNoCapacity) {
+		t.Fatalf("ErrInboundFull must be recognisable as dispatch.ErrNoCapacity, got %v", err)
+	}
 }
 
 // TestWorkerRunDrainsInboundDispatch verifies the Run loop drains a dispatched

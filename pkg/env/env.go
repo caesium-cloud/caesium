@@ -299,6 +299,13 @@ type Environment struct {
 	// to time.Now() in each DispatchRequest.  Workers use this to bound how long
 	// they hold the claim before returning it.  Default 5m.
 	RunOwnerDispatchDeadline time.Duration `envconfig:"RUN_OWNER_DISPATCH_DEADLINE" default:"5m"`
+	// CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE is how long a ready task may
+	// keep being refused by workers for lack of execution capacity before the
+	// dispatch loop surfaces it as a stall (warn log +
+	// caesium_dispatch_stalled_total).  It does not cancel or fail the task —
+	// dispatch keeps retrying on an exponential backoff — it only makes a run
+	// that cannot start visible instead of silent.  Default 10m.
+	RunOwnerDispatchProgressDeadline time.Duration `envconfig:"RUN_OWNER_DISPATCH_PROGRESS_DEADLINE" default:"10m"`
 
 	// CAESIUM_INTERNAL_PORT is the port for the dedicated internal mTLS listener
 	// that hosts the run-owner endpoints (/internal/dispatch, /internal/complete).

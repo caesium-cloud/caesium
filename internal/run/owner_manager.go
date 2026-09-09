@@ -449,6 +449,32 @@ func (m *OwnerManager) ReadyForDispatch(runID uuid.UUID) []DispatchableTask {
 	return out
 }
 
+// Dispatchable reports whether taskID (an execution ref: the instance id for a
+// fanned task, the catalog task id otherwise) is still worth pushing to a
+// worker — the run is owned here and the task exists and has not reached a
+// terminal state.
+//
+// The dispatch loop snapshots the ready queue once per tick and then posts each
+// task from a bounded pool of goroutines, so a task can go terminal (a cancel, a
+// fail-fast skip propagated from a sibling, a completion applied out of band)
+// between the snapshot and its own POST.  Re-asking here, immediately before the
+// POST, is what keeps that window from putting a resolved task back on the wire.
+// It also answers false for a catalog id whose group has since been expanded,
+// which is the one dispatch the worker can only reject as ambiguous.
+func (m *OwnerManager) Dispatchable(runID, taskID uuid.UUID) bool {
+	or, ok := m.get(runID)
+	if !ok {
+		return false
+	}
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	st, ok := or.state.TaskState(taskID)
+	if !ok {
+		return false
+	}
+	return !IsTerminal(st.Status)
+}
+
 // MarkDispatched records that a ready task was pushed to a worker.
 func (m *OwnerManager) MarkDispatched(runID, taskID uuid.UUID, worker string, attempt int, leaseExpiresAtMs int64) {
 	or, ok := m.get(runID)
