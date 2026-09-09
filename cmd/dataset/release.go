@@ -131,6 +131,8 @@ func parseReleaseTolerances(entries []string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("--tolerate requires <assertion>=<duration>")
 		}
+		// The enforceable kinds only: `unavailable` never opens a hold, so a
+		// tolerance window over it would suppress nothing.
 		switch assertion {
 		case runstore.AssertionMin, runstore.AssertionMax, runstore.AssertionDeltaFromBaseline, runstore.AssertionMaxLag, runstore.AssertionMissing:
 		default:

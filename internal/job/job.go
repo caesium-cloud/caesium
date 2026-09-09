@@ -1416,7 +1416,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// and the instance's TaskRun primary key for a fan-out partition, where N
 	// sibling rows share (runID, taskID) and every store write and container name
 	// must therefore be keyed on the instance, not the catalog task.
-	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, []pkgtask.DatasetMetricSample, *run.TaskLogSnapshot, error) {
+	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 		// taskRef is what the run store resolves this execution to; see
 		// loadTaskRunByIDOrUnique for the primary-key-or-task-ID contract.
 		taskRef := taskID
@@ -1437,16 +1437,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 		spec := runner.spec
 		taskQuarantined := taskQuarantine[taskID] || runQuarantined
 		if taskQuarantined {
-			return "", nil, nil, nil, nil, nil, ErrLocalQuarantinedReplayUnsupported
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, ErrLocalQuarantinedReplayUnsupported
 		}
 		interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 		spec.Env = interpolated
 		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 		if len(secretIdentities) > 0 {
 			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
@@ -1472,11 +1472,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			Spec:    spec,
 		})
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
 		if err := store.StartTask(runID, taskRef, a.ID()); err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
 		waitResult := make(chan struct {
@@ -1516,7 +1516,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// failed Stop is reported rather than swallowed — "cancelled" and
 		// "cancelled but the container is still out there" are different
 		// operational facts.
-		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, []pkgtask.DatasetMetricSample, *run.TaskLogSnapshot, error) {
+		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
@@ -1524,18 +1524,18 @@ func (j *job) Run(ctx context.Context) (err error) {
 			switch {
 			case errors.Is(taskCtx.Err(), context.DeadlineExceeded):
 				if stopErr != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
 				if ctx.Err() != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
-				return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			case errors.Is(taskCtx.Err(), context.Canceled):
 				if stopErr != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
 				}
-				return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
 			}
 			// taskCtx is still live, so this is a genuine wait failure rather
 			// than a cancellation arriving by the other door. The stop is
@@ -1544,9 +1544,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 				log.Warn("failed to stop atom after engine wait error", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", stopErr)
 			}
 			if waitErr != nil {
-				return "", nil, nil, nil, nil, nil, waitErr
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, waitErr
 			}
-			return "", nil, nil, nil, nil, nil, taskCtx.Err()
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, taskCtx.Err()
 		}
 
 		select {
@@ -1571,29 +1571,44 @@ func (j *job) Run(ctx context.Context) (err error) {
 			var branchNames []string
 			var logSnapshot *run.TaskLogSnapshot
 			var partitions []pkgtask.Partition
-			var datasetMetrics []pkgtask.DatasetMetricSample
+			// metricsCapture carries the samples AND how completely they were
+			// read: a log this executor could not fetch or parse, and a metrics
+			// scan that overflowed its cap, both mean a declared metric's
+			// absence proves nothing (issue #437). The evaluator downgrades
+			// those verdicts to `unavailable` instead of failing the task for
+			// an infrastructure fault.
+			var metricsCapture run.MetricsCapture
 			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
-			if logErr == nil {
+			if logErr != nil {
+				metricsCapture.Unreadable = true
+				log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
+					"job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", logErr)
+			} else {
 				maxParts := env.Variables().FanOutMaxPartitions
 				markers, parseErr := pkgtask.CaptureMarkersWithLimits(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64(), maxParts)
 				if closeErr := logStream.Close(); closeErr != nil {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
-				if parseErr != nil {
+				switch {
+				case parseErr != nil:
 					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
-							return "", nil, nil, nil, nil, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
+							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
 						}
-						return "", nil, nil, nil, nil, nil, parseErr
+						return "", nil, nil, nil, run.MetricsCapture{}, nil, parseErr
 					}
+					metricsCapture.Unreadable = true
 					log.Warn("failed to parse task markers", "task_id", taskID, "error", parseErr)
-				} else if markers != nil {
+				case markers == nil:
+					metricsCapture.Unreadable = true
+				default:
 					taskOutput = markers.Output
 					branchNames = markers.Branches
 					partitions = markers.Partitions
-					datasetMetrics = markers.Metrics
+					metricsCapture.Samples = markers.Metrics
 					if markers.MetricsTruncated {
+						metricsCapture.Truncated = true
 						log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
 							"task_id", taskID, "cap_bytes", pkgtask.MaxMetricsBytes)
 					}
@@ -1610,7 +1625,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				ID:    a.ID(),
 				Force: true,
 			})
-			return string(a.Result()), taskOutput, branchNames, partitions, datasetMetrics, logSnapshot, stopErr
+			return string(a.Result()), taskOutput, branchNames, partitions, metricsCapture, logSnapshot, stopErr
 		}
 	}
 
@@ -2103,7 +2118,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if taskTimeout > 0 {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			result, output, branches, _, datasetMetrics, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
+			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
 			cancel()
 
 			if execErr == nil {
@@ -2129,7 +2144,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation and keyed on THIS
 				// instance's row: a fanned step records its samples per
 				// partition (see run.EvaluateDataAssertions).
-				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, datasetMetrics); err != nil {
+				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, metricsCapture); err != nil {
 					execErr = err
 				}
 			}
@@ -2776,7 +2791,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, branchNames, partitions, datasetMetrics, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner, outputEnv)
+			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner, outputEnv)
 			cancel()
 
 			if execErr == nil {
@@ -2799,7 +2814,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation. The unfanned
 				// path has one row per (run, task), so the catalog task id
 				// resolves it unambiguously.
-				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, datasetMetrics); err != nil {
+				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
 					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}

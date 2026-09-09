@@ -805,24 +805,38 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	var taskOutput map[string]string
 	var branchSelections []string
 	var partitions []pkgtask.Partition
-	var datasetMetrics []pkgtask.DatasetMetricSample
+	// metricsCapture carries the samples AND how completely they were read: a
+	// log this executor could not fetch or parse, and a metrics scan that
+	// overflowed its cap, both mean a declared metric's absence proves nothing
+	// (issue #437). The evaluator downgrades those verdicts to `unavailable`
+	// instead of failing the task for an infrastructure fault.
+	var metricsCapture run.MetricsCapture
 	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
-	if logErr == nil {
+	if logErr != nil {
+		metricsCapture.Unreadable = true
+		log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
+			"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", logErr)
+	} else {
 		markers, parseErr := pkgtask.CaptureMarkersWithLimits(logs, pkgtask.MaxLogSnapshotBytes, 0, env.Variables().FanOutMaxPartitions)
 		if closeErr := logs.Close(); closeErr != nil {
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
-		if parseErr != nil {
+		switch {
+		case parseErr != nil:
 			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 				return nil, parseErr
 			}
+			metricsCapture.Unreadable = true
 			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)
-		} else if markers != nil {
+		case markers == nil:
+			metricsCapture.Unreadable = true
+		default:
 			taskOutput = markers.Output
 			partitions = markers.Partitions
-			datasetMetrics = markers.Metrics
+			metricsCapture.Samples = markers.Metrics
 			if markers.MetricsTruncated {
+				metricsCapture.Truncated = true
 				log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
 					"task_id", taskRun.TaskID, "cap_bytes", pkgtask.MaxMetricsBytes)
 			}
@@ -898,7 +912,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// same run and poison the median. The local executor cannot produce that
 	// (its seam runs only when execErr == nil), and the two executors must
 	// baseline a job identically.
-	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
+	if err := e.runDataAssertions(taskRun, metricsCapture); err != nil {
 		return nil, err
 	}
 
@@ -962,12 +976,19 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 // exactly what the row carried when this worker claimed it: claim_attempt makes
 // it a token rather than a name, so even this worker RE-claiming the same row
 // does not let its superseded attempt write.
-func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
+//
+// The capture, not a bare sample slice, is what crosses this seam: it is the
+// only place that knows whether an absent metric was never emitted or merely
+// never read, and the evaluator cannot reconstruct that afterwards. The two
+// travel together and answer different questions — the claim decides whether
+// this attempt may record anything, the capture decides what a metric's
+// absence means if it may.
+func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, capture run.MetricsCapture) error {
 	if taskRun == nil {
 		return nil
 	}
 	claim := &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
-	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, samples)
+	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, capture)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

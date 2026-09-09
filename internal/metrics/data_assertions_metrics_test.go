@@ -10,22 +10,29 @@ import (
 )
 
 // TestDataAssertionsTotalRecordsEveryDisposition pins the bounded `result`
-// label set the data circuit breaker emits. The four values are the APPLIED
+// label set the data circuit breaker emits. The values are the APPLIED
 // disposition, not the declared one:
 //
-//	pass    — the dataset's declared contract held on this run
-//	seeding — a cold-start deltaFromBaseline verdict: recorded, never enforced
-//	warn    — a violation recorded without failing the task (onViolation: warn,
-//	          and onViolation: hold until Stream C wires the breaker)
-//	fail    — a violation escalated into a red run (onViolation: fail)
+//	pass        — the dataset's declared contract held on this run
+//	seeding     — a cold-start deltaFromBaseline verdict: recorded, never
+//	              enforced
+//	warn        — a violation recorded without failing the task
+//	              (onViolation: warn)
+//	hold        — a violation that opened or appended to a DatasetHold
+//	              (onViolation: hold); the task still succeeds
+//	fail        — a violation escalated into a red run (onViolation: fail)
+//	unavailable — the metric could not be observed at all, because the marker
+//	              stream was lost (unreadable log, or a truncated
+//	              ##caesium::metrics scan). Warn-only by construction
+//	              (issue #437)
 //
-// A dashboard groups by this label, so adding a fifth value is an API change
-// and has to fail here first.
+// A dashboard groups by this label, so adding a value is an API change and has
+// to fail here first.
 func TestDataAssertionsTotalRecordsEveryDisposition(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(DataAssertionsTotal)
 
-	for _, result := range []string{"pass", "seeding", "warn", "fail"} {
+	for _, result := range []string{"pass", "seeding", "warn", "hold", "fail", "unavailable"} {
 		before := metrictestutil.CounterValue(t, DataAssertionsTotal, result)
 		DataAssertionsTotal.WithLabelValues(result).Inc()
 		after := metrictestutil.CounterValue(t, DataAssertionsTotal, result)
@@ -52,7 +59,7 @@ func TestDataAssertionsTotalRecordsEveryDisposition(t *testing.T) {
 		}
 	}
 	require.NotNil(t, found, "caesium_data_assertions_total must be gatherable")
-	for _, result := range []string{"pass", "seeding", "warn", "fail"} {
+	for _, result := range []string{"pass", "seeding", "warn", "hold", "fail", "unavailable"} {
 		assert.True(t, labels[result], "result=%s must be a gatherable label value", result)
 	}
 }

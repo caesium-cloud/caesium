@@ -29,12 +29,62 @@ const (
 	assertionResultWarn    = "warn"
 	assertionResultHold    = "hold"
 	assertionResultFail    = "fail"
+	// assertionResultUnavailable is the infrastructure disposition: the marker
+	// stream was lost, so a declared metric could not be observed at all. It is
+	// warn-only by construction (DataViolation.Enforceable is false for it) and
+	// is counted separately precisely so a dashboard can tell "the contract
+	// broke" from "we never got to look".
+	assertionResultUnavailable = "unavailable"
 )
 
 // datasetMetricDropStaleClaim is the one bounded reason label
 // caesium_dataset_metrics_dropped_total carries today: a worker that no longer
 // holds the TaskRun row's claim reaching the post-task seam.
 const datasetMetricDropStaleClaim = "stale_claim"
+
+// MetricsCapture is one task's ##caesium::metrics observation TOGETHER WITH how
+// completely it was captured. The two travel as one value because a verdict
+// computed from samples alone cannot tell an absent metric from a lost one, and
+// under onViolation: fail that difference is the difference between a red run
+// and a green one.
+//
+// It is what both executor seams hand this package: the local executor returns
+// it from executeAtom, the distributed worker builds it beside the marker
+// parse. The zero value is "nothing emitted, nothing lost" — the honest state
+// for a step that legitimately reports no metrics, which still yields `missing`
+// for every declared metric.
+type MetricsCapture struct {
+	// Samples are the observations that DID arrive. A truncated stream still
+	// carries the samples that fit under the cap.
+	Samples []pkgtask.DatasetMetricSample
+	// Truncated reports that the ##caesium::metrics scan overflowed
+	// pkgtask.MaxMetricsBytes and dropped at least one sample.
+	Truncated bool
+	// Unreadable reports that the task's log could not be fetched or parsed at
+	// all, so NO marker could be read — Samples is necessarily empty.
+	Unreadable bool
+}
+
+// CapturedMetrics wraps a COMPLETE sample set: everything the step emitted was
+// observed. It is the constructor for every caller with no capture problem to
+// report.
+func CapturedMetrics(samples []pkgtask.DatasetMetricSample) MetricsCapture {
+	return MetricsCapture{Samples: samples}
+}
+
+// UnavailableReason names how this capture lost observations, or "" when it
+// lost none. Unreadable outranks Truncated: a log that could not be read at all
+// is the stronger statement, and the two are never usefully reported together.
+func (c MetricsCapture) UnavailableReason() string {
+	switch {
+	case c.Unreadable:
+		return UnavailableLogUnreadable
+	case c.Truncated:
+		return UnavailableStreamTruncated
+	default:
+		return ""
+	}
+}
 
 // DataAssertionsEnabled reports the data circuit breaker's master gate. It is
 // the single read point every seam in this package consults, so the feature
@@ -86,17 +136,24 @@ func DataAssertionsEnabled() bool {
 // registry spec — is logged and swallowed, because losing an observation must
 // not turn a successful run red.
 //
-// KNOWN LIMITATION (tracked, not fixed here): a truncated or unreadable marker
-// stream is indistinguishable from a missing metric. Both executors tolerate a
-// log-read or parse failure by passing nil samples, and the marker parser's own
-// `MetricsTruncated` flag (pkg/task, MaxMetricsBytes) is not threaded into this
-// seam — so a lost observation currently reads as "the step never emitted this
-// metric" and, under onViolation: fail, turns a green run red for an
-// infrastructure reason rather than a data one. Closing it means widening the
-// three executor call sites to pass the flag, which is deliberately out of
-// scope for B1.
-func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, samples []pkgtask.DatasetMetricSample) error {
-	return EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, nil, samples)
+// A LOST OBSERVATION IS NOT A BROKEN CONTRACT (issue #437). The capture the
+// executors hand this seam carries not just the samples but how completely they
+// were read: a log that could not be fetched or parsed, and a
+// ##caesium::metrics scan that overflowed pkgtask.MaxMetricsBytes, both mean a
+// declared metric's absence proves nothing. Those verdicts are recorded as
+// `unavailable` rather than `missing` — warn-only whatever onViolation says,
+// counted under result="unavailable", and carrying the reason the stream was
+// lost — so an infrastructure problem never reddens a run or breaks a circuit
+// on evidence nobody has. A step that legitimately emits nothing, with no read
+// error, still yields `missing`: that IS a broken contract.
+//
+// That is a different question from the claim fence below, and the two compose
+// rather than overlap: the capture decides WHAT a missing metric means, the
+// claim decides WHETHER this attempt may record anything at all. A stale claim
+// stops the evaluation outright — `unavailable` verdicts included, because a
+// verdict nothing may act on is a verdict nothing should count.
+func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, capture MetricsCapture) error {
+	return EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, nil, capture)
 }
 
 // EvaluateDataAssertionsClaimed is the same seam for a caller that HOLDS A
@@ -113,13 +170,14 @@ func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, sa
 //
 // A nil claim is exactly EvaluateDataAssertions: the local executor
 // (internal/job, enforceClaim=false) holds no claim and cannot be superseded.
-func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, samples []pkgtask.DatasetMetricSample) error {
+func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, capture MetricsCapture) error {
 	if !DataAssertionsEnabled() {
 		return nil
 	}
 	if store == nil || store.db == nil {
 		return nil
 	}
+	samples := capture.Samples
 
 	ref := taskRunID
 	if ref == uuid.Nil {
@@ -166,7 +224,7 @@ func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.U
 	// executor paths.)
 	baselines := loadAssertionBaselines(ctx, store.db, contracts, now)
 
-	verdicts := evaluateContracts(contracts, observed, baselines, now)
+	verdicts := evaluateContracts(contracts, observed, baselines, now, capture.UnavailableReason())
 
 	// A rejected claim STOPS THE EVALUATION, it does not merely drop the
 	// sample. The verdict this attempt computed describes data the row's
@@ -249,11 +307,17 @@ func declaredContracts(declarations []models.DatasetDeclaration) []declaredContr
 // evaluateContracts runs the pure core once per declared contract. It performs
 // no I/O of its own, so the shell's entire decision surface is one call away
 // from the function Plan 3's backtest replays.
+//
+// unavailableReason is MetricsCapture.UnavailableReason(): empty on a complete
+// capture, and otherwise the reason every `missing` verdict is downgraded to
+// `unavailable` by MarkUnavailable. The downgrade is applied here, once, so no
+// dispatch path can forget it.
 func evaluateContracts(
 	contracts []declaredContract,
 	observed map[string]map[string]float64,
 	baselines map[string]map[string]*BaselineStats,
 	now time.Time,
+	unavailableReason string,
 ) []datasetVerdict {
 	if len(contracts) == 0 {
 		return nil
@@ -263,6 +327,7 @@ func evaluateContracts(
 	for _, contract := range contracts {
 		violations := EvaluateAssertions(contract.name, contract.assertions, observed[contract.name],
 			baselines[contract.name], minSamples, now)
+		violations = MarkUnavailable(violations, unavailableReason)
 		for i := range violations {
 			violations[i].Namespace = contract.namespace
 		}
@@ -787,6 +852,12 @@ func dispatchDataAssertions(
 			escalates := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationFail
 			holds := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationHold
 			switch {
+			case violation.Assertion == AssertionUnavailable:
+				// The marker stream was lost, so this metric's absence is
+				// evidence of nothing. It is recorded and surfaced — an
+				// operator should see that an observation went missing — but it
+				// never fails a task and never opens a hold.
+				metrics.DataAssertionsTotal.WithLabelValues(assertionResultUnavailable).Inc()
 			case !violation.Enforceable():
 				// A seeding verdict never holds, whatever onViolation says: the
 				// baseline it was judged against was too short to trust, and

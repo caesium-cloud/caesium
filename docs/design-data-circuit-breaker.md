@@ -139,6 +139,19 @@ but holds the dataset. A missing declared metric is itself a violation — a
 step that stops emitting `rowCount` must not silently pass. `caesium job
 lint` validates dataset names, `consumes` resolvability, and syntax.
 
+**A lost observation is not a broken contract.** "The step stopped emitting
+`rowCount`" and "we never got to read `rowCount`" are different facts, and only
+the executor can tell them apart. When the task log cannot be read or parsed,
+or the `##caesium::metrics` scan overflows its 16 KiB cap and drops samples,
+the seam reports that alongside the samples, and the evaluator records the
+absent metric as an **`unavailable`** violation rather than a `missing` one:
+warn-only whatever `onViolation` says, never opening a hold, counted under
+`caesium_data_assertions_total{result="unavailable"}`, and carrying a
+`reason` of `log_unreadable` or `marker_stream_truncated` so the operator sees
+that the marker stream was lost rather than a contract breached. Metrics that
+*did* arrive are still judged on their real values, so a truncated stream
+cannot launder a genuine breach.
+
 ## Scenario walkthroughs
 
 **1. Truncated feed / bad values.** Nightly load writes 10M rows but 3 bad
@@ -175,9 +188,12 @@ selects the declared dataset (omitted ⇒ the step's sole declared dataset,
 error if ambiguous); values are JSON numbers or RFC3339 strings; multiple
 lines merge last-write-wins per (dataset, metric). Metrics get their own cap
 (`MaxMetricsBytes = 16 KiB`, separate from the 64 KiB `MaxOutputBytes` so a
-chatty metrics emitter cannot evict real outputs, or vice versa). Malformed
-lines are skipped leniently like malformed output lines — safe because a
-declared assertion whose metric never arrives is itself a violation.
+chatty metrics emitter cannot evict real outputs, or vice versa). Overflowing
+the cap sets `Markers.MetricsTruncated` rather than failing the parse; the
+executors carry that flag into the evaluator so the dropped metrics read as
+`unavailable`, not `missing`. Malformed lines are skipped leniently like
+malformed output lines — safe because a declared assertion whose metric never
+arrives is itself a violation.
 
 ### Assertion evaluator (post-task pipeline)
 
@@ -191,7 +207,10 @@ persists violations (a `DataViolation` shape parallel to `SchemaViolations`);
 (4) dispatches `onViolation` — `warn` logs + persists, `fail` returns an
 error the executors escalate exactly as schema `fail` mode, `hold` opens the
 hold via idempotent upsert (one *active* hold per dataset; repeat violations
-append occurrences rather than re-alerting). Replay-quarantined runs
+append occurrences rather than re-alerting). Both executors hand it a
+`run.MetricsCapture` — the samples plus whether the marker stream was
+truncated or unreadable — so an observation lost on the way in is dispatched
+as `unavailable` (warn-only) instead of `missing`. Replay-quarantined runs
 (`TaskRun.Quarantine`) are excluded completely — no metrics, no baselines,
 no holds opened or released; a what-if never trips or clears the breaker.
 

@@ -203,14 +203,14 @@ func TestEvaluateDataAssertionsClaimed_LateInsertAfterReclaimLeavesOneSampleSet(
 	claimB := TaskClaim{ClaimedBy: "worker-b", ClaimAttempt: 2}
 	claimTaskRun(t, db, taskRunID, claimB)
 	require.NoError(t, EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, &claimB,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 200}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 200}})))
 	require.Len(t, metricRows(t, db), 1)
 
 	// A finally reaches its post-task seam. Its container really did run and
 	// really did emit a sample — it just does not own this row any more.
 	before := metricstestutil.CounterValue(t, metrics.DatasetMetricsDroppedTotal, datasetMetricDropStaleClaim)
 	require.NoError(t, EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, &claimA,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 100}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 100}})))
 	assert.Equal(t, before+1, metricstestutil.CounterValue(t, metrics.DatasetMetricsDroppedTotal, datasetMetricDropStaleClaim),
 		"a dropped sample set is counted, not silent")
 
@@ -259,14 +259,14 @@ func TestEvaluateDataAssertionsClaimed_HoldReleaseIsFencedToo(t *testing.T) {
 	clean := []pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5000}}
 
 	// A's late seam: no sample, and therefore no release either.
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, cleanRunID, cleanTaskID, cleanTaskRunID, &stale, clean))
+	require.NoError(t, EvaluateDataAssertionsClaimed(store, cleanRunID, cleanTaskID, cleanTaskRunID, &stale, CapturedMetrics(clean)))
 	assert.Len(t, metricRowsFor(t, db, cleanTaskRunID), 0, "the superseded attempt's evidence is dropped")
 	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
 		"and the hold it would have released stays held: the release travels with the evidence")
 
 	// B's seam, on the same row, releases it — so the fence is what stopped the
 	// write above, not a missing precondition.
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, cleanRunID, cleanTaskID, cleanTaskRunID, &current, clean))
+	require.NoError(t, EvaluateDataAssertionsClaimed(store, cleanRunID, cleanTaskID, cleanTaskRunID, &current, CapturedMetrics(clean)))
 	assert.Len(t, metricRowsFor(t, db, cleanTaskRunID), 1)
 	assert.Empty(t, activeHolds(t, db, "warehouse/orders"))
 }
@@ -309,7 +309,7 @@ func TestRetryTaskClaimedInstanceKeepsTheClaimTheFenceChecks(t *testing.T) {
 	// The worker still holds the claim it took at dispatch, so attempt 2's
 	// samples are accepted.
 	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &claim,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 42}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 42}})))
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1, "an in-worker retry keeps the claim, so the fence must accept the next attempt")
 	assert.InDelta(t, 42, rows[0].Value, 0.001)
@@ -363,7 +363,7 @@ func TestEvaluateDataAssertionsClaimed_StaleClaimOpensNoHoldAndWritesNoViolation
 	claimTaskRun(t, db, taskRunID, TaskClaim{ClaimedBy: "worker-b", ClaimAttempt: 2})
 
 	breaching := []pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}}
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &stale, breaching))
+	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &stale, CapturedMetrics(breaching)))
 
 	assert.Empty(t, metricRows(t, db), "the superseded worker's sample is refused")
 	assert.Empty(t, activeHolds(t, db, "warehouse/orders"),
@@ -394,7 +394,7 @@ func TestEvaluateDataAssertionsClaimed_StaleClaimWithNoSamplesOpensNoHold(t *tes
 	claimTaskRun(t, db, taskRunID, TaskClaim{ClaimedBy: "worker-b", ClaimAttempt: 2})
 
 	// No samples at all: the declared rowCount assertion is `missing`.
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &stale, nil))
+	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &stale, MetricsCapture{}))
 
 	assert.Empty(t, activeHolds(t, db, "warehouse/orders"))
 	assert.Nil(t, dataViolationsOf(t, db, taskRunID))
@@ -420,7 +420,7 @@ func TestEvaluateDataAssertionsClaimed_LiveClaimStillOpensTheHold(t *testing.T) 
 	claimTaskRun(t, db, taskRunID, live)
 
 	breaching := []pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}}
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &live, breaching))
+	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &live, CapturedMetrics(breaching)))
 
 	require.Len(t, metricRows(t, db), 1, "the holder's sample is history")
 	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1, "and the circuit still breaks")
@@ -443,7 +443,7 @@ func TestEvaluateDataAssertions_LocalPathStillOpensTheHold(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&row).Error)
 
 	require.NoError(t, EvaluateDataAssertions(store, row.JobRunID, taskID, taskRunID,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}})))
 
 	require.Len(t, metricRows(t, db), 1)
 	require.Len(t, activeHolds(t, db, "warehouse/orders"), 1)

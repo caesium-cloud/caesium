@@ -34,12 +34,12 @@ func TestEvaluateDataAssertions_ViolatingSampleIsExcludedFromTheNextBaseline(t *
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10},
 		// An unasserted metric on the same dataset is not collateral damage:
 		// only the metric an enforced violation named is flagged.
 		{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01},
-	}))
+	})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 2)
@@ -81,9 +81,9 @@ func TestEvaluateDataAssertions_SeedingSampleStaysCleanHistory(t *testing.T) {
 
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10},
-	}))
+	})))
 
 	for _, row := range metricRows(t, db) {
 		assert.False(t, row.Violated, "a seeding verdict does not reject its sample")
@@ -115,9 +115,9 @@ func TestEvaluateDataAssertions_RetryDiscardsThePriorAttemptsSamples(t *testing.
 
 	// Attempt 1: the container succeeded but the data is bad, so the seam fails
 	// the attempt — after having recorded the sample.
-	require.Error(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.Error(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 3},
-	}))
+	})))
 	require.Len(t, metricRows(t, db), 1)
 
 	// The executors' retry path, unchanged: same row, next attempt.
@@ -126,9 +126,9 @@ func TestEvaluateDataAssertions_RetryDiscardsThePriorAttemptsSamples(t *testing.
 	assert.Nil(t, dataViolationsOf(t, db, taskRunID), "and so do its verdicts")
 
 	// Attempt 2 passes.
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10400},
-	}))
+	})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1, "one logical run contributes exactly one sample")
@@ -169,9 +169,9 @@ func TestEvaluateDataAssertions_PersistsTheDeclarationNamespace(t *testing.T) {
 
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Metric: "rowCount", Value: 42},
-	}))
+	})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1)
@@ -217,10 +217,10 @@ func TestEvaluateDataAssertions_DedupesOneSamplePerMetric(t *testing.T) {
 
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 5},
 		{Metric: "rowCount", Value: 7},
-	}))
+	})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1, "one (dataset, metric) is one sample")

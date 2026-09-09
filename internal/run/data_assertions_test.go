@@ -57,12 +57,12 @@ func TestEvaluateDataAssertions_PersistsSamplesAgainstTheInstanceRow(t *testing.
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, []pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 42},
 		// An undeclared METRIC is still recorded: free baseline history for an
 		// assertion added later.
 		{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.01},
-	})
+	}))
 	require.NoError(t, err)
 
 	rows := metricRows(t, db)
@@ -91,7 +91,7 @@ func TestEvaluateDataAssertions_UnfannedPathResolvesByCatalogTask(t *testing.T) 
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
 	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, uuid.Nil,
-		[]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 7}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 7}})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1)
@@ -111,10 +111,10 @@ func TestEvaluateDataAssertions_AmbiguousSelectorDropsTheSample(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
 	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
-		[]pkgtask.DatasetMetricSample{
+		CapturedMetrics([]pkgtask.DatasetMetricSample{
 			{Metric: "rowCount", Value: 7},
 			{Dataset: "warehouse/orders", Metric: "rowCount", Value: 9},
-		}))
+		})))
 
 	rows := metricRows(t, db)
 	require.Len(t, rows, 1, "the ambiguous sample is dropped, the explicit one is kept")
@@ -134,7 +134,7 @@ func TestEvaluateDataAssertions_QuarantinedRunRecordsNothing(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
 	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}})))
 
 	assert.Empty(t, metricRows(t, db), "a what-if must never move a baseline")
 }
@@ -152,7 +152,7 @@ func TestEvaluateDataAssertions_InertWhenFlagOff(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
 	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
-		[]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}}))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}})))
 
 	assert.Empty(t, metricRows(t, db), "off means no metrics persistence at all")
 }
@@ -160,6 +160,6 @@ func TestEvaluateDataAssertions_InertWhenFlagOff(t *testing.T) {
 func TestEvaluateDataAssertions_NilStoreAndNoSamplesAreNoOps(t *testing.T) {
 	setDataAssertions(t, true)
 	require.NoError(t, EvaluateDataAssertions(nil, uuid.New(), uuid.New(), uuid.New(),
-		[]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 1}}))
-	require.NoError(t, EvaluateDataAssertions(nil, uuid.New(), uuid.New(), uuid.New(), nil))
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 1}})))
+	require.NoError(t, EvaluateDataAssertions(nil, uuid.New(), uuid.New(), uuid.New(), MetricsCapture{}))
 }
