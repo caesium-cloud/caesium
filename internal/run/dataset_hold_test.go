@@ -80,7 +80,7 @@ func emitSamples(t *testing.T, store *Store, db *gorm.DB, taskID, taskRunID uuid
 	t.Helper()
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
-	return EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, samples)
+	return EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics(samples))
 }
 
 // TestHoldOpensOnceAndAppendsOccurrences is the alert-once contract, driven

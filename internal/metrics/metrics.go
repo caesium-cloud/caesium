@@ -284,10 +284,16 @@ var (
 	//             (onViolation: hold). The task still SUCCEEDS; the dataset is
 	//             what breaks.
 	//   fail    — a violation escalated into a red run (onViolation: fail).
+	//   unavailable — the metric could not be OBSERVED at all: the task log was
+	//             unreadable, or the ##caesium::metrics scan overflowed its cap
+	//             and dropped samples. An infrastructure verdict rather than a
+	//             data one, so it is recorded and surfaced but never escalated
+	//             and never opens a hold. A rise here means observations are
+	//             being lost, not that a contract broke.
 	DataAssertionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_data_assertions_total",
-			Help: "Total data-assertion verdicts by applied disposition (pass, seeding, warn, hold, fail).",
+			Help: "Total data-assertion verdicts by applied disposition (pass, seeding, warn, hold, fail, unavailable).",
 		},
 		[]string{"result"},
 	)
