@@ -211,10 +211,27 @@ lands, then F in its dependency-ordered waves, then N-1.
   after the first 50 CLI holds, fixed with `--limit`/`--offset`, visible totals,
   and a 55-row HTTP regression; scoped re-review found no further substantive
   issues. Current-head CI and required code-owner review remain merge gates.
-  **For E:** list rows and Detail expose optional `hold_status`/`hold`; holds
+  **PR review follow-up:** list and metric CLI reads expose pagination and
+  totals; raw metric history pages independently of the clean baseline window,
+  with `in_baseline` marking actual selected samples. List holds use a small
+  summary projection; Detail and the hold feed retain full evidence. The
+  dataset board requests `include_hold=false` for per-row SLO metadata and uses
+  a separate cache key for full selected detail. Release conflicts refresh the
+  exact identity and report a newer active hold without acknowledging it.
+  Holds default to the empty namespace, with `--all-namespaces` for discovery.
+  [Upgrade notes](../../upgrade-notes.md) document legacy escaped-name state
+  rows and the intentional absence of automatic identity reconciliation.
+  `TestDataAssertionsMetricsPersisted` now completes HTTP and descriptor
+  assertions on Kubernetes, where its former direct-catalog helper skipped.
+  **For E:** list rows and Detail expose optional `hold_status`/`hold`; list hold
+  summaries contain `id,status,reason,opened_at,occurrence_count`, while Detail
+  retains the full hold. Holds
   returns `{holds,total,limit,offset}`; metrics returns
-  `{namespace,name,metric,series,baseline,window,min_samples,seeding}`. Rejected
-  values remain in `series`, outside the clean baseline. F4 owns the freshness
+  `{namespace,name,metric,series,total,limit,offset,baseline,window,min_samples,seeding}`.
+  Metric `limit`/`offset` page recent observations (oldest-first within each
+  page) independently of the clean baseline window. Each series point includes
+  `in_baseline`; rejected values remain visible outside the clean baseline.
+  F4 owns the freshness
   status change; N-1 retains final docs, roadmap, and tour closeout.
 
 ### Wave 3 — Circuit breaker (2026-09-08)
