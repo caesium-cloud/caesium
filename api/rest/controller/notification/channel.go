@@ -6,18 +6,25 @@ import (
 	"time"
 
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
-func ListChannels(c *echo.Context) error {
+// newService constructs the notification service used by the handlers below.
+// It is a package-level var (rather than a direct svc.New call) so tests can
+// substitute a fake Service without a live database connection — the same
+// seam api/rest/controller/webhook uses for its collaborators.
+var newService = svc.New
+
+func (ctrl *Controller) ListChannels(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	channels, err := svc.New(c.Request().Context()).ListChannels(req)
+	channels, err := newService(c.Request().Context()).ListChannels(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
@@ -29,33 +36,47 @@ func ListChannels(c *echo.Context) error {
 	return c.JSON(http.StatusOK, views)
 }
 
-func GetChannel(c *echo.Context) error {
+func (ctrl *Controller) GetChannel(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	ch, err := svc.New(c.Request().Context()).GetChannel(id)
+	ch, err := newService(c.Request().Context()).GetChannel(id)
 	if err != nil {
 		return serviceError(err)
 	}
 	return c.JSON(http.StatusOK, redactChannel(*ch))
 }
 
-func CreateChannel(c *echo.Context) error {
+func (ctrl *Controller) CreateChannel(c *echo.Context) error {
 	req := &svc.CreateChannelRequest{}
 	if err := c.Bind(req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	ch, err := svc.New(c.Request().Context()).CreateChannel(req)
+	ch, err := newService(c.Request().Context()).CreateChannel(req)
 	if err != nil {
 		return serviceError(err)
 	}
+
+	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+		Actor:        auditActor(c),
+		Action:       auth.ActionNotificationChannelCreate,
+		ResourceType: "notification_channel",
+		ResourceID:   ch.ID.String(),
+		SourceIP:     c.RealIP(),
+		Outcome:      auth.OutcomeSuccess,
+		Metadata: map[string]any{
+			"name": ch.Name,
+			"type": string(ch.Type),
+		},
+	}))
+
 	return c.JSON(http.StatusCreated, redactChannel(*ch))
 }
 
-func UpdateChannel(c *echo.Context) error {
+func (ctrl *Controller) UpdateChannel(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
@@ -66,22 +87,51 @@ func UpdateChannel(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	ch, err := svc.New(c.Request().Context()).UpdateChannel(id, req)
+	ch, err := newService(c.Request().Context()).UpdateChannel(id, req)
 	if err != nil {
 		return serviceError(err)
 	}
+
+	// Metadata deliberately excludes req.Config / ch.Config: channel config
+	// carries secrets (webhook URLs, tokens) that the read API itself
+	// redacts (see redactChannel) — the audit trail must not become the
+	// leak path for values the REST responses go out of their way to mask.
+	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+		Actor:        auditActor(c),
+		Action:       auth.ActionNotificationChannelUpdate,
+		ResourceType: "notification_channel",
+		ResourceID:   ch.ID.String(),
+		SourceIP:     c.RealIP(),
+		Outcome:      auth.OutcomeSuccess,
+		Metadata: map[string]any{
+			"name":           ch.Name,
+			"enabled":        ch.Enabled,
+			"config_updated": req.Config != nil,
+		},
+	}))
+
 	return c.JSON(http.StatusOK, redactChannel(*ch))
 }
 
-func DeleteChannel(c *echo.Context) error {
+func (ctrl *Controller) DeleteChannel(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	if err := svc.New(c.Request().Context()).DeleteChannel(id); err != nil {
+	if err := newService(c.Request().Context()).DeleteChannel(id); err != nil {
 		return serviceError(err)
 	}
+
+	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+		Actor:        auditActor(c),
+		Action:       auth.ActionNotificationChannelDelete,
+		ResourceType: "notification_channel",
+		ResourceID:   id.String(),
+		SourceIP:     c.RealIP(),
+		Outcome:      auth.OutcomeSuccess,
+	}))
+
 	return c.NoContent(http.StatusNoContent)
 }
 

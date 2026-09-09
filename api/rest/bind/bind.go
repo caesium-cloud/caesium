@@ -58,10 +58,10 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 		}
 	}
 
-	Protected(protected, bus)
+	Protected(protected, bus, auditor)
 }
 
-func Protected(g *echo.Group, bus internal_event.Bus) {
+func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger) {
 	// events
 	{
 		ctrl := event.New(bus)
@@ -199,22 +199,22 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/database/query", database.Query)
 	}
 
-	// notification channels
+	// notification channels + policies. Channel/policy create/update/delete
+	// are audited (issue #413): the controller threads the same
+	// *auth.AuditLogger the auth-key routes use.
 	{
-		g.GET("/notifications/channels", notifctrl.ListChannels)
-		g.GET("/notifications/channels/:id", notifctrl.GetChannel)
-		g.POST("/notifications/channels", notifctrl.CreateChannel)
-		g.PATCH("/notifications/channels/:id", notifctrl.UpdateChannel)
-		g.DELETE("/notifications/channels/:id", notifctrl.DeleteChannel)
-	}
+		nc := notifctrl.New(auditor)
+		g.GET("/notifications/channels", nc.ListChannels)
+		g.GET("/notifications/channels/:id", nc.GetChannel)
+		g.POST("/notifications/channels", nc.CreateChannel)
+		g.PATCH("/notifications/channels/:id", nc.UpdateChannel)
+		g.DELETE("/notifications/channels/:id", nc.DeleteChannel)
 
-	// notification policies
-	{
-		g.GET("/notifications/policies", notifctrl.ListPolicies)
-		g.GET("/notifications/policies/:id", notifctrl.GetPolicy)
-		g.POST("/notifications/policies", notifctrl.CreatePolicy)
-		g.PATCH("/notifications/policies/:id", notifctrl.UpdatePolicy)
-		g.DELETE("/notifications/policies/:id", notifctrl.DeletePolicy)
+		g.GET("/notifications/policies", nc.ListPolicies)
+		g.GET("/notifications/policies/:id", nc.GetPolicy)
+		g.POST("/notifications/policies", nc.CreatePolicy)
+		g.PATCH("/notifications/policies/:id", nc.UpdatePolicy)
+		g.DELETE("/notifications/policies/:id", nc.DeletePolicy)
 	}
 
 	// agent profiles (agent-in-the-loop-remediation E2): the AgentProfile

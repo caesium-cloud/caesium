@@ -45,6 +45,13 @@ const (
 	ActionLogLevel           = "log.set_level"
 	ActionDBQuery            = "database.query"
 	ActionWebhookDenied      = "webhook.denied"
+
+	ActionNotificationChannelCreate = "notification_channel.create"
+	ActionNotificationChannelUpdate = "notification_channel.update"
+	ActionNotificationChannelDelete = "notification_channel.delete"
+	ActionNotificationPolicyCreate  = "notification_policy.create"
+	ActionNotificationPolicyUpdate  = "notification_policy.update"
+	ActionNotificationPolicyDelete  = "notification_policy.delete"
 )
 
 // AuditLogger writes structured audit log entries to the database.

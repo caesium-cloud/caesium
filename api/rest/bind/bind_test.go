@@ -59,12 +59,12 @@ func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 func TestProtectedGatesContractGraphRoute(t *testing.T) {
 	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "")
 	off := echo.New()
-	Protected(off.Group("/v1"), nil)
+	Protected(off.Group("/v1"), nil, nil)
 	require.False(t, hasRoute(off, http.MethodGet, "/v1/contracts/graph"))
 
 	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "fail")
 	on := echo.New()
-	Protected(on.Group("/v1"), nil)
+	Protected(on.Group("/v1"), nil, nil)
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/contracts/graph"))
 }
 
@@ -80,7 +80,7 @@ func TestProtectedGatesDatasetAssertionRoutes(t *testing.T) {
 	t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "false")
 	require.NoError(t, env.Process())
 	off := echo.New()
-	Protected(off.Group("/v1"), nil)
+	Protected(off.Group("/v1"), nil, nil)
 	require.False(t, hasRoute(off, http.MethodPost, "/v1/datasets/holds/:id/release"))
 	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/holds"))
 	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
@@ -94,7 +94,7 @@ func TestProtectedGatesDatasetAssertionRoutes(t *testing.T) {
 		require.NoError(t, env.Process())
 	})
 	on := echo.New()
-	Protected(on.Group("/v1"), nil)
+	Protected(on.Group("/v1"), nil, nil)
 	require.True(t, hasRoute(on, http.MethodPost, "/v1/datasets/holds/:id/release"))
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/holds"))
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
@@ -122,7 +122,7 @@ func TestProtectedRoutesAllHaveAnRBACEntry(t *testing.T) {
 	})
 
 	e := echo.New()
-	Protected(e.Group("/v1"), nil)
+	Protected(e.Group("/v1"), nil, nil)
 
 	for _, route := range e.Router().Routes() {
 		path := authmw.NormalizeRoutePath(route.Path)
