@@ -10,6 +10,7 @@ import {
   Radio,
   Server,
   ShieldCheck,
+  Hand,
   Siren,
   type LucideIcon,
 } from "lucide-react";
@@ -119,6 +120,9 @@ export function Sidebar() {
     { to: "/atoms", label: "Atoms", icon: Database, count: counts.atoms },
     ...(freshnessEnabled
       ? [{ to: "/datasets", label: "Datasets", icon: GitBranch, count: null }]
+      : []),
+    ...(features?.data_assertions_enabled === true
+      ? [{ to: "/datasets/holds", label: "Holds", icon: Hand, count: counts.holds }]
       : []),
     ...(contractEnforcementEnabled
       ? [{ to: "/contracts", label: "Contracts", icon: ShieldCheck, count: null }]

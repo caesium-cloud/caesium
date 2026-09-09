@@ -21,6 +21,8 @@ import {
   type DatasetStatus,
 } from "@/lib/api";
 import { cn, shortId } from "@/lib/utils";
+import { holdSearch } from "./hold-utils";
+import { useDataAssertionsEnabled } from "./useDataAssertions";
 import { DerivationsPanel } from "./DerivationsPanel";
 import { FreshnessStatusChip } from "./FreshnessStatusChip";
 import {
@@ -50,6 +52,7 @@ type DatasetsSearch = {
 };
 
 export function DatasetsPage() {
+  const assertionsEnabled = useDataAssertionsEnabled();
   const search = datasetsRouteApi.useSearch() as DatasetsSearch;
   const navigate = useNavigate();
   const statusFilter = normalizeStatusFilter(search.status);
@@ -149,6 +152,7 @@ export function DatasetsPage() {
     <div className="space-y-5" data-testid="datasets-page">
       <PageHeader total={listQuery.data?.total} />
 
+      {assertionsEnabled ? <Link to="/datasets/holds" search={{}} className="text-sm text-fuchsia-300 hover:underline">View dataset holds</Link> : null}
       <StatusFilterBar value={statusFilter} onChange={setStatusFilter} />
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
@@ -607,6 +611,7 @@ function DatasetDetailPanel({
         <FreshnessStatusChip status={state?.status} />
       </div>
 
+      {detail?.hold ? <Link to="/datasets/holds" search={holdSearch(detail.hold)} className="mt-3 block rounded border border-fuchsia-400/40 bg-fuchsia-400/10 p-2 text-xs text-fuchsia-300">Held · {detail.hold.reason} · inspect {detail.hold.occurrence_count} occurrences</Link> : null}
       <dl className="mt-4 grid gap-3 text-xs">
         <MetadataRow label="Watermark" value={state?.watermark || "-"} mono />
         <MetadataRow label="Reason" value={state?.reason || detail?.last_decision?.reason || "-"} />

@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
+import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
@@ -447,6 +449,8 @@ export function RunDetailPage() {
         />
       ) : null}
 
+      <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
+      {run.tasks?.filter((task) => task.data_violations?.length || task.schema_violations?.length).map((task) => <DataAssertionsPanel key={task.id} task={task} />)}
       {/* Cache summary */}
       <div className="flex items-center gap-4">
         <RunCacheSummary run={run} />

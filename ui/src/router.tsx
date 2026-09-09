@@ -4,6 +4,7 @@ import { ConsoleNotFound } from "./components/not-found-state";
 import { AtomsPage } from "./features/atoms/AtomsPage";
 import { ContractGraphPage } from "./features/contracts/ContractGraphPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
+import { DatasetHoldsPage } from "./features/datasets/DatasetHoldsPage";
 import { DatasetsPage } from "./features/datasets/DatasetsPage";
 import { IncidentDetailPage } from "./features/incidents/IncidentDetailPage";
 import { IncidentsPage } from "./features/incidents/IncidentsPage";
@@ -132,6 +133,20 @@ async function requireFreshnessEnabled() {
   }
 }
 
+const datasetHoldsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "datasets/holds",
+  validateSearch: (search: Record<string, unknown>): { namespace?: string; name?: string; hold?: string } => ({
+    namespace: typeof search.namespace === "string" ? search.namespace : undefined,
+    name: typeof search.name === "string" ? search.name : undefined,
+    hold: typeof search.hold === "string" ? search.hold : undefined,
+  }),
+  loader: async () => {
+    if (!(await api.getSystemFeatures()).data_assertions_enabled) throw redirect({ to: "/jobs" });
+  },
+  component: DatasetHoldsPage,
+});
+
 const datasetsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "datasets",
@@ -250,6 +265,7 @@ const routeTree = rootRoute.addChildren([
   lineageRoute,
   contractsRoute,
   datasetsRoute,
+  datasetHoldsRoute,
   incidentsRoute,
   incidentDetailRoute,
   statsRoute,

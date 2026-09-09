@@ -106,6 +106,7 @@ export interface TaskRun {
   result?: string;
   output?: Record<string, string>;
   schema_violations?: Array<{ key: string; message: string }>;
+  data_violations?: DataViolation[];
   branch_selections?: string[];
   cache_hit?: boolean;
   cache_origin_run_id?: string;
@@ -434,6 +435,7 @@ export interface SystemFeatures {
   log_console_enabled: boolean;
   agent_remediation_enabled: boolean;
   freshness_enabled: boolean;
+  data_assertions_enabled?: boolean;
   contract_enforcement_enabled: boolean;
   external_url?: string;
 }
@@ -818,6 +820,88 @@ export type DatasetDecision =
   | "skipped_active_run"
   | string;
 
+export interface DataViolation {
+  namespace?: string;
+  dataset: string;
+  metric: string;
+  assertion: string;
+  observed?: number;
+  bound?: number;
+  delta_from_baseline?: string;
+  baseline_median?: number;
+  baseline_samples?: number;
+  seeding?: boolean;
+  message: string;
+}
+
+export interface DatasetHoldSummary {
+  id: string;
+  status: "active" | "released";
+  reason: string;
+  opened_at: string;
+  occurrence_count: number;
+}
+
+export interface DatasetHold extends DatasetHoldSummary {
+  namespace: string;
+  name: string;
+  held_by_job_id: string;
+  held_by_job_alias?: string;
+  held_by_run_id?: string;
+  held_by_step?: string;
+  violations?: DataViolation[];
+  impact?: ImpactResult;
+  last_breach_at?: string;
+  last_breach_run_id?: string;
+  released_at?: string;
+  released_by?: string;
+  release_reason?: string;
+  release_note?: string;
+  release_run_id?: string;
+  tolerances?: Record<string, string>;
+}
+
+export interface DatasetHoldsParams {
+  status?: "active" | "released" | "all";
+  namespace?: string;
+  name?: string;
+  limit?: number;
+  offset?: number;
+}
+export interface DatasetHoldsResponse {
+  holds: DatasetHold[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+export interface DatasetMetricsResponse {
+  namespace: string;
+  name: string;
+  metric: string;
+  series: Array<{
+    id: string;
+    task_run_id: string;
+    value: number;
+    created_at: string;
+    violated: boolean;
+    in_baseline: boolean;
+  }>;
+  total: number;
+  limit: number;
+  offset: number;
+  baseline: {
+    values?: number[];
+    samples: number;
+    median: number;
+    p10: number;
+    p90: number;
+    as_of: string;
+  } | null;
+  window: number;
+  min_samples: number;
+  seeding: boolean;
+}
+
 export interface DatasetState {
   id: string;
   namespace?: string;
@@ -830,6 +914,8 @@ export interface DatasetState {
   reason?: string;
   last_run_id?: string;
   consumed_watermarks?: Record<string, string>;
+  hold_status?: string;
+  hold?: DatasetHoldSummary;
   created_at: string;
   updated_at: string;
 }
@@ -889,6 +975,8 @@ export interface DatasetListResponse {
 }
 
 export interface DatasetDetail {
+  hold_status?: string;
+  hold?: DatasetHold;
   state: DatasetState;
   declaration?: DatasetDeclaration;
   slo?: DatasetSLO;
@@ -1227,6 +1315,17 @@ export const api = {
     const query = queryString({ include_hold: options.includeHold });
     return request<DatasetDetail>(`${datasetPath(namespace, name)}${query ? `?${query}` : ""}`);
   },
+  getDatasetHolds: (params: DatasetHoldsParams = {}) => {
+    const query = queryString({ ...params });
+    return request<DatasetHoldsResponse>(`/datasets/holds${query ? `?${query}` : ""}`);
+  },
+  getDatasetMetrics: (namespace: string, name: string, metric: string) =>
+    request<DatasetMetricsResponse>(`${datasetPath(namespace, name)}/metrics?${queryString({ metric, limit: 200 })}`),
+  releaseDatasetHold: (holdId: string, reason: string, tolerate: Record<string, string>) =>
+    request<{ hold: DatasetHold }>(`/datasets/holds/${encodeURIComponent(holdId)}/release`, {
+      method: "POST",
+      body: JSON.stringify({ reason, tolerate }),
+    }),
   getDatasetDerivations: (
     namespace: string | undefined,
     name: string,
