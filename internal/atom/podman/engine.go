@@ -2,8 +2,11 @@ package podman
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -14,6 +17,7 @@ import (
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/specgen"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -101,6 +105,10 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	if mounts, volumes := convertPodmanMounts(req.Spec.Mounts, req.Spec.ResolvedVolumeMounts); len(mounts) > 0 || len(volumes) > 0 {
 		spec.Mounts = mounts
 		spec.Volumes = volumes
+	}
+
+	if err := e.ensureNamedVolumes(spec.Volumes); err != nil {
+		return nil, err
 	}
 
 	created, err := e.backend.ContainerCreate(spec)
@@ -295,4 +303,109 @@ func convertPodmanMounts(specMounts []container.Mount, resolvedMounts []containe
 		}
 	}
 	return result, volumes
+}
+
+// ensureNamedVolumes creates every explicitly named volume a container spec
+// mounts, before that container is created.
+//
+// Podman's own container-create path creates a missing named volume inline,
+// but that create is not concurrency-safe: its "does the volume already
+// exist?" check and the state write that registers the volume are not atomic,
+// so two sibling tasks that first-mount the same shared volume can both find
+// it absent and race. The loser's ENTIRE container create then fails with
+//
+//	creating named volume "x": adding volume to state: name "x" is in use: volume already exists
+//
+// and the task fails even though the only thing that happened is that its
+// sibling created the volume it wanted (caesium#443). Docker has no such
+// problem — its daemon treats a named-volume create during container create as
+// idempotent — which is why this helper has no counterpart in
+// internal/atom/docker.
+//
+// Hoisting the create out of ContainerCreate turns an unrecoverable container
+// failure into a volume create the engine can reason about: by the time the
+// spec reaches ContainerCreate the volume exists, so podman never attempts the
+// racy inline create at all. Mount and volume options are left untouched — the
+// volume is created with podman's defaults, exactly what podman's own inline
+// create would have produced for a named (non-anonymous) volume — and only the
+// volume's existence is ensured here.
+func (e *podmanEngine) ensureNamedVolumes(vols []*specgen.NamedVolume) error {
+	seen := make(map[string]struct{}, len(vols))
+	for _, vol := range vols {
+		if vol == nil || vol.Name == "" {
+			continue
+		}
+		if _, ok := seen[vol.Name]; ok {
+			continue
+		}
+		seen[vol.Name] = struct{}{}
+		if err := e.ensureNamedVolume(vol.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureNamedVolume makes one named volume exist. A concurrent winner is an
+// acceptable outcome — it produced the very volume this call wanted — but it
+// is accepted only after re-verifying that the volume really is there, so a
+// misreported conflict can never be mistaken for a usable volume. Every other
+// error is returned unchanged.
+func (e *podmanEngine) ensureNamedVolume(name string) error {
+	exists, err := e.backend.VolumeExists(name)
+	if err != nil {
+		return fmt.Errorf("check podman volume %q: %w", name, err)
+	}
+	if exists {
+		return nil
+	}
+
+	log.Info("creating podman named volume", "volume", name)
+
+	// IgnoreIfExists closes the window podman itself can close (a volume that
+	// already exists when the request lands); the conflict branch below closes
+	// the one it cannot (a concurrent writer landing between podman's own
+	// existence check and its state write).
+	createErr := e.backend.VolumeCreate(entities.VolumeCreateOptions{
+		Name:           name,
+		IgnoreIfExists: true,
+	})
+	if createErr == nil {
+		return nil
+	}
+	if !isVolumeExistsError(createErr) {
+		return fmt.Errorf("create podman volume %q: %w", name, createErr)
+	}
+
+	exists, err = e.backend.VolumeExists(name)
+	if err != nil {
+		return fmt.Errorf("verify podman volume %q after create conflict: %w", name, err)
+	}
+	if !exists {
+		return fmt.Errorf(
+			"podman reported volume %q already exists but it cannot be found: %w",
+			name, createErr,
+		)
+	}
+
+	log.Info("podman named volume was created concurrently; reusing it", "volume", name)
+	return nil
+}
+
+// isVolumeExistsError reports whether err is podman's "volume already exists"
+// outcome. Over the remote bindings the sentinel does not survive the wire:
+// the server renders it into an *errorhandling.ErrorModel that carries only
+// the message string, so errors.Is cannot see define.ErrVolumeExists and the
+// message has to be matched as well. Both shapes podman produces —
+// `volume with name x already exists: volume already exists` and the racing
+// `adding volume to state: name "x" is in use: volume already exists` — end in
+// the sentinel's text.
+func isVolumeExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, define.ErrVolumeExists) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), define.ErrVolumeExists.Error())
 }

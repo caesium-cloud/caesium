@@ -10,6 +10,7 @@ import (
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
+	"github.com/containers/podman/v5/pkg/bindings/volumes"
 	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/containers/podman/v5/pkg/specgen"
 )
@@ -46,6 +47,8 @@ type podmanBackend interface {
 	ContainerLogs(string, containers.LogOptions) (io.ReadCloser, error)
 	ImageExists(string) (bool, error)
 	ImagePull(string, *images.PullOptions) (io.ReadCloser, error)
+	VolumeExists(string) (bool, error)
+	VolumeCreate(entities.VolumeCreateOptions) error
 }
 
 type podmanClient struct {
@@ -163,4 +166,13 @@ func (cli *podmanClient) ImagePull(image string, opts *images.PullOptions) (io.R
 
 func (cli *podmanClient) ImageExists(image string) (bool, error) {
 	return images.Exists(cli.ctx, image, nil)
+}
+
+func (cli *podmanClient) VolumeExists(name string) (bool, error) {
+	return volumes.Exists(cli.ctx, name, nil)
+}
+
+func (cli *podmanClient) VolumeCreate(opts entities.VolumeCreateOptions) error {
+	_, err := volumes.Create(cli.ctx, opts, nil)
+	return err
 }
