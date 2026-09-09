@@ -683,6 +683,15 @@ rule to hold onto is:
   The same rule applies to any volume you add: check which step mounts it first
   and, if that step is not a reagent image, chown the mount there.
 
+  On **Podman** the volume itself is created by Caesium rather than by Podman's
+  container-create call (`internal/atom/podman`'s `ensureNamedVolumes`), because
+  Podman's inline create is not concurrency-safe: two sibling steps
+  first-mounting the same fresh volume could race and fail the loser with
+  `volume already exists` (#443). This does **not** change the rule above —
+  a volume Caesium creates is still empty and still un-chowned, so Podman's
+  first-mount copy-up and chown behave exactly as they did — it only means the
+  volume already exists by the time the first container is created.
+
 - **Kubernetes PVCs** — none of the above applies. The image contributes
   nothing to a PVC; ownership comes from the volume, so it is a **cluster-side
   prerequisite**. Pre-provision each PVC already owned by 10001, or set

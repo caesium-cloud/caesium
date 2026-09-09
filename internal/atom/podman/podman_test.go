@@ -124,6 +124,16 @@ func (m *mockPodmanBackend) ImagePull(image string, opts *images.PullOptions) (i
 	return io.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
 
+func (m *mockPodmanBackend) VolumeExists(name string) (bool, error) {
+	args := m.Called(name)
+	return args.Bool(0), args.Error(1)
+}
+
+func (m *mockPodmanBackend) VolumeCreate(opts entities.VolumeCreateOptions) error {
+	args := m.Called(opts)
+	return args.Error(0)
+}
+
 func newContainer(id string, state *define.InspectContainerState) *define.InspectContainerData {
 	return &define.InspectContainerData{
 		ID:      id,
