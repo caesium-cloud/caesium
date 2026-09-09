@@ -180,8 +180,59 @@ scope-aware integration gate on its exact final head before merge (lint + unit
 + the default, agent, owner-memory and distributed lanes), and — the review bot
 having reviewed none of them — every code PR got a substitute Opus adversarial
 review plus a scoped re-review of each fix commit; the reviews found one P1 per
-PR (see the wave entries), all fixed before merge. Next eligible: Stream D
-(operator surface), then E, then F one wave each, then N-1.
+PR (see the wave entries), all fixed before merge. Wave 4's Stream D is verified
+locally and in review in #442; it is not shipped until merged. Next: E after D
+lands, then F in its dependency-ordered waves, then N-1.
+
+### Wave 4 — Dataset operator surface (in review)
+
+- **α / D1–D2** — [#442](https://github.com/caesium-cloud/caesium/pull/442),
+  **pending merge**. Dataset list/detail retain their freshness projection and
+  add flag-gated active hold evidence. The new hold feed supports status,
+  exact namespace/name filters, and pagination; metric reads return recent raw
+  samples alongside the clean rolling baseline. Both reads are viewer-accessible
+  and absent with the feature off. `dataset holds`, `metrics`, and authenticated
+  `release` reuse the existing HTTP client and keep JSON on stdout. Release
+  resolves exactly one active hold for the requested identity before posting its
+  ID, requires a reason, and preserves C3's advisory tolerance semantics.
+  **Identity correction:** v1 declarations store a slash-containing name such as
+  `warehouse/orders` wholly in `Name`; the CLI preserves that convention and
+  uses `--namespace` for the separate axis. The dataset controller decodes Echo's
+  escaped path parameters exactly once, with encoded namespace, slash, and
+  literal-percent regressions.
+  **Validation:** `just lint` passed at `fb5489e1`; the full `just unit-test`
+  race/coverage suite passed at `2473464b`, and the subsequent CLI pagination
+  change passed containerized `go test -race -count=1 -v ./cmd/dataset` at
+  `fb5489e1`. The same final runtime head passed `just integration-test`
+  (200 scenarios, 28 expected lane/mode skips) and `just integration-test-agent`
+  (31 executed scenarios, including `TestHoldDatasetCLIReleaseReopensTheGate`).
+  W1's temporary catalog metric read now uses the HTTP endpoint and public
+  execution descriptor. **Independent native review:** one P2, silent truncation
+  after the first 50 CLI holds, fixed with `--limit`/`--offset`, visible totals,
+  and a 55-row HTTP regression; scoped re-review found no further substantive
+  issues. Current-head CI and required code-owner review remain merge gates.
+  **PR review follow-up:** list and metric CLI reads expose pagination and
+  totals; raw metric history pages independently of the clean baseline window,
+  with `in_baseline` marking actual selected samples. List holds use a small
+  summary projection; Detail and the hold feed retain full evidence. The
+  dataset board requests `include_hold=false` for per-row SLO metadata and uses
+  a separate cache key for full selected detail. Release conflicts refresh the
+  exact identity and report a newer active hold without acknowledging it.
+  Holds default to the empty namespace, with `--all-namespaces` for discovery.
+  [Upgrade notes](../../upgrade-notes.md) document legacy escaped-name state
+  rows and the intentional absence of automatic identity reconciliation.
+  `TestDataAssertionsMetricsPersisted` now completes HTTP and descriptor
+  assertions on Kubernetes, where its former direct-catalog helper skipped.
+  **For E:** list rows and Detail expose optional `hold_status`/`hold`; list hold
+  summaries contain `id,status,reason,opened_at,occurrence_count`, while Detail
+  retains the full hold. Holds
+  returns `{holds,total,limit,offset}`; metrics returns
+  `{namespace,name,metric,series,total,limit,offset,baseline,window,min_samples,seeding}`.
+  Metric `limit`/`offset` page recent observations (oldest-first within each
+  page) independently of the clean baseline window. Each series point includes
+  `in_baseline`; rejected values remain visible outside the clean baseline.
+  F4 owns the freshness
+  status change; N-1 retains final docs, roadmap, and tour closeout.
 
 ### Wave 3 — Circuit breaker (2026-09-08)
 
@@ -320,7 +371,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **Shipped** (W2, #436) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
-| D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | Not started |
+| D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **In review** (W4, #442; local gates passed, pending merge) |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
 | H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
@@ -1144,7 +1195,7 @@ itself. `GET /v1/datasets` already exists (`api/rest/service/dataset/dataset.go`
 `List`, returning `ListResult` with SLO/producing-job detail) — D1 **adds hold
 status to that existing response** rather than creating the route.
 
-- [ ] D1. Add the dataset read endpoints. `GET /v1/datasets` **already exists**
+- [x] D1. Add the dataset read endpoints. `GET /v1/datasets` **already exists**
       (`api/rest/service/dataset/dataset.go` `List`, returning `ListResult` with
       SLO/producing-job detail) — this item **extends** `List`/`Detail` with hold
       status (and, for F4, with the held⇒not-fresh status) rather than creating the
@@ -1170,7 +1221,12 @@ status to that existing response** rather than creating the route.
       Files: `api/rest/controller/dataset/`, `api/rest/service/dataset/`,
       `api/rest/bind/bind.go`.
       Depends on: A2 (models) + A5 (baseline read) + C1 (`DatasetHold`).
-- [ ] D2. Add the circuit-breaker subcommands to the `caesium dataset` CLI group —
+      **Implemented and locally verified in W4-α (#442), pending merge.**
+      Existing fields remain intact; hold evidence is omitted flag-off. Metrics
+      include explicitly emitted, unregistered datasets and separate recent raw
+      observations from `run.Baseline`'s clean window. The live reads now close
+      Stream A's temporary catalog-read verification exception.
+- [x] D2. Add the circuit-breaker subcommands to the `caesium dataset` CLI group —
       `holds [--status active] [--json]`,
       `release <ns>/<name> [--reason …] [--tolerate <assertion>=<dur>]`,
       `metrics <ns>/<name> --metric rowCount [--json]` — **extending** the existing
@@ -1193,6 +1249,13 @@ status to that existing response** rather than creating the route.
       `(*IntegrationTestSuite).runCLIStdout` in `test/data_plane_e2e_test.go`.
       Files: `cmd/dataset/` (**extend**).
       Depends on: D1 + C3 (the release endpoint `release` drives).
+      **Implemented and locally verified in W4-α (#442), pending merge.**
+      All three commands reuse `http.go`; release filters on both identity
+      columns and rejects absent, ambiguous, stale, or mismatched hold responses.
+      Slash-containing arguments remain complete names, with `--namespace` for
+      a separate namespace, matching the existing group. `--reason` is required
+      by C3; tolerance windows are explicitly advisory. Holds adds
+      `--limit`/`--offset` and visible page totals so older holds are reachable.
 
 ### Stream E — Console UI: hold badges, ack/release, baseline sparkline
 
@@ -2061,4 +2124,3 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    never runs again, the hold needs a human. That is the safe direction, and it
    is visible rather than silent. Covered by
    `TestCleanRunOfAnotherProducerDoesNotRelease`.
-

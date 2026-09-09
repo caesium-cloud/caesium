@@ -4,10 +4,12 @@ package test
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"time"
 
+	datasetsvc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/stretchr/testify/require"
 )
@@ -35,11 +37,10 @@ func (s *IntegrationTestSuite) runCLIWithDataAssertions(args ...string) {
 // the samples land as DatasetMetric rows attributed to the task run that
 // emitted them, against the dataset the step declares.
 //
-// It reads the rows through the shared catalog handle rather than
-// GET /v1/datasets/:ns/:name/metrics, because that route belongs to Stream D
-// (W4) and does not exist yet; D1 replaces this read with the route-based
-// check. Recorded as a deliberate, temporary deviation from acceptance
-// criterion 1.
+// It reads each metric through GET /v1/datasets/:ns/:name/metrics and checks
+// task-run attribution against the public execution descriptor. This closes
+// the temporary catalog-read exception from Stream A, including on Kubernetes:
+// this HTTP-only scenario no longer inherits the direct-catalog lane skip.
 func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 	s.requireDataAssertionsLane()
 
@@ -66,23 +67,16 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 	run := s.awaitRun(job.ID, runID, runTimeout)
 	s.Require().Equal("succeeded", run.Status, "a metrics emitter must succeed: Phase 0 observes, it does not enforce")
 
-	conn := s.openIntegrationCatalogGorm()
-
-	var rows []models.DatasetMetric
-	s.Require().Eventually(func() bool {
-		rows = nil
-		if err := conn.Where("name = ?", dataset).Order("metric ASC").Find(&rows).Error; err != nil {
-			return false
-		}
-		return len(rows) == 3
-	}, 60*time.Second, 500*time.Millisecond, "expected 3 dataset_metrics rows for %s", dataset)
-
-	byMetric := make(map[string]models.DatasetMetric, len(rows))
-	for _, row := range rows {
-		byMetric[row.Metric] = row
+	byMetric := make(map[string]models.DatasetMetric, 3)
+	for _, metric := range []string{"rowCount", "dedup_ratio", "max_event_time"} {
+		var result datasetsvc.MetricsResult
+		s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"/metrics?"+url.Values{"metric": {metric}}.Encode(), &result)
+		s.Require().Len(result.Series, 1)
+		row := result.Series[0]
+		byMetric[metric] = row.DatasetMetric
 		s.Equal(dataset, row.Name)
 		s.Equal("", row.Namespace, "namespace is reserved in v1")
-		s.NotEqual("", row.TaskRunID.String(), "every sample attributes to the task run that emitted it")
+		s.Equal(metric, row.Metric)
 	}
 
 	s.Require().Contains(byMetric, "rowCount")
@@ -97,13 +91,15 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 	s.InDelta(float64(wantWatermark.Unix()), byMetric["max_event_time"].Value, 0.5,
 		"an RFC3339 metric is stored as epoch seconds")
 
-	// The samples must hang off a task run of THIS run, not an arbitrary row.
-	var taskRunIDs []string
-	s.Require().NoError(conn.Model(&models.TaskRun{}).
-		Where("job_run_id = ?", runID).
-		Pluck("id", &taskRunIDs).Error)
-	s.Require().NotEmpty(taskRunIDs)
-	s.Contains(taskRunIDs, byMetric["rowCount"].TaskRunID.String())
+	// The descriptor resolves the specific emitting task instance of THIS run.
+	var descriptor struct {
+		TaskRunID string `json:"task_run_id"`
+	}
+	s.fetchDatasetOperatorJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s/tasks/load/descriptor", job.ID, runID), &descriptor)
+	s.Require().NotEmpty(descriptor.TaskRunID)
+	for _, row := range byMetric {
+		s.Equal(descriptor.TaskRunID, row.TaskRunID.String())
+	}
 }
 
 // TestDataAssertionsSchemaPersistsOnTheRegistry proves the declared assertion

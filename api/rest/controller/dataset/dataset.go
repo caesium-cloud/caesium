@@ -1,10 +1,11 @@
-// Package dataset implements the freshness dataset REST surface.
+// Package dataset implements the dataset freshness and circuit-breaker REST surface.
 package dataset
 
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -44,7 +45,15 @@ func (ctrl *Controller) Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request")
 	}
 
-	result, err := svc.New(c.Request().Context()).Get(namespace, name)
+	options := svc.GetOptions{IncludeHold: true}
+	if c.QueryParams().Has("include_hold") {
+		include, err := strconv.ParseBool(c.QueryParam("include_hold"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid include_hold")
+		}
+		options.IncludeHold = include
+	}
+	result, err := svc.New(c.Request().Context()).GetWithOptions(namespace, name, options)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -111,7 +120,19 @@ func (ctrl *Controller) Advance(c *echo.Context) error {
 }
 
 func datasetPath(c *echo.Context) (string, string) {
-	return svc.NamespaceFromPath(c.Param("ns")), strings.TrimSpace(c.Param("name"))
+	namespace, name := c.Param("ns"), c.Param("name")
+	// Echo's default router uses RawPath when present and leaves its parameters
+	// escaped. Otherwise it uses the already-decoded Path. Decode exactly once:
+	// unconditional unescaping would confuse a literal %2F name with a slash.
+	if c.Request().URL.RawPath != "" {
+		if decoded, err := url.PathUnescape(namespace); err == nil {
+			namespace = decoded
+		}
+		if decoded, err := url.PathUnescape(name); err == nil {
+			name = decoded
+		}
+	}
+	return svc.NamespaceFromPath(namespace), strings.TrimSpace(name)
 }
 
 func parsePagination(c *echo.Context, limit, offset *int) error {

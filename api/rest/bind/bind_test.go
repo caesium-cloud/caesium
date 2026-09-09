@@ -68,13 +68,13 @@ func TestProtectedGatesContractGraphRoute(t *testing.T) {
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/contracts/graph"))
 }
 
-// TestProtectedGatesDatasetHoldReleaseRoute pins arc convention 1 for the data
+// TestProtectedGatesDatasetAssertionRoutes pins arc convention 1 for the data
 // circuit breaker: off means NO ROUTE, not a route that 404s.
 //
 // It has to be a unit test. H-1 turned CAESIUM_DATA_ASSERTIONS_ENABLED on for
 // every self-server lane, so no integration lane can ever observe the off
 // state — an integration test would only ever prove the on half.
-func TestProtectedGatesDatasetHoldReleaseRoute(t *testing.T) {
+func TestProtectedGatesDatasetAssertionRoutes(t *testing.T) {
 	t.Setenv("CAESIUM_DATABASE_PATH", t.TempDir())
 
 	t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "false")
@@ -82,6 +82,8 @@ func TestProtectedGatesDatasetHoldReleaseRoute(t *testing.T) {
 	off := echo.New()
 	Protected(off.Group("/v1"), nil)
 	require.False(t, hasRoute(off, http.MethodPost, "/v1/datasets/holds/:id/release"))
+	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/holds"))
+	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
 	// The base freshness dataset surface is unconditional and must stay so.
 	require.True(t, hasRoute(off, http.MethodGet, "/v1/datasets"))
 
@@ -94,6 +96,8 @@ func TestProtectedGatesDatasetHoldReleaseRoute(t *testing.T) {
 	on := echo.New()
 	Protected(on.Group("/v1"), nil)
 	require.True(t, hasRoute(on, http.MethodPost, "/v1/datasets/holds/:id/release"))
+	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/holds"))
+	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
 }
 
 // TestProtectedRoutesAllHaveAnRBACEntry closes the gap that let the hold-release

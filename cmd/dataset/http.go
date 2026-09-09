@@ -15,6 +15,15 @@ const apiKeyEnvVar = cliutil.APIKeyEnvVar
 
 var httpClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
 
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("dataset request failed (%d): %s", e.StatusCode, e.Body)
+}
+
 func request(cmd *cobra.Command, method, reqURL string, body io.Reader) ([]byte, error) {
 	req, err := http.NewRequestWithContext(cmd.Context(), method, reqURL, body)
 	if err != nil {
@@ -38,7 +47,7 @@ func request(cmd *cobra.Command, method, reqURL string, body io.Reader) ([]byte,
 		return nil, fmt.Errorf("reading dataset response: %w", err)
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("dataset request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	return data, nil
 }
@@ -65,9 +74,13 @@ func splitDatasetRef(raw string) (string, string, error) {
 	if name == "" {
 		return "", "", fmt.Errorf("dataset name is required")
 	}
+	return datasetNamespace(), name, nil
+}
+
+func datasetNamespace() string {
 	ns := strings.TrimSpace(namespaceFlag)
 	if ns == "_" {
 		ns = ""
 	}
-	return ns, name, nil
+	return ns
 }

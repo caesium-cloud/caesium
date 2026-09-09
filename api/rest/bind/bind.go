@@ -152,12 +152,14 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/datasets/:ns/:name/derivations", dc.Derivations)
 		g.POST("/datasets/:ns/:name/advance", dc.Advance)
 
-		// The data circuit breaker's human ack. Off means NO ROUTE: with
+		// The data circuit breaker's reads and human ack. Off means NO ROUTE: with
 		// CAESIUM_DATA_ASSERTIONS_ENABLED unset there are no holds to release,
 		// so the endpoint must not exist rather than 404 on every id. (The bare
 		// block above is the older, unconditional freshness surface; this
 		// follows the `if contractsvc.Enabled()` shape instead.)
 		if env.Variables().DataAssertionsEnabled {
+			g.GET("/datasets/holds", dc.Holds)
+			g.GET("/datasets/:ns/:name/metrics", dc.Metrics)
 			g.POST("/datasets/holds/:id/release", dc.Release)
 		}
 	}

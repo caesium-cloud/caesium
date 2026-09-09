@@ -1,0 +1,203 @@
+package dataset
+
+import (
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstore "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
+
+// State extends the existing freshness row without changing its status semantics.
+// Hold fields are omitted when assertions are disabled or no active hold exists.
+type State struct {
+	models.DatasetState
+	HoldStatus string       `json:"hold_status,omitempty"`
+	Hold       *HoldSummary `json:"hold,omitempty"`
+}
+
+// HoldSummary keeps list polling independent of the hold's potentially large
+// violation and downstream impact evidence. Detail and Holds return that evidence.
+type HoldSummary struct {
+	ID              uuid.UUID `json:"id"`
+	Status          string    `json:"status"`
+	Reason          string    `json:"reason"`
+	OpenedAt        time.Time `json:"opened_at"`
+	OccurrenceCount int       `json:"occurrence_count"`
+}
+
+// withHolds enriches only the requested page, using exact namespace/name pairs.
+func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
+	states := make([]State, len(rows))
+	for i, row := range rows {
+		states[i].DatasetState = row
+	}
+	if !env.Variables().DataAssertionsEnabled || len(rows) == 0 {
+		return states, nil
+	}
+	identity := s.db.Where("namespace = ? AND name = ?", rows[0].Namespace, rows[0].Name)
+	for _, row := range rows[1:] {
+		identity = identity.Or("namespace = ? AND name = ?", row.Namespace, row.Name)
+	}
+	var holds []struct {
+		Namespace string
+		Name      string
+		HoldSummary
+	}
+	if err := s.db.WithContext(s.ctx).Model(&models.DatasetHold{}).
+		Select("namespace", "name", "id", "status", "reason", "opened_at", "occurrence_count").
+		Where("status = ?", models.DatasetHoldStatusActive).
+		Where(identity).Find(&holds).Error; err != nil {
+		return nil, err
+	}
+	byIdentity := make(map[[2]string]*HoldSummary, len(holds))
+	for i := range holds {
+		byIdentity[[2]string{holds[i].Namespace, holds[i].Name}] = &holds[i].HoldSummary
+	}
+	for i := range states {
+		if hold := byIdentity[[2]string{states[i].Namespace, states[i].Name}]; hold != nil {
+			states[i].HoldStatus = hold.Status
+			states[i].Hold = hold
+		}
+	}
+	return states, nil
+}
+
+// ErrHoldStatus identifies an unsupported hold feed filter.
+var ErrHoldStatus = errors.New("status must be active, released, or all")
+
+// ErrMetricRequired identifies a missing or reserved metric selector.
+var ErrMetricRequired = errors.New("metric is required and must name an emitted metric (not dataset)")
+
+// HoldsParams filters the hold feed. Namespace is a pointer so an explicit empty
+// namespace is distinct from an unfiltered feed. Name is an exact match.
+type HoldsParams struct {
+	Status    string
+	Namespace *string
+	Name      string
+	Limit     int
+	Offset    int
+}
+
+// HoldsResult is a bounded page of hold history.
+type HoldsResult struct {
+	Holds  []models.DatasetHold `json:"holds"`
+	Total  int64                `json:"total"`
+	Limit  int                  `json:"limit"`
+	Offset int                  `json:"offset"`
+}
+
+// Holds returns active holds by default, or released/all history on request.
+func (s *Service) Holds(p HoldsParams) (*HoldsResult, error) {
+	status := strings.TrimSpace(p.Status)
+	if status == "" {
+		status = models.DatasetHoldStatusActive
+	}
+	if status != models.DatasetHoldStatusActive && status != models.DatasetHoldStatusReleased && status != "all" {
+		return nil, ErrHoldStatus
+	}
+	limit, offset := normalizePagination(p.Limit, p.Offset)
+	q := s.db.WithContext(s.ctx).Model(&models.DatasetHold{})
+	if status != "all" {
+		q = q.Where("status = ?", status)
+	}
+	if p.Namespace != nil {
+		q = q.Where("namespace = ?", strings.TrimSpace(*p.Namespace))
+	}
+	if name := strings.TrimSpace(p.Name); name != "" {
+		q = q.Where("name = ?", name)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, err
+	}
+	rows := make([]models.DatasetHold, 0)
+	if err := q.Order("opened_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return &HoldsResult{Holds: rows, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+// MetricsParams pages raw observations independently of the clean baseline.
+// Offset counts from the newest sample; each returned page is oldest-first.
+type MetricsParams struct {
+	Limit  int
+	Offset int
+}
+
+// MetricSample identifies whether an observation belongs to the actual returned
+// baseline, including its configured clean sample window.
+type MetricSample struct {
+	models.DatasetMetric
+	InBaseline bool `json:"in_baseline"`
+}
+
+// MetricsResult keeps recent observations separate from the clean baseline:
+// rejected samples belong in the series so the breach is visible to operators.
+type MetricsResult struct {
+	Namespace  string                  `json:"namespace"`
+	Name       string                  `json:"name"`
+	Metric     string                  `json:"metric"`
+	Series     []MetricSample          `json:"series"`
+	Total      int64                   `json:"total"`
+	Limit      int                     `json:"limit"`
+	Offset     int                     `json:"offset"`
+	Baseline   *runstore.BaselineStats `json:"baseline"`
+	Window     int                     `json:"window"`
+	MinSamples int                     `json:"min_samples"`
+	Seeding    bool                    `json:"seeding"`
+}
+
+// Metrics returns recent observations and a separately computed clean baseline.
+// A known dataset with no samples for the selected metric has an empty series.
+func (s *Service) Metrics(namespace, name, metric string, p MetricsParams) (*MetricsResult, error) {
+	namespace, name, metric = strings.TrimSpace(namespace), strings.TrimSpace(name), strings.TrimSpace(metric)
+	if metric == "" || metric == "dataset" {
+		return nil, ErrMetricRequired
+	}
+	exists, err := s.exists(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		var count int64
+		if err := s.db.WithContext(s.ctx).Model(&models.DatasetMetric{}).Where("namespace = ? AND name = ?", namespace, name).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			return nil, gorm.ErrRecordNotFound
+		}
+	}
+	asOf := time.Now().UTC()
+	window := runstore.BaselineWindow()
+	baseline, baselineRows, err := runstore.BaselineWithSamples(s.ctx, s.db, namespace, name, metric, window, asOf)
+	if err != nil {
+		return nil, err
+	}
+	limit, offset := normalizePagination(p.Limit, p.Offset)
+	q := s.db.WithContext(s.ctx).Model(&models.DatasetMetric{}).
+		Where("namespace = ? AND name = ? AND metric = ? AND created_at < ?", namespace, name, metric, asOf)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, err
+	}
+	var rows []models.DatasetMetric
+	if err := q.Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	inBaseline := make(map[uuid.UUID]bool, len(baselineRows))
+	for _, row := range baselineRows {
+		inBaseline[row.ID] = true
+	}
+	series := make([]MetricSample, 0, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		series = append(series, MetricSample{DatasetMetric: rows[i], InBaseline: inBaseline[rows[i].ID]})
+	}
+	minSamples := runstore.BaselineMinSamples()
+	return &MetricsResult{Namespace: namespace, Name: name, Metric: metric, Series: series, Total: total, Limit: limit, Offset: offset, Baseline: baseline,
+		Window: window, MinSamples: minSamples, Seeding: baseline.Samples < minSamples}, nil
+}

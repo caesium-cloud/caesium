@@ -147,6 +147,33 @@ func TestBaseline_WindowKeepsMostRecent(t *testing.T) {
 	assert.Equal(t, []float64{7, 8, 9}, stats.Values)
 }
 
+func TestBaselineWithSamplesUsesStableIDsToBreakTimestampTies(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	_, _, taskRunID, _ := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+	at := time.Now().UTC().Add(-time.Hour)
+	ids := []uuid.UUID{
+		uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+	}
+	// Insert out of ID order so the window cannot accidentally follow row order.
+	for _, i := range []int{2, 0, 1} {
+		require.NoError(t, db.Create(&models.DatasetMetric{ID: ids[i], TaskRunID: taskRunID, Name: "orders",
+			Metric: "rowCount", Value: float64((i + 1) * 10), CreatedAt: at}).Error)
+	}
+	cut := at.Add(time.Minute)
+	stats, rows, err := BaselineWithSamples(context.Background(), db, "", "orders", "rowCount", 2, cut)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, ids[1], rows[0].ID)
+	require.Equal(t, ids[2], rows[1].ID)
+	require.Equal(t, []float64{20, 30}, stats.Values)
+	existing, err := Baseline(context.Background(), db, "", "orders", "rowCount", 2, cut)
+	require.NoError(t, err)
+	require.Equal(t, stats, existing, "the evaluator and operator read use the same selection and statistics")
+}
+
 func TestBaseline_NoSamplesIsNotAnError(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

@@ -16,6 +16,7 @@ authoring pipelines against a real server.
 
 ### Operator Reference
 
+- [upgrade-notes.md](upgrade-notes.md): Upgrade compatibility notes, including dataset identities written under escaped names.
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, schema tooling, Git sync, and operational controls for job manifests.
 - [caesium-job-llm-reference.md](caesium-job-llm-reference.md): LLM authoring guide plus executable harness scenario format, including metrics and OpenLineage assertions.
 - [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
