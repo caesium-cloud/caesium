@@ -15,6 +15,8 @@ import (
 var statusJSON bool
 
 type statusResponse struct {
+	HoldStatus   string             `json:"hold_status,omitempty"`
+	Hold         *datasetHold       `json:"hold,omitempty"`
 	State        datasetState       `json:"state"`
 	SLO          *datasetSLO        `json:"slo,omitempty"`
 	Producing    *producingJob      `json:"producing_job,omitempty"`
@@ -72,6 +74,12 @@ func renderDatasetStatus(cmd *cobra.Command, result statusResponse) {
 	_, _ = fmt.Fprintf(w, "NAMESPACE\t%s\n", displayNamespace(result.State.Namespace))
 	_, _ = fmt.Fprintf(w, "NAME\t%s\n", result.State.Name)
 	_, _ = fmt.Fprintf(w, "STATUS\t%s\n", result.State.Status)
+	if result.HoldStatus != "" {
+		_, _ = fmt.Fprintf(w, "HOLD\t%s\n", result.HoldStatus)
+	}
+	if result.Hold != nil {
+		_, _ = fmt.Fprintf(w, "HOLD ID\t%s\nHOLD REASON\t%s\n", result.Hold.ID, result.Hold.Reason)
+	}
 	_, _ = fmt.Fprintf(w, "WATERMARK\t%s\n", result.State.Watermark)
 	_, _ = fmt.Fprintf(w, "UPDATED\t%s\n", formatTime(result.State.UpdatedAt))
 	if result.State.Reason != "" {

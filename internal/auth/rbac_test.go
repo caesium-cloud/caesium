@@ -119,6 +119,8 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		{"DELETE", "/v1/agentprofiles/:id", models.RoleOperator},
 		{"POST", "/v1/jobs/:id/runs/:id/replay", models.RoleRunner},
 		{"GET", "/v1/datasets", models.RoleViewer},
+		{"GET", "/v1/datasets/holds", models.RoleViewer},
+		{"GET", "/v1/datasets/:id/:id/metrics", models.RoleViewer},
 		{"POST", "/v1/datasets/:id/:id/advance", models.RoleRunner},
 		// A route that is bound but absent from this table is denied as
 		// "unknown_route" — a 403 that looks exactly like a role failure and is

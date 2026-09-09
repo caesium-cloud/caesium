@@ -26,12 +26,13 @@ type listResponse struct {
 }
 
 type datasetState struct {
-	Namespace string    `json:"namespace,omitempty"`
-	Name      string    `json:"name"`
-	Watermark string    `json:"watermark"`
-	Status    string    `json:"status"`
-	Reason    string    `json:"reason,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	HoldStatus string    `json:"hold_status,omitempty"`
+	Namespace  string    `json:"namespace,omitempty"`
+	Name       string    `json:"name"`
+	Watermark  string    `json:"watermark"`
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 var listCmd = &cobra.Command{
@@ -66,9 +67,17 @@ var listCmd = &cobra.Command{
 
 func renderDatasetList(cmd *cobra.Command, rows []datasetState) {
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAMESPACE\tNAME\tSTATUS\tWATERMARK\tUPDATED\tREASON")
+	held := false
 	for _, row := range rows {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		held = held || row.HoldStatus != ""
+	}
+	header := "NAMESPACE\tNAME\tSTATUS\tWATERMARK\tUPDATED\tREASON"
+	if held {
+		header += "\tHOLD"
+	}
+	_, _ = fmt.Fprintln(w, header)
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s",
 			displayNamespace(row.Namespace),
 			row.Name,
 			row.Status,
@@ -76,6 +85,10 @@ func renderDatasetList(cmd *cobra.Command, rows []datasetState) {
 			formatTime(row.UpdatedAt),
 			row.Reason,
 		)
+		if held {
+			_, _ = fmt.Fprintf(w, "\t%s", row.HoldStatus)
+		}
+		_, _ = fmt.Fprintln(w)
 	}
 	_ = w.Flush()
 }

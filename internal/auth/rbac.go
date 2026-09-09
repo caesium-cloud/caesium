@@ -85,6 +85,8 @@ var endpointPolicy = map[string]models.Role{
 	// Dataset freshness operator surface (freshness-scheduling E1). Reads are
 	// viewer; the manual watermark advance is a data-plane write at runner.
 	"GET /v1/datasets":                     models.RoleViewer,
+	"GET /v1/datasets/holds":               models.RoleViewer,
+	"GET /v1/datasets/:id/:id/metrics":     models.RoleViewer,
 	"GET /v1/datasets/:id/:id":             models.RoleViewer,
 	"GET /v1/datasets/:id/:id/derivations": models.RoleViewer,
 	"POST /v1/datasets/:id/:id/advance":    models.RoleRunner,

@@ -1,5 +1,5 @@
-// Package dataset exposes the freshness dataset read model and manual advance
-// operation used by the REST controller and operator CLI.
+// Package dataset exposes dataset freshness, circuit-breaker reads, and operator
+// actions used by the REST controller and CLI.
 package dataset
 
 import (
@@ -63,10 +63,10 @@ type ListParams struct {
 
 // ListResult is the paginated dataset state response.
 type ListResult struct {
-	Datasets []models.DatasetState `json:"datasets"`
-	Total    int64                 `json:"total"`
-	Limit    int                   `json:"limit"`
-	Offset   int                   `json:"offset"`
+	Datasets []State `json:"datasets"`
+	Total    int64   `json:"total"`
+	Limit    int     `json:"limit"`
+	Offset   int     `json:"offset"`
 }
 
 // SLO summarizes the declaration-level freshness contract for a dataset.
@@ -86,6 +86,8 @@ type ProducingJob struct {
 // Detail returns the state row plus the declaration metadata operators need to
 // understand the SLO and producer.
 type Detail struct {
+	HoldStatus   string                     `json:"hold_status,omitempty"`
+	Hold         *models.DatasetHold        `json:"hold,omitempty"`
 	State        models.DatasetState        `json:"state"`
 	Declaration  *models.DatasetDeclaration `json:"declaration,omitempty"`
 	SLO          *SLO                       `json:"slo,omitempty"`
@@ -135,8 +137,12 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		states, err := s.withHolds(rows)
+		if err != nil {
+			return nil, err
+		}
 		return &ListResult{
-			Datasets: rows,
+			Datasets: states,
 			Total:    total,
 			Limit:    limit,
 			Offset:   offset,
@@ -157,8 +163,12 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	sortStates(rows)
 
 	rows = paginateStates(rows, limit, offset)
+	states, err := s.withHolds(rows)
+	if err != nil {
+		return nil, err
+	}
 	return &ListResult{
-		Datasets: rows,
+		Datasets: states,
 		Total:    observedTotal + declTotal,
 		Limit:    limit,
 		Offset:   offset,
@@ -185,7 +195,11 @@ func (s *Service) Get(namespace, name string) (*Detail, error) {
 		state = unknownState(namespace, name, decl.CreatedAt, decl.UpdatedAt)
 	}
 
-	detail := &Detail{State: state}
+	states, err := s.withHolds([]models.DatasetState{state})
+	if err != nil {
+		return nil, err
+	}
+	detail := &Detail{State: state, HoldStatus: states[0].HoldStatus, Hold: states[0].Hold}
 	if foundDecl {
 		detail.Declaration = &decl
 		detail.SLO = &SLO{
