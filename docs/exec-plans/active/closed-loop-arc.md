@@ -1,6 +1,6 @@
 # Closed-Loop Orchestration — The Arc
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 > Status: **Umbrella arc (active).** This document is the program-level source
 > of truth for the next several execution plans. It is **not** itself a wave
@@ -91,8 +91,8 @@ siblings (`freshness-scheduling` ≈ 4 waves / 11 PRs; `reproduce` ≈ 5 waves).
 | # | Plan | Slug | Loop | Size | Status |
 |---|---|---|---|---|---|
 | 0 | **Trust the substrate** — fix the six ledger bugs, **close the approval loop** (proposal → `ApprovalRequest` → approve → execute, with the direct `apply_jobdef_patch` route), de-hollow and widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, ship `docs/getting-started.md`, delete dead scaffolding, file the unfiled follow-ups | [`trust-the-substrate.md`](../completed/trust-the-substrate.md) | foundation | M–L (2–3 waves) | Shipped (W1+W2, `v0.1.0` released 2026-09-07) |
-| 1 | **The data loop** — data circuit breaker **plus** its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance | [`data-circuit-breaker.md`](data-circuit-breaker.md) | data | XL (~4 waves) | In progress — W1–W3 shipped (A, B, C); D/E/F/N-1 remain |
-| 2 | **The compute loop** — resource right-sizing with Stream E recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations | [`resource-right-sizing.md`](resource-right-sizing.md) | compute | XL (~4 waves) | Not started |
+| 1 | **The data loop** — data circuit breaker **plus** its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance | [`data-circuit-breaker.md`](data-circuit-breaker.md) | data | XL (~4 waves) | In progress — W1–W3 shipped (A, B, C), W4-α (D) merged; E in draft #445; F/N-1 remain |
+| 2 | **The compute loop** — resource right-sizing with Stream E recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations | [`resource-right-sizing.md`](resource-right-sizing.md) | compute | XL (~4 waves) | W1 A + H-1 in draft #449; verification pending |
 | 3 | **The proof loop** — backtesting, after a design refresh (`internal/outputdiff` reuse; reconcile with the fan-out-aware replay core), **plus** proposal verification in the approval flow and assertion-threshold backtests | [`backtesting.md`](backtesting.md) | proof | XL (~4–5 waves) | Not started |
 | 4 | **The time loop** *(optional tail)* — window scheduling re-cut to P0 over the shared stats substrate; cost/carbon signals parked | [`window-scheduling.md`](window-scheduling.md) | time | L (~2–3 waves) | Not started — optional |
 | ✦ | **Tell it** — README rewritten around the loop, strategy doc refreshed, onboarding tour, `v0.2.0` | drafted as `tell-it.md` when Plan 3 enters its final wave | narrative | S–M | Not started |
@@ -110,8 +110,8 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
 | 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; E4: `v0.1.0` released 2026-09-07 — https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0 (image digests in `docs/ci.md` § v0.1.0); N-4 closed out, plan archived to `completed/` |
-| 1 data-circuit-breaker | 3 | #439 (`dc00f167`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439) — the breaker is live behind the flag; next: D, E, F, N-1 |
-| 2 resource-right-sizing | 0 | — | |
+| 1 data-circuit-breaker | 3 complete; W4 partial | #445 (draft; D merged in #442) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439); W4-α: Stream D reads/CLI (#442); W4-β: E in draft #445, live verification pending. Next: F, N-1 after dependencies. E overlaps Plan 2 A; F may not. |
+| 2 resource-right-sizing | 0 | #449 (draft) | W1 A + H-1 implemented, independent review fixes addressed; required verification pending. B onward and H-2 retain their dependencies. |
 | 3 backtesting | 0 | — | |
 | 4 window-scheduling | 0 | — | optional |
 | ✦ tell-it | 0 | — | not yet drafted |

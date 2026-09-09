@@ -158,15 +158,37 @@ identity in [`internal/cache/hash.go`](../../../internal/cache/hash.go); because
 the hash exclusion (Stream B) is load-bearing and the schema wins on any
 field-name disagreement.
 
-## Progress (as of 2026-09-05)
+## Progress (as of 2026-09-09)
 
-No implementation waves have shipped yet. The plan was re-cut on 2026-09-05
-against [`closed-loop-arc.md`](closed-loop-arc.md); the first wave is the next
-eligible run of the `exec-plan-wave` skill against this doc, and it may only run
-after Plan 0 ([`trust-the-substrate.md`](../completed/trust-the-substrate.md)) and Plan 1
-([`data-circuit-breaker.md`](data-circuit-breaker.md)) — see the arc's
-§ Cross-plan sequencing. The design doc's `> Status:` banner already points at
-this plan; N-1 flips it to "implemented" and ticks the arc dashboard row.
+No implementation waves have shipped yet. Wave 1 implements A1 → A2 → A3
+with H-1 in one combined candidate, in parallel with Plan 1 E under the arc's
+explicit D/E overlap allowance. Plan 1 F does not run in this wave. The design
+banner and roadmap remain pending N-1; later streams retain their dependencies.
+
+### Wave 1 — Runtime observations and the shared stress harness
+
+- **α / A1–A3 + H-1** — [draft #449](https://github.com/caesium-cloud/caesium/pull/449),
+  candidate `546ef3f9`. Implementation complete; live verification pending.
+  Six `TaskRun` columns, gated runtime OOM evidence and incident classification,
+  per-instance persistence, cancel-and-join sampling in both executors, and
+  registered OOM/memory/CPU metrics. Existing run/partition reads expose
+  observations without presenting one sibling as a group measurement. The
+  bounded stress fixture and exact-tag distribution are wired into all
+  self-server lanes. Declarative limits, escalation, recommendation routes,
+  and H-2 remain in their later dependency-ordered waves.
+  **Validation:** the real stress-fixture gate passed at `657a0d7e` (identical
+  H-1 contents in the combined candidate), including a 64MiB OOM, exit 137,
+  the release barrier, and bounds/timeout refusal. actionlint, shellcheck,
+  and all 16 CI regressions passed. Initial focused race tests at `3d7f4d5b`
+  exposed invalid environment restoration in new test cleanup; corrected in
+  `546ef3f9`. Independent review also identified failover observation resets,
+  quarantine metric suppression, and timeout sample persistence; all were
+  fixed, and exact-head re-review found no residual findings. Final focused
+  race tests and integration-package compilation could not acquire the shared
+  Docker lane within the review window; CI is running on #449.
+  Required baseline and engine lanes are not yet green. A/H-1 checkboxes
+  remain open until acceptance evidence is established; this is a review
+  endpoint, not a shipped wave.
 
 ### Verified facts (re-verified 2026-09-05 — re-grep before you edit)
 
@@ -282,13 +304,13 @@ against `master` on the date above.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Phase 0 substrate — `TaskRun` stats columns (per-partition for free), `Stats()` on the engine interface + sampling, honest OOM reclassification to `ResourceFailure` **and to `ClassOOM`**, Prometheus families | **P0** | Not started |
+| A | Phase 0 substrate — `TaskRun` stats columns (per-partition for free), `Stats()` on the engine interface + sampling, honest OOM reclassification to `ResourceFailure` **and to `ClassOOM`**, Prometheus families | **P0** | **Draft review** (W1-α, #449; live verification pending) |
 | B | Phase 1 — `resources:` block through all three engines, lint validation, cache-identity exclusion + test, descriptor schema bump, distributed flow | **P0** | Not started |
 | C | Phase 2 — `onOOM` escalation ladder in both executors, local-loop retryability fix, persisted escalation state, **`why` provenance (C3)** | P1 | Not started |
 | D | Phase 3 — shared `HistorySource` reader + compute-on-read recommendation engine (p99 across fan-out partitions) + `GET /v1/jobs/:id/resources` + `GET /v1/stats/resources` + `caesium job resources` CLI | P2 | Not started |
 | E | Phase 4 — `propose_resources` incident action → `apply_jobdef_patch` proposal through the Plan 0/Plan 1 pipeline; `mode: auto`; conservative downsizing | P3 | Not started |
 | F | UI — JobDetail Resources panel, attempt-trail badges, RunDetail anomaly ribbon, stats reclaim view | P2 | Not started |
-| H-1 | Integration harness — `build/` stress image, feature envs on **every self-server lane** | — | Not started |
+| H-1 | Integration harness — `build/` stress image, feature envs on **every self-server lane** | — | **Draft review** (W1-α, #449; live verification pending) |
 | H-2 | Kubernetes kind lane — pod OOM reason, requests/limits, `metrics.k8s.io` stats (arc convention 2) | — | Not started |
 | N-1 | Docs — design banner, roadmap, generated schema reference, examples, README, **`docs/tour-compute-loop.md`**, arc dashboard | — | Not started |
 
