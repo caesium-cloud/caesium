@@ -31,7 +31,9 @@ type DecideResult struct {
 	Approval models.ApprovalRequest
 	Incident models.Incident
 	// StatusChanged reports whether the incident advanced state as part of the
-	// decision. Used to decide SSE emission.
+	// decision. Used to decide SSE emission. False when the incident stays parked
+	// because another ApprovalRequest on it is still pending, and when a human had
+	// already advanced it past awaiting_approval.
 	StatusChanged bool
 	// Executed reports whether the approved action was actually dispatched.
 	// False on a rejection, when no post-approval executor is registered (the
@@ -119,11 +121,12 @@ func (s *Service) Reject(incidentID, approvalID uuid.UUID, decider, reason strin
 }
 
 // decide records the human decision on a tier-3 approval, mirrors it onto the
-// audit-spine AgentAction, and advances the incident — ALL in one transaction so
-// the decision, the action, and the incident status can never drift. The decision
-// write is a conditional update guarded on decision = pending, so two operators
-// racing to decide the same approval cannot both "succeed": the loser matches zero
-// rows and is refused with ErrApprovalNotPending (→ 409).
+// audit-spine AgentAction, and advances the incident once no approval on it is
+// still pending — ALL in one transaction so the decision, the action, and the
+// incident status can never drift. The decision write is a conditional update
+// guarded on decision = pending, so two operators racing to decide the same
+// approval cannot both "succeed": the loser matches zero rows and is refused with
+// ErrApprovalNotPending (→ 409).
 //
 // This is the human-decision boundary the design's "tier 3 always terminates at a
 // human" invariant rests on. The route-level auth (operator role) plus the
@@ -187,14 +190,41 @@ func (s *Service) decide(incidentID, approvalID uuid.UUID, decision models.Appro
 		}
 
 		// Advance the incident IN THE SAME TRANSACTION so a decision can never
-		// commit while leaving the incident parked in awaiting_approval. An incident
-		// already advanced past awaiting_approval (human take-over, terminal) is left
-		// as-is — the decision is still legitimately recorded.
+		// commit while leaving the incident parked in awaiting_approval with nothing
+		// left to decide. An incident already advanced past awaiting_approval (human
+		// take-over, terminal) is left as-is — the decision is still legitimately
+		// recorded.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			First(&incident, "id = ?", incidentID).Error; err != nil {
 			return err
 		}
-		if incident.Status == models.IncidentStatusAwaitingApproval {
+
+		// …but only once EVERY approval on the incident is decided. An incident can
+		// hold more than one pending ApprovalRequest — a second tier-3 proposal finds
+		// the incident already parked, so parkAwaitingApprovalTx is a no-op while the
+		// approval row is still created — and advancing on the first decision left the
+		// remaining ones pending under a status that says nobody is waiting on a
+		// human. That is wrong twice over: the state machine mis-states the incident,
+		// and the operator feed (which asks the same question) stopped listing it
+		// (#417). The count is deliberately taken AFTER the row lock above and inside
+		// this transaction, so two operators deciding two different approvals cannot
+		// both read zero and both think they are last: on dqlite every transaction
+		// serializes on the single write connection, and on Postgres the loser blocks
+		// on the incident's FOR UPDATE lock and then re-reads the winner's committed
+		// decision.
+		var stillPending int64
+		if err := tx.Model(&models.ApprovalRequest{}).
+			Where("incident_id = ? AND decision = ?", incidentID, models.ApprovalDecisionPending).
+			Count(&stillPending).Error; err != nil {
+			return err
+		}
+
+		// The LAST decision sets the incident's disposition, with the same
+		// approve→triaging / reject→escalated mapping a single approval has always
+		// had. An earlier sibling decision does not veto it: each ApprovalRequest is a
+		// decision about its own action, and the rejected action row is stamped
+		// rejected either way, so nothing an operator refused becomes executable.
+		if stillPending == 0 && incident.Status == models.IncidentStatusAwaitingApproval {
 			if !incidentcore.CanTransition(incident.Status, target) {
 				return fmt.Errorf("incident: cannot transition %s → %s", incident.Status, target)
 			}

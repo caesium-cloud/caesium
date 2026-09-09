@@ -514,6 +514,18 @@ pending the incident parks in `awaiting_approval`; the agent session ends
 (no idle container burning tokens) and a fresh session resumes on decision
 if follow-up work is needed.
 
+An incident can owe MORE THAN ONE decision at a time: a later tier-3 proposal
+finds the incident already parked (parking is then a no-op) and adds its own
+`ApprovalRequest` under the one `awaiting_approval` status. Both operator
+surfaces are therefore keyed off the approval ROWS, not the incident status:
+`GET /v1/incidents?needs_approval=true` (and `caesium incident list
+--needs-approval`) is an EXISTS over the incident's still-pending requests, and
+a decision keeps the incident parked until every request on it is decided. The
+LAST decision advances the incident with the usual mapping — approve →
+`triaging` (then the approved action executes), reject → `escalated` — while
+each earlier one is recorded, mirrored onto its `AgentAction`, and executed on
+its own merits.
+
 ### Data model (new GORM models, `internal/models/`)
 
 - `Incident` — id, job/run/task refs, `Class`, `Status`, dedupe key, attempt
@@ -560,7 +572,7 @@ bound (reported by `GET /system/features`).
 ### CLI
 
 ```
-caesium incident list [--status open] [--class schema_violation]
+caesium incident list [--status open] [--class schema_violation] [--needs-approval]
 caesium incident get <id>            # timeline: observations, actions, evidence
 caesium incident approve <id> --approval <approval_id>
 caesium incident reject  <id> --approval <approval_id> [--reason ...]
