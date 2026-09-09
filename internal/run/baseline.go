@@ -48,10 +48,18 @@ type BaselineStats struct {
 // ended in anything but success, AND the sample itself did not break the
 // contract it was judged against (models.DatasetMetric.Violated) — a what-if, a
 // failed attempt or a rejected value must not move a baseline. The design's
-// remaining predicate, "non-held", joins in with the DatasetHold model (Stream
-// C1), which does not exist yet; cleanSampleQuery is the single seam where that
-// filter lands.
+// remaining predicate, "non-held", excludes samples from hold windows and the
+// opening run, with the clean releasing run exempted. cleanSampleQuery is the
+// single seam for all cleanliness filters.
 func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, error) {
+	stats, _, err := BaselineWithSamples(ctx, conn, namespace, name, metric, window, asOf)
+	return stats, err
+}
+
+// BaselineWithSamples computes the same baseline as Baseline and returns the
+// exact samples used, oldest-first. Operator reads use these identities to
+// explain baseline membership without reimplementing the cleanliness filters.
+func BaselineWithSamples(ctx context.Context, conn *gorm.DB, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
 	stats := &BaselineStats{
 		Namespace: namespace,
 		Name:      name,
@@ -59,7 +67,7 @@ func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string
 		AsOf:      asOf.UTC(),
 	}
 	if conn == nil || name == "" || metric == "" {
-		return stats, nil
+		return stats, nil, nil
 	}
 	if window <= 0 {
 		window = DefaultBaselineWindow
@@ -68,20 +76,24 @@ func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string
 	var rows []models.DatasetMetric
 	err := cleanSampleQuery(ctx, conn, namespace, name, metric, asOf).
 		Order("dataset_metrics.created_at DESC").
+		Order("dataset_metrics.id DESC").
 		Limit(window).
 		Find(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(rows) == 0 {
-		return stats, nil
+		return stats, rows, nil
 	}
 
 	// Rows arrive newest-first (that is what "the last N" means); the caller
 	// sees them oldest-first, which is the order a sparkline renders.
+	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
+		rows[left], rows[right] = rows[right], rows[left]
+	}
 	values := make([]float64, 0, len(rows))
-	for i := len(rows) - 1; i >= 0; i-- {
-		values = append(values, rows[i].Value)
+	for _, row := range rows {
+		values = append(values, row.Value)
 	}
 
 	sorted := append([]float64(nil), values...)
@@ -92,7 +104,7 @@ func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string
 	stats.P10 = percentile(sorted, 0.1)
 	stats.P90 = percentile(sorted, 0.9)
 	stats.Values = values
-	return stats, nil
+	return stats, rows, nil
 }
 
 // BaselineWindow is the configured sample window, falling back to

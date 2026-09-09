@@ -45,7 +45,15 @@ func (ctrl *Controller) Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request")
 	}
 
-	result, err := svc.New(c.Request().Context()).Get(namespace, name)
+	options := svc.GetOptions{IncludeHold: true}
+	if c.QueryParams().Has("include_hold") {
+		include, err := strconv.ParseBool(c.QueryParam("include_hold"))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid include_hold")
+		}
+		options.IncludeHold = include
+	}
+	result, err := svc.New(c.Request().Context()).GetWithOptions(namespace, name, options)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound

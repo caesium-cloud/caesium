@@ -36,7 +36,11 @@ func (ctrl *Controller) Metrics(c *echo.Context) error {
 	if name == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "dataset name is required")
 	}
-	result, err := svc.New(c.Request().Context()).Metrics(namespace, name, strings.TrimSpace(c.QueryParam("metric")))
+	params := svc.MetricsParams{}
+	if err := parsePagination(c, &params.Limit, &params.Offset); err != nil {
+		return err
+	}
+	result, err := svc.New(c.Request().Context()).Metrics(namespace, name, strings.TrimSpace(c.QueryParam("metric")), params)
 	if err != nil {
 		if errors.Is(err, svc.ErrMetricRequired) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())

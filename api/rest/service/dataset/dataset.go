@@ -4,6 +4,7 @@ package dataset
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -178,6 +180,17 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 // Get returns one dataset's state plus declaration metadata. A declared dataset
 // with no state row is served as unknown rather than 404.
 func (s *Service) Get(namespace, name string) (*Detail, error) {
+	return s.GetWithOptions(namespace, name, GetOptions{IncludeHold: true})
+}
+
+// GetOptions controls optional detail evidence. Metadata polling can omit the
+// hold lookup because the corresponding list row already carries its summary.
+type GetOptions struct {
+	IncludeHold bool
+}
+
+// GetWithOptions returns dataset detail with optional active hold evidence.
+func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*Detail, error) {
 	name = strings.TrimSpace(name)
 	state, foundState, err := s.getState(namespace, name)
 	if err != nil {
@@ -195,11 +208,19 @@ func (s *Service) Get(namespace, name string) (*Detail, error) {
 		state = unknownState(namespace, name, decl.CreatedAt, decl.UpdatedAt)
 	}
 
-	states, err := s.withHolds([]models.DatasetState{state})
-	if err != nil {
-		return nil, err
+	detail := &Detail{State: state}
+	if options.IncludeHold && env.Variables().DataAssertionsEnabled {
+		var hold models.DatasetHold
+		err := s.db.WithContext(s.ctx).
+			Where("namespace = ? AND name = ? AND status = ?", state.Namespace, state.Name, models.DatasetHoldStatusActive).
+			Take(&hold).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		if err == nil {
+			detail.HoldStatus, detail.Hold = hold.Status, &hold
+		}
 	}
-	detail := &Detail{State: state, HoldStatus: states[0].HoldStatus, Hold: states[0].Hold}
 	if foundDecl {
 		detail.Declaration = &decl
 		detail.SLO = &SLO{

@@ -29,3 +29,23 @@ func TestDatasetPathDecodesEscapedIdentityExactlyOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestDatasetReadOptionsRejectMalformedQueriesBeforeDatabaseAccess(t *testing.T) {
+	for _, path := range []string{
+		"/datasets/_/orders?include_hold=maybe",
+		"/datasets/_/orders?include_hold=",
+		"/datasets/_/orders/metrics?metric=rowCount&limit=bad",
+		"/datasets/_/orders/metrics?metric=rowCount&offset=bad",
+	} {
+		t.Run(path, func(t *testing.T) {
+			e := echo.New()
+			ctrl := New()
+			e.GET("/datasets/:ns/:name", ctrl.Get)
+			e.GET("/datasets/:ns/:name/metrics", ctrl.Metrics)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}
