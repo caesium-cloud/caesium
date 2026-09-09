@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	datasetsvc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
@@ -136,6 +137,28 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 				ids = append(ids, h.ID.String())
 			}
 			s.Contains(ids, hold.ID.String())
+		}
+	}
+	// Exercise explicit page selection through the real CLI and feed. Only
+	// this scenario's one new hold is needed; offset 1 may be an empty page
+	// when the server has no older holds, but must still echo the requested
+	// position and the unpaginated total.
+	for offset := 0; offset < 2; offset++ {
+		stdout, err := s.runCLIStdout("dataset", "holds", "--namespace", "_", "--limit", "1", "--offset", strconv.Itoa(offset), "--json", "--server", s.caesiumURL)
+		s.Require().NoError(err)
+		var page datasetsvc.HoldsResult
+		s.Require().NoError(json.Unmarshal([]byte(stdout), &page), "page JSON must be clean stdout")
+		s.Equal(1, page.Limit)
+		s.Equal(offset, page.Offset)
+		s.Require().GreaterOrEqual(page.Total, int64(1))
+		if offset == 0 {
+			s.Require().Len(page.Holds, 1)
+			s.Equal(hold.ID, page.Holds[0].ID, "the just-opened hold is the newest page")
+		} else if page.Total > int64(offset) {
+			s.Require().Len(page.Holds, 1)
+			s.NotEqual(hold.ID, page.Holds[0].ID, "offset must advance past the first page")
+		} else {
+			s.Empty(page.Holds)
 		}
 	}
 	for _, path := range []string{"/v1/datasets/holds?status=bogus", datasetOperatorPath(dataset) + "/metrics", datasetOperatorPath(dataset) + "/metrics?metric=dataset"} {
