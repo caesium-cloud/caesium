@@ -34,6 +34,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
+| `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
 
 ## Cancelling a Run Reaches the Container
 
@@ -58,9 +59,17 @@ Setting the interval to `0` disables the sweep and returns to trusting the event
 `CAESIUM_WORKER_POOL_SIZE` is an admission limit, not merely an execution limit: a node never marks a task `running` unless it already holds a free pool slot for it. A node therefore reports at most `CAESIUM_WORKER_POOL_SIZE` tasks in `running`.
 
 - **Pull path** — the worker reserves a slot before it calls the claimer, so a saturated node issues no claim at all. Ready tasks stay `pending` (and claimable by another node) instead of being parked `running` behind a busy pool.
-- **Push path (run-owner mode)** — a dispatch that reaches a saturated node is rejected with `409 worker busy; task returned to dispatch pool`. The owner rolls the claim back to `pending` and re-dispatches on a later tick, here or to another peer.
+- **Push path (run-owner mode)** — a dispatch that reaches a saturated node is rejected with `409 worker busy; task returned to dispatch pool` under the reason code `no_capacity`. The owner rolls the claim back to `pending` and re-dispatches on a later tick, here or to another peer.
 
-Expect `caesium_dispatch_rejected_total{reason="worker_rejected"}` to be non-zero whenever workers are the bottleneck; that is normal backpressure, not an error. Sustained growth alongside a flat `caesium_dispatch_sent_total` means the cluster is under-provisioned — raise `CAESIUM_WORKER_POOL_SIZE` or add worker nodes.
+Expect `caesium_dispatch_rejected_total{reason="no_capacity"}` to be non-zero whenever workers are the bottleneck; that is normal backpressure, not an error. Sustained growth alongside a flat `caesium_dispatch_sent_total` means the cluster is under-provisioned — raise `CAESIUM_WORKER_POOL_SIZE` or add worker nodes. The `reason` label carries the worker's own rejection code, so saturation (`no_capacity`) reads apart from a dispatch that was wrong (`task_not_running`, `wrong_worker`, `ambiguous_task`); a peer too old to send a code still counts under the historical `worker_rejected`.
+
+### Capacity backoff and the progress deadline
+
+A `no_capacity` rejection puts that one task on an exponential per-task cooldown — 250 ms doubling to a 5 s ceiling — instead of re-posting it on every dispatch tick. Only capacity rejections are backed off; every other 409 says the dispatch itself was wrong and is retried immediately (a different peer comes up in the round-robin). The cooldown is cleared the moment a worker accepts the task, and the ceiling bounds the cost: once capacity frees up, a task waits at most one backoff step (≤ 5 s) before it is tried again. Siblings are independent, so one parked fan-out partition never holds back the rest of its group.
+
+If a task is still being refused for capacity `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` (default 10 m) after its first rejection, the owner logs `dispatch loop: task has not been accepted by any worker within the progress deadline` and increments `caesium_dispatch_stalled_total{reason="no_capacity"}`, re-arming once per deadline window. The task is not cancelled or failed — dispatch keeps retrying, because capacity usually does return. Unlike `caesium_dispatch_rejected_total`, any increment of `caesium_dispatch_stalled_total` is worth alerting on: it means a ready task has been unable to start for the whole window.
+
+Backoff state is per-owner and in-memory only; it is dropped when the run finishes or its lease moves to another node, so a new owner starts a task with a clean schedule.
 
 ## Run-Owner Mode (Phase 2 Phase A, experimental)
 
@@ -76,6 +85,7 @@ Run-owner mode assigns each in-flight job run to a single owner node. The owner 
 
 **New metrics:**
 - `caesium_complete_rejected_total{reason}` — counts `/internal/complete` rejections by fence violation type.
+- `caesium_dispatch_stalled_total{reason}` — counts tasks that passed the dispatch progress deadline without any worker ever accepting them.
 - `caesium_run_lease_renewals_total` — counts batched run-lease renewal statements.
 - `caesium_run_leases_owned` — current number of run leases held by this node.
 

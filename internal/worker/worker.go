@@ -232,7 +232,15 @@ func (w *Worker) WithInboundDispatch(completionToken string) *Worker {
 // this as a rejectable condition and rolls the claim back so the owner
 // re-dispatches — which is exactly right, because the owner has already flipped
 // the row to `running` by the time it asks the worker to take it.
-var ErrInboundFull = errors.New("worker: no execution capacity for dispatched task")
+//
+// It is an alias for dispatch.ErrNoCapacity rather than its own error value:
+// the dispatch handler has to recognise saturation to answer with the
+// no_capacity reason code (which is what makes the owner back the task off
+// instead of re-posting it every tick), and it cannot import this package —
+// the dependency runs the other way.  Aliasing keeps one sentinel, so
+// errors.Is(err, worker.ErrInboundFull) and errors.Is(err, dispatch.ErrNoCapacity)
+// both answer true and the message is unchanged.
+var ErrInboundFull = dispatch.ErrNoCapacity
 
 // ErrWorkerNotAccepting is returned by SubmitDispatched when the worker is not
 // configured to accept dispatched tasks (WithInboundDispatch was never called).

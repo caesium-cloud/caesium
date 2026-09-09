@@ -587,12 +587,38 @@ var (
 	//
 	// reason values:
 	//   network_error    – PostDispatch returned a non-nil error (network / timeout)
-	//   worker_rejected  – worker returned 409 (busy, claim mismatch, etc.)
+	//   no_capacity      – worker 409: no free execution slot (backpressure)
+	//   task_not_running – worker 409: the row was not claimable (stale claim, done)
+	//   wrong_worker /
+	//   ambiguous_task /
+	//   malformed        – worker 409: the dispatch envelope itself was wrong
+	//   worker_rejected  – worker 409 with no reason code (peer predates them)
 	//   no_peers         – peer discovery returned an empty list or failed
 	DispatchRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_dispatch_rejected_total",
 			Help: "Total owner-push dispatch attempts rejected or failed, by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// DispatchStalledTotal counts tasks that passed the dispatch progress
+	// deadline (CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE) without a single
+	// worker ever accepting them.  Unlike caesium_dispatch_rejected_total — which
+	// is expected to be non-zero under ordinary backpressure — any increment here
+	// means a ready task has been unable to start for the whole deadline window,
+	// so it is the signal to alert on: the cluster is under-provisioned, or every
+	// eligible worker is wedged.  Re-armed once per deadline window per task, so
+	// one stuck task contributes at most one increment per window rather than one
+	// per dispatch attempt.
+	//
+	// reason values: no_capacity — a task refused for a free worker slot for the
+	// whole window.  Rejections that mean the dispatch itself was wrong are not
+	// backed off and so never reach this counter.
+	DispatchStalledTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_dispatch_stalled_total",
+			Help: "Total tasks that exceeded the dispatch progress deadline without ever being accepted by a worker, by reason.",
 		},
 		[]string{"reason"},
 	)
@@ -760,6 +786,7 @@ func Register() {
 			RunLeaseRenewalsTotal,
 			RunLeasesOwned,
 			DispatchRejectedTotal,
+			DispatchStalledTotal,
 			DispatchSentTotal,
 			CompleteReportFailedTotal,
 			CompleteRetryableTotal,

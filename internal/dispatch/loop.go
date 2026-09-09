@@ -130,6 +130,12 @@ type DispatchLoopConfig struct {
 	// Deadline is added to time.Now() to produce the DispatchRequest.Deadline
 	// (CAESIUM_RUN_OWNER_DISPATCH_DEADLINE).
 	Deadline time.Duration
+	// ProgressDeadline bounds how long a ready task may go on being refused for
+	// worker capacity before the loop surfaces it as a stall — a warn log plus
+	// caesium_dispatch_stalled_total (CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE,
+	// default 10m).  It does not cancel or fail the task: dispatch keeps
+	// retrying on the backoff schedule, because capacity usually does return.
+	ProgressDeadline time.Duration
 	// LeaseTTL is the run-lease TTL (CAESIUM_RUN_LEASE_TTL), used as the new
 	// expiry when this node takes over an expired lease in the failover sweep.
 	LeaseTTL time.Duration
@@ -185,6 +191,23 @@ type DispatchLoop struct {
 	rateLimitDelayMu sync.Mutex
 	rateLimitDelays  map[uuid.UUID]map[uuid.UUID]time.Time
 
+	// capacityMu guards capacityBackoff, the per-task cooldown applied when a
+	// worker refuses a dispatch for lack of a free execution slot.  Nothing
+	// about a capacity rejection is task-specific — the pool is simply full —
+	// so without it a saturated cluster re-posts every ready task on every
+	// single tick: one owner-memory CI run logged 327 rejections for one task
+	// in 162s, exactly the 500ms tick rate, until the suite timed out.
+	// Keyed run → execution ref (the same instance-vs-catalog identity
+	// dispatchTaskRef resolves), so one parked fan-out instance never holds
+	// back its siblings.
+	capacityMu      sync.Mutex
+	capacityBackoff map[uuid.UUID]map[uuid.UUID]*capacityState
+
+	// capacityBackoffBase / capacityBackoffMax bound the exponential schedule.
+	// Fields rather than constants only so tests can compress the schedule.
+	capacityBackoffBase time.Duration
+	capacityBackoffMax  time.Duration
+
 	// lastReclaim throttles the SQL lane's expired-claim sweep to one query per
 	// run per ownerReclaimInterval.  The in-memory lane keeps this per-run clock
 	// on the OwnerManager, where it can also consult the owner's own lease
@@ -205,6 +228,38 @@ const ownerReclaimInterval = 15 * time.Second
 // transiently-unreachable peer rejoins the rotation quickly.
 const peerBenchCooldown = 10 * time.Second
 
+// Capacity backoff schedule.  The first retry is deliberately well under the
+// default 1s tick — a pool slot often frees within milliseconds, and a task
+// must not pay a long penalty for arriving during a momentary burst.  The cap
+// bounds the opposite case: under sustained saturation a task waits at most
+// capacityBackoffMax after capacity returns, which is also the most this
+// backoff can ever add to a task's start latency.
+const (
+	capacityBackoffBase = 250 * time.Millisecond
+	capacityBackoffMax  = 5 * time.Second
+)
+
+// defaultProgressDeadline is how long a task may be refused for capacity before
+// the loop surfaces it as a stall.  Long enough that ordinary saturation (a
+// queue draining through a small pool) never trips it, short enough that a
+// genuinely wedged cluster is visible well inside an on-call window.
+const defaultProgressDeadline = 10 * time.Minute
+
+// capacityState is one task's capacity-rejection bookkeeping.
+type capacityState struct {
+	// delay is the cooldown applied after the most recent rejection; it doubles
+	// per consecutive rejection up to capacityBackoffMax.
+	delay time.Duration
+	// retryAt is when the task becomes dispatchable again.
+	retryAt time.Time
+	// firstAt is the first rejection of the current unaccepted streak — the
+	// clock the progress deadline measures.  Cleared on acceptance.
+	firstAt time.Time
+	// stalledAt is when the stall was last surfaced, so one wedged task logs
+	// and counts once per deadline window instead of once per attempt.
+	stalledAt time.Time
+}
+
 // NewDispatchLoop constructs a DispatchLoop from cfg.
 func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.Interval <= 0 {
@@ -219,11 +274,17 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.APIPort <= 0 {
 		cfg.APIPort = 8080
 	}
+	if cfg.ProgressDeadline <= 0 {
+		cfg.ProgressDeadline = defaultProgressDeadline
+	}
 	l := &DispatchLoop{
-		cfg:             cfg,
-		benchedPeers:    make(map[string]time.Time),
-		rateLimitDelays: make(map[uuid.UUID]map[uuid.UUID]time.Time),
-		lastReclaim:     make(map[uuid.UUID]time.Time),
+		cfg:                 cfg,
+		benchedPeers:        make(map[string]time.Time),
+		rateLimitDelays:     make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		lastReclaim:         make(map[uuid.UUID]time.Time),
+		capacityBackoff:     make(map[uuid.UUID]map[uuid.UUID]*capacityState),
+		capacityBackoffBase: capacityBackoffBase,
+		capacityBackoffMax:  capacityBackoffMax,
 	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
 	// own base URL is built identically (and honors the PeerBaseURL test hook).
@@ -303,7 +364,7 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		log.Warn("dispatch loop: OwnedRunsWithGenerations failed", "error", err)
 		return
 	}
-	l.forgetUnownedReclaims(ownedRuns)
+	l.forgetUnownedRuns(ownedRuns)
 	if len(ownedRuns) == 0 {
 		return // nothing to do
 	}
@@ -349,6 +410,23 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 			"run_id", runID, "error", err)
 		return
 	}
+	if len(tasks) == 0 {
+		return
+	}
+
+	// Hold back rows still inside their capacity cooldown.  The SQL lane keeps
+	// re-reading them because a rejected dispatch leaves the row `pending`, which
+	// is exactly the spin the cooldown exists to damp; the filter is in-memory,
+	// so a parked row costs nothing beyond the poll that was happening anyway.
+	now := time.Now().UTC()
+	dispatchable := tasks[:0]
+	for i := range tasks {
+		if l.capacityDelayed(runID, tasks[i].ID, now) {
+			continue
+		}
+		dispatchable = append(dispatchable, tasks[i])
+	}
+	tasks = dispatchable
 	if len(tasks) == 0 {
 		return
 	}
@@ -445,6 +523,12 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		if l.rateLimitDelayed(runID, dt.ExecutionRef(), now) {
 			continue
 		}
+		// Same per-row reasoning for a worker that had no free slot: the ready
+		// queue is the owner's own memory, so without this the task is re-posted
+		// on every single tick for as long as the pool stays full.
+		if l.capacityDelayed(runID, dt.ExecutionRef(), now) {
+			continue
+		}
 		filtered = append(filtered, dt)
 	}
 	ready = filtered
@@ -531,17 +615,36 @@ func (l *DispatchLoop) dueForReclaim(runID uuid.UUID, now time.Time) bool {
 	return true
 }
 
-// forgetUnownedReclaims drops reclaim clocks for runs this node no longer owns,
-// so the map tracks the owned set rather than growing for the life of the
-// process.
-func (l *DispatchLoop) forgetUnownedReclaims(owned map[uuid.UUID]int64) {
+// forgetUnownedRuns drops per-run loop state for runs this node no longer owns,
+// so the maps track the owned set rather than growing for the life of the
+// process.  Every per-run map the loop keeps is swept here: a run that finishes
+// or moves to another owner never comes back to clean up after itself, and a
+// task parked by a rate limit or a capacity rejection when that happened would
+// otherwise leave its entry behind forever.
+func (l *DispatchLoop) forgetUnownedRuns(owned map[uuid.UUID]int64) {
 	l.reclaimMu.Lock()
-	defer l.reclaimMu.Unlock()
 	for runID := range l.lastReclaim {
 		if _, still := owned[runID]; !still {
 			delete(l.lastReclaim, runID)
 		}
 	}
+	l.reclaimMu.Unlock()
+
+	l.capacityMu.Lock()
+	for runID := range l.capacityBackoff {
+		if _, still := owned[runID]; !still {
+			delete(l.capacityBackoff, runID)
+		}
+	}
+	l.capacityMu.Unlock()
+
+	l.rateLimitDelayMu.Lock()
+	for runID := range l.rateLimitDelays {
+		if _, still := owned[runID]; !still {
+			delete(l.rateLimitDelays, runID)
+		}
+	}
+	l.rateLimitDelayMu.Unlock()
 }
 
 // acquireRateLimit resolves and consumes the task's declared rate-limit budget.
@@ -635,10 +738,139 @@ func (l *DispatchLoop) rateLimitDelayed(runID, taskID uuid.UUID, now time.Time) 
 	return false
 }
 
+// noteCapacityRejection records that a worker refused this task for lack of
+// execution capacity and returns the cooldown now applied to it, plus whether
+// the task just crossed the progress deadline without ever having been
+// accepted (the caller surfaces that as a stall).
+//
+// The delay doubles per consecutive rejection from capacityBackoffBase to
+// capacityBackoffMax.  Note what the growth is NOT allowed to do: the entry is
+// cleared the moment a worker accepts the task (clearCapacityBackoff), and the
+// cap bounds the wait once capacity returns to one backoff step, so a task
+// never pays for a long-past burst.  While the delay is still under the tick
+// interval the task is retried every tick as before — which is what keeps a
+// multi-peer rotation trying other, possibly idle, peers early.
+func (l *DispatchLoop) noteCapacityRejection(runID, taskID uuid.UUID, now time.Time) (time.Duration, bool) {
+	now = now.UTC()
+	l.capacityMu.Lock()
+	defer l.capacityMu.Unlock()
+
+	tasks := l.capacityBackoff[runID]
+	if tasks == nil {
+		tasks = make(map[uuid.UUID]*capacityState)
+		l.capacityBackoff[runID] = tasks
+	}
+	st := tasks[taskID]
+	if st == nil {
+		st = &capacityState{}
+		tasks[taskID] = st
+	}
+
+	switch {
+	case st.delay <= 0:
+		st.delay = l.capacityBackoffBase
+	default:
+		st.delay *= 2
+	}
+	if st.delay > l.capacityBackoffMax {
+		st.delay = l.capacityBackoffMax
+	}
+	st.retryAt = now.Add(st.delay)
+	if st.firstAt.IsZero() {
+		st.firstAt = now
+	}
+
+	// Re-arm once per deadline window: a wedged task should be visible without
+	// re-logging on every attempt for as long as it stays wedged.
+	stalled := false
+	if now.Sub(st.firstAt) >= l.cfg.ProgressDeadline &&
+		(st.stalledAt.IsZero() || now.Sub(st.stalledAt) >= l.cfg.ProgressDeadline) {
+		st.stalledAt = now
+		stalled = true
+	}
+	return st.delay, stalled
+}
+
+// clearCapacityBackoff forgets a task's capacity bookkeeping.  Called when a
+// worker accepts the task: the next rejection then starts again at the base
+// delay and the progress-deadline clock restarts, because the task did make
+// progress.
+func (l *DispatchLoop) clearCapacityBackoff(runID, taskID uuid.UUID) {
+	l.capacityMu.Lock()
+	defer l.capacityMu.Unlock()
+	tasks := l.capacityBackoff[runID]
+	if tasks == nil {
+		return
+	}
+	delete(tasks, taskID)
+	if len(tasks) == 0 {
+		delete(l.capacityBackoff, runID)
+	}
+}
+
+// capacityDelayed reports whether a task is still inside its capacity cooldown.
+//
+// A lapsed entry is deliberately NOT deleted here: the retry it permits is the
+// next attempt of the same unaccepted streak, and dropping the state would
+// restart the schedule at the base delay every time — turning the exponential
+// backoff back into a fixed one-tick retry.  Acceptance (clearCapacityBackoff)
+// and losing the run (forgetUnownedRuns) are what remove entries.
+func (l *DispatchLoop) capacityDelayed(runID, taskID uuid.UUID, now time.Time) bool {
+	l.capacityMu.Lock()
+	defer l.capacityMu.Unlock()
+	tasks := l.capacityBackoff[runID]
+	if tasks == nil {
+		return false
+	}
+	st := tasks[taskID]
+	if st == nil {
+		return false
+	}
+	return st.retryAt.After(now.UTC())
+}
+
+// rejectionLabel maps a peer's rejection code onto the fixed label set
+// caesium_dispatch_rejected_total (and the stall counter) may carry.  An unknown
+// or absent code — an older peer, a body the client could not parse — collapses
+// to the historical worker_rejected bucket, so a peer can never widen the
+// metric's cardinality and a mixed-version cluster still reports something
+// meaningful.
+func rejectionLabel(code string) string {
+	switch code {
+	case ReasonNoCapacity, ReasonTaskNotRunning, ReasonWrongWorker, ReasonAmbiguousTask, ReasonMalformed:
+		return code
+	default:
+		return DispatchReasonWorkerRejected
+	}
+}
+
 // postOne does the actual HTTP call + metric/log accounting for one dispatch.
 func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest, quarantined bool) {
+	// execRef is the row this dispatch addresses (instance for a fanned task,
+	// catalog task otherwise) — the identity RunState is keyed by and the key
+	// every per-task cooldown here uses.
+	execRef := dispatchTaskRef(req)
+
+	// The ready set was snapshotted at the top of the tick and this goroutine may
+	// have queued behind up to BatchSize others since.  A task that went terminal
+	// in that window (a cancel, or a fail-fast skip propagated from a sibling's
+	// failure) must not be posted: the worker either rejects it — a dispatch that
+	// could only ever be refused — or, if the owner's terminal row has not landed
+	// yet, claims it and actually executes work the owner has already resolved.
+	// The ready queue itself never holds a terminal task (RunState.markTerminal
+	// removes it and pushReady refuses to re-add one); this window between the
+	// snapshot and the post is the one place a resolved task can still go out.
+	if l.cfg.OwnerManager != nil && !l.cfg.OwnerManager.Dispatchable(runID, execRef) {
+		log.Debug("dispatch loop: skipping task that is no longer dispatchable",
+			"run_id", runID,
+			"task_id", req.TaskID,
+			"task_run_id", req.TaskRunID,
+		)
+		return
+	}
+
 	dispatchURL := p.baseURL + "/internal/dispatch"
-	accepted, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
+	accepted, reason, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
 	if postErr != nil {
 		if ctx.Err() != nil {
 			return
@@ -649,6 +881,7 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		log.Warn("dispatch loop: PostDispatch network error; benching peer",
 			"run_id", runID,
 			"task_id", req.TaskID,
+			"task_run_id", req.TaskRunID,
 			"peer", p.nodeID,
 			"cooldown", peerBenchCooldown,
 			"error", postErr,
@@ -659,16 +892,59 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		return
 	}
 	if !accepted {
-		log.Warn("dispatch loop: worker rejected dispatch",
-			"run_id", runID,
-			"task_id", req.TaskID,
-			"peer", p.nodeID,
-		)
+		// The rejection's own code is the metric's reason, so backpressure
+		// (no_capacity) is separable from a dispatch that was simply wrong
+		// (task_not_running, wrong_worker, …).  Both were previously bucketed
+		// as worker_rejected, which made a saturated pool and a stale claim
+		// indistinguishable on the dashboard — and made "how much is THIS
+		// workload being refused for capacity" unanswerable.
+		label := rejectionLabel(reason)
+		// Only a capacity rejection is backed off.  Every other rejection says
+		// this dispatch was wrong (wrong worker, claim lost, ambiguous identity),
+		// and those are answered by retrying immediately — the round-robin picks
+		// a different peer, or the owner's state has already moved on.
+		if reason == ReasonNoCapacity {
+			delay, stalled := l.noteCapacityRejection(runID, execRef, time.Now())
+			log.Warn("dispatch loop: worker had no capacity; backing task off",
+				"run_id", runID,
+				"task_id", req.TaskID,
+				"task_run_id", req.TaskRunID,
+				"peer", p.nodeID,
+				"retry_in", delay,
+			)
+			if stalled {
+				// Not a new task state: the task stays ready and dispatch keeps
+				// retrying.  This only makes the lack of progress loud, because a
+				// steady trickle of ordinary capacity rejections looks identical to
+				// one task that has been unable to start for the whole window.
+				log.Warn("dispatch loop: task has not been accepted by any worker within the progress deadline",
+					"run_id", runID,
+					"task_id", req.TaskID,
+					"task_run_id", req.TaskRunID,
+					"progress_deadline", l.cfg.ProgressDeadline,
+					"reason", ReasonNoCapacity,
+				)
+				if !quarantined {
+					metrics.DispatchStalledTotal.WithLabelValues(ReasonNoCapacity).Inc()
+				}
+			}
+		} else {
+			log.Warn("dispatch loop: worker rejected dispatch",
+				"run_id", runID,
+				"task_id", req.TaskID,
+				"task_run_id", req.TaskRunID,
+				"peer", p.nodeID,
+				"reason", label,
+			)
+		}
 		if !quarantined {
-			metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonWorkerRejected).Inc()
+			metrics.DispatchRejectedTotal.WithLabelValues(label).Inc()
 		}
 		return
 	}
+	// Accepted: the task made progress, so its backoff and progress-deadline
+	// clock both start from scratch if it ever comes back here.
+	l.clearCapacityBackoff(runID, execRef)
 	if !quarantined {
 		metrics.DispatchSentTotal.Inc()
 	}
@@ -679,15 +955,12 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		// RunState is keyed by instance identity for a fanned task; marking the
 		// catalog task would leave the instance on the ready queue and
 		// re-dispatch it every tick.
-		dispatched := req.TaskRunID
-		if dispatched == uuid.Nil {
-			dispatched = req.TaskID
-		}
-		l.cfg.OwnerManager.MarkDispatched(runID, dispatched, p.nodeID, req.Attempt, leaseMs)
+		l.cfg.OwnerManager.MarkDispatched(runID, execRef, p.nodeID, req.Attempt, leaseMs)
 	}
 	log.Debug("dispatch loop: task dispatched",
 		"run_id", runID,
 		"task_id", req.TaskID,
+		"task_run_id", req.TaskRunID,
 		"peer", p.nodeID,
 	)
 }

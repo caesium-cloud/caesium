@@ -59,7 +59,21 @@ const (
 	// either strands a claim inside a transaction or drives a legacy group-wide
 	// write.  Only an owner from BEFORE instance-addressed dispatch sends one.
 	ReasonAmbiguousTask = "ambiguous_task"
+	// ReasonNoCapacity rejects a dispatch the addressed worker has no free
+	// execution slot for.  It is deliberately distinct from the generic
+	// task_not_running 409: a capacity rejection says "ask me again later",
+	// every other rejection says "this dispatch was wrong".  The owner's
+	// dispatch loop backs the task off only for this one, so a task rejected
+	// for any other reason is still retried on the very next tick.
+	ReasonNoCapacity = "no_capacity"
 )
+
+// ErrNoCapacity is the sentinel a WorkerSubmitter returns when it has no free
+// execution slot for a dispatched task.  It lives here rather than in the
+// worker package because the handler must recognise it without importing the
+// worker (the worker imports this package); worker.ErrInboundFull is an alias
+// for it, so errors.Is answers true for either name.
+var ErrNoCapacity = errors.New("worker: no execution capacity for dispatched task")
 
 // Internal dispatch protocol versioning.
 //
@@ -503,10 +517,18 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		log.Warn("dispatch: worker could not accept task; rolled back claim",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
+			"task_run_id", req.TaskRunID,
 			"error", submitErr,
 		)
+		// Saturation is reported under its own code so the owner can back the
+		// task off instead of re-posting it every tick; anything else keeps the
+		// generic code and the owner's immediate retry.
+		code := ReasonTaskNotRunning
+		if errors.Is(submitErr, ErrNoCapacity) {
+			code = ReasonNoCapacity
+		}
 		writeJSON(w, http.StatusConflict, ErrorResponse{
-			Code:    ReasonTaskNotRunning,
+			Code:    code,
 			Message: "worker busy; task returned to dispatch pool",
 		})
 		return
@@ -806,13 +828,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 // PostDispatch sends a DispatchRequest to the target worker node and returns
-// whether the worker accepted (202) or rejected (409).  On rejection or
-// network error, the caller should fall back to writing the task to the DB
-// with claimed_by="" for ClaimNext recovery.
-func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequest) (bool, error) {
+// whether the worker accepted (202) or rejected (409), plus the rejection's
+// reason code when the worker supplied one (ErrorResponse.Code — e.g.
+// ReasonNoCapacity).  The reason is "" for an acceptance, for a worker that
+// answered without a structured body, and for a build predating the code (a
+// rolling upgrade simply gets the old undifferentiated retry behaviour).  On
+// rejection or network error, the caller should fall back to writing the task
+// to the DB with claimed_by="" for ClaimNext recovery.
+func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequest) (bool, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return false, fmt.Errorf("dispatch: marshal: %w", err)
+		return false, "", fmt.Errorf("dispatch: marshal: %w", err)
 	}
 
 	// Fail fast on an unreachable peer: a dispatch is cheap to retry on the next
@@ -824,23 +850,33 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 
 	httpReq, err := http.NewRequestWithContext(dialCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		return false, fmt.Errorf("dispatch: new request: %w", err)
+		return false, "", fmt.Errorf("dispatch: new request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := internalClient.Do(httpReq)
 	if err != nil {
-		return false, fmt.Errorf("dispatch: http: %w", err)
+		return false, "", fmt.Errorf("dispatch: http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode == http.StatusAccepted {
-		return true, nil
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return true, "", nil
 	}
-	// 409 or any non-202: worker rejected.
-	return false, nil
+	// 409 or any non-202: worker rejected.  Read the reason code so the caller
+	// can tell backpressure ("no capacity, ask later") from a rejection that
+	// says this dispatch itself was wrong.  A body that is missing, oversized,
+	// or not an ErrorResponse yields "" and the undifferentiated behaviour.
+	var rejection ErrorResponse
+	rejectBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	// Drain whatever the limit left behind so the connection stays reusable.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if readErr == nil {
+		_ = json.Unmarshal(rejectBody, &rejection)
+	}
+	return false, rejection.Code, nil
 }
 
 // GetCapabilities probes a peer's GET /internal/capabilities.

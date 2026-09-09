@@ -388,6 +388,7 @@ func start(cmd *cobra.Command, args []string) error {
 			"dispatch_interval", vars.RunOwnerDispatchInterval,
 			"dispatch_batch", vars.RunOwnerDispatchBatch,
 			"dispatch_deadline", vars.RunOwnerDispatchDeadline,
+			"dispatch_progress_deadline", vars.RunOwnerDispatchProgressDeadline,
 		)
 
 		// --- Phase A2: Executor-side dispatch loop ---
@@ -396,20 +397,21 @@ func start(cmd *cobra.Command, args []string) error {
 		// PostDispatch.  If PostDispatch returns false (worker rejected or network
 		// error), the task is left unclaimed and ClaimNext recovery picks it up.
 		dispatchLoop := dispatch.NewDispatchLoop(dispatch.DispatchLoopConfig{
-			NodeID:       vars.NodeAddress,
-			APIPort:      vars.Port,
-			InternalPort: vars.InternalPort,
-			Token:        token,
-			Interval:     vars.RunOwnerDispatchInterval,
-			BatchSize:    vars.RunOwnerDispatchBatch,
-			Deadline:     vars.RunOwnerDispatchDeadline,
-			LeaseTTL:     vars.RunLeaseTTL,
-			LeaseStore:   leaseStore,
-			Store:        runStore,
-			RateLimitDB:  db.Connection(),
-			RateLimiter:  ratelimit.NewLimiter(db.Connection()),
-			Peers:        dqliteDispatchPeerResolver(),
-			OwnerManager: ownerManager,
+			NodeID:           vars.NodeAddress,
+			APIPort:          vars.Port,
+			InternalPort:     vars.InternalPort,
+			Token:            token,
+			Interval:         vars.RunOwnerDispatchInterval,
+			BatchSize:        vars.RunOwnerDispatchBatch,
+			Deadline:         vars.RunOwnerDispatchDeadline,
+			ProgressDeadline: vars.RunOwnerDispatchProgressDeadline,
+			LeaseTTL:         vars.RunLeaseTTL,
+			LeaseStore:       leaseStore,
+			Store:            runStore,
+			RateLimitDB:      db.Connection(),
+			RateLimiter:      ratelimit.NewLimiter(db.Connection()),
+			Peers:            dqliteDispatchPeerResolver(),
+			OwnerManager:     ownerManager,
 		})
 		runAsync(func() {
 			log.Info("launching owner dispatch loop",

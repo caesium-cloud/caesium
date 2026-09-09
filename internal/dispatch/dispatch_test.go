@@ -245,9 +245,10 @@ func TestHandleDispatch_Fallback(t *testing.T) {
 		Deadline:        time.Now().Add(30 * time.Second),
 	}
 
-	accepted, err := PostDispatch(context.Background(), server.URL+"/internal/dispatch", testToken, req)
+	accepted, reason, err := PostDispatch(context.Background(), server.URL+"/internal/dispatch", testToken, req)
 	require.NoError(t, err)
 	require.False(t, accepted, "worker 409 should be surfaced as not-accepted so owner falls back to ClaimNext")
+	require.Empty(t, reason, "a 409 with no structured body carries no reason code")
 }
 
 // TestValidCompleteStatuses verifies the status allowlist.
@@ -469,6 +470,57 @@ func TestHandleDispatch_RejectsAndRollsBackWhenWorkerFull(t *testing.T) {
 	status, claimedBy := taskStatus(t, store, runID, taskID)
 	require.Equal(t, string(run.TaskStatusPending), status, "task must be returned to pending")
 	require.Equal(t, "", claimedBy, "claim must be released on rollback")
+
+	// A submit failure that is NOT saturation keeps the generic code, so the
+	// owner retries it immediately rather than backing the task off.
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, ReasonTaskNotRunning, body.Code)
+}
+
+// TestHandleDispatch_ReportsNoCapacityReason pins the wire half of the
+// capacity-backoff fix: a worker that refuses for lack of an execution slot must
+// say so under its own reason code.  Without it the owner cannot tell "the pool
+// is full, ask me later" from "this dispatch was wrong", and its only option is
+// to re-post the task on every tick.
+func TestHandleDispatch_ReportsNoCapacityReason(t *testing.T) {
+	store, _, h := setupHandler(t)
+	// The worker returns this exact sentinel (worker.ErrInboundFull is an alias
+	// for it), so this is the real submit failure, not a look-alike.
+	sub := &fakeSubmitter{err: ErrNoCapacity}
+	h = h.WithWorkerSubmitter(sub)
+
+	runID, taskID := seedPendingTaskRun(t, store)
+
+	req := DispatchRequest{
+		RunID:           runID,
+		TaskID:          taskID,
+		OwnerGeneration: 1,
+		Attempt:         1,
+		WorkerNode:      ownerNodeAddr,
+		OwnerBaseURL:    "http://10.0.0.1:8080",
+		Deadline:        time.Now().Add(5 * time.Minute),
+	}
+	w := postJSON(t, h.HandleDispatch, req)
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, ReasonNoCapacity, body.Code,
+		"saturation must be reported as no_capacity so the owner backs the task off")
+
+	// Still rolled back: a backed-off task must be dispatchable again later.
+	status, claimedBy := taskStatus(t, store, runID, taskID)
+	require.Equal(t, string(run.TaskStatusPending), status)
+	require.Equal(t, "", claimedBy)
+
+	// And the client half reads that code back off the wire.
+	server := httptest.NewServer(http.HandlerFunc(h.HandleDispatch))
+	t.Cleanup(server.Close)
+	accepted, reason, err := PostDispatch(context.Background(), server.URL, testToken, req)
+	require.NoError(t, err)
+	require.False(t, accepted)
+	require.Equal(t, ReasonNoCapacity, reason, "PostDispatch must surface the rejection code")
 }
 
 // TestHandleDispatch_RejectsWhenNoWorker verifies that a node without a worker
