@@ -8,7 +8,16 @@ export function holdSearch(
 
 export function parseHoldSkipReason(reason?: string) {
   if (!reason?.startsWith("dataset_hold:")) return null;
-  const [identity, hold] = reason.slice("dataset_hold:".length).split(" hold=");
+  const rawIdentity = reason.slice("dataset_hold:".length);
+  // The task error appends a UUID, while the run's legacy skip reason contains
+  // only the identity. Dataset names can themselves contain " hold=", so only
+  // the terminal, structurally valid hold suffix is metadata.
+  const suffix =
+    / hold=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
+      rawIdentity,
+    );
+  const identity = suffix ? rawIdentity.slice(0, suffix.index) : rawIdentity;
+  const hold = suffix?.[1];
   const slash = identity.indexOf("/");
   if (slash < 0 || !identity.slice(slash + 1)) return null;
   return {

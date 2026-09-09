@@ -15,7 +15,19 @@ vi.mock("@/lib/auth", () => ({
   withAuthHeaders: () => ({}),
 }));
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
+  Link: ({
+    children,
+    params,
+  }: {
+    children: ReactNode;
+    params?: Record<string, string>;
+  }) => (
+    <a
+      href={params?.runId ? `/jobs/${params.jobId}/runs/${params.runId}` : "#"}
+    >
+      {children}
+    </a>
+  ),
 }));
 
 const hold: DatasetHold = {
@@ -70,16 +82,14 @@ describe("hold release boundary", () => {
     },
   );
   it("requires a trimmed reason, preserves a real zero observation, and submits advisory assertion-kind tolerances", async () => {
-    const release = vi
-      .spyOn(api, "releaseDatasetHold")
-      .mockResolvedValue({
-        hold: {
-          ...hold,
-          status: "released",
-          released_by: "operator",
-          release_note: "seasonal",
-        },
-      });
+    const release = vi.spyOn(api, "releaseDatasetHold").mockResolvedValue({
+      hold: {
+        ...hold,
+        status: "released",
+        released_by: "operator",
+        release_note: "seasonal",
+      },
+    });
     show(<HoldPanel hold={hold} />);
     expect(screen.getByText(/Observed: 0/)).toBeVisible();
     const button = screen.getByRole("button", { name: "Release hold" });
@@ -119,15 +129,59 @@ describe("hold release boundary", () => {
   });
 });
 
-describe("identity and pagination", () => {
-  it("preserves the full slash and percent-containing name in a skipped task reason", () => {
+describe("hold producing-run evidence", () => {
+  it("keeps the opening run link and shows a later producer's run without an invented job", () => {
+    show(
+      <HoldPanel
+        hold={{ ...hold, last_breach_run_id: "different-producer-run" }}
+      />,
+    );
     expect(
-      parseHoldSkipReason("dataset_hold:/warehouse/orders%2Fraw hold=original"),
+      screen.getByRole("link", { name: "producer · run" }),
+    ).toHaveAttribute("href", "/jobs/producer/runs/run");
+    const latest = screen.getByTestId("hold-latest-breach-run");
+    expect(latest).toHaveTextContent("different-producer-run");
+    expect(latest.querySelector("a")).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "different-producer-run" }),
+    ).toBeNull();
+  });
+});
+
+describe("identity and pagination", () => {
+  const holdID = "47e69470-a0b9-49aa-a1b1-e343c71b1fa6";
+  it.each([
+    ["/warehouse/orders%2Fraw", "", "warehouse/orders%2Fraw"],
+    ["/orders hold=raw", "", "orders hold=raw"],
+    [
+      "tenant%2Fblue/warehouse/orders%2Fraw hold=source%26a",
+      "tenant%2Fblue",
+      "warehouse/orders%2Fraw hold=source%26a",
+    ],
+  ])(
+    "preserves identity %s in bare and UUID-suffixed reasons",
+    (identity, namespace, name) => {
+      expect(parseHoldSkipReason(`dataset_hold:${identity}`)).toEqual({
+        namespace,
+        name,
+        hold: undefined,
+      });
+      expect(
+        parseHoldSkipReason(`dataset_hold:${identity} hold=${holdID}`),
+      ).toEqual({ namespace, name, hold: holdID });
+    },
+  );
+  it("does not strip nonterminal or malformed hold suffixes", () => {
+    expect(
+      parseHoldSkipReason(`dataset_hold:/orders hold=${holdID} trailing`),
     ).toEqual({
       namespace: "",
-      name: "warehouse/orders%2Fraw",
-      hold: "original",
+      name: `orders hold=${holdID} trailing`,
+      hold: undefined,
     });
+    expect(parseHoldSkipReason("dataset_hold:/orders hold=not-a-uuid")).toEqual(
+      { namespace: "", name: "orders hold=not-a-uuid", hold: undefined },
+    );
     expect(parseHoldSkipReason("trigger rule not satisfied")).toBeNull();
   });
   it("pages exact-identity history without substituting a newer active hold", async () => {

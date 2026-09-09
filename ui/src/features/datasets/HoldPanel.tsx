@@ -113,17 +113,13 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
         hold.last_breach_run_id !== hold.held_by_run_id ? (
           <>
             <dt className="text-text-3">Latest breach run</dt>
-            <dd>
-              <Link
-                to="/jobs/$jobId/runs/$runId"
-                params={{
-                  jobId: hold.held_by_job_id,
-                  runId: hold.last_breach_run_id,
-                }}
-                className="text-cyan-glow hover:underline"
-              >
-                {hold.last_breach_run_id}
-              </Link>
+            <dd
+              className="break-all font-mono"
+              data-testid="hold-latest-breach-run"
+            >
+              {/* The latest occurrence may come from a different producer.
+                  The API only supplies its run ID, not its owning job ID. */}
+              {hold.last_breach_run_id}
             </dd>
           </>
         ) : null}

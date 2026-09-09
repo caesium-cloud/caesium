@@ -43,3 +43,21 @@ it("releases the explicit hold ID using the existing authenticated request path"
     }),
   });
 });
+
+it("encodes reserved namespace and dataset characters on separate axes", async () => {
+  await api.getDatasetHolds({
+    namespace: "tenant/blue%2F",
+    name: "orders hold=raw%2F",
+  });
+  const url = new URL(fetchMock.mock.calls[0][0], "http://localhost");
+  expect(url.searchParams.get("namespace")).toBe("tenant/blue%2F");
+  expect(url.searchParams.get("name")).toBe("orders hold=raw%2F");
+  await api.getDatasetMetrics(
+    "tenant/blue%2F",
+    "orders hold=raw%2F",
+    "rowCount",
+  );
+  expect(fetchMock.mock.calls[1][0]).toBe(
+    "/v1/datasets/tenant%2Fblue%252F/orders%20hold%3Draw%252F/metrics?metric=rowCount&limit=200",
+  );
+});
