@@ -57,6 +57,35 @@ type ListResult struct {
 	Offset    int               `json:"offset"`
 }
 
+// pendingApprovalSubquery is the `needs_approval` predicate: a correlated EXISTS
+// against the incident's ApprovalRequest rows.
+//
+// It deliberately does NOT filter on `incidents.status = awaiting_approval`,
+// which is what this used to do. The question the feed answers is "does a human
+// still owe a decision here", and that is a property of the approval ROWS, not
+// of the incident's status column — the two can legitimately disagree:
+//
+//   - an incident can hold MORE THAN ONE pending ApprovalRequest (a second tier-3
+//     proposal finds the incident already parked, so parkAwaitingApprovalTx is a
+//     no-op while the approval row is still created). Deciding one of them used to
+//     advance the incident and evict every remaining approval from this feed — the
+//     second decision was still valid and pending in the database, but no operator
+//     surface listed it (#417);
+//   - a human can take an incident over (escalate, close) while an approval is
+//     still pending, which likewise hides an outstanding decision.
+//
+// Expiry is not part of the predicate: nothing auto-expires an ApprovalRequest
+// today (ExpiresAt is advisory), so a stale-but-pending request is still a
+// decision a human owes — surfacing it is the point of the feed. The decision
+// gate in decide() uses the same definition, so the feed and the status machine
+// can never disagree about what "still pending" means.
+func pendingApprovalSubquery(db *gorm.DB) *gorm.DB {
+	return db.Model(&models.ApprovalRequest{}).
+		Select("1").
+		Where("approval_requests.incident_id = incidents.id").
+		Where("approval_requests.decision = ?", models.ApprovalDecisionPending)
+}
+
 // List returns a bounded, paginated, filtered slice of incidents newest-first.
 func (s *Service) List(p ListParams) (*ListResult, error) {
 	limit := p.Limit
@@ -79,7 +108,7 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		q = q.Where("job_id = ?", *p.JobID)
 	}
 	if p.NeedsApproval {
-		q = q.Where("status = ?", models.IncidentStatusAwaitingApproval)
+		q = q.Where("EXISTS (?)", pendingApprovalSubquery(s.db.WithContext(s.ctx)))
 	}
 
 	var total int64

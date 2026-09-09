@@ -33,11 +33,14 @@ import (
 // is the approvals service's conditional `decision = pending` update.
 var ErrActionNotApproved = errors.New("incident: action is not approved")
 
-// N-3 (not built): a SECOND pending approval on one incident becomes unlistable
-// once the first is decided — deciding moves the incident out of
-// awaiting_approval, and the approvals feed lists what is parked there. Today
-// nothing creates two (a proposal parks the incident and the session ends), but
-// a future concurrent-session cap above 1 would. Filed as a follow-up.
+// A SECOND pending approval on one incident is a supported shape: parking is a
+// no-op when the incident is already parked (see parkAwaitingApprovalTx), so a
+// later tier-3 proposal adds its own ApprovalRequest under one
+// awaiting_approval status. Both ends of the operator surface are keyed off the
+// approval ROWS rather than that status, so neither request can be stranded:
+// `needs_approval` is an EXISTS over pending rows, and the decision transaction
+// keeps the incident parked until every one of them is decided
+// (api/rest/service/incident, #417).
 //
 // ErrIncidentNotApprovable is returned when a tier-3 proposal is made against an
 // incident that cannot be parked in awaiting_approval — it is terminal, or a
@@ -56,9 +59,9 @@ const approvalExpiry = 24 * time.Hour
 // incident in awaiting_approval, and announces it on the event stream.
 //
 // The row and the parking are ONE TRANSACTION, and the parking is the gate. A
-// pending ApprovalRequest is only reachable through its incident: the approvals
-// feed lists what is parked in awaiting_approval, and the decide endpoint
-// advances the incident out of it. So an approval that commits while its
+// pending ApprovalRequest is only reachable through its incident: the operator
+// feed lists incidents that still owe a decision, and the decide endpoint is
+// addressed by incident id. So an approval that commits while its
 // incident stays terminal — or races ahead into another state — is invisible
 // forever: no feed shows it, no human can decide it, and the proposal it stands
 // for silently never happens. Creating it first and parking best-effort (what

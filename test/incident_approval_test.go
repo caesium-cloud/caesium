@@ -767,3 +767,177 @@ func (s *IntegrationTestSuite) TestIncidentApplyJobdefPatchCannotEditItsOwnPolic
 			"the agent must not have widened its own allowlist")
 	}
 }
+
+// TestIncidentApprovalSecondPendingRequestStaysDecidable is #417: one incident
+// can owe TWO decisions at once, and deciding the first must not hide the second.
+//
+// A tier-3 proposal parks the incident in awaiting_approval; a LATER tier-3
+// proposal finds it already parked, so the park is a no-op while its own
+// ApprovalRequest is still created. Deciding the first request used to advance the
+// incident to triaging/escalated, and the operator feed — which filtered on the
+// incident's status — then stopped listing it. The second request was still
+// pending and still valid in the database with no surface that showed it.
+//
+// The scenario therefore drives BOTH decisions through the real CLI/REST surface
+// and asserts on the feed an operator actually reads, not on internal rows.
+func (s *IntegrationTestSuite) TestIncidentApprovalSecondPendingRequestStaysDecidable() {
+	s.requireAuthLane()
+
+	first := s.driveTier3SkipTaskProposal("approval-two-pending")
+
+	// A SECOND tier-3 proposal on the same, already-parked incident.
+	second := s.proposeSecondTier3SkipTask(first)
+	s.Require().NotEqual(first.approvalID, second.approvalID)
+
+	s.Require().True(s.approvalFeedContains(first.jobID, first.incidentID),
+		"an incident with two pending approvals must be in the needs_approval feed")
+
+	// --- Decide the FIRST request ------------------------------------------
+	out, err := s.runCLIStdout(s.incidentCLIArgs("approve", first.incidentID,
+		"--approval", first.approvalID, "--reason", "the gate step is non-essential today")...)
+	s.Require().NoError(err, "caesium incident approve failed:\n%s", out)
+
+	var decided approvalRequest
+	s.Require().NoError(json.Unmarshal([]byte(out), &decided))
+	s.Require().Equal("approved", decided.Decision)
+
+	// The incident still owes a human a decision, so it must still READ as one:
+	// parked, and present in the feed operators use to find approvals.
+	detail := s.incidentDetail(first.incidentID)
+	s.Require().Equal("awaiting_approval", detail.Incident.Status,
+		"an incident with another pending approval must stay parked, not advance to triaging")
+	s.Require().Equal("pending", s.approvalDecisionByID(detail, second.approvalID),
+		"the undecided approval must still be pending")
+
+	s.Require().True(s.approvalFeedContains(first.jobID, first.incidentID),
+		"deciding one of two approvals must not drop the incident from needs_approval=true")
+	s.Require().Contains(s.approvalFeedIDsCLI(first.jobID), first.incidentID,
+		"`caesium incident list --needs-approval` must still list the incident")
+
+	// Keeping the incident parked must not have cost the approved action its
+	// execution: the effect is still observable on the run.
+	s.awaitTaskStatus(first.jobID, first.runID, "skipped", 30*time.Second)
+
+	// --- Decide the SECOND request ------------------------------------------
+	// Still decidable through the same surface, addressed by its own approval id.
+	out, err = s.runCLIStdout(s.incidentCLIArgs("reject", first.incidentID,
+		"--approval", second.approvalID, "--reason", "one skip is enough")...)
+	s.Require().NoError(err, "caesium incident reject failed:\n%s", out)
+
+	var refused approvalRequest
+	s.Require().NoError(json.Unmarshal([]byte(out), &refused))
+	s.Require().Equal("rejected", refused.Decision)
+
+	// The LAST decision advances the incident, with the same mapping a single
+	// approval has always had (reject → escalated), and the incident leaves the
+	// feed because nothing is owed any more.
+	final := s.incidentDetail(first.incidentID)
+	s.Require().Equal("escalated", final.Incident.Status,
+		"the last decision must advance the incident (reject → escalated)")
+	s.Require().False(s.approvalFeedContains(first.jobID, first.incidentID),
+		"a fully decided incident must leave the needs_approval feed")
+	s.Require().NotContains(s.approvalFeedIDsCLI(first.jobID), first.incidentID,
+		"`caesium incident list --needs-approval` must drop a fully decided incident")
+}
+
+// proposeSecondTier3SkipTask makes a second tier-3 proposal on the incident of an
+// existing proposal, reusing the same agent-session token, and returns the new
+// action + approval ids. The agent surface is the only way two pending approvals
+// legitimately exist, so the scenario creates them the way production would
+// rather than by seeding rows.
+func (s *IntegrationTestSuite) proposeSecondTier3SkipTask(first tier3Proposal) tier3Proposal {
+	s.T().Helper()
+
+	status, body := s.postWithToken(
+		fmt.Sprintf("%s/v1/agent/incidents/%s/actions", s.caesiumURL, first.incidentID),
+		first.agentToken,
+		map[string]any{
+			"type": "skip_task",
+			"params": map[string]any{
+				"task_name": "gate",
+				"reason":    "second proposal: skip the gate step for today's vendor outage",
+			},
+		})
+	s.Require().Equal(http.StatusAccepted, status, string(body))
+
+	var proposal struct {
+		Action      approvalAction `json:"action"`
+		Disposition string         `json:"disposition"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &proposal))
+	s.Require().Equal("awaiting_approval", proposal.Disposition)
+	s.Require().NotEqual(first.actionID, proposal.Action.ID)
+
+	// A second proposal onto an already-parked incident must create its OWN
+	// approval row (the park itself is the no-op).
+	detail := s.incidentDetail(first.incidentID)
+	s.Require().Equal("awaiting_approval", detail.Incident.Status)
+
+	out := first
+	out.actionID = proposal.Action.ID
+	out.approvalID = ""
+	for _, a := range detail.Approvals {
+		if a.ActionID == proposal.Action.ID && a.Decision == "pending" {
+			out.approvalID = a.ID
+			break
+		}
+	}
+	s.Require().NotEmpty(out.approvalID,
+		"a second tier-3 proposal must create its own pending ApprovalRequest (action %s)", proposal.Action.ID)
+	return out
+}
+
+// approvalDecisionByID reads one approval's decision off the incident timeline.
+func (s *IntegrationTestSuite) approvalDecisionByID(detail approvalDetail, approvalID string) string {
+	s.T().Helper()
+	for _, a := range detail.Approvals {
+		if a.ID == approvalID {
+			return a.Decision
+		}
+	}
+	s.T().Fatalf("approval %s is not on the incident timeline", approvalID)
+	return ""
+}
+
+// approvalFeedContains reports whether the needs_approval feed lists an incident.
+// It is scoped to the scenario's job so a lane full of other incidents cannot
+// push the answer off the first page.
+func (s *IntegrationTestSuite) approvalFeedContains(jobID, incidentID string) bool {
+	s.T().Helper()
+
+	var list approvalIncidentList
+	s.getJSON(fmt.Sprintf("/v1/incidents?needs_approval=true&job_id=%s&limit=200", jobID), &list)
+	for _, inc := range list.Incidents {
+		if inc.ID == incidentID {
+			return true
+		}
+	}
+	return false
+}
+
+// approvalFeedIDsCLI is the same feed read through `caesium incident list
+// --needs-approval`, with stdout captured separately from stderr so a leaked log
+// line cannot make the parse pass by accident.
+func (s *IntegrationTestSuite) approvalFeedIDsCLI(jobID string) []string {
+	s.T().Helper()
+
+	args := []string{"incident", "list", "--needs-approval", "--job-id", jobID,
+		"--limit", "200", "--json", "--server", s.caesiumURL}
+	if key := firstEnv("CAESIUM_INCIDENT_API_KEY", "CAESIUM_API_KEY", "CAESIUM_E2E_AUTH_ADMIN_KEY"); key != "" {
+		args = append(args, "--api-key", key)
+	}
+
+	out, err := s.runCLIStdout(args...)
+	s.Require().NoError(err, "caesium incident list failed:\n%s", out)
+	s.Require().True(json.Valid([]byte(out)),
+		"caesium incident list stdout was not clean JSON:\n%s", out)
+
+	var list approvalIncidentList
+	s.Require().NoError(json.Unmarshal([]byte(out), &list))
+
+	ids := make([]string, 0, len(list.Incidents))
+	for _, inc := range list.Incidents {
+		ids = append(ids, inc.ID)
+	}
+	return ids
+}
