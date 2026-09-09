@@ -38,6 +38,9 @@ import (
 //  3. A job with no remediation block at all falls back to the deployment
 //     default profile: that is what "default profile" means, and the job has
 //     expressed no policy to override it.
+//  4. Finally the incident's own failure class narrows the result
+//     (Playbook.ForClass), so `autonomy.perClass.<class>` is enforced — and the
+//     agent's brief shows the same narrowed policy, because both come from here.
 //
 // Every failure fails CLOSED, with the severity matched to what was lost:
 //
@@ -49,7 +52,7 @@ import (
 //     widening direction.
 func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defaultProfile string) Playbook {
 	var inc models.Incident
-	if err := db.WithContext(ctx).Select("id", "job_id").First(&inc, "id = ?", incidentID).Error; err != nil {
+	if err := db.WithContext(ctx).Select("id", "job_id", "class").First(&inc, "id = ?", incidentID).Error; err != nil {
 		log.Warn("incident: could not load incident for playbook; failing closed",
 			"incident_id", incidentID, "error", err)
 		return Playbook{}
@@ -63,7 +66,7 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 	}
 
 	if len(job.Remediation) == 0 {
-		return defaultProfilePlaybook(ctx, db, incidentID, defaultProfile)
+		return defaultProfilePlaybook(ctx, db, incidentID, defaultProfile).ForClass(inc.Class)
 	}
 
 	var block schema.MetadataRemediation
@@ -80,7 +83,10 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 
 	// The job's own autonomy block is a valid playbook document (both are
 	// pkg/jobdef.RemediationAutonomy's shape), so the shared decoder reads it.
-	return base.Override(DecodePlaybook(job.Remediation))
+	// ForClass then folds in the narrowing declared for THIS incident's failure
+	// class, which is why the resolver — not the executor — is where the class
+	// enters: the enforced policy and the agent's brief must be the same object.
+	return base.Override(DecodePlaybook(job.Remediation)).ForClass(inc.Class)
 }
 
 // ResolveProfile returns the AgentProfile an incident's job names, falling back
@@ -155,6 +161,11 @@ func defaultProfilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UU
 // A nil Allow (unconfigured) is omitted; a configured-but-empty one is rendered
 // as `[]`, because "grants nothing" and "not configured" are different policies
 // and the agent must be able to tell them apart.
+//
+// A resolved playbook has no PerClass left (ResolvePlaybook consumes it through
+// ForClass), but an unresolved one is rendered WITH its per-class constraints
+// rather than silently flattened — this function's contract is to show the whole
+// policy, and a hidden narrowing is the same lie as a hidden allow-list.
 func (pb Playbook) Document() json.RawMessage {
 	autonomy := map[string]any{}
 	if pb.Allow != nil {
@@ -165,6 +176,13 @@ func (pb Playbook) Document() json.RawMessage {
 	}
 	if pb.ParamOverrides != nil {
 		autonomy["paramOverrides"] = pb.ParamOverrides
+	}
+	if pb.PerClass != nil {
+		classes := make(map[string]any, len(pb.PerClass))
+		for class, constraint := range pb.PerClass {
+			classes[class] = constraint.classDocument()
+		}
+		autonomy["perClass"] = classes
 	}
 	encoded, err := json.Marshal(map[string]any{"autonomy": autonomy})
 	if err != nil {

@@ -400,8 +400,10 @@ metadata:
       allow: [auto_retry_backoff, snooze_until_cron, notify, suppress_downstream_alerts]
       paramOverrides:                       # whitelist rerun_with_params values per trigger.defaultParams key
         mode: [full, incremental]
-      perClass:                             # narrow the allow-list for a specific class
-        auth_failure: {allow: [notify, escalate]}
+      perClass:                             # narrow the policy for a specific failure class
+        auth_failure:
+          allow: [notify, escalate]         # intersects with autonomy.allow above
+          requireApproval: [notify]         # unions with autonomy.requireApproval
       requireApproval: [apply_jobdef_patch, override_schema_gate]
     escalation: {channel: data-oncall, after: 2h}
 trigger:
@@ -412,7 +414,13 @@ trigger:
 
 - `profile` (required) names a server-side `AgentProfile`. Offline `caesium job lint` cannot verify it and emits a scope note; server-side lint (`POST /v1/jobdefs/lint`) and apply verify it.
 - `classes` (at least one) selects the failure classes the policy applies to: `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`.
-- `autonomy.allow`, `autonomy.perClass[].allow`, and `autonomy.requireApproval` accept remediation action names: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`.
+- `autonomy.allow`, `autonomy.perClass[].allow`, `autonomy.perClass[].requireApproval`, and `autonomy.requireApproval` accept remediation action names: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`.
+- `autonomy.perClass.<class>` narrows the policy for one failure class. Keys must name a known failure class (`caesium job lint` rejects anything else); each value takes `allow`, `paramOverrides`, and `requireApproval`. **A per-class block is a constraint, never a grant** — the server merges it over the resolved policy (this job block over its `AgentProfile` playbook) *before* deciding the action's tier, and it can only remove permissions relative to both:
+  - `allow` **intersects**: an action must be permitted by the surrounding policy *and* named in the class block. When the surrounding `allow` is absent (so tier defaults govern), only tier 0/1 actions survive, and a class block therefore cannot grant a tier-2 action.
+  - `requireApproval` **unions**: approval gates are additive, so a class block can send more actions to a human but can never drop a gate the job or profile imposed.
+  - `paramOverrides` takes the **most restrictive**: only keys present in both survive, with only the values both permit; an absent surrounding whitelist still denies every key.
+  - Anything the class block does not mention is inherited unchanged, and a failure class with no entry uses the surrounding policy as-is.
+  - An omitted list and an explicitly empty one are **different policies**, at both levels: omitting `allow` leaves autonomy unconfigured (each action's own tier decides), while `allow: []` configures an allow-list that grants nothing. Both survive `caesium job apply` intact, so `perClass.<class>.allow: []` is how you say "this failure class gets no autonomous action at all".
 - `escalation` forces a hand-off to a NotificationChannel when the incident is unresolved within `after`; at least one of `channel`/`after` is required when `escalation` is set.
 
 ## Volumes And Workload Identity
