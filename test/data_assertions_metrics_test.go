@@ -39,7 +39,8 @@ func (s *IntegrationTestSuite) runCLIWithDataAssertions(args ...string) {
 //
 // It reads each metric through GET /v1/datasets/:ns/:name/metrics and checks
 // task-run attribution against the public execution descriptor. This closes
-// the temporary catalog-read exception from Stream A.
+// the temporary catalog-read exception from Stream A, including on Kubernetes:
+// this HTTP-only scenario no longer inherits the direct-catalog lane skip.
 func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 	s.requireDataAssertionsLane()
 
@@ -72,7 +73,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsMetricsPersisted() {
 		s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"/metrics?"+url.Values{"metric": {metric}}.Encode(), &result)
 		s.Require().Len(result.Series, 1)
 		row := result.Series[0]
-		byMetric[metric] = row
+		byMetric[metric] = row.DatasetMetric
 		s.Equal(dataset, row.Name)
 		s.Equal("", row.Namespace, "namespace is reserved in v1")
 		s.Equal(metric, row.Metric)

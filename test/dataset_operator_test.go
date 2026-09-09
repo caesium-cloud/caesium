@@ -61,6 +61,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 	s.Equal("rowCount", metric.Metric)
 	s.Equal(2000.0, metric.Series[0].Value)
 	s.False(metric.Series[0].Violated)
+	s.True(metric.Series[0].InBaseline)
 	s.Equal(2000.0, metric.Baseline.Median)
 	s.Equal(2000.0, metric.Baseline.P10)
 	s.Equal(2000.0, metric.Baseline.P90)
@@ -85,6 +86,11 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 	s.Require().NotNil(detail.Hold)
 	s.Equal(hold.ID, detail.Hold.ID)
 	s.Equal("active", detail.HoldStatus)
+	var metadata datasetsvc.Detail
+	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"?include_hold=false", &metadata)
+	s.Nil(metadata.Hold)
+	s.Empty(metadata.HoldStatus)
+	s.Equal(detail.State, metadata.State)
 	var listed datasetsvc.ListResult
 	s.fetchDatasetOperatorJSON("/v1/datasets?limit=200", &listed)
 	found := false
@@ -98,13 +104,50 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 		}
 	}
 	s.True(found, "the dataset must remain in the existing registry feed")
+	// Decode the observed payload without a typed projection so unexpected
+	// heavyweight JSON cannot disappear during unmarshalling and hide a regression.
+	var rawList struct {
+		Datasets []map[string]json.RawMessage `json:"datasets"`
+	}
+	s.fetchDatasetOperatorJSON("/v1/datasets?limit=200", &rawList)
+	for _, row := range rawList.Datasets {
+		if string(row["name"]) != strconv.Quote(dataset) {
+			continue
+		}
+		var summary map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(row["hold"], &summary))
+		s.Contains(summary, "id")
+		s.NotContains(summary, "violations")
+		s.NotContains(summary, "impact")
+	}
 
 	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"/metrics?metric=rowCount", &metric)
 	s.Require().Len(metric.Series, 2)
 	s.Equal(12.0, metric.Series[1].Value)
 	s.True(metric.Series[1].Violated)
+	s.False(metric.Series[1].InBaseline)
 	s.Equal(1, metric.Baseline.Samples, "a held violating sample must remain outside the clean baseline")
 	s.Equal([]float64{2000}, metric.Baseline.Values)
+	for offset := 0; offset < 2; offset++ {
+		stdout, err := s.runCLIStdout("dataset", "metrics", dataset, "--metric", "rowCount", "--limit", "1", "--offset", strconv.Itoa(offset), "--json", "--server", s.caesiumURL)
+		s.Require().NoError(err)
+		var page datasetsvc.MetricsResult
+		s.Require().NoError(json.Unmarshal([]byte(stdout), &page))
+		s.EqualValues(2, page.Total)
+		s.Equal(1, page.Limit)
+		s.Equal(offset, page.Offset)
+		s.Require().Len(page.Series, 1)
+		s.Equal(metric.Series[1-offset].ID, page.Series[0].ID)
+		s.Equal(offset == 1, page.Series[0].InBaseline)
+		s.Equal([]float64{2000}, page.Baseline.Values, "paging raw history must not page the clean baseline")
+		stdout, err = s.runCLIStdout("dataset", "list", "--limit", "1", "--offset", strconv.Itoa(offset), "--json", "--server", s.caesiumURL)
+		s.Require().NoError(err)
+		var states datasetsvc.ListResult
+		s.Require().NoError(json.Unmarshal([]byte(stdout), &states))
+		s.Equal(1, states.Limit)
+		s.Equal(offset, states.Offset)
+		s.GreaterOrEqual(states.Total, int64(1))
+	}
 
 	for _, args := range [][]string{
 		{"dataset", "holds", "--json"},
@@ -161,7 +204,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 			s.Empty(page.Holds)
 		}
 	}
-	for _, path := range []string{"/v1/datasets/holds?status=bogus", datasetOperatorPath(dataset) + "/metrics", datasetOperatorPath(dataset) + "/metrics?metric=dataset"} {
+	for _, path := range []string{"/v1/datasets/holds?status=bogus", datasetOperatorPath(dataset) + "/metrics", datasetOperatorPath(dataset) + "/metrics?metric=dataset", datasetOperatorPath(dataset) + "/metrics?metric=rowCount&limit=bad", datasetOperatorPath(dataset) + "?include_hold=bad"} {
 		resp, err := s.doJSONRequest(http.MethodGet, s.caesiumURL+path, nil)
 		s.Require().NoError(err)
 		resp.Body.Close()
@@ -187,6 +230,28 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset), &after)
 	s.Empty(after.HoldStatus)
 	s.Nil(after.Hold)
+}
+
+// An unviolated metric from a failed task remains visible but is not clean
+// baseline evidence. Drive the evaluator and task completion before reading it.
+func (s *IntegrationTestSuite) TestDataAssertionsDatasetMetricBaselineMembership() {
+	s.requireDataAssertionsLane()
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("integration-operator-membership-%d", suffix)
+	dataset := fmt.Sprintf("warehouse/membership-%d", suffix)
+	step, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": 12, "dedup_ratio": 0.01})
+	s.Require().NoError(err)
+	producer := s.applyAssertionsJob(alias, assertionsEvaluatorManifest(alias, dataset, step,
+		"            rowCount: {min: 1000}", "fail"))
+	runID := s.triggerRun(producer.ID)
+	run := s.awaitRun(producer.ID, runID, runTimeout)
+	s.Require().Equal("failed", run.Status)
+	var result datasetsvc.MetricsResult
+	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"/metrics?metric=dedup_ratio", &result)
+	s.Require().Len(result.Series, 1)
+	s.False(result.Series[0].Violated)
+	s.False(result.Series[0].InBaseline, "failed-run samples must not appear in the clean baseline")
+	s.Equal(0, result.Baseline.Samples)
 }
 
 // TestHoldDatasetCLIReleaseReopensTheGate runs visibly on the auth lane. The

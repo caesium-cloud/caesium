@@ -86,8 +86,10 @@ export function DatasetsPage() {
     queries: rows.map((state) => {
       const namespace = datasetNamespace(state);
       return {
-        queryKey: ["datasets", "detail", namespace, state.name],
-        queryFn: () => api.getDataset(namespace, state.name),
+        // List already batches hold summaries. These calls only supply SLO and
+        // producer metadata; keep their cache separate from full selected detail.
+        queryKey: ["datasets", "metadata", namespace, state.name],
+        queryFn: () => api.getDataset(namespace, state.name, { includeHold: false }),
         enabled: listQuery.isSuccess,
         staleTime: 30_000,
       };

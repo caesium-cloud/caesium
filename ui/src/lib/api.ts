@@ -1219,8 +1219,14 @@ export const api = {
     });
     return request<DatasetListResponse>(`/datasets${query ? `?${query}` : ""}`);
   },
-  getDataset: (namespace: string | undefined, name: string) =>
-    request<DatasetDetail>(datasetPath(namespace, name)),
+  getDataset: (
+    namespace: string | undefined,
+    name: string,
+    options: { includeHold?: boolean } = {},
+  ) => {
+    const query = queryString({ include_hold: options.includeHold });
+    return request<DatasetDetail>(`${datasetPath(namespace, name)}${query ? `?${query}` : ""}`);
+  },
   getDatasetDerivations: (
     namespace: string | undefined,
     name: string,
