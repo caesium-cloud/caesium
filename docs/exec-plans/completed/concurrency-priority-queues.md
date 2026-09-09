@@ -252,6 +252,11 @@ path), folded into the **nine** as-built corrections in the Source-Of-Truth Note
 **P1**) are done. Fairness (per-namespace) remains deferred to Multi-Tenancy (§3.1).
 Follow-ups recorded: surface the `id`/stale-claimed rows in the queue view, a single-deadline
 hardening of the claim-order pending wait, and a focused cancelRunTx read optimization.
+**All three closed** by issue #396 / PR #457: the queue view now returns claimed rows
+annotated with a `claim_state`/`stale` pair that shares the reaper's own cutoff (CLI `STATE`
+column + a run-queue panel badge), the claim-order pending wait draws every rollback grace
+from one `internal/waitbudget` deadline, and `cancelRunTx` reads only the four values
+`cancelledRunInfo` needs instead of `job_runs.*`.
 
 ### Stream Status
 

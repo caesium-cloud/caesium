@@ -59,7 +59,7 @@ func NewDequeuer(cfg Config) *Dequeuer {
 	}
 	staleClaimThreshold := cfg.StaleClaimThreshold
 	if staleClaimThreshold <= 0 {
-		staleClaimThreshold = 2 * time.Minute
+		staleClaimThreshold = models.DefaultRunQueueClaimStaleAfter
 	}
 	return &Dequeuer{
 		db:                  cfg.DB,
@@ -123,7 +123,9 @@ func (d *Dequeuer) DrainOnce(ctx context.Context) error {
 }
 
 func (d *Dequeuer) reclaimStaleClaims(ctx context.Context) error {
-	cutoff := time.Now().UTC().Add(-d.staleClaimThreshold)
+	// Same cutoff the queue view classifies rows against, so a row the operator
+	// is shown as `stale` is exactly a row this reaper is about to release.
+	cutoff := models.RunQueueStaleCutoff(time.Now(), d.staleClaimThreshold)
 	result := d.db.WithContext(ctx).
 		Model(&models.RunQueue{}).
 		Where("claimed_by <> '' AND (claimed_at IS NULL OR claimed_at < ?)", cutoff).

@@ -32,6 +32,7 @@ import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { buildJobAuthoringManifest, formatCommandForDisplay } from "./job-detail-manifest";
+import { formatPriority, formatQueueParams, isStaleQueueRow, queuePendingReason } from "./queue-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
@@ -669,6 +670,7 @@ function RunQueuePanel({
   onCancel: (queueId: string) => void;
 }) {
   const hasRows = (rows?.length ?? 0) > 0;
+  const staleCount = rows?.filter(isStaleQueueRow).length ?? 0;
   if (!hasRows && !isLoading) {
     return null;
   }
@@ -680,9 +682,20 @@ function RunQueuePanel({
           <ListOrdered className="h-4 w-4 text-cyan-glow" />
           <h2 className="text-sm font-semibold text-text-1">Run queue</h2>
         </div>
-        <Badge variant="outline" className="font-mono text-[10px]">
-          {rows?.length ?? 0} pending
-        </Badge>
+        <div className="flex items-center gap-2">
+          {staleCount > 0 ? (
+            <Badge
+              variant="outline"
+              data-testid="run-queue-stale-count"
+              className="border-danger/35 bg-danger/10 font-mono text-[10px] text-danger"
+            >
+              {staleCount} stale
+            </Badge>
+          ) : null}
+          <Badge variant="outline" className="font-mono text-[10px]">
+            {rows?.length ?? 0} queued
+          </Badge>
+        </div>
       </div>
       {hasRows ? (
         <div className="divide-y rounded-md border bg-background/40">
@@ -699,6 +712,23 @@ function RunQueuePanel({
                   <Badge variant="outline" className="w-fit font-mono text-[10px]">
                     {formatPriority(row.priority)}
                   </Badge>
+                  {isStaleQueueRow(row) ? (
+                    <Badge
+                      variant="outline"
+                      data-testid="run-queue-stale-badge"
+                      className="w-fit border-danger/35 bg-danger/10 font-mono text-[10px] text-danger"
+                    >
+                      stale claim
+                    </Badge>
+                  ) : row.claim_state === "claimed" ? (
+                    <Badge
+                      variant="outline"
+                      data-testid="run-queue-claimed-badge"
+                      className="w-fit font-mono text-[10px] text-text-3"
+                    >
+                      claimed
+                    </Badge>
+                  ) : null}
                 </div>
                 <div className="mt-1 font-mono text-[10px] text-text-4">{shortId(row.id)}</div>
               </div>
@@ -1143,36 +1173,4 @@ function renderTriggerSummary(trigger: Trigger | null | undefined) {
       </div>
     </>
   );
-}
-
-function formatPriority(priority: number) {
-  switch (priority) {
-    case 1:
-      return "low";
-    case 3:
-      return "high";
-    default:
-      return "normal";
-  }
-}
-
-function formatQueueParams(params?: Record<string, string>) {
-  if (!params || Object.keys(params).length === 0) {
-    return "no params";
-  }
-  return Object.keys(params)
-    .sort()
-    .map((key) => `${key}=${params[key]}`)
-    .join(", ");
-}
-
-function queuePendingReason(row: RunQueueItem) {
-  const explicitReason = row.pending_reason ?? row.wait_reason ?? row.blocked_reason ?? row.reason;
-  if (row.blocked === true) {
-    return explicitReason ? `Blocked: ${explicitReason}` : "Blocked by scheduler policy";
-  }
-  if (explicitReason) {
-    return explicitReason;
-  }
-  return `Waiting for a run slot; ${formatPriority(row.priority)} priority at position #${row.position}`;
 }

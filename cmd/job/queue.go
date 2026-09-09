@@ -35,6 +35,9 @@ type queueItem struct {
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`
 	EnqueuedAt time.Time         `json:"enqueued_at"`
+	ClaimState string            `json:"claim_state"`
+	Stale      bool              `json:"stale"`
+	ClaimedBy  string            `json:"claimed_by,omitempty"`
 }
 
 var queueCmd = &cobra.Command{
@@ -141,18 +144,53 @@ func renderQueueTable(cmd *cobra.Command, rows []queueItem) {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "POSITION\tPRIORITY\tENQUEUED_AT\tPARAMS")
+	_, _ = fmt.Fprintln(tw, "POSITION\tPRIORITY\tSTATE\tENQUEUED_AT\tPARAMS")
+	stale := make([]string, 0, len(rows))
 	for _, row := range rows {
+		if row.Stale {
+			stale = append(stale, fmt.Sprintf("#%d held by %s", row.Position, formatQueueClaimHolder(row)))
+		}
 		_, _ = fmt.Fprintf(
 			tw,
-			"%d\t%s\t%s\t%s\n",
+			"%d\t%s\t%s\t%s\t%s\n",
 			row.Position,
 			runstorage.PriorityLabel(row.Priority),
+			formatQueueClaimState(row),
 			row.EnqueuedAt.UTC().Format(time.RFC3339),
 			formatQueueParams(row.Params),
 		)
 	}
 	_ = tw.Flush()
+
+	if len(stale) > 0 {
+		_, _ = fmt.Fprintf(
+			out,
+			"\n%d queued run(s) hold an expired claim (%s): the dequeuer that took them died mid-drain, "+
+				"so they wait on the leader's reaper rather than on capacity.\n",
+			len(stale),
+			strings.Join(stale, ", "),
+		)
+	}
+}
+
+// formatQueueClaimState renders the row's claim state as a single token, so the
+// table stays field-parseable; the holder of an expired claim is named in the
+// footer instead.
+func formatQueueClaimState(row queueItem) string {
+	state := strings.TrimSpace(row.ClaimState)
+	if state == "" {
+		// A server older than the claim-state field reports nothing; say so
+		// rather than silently calling every row pending.
+		return "-"
+	}
+	return state
+}
+
+func formatQueueClaimHolder(row queueItem) string {
+	if holder := strings.TrimSpace(row.ClaimedBy); holder != "" {
+		return holder
+	}
+	return "an unnamed dequeuer"
 }
 
 func formatQueueParams(params map[string]string) string {

@@ -4973,12 +4973,19 @@ func (s *Store) cancelRunTx(tx *gorm.DB, runID uuid.UUID, reason string) (*cance
 		return nil, nil, err
 	}
 
+	// Only four values feed cancelledRunInfo (and through it the cancellation
+	// metrics), so select exactly those columns rather than `job_runs.*`: the
+	// wide read dragged `params` and `replay_overrides` — unbounded JSON blobs —
+	// plus every other column across the Raft read path on a hot cancellation.
+	// Same statement, same transaction, same write connection; narrower row.
 	var infoRow struct {
-		models.JobRun
-		JobAlias string
+		JobID      uuid.UUID
+		StartedAt  time.Time
+		Quarantine bool
+		JobAlias   string
 	}
 	if err := tx.Table("job_runs").
-		Select("job_runs.*, jobs.alias as job_alias").
+		Select("job_runs.job_id, job_runs.started_at, job_runs.quarantine, jobs.alias as job_alias").
 		Joins("left join jobs on jobs.id = job_runs.job_id").
 		Where("job_runs.id = ?", runID).
 		Take(&infoRow).Error; err != nil {

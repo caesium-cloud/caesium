@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/waitbudget"
 )
 
 func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
@@ -111,14 +113,26 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 		// grace is two orders of magnitude above the observed rollback latency
 		// and five times below the filler's hold, so it separates the two
 		// cleanly.
-		const dispatchRollbackGrace = 3 * time.Second
+		const (
+			dispatchRollbackGrace = 3 * time.Second
+			samplingCadence       = 250 * time.Millisecond
+			// One deadline bounds the WHOLE observation, sampling and rollback
+			// graces alike.  The loop this replaced paired a 6s outer bound with
+			// an independent 3s grace per subject, and an outer bound is only
+			// re-tested between iterations — so its real worst case was
+			// 6s + 3×3s = 15s, exactly the filler's hold.  Drawing every grace
+			// from one budget makes the worst case the budget itself, and 9s
+			// still leaves the filler holding the slot with room to spare.
+			holdObservationBudget = 9 * time.Second
+		)
 
 		// Sample repeatedly for as long as the filler still holds the slot.  A
 		// single sample would pass even on the broken build, which took about
 		// one dispatch interval to over-admit the siblings.
 		samples := 0
-		deadline := time.Now().Add(6 * time.Second)
-		for time.Now().Before(deadline) {
+		budget := waitbudget.New(holdObservationBudget)
+	sampling:
+		for !budget.Expired() {
 			filler := s.fetchRun(fillerJob.ID, fillerRunID)
 			s.Require().NotEmpty(filler.Tasks)
 			if filler.Tasks[0].Status != "running" {
@@ -134,12 +148,19 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 				if observed.Tasks[0].Status != "running" {
 					continue
 				}
+				// A grace shortened by the budget would read a flicker as a
+				// settled claim, so once a full grace no longer fits, stop
+				// sampling rather than assert on a truncated one.
+				grace := budget.Slice(dispatchRollbackGrace)
+				if grace < dispatchRollbackGrace {
+					break sampling
+				}
 				s.Require().True(
-					s.awaitClaimRolledBack(job.ID, runID, fillerJob.ID, fillerRunID, dispatchRollbackGrace),
+					s.awaitClaimRolledBack(job.ID, runID, fillerJob.ID, fillerRunID, grace),
 					"%s run settled in `running` while the one-slot worker was busy with the filler; "+
 						"a task may only be `running` on a node that holds a free pool slot for it", label)
 			}
-			time.Sleep(250 * time.Millisecond)
+			budget.Sleep(samplingCadence)
 		}
 		s.Require().GreaterOrEqual(samples, 8,
 			"the filler must hold the slot long enough for the capacity assertion to be meaningful (got %d samples)", samples)
@@ -193,6 +214,11 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 // is briefly `running` before the owner's rollback lands — a settled `running`
 // is the bug (#355), a flicker is not.  Returns true early if the filler itself
 // finishes, because from that moment `running` is legitimate again.
+//
+// `grace` must be a slice of the caller's overall wait budget, never an
+// independent constant: this helper is called once per subject per sample, so a
+// grace that does not draw down a shared budget is what turns a bounded-looking
+// sampling loop into a wait of outer-bound-plus-a-whole-final-iteration.
 func (s *IntegrationTestSuite) awaitClaimRolledBack(jobID, runID, fillerJobID, fillerRunID string, grace time.Duration) bool {
 	s.T().Helper()
 
