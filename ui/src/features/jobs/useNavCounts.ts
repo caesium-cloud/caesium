@@ -1,9 +1,12 @@
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
+import { usePrincipal } from "@/lib/auth";
+import { useDataAssertionsEnabled, useHoldInvalidation } from "@/features/datasets/useDataAssertions";
 import { api } from "@/lib/api";
 
 const REFETCH_MS = 30_000;
 
 export interface NavCounts {
+  holds: number | null;
   jobs: number | null;
   triggers: number | null;
   atoms: number | null;
@@ -22,6 +25,15 @@ export interface NavCounts {
  *   - `GET /v1/jobs/summary` (status counts, used by 1.1)
  */
 export function useNavCounts(): NavCounts {
+  const assertionsEnabled = useDataAssertionsEnabled();
+  const principal = usePrincipal();
+  useHoldInvalidation(assertionsEnabled);
+  const holds = useQuery({
+    queryKey: ["dataset-holds", "nav"],
+    queryFn: () => api.getDatasetHolds({ status: "active", limit: 1 }),
+    enabled: assertionsEnabled && !principal.isScoped,
+    refetchInterval: REFETCH_MS,
+  });
   const results = useQueries({
     queries: [
       {
@@ -47,6 +59,7 @@ export function useNavCounts(): NavCounts {
 
   const [jobs, triggers, atoms] = results;
   return {
+    holds: assertionsEnabled && !principal.isScoped && !holds.error ? holds.data?.total ?? null : null,
     jobs: jobs.data ? jobs.data.length : null,
     triggers: triggers.data ? triggers.data.length : null,
     atoms: atoms.data ? atoms.data.length : null,

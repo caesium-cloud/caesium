@@ -25,6 +25,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
+import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { api, type Incident, type JobTask, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
@@ -364,6 +366,8 @@ export function TaskDetailPanel({
         {activeTab === "details" ? (
           <ScrollArea className="h-full">
             <div className="p-4 space-y-4">
+              {runTask ? <DataAssertionsPanel task={runTask} /> : null}
+              <HoldSkipReason reason={runTask?.error} />
               {/* Error banner */}
               {runTask?.error && status === "skipped" ? (
                 <div className="rounded-lg border border-text-3/20 bg-text-3/10 px-3 py-2.5 flex gap-3 items-start">

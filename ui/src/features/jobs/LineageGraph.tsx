@@ -30,7 +30,9 @@ import {
   isDeclaredBeforeRun,
   isStaleLike,
 } from "@/features/datasets/freshness-utils";
-import { api, type DatasetState, type ImpactNode } from "@/lib/api";
+import { holdSearch } from "@/features/datasets/hold-utils";
+import { useHoldInvalidation } from "@/features/datasets/useDataAssertions";
+import { api, type DatasetHold, type DatasetState, type ImpactNode } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
 
@@ -44,6 +46,8 @@ type LineageSearch = {
 };
 
 type LineageNodeData = {
+  hold?: DatasetHold;
+  holdAffected?: boolean;
   kind: "root" | "downstream";
   namespace: string;
   name: string;
@@ -104,7 +108,7 @@ export function LineageGraph({
   const name = cleanParam(initialName) ?? "";
   const [namespaceInput, setNamespaceInput] = useState(namespace);
   const [nameInput, setNameInput] = useState(name);
-  const hasDataset = namespace !== "" && name !== "";
+  const hasDataset = name !== "";
   const isScoped = principal.isScoped;
 
   const featuresQuery = useQuery({
@@ -112,6 +116,8 @@ export function LineageGraph({
     queryFn: api.getSystemFeatures,
     staleTime: 60_000,
   });
+  const assertionsEnabled = featuresQuery.data?.data_assertions_enabled === true;
+  useHoldInvalidation(assertionsEnabled);
   const freshnessEnabled = featuresQuery.data?.freshness_enabled === true;
 
   const impactQuery = useQuery({
@@ -148,7 +154,8 @@ export function LineageGraph({
     queries: overlayTargets.map((target) => ({
       queryKey: ["datasets", "detail", target.namespace, target.name],
       queryFn: () => api.getDataset(target.namespace, target.name),
-      enabled: freshnessEnabled && !isScoped,
+      enabled: (freshnessEnabled || assertionsEnabled) && !isScoped,
+      refetchInterval: 30_000,
       staleTime: 30_000,
     })),
   });
@@ -165,7 +172,28 @@ export function LineageGraph({
     return map;
   }, [freshnessQueries, overlayTargets]);
 
-  const graph = useMemo(() => {
+  const holdsByDataset = new Map<string, DatasetHold>();
+  freshnessQueries.forEach((query, index) => {
+    const target = overlayTargets[index];
+    if (assertionsEnabled && target && query.data?.hold?.status === "active") {
+      holdsByDataset.set(datasetKey(target.namespace, target.name), query.data.hold);
+    }
+  });
+  // Query each held identity's actual cone. BFS depth alone does not identify
+  // parents, so propagating a hold through the drawn frontier edges would shade
+  // unrelated sibling branches.
+  const heldTargets = [...holdsByDataset.values()];
+  const holdImpactQueries = useQueries({ queries: heldTargets.map((hold) => ({
+    queryKey: ["lineage", "impact", hold.namespace, hold.name],
+    queryFn: () => api.getLineageImpact({ namespace: hold.namespace, name: hold.name }),
+    enabled: assertionsEnabled && !isScoped,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  })) });
+  const holdAffected = new Set<string>();
+  holdImpactQueries.forEach((query) => query.data?.downstream.forEach((node) => holdAffected.add(datasetKey(node.dataset_namespace, node.dataset_name))));
+
+  const graph = (() => {
     if (!impactQuery.data) {
       return { nodes: [] as Node<LineageNodeData>[], edges: [] as Edge[] };
     }
@@ -174,8 +202,10 @@ export function LineageGraph({
       impactQuery.data.root_name,
       impactQuery.data.downstream ?? [],
       freshnessByDataset,
+      holdsByDataset,
+      holdAffected,
     );
-  }, [freshnessByDataset, impactQuery.data]);
+  })();
 
   function applyDataset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -246,6 +276,8 @@ export function LineageGraph({
         />
       ) : null}
 
+      {assertionsEnabled && freshnessQueries.some((query) => query.error) ? <p role="status" className="text-xs text-warning">Hold or freshness evidence is unavailable for some datasets. Unmarked nodes may have unknown hold status.</p> : null}
+      {holdImpactQueries.some((query) => query.error) ? <p role="status" className="text-xs text-warning">Part of the held downstream cone is unavailable.</p> : null}
       {impactQuery.isLoading ? (
         <div className="space-y-4">
           <Skeleton className="h-8 w-[240px]" />
@@ -270,7 +302,7 @@ export function LineageGraph({
         </div>
       ) : null}
 
-      {impactQuery.data && impactQuery.data.downstream.length > 0 ? (
+      {impactQuery.data ? (
         <>
           <div className="grid gap-3 md:grid-cols-3">
             <MetadataCell label="Root Namespace" value={impactQuery.data.root_namespace} />
@@ -381,7 +413,7 @@ function DatasetForm({
               size="sm"
               className="h-9 w-full md:w-auto"
               data-testid="lineage-submit"
-              disabled={namespaceInput.trim() === "" || nameInput.trim() === ""}
+              disabled={nameInput.trim() === ""}
             >
               <Search className="h-3.5 w-3.5" />
               Inspect
@@ -443,6 +475,8 @@ function buildGraph(
   rootName: string,
   downstream: ImpactNode[],
   freshnessByDataset: Map<string, DatasetState>,
+  holdsByDataset: Map<string, DatasetHold>,
+  holdAffected: Set<string>,
 ) {
   const rootId = `root:${rootNamespace}:${rootName}`;
   const rootState = freshnessByDataset.get(datasetKey(rootNamespace, rootName));
@@ -459,6 +493,8 @@ function buildGraph(
       id: rootId,
       type: "lineage",
       data: {
+        hold: holdsByDataset.get(datasetKey(rootNamespace, rootName)),
+        holdAffected: holdAffected.has(datasetKey(rootNamespace, rootName)),
         kind: "root",
         namespace: rootNamespace,
         name: rootName,
@@ -491,6 +527,8 @@ function buildGraph(
       id: nodeId,
       type: "lineage",
       data: {
+        hold: holdsByDataset.get(datasetKey(node.dataset_namespace, node.dataset_name)),
+        holdAffected: holdAffected.has(datasetKey(node.dataset_namespace, node.dataset_name)),
         kind: "downstream",
         namespace: node.dataset_namespace,
         name: node.dataset_name,
@@ -622,6 +660,8 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
       data-dataset-name={data.name}
       data-job-id={data.jobId}
       data-job-alias={data.jobAlias}
+      data-hold-status={data.hold ? "active" : undefined}
+      data-hold-affected={data.holdAffected ? "true" : undefined}
       className={cn(
         "relative h-[150px] w-[320px] overflow-hidden rounded-lg border-2 px-4 py-3 shadow-sm transition-colors",
         hasFreshnessOverlay
@@ -637,6 +677,8 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
             : "cursor-pointer border-caesium-cyan/45 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--node-surface)/0.95)_60%)] hover:border-caesium-cyan/80",
         !isRoot && "cursor-pointer",
         hasFreshnessOverlay && !isRoot && "hover:border-text-2/60",
+        data.holdAffected && "!border-fuchsia-400/45 !bg-fuchsia-400/10 !bg-none",
+        data.hold && "!border-fuchsia-400 !bg-fuchsia-400/10 !bg-none",
       )}
       title={isRoot ? `${data.namespace}/${data.name}` : jobTitle}
     >
@@ -660,6 +702,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
             <Badge variant="outline" className="text-[10px]">
               {isRoot ? "Root dataset" : "Downstream output"}
             </Badge>
+            {data.hold ? <Link to="/datasets/holds" search={holdSearch(data.hold)} onClick={(event) => event.stopPropagation()} className="nodrag rounded border border-fuchsia-400/60 bg-fuchsia-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-fuchsia-200" data-testid="lineage-hold-badge">Held · inspect</Link> : data.holdAffected ? <span className="text-[10px] text-fuchsia-300">Downstream of hold</span> : null}
             {hop ? (
               <span className="rounded border border-running/30 bg-running/10 px-1.5 py-0.5 text-[10px] font-semibold text-running">
                 Hop {hop}
@@ -784,7 +827,7 @@ const edgeTypes = {
 
 function buildSearch(namespace: string, name: string) {
   return {
-    namespace: cleanParam(namespace),
+    namespace: cleanParam(namespace) ?? "",
     name: cleanParam(name),
   };
 }
