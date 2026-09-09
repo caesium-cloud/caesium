@@ -311,6 +311,27 @@ var (
 		[]string{"reason"},
 	)
 
+	// DatasetMetricsDroppedTotal counts self-reported dataset samples the
+	// post-task seam refused to persist, by the bounded reason it refused them.
+	//
+	//   stale_claim — the worker that emitted them no longer holds the TaskRun
+	//                 row's claim: its lease expired and the row was reclaimed
+	//                 (ReclaimOwnerExpiredClaims) or reset by an owner takeover
+	//                 (ResetInFlightTasks), and the re-executing worker owns the
+	//                 attempt now. Persisting them anyway would leave one extra
+	//                 sample set in the baseline for that (dataset, metric).
+	//
+	// A non-zero rate is normal on a lane that loses workers; a SUSTAINED one
+	// means workers are being superseded routinely, which is worth looking at
+	// for reasons that have nothing to do with data quality.
+	DatasetMetricsDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_dataset_metrics_dropped_total",
+			Help: "Total self-reported dataset samples dropped before persistence, by bounded reason.",
+		},
+		[]string{"reason"},
+	)
+
 	// DatasetHoldsActive is the number of datasets currently held. It is a
 	// gauge over persisted state rather than an in-process counter: it is Set()
 	// from a COUNT of active dataset_holds rows after every open and release,
@@ -688,6 +709,7 @@ func Register() {
 			FreshnessViolationsTotal,
 			DataAssertionsTotal,
 			DatasetHoldsTotal,
+			DatasetMetricsDroppedTotal,
 			DatasetHoldsActive,
 			RunsHeldUpstreamTotal,
 			ContractFindingsTotal,

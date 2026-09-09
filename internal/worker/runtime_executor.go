@@ -950,11 +950,24 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 // Like runSchemaValidation it keys on taskRun.ID, not taskRun.TaskID: a fanned
 // step has N sibling rows and each partition owns its own samples. Its caller
 // invokes it only on a succeeding attempt — see the comment at the call site.
+//
+// It goes through the CLAIMED variant, carrying the claim this worker took at
+// dispatch. This worker may have lost its lease while the container ran — a
+// reclaim (run.ReclaimOwnerExpiredClaims) or an owner takeover
+// (run.ResetInFlightTasks) re-pends the row, deletes this attempt's samples and
+// hands it to another worker — and the seam is reached anyway, ahead of the
+// completion that would be claim-rejected. Without the fence the superseded
+// attempt's samples land on top of the new owner's and the (dataset, metric)
+// baseline carries two sample sets for one logical run. The claim identity is
+// exactly what the row carried when this worker claimed it: claim_attempt makes
+// it a token rather than a name, so even this worker RE-claiming the same row
+// does not let its superseded attempt write.
 func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
 	if taskRun == nil {
 		return nil
 	}
-	return run.EvaluateDataAssertions(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, samples)
+	claim := &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
+	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, samples)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

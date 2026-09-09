@@ -293,7 +293,11 @@ is the page-worthy event, emitted exactly once per hold (repeat violations
 increment the occurrence counter without re-emitting); `run_held_upstream`
 defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
 `caesium_dataset_holds_active`, `caesium_data_assertions_total{result}`,
-`caesium_runs_held_upstream_total`.
+`caesium_runs_held_upstream_total`,
+`caesium_dataset_metrics_dropped_total{reason}` (samples refused before
+persistence; `stale_claim` is a distributed worker whose lease expired mid-task
+reaching the post-task seam after another worker took the row over — see the
+claim fence on `run.EvaluateDataAssertionsClaimed`).
 
 - REST: `GET /v1/datasets` (registry + freshness/hold status),
   `GET /v1/datasets/holds?status=active`, `GET /v1/datasets/:ns/:name/metrics`

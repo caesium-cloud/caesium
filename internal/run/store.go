@@ -2963,23 +2963,43 @@ func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgt
 // be addressed by its TaskRun ID, because assertions are evaluated PER
 // PARTITION and one bad partition must not make its N siblings look violating.
 func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataViolation) error {
+	_, err := s.saveDataViolationsClaimed(runID, taskRef, nil, violations)
+	return err
+}
+
+// saveDataViolationsClaimed is the claim-fenced form, for the distributed
+// worker (issue #438, maintainer review). It reports whether the write LANDED:
+// false means the attempt no longer owns the row, so its verdict would have
+// been stamped onto the replacement attempt's row.
+//
+// The fence lives in the UPDATE's own predicate rather than in a preceding
+// read, so it is atomic with the write and needs no lock: a takeover that
+// commits first simply makes the statement match zero rows. A nil claim is the
+// local executor, which holds no claim and always writes.
+func (s *Store) saveDataViolationsClaimed(runID, taskRef uuid.UUID, claim *TaskClaim, violations []DataViolation) (bool, error) {
 	if len(violations) == 0 {
-		return nil
+		return true, nil
 	}
 	b, err := json.Marshal(violations)
 	if err != nil {
-		return err
+		return false, err
 	}
 	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
-	return s.db.Model(&models.TaskRun{}).
-		Where("id = ?", row.ID).
-		Update("data_violations", datatypes.JSON(b)).Error
+	q := s.db.Model(&models.TaskRun{}).Where("id = ?", row.ID)
+	if claim != nil {
+		q = q.Where("claimed_by = ? AND claim_attempt = ?", claim.ClaimedBy, claim.ClaimAttempt)
+	}
+	res := q.Update("data_violations", datatypes.JSON(b))
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {

@@ -31,6 +31,11 @@ const (
 	assertionResultFail    = "fail"
 )
 
+// datasetMetricDropStaleClaim is the one bounded reason label
+// caesium_dataset_metrics_dropped_total carries today: a worker that no longer
+// holds the TaskRun row's claim reaching the post-task seam.
+const datasetMetricDropStaleClaim = "stale_claim"
+
 // DataAssertionsEnabled reports the data circuit breaker's master gate. It is
 // the single read point every seam in this package consults, so the feature
 // cannot be half-on (arc convention 1).
@@ -91,6 +96,24 @@ func DataAssertionsEnabled() bool {
 // three executor call sites to pass the flag, which is deliberately out of
 // scope for B1.
 func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, samples []pkgtask.DatasetMetricSample) error {
+	return EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, nil, samples)
+}
+
+// EvaluateDataAssertionsClaimed is the same seam for a caller that HOLDS A
+// CLAIM on the TaskRun row — the distributed worker's runtime executor, and
+// only it. It is the sibling of RetryTaskClaimedInstance / StartTaskClaimed /
+// CompleteTaskClaimed in the same sense: identical work, fenced on the claim.
+//
+// Passing the claim makes the sample INSERT (and the clean-run release it
+// shares a transaction with) conditional on the row still being held by this
+// exact claim. Without it a worker whose lease expired mid-task still reaches
+// this seam and appends its samples to a row another worker is re-executing,
+// AFTER the reclaim deleted them — one logical run, two sample sets in the
+// baseline. See TaskClaim and insertDatasetMetricsFencedTx.
+//
+// A nil claim is exactly EvaluateDataAssertions: the local executor
+// (internal/job, enforceClaim=false) holds no claim and cannot be superseded.
+func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, samples []pkgtask.DatasetMetricSample) error {
 	if !DataAssertionsEnabled() {
 		return nil
 	}
@@ -145,10 +168,19 @@ func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, sa
 
 	verdicts := evaluateContracts(contracts, observed, baselines, now)
 
-	persistDatasetMetrics(ctx, store, row, runID, taskID, samples, names, namespaces,
-		rejectedMetrics(verdicts), cleanContracts(verdicts, observed, baselines))
+	// A rejected claim STOPS THE EVALUATION, it does not merely drop the
+	// sample. The verdict this attempt computed describes data the row's
+	// current owner is re-deriving, so dispatching it would stamp violations
+	// onto the replacement attempt's row and break the circuit on evidence the
+	// metric fence just refused. (dispatchDataAssertions fences its own writes
+	// too — this is the early exit that also keeps the disposition counters
+	// from recording a verdict nothing acted on, not the guard itself.)
+	if !persistDatasetMetrics(ctx, store, row, runID, taskID, claim, samples, names, namespaces,
+		rejectedMetrics(verdicts), cleanContracts(verdicts, observed, baselines)) {
+		return nil
+	}
 
-	return dispatchDataAssertions(ctx, store, runID, taskID, row, verdicts)
+	return dispatchDataAssertions(ctx, store, runID, taskID, row, claim, verdicts)
 }
 
 // declaredContract pairs a produced-dataset registry row with its decoded
@@ -430,24 +462,37 @@ func (c releaseCandidate) disprovesHold(hold *models.DatasetHold) bool {
 //
 // A failure here is logged and swallowed — the observation is lost, the task is
 // not, and the verdict has already been computed from the in-memory samples.
+//
+// `claim` is the CLAIM FENCE (nil on the local executor). See TaskClaim and
+// insertDatasetMetricsFencedTx: a distributed worker that lost its lease must
+// not append to a row another worker is now re-executing.
+//
+// It returns whether the claim still held, and the caller uses that to decide
+// whether the VERDICT may be dispatched at all — an unfenced caller always gets
+// true. Every branch answers it, including the two that write nothing: a
+// `missing` verdict needs no sample, so "the insert was refused" cannot be the
+// only place staleness is discovered.
 func persistDatasetMetrics(
 	ctx context.Context,
 	store *Store,
 	row *models.TaskRun,
 	runID, taskID uuid.UUID,
+	claim *TaskClaim,
 	samples []pkgtask.DatasetMetricSample,
 	declared []string,
 	namespaces map[string]string,
 	rejected map[metricRef]struct{},
 	clean []releaseCandidate,
-) {
+) bool {
 	if len(samples) == 0 {
 		// A contract can pass with no samples only when it declares nothing
 		// that needs one; the release still has to happen.
-		if err := releaseHoldsForCleanRun(ctx, store, nil, runID, clean); err != nil {
+		held, err := releaseHoldsForCleanRun(ctx, store, claim, row.ID, nil, runID, clean)
+		if err != nil {
 			log.Warn("failed to release dataset holds after a clean run", "run_id", runID, "task_id", taskID, "error", err)
+			return true
 		}
-		return
+		return held
 	}
 	// One row per (dataset, metric), last write wins — the SAME collapse
 	// observedByDataset does when it builds the values the verdict is computed
@@ -482,16 +527,33 @@ func persistDatasetMetrics(
 		})
 	}
 	if len(rows) == 0 {
-		if err := releaseHoldsForCleanRun(ctx, store, nil, runID, clean); err != nil {
+		held, err := releaseHoldsForCleanRun(ctx, store, claim, row.ID, nil, runID, clean)
+		if err != nil {
 			log.Warn("failed to release dataset holds after a clean run", "run_id", runID, "task_id", taskID, "error", err)
+			return true
 		}
-		return
+		return held
 	}
-	if err := releaseHoldsForCleanRun(ctx, store, rows, runID, clean); err != nil {
+	held, err := releaseHoldsForCleanRun(ctx, store, claim, row.ID, rows, runID, clean)
+	if err != nil {
+		// The observation is lost but the claim is not known to be stale, so
+		// the verdict still dispatches: a breach must not go unrecorded because
+		// the sample write failed.
 		log.Warn("failed to persist dataset metrics", "run_id", runID, "task_id", taskID, "metrics", len(rows), "error", err)
-		return
+		return true
+	}
+	if !held {
+		// The claim fence rejected this attempt: another worker owns the row
+		// and has already produced (or is producing) the samples that belong to
+		// it. Dropping is the whole point — see insertDatasetMetricsFencedTx.
+		metrics.DatasetMetricsDroppedTotal.WithLabelValues(datasetMetricDropStaleClaim).Inc()
+		log.Warn("dropped dataset metrics from a superseded worker",
+			"run_id", runID, "task_id", taskID, "task_run_id", row.ID,
+			"metrics", len(rows), "stale_claim", claim.String())
+		return false
 	}
 	log.Info("recorded dataset metrics", "run_id", runID, "task_id", taskID, "task_run_id", row.ID, "metrics", len(rows))
+	return true
 }
 
 // releaseHoldsForCleanRun inserts this task's samples and, in the SAME
@@ -516,13 +578,27 @@ func persistDatasetMetrics(
 // partition 3 passes would otherwise have partition 3 release the hold
 // partition 2 just opened, and which partition finished last would decide
 // whether a broken dataset stayed held.
+//
+// THE CLAIM FENCE (issue #438) covers this WHOLE transaction, not just the
+// INSERT, and it is checked first inside it. A superseded worker's post-task
+// evidence is discarded as one piece: its samples are the proof its contract
+// passed, and "the dataset recovered" must not be separable from "here is the
+// evidence it recovered" — releasing on evidence whose sample was refused would
+// separate exactly those two. Worker B is re-executing the same row and will
+// produce both, so at worst a hold stays held one attempt longer.
+//
+// It returns whether the claim still held (always true on the unfenced local
+// path); the caller logs and counts the drop, because only it knows the run and
+// task the samples came from.
 func releaseHoldsForCleanRun(
 	ctx context.Context,
 	store *Store,
+	claim *TaskClaim,
+	taskRunID uuid.UUID,
 	rows []models.DatasetMetric,
 	runID uuid.UUID,
 	clean []releaseCandidate,
-) error {
+) (bool, error) {
 	eligible := make([]releaseCandidate, 0, len(clean))
 	names := make([]string, 0, len(clean))
 	namespaces := make(map[string]string, len(clean))
@@ -536,16 +612,59 @@ func releaseHoldsForCleanRun(
 	}
 
 	if len(rows) == 0 && len(eligible) == 0 {
-		return nil
+		// Nothing to write — but the caller still has to learn whether this
+		// attempt owns the row, because a `missing` verdict reaches dispatch
+		// with no sample behind it and would otherwise open a hold from a
+		// superseded worker. This read is an EARLY EXIT, not the guard: the
+		// dispatch writes carry their own in-transaction fence.
+		if claim == nil {
+			return true, nil
+		}
+		held := false
+		err := store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var txErr error
+			held, txErr = taskRunClaimHeldTx(tx, taskRunID, *claim)
+			return txErr
+		})
+		return held, err
 	}
 	if len(eligible) == 0 {
-		return InsertDatasetMetrics(ctx, store.db, rows)
+		// No hold to release: the samples are the only write, so the fence and
+		// the INSERT are the whole transaction — under the same contention
+		// retry the hold branch uses, because a BEGIN/COMMIT pair is more
+		// exposed to a dqlite write collision than the single statement it
+		// replaces. The unfenced local path keeps that original Create.
+		if claim == nil {
+			return true, InsertDatasetMetrics(ctx, store.db, rows)
+		}
+		held := false
+		err := withStoreBusyRetryContext(ctx, func() error {
+			held = false
+			return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				var txErr error
+				held, txErr = insertDatasetMetricsFencedTx(tx, taskRunID, claim, rows)
+				return txErr
+			})
+		})
+		return held, err
 	}
 
+	held := false
 	var events []event.Event
 	err := withStoreBusyRetryContext(ctx, func() error {
 		events = nil
+		held = false
 		return store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if claim != nil {
+				stillHeld, fenceErr := taskRunClaimHeldTx(tx, taskRunID, *claim)
+				if fenceErr != nil {
+					return fenceErr
+				}
+				if !stillHeld {
+					return nil
+				}
+			}
+			held = true
 			if len(rows) > 0 {
 				if err := tx.Create(&rows).Error; err != nil {
 					return err
@@ -608,23 +727,39 @@ func releaseHoldsForCleanRun(
 		})
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(events) > 0 {
 		store.syncDatasetHoldsActiveGauge(ctx)
 		store.publishEvents(events...)
 	}
-	return nil
+	return held, nil
 }
 
 // dispatchDataAssertions applies the evaluated verdicts: it counts them,
 // persists them onto the task run, and either escalates (fail) or publishes the
 // non-failing event (warn / hold / seeding).
+//
+// EVERY DURABLE WRITE HERE IS CLAIM-FENCED (issue #438, maintainer review).
+// Both of them outlive the attempt that made them — a DatasetHold gates every
+// downstream consumer until someone releases it, and DataViolations lands on a
+// TaskRun row the next attempt is going to finish — so a superseded worker
+// reaching this seam must change neither. The fences live inside the writes'
+// own transactions rather than in a check before them, because the reclaim can
+// land between the two; the caller's early exit on a refused sample is an
+// optimisation on top, not the guard.
+//
+// A refused claim is NOT an error: nothing was written and nothing should be,
+// so the attempt is abandoned quietly. In particular it does not escalate a
+// `fail` verdict — the row belongs to another worker, whose own completion
+// decides the task's outcome, and this attempt's completion is claim-rejected
+// anyway.
 func dispatchDataAssertions(
 	ctx context.Context,
 	store *Store,
 	runID, taskID uuid.UUID,
 	row *models.TaskRun,
+	claim *TaskClaim,
 	verdicts []datasetVerdict,
 ) error {
 	if len(verdicts) == 0 {
@@ -632,10 +767,11 @@ func dispatchDataAssertions(
 	}
 
 	var (
-		recorded  []DataViolation
-		enforced  []DataViolation
-		datasets  []string
-		holdError error
+		recorded   []DataViolation
+		enforced   []DataViolation
+		datasets   []string
+		holdError  error
+		staleClaim bool
 	)
 
 	for _, verdict := range verdicts {
@@ -681,18 +817,41 @@ func dispatchDataAssertions(
 			"violations", len(verdict.violations),
 		)
 		if len(breaking) > 0 {
-			if err := openHoldForContract(ctx, store, contract, row, runID, taskID, breaking); err != nil && holdError == nil {
+			err := openHoldForContract(ctx, store, contract, row, runID, taskID, claim, breaking)
+			switch {
+			case errors.Is(err, errDatasetHoldStaleClaim):
+				staleClaim = true
+			case err != nil && holdError == nil:
 				holdError = err
 			}
 		}
+		if staleClaim {
+			break
+		}
+	}
+
+	if staleClaim {
+		logStaleAssertionDispatch(runID, taskID, row.ID, claim)
+		return nil
 	}
 
 	if len(recorded) == 0 {
 		return nil
 	}
 
-	if err := store.SaveDataViolations(runID, row.ID, recorded); err != nil {
+	written, err := store.saveDataViolationsClaimed(runID, row.ID, claim, recorded)
+	if err != nil {
 		log.Warn("failed to persist data violations", "run_id", runID, "task_id", taskID, "error", err)
+	}
+	if claim != nil && err == nil && !written {
+		// The UPDATE matched no row: the claim went stale between the hold
+		// fence and here. Nothing of this verdict is durable, so nothing of it
+		// is dispatched either. Guarded on claim != nil so the unfenced local
+		// path keeps its exact behaviour — there the only way to match no row
+		// is a row that vanished mid-seam, which was never treated as a reason
+		// to withhold the event.
+		logStaleAssertionDispatch(runID, taskID, row.ID, claim)
+		return nil
 	}
 
 	// Fail-closed: the verdicts are persisted first, so the evidence outlives
@@ -737,12 +896,22 @@ func dispatchDataAssertions(
 // durable failure, not a transient lock. The failed attempt is counted under
 // caesium_dataset_holds_total{reason="open_failed"}, a page-worthy series in
 // its own right.
+// logStaleAssertionDispatch records that a superseded attempt's verdict was
+// discarded whole. It is one line for the whole dispatch, not one per write:
+// the interesting fact is that this attempt's data-quality decision changed
+// nothing, and the run/task/claim identify which attempt that was.
+func logStaleAssertionDispatch(runID, taskID, taskRunID uuid.UUID, claim *TaskClaim) {
+	log.Warn("discarded a superseded worker's data-assertion verdict; the row belongs to another attempt",
+		"run_id", runID, "task_id", taskID, "task_run_id", taskRunID, "stale_claim", claim.String())
+}
+
 func openHoldForContract(
 	ctx context.Context,
 	store *Store,
 	contract declaredContract,
 	row *models.TaskRun,
 	runID, taskID uuid.UUID,
+	claim *TaskClaim,
 	violations []DataViolation,
 ) error {
 	hold, opened, err := store.openOrAppendDatasetHold(ctx, datasetHoldRequest{
@@ -755,8 +924,14 @@ func openHoldForContract(
 		taskID:     taskID,
 		taskRunID:  row.ID,
 		stepName:   contract.stepName,
+		claim:      claim,
 		violations: violations,
 	})
+	if errors.Is(err, errDatasetHoldStaleClaim) {
+		// Refused by the fence, not broken: no row was written, so this is not
+		// an open_failed and must not fail the task closed.
+		return err
+	}
 	if err != nil {
 		metrics.DatasetHoldsTotal.WithLabelValues(HoldReasonOpenFailed).Inc()
 		log.Error("failed to open a dataset hold for a breached contract; failing the task so the breach is not silently ignored",

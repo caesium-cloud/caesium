@@ -294,7 +294,8 @@ lands, then F in its dependency-ordered waves, then N-1.
   **Filed, not fixed:** [#437](https://github.com/caesium-cloud/caesium/issues/437)
   (a truncated/unreadable marker stream reads as a missing metric) and
   [#438](https://github.com/caesium-cloud/caesium/issues/438)
-  (`InsertDatasetMetrics` has no claim fence). Also learned: `just lint` runs
+  (`InsertDatasetMetrics` has no claim fence) — #438 is **fixed** in
+  [#453](https://github.com/caesium-cloud/caesium/pull/453). Also learned: `just lint` runs
   `go fmt .` on the root package only, so gofmt drift under `internal/` is not
   caught locally — CI's lint job is the check.
 
@@ -754,10 +755,36 @@ executors), so it never re-touches the executor call sites.
       logical run contributes one sample, and a metric emitted both with and
       without a `dataset` selector is de-duplicated to the single row the single
       verdict judged.
-      **Remaining gap (issue filed by the orchestrator):** `InsertDatasetMetrics`
-      has no claim fence, so a superseded worker can still write samples onto a
-      row it no longer owns, after a reclaim has cleared them. Every other
-      terminal write on the row is claim-fenced; this one is not.
+      **Remaining gap — CLOSED by [#453](https://github.com/caesium-cloud/caesium/pull/453)
+      ([#438](https://github.com/caesium-cloud/caesium/issues/438)):**
+      `InsertDatasetMetrics` had no claim fence, so a superseded worker could
+      still write samples onto a row it no longer owns, after a reclaim had
+      cleared them. The distributed seam now goes through
+      `run.EvaluateDataAssertionsClaimed`, carrying the `run.TaskClaim`
+      (`claimed_by` + `claim_attempt`, so a worker re-claiming the SAME row does
+      not let its superseded attempt through) the worker took at dispatch; the
+      fence is re-read inside the post-task WRITE transaction — under a
+      dialect-conditional row lock, the same split
+      `lockGroupForTerminalDecisionTx` makes — and covers the whole transaction,
+      samples AND clean-run release, because the samples are the evidence the
+      release rests on. A refused attempt drops its samples with a warn log
+      naming the run/task and the stale claim, and increments
+      `caesium_dataset_metrics_dropped_total{reason="stale_claim"}`. The local
+      executor (`internal/job`, `enforceClaim=false`) passes a nil claim and is
+      unchanged.
+      **Review fix on that PR (maintainer P1):** the fence has to carry through
+      the assertion's SIDE EFFECTS, not just the sample. A superseded worker
+      whose sample was refused was still dispatching its verdict — opening a
+      `DatasetHold` and stamping `DataViolations` onto the replacement attempt's
+      row, i.e. breaking the circuit on evidence the fence had just rejected and
+      blocking consumers after the row's real owner had recovered the dataset.
+      Both dispatch writes are now fenced INSIDE their own write transactions
+      (`openOrAppendDatasetHold` under the same row lock as its conditional
+      insert; `saveDataViolationsClaimed` in the UPDATE's own predicate, so the
+      check is atomic with the write) and a refused claim abandons quietly — no
+      hold, no violations, no event, no `fail` escalation. `missing` verdicts,
+      which carry no sample at all, are covered because the persist step reports
+      the fence result on every branch.
       **Starvation fallback, stated so C1/F3 inherit it deliberately:** because
       rejected samples leave the baseline, a dataset that breaches an absolute
       bound on EVERY run eventually has no clean history, and its
