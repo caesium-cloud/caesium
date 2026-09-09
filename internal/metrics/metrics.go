@@ -451,6 +451,30 @@ var (
 		[]string{"event_type"},
 	)
 
+	// RunCancelReconcileSweepsTotal counts ticks of the local cancel registry's
+	// reconciliation sweep. It is the liveness signal for that loop: a server
+	// whose sweep goroutine never started, or died, reports a flat counter, and
+	// there is otherwise no way to tell the difference between "the sweep ran
+	// and found nothing" and "the sweep is not running".
+	RunCancelReconcileSweepsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_run_cancel_reconcile_sweeps_total",
+			Help: "Total reconciliation sweeps performed by the local run-cancel registry.",
+		},
+	)
+
+	// RunCancelReconciledTotal counts run contexts cancelled by the
+	// reconciliation sweep rather than by the run_cancelled event. Every
+	// increment is one cancel the in-process event bus lost (or delivered too
+	// late), so a non-zero value is a real signal about bus backpressure, not
+	// routine bookkeeping.
+	RunCancelReconciledTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_run_cancel_reconciled_total",
+			Help: "Total in-process run contexts cancelled by reconciliation because the run_cancelled event never arrived.",
+		},
+	)
+
 	TriggerChainDepth = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "caesium_trigger_chain_depth",
@@ -702,6 +726,8 @@ func Register() {
 			WebhookAuthFailuresTotal,
 			EventTriggerMatchesTotal,
 			EventBusDroppedTotal,
+			RunCancelReconcileSweepsTotal,
+			RunCancelReconciledTotal,
 			TriggerChainDepth,
 			TriggerChainRejectedTotal,
 			EventsIngestedTotal,

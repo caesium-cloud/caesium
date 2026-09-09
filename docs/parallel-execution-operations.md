@@ -17,6 +17,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_TASK_FAILURE_POLICY` | `halt` | Task failure behavior: `halt` or `continue`. |
 | `CAESIUM_TASK_TIMEOUT` | `0` | Per-task timeout (`0` disables timeout). |
 | `CAESIUM_EXECUTION_MODE` | `local` | `local` or `distributed` execution model. |
+| `CAESIUM_CANCEL_RECONCILE_INTERVAL` | `15s` | How often a node re-checks its in-flight local runs against their stored status and stops the containers of any that are already `cancelled`. `0` disables the sweep. |
 | `CAESIUM_WORKER_ENABLED` | `true` | Enables distributed worker loop on this node. |
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent claimed tasks per node. |
 | `CAESIUM_WORKER_POLL_INTERVAL` | `15s` | Fallback poll cadence for new claimable tasks. Distributed wakeups should handle normal claim latency. |
@@ -33,6 +34,24 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
+
+## Cancelling a Run Reaches the Container
+
+Cancelling a run — `POST /v1/jobs/:id/run` under a `replace` concurrency policy, or any other path through `CancelRun` — writes every non-terminal task row `cancelled` and publishes a `run_cancelled` event. Each execution mode turns that into a stopped container differently:
+
+- **local** — an in-process subscriber cancels the run's registered execution context and the executor force-stops the atom.
+- **distributed** — the cancel blanks `claimed_by`, the owning worker sees the claim disappear on its next liveness check, and force-stops the atom.
+
+The local path depends on one message on an in-process bus that **does not queue**: a subscriber whose buffer is momentarily full loses the event (`caesium_event_bus_dropped_total` increments and a `event bus subscriber buffer full; dropping event` warning is logged). A lost `run_cancelled` used to orphan that run's container permanently — the row read `cancelled` while the container ran to completion, holding a pool slot, a rate-limit token, and whatever the step does to the outside world.
+
+`CAESIUM_CANCEL_RECONCILE_INTERVAL` (default `15s`) closes that: every tick, a node asks the catalog in one indexed statement which of the runs it is currently executing are already `cancelled`, and cancels their contexts directly. The event stays the fast path; the sweep bounds the cost of losing one to a single interval. Only `cancelled` is acted on — `succeeded`/`failed` are written by the engine's own completion path (cancelling there would abort a correct completion) and `skipped` runs never start an engine. The sweep is per-node and not leader-gated: it only ever looks at the runs the node itself is executing.
+
+Two counters make the loop observable:
+
+- `caesium_run_cancel_reconcile_sweeps_total` — sweeps performed. Flat means the loop is not running (interval set to `0`, or the process is wedged).
+- `caesium_run_cancel_reconciled_total` — contexts cancelled by reconciliation rather than by the event. **Any** increment means a `run_cancelled` was lost or arrived too late; correlate with `caesium_event_bus_dropped_total{event_type="run_cancelled"}` and treat sustained growth as bus backpressure worth investigating, not routine bookkeeping.
+
+Setting the interval to `0` disables the sweep and returns to trusting the event alone.
 
 ## Worker Capacity
 

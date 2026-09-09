@@ -195,6 +195,13 @@ func start(cmd *cobra.Command, args []string) error {
 	// driving that run (internal/job/cancel_registry.go). The distributed lane's
 	// half is claim-loss detection in internal/worker.
 	job.SubscribeRunCancellations(ctx, bus)
+	// …and make that reach the container even when the event does not. The bus
+	// is non-blocking: Publish drops run_cancelled on a full subscriber buffer,
+	// and the subscriber above is the only thing listening, so one dropped event
+	// used to orphan a local container for the rest of its natural life. The
+	// reconciler re-derives the answer from the run rows on a timer, so a lost
+	// event costs one interval instead of the whole run.
+	job.StartRunCancelReconciler(ctx, runStore, vars.CancelReconcileInterval)
 	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
 		dequeuer := runqueue.NewDequeuer(runqueue.Config{
 			DB:                  db.Connection(),

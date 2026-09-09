@@ -5,8 +5,10 @@ package test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -396,6 +398,107 @@ steps:
 	}
 
 	s.retireReplacementRun(cli, marker, orphanIDs, job.ID, secondRunID)
+}
+
+// TestCancelReconcilerSweepsLiveRunsWithoutCancellingThem is the wiring half of
+// the cancel-reconciliation sweep (issue #402).
+//
+// The scenarios above all rely on the run_cancelled EVENT reaching the local
+// cancel registry. That event travels on an in-process bus that does not queue:
+// Publish's send is a non-blocking select, and a subscriber whose buffer is
+// momentarily full loses the message (`caesium_event_bus_dropped_total`). Since
+// the registry is the only thing that stops a local container on a cancel,
+// losing that one message orphaned the container permanently. A reconciliation
+// sweep now re-derives the answer from the run rows every
+// CAESIUM_CANCEL_RECONCILE_INTERVAL.
+//
+// The DROP itself cannot be forced through the real surface — filling one
+// specific in-process subscriber's buffer is not something an HTTP client can
+// arrange — so the dropped-event path is pinned by
+// TestCancelReconcilerCancelsARunWhoseCancelEventWasDropped in
+// internal/job/cancel_registry_test.go, against the real *run.Store. What this
+// scenario proves is what that unit test cannot: that the loop is actually
+// RUNNING inside the shipped binary on the configured interval, and that it is
+// safe — a sweep that fired on a healthy in-flight run would kill jobs on a
+// timer, a far worse bug than the one it fixes.
+//
+// Both counters are read from the live /metrics endpoint:
+//
+//	caesium_run_cancel_reconcile_sweeps_total — must ADVANCE (the loop is alive)
+//	caesium_run_cancel_reconciled_total       — must NOT (no false positives)
+func (s *IntegrationTestSuite) TestCancelReconcilerSweepsLiveRunsWithoutCancellingThem() {
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Skipf("the in-flight-container assertion inspects containers over the docker SDK; engine=%s", s.engineType)
+	}
+
+	cli := s.dockerClient()
+	defer func() { _ = cli.Close() }()
+
+	marker := fmt.Sprintf("caesium-reconcile-marker-%d", time.Now().UnixNano())
+	job := s.applyConcurrencyJob("replace", fmt.Sprintf("sleep 120 # %s", marker))
+	defer s.removeContainersWithMarker(cli, marker)
+
+	status, runID := s.postConcurrencyRun(job.ID)
+	s.Require().Equal(http.StatusAccepted, status)
+	s.Require().NotEmpty(runID)
+
+	// The sweep only has something to look at once the run has a registered
+	// execution context, which is once its container exists.
+	s.Require().Eventually(func() bool {
+		return len(s.runningContainerIDsWithMarker(cli, marker)) > 0
+	}, 60*time.Second, time.Second, "the run never started a container carrying %q", marker)
+
+	sweepsBefore := s.promCounter("caesium_run_cancel_reconcile_sweeps_total")
+	reconciledBefore := s.promCounter("caesium_run_cancel_reconciled_total")
+
+	// Two full ticks with a live, healthy run registered. The deadline holds for
+	// the 15s default as well as for the shortened interval the integration
+	// server is started with.
+	s.Require().Eventually(func() bool {
+		return s.promCounter("caesium_run_cancel_reconcile_sweeps_total") >= sweepsBefore+2
+	}, cancelReconcileSweepDeadline, time.Second,
+		"caesium_run_cancel_reconcile_sweeps_total never advanced past %v: the reconciliation loop is not running on this server", sweepsBefore)
+
+	s.Equal(reconciledBefore, s.promCounter("caesium_run_cancel_reconciled_total"),
+		"the sweep cancelled a run nobody cancelled: a healthy in-flight run must survive every tick")
+	s.Equal("running", s.fetchRun(job.ID, runID).Status,
+		"the swept run must still be running")
+
+	s.retireReplacementRun(cli, marker, nil, job.ID, runID)
+}
+
+// cancelReconcileSweepDeadline must outlast two ticks of the SLOWEST interval
+// any lane runs with — the 15s CAESIUM_CANCEL_RECONCILE_INTERVAL default, used
+// by every lane that does not shorten it — plus room for scraping.
+const cancelReconcileSweepDeadline = 75 * time.Second
+
+// promCounter reads one unlabelled counter from the live /metrics endpoint.
+// A metric that is missing entirely is a failure, not a zero: an unregistered
+// counter and a counter that has never been incremented are indistinguishable
+// to a caller that defaults to 0, and this scenario's whole job is to tell
+// "the loop ran and found nothing" apart from "the loop is not there".
+func (s *IntegrationTestSuite) promCounter(name string) float64 {
+	s.T().Helper()
+
+	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+"/metrics", nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
+
+	for _, line := range strings.Split(string(body), "\n") {
+		rest, ok := strings.CutPrefix(line, name+" ")
+		if !ok {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
+		s.Require().NoError(err, "unparseable value for %s: %q", name, line)
+		return value
+	}
+	s.Require().Fail("metric not exposed", "%s is absent from /metrics; it is not registered", name)
+	return 0
 }
 
 // containerName returns a container's name, or "" when it has already gone.

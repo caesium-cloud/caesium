@@ -774,6 +774,37 @@ func (s *Store) ClaimedTaskRunIDs(ctx context.Context, nodeID string, ids []uuid
 	return held, nil
 }
 
+// CancelledRunIDs returns the subset of ids whose run row is already in the
+// terminal `cancelled` status, in ONE indexed SELECT rather than one Get per
+// id.
+//
+// It exists for the local cancel registry's reconciliation sweep
+// (internal/job/cancel_registry.go): the sweep asks this question every tick
+// for every run that has a live registered context, so a per-run Get would put
+// a steady N-statement load on the single dqlite writer's connection just to
+// learn that nothing changed. `status` is indexed and the id set is bounded by
+// the number of runs THIS node is executing, so the sweep costs one cheap
+// statement per tick.
+//
+// Only `cancelled` is selected. `succeeded`/`failed` are written by the
+// engine's own completion defer, which is still using its run context to
+// finalize the run when the row already reads terminal — cancelling on those
+// would abort a correct completion rather than rescue a lost one. `skipped`
+// runs never start an engine, so they can never have a registered context.
+func (s *Store) CancelledRunIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var cancelled []uuid.UUID
+	if err := s.db.WithContext(ctx).
+		Model(&models.JobRun{}).
+		Where("id IN ? AND status = ?", ids, string(StatusCancelled)).
+		Pluck("id", &cancelled).Error; err != nil {
+		return nil, err
+	}
+	return cancelled, nil
+}
+
 // SetTaskHash persists a task's identity hash. taskRef follows the
 // TaskRun-primary-key-or-catalog-task-ID contract, so a fan-out instance is
 // addressed by its own TaskRun ID.
