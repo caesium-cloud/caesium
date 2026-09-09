@@ -38,19 +38,18 @@ type jobRunPayload struct {
 }
 
 type taskRunPayload struct {
-	ID        uuid.UUID  `json:"id"`
-	JobRunID  uuid.UUID  `json:"job_run_id"`
-	TaskID    uuid.UUID  `json:"task_id"`
-	AtomID    uuid.UUID  `json:"atom_id"`
-	Engine    string     `json:"engine"`
-	Image     string     `json:"image"`
-	Command   []string   `json:"command"`
-	RuntimeID string     `json:"runtime_id"`
-	Status    string     `json:"status"`
-	ClaimedBy string     `json:"claimed_by"`
-	Result    string     `json:"result"`
-	Error     string     `json:"error"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
+	ID        uuid.UUID `json:"id"`
+	JobRunID  uuid.UUID `json:"job_run_id"`
+	TaskID    uuid.UUID `json:"task_id"`
+	AtomID    uuid.UUID `json:"atom_id"`
+	Engine    string    `json:"engine"`
+	Image     string    `json:"image"`
+	Command   []string  `json:"command"`
+	RuntimeID string    `json:"runtime_id"`
+	Status    string    `json:"status"`
+	ClaimedBy string    `json:"claimed_by"`
+	Result    string    `json:"result"`
+	Error     string    `json:"error"`
 
 	// Output holds the structured key→value pairs emitted via ##caesium::output.
 	// Values may be file paths, table names, URIs, or scalar summaries.
@@ -548,13 +547,18 @@ func (m *mapper) enrichTaskPayload(payload *taskRunPayload, asOf time.Time) {
 		}
 	}
 	// Applying a new definition replaces registry rows but may retain task IDs.
-	// A delayed lifecycle event must never gain those new relationships. Use
-	// the execution's original start when present, otherwise the event's own
-	// timestamp; a missing timestamp cannot establish a declaration's age.
-	if payload.StartedAt != nil && !payload.StartedAt.IsZero() && (asOf.IsZero() || payload.StartedAt.Before(asOf)) {
-		asOf = *payload.StartedAt
-	}
-	if rec.JobID != uuid.Nil && rec.Name != "" && !asOf.IsZero() {
+	// TaskRun.CreatedAt is the immutable instance-admission cut; StartedAt is
+	// reset on retry. Using a retry's newer start could mix two definitions'
+	// edges on the same task_run_id. Missing historical declarations stay
+	// unknown rather than being replaced by the current definition.
+	var instance struct{ CreatedAt time.Time }
+	if rec.JobID != uuid.Nil && rec.Name != "" && !asOf.IsZero() &&
+		m.db.Model(&models.TaskRun{}).Select("created_at").
+			Where("id = ? AND task_id = ? AND job_run_id = ?", payload.ID, payload.TaskID, payload.JobRunID).
+			Take(&instance).Error == nil && !instance.CreatedAt.IsZero() {
+		if instance.CreatedAt.Before(asOf) {
+			asOf = instance.CreatedAt
+		}
 		var declarations []models.DatasetDeclaration
 		if err := m.db.Where("job_id = ? AND step_name = ? AND direction IN ?",
 			rec.JobID, rec.Name, []string{models.DatasetDirectionProduces, models.DatasetDirectionConsumes}).

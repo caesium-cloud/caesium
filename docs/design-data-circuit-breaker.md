@@ -427,8 +427,8 @@ their own scenarios.
    an explicit `namespace=` for the v1 registry; omitting it remains invalid.
    Existing historical runs are not backfilled: the declared relationships
    appear when task lifecycle events are captured. If an apply replaces the
-   registry before a delayed event is mapped, declarations newer than that
-   execution are rejected; missing historical edges remain unknown rather
+   registry before a delayed event or retry is mapped, declarations newer than
+   the task instance's immutable admission time are rejected; missing historical edges remain unknown rather
    than being attributed to the replacement definition.
 2. **Multi-producer datasets.** Does a clean run of producer B release a
    hold opened by producer A? Proposal: no — only the holder's clean run.

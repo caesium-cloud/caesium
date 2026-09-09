@@ -18,6 +18,8 @@ func (s *ImpactSuite) TestMapperPersistsDeclaredIdentityAlongsideArtifacts() {
 		{ID: uuid.New(), JobID: job.ID, JobAlias: job.Alias, StepName: job.Alias + "-task", Namespace: &ns, Name: "warehouse/clean", Direction: models.DatasetDirectionProduces},
 	}
 	s.Require().NoError(s.db.Create(&declarations).Error)
+	// Real task instances are admitted after their job definition is applied.
+	s.Require().NoError(s.db.Model(tr).Update("created_at", time.Now().UTC()).Error)
 	m := newMapper("configured-lineage", s.db)
 	payload := taskRunPayload{ID: tr.ID, JobRunID: tr.JobRunID, TaskID: tr.TaskID, Output: map[string]string{"artifact": "s3://bucket/artifact"}}
 	evt := event.Event{Type: event.TypeTaskSucceeded, JobID: job.ID, RunID: tr.JobRunID, TaskID: tr.TaskID, Timestamp: time.Now(), Payload: marshalFacet(payload)}
@@ -53,6 +55,7 @@ func (s *ImpactSuite) TestMapperPersistsDeclaredIdentityAlongsideArtifacts() {
 func (s *ImpactSuite) TestDelayedEventRejectsReplacementDeclarations() {
 	job, tr := s.createJobAndRun("delayed-consumer", "commit")
 	started := time.Now().UTC().Add(-time.Minute)
+	s.Require().NoError(s.db.Model(tr).Update("created_at", started).Error)
 	makeDeclarations := func(input, output string, created time.Time) []models.DatasetDeclaration {
 		return []models.DatasetDeclaration{
 			{ID: uuid.New(), JobID: job.ID, JobAlias: job.Alias, StepName: job.Alias + "-task", Name: input, Direction: models.DatasetDirectionConsumes, CreatedAt: created, UpdatedAt: created},
@@ -61,7 +64,7 @@ func (s *ImpactSuite) TestDelayedEventRejectsReplacementDeclarations() {
 	}
 	old := makeDeclarations("old/input", "old/output", started.Add(-time.Second))
 	s.Require().NoError(s.db.Create(&old).Error)
-	payload := taskRunPayload{ID: tr.ID, JobRunID: tr.JobRunID, TaskID: tr.TaskID, StartedAt: &started}
+	payload := taskRunPayload{ID: tr.ID, JobRunID: tr.JobRunID, TaskID: tr.TaskID}
 	evt := event.Event{Type: event.TypeTaskStarted, JobID: job.ID, RunID: tr.JobRunID, TaskID: tr.TaskID, Timestamp: started, Payload: marshalFacet(payload)}
 	m := newMapper("configured", s.db)
 	_, err := m.mapEvent(evt)
@@ -83,13 +86,18 @@ func (s *ImpactSuite) TestDelayedEventRejectsReplacementDeclarations() {
 	s.Require().NoError(err)
 	s.Empty(newImpact.Downstream)
 
-	// Legacy event payloads without started_at still use the original event
-	// timestamp, not the mapper's wall clock after the replacement apply.
-	payload.StartedAt = nil
-	evt.Timestamp = started
-	evt.Payload = marshalFacet(payload)
+	// A retry resets started_at and emits new events on the same instance.
+	// It must not combine the replacement definition with the first attempt's
+	// already persisted edges.
+	s.Require().NoError(s.db.Model(tr).Updates(map[string]any{"started_at": started.Add(3 * time.Second), "attempt": 2}).Error)
+	evt.Type = event.TypeTaskStarted
+	evt.Timestamp = started.Add(3 * time.Second)
 	mapped, err = m.mapEvent(evt)
 	s.Require().NoError(err)
 	s.Empty(mapped.Inputs)
 	s.Empty(mapped.Outputs)
+	oldImpact, err = QueryImpact(s.ctx, s.db, "", "old/input", 0)
+	s.Require().NoError(err)
+	s.Require().Len(oldImpact.Downstream, 1)
+	s.Equal("old/output", oldImpact.Downstream[0].DatasetName)
 }
