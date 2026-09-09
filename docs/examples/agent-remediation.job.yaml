@@ -37,12 +37,18 @@ metadata:
         mode:
           - full
           - incremental
-      # Narrow the allow-list for a specific failure class.
+      # Narrow the policy for a specific failure class. A perClass block is a
+      # constraint, never a grant: allow intersects with autonomy.allow above,
+      # requireApproval unions with autonomy.requireApproval below, and
+      # paramOverrides keeps only what both permit.
       perClass:
         auth_failure:
           allow:
             - notify
             - escalate
+          # A bad credential is never quietly retried: a human sees it first.
+          requireApproval:
+            - notify
       # Always require human approval for these, even if their tier would
       # otherwise permit autonomous execution.
       requireApproval:

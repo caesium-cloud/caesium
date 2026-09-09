@@ -651,10 +651,70 @@ func isKnownRemediationAction(name string) bool {
 	return ok
 }
 
-// RemediationClassPolicy narrows the allowed action set for one failure class,
-// e.g. metadata.remediation.autonomy.perClass.auth_failure.allow.
+// RemediationClassPolicy narrows the autonomy policy for one failure class,
+// e.g. metadata.remediation.autonomy.perClass.auth_failure.
+//
+// A per-class block may only NARROW what the job-level block (and, through it,
+// the operator's AgentProfile playbook) already permits — it can never widen.
+// The server merges it over the resolved policy BEFORE the tier decision; the
+// exact rule is documented on internal/incident.Playbook.ForClass and is:
+// `allow` intersects, `requireApproval` unions, `paramOverrides` keeps only the
+// keys and values both sides permit.
 type RemediationClassPolicy struct {
+	// Allow narrows the actions permitted to run autonomously for this class.
+	// It intersects with the job/profile allow-list; an action the outer policy
+	// does not permit cannot be granted here.
 	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+	// ParamOverrides narrows the rerun_with_params whitelist for this class.
+	// Every key must name an existing trigger.defaultParams entry, exactly as
+	// at the autonomy level.
+	ParamOverrides map[string][]string `yaml:"paramOverrides,omitempty" json:"paramOverrides,omitempty"`
+	// RequireApproval adds approval gates for this class. Gates are additive, so
+	// a class block can only make MORE actions require a human, never fewer.
+	RequireApproval []string `yaml:"requireApproval,omitempty" json:"requireApproval,omitempty"`
+}
+
+// MarshalJSON keys the class constraint on ABSENT vs EXPLICITLY EMPTY. See
+// remediationConstraintsJSON: `allow: []` is a configured deny-all list, and
+// plain `omitempty` would erase it on the way into models.Job.Remediation.
+func (p RemediationClassPolicy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(remediationConstraintsJSON{
+		Allow:           nilOrRef(p.Allow),
+		ParamOverrides:  nilOrRef(p.ParamOverrides),
+		RequireApproval: nilOrRef(p.RequireApproval),
+	})
+}
+
+// remediationConstraintsJSON is the wire shape for the three narrowing fields
+// an autonomy block and a per-class block share.
+//
+// The pointers are the whole point. `json:"allow,omitempty"` on a []string
+// drops an EMPTY slice as readily as a nil one, and for this schema those are
+// different policies: nil means "not configured" (tier defaults govern, so
+// tier 0/1 runs autonomously) while `[]` means "configured, grants nothing".
+// The importer persists `metadata.remediation` by marshalling it into
+// models.Job.Remediation (internal/jobdef.marshalOptionalJSON), so the tag
+// silently rewrote an authored `allow: []` — at the top level and per class —
+// into "unconfigured" on the way to the column, and the resolver then inherited
+// the surrounding permissions. A job allowing pause_job globally would
+// autonomously pause on a class whose allow-list was explicitly empty.
+//
+// omitempty on a POINTER keys on nil, so an unset field stays absent (documents
+// that never used these fields are byte-identical to before) while an explicitly
+// empty one is written as `[]` and survives the round-trip.
+type remediationConstraintsJSON struct {
+	Allow           *[]string            `json:"allow,omitempty"`
+	ParamOverrides  *map[string][]string `json:"paramOverrides,omitempty"`
+	RequireApproval *[]string            `json:"requireApproval,omitempty"`
+}
+
+// nilOrRef returns nil for a nil slice/map and a pointer to it otherwise, so a
+// zero-length-but-present value marshals as `[]`/`{}` rather than vanishing.
+func nilOrRef[T ~[]string | ~map[string][]string](v T) *T {
+	if v == nil {
+		return nil
+	}
+	return &v
 }
 
 // RemediationAutonomy is the tiered-autonomy policy within a remediation
@@ -670,12 +730,37 @@ type RemediationAutonomy struct {
 	// trigger.defaultParams key. Every key must name an existing
 	// trigger.defaultParams entry.
 	ParamOverrides map[string][]string `yaml:"paramOverrides,omitempty" json:"paramOverrides,omitempty"`
-	// PerClass optionally narrows the allow list for a specific failure class.
+	// PerClass optionally narrows this policy for a specific failure class.
+	// Keys are failure-class names; a class block may only tighten what the
+	// surrounding block permits (see RemediationClassPolicy).
 	PerClass map[string]RemediationClassPolicy `yaml:"perClass,omitempty" json:"perClass,omitempty"`
 	// RequireApproval lists actions that must create an ApprovalRequest for
 	// this job even if the action's own default tier would otherwise permit
 	// autonomous execution.
 	RequireApproval []string `yaml:"requireApproval,omitempty" json:"requireApproval,omitempty"`
+}
+
+// MarshalJSON keys the autonomy block's constraints on ABSENT vs EXPLICITLY
+// EMPTY, for the reason remediationConstraintsJSON documents. `allow: []` is
+// the shipped triage-only posture — "configured, grants nothing" — and it must
+// not decay into "unconfigured" (tier 0/1 autonomous) on the way to the column.
+//
+// PerClass keeps plain omitempty deliberately: an empty per-class map and an
+// absent one are the SAME policy (ForClass over an empty map inherits the base
+// unchanged), so preserving the distinction there would persist bytes that
+// cannot change an outcome.
+func (a RemediationAutonomy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		remediationConstraintsJSON
+		PerClass map[string]RemediationClassPolicy `json:"perClass,omitempty"`
+	}{
+		remediationConstraintsJSON: remediationConstraintsJSON{
+			Allow:           nilOrRef(a.Allow),
+			ParamOverrides:  nilOrRef(a.ParamOverrides),
+			RequireApproval: nilOrRef(a.RequireApproval),
+		},
+		PerClass: a.PerClass,
+	})
 }
 
 // RemediationEscalation configures the forced hand-off when remediation does
@@ -1085,13 +1170,8 @@ func validateRemediationAutonomy(a *RemediationAutonomy, defaultParams map[strin
 		return err
 	}
 
-	for key, values := range a.ParamOverrides {
-		if _, ok := defaultParams[key]; !ok {
-			return fmt.Errorf("metadata.remediation.autonomy.paramOverrides key %q does not match any trigger.defaultParams key", key)
-		}
-		if len(values) == 0 {
-			return fmt.Errorf("metadata.remediation.autonomy.paramOverrides[%q] must list at least one allowed value", key)
-		}
+	if err := validateRemediationParamOverrides("metadata.remediation.autonomy.paramOverrides", a.ParamOverrides, defaultParams); err != nil {
+		return err
 	}
 
 	if len(a.PerClass) > 0 {
@@ -1110,6 +1190,12 @@ func validateRemediationAutonomy(a *RemediationAutonomy, defaultParams map[strin
 			if err := validateRemediationActionList(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].allow", name), policy.Allow); err != nil {
 				return err
 			}
+			if err := validateRemediationActionList(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].requireApproval", name), policy.RequireApproval); err != nil {
+				return err
+			}
+			if err := validateRemediationParamOverrides(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].paramOverrides", name), policy.ParamOverrides, defaultParams); err != nil {
+				return err
+			}
 			normalized[name] = policy
 		}
 		a.PerClass = normalized
@@ -1119,6 +1205,24 @@ func validateRemediationAutonomy(a *RemediationAutonomy, defaultParams map[strin
 		return err
 	}
 
+	return nil
+}
+
+// validateRemediationParamOverrides checks a rerun_with_params whitelist:
+// every key must name a declared trigger.defaultParams entry, and every key
+// must list at least one allowed value. An EMPTY value list is refused rather
+// than treated as "any value" — the server reads an empty list as unconstrained
+// (internal/incident.validateParamOverrides), so silently accepting one here
+// would let a whitelist that looks restrictive grant everything.
+func validateRemediationParamOverrides(field string, overrides map[string][]string, defaultParams map[string]string) error {
+	for key, values := range overrides {
+		if _, ok := defaultParams[key]; !ok {
+			return fmt.Errorf("%s key %q does not match any trigger.defaultParams key", field, key)
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("%s[%q] must list at least one allowed value", field, key)
+		}
+	}
 	return nil
 }
 

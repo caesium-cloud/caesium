@@ -475,6 +475,16 @@ metadata:
       after: 15m                      # wall-clock cap before forced escalation
 ```
 
+`perClass.<class>` is a CONSTRAINT on the resolved policy, never a grant. The
+incident's classified failure class selects the block, and the server merges it
+over the resolved playbook (the job block over its profile's) *before* the tier
+decision, so it can only remove permissions relative to both: `allow`
+intersects, `requireApproval` unions, and `paramOverrides` keeps only the keys
+and values both sides permit. Where the surrounding `allow` is unset — so tier
+defaults govern — the intersection is taken against that default, which is what
+stops a class block from granting itself a tier-2 action. A class with no entry
+inherits the surrounding policy unchanged.
+
 `AgentProfile` is a small server-side resource (REST CRUD, like notification
 channels today; a GitOps YAML-apply path would mean extending the jobdef
 `Kind` system beyond `Job`, which nothing does yet — tracked as an open

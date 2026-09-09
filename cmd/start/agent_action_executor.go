@@ -71,11 +71,17 @@ func (a *agentActionExecutor) ExecuteAgentAction(ctx context.Context, req agents
 }
 
 // disposition maps the recorded row onto the coarse label the endpoint returns.
-// A tier-3 row left `proposed` is reported as awaiting_approval, which is what
-// actually happened: an ApprovalRequest now exists and a human owns the next
-// move.
+// A row left `proposed` is reported as awaiting_approval, which is what actually
+// happened: an ApprovalRequest now exists and a human owns the next move.
+//
+// Execute leaves a row `proposed` on exactly one path — decisionApprove, which
+// always creates the approval and parks the incident — so the status alone is
+// the signal. It used to also require tier 3, which mislabelled every
+// approval-gated tier-1/2 action as a bare "proposed" while the incident was
+// parked in awaiting_approval; `requireApproval` (job-level, and now per failure
+// class) is precisely what produces those rows.
 func disposition(action *models.AgentAction) string {
-	if action.Status == models.AgentActionStatusProposed && action.Tier >= incident.TierApproval {
+	if action.Status == models.AgentActionStatusProposed {
 		return "awaiting_approval"
 	}
 	return string(action.Status)

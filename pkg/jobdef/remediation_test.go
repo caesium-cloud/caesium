@@ -38,6 +38,11 @@ steps:
     image: etl:1.4
 `
 
+// perClassBlock is remediationJob's per-class entry, so a test can swap the
+// whole block rather than a line that also appears elsewhere in the manifest.
+const perClassBlock = `        auth_failure:
+          allow: [pause_job, notify, escalate]`
+
 func TestParseRemediationSurface(t *testing.T) {
 	def, err := Parse([]byte(remediationJob))
 	if err != nil {
@@ -285,5 +290,71 @@ steps:
 
 	if got, want := hashFor(withRemediation), hashFor(base); got != want {
 		t.Fatalf("remediation changed the cache hash: with=%s without=%s", got, want)
+	}
+}
+
+// TestValidateRemediation_PerClassFullSurface pins that a per-class block
+// carries the whole narrowing surface — allow, requireApproval, and
+// paramOverrides — rather than only `allow`. The server enforces all three
+// (internal/incident.Playbook.ForClass), so anything lint silently dropped here
+// would be a policy the author wrote and nothing applied.
+func TestValidateRemediation_PerClassFullSurface(t *testing.T) {
+	y := strings.Replace(remediationJob, perClassBlock, `        auth_failure:
+          allow: [pause_job, notify, escalate]
+          requireApproval: [pause_job]
+          paramOverrides:
+            badRowPolicy: [quarantine]`, 1)
+
+	def, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pc := def.Metadata.Remediation.Autonomy.PerClass["auth_failure"]
+	if len(pc.Allow) != 3 {
+		t.Fatalf("unexpected perClass allow: %+v", pc.Allow)
+	}
+	if len(pc.RequireApproval) != 1 || pc.RequireApproval[0] != "pause_job" {
+		t.Fatalf("unexpected perClass requireApproval: %+v", pc.RequireApproval)
+	}
+	if vals := pc.ParamOverrides["badRowPolicy"]; len(vals) != 1 || vals[0] != "quarantine" {
+		t.Fatalf("unexpected perClass paramOverrides: %+v", pc.ParamOverrides)
+	}
+}
+
+func TestValidateRemediation_PerClassUnknownRequireApprovalAction(t *testing.T) {
+	y := strings.Replace(remediationJob, perClassBlock, `        auth_failure:
+          requireApproval: [rm_rf_slash]`, 1)
+	_, err := Parse([]byte(y))
+	if err == nil || !strings.Contains(err.Error(), "not a known remediation action") {
+		t.Fatalf("expected unknown-action error for perClass requireApproval, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `perClass["auth_failure"].requireApproval`) {
+		t.Fatalf("error must name the offending field, got %v", err)
+	}
+}
+
+func TestValidateRemediation_PerClassParamOverridesMustMatchDefaultParams(t *testing.T) {
+	y := strings.Replace(remediationJob, perClassBlock, `        auth_failure:
+          paramOverrides:
+            unknownParam: [quarantine]`, 1)
+	_, err := Parse([]byte(y))
+	if err == nil || !strings.Contains(err.Error(), "does not match any trigger.defaultParams key") {
+		t.Fatalf("expected paramOverrides-mismatch error for perClass, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `perClass["auth_failure"].paramOverrides`) {
+		t.Fatalf("error must name the offending field, got %v", err)
+	}
+}
+
+// TestValidateRemediation_PerClassParamOverridesRejectEmptyValueList: an empty
+// value list reads as "any value for this key" server-side, so accepting one
+// would turn a whitelist that looks restrictive into an unconstrained key.
+func TestValidateRemediation_PerClassParamOverridesRejectEmptyValueList(t *testing.T) {
+	y := strings.Replace(remediationJob, perClassBlock, `        auth_failure:
+          paramOverrides:
+            badRowPolicy: []`, 1)
+	_, err := Parse([]byte(y))
+	if err == nil || !strings.Contains(err.Error(), "must list at least one allowed value") {
+		t.Fatalf("expected empty-value-list error for perClass paramOverrides, got %v", err)
 	}
 }

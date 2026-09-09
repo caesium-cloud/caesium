@@ -904,3 +904,106 @@ steps:
 	s.Require().NoError(s.db.Raw("SELECT remediation FROM jobs WHERE id = ?", job.ID).Row().Scan(&remediation))
 	s.False(remediation.Valid, "removing the remediation block must clear the persisted policy, got %q", remediation.String)
 }
+
+// TestApplyPreservesExplicitlyEmptyRemediationConstraints drives the REAL
+// importer over the reviewer's P1 reproduction (PR #452): an authored
+// `allow: []` is a CONFIGURED deny-all list, and it has to reach the column as
+// one.
+//
+// `json:"allow,omitempty"` drops an empty slice exactly as readily as a nil
+// one, so the marshal into models.Job.Remediation used to rewrite every
+// explicitly empty constraint into "unconfigured" — after which the resolver
+// applies tier defaults (tier 0/1 autonomous) or, per class, inherits the
+// surrounding allow-list. The policy the author wrote was strictly narrower
+// than the one the server enforced, and nothing between lint and the executor
+// could see it. pkg/jobdef.RemediationAutonomy/RemediationClassPolicy now
+// marshal these fields through pointers so absent stays absent and empty stays
+// empty; this pins it end to end rather than over a hand-written document.
+func (s *ImporterTestSuite) TestApplyPreservesExplicitlyEmptyRemediationConstraints() {
+	const denyAll = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: remediation-empty-constraints
+  remediation:
+    profile: triage-only
+    classes: [auth_failure, transient_infra]
+    autonomy:
+      allow: []
+      requireApproval: []
+      perClass:
+        auth_failure:
+          allow: []
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+`
+	def, err := schema.Parse([]byte(denyAll))
+	s.Require().NoError(err)
+
+	job, err := s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	var jobModel models.Job
+	s.Require().NoError(s.db.First(&jobModel, "id = ?", job.ID).Error)
+	s.Require().NotEmpty(jobModel.Remediation)
+
+	var stored schema.MetadataRemediation
+	s.Require().NoError(json.Unmarshal(jobModel.Remediation, &stored))
+	s.Require().NotNil(stored.Autonomy)
+
+	s.Require().NotNil(stored.Autonomy.Allow,
+		"`autonomy.allow: []` must persist as a configured empty list, not vanish: %s", jobModel.Remediation)
+	s.Empty(stored.Autonomy.Allow)
+	s.Require().NotNil(stored.Autonomy.RequireApproval,
+		"`autonomy.requireApproval: []` must persist too: %s", jobModel.Remediation)
+
+	class, ok := stored.Autonomy.PerClass["auth_failure"]
+	s.Require().True(ok)
+	s.Require().NotNil(class.Allow,
+		"`perClass.auth_failure.allow: []` must persist as a configured empty list: %s", jobModel.Remediation)
+	s.Empty(class.Allow)
+
+	// The other half of the distinction: an UNSET constraint must still be
+	// absent from the persisted document, so the fix cannot be "write null
+	// everywhere" — that would make every unconfigured block look configured.
+	const unset = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: remediation-unset-constraints
+  remediation:
+    profile: triage-only
+    classes: [auth_failure]
+    autonomy:
+      requireApproval: [pause_job]
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+`
+	def, err = schema.Parse([]byte(unset))
+	s.Require().NoError(err)
+
+	job, err = s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	// A FRESH model: scanning into the already-populated one makes gorm add its
+	// primary key as an extra condition and the lookup finds nothing.
+	var unsetModel models.Job
+	s.Require().NoError(s.db.First(&unsetModel, "id = ?", job.ID).Error)
+
+	s.NotContains(string(unsetModel.Remediation), `"allow"`,
+		"an unset allow-list must stay absent from the persisted policy: %s", unsetModel.Remediation)
+
+	var unsetStored schema.MetadataRemediation
+	s.Require().NoError(json.Unmarshal(unsetModel.Remediation, &unsetStored))
+	s.Require().NotNil(unsetStored.Autonomy)
+	s.Nil(unsetStored.Autonomy.Allow, "absent must decode as unconfigured, not as configured-empty")
+	s.Equal([]string{"pause_job"}, unsetStored.Autonomy.RequireApproval)
+}

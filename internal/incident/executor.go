@@ -109,23 +109,34 @@ type Playbook struct {
 	// ParamOverrides whitelists rerun_with_params keys → allowed values; nil
 	// means unconfigured, and an unconfigured whitelist denies every key.
 	ParamOverrides map[string][]string
+	// PerClass carries the per-failure-class NARROWING constraints declared by
+	// `metadata.remediation.autonomy.perClass` (and by an AgentProfile playbook
+	// document, which shares the shape). It is not itself an enforcement input:
+	// ForClass folds the entry matching the incident's class into the three
+	// fields above and clears this one, so what decide() sees is a single,
+	// already-narrowed policy. See playbook_class.go for the merge rule.
+	PerClass map[string]Playbook
 }
 
 // playbookDocument mirrors the JSON shape stored on AgentProfile.Playbook (see
 // agentprofile.SeedDefaults) and the `metadata.remediation` block in
 // pkg/jobdef.RemediationAutonomy, so one decoder serves both: the profile-level
 // document and the job-level block now persisted on models.Job.Remediation.
-// N-3 (not built): pkg/jobdef.RemediationAutonomy also carries `perClass`
-// (per-failure-class narrowing). Nothing decodes it here, so a job that narrows
-// autonomy per class is currently enforced as if the block named no classes.
-// Wiring it means threading the incident's class into decide(); filed as a
-// follow-up rather than smuggled into a review-fix commit.
 type playbookDocument struct {
 	Autonomy struct {
-		Allow           []string            `json:"allow"`
-		ParamOverrides  map[string][]string `json:"paramOverrides"`
-		RequireApproval []string            `json:"requireApproval"`
+		Allow           []string                         `json:"allow"`
+		ParamOverrides  map[string][]string              `json:"paramOverrides"`
+		PerClass        map[string]playbookClassDocument `json:"perClass"`
+		RequireApproval []string                         `json:"requireApproval"`
 	} `json:"autonomy"`
+}
+
+// playbookClassDocument mirrors pkg/jobdef.RemediationClassPolicy: one failure
+// class's NARROWING constraint on the surrounding autonomy block.
+type playbookClassDocument struct {
+	Allow           []string            `json:"allow"`
+	ParamOverrides  map[string][]string `json:"paramOverrides"`
+	RequireApproval []string            `json:"requireApproval"`
 }
 
 // DecodePlaybook parses a stored playbook document into the enforcement input.
@@ -145,20 +156,26 @@ func DecodePlaybook(raw []byte) Playbook {
 		log.Warn("incident: could not decode playbook; falling back to the default policy", "error", err)
 		return Playbook{}
 	}
-	pb := Playbook{ParamOverrides: doc.Autonomy.ParamOverrides}
-	if doc.Autonomy.Allow != nil {
-		pb.Allow = make(map[string]bool, len(doc.Autonomy.Allow))
-		for _, a := range doc.Autonomy.Allow {
-			pb.Allow[a] = true
-		}
+	return Playbook{
+		Allow:           actionSet(doc.Autonomy.Allow),
+		ParamOverrides:  doc.Autonomy.ParamOverrides,
+		RequireApproval: actionSet(doc.Autonomy.RequireApproval),
+		PerClass:        decodeClassPolicies(doc.Autonomy.PerClass),
 	}
-	if doc.Autonomy.RequireApproval != nil {
-		pb.RequireApproval = make(map[string]bool, len(doc.Autonomy.RequireApproval))
-		for _, a := range doc.Autonomy.RequireApproval {
-			pb.RequireApproval[a] = true
-		}
+}
+
+// actionSet turns a document's action list into the enforcement set, PRESERVING
+// the nil-vs-empty distinction the whole policy model rests on: an absent list
+// stays nil (unconfigured), a present `[]` becomes a configured empty set.
+func actionSet(actions []string) map[string]bool {
+	if actions == nil {
+		return nil
 	}
-	return pb
+	set := make(map[string]bool, len(actions))
+	for _, a := range actions {
+		set[a] = true
+	}
+	return set
 }
 
 // Override resolves a job's authored `metadata.remediation.autonomy` block over
@@ -182,10 +199,15 @@ func DecodePlaybook(raw []byte) Playbook {
 //     wins. Removing an approval gate is the single edit that can only reduce
 //     safety, and nothing in the design asks a job to do it, so a profile's gate
 //     survives a job block that omits it.
+//   - PerClass: BOTH sides' constraints are kept and combined per class, because
+//     a per-class block may only narrow (see ForClass). Replacing here would let
+//     a job's per-class block drop an operator's, which is the one direction
+//     narrowing must never travel.
 func (pb Playbook) Override(job Playbook) Playbook {
 	out := Playbook{
 		Allow:          pb.Allow,
 		ParamOverrides: pb.ParamOverrides,
+		PerClass:       combinePerClass(pb.PerClass, job.PerClass),
 	}
 	if job.Allow != nil {
 		out.Allow = job.Allow
@@ -308,7 +330,14 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 		return nil, errors.New("incident: incident not found")
 	}
 
-	dec := req.Playbook.decide(req.Type, tier)
+	// Per-class narrowing is folded in HERE, before the tier decision, using the
+	// incident's OWN failure class. ResolvePlaybook already applies it, so this
+	// is normally a no-op (ForClass consumes PerClass, making it idempotent) —
+	// but the playbook arrives as a caller-supplied field, and a caller that
+	// builds one straight from DecodePlaybook must not enforce a job's policy as
+	// if it had declared no classes. That fail-open gap is issue #416.
+	playbook := req.Playbook.ForClass(inc.Class)
+	dec := playbook.decide(req.Type, tier)
 
 	action := e.newAction(inc, req, tier, actor)
 	if err := e.store.DB().WithContext(ctx).Create(action).Error; err != nil {
@@ -340,8 +369,10 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 		return action, nil
 	}
 
-	// decisionExecute: dispatch server-side.
-	result, execErr := e.dispatch(ctx, req.Type, inc, action, req.Params, req.Playbook)
+	// decisionExecute: dispatch server-side. The NARROWED playbook is what the
+	// dispatcher gets too, so a per-class paramOverrides constraint governs the
+	// rerun_with_params whitelist as well as the allow-list.
+	result, execErr := e.dispatch(ctx, req.Type, inc, action, req.Params, playbook)
 	if execErr != nil {
 		e.finish(ctx, action, models.AgentActionStatusFailed, map[string]any{"error": execErr.Error()})
 		return action, execErr
