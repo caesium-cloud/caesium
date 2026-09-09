@@ -171,7 +171,7 @@ decided.
 > plan reads the same `consumes` edges for its compatibility graph but does not
 > define registry structure.
 
-## Progress (as of 2026-09-08)
+## Progress (as of 2026-09-09)
 
 Three waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B) and
 Wave 3 (Stream C) — the observe → assert → hold half of the loop is live behind
@@ -180,14 +180,15 @@ scope-aware integration gate on its exact final head before merge (lint + unit
 + the default, agent, owner-memory and distributed lanes), and — the review bot
 having reviewed none of them — every code PR got a substitute Opus adversarial
 review plus a scoped re-review of each fix commit; the reviews found one P1 per
-PR (see the wave entries), all fixed before merge. Wave 4's Stream D is verified
-locally and in review in #442; it is not shipped until merged. Next: E after D
-lands, then F in its dependency-ordered waves, then N-1.
+PR (see the wave entries), all fixed before merge. Wave 4's Stream D merged in
+#442 (`995ae8b3`) on 2026-09-09. Stream E is now eligible alongside Plan 2
+Stream A under the arc's explicit overlap allowance; F follows in its
+dependency-ordered waves, then N-1. Wave 4 is not complete until E ships.
 
-### Wave 4 — Dataset operator surface (in review)
+### Wave 4 — Dataset operator surface (D merged; E pending)
 
 - **α / D1–D2** — [#442](https://github.com/caesium-cloud/caesium/pull/442),
-  **pending merge**. Dataset list/detail retain their freshness projection and
+  **merged as `995ae8b3`** on 2026-09-09. Dataset list/detail retain their freshness projection and
   add flag-gated active hold evidence. The new hold feed supports status,
   exact namespace/name filters, and pagination; metric reads return recent raw
   samples alongside the clean rolling baseline. Both reads are viewer-accessible
@@ -210,7 +211,13 @@ lands, then F in its dependency-ordered waves, then N-1.
   execution descriptor. **Independent native review:** one P2, silent truncation
   after the first 50 CLI holds, fixed with `--limit`/`--offset`, visible totals,
   and a 55-row HTTP regression; scoped re-review found no further substantive
-  issues. Current-head CI and required code-owner review remain merge gates.
+  issues. After PR review fixes, final head `82d3625c` passed local `just lint`,
+  `just unit-test`, `just integration-test` (201 scenarios, 28 expected skips),
+  `just integration-test-agent` (31 scenarios), and `just ui-e2e` (27 scenarios).
+  The current [CI run](https://github.com/caesium-cloud/caesium/actions/runs/34334279966)
+  is successful. Its initial Podman named-volume race is retained as
+  [#443](https://github.com/caesium-cloud/caesium/issues/443); a later passing
+  attempt is not evidence that the race has been corrected.
   **PR review follow-up:** list and metric CLI reads expose pagination and
   totals; raw metric history pages independently of the clean baseline window,
   with `in_baseline` marking actual selected samples. List holds use a small
@@ -371,7 +378,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | A | Observability substrate — `##caesium::metrics` marker, `DatasetMetric` model + `DatasetDeclaration` extension, jobdef `assertions`/`onViolation`/`release`/`onUpstreamHold` schema + lint, metrics persistence in both executors, `asOf`-cut baseline read, master env gate (Phase 0) | **P0** | **Shipped** (W1, #434) |
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **Shipped** (W2, #436) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
-| D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **In review** (W4, #442; local gates passed, pending merge) |
+| D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **Shipped** (W4-α, #442, `995ae8b3`) |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | Not started |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
 | H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
