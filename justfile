@@ -421,6 +421,13 @@ integration-test: integration-runner
       exit 1; \
     fi
 
+# The -test.run list below is the set of scenarios whose BEHAVIOUR differs in
+# distributed mode, so each one must name a path the local lane cannot reach.
+# TestDataAssertionsMetricsPersisted is there for the dataset-metric CLAIM FENCE
+# (issue #438): the worker's post-task seam writes samples only while it still
+# holds the TaskRun row's claim, and that fence exists ONLY on this lane — a
+# wrong claim identity would silently drop every distributed sample, which the
+# local-mode default lane cannot observe.
 integration-test-distributed: integration-runner
     just tag={{ tag }} integration-up-distributed
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
@@ -443,7 +450,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \

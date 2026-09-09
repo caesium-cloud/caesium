@@ -81,17 +81,29 @@ type RunHeldUpstreamEvent struct {
 // datasetHoldRequest is one hold-open request: everything the row and the
 // event need, resolved by the evaluator before it reaches the store.
 type datasetHoldRequest struct {
-	namespace  string
-	name       string
-	reason     string
-	jobID      uuid.UUID
-	jobAlias   string
-	runID      uuid.UUID
-	taskID     uuid.UUID
-	taskRunID  uuid.UUID
-	stepName   string
+	namespace string
+	name      string
+	reason    string
+	jobID     uuid.UUID
+	jobAlias  string
+	runID     uuid.UUID
+	taskID    uuid.UUID
+	taskRunID uuid.UUID
+	stepName  string
+	// claim fences the open on the breaching attempt still owning taskRunID.
+	// Nil on the local executor, which holds no claim. See TaskClaim; the check
+	// runs INSIDE the open transaction, not before it, because a preflight
+	// would leave the reclaim window between the check and the insert open —
+	// and a hold is the one write here that outlives the attempt that made it.
+	claim      *TaskClaim
 	violations []DataViolation
 }
+
+// errDatasetHoldStaleClaim reports that the attempt asking for a hold no longer
+// owns its TaskRun row. It is NOT a failure to open: nothing was written and
+// nothing should be, so the caller abandons quietly instead of failing the task
+// closed the way it does for a durable write error.
+var errDatasetHoldStaleClaim = errors.New("run: dataset hold refused: stale claim")
 
 // openOrAppendDatasetHold opens exactly one active hold per dataset, or folds a
 // repeat breach into the existing one as an occurrence.
@@ -176,6 +188,25 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 			opened = false
 			evt = nil
 			return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+				// THE CLAIM FENCE, inside the write transaction (issue #438,
+				// maintainer review). A superseded worker reaches this seam
+				// with a real breach in hand, and opening its hold would break
+				// the circuit on evidence the metric fence had already refused
+				// — blocking every consumer after the worker that owns the row
+				// has already recovered the dataset. Checking here rather than
+				// before the call is what closes the reclaim window: on
+				// Postgres the row lock taskRunClaimHeldTx takes holds until
+				// this transaction commits, so a takeover cannot land between
+				// the check and the insert.
+				if req.claim != nil {
+					held, fenceErr := taskRunClaimHeldTx(tx, req.taskRunID, *req.claim)
+					if fenceErr != nil {
+						return fenceErr
+					}
+					if !held {
+						return errDatasetHoldStaleClaim
+					}
+				}
 				res := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "active_key"}},
 					DoNothing: true,
@@ -227,6 +258,11 @@ func (s *Store) openOrAppendDatasetHold(ctx context.Context, req datasetHoldRequ
 		})
 		if errors.Is(err, errDatasetHoldRace) {
 			continue
+		}
+		if errors.Is(err, errDatasetHoldStaleClaim) {
+			// Not a retry and not a failure: the row belongs to another
+			// attempt, so there is nothing here to write on any attempt.
+			return nil, false, errDatasetHoldStaleClaim
 		}
 		if err != nil {
 			return nil, false, err
