@@ -1,0 +1,3 @@
+interface:
+  display_name: "Execute Plan Wave"
+  short_description: "Run Caesium plan waves with native Codex agents"
