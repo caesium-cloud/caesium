@@ -8,6 +8,11 @@ general execution-mode / worker / dqlite env reference (what each
 [parallel-execution-operations.md](parallel-execution-operations.md) — this
 doc does not repeat that material, only the CI-specific wiring.
 
+Proposed improvements to distributed failure testing, developer/Console
+journeys, coverage evidence, and performance regression gates are tracked in
+[Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
+That plan does not change the current required checks described below.
+
 ## 1. Required-to-merge checks
 
 `ci-ok` is the aggregate merge gate to enable in branch protection. It
