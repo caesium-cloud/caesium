@@ -530,12 +530,18 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+			// The row may still have failed under this claim — a final attempt
+			// that reported a failure RESULT terminalizes it through the
+			// completion route above, and a later delivery is refused — so the
+			// halt is decided from the durable row, not from this outcome.
+			e.haltRunAfterFailure(taskRun)
 			return
 		}
 		log.Error("failed to persist worker task failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
 	}
 
 	if !e.continueOnFailure {
+		e.haltRunAfterFailure(taskRun)
 		return
 	}
 
@@ -550,6 +556,41 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if skipErr := e.store.SkipTask(taskRun.JobRunID, taskID, reason); skipErr != nil {
 			log.Error("failed to persist skipped descendant task", "run_id", taskRun.JobRunID, "task_id", taskID, "error", skipErr)
 		}
+	}
+}
+
+// haltRunAfterFailure is the distributed worker's half of
+// CAESIUM_TASK_FAILURE_POLICY=halt: stop the run from admitting new work.
+//
+// The failure transaction already resolved THIS task's successors by trigger
+// rule (the store's route-completeness contract: an all_done consumer is
+// released, an all_success one skipped with its rule reason). What halt adds is
+// the rest of the DAG — every step that has not started and is not
+// failure-tolerant is skipped right here, before the owner's next dispatch tick
+// can claim it, so the only work that starts after a failure is the work whose
+// trigger rule says it should. The local executor issues the same sweep
+// (internal/job/job.go haltUnstarted) and the run-completion waiter repeats it
+// as a belt-and-braces pass; all three share run.Store.HaltUnstartedTasks.
+//
+// It sweeps only when the durable row really is failed. The caller can reach
+// here on a claim mismatch, and a mismatch also means "resolved out from under
+// me" — cancelled by a concurrency replace, reclaimed by another node whose
+// attempt may yet succeed — and halting a run on a failure that did not happen
+// would strand every step of it.
+func (e *runtimeExecutor) haltRunAfterFailure(taskRun *models.TaskRun) {
+	if e.continueOnFailure || taskRun == nil {
+		return
+	}
+	var row models.TaskRun
+	if err := e.store.DB().Select("status").First(&row, "id = ?", taskRun.ID).Error; err != nil {
+		log.Error("failed to read task row before halting run", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
+		return
+	}
+	if row.Status != string(run.TaskStatusFailed) {
+		return
+	}
+	if _, err := e.store.HaltUnstartedTasks(taskRun.JobRunID, taskRun.TaskID, nil); err != nil {
+		log.Error("failed to halt unstarted tasks after failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
 	}
 }
 

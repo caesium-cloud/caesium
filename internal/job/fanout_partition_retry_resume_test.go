@@ -378,11 +378,11 @@ func TestFanOutPartitionRetryReplacementHandsFreshRetryToAnotherEngine(t *testin
 }
 
 // TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone pins the fail-fast
-// half of re-entry. Under the default halt policy the first failure clears the
-// queue, leaving never-dispatched roots pending with indegree 0. A partition
-// retry resumed into that run must execute the reset instance (and whatever
-// its success releases) and nothing else — not resurrect a root the halt
-// deliberately suppressed.
+// half of re-entry. Under the default halt policy the first failure resolves
+// every never-dispatched intolerant root as skipped (`run halted after task
+// … failed`). A partition retry resumed into that run must execute the reset
+// instance (and whatever its success releases) and nothing else — not
+// resurrect a root the halt deliberately suppressed.
 func TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone(t *testing.T) {
 	f := newFanOutFixture(t, `["ok","flaky"]`, &schema.FanOut{
 		From:          "list",
@@ -408,7 +408,8 @@ func TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone(t *testing.T) {
 	require.Len(t, f.engine.createRequestsForTask(later), 0, "precondition: the halt must suppress the later root")
 	var laterRow models.TaskRun
 	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", jobRun.ID, later).First(&laterRow).Error)
-	require.Equal(t, string(run.TaskStatusPending), laterRow.Status)
+	require.Equal(t, string(run.TaskStatusSkipped), laterRow.Status, "the halt resolves the never-dispatched root, it does not leave it pending")
+	require.Contains(t, laterRow.Error, "run halted after task")
 	var flakyID uuid.UUID
 	for _, r := range f.instanceRows(t) {
 		if r.PartitionValue == "flaky" {
@@ -430,7 +431,7 @@ func TestFanOutPartitionRetryResumeLeavesHaltedRootsAlone(t *testing.T) {
 	require.Len(t, f.engine.createRequestsForTask(later), 0,
 		"a partition retry must not resurrect a root the fail-fast halt suppressed")
 	require.NoError(t, f.db.First(&laterRow, "id = ?", laterRow.ID).Error)
-	require.Equal(t, string(run.TaskStatusPending), laterRow.Status)
+	require.Equal(t, string(run.TaskStatusSkipped), laterRow.Status)
 	f.awaitRunTerminal(t, jobRun.ID)
 }
 

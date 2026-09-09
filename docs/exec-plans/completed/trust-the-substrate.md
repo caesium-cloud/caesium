@@ -497,6 +497,24 @@ orders this stream first.
       change owned by H-2, not by this stream. The remaining product question —
       should `halt` release rule-tolerant successors at all, in BOTH executors? —
       is an N-3 issue, not something to smuggle into a scheduler-correctness PR.
+      **Resolved by #401 (PR #456, `fix/issue-401-halt-tolerant-successors`).** The
+      answer is yes, on both executors: `halt` stops the run from admitting
+      new work — every not-yet-started step whose rule is `all_success` is
+      skipped with `run halted after task "<name>" failed` — but never halts a
+      step with a failure-tolerant rule, which is evaluated as its
+      predecessors resolve and runs when satisfied. One store primitive
+      (`run.Store.HaltUnstartedTasks`) is issued by the local Kahn loop, by
+      the distributed worker right after it records a failure, and by the
+      run-completion waiter as a belt-and-braces pass; the waiter now
+      finalizes only when the store reports every row terminal and treats
+      "a pending step whose predecessors are all terminal" (decided from
+      edges, `run.Store.HasReleasablePending`) as not-a-stall. The scenarios
+      that assert EXECUTION of the tolerant consumer under the default policy
+      live in `test/halt_policy_test.go` (`TestHaltPolicy…`, in the default
+      and `-distributed` lanes); `continue` is still untested end-to-end for
+      the H-2 reason above. Semantics are written down in
+      `docs/job-definitions.md` (trigger rules) and
+      `docs/parallel-execution-operations.md`.
 - [x] A3. Make run cancellation reach the local executor's container. Add a
       process-wide run-cancel registry in `internal/job` (new
       `internal/job/cancel_registry.go`: `Register(runID) (ctx, release)`,

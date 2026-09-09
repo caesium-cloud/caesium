@@ -289,6 +289,26 @@ type Store struct {
 // comment calls load-bearing.
 type runStateInvalidator interface {
 	Release(runID uuid.UUID) error
+	// ApplyTerminalRows folds terminal task_runs rows the STORE resolved —
+	// not the owner — into the cached state, in terminal_sequence order, so
+	// the owner's ready queue stops carrying a row that is already skipped
+	// and starts carrying the successors that resolution released. The halt
+	// sweep is the writer that needs it (HaltUnstartedTasks). A run this
+	// node does not own is a no-op.
+	ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
+}
+
+// syncRunStateTerminalRows hands rows the store just made terminal to the
+// cached in-memory run state, if there is one. It is called after the
+// transaction that wrote them committed, so the cache never sees a
+// transition that can still roll back.
+func (s *Store) syncRunStateTerminalRows(runID uuid.UUID, rows []models.TaskRun) {
+	if s == nil || len(rows) == 0 {
+		return
+	}
+	if inv := s.runStateCache.Load(); inv != nil && *inv != nil {
+		(*inv).ApplyTerminalRows(runID, rows)
+	}
 }
 
 // SetRunStateCache registers the in-memory run state layered over this store.
@@ -4387,6 +4407,20 @@ func terminalStatusStrings() []string {
 // of their predecessors are terminal and their trigger rules remain
 // unsatisfied.
 func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) ([]uuid.UUID, error) {
+	return s.skipTaskAndDescendantsUsingTx(tx, runID, taskID, reason, s.markTaskSkippedTx, pendingEvents, counts)
+}
+
+// taskSkipMarker resolves every eligible row of one (runID, taskID) step as
+// skipped and reports whether any row transitioned. markTaskSkippedTx is the
+// pending-only default; the halt sweep uses markTaskCancelledBeforeStartTx,
+// which also reaches a row that is claimed but has no container yet.
+type taskSkipMarker func(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error)
+
+// skipTaskAndDescendantsUsingTx is skipTaskAndDescendantsTx with the ROOT
+// step's marker chosen by the caller. Descendants are always marked through
+// markTaskSkippedTx: a descendant of an unstarted step cannot itself have been
+// claimed, so the pending-only marker is exact for them.
+func (s *Store) skipTaskAndDescendantsUsingTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, markRoot taskSkipMarker, pendingEvents *[]event.Event, counts *dbWriteCounts) ([]uuid.UUID, error) {
 	type queuedSkip struct {
 		taskID uuid.UUID
 		reason string
@@ -4394,12 +4428,14 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 
 	queue := []queuedSkip{{taskID: taskID, reason: reason}}
 	var skipped []uuid.UUID
+	mark := markRoot
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 
-		markedSkipped, err := s.markTaskSkippedTx(tx, runID, current.taskID, current.reason, pendingEvents, counts)
+		markedSkipped, err := mark(tx, runID, current.taskID, current.reason, pendingEvents, counts)
+		mark = s.markTaskSkippedTx
 		if err != nil {
 			return skipped, err
 		}
@@ -4463,6 +4499,21 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 				return skipped, err
 			}
 			if shouldRun {
+				// Same guard as advanceCrossStepSuccessorsTx: a fanned step whose
+				// producer was skipped (by rule, or by the halt sweep) is still an
+				// unexpanded template, and announcing it ready would run it once,
+				// unpartitioned. The group cannot materialize, so it is skipped.
+				isTemplate, producer, tmplErr := s.unexpandedFanOutTemplateTx(tx, runID, edge.ToTaskID)
+				if tmplErr != nil {
+					return skipped, tmplErr
+				}
+				if isTemplate {
+					queue = append(queue, queuedSkip{
+						taskID: edge.ToTaskID,
+						reason: unexpandedTemplateSkipReason(producer),
+					})
+					continue
+				}
 				if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, pendingEvents, counts); err != nil {
 					return skipped, err
 				}

@@ -450,7 +450,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -492,7 +492,7 @@ integration-test-owner-memory: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestHaltPolicy)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
