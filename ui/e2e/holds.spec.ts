@@ -55,9 +55,29 @@ test("live held lineage, downstream skip and recorded baseline remain visible wi
     "data-hold-status",
     "active",
   );
-  await expect(
-    page.getByTestId(`lineage-impact-node::${output}:${consumer.id}`),
-  ).toHaveAttribute("data-hold-affected", "true");
+  const downstreamNodes = page.getByTestId(
+    `lineage-impact-node::${output}:${consumer.id}`,
+  );
+  // Impact rows are recorded per task run. The earlier successful consumer and
+  // the later skipped consumer can both appear for this dataset/job identity;
+  // the graph renders every returned row, and every occurrence must be shaded.
+  await expect.poll(() => downstreamNodes.count()).toBeGreaterThan(0);
+  await expect
+    .poll(
+      () =>
+        downstreamNodes.evaluateAll(
+          (nodes) =>
+            nodes.length > 0 &&
+            nodes.every(
+              (node) => node.getAttribute("data-hold-affected") === "true",
+            ),
+        ),
+      {
+        message:
+          "Every matching downstream occurrence must show the active hold overlay",
+      },
+    )
+    .toBe(true);
   await page.getByTestId("lineage-hold-badge").click();
   await expect(page.getByTestId("hold-panel")).toHaveAttribute(
     "data-hold-id",
