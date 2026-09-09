@@ -151,6 +151,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 
 	for _, args := range [][]string{
 		{"dataset", "holds", "--json"},
+		{"dataset", "holds", "--all-namespaces", "--json"},
 		{"dataset", "metrics", dataset, "--metric", "rowCount", "--json"},
 		{"dataset", "status", dataset, "--json"},
 		{"dataset", "list", "--json"},
