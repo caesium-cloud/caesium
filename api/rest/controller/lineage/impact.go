@@ -28,7 +28,10 @@ func Impact(c *echo.Context) error {
 	namespace := c.QueryParam("namespace")
 	name := c.QueryParam("name")
 
-	if namespace == "" || name == "" {
+	// An explicit empty namespace is the declared registry's v1 identity.
+	// Missing namespace remains invalid; silently defaulting it would query a
+	// different graph from the identity the caller supplied.
+	if !c.QueryParams().Has("namespace") || name == "" {
 		return echo.NewHTTPError(http.StatusBadRequest,
 			"namespace and name query parameters are required")
 	}

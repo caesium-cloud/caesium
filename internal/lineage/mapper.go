@@ -68,6 +68,12 @@ type taskRunPayload struct {
 	// describing which keys this step consumes.  Non-nil when the step declares
 	// inputSchema in the job manifest.
 	InputSchema map[string]map[string]any `json:"input_schema,omitempty"`
+
+	// The declared registry and holds share an exact (namespace, name)
+	// identity. Keep these relationships alongside heuristic artifact lineage,
+	// so a declared dataset's impact does not depend on its name resembling a
+	// path or on the configured OpenLineage namespace.
+	declaredDatasets []models.DatasetDeclaration
 }
 
 type jobRecord struct {
@@ -496,9 +502,10 @@ func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]any 
 // recover a task's step name and declared schemas (mirrors jobRecord's pattern
 // of mapping a local struct to a table to avoid importing internal/models).
 type taskRecord struct {
-	Name         string `gorm:"column:name"`
-	OutputSchema []byte `gorm:"column:output_schema"`
-	InputSchema  []byte `gorm:"column:input_schema"`
+	JobID        uuid.UUID `gorm:"column:job_id"`
+	Name         string    `gorm:"column:name"`
+	OutputSchema []byte    `gorm:"column:output_schema"`
+	InputSchema  []byte    `gorm:"column:input_schema"`
 }
 
 func (taskRecord) TableName() string { return "tasks" }
@@ -519,11 +526,8 @@ func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
 	if m.db == nil || payload.TaskID == uuid.Nil {
 		return
 	}
-	if payload.TaskName != "" && payload.OutputSchema != nil && payload.InputSchema != nil {
-		return
-	}
 	var rec taskRecord
-	if err := m.db.Select("name", "output_schema", "input_schema").
+	if err := m.db.Select("job_id", "name", "output_schema", "input_schema").
 		Where("id = ?", payload.TaskID).First(&rec).Error; err != nil {
 		return
 	}
@@ -540,6 +544,14 @@ func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
 		var is map[string]map[string]any
 		if json.Unmarshal(rec.InputSchema, &is) == nil {
 			payload.InputSchema = is
+		}
+	}
+	if rec.JobID != uuid.Nil && rec.Name != "" {
+		var declarations []models.DatasetDeclaration
+		if err := m.db.Where("job_id = ? AND step_name = ? AND direction IN ?",
+			rec.JobID, rec.Name, []string{models.DatasetDirectionProduces, models.DatasetDirectionConsumes}).
+			Order("namespace ASC, name ASC, direction ASC").Find(&declarations).Error; err == nil {
+			payload.declaredDatasets = declarations
 		}
 	}
 }
@@ -616,12 +628,41 @@ func (m *mapper) persistTaskDatasets(payload taskRunPayload, inputs, outputs []D
 	}).Create(&rows).Error
 }
 
-// The namespace is always the mapper's configured namespace so datasets from
-// the same Caesium instance share a namespace and can be joined across jobs.
+// Heuristic artifacts use the configured OpenLineage namespace; declared
+// datasets retain their registry identity (empty namespace in v1). Never
+// join these identities by name alone: they may refer to different datasets.
 func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inputs, outputs []Dataset) {
 	stepName := payload.TaskName
 	if stepName == "" {
 		stepName = payload.TaskID.String()
+	}
+	for _, declaration := range payload.declaredDatasets {
+		direction := "input"
+		if declaration.Direction == models.DatasetDirectionProduces {
+			direction = "output"
+		} else if declaration.Direction != models.DatasetDirectionConsumes {
+			continue
+		}
+		namespace := ""
+		if declaration.Namespace != nil {
+			namespace = *declaration.Namespace
+		}
+		dataset := Dataset{
+			Namespace: namespace,
+			Name:      declaration.Name,
+			Facets: map[string]any{
+				"caesium_dataset": CaesiumDatasetFacet{
+					BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
+					StepName:  stepName,
+					Direction: direction,
+				},
+			},
+		}
+		if direction == "output" {
+			outputs = append(outputs, dataset)
+		} else {
+			inputs = append(inputs, dataset)
+		}
 	}
 
 	// --- Outputs ---

@@ -418,10 +418,15 @@ their own scenarios.
 
 ## Open questions
 
-1. **Identity unification.** Should declared registry names *replace* the
-   heuristic lineage names for declaring steps (mapper prefers `produces`
-   over path-derivation), so holds and impact queries share one spine?
-   Leaning yes — it also fixes lineage-name instability.
+1. **Identity unification — answered in Stream E (2026-09-09).** Task lifecycle
+   capture records `datasets.produces` / `datasets.consumes` relationships with
+   the registry's exact `(namespace, name)` identity (empty namespace in v1),
+   alongside existing heuristic artifact lineage. Holds and their Console
+   impact graph therefore share one identity without discarding older artifact
+   edges or matching unrelated namespaces by name. The impact HTTP query accepts
+   an explicit `namespace=` for the v1 registry; omitting it remains invalid.
+   Existing historical runs are not backfilled: the declared relationships
+   appear when task lifecycle events are captured.
 2. **Multi-producer datasets.** Does a clean run of producer B release a
    hold opened by producer A? Proposal: no — only the holder's clean run.
 3. **Partition-scoped holds.** Holding `transactions_daily/2026-07-03`
