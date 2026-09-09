@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -264,4 +265,80 @@ func TestStartSkipReturnsSentinel(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.Start(job.ID, nil)
 	require.True(t, errors.Is(err, ErrRunSkipped))
+}
+
+// TestCancelRunTxDecisionIsStatusGated pins the cancel decision itself so the
+// narrowed cancelledRunInfo read cannot change WHICH runs get cancelled or WHAT
+// the metrics path is told about them. Only a `running` run may be cancelled;
+// every other status is a no-op returning a nil info and no events, leaving the
+// row exactly as it was.
+func TestCancelRunTxDecisionIsStatusGated(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	job := createConcurrencyJob(t, db, "cancel-status-gate", jobdef.ConcurrencyStrategyReplace, 1)
+	startedAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+
+	for _, tc := range []struct {
+		status        Status
+		wantCancelled bool
+	}{
+		{status: StatusRunning, wantCancelled: true},
+		{status: StatusSucceeded},
+		{status: StatusFailed},
+		{status: StatusCancelled},
+		{status: StatusSkipped},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			runID := uuid.New()
+			require.NoError(t, db.Create(&models.JobRun{
+				ID:        runID,
+				JobID:     job.ID,
+				Status:    string(tc.status),
+				StartedAt: startedAt,
+				// The wide `job_runs.*` read used to drag these blobs across the
+				// read path; keep them populated so the narrowed select runs
+				// against a row that actually has them.
+				Params:     datatypes.JSON(`{"lane":"cancel-status-gate"}`),
+				Quarantine: true,
+				CreatedAt:  startedAt,
+				UpdatedAt:  startedAt,
+			}).Error)
+
+			var (
+				info   *cancelledRunInfo
+				events []event.Event
+			)
+			require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+				var err error
+				info, events, err = store.cancelRunTx(tx, runID, "cancelled by concurrency replacement")
+				return err
+			}))
+
+			var row models.JobRun
+			require.NoError(t, db.First(&row, "id = ?", runID).Error)
+
+			if !tc.wantCancelled {
+				require.Nil(t, info, "%s run must not be cancelled", tc.status)
+				require.Empty(t, events)
+				require.Equal(t, string(tc.status), row.Status, "%s run must be left alone", tc.status)
+				require.Nil(t, row.CompletedAt)
+				require.Empty(t, row.Error)
+				return
+			}
+
+			require.NotNil(t, info)
+			require.Equal(t, runID, info.ID)
+			require.Equal(t, job.ID, info.JobID)
+			require.Equal(t, job.Alias, info.JobAlias, "the narrowed read must still resolve the job alias")
+			require.WithinDuration(t, startedAt, info.StartedAt, time.Second,
+				"the narrowed read must still resolve started_at for the duration metric")
+			require.True(t, info.Quarantine, "the narrowed read must still resolve quarantine")
+			require.False(t, info.CancelledAt.IsZero())
+			require.Equal(t, string(StatusCancelled), row.Status)
+			require.NotNil(t, row.CompletedAt)
+			require.Equal(t, "cancelled by concurrency replacement", row.Error)
+		})
+	}
 }

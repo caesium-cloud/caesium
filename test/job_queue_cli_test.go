@@ -28,6 +28,9 @@ type queueCLIItem struct {
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`
 	EnqueuedAt string            `json:"enqueued_at"`
+	ClaimState string            `json:"claim_state"`
+	Stale      bool              `json:"stale"`
+	ClaimedBy  string            `json:"claimed_by,omitempty"`
 }
 
 func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
@@ -60,12 +63,14 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 
 	lines := nonEmptyLines(stdout)
 	s.Require().GreaterOrEqual(len(lines), 2, "queue table should have a header and row:\n%s", stdout)
-	s.Equal([]string{"POSITION", "PRIORITY", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
+	s.Equal([]string{"POSITION", "PRIORITY", "STATE", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
 	fields := strings.Fields(lines[1])
-	s.Require().GreaterOrEqual(len(fields), 4, "queue row should be parseable:\n%s", lines[1])
+	s.Require().GreaterOrEqual(len(fields), 5, "queue row should be parseable:\n%s", lines[1])
 	s.Equal("1", fields[0])
 	s.Equal("high", fields[1])
-	s.Contains(fields[3], "lane=queued")
+	s.Equal("pending", fields[2], "an unclaimed queued run must read as pending, not as a claim")
+	s.Contains(fields[4], "lane=queued")
+	s.NotContains(stdout, "expired claim", "no row is stuck, so the stale footer must not appear")
 
 	jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "queue", alias, "--json", "--server", s.caesiumURL)
 	s.Require().NoError(jsonCmdErr, "caesium job queue --json failed:\nstdout=%s\nstderr=%s", jsonOut, jsonErr)
@@ -81,6 +86,43 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 	s.Equal(3, rows[0].Priority)
 	s.Equal("queued", rows[0].Params["lane"])
 	s.NotEmpty(rows[0].EnqueuedAt)
+	// The claim annotation must be PRESENT and false-y on a live queue, not
+	// merely absent — an omitted field would let a stuck row read as pending.
+	s.Equal("pending", rows[0].ClaimState)
+	s.False(rows[0].Stale)
+	s.Empty(rows[0].ClaimedBy)
+
+	// The same row through the REST surface the CLI and the Console both read.
+	s.assertQueueRESTRowIsPending(job.ID, rows[0].ID)
+}
+
+// assertQueueRESTRowIsPending drives GET /v1/jobs/:id/queue directly and pins
+// the claim annotation on a live, unclaimed row.
+//
+// `claimed` is covered e2e by TestJobQueueCancelEndpointConflictsWithClaimedRow.
+// `stale` is not, and cannot be: the leader's reaper releases an expired claim
+// within a dequeue interval, so reading the row as stale means racing it, and
+// nothing on the public surface produces a claim that outlives its lease in the
+// first place (the in-process dequeuer is the sole claimer, and it starts or
+// releases every row it claims inside one drain). The stale classification is
+// pinned instead by unit tests that share the reaper's own cutoff:
+// TestQueueAnnotatesClaimStateInsteadOfHidingClaimedRows (service) and
+// TestReclaimStaleClaimsMatchesTheViewsClaimState (reaper).
+func (s *IntegrationTestSuite) assertQueueRESTRowIsPending(jobID, queueID string) {
+	s.T().Helper()
+
+	resp, err := s.doJSONRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s/queue", s.caesiumURL, jobID), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	var rows []queueCLIItem
+	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&rows))
+	s.Require().Len(rows, 1)
+	s.Equal(queueID, rows[0].ID, "the REST surface and the CLI must list the same row")
+	s.Equal("pending", rows[0].ClaimState)
+	s.False(rows[0].Stale)
+	s.Empty(rows[0].ClaimedBy)
 }
 
 func TestJobQueueRouteAllowsInScopeScopedKey(t *testing.T) {

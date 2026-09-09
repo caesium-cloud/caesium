@@ -133,12 +133,25 @@ export interface TaskRun {
   updated_at: string;
 }
 
+/**
+ * A queued run's claim state. A queued run is claimed by exactly one dequeuer
+ * at a time and that claim is a lease: `claimed` is a live claim (normally
+ * sub-second), while `stale` means the claimer died mid-drain and the row waits
+ * on the leader's reaper rather than on capacity.
+ */
+export type RunQueueClaimState = "pending" | "claimed" | "stale";
+
 export interface RunQueueItem {
   id: string;
   position: number;
   priority: number;
   params?: Record<string, string>;
   enqueued_at: string;
+  /** Optional so a server older than the claim-state field still types. */
+  claim_state?: RunQueueClaimState;
+  stale?: boolean;
+  claimed_by?: string;
+  claimed_at?: string;
   blocked?: boolean;
   reason?: string;
   pending_reason?: string;

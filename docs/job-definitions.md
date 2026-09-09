@@ -269,6 +269,32 @@ steps:
 
 Valid priorities are `high`, `normal`, and `low`. Valid concurrency strategies are `queue`, `replace`, `skip`, and `fail`. A step-level `rateLimit.resource` must match one of the job-level `metadata.rateLimits[].resource` entries.
 
+### Inspecting the run queue
+
+`strategy: queue` parks overflow runs in a durable run queue that a leader-gated
+dequeuer drains priority-first. Inspect it with `caesium job queue <alias>`
+(add `--json` for machine-readable output) or `GET /v1/jobs/:id/queue`; the
+job-detail page shows the same rows in its run-queue panel.
+
+Every row carries a `claim_state`, because a queued run is claimed by exactly
+one dequeuer at a time and that claim is a **lease**:
+
+| `claim_state` | `stale` | Meaning |
+|---------------|---------|---------|
+| `pending`     | `false` | Unclaimed — genuinely waiting for a run slot. |
+| `claimed`     | `false` | A dequeuer holds a live claim and is starting the run. Normally a sub-second state. |
+| `stale`       | `true`  | The claim outlived its lease: the dequeuer that took the row died mid-drain. The row waits on the leader's reaper, not on capacity. |
+
+A stale row is still listed (with `claimed_by` naming the node that took it) so
+queue depth stays honest and the one row an operator most needs to see is not
+the only invisible one. The leader releases it automatically on its next drain,
+after which it reads `pending` again. Cancelling a claimed or stale row returns
+`409` until the reaper releases it.
+
+The lease is `CAESIUM_RUN_QUEUE_CLAIM_STALE_AFTER` (default `2m`); the reaper
+and the queue view share it, so a row shown as `stale` is exactly a row the
+reaper is about to release.
+
 ## Freshness-Driven Scheduling
 
 A cron expression is a guess about when data will have arrived. Freshness-driven scheduling inverts that: steps declare the datasets they produce and consume plus a freshness SLO on each output, and Caesium derives execution from data arrival and staleness — run when upstream data has arrived and my output is stale against its SLO, skip when nothing changed, and surface `stale-upstream` (an observable state with a reason) instead of a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. Enable it with `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed via the `GET /v1/datasets*` REST surface and the Console freshness view.

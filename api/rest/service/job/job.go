@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -345,17 +346,39 @@ type QueueItem struct {
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`
 	EnqueuedAt time.Time         `json:"enqueued_at"`
+	// ClaimState is `pending`, `claimed` or `stale` (see models.RunQueueClaimState*).
+	ClaimState string `json:"claim_state"`
+	// Stale is the one-bit form of ClaimState == "stale", for callers that only
+	// need "is this row stuck?".
+	Stale bool `json:"stale"`
+	// ClaimedBy/ClaimedAt name the dequeuer holding the row and when it took
+	// it. Both are empty on a pending row; on a stale one they say which node
+	// died and how long ago.
+	ClaimedBy string     `json:"claimed_by,omitempty"`
+	ClaimedAt *time.Time `json:"claimed_at,omitempty"`
 }
 
+// Queue lists every queued run for a job, claimed rows included.
+//
+// Claimed rows used to be filtered out entirely, the query matching only rows
+// with an empty claim. That reads fine while claims last milliseconds, but a
+// dequeuer that dies between claiming a row and starting it leaves the row
+// claimed until the leader's reaper releases it — up to
+// CAESIUM_RUN_QUEUE_CLAIM_STALE_AFTER later. Hiding it for that whole window
+// understates queue depth and, worse, makes the one row an operator most needs
+// to see — a stuck one — the only invisible row in the queue. So every row is
+// returned and annotated with its claim state instead.
 func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
 	var rows []models.RunQueue
 	if err := j.db.WithContext(j.ctx).
-		Where("job_id = ? AND claimed_by = ''", id).
+		Where("job_id = ?", id).
 		Order("priority DESC").
 		Order("created_at ASC").
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
+
+	staleCutoff := models.RunQueueStaleCutoff(time.Now(), env.Variables().RunQueueClaimStaleAfter)
 
 	items := make([]QueueItem, 0, len(rows))
 	for idx := range rows {
@@ -363,12 +386,17 @@ func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
 		if err != nil {
 			return nil, err
 		}
+		state := rows[idx].ClaimState(staleCutoff)
 		items = append(items, QueueItem{
 			ID:         rows[idx].ID,
 			Position:   idx + 1,
 			Priority:   rows[idx].Priority,
 			Params:     params,
 			EnqueuedAt: rows[idx].CreatedAt,
+			ClaimState: state,
+			Stale:      state == models.RunQueueClaimStateStale,
+			ClaimedBy:  rows[idx].ClaimedBy,
+			ClaimedAt:  rows[idx].ClaimedAt,
 		})
 	}
 	return items, nil

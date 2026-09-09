@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
@@ -91,6 +92,82 @@ func TestSetPausedNotFoundReturnsError(t *testing.T) {
 
 	_, err := svc.SetPaused(uuid.New(), true)
 	require.Error(t, err)
+}
+
+// TestQueueAnnotatesClaimStateInsteadOfHidingClaimedRows pins the contract the
+// queue view is there for: a row whose dequeuer died mid-drain must stay
+// VISIBLE and be marked stale, because it is the row an operator most needs to
+// see. A live claim is visible too but not stale, and an unclaimed row is
+// plainly pending.
+func TestQueueAnnotatesClaimStateInsteadOfHidingClaimedRows(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	job, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "queue-claim-state"})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	// Stale by the DEFAULT lease (2m) that env.Variables() yields in a unit
+	// test, so the classification is not clock-flaky.
+	expiredClaim := now.Add(-models.DefaultRunQueueClaimStaleAfter - time.Minute)
+	liveClaim := now.Add(-time.Second)
+
+	staleID, claimedID, pendingID, unstampedID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, row := range []models.RunQueue{
+		{ID: staleID, JobID: job.ID, Priority: 3, ClaimedBy: "node-a/dead", ClaimedAt: &expiredClaim, CreatedAt: now.Add(-4 * time.Minute)},
+		{ID: claimedID, JobID: job.ID, Priority: 2, ClaimedBy: "node-b/live", ClaimedAt: &liveClaim, CreatedAt: now.Add(-3 * time.Minute)},
+		{ID: pendingID, JobID: job.ID, Priority: 2, CreatedAt: now.Add(-2 * time.Minute)},
+		// A claim with no timestamp is stale by the reaper's own predicate
+		// (`claimed_at IS NULL OR claimed_at < cutoff`).
+		{ID: unstampedID, JobID: job.ID, Priority: 1, ClaimedBy: "node-c/unstamped", CreatedAt: now.Add(-time.Minute)},
+	} {
+		require.NoError(t, db.Create(&row).Error)
+	}
+
+	items, err := svc.Queue(job.ID)
+	require.NoError(t, err)
+	require.Len(t, items, 4, "claimed rows must not be filtered out of the queue view")
+
+	byID := map[uuid.UUID]QueueItem{}
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+
+	require.Equal(t, models.RunQueueClaimStateStale, byID[staleID].ClaimState)
+	require.True(t, byID[staleID].Stale)
+	require.Equal(t, "node-a/dead", byID[staleID].ClaimedBy)
+	require.NotNil(t, byID[staleID].ClaimedAt)
+
+	require.Equal(t, models.RunQueueClaimStateClaimed, byID[claimedID].ClaimState)
+	require.False(t, byID[claimedID].Stale, "a claim inside its lease is live, not stuck")
+	require.Equal(t, "node-b/live", byID[claimedID].ClaimedBy)
+
+	require.Equal(t, models.RunQueueClaimStatePending, byID[pendingID].ClaimState)
+	require.False(t, byID[pendingID].Stale)
+	require.Empty(t, byID[pendingID].ClaimedBy)
+	require.Nil(t, byID[pendingID].ClaimedAt)
+
+	require.Equal(t, models.RunQueueClaimStateStale, byID[unstampedID].ClaimState)
+	require.True(t, byID[unstampedID].Stale)
+
+	// Ordering and positions still follow the dequeuer's own drain order.
+	require.Equal(t, []uuid.UUID{staleID, claimedID, pendingID, unstampedID},
+		[]uuid.UUID{items[0].ID, items[1].ID, items[2].ID, items[3].ID})
+	for idx, item := range items {
+		require.Equal(t, idx+1, item.Position)
+	}
+}
+
+func TestQueueOfJobWithNoQueuedRunsIsEmpty(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	job, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "queue-empty"})
+	require.NoError(t, err)
+
+	items, err := svc.Queue(job.ID)
+	require.NoError(t, err)
+	require.Empty(t, items)
 }
 
 func TestListFiltersByAliases(t *testing.T) {
