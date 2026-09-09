@@ -208,6 +208,19 @@ type Environment struct {
 	ContractEnforcement            string        `envconfig:"CONTRACT_ENFORCEMENT" default:""`
 	ContractDeprecationWindow      time.Duration `envconfig:"CONTRACT_DEPRECATION_WINDOW" default:"336h"`
 
+	// Local run-cancel reconciliation (internal/job/cancel_registry.go).
+	// CancelReconcileInterval is how often a node re-derives "is this run
+	// cancelled?" from the run rows instead of waiting for a run_cancelled event.
+	//
+	// The in-process event bus does not queue — Publish drops on a full
+	// subscriber buffer — and in local mode that one event is the only thing that
+	// stops a cancelled run's container, so without this sweep a single lost
+	// event orphans the container permanently. The sweep costs one indexed SELECT
+	// per tick over the runs THIS node is executing, which is why the default is
+	// seconds rather than minutes. Set it to 0 to disable the sweep and go back
+	// to trusting the event alone.
+	CancelReconcileInterval time.Duration `envconfig:"CANCEL_RECONCILE_INTERVAL" default:"15s"`
+
 	// Data circuit breaker (design-data-circuit-breaker.md).
 	// DataAssertionsEnabled is the ONE master gate for the whole feature: off
 	// means no evaluator, no metrics persistence, no routes, and the jobdef

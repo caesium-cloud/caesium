@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,6 +83,195 @@ func TestSubscribeRunCancellationsCancelsOnEvent(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run_cancelled did not cancel the registered run context")
 	}
+}
+
+// TestCancelReconcilerCancelsARunWhoseCancelEventWasDropped is the whole point
+// of the sweep.
+//
+// The in-process bus does not queue: Publish's send is a non-blocking select and
+// a full subscriber buffer silently loses the event. run_cancelled is published
+// exactly once per cancel, and in local mode the cancel-registry subscriber is
+// the ONLY thing that turns it into a stopped container — so losing that one
+// message used to orphan the container permanently.
+//
+// The drop is simulated the only way that is deterministic: the store here has
+// no bus at all, so CancelRun writes the row exactly as it does in production
+// and the registry never hears about it. That is byte-identical, from the
+// registry's side, to the buffer-full drop. Everything downstream of the drop is
+// real — the real *run.Store, the real row write, the real batched read.
+func TestCancelReconcilerCancelsARunWhoseCancelEventWasDropped(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	jobID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-reconcile"}).Error)
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	registry := newCancelRegistry()
+	runCtx, release := registry.register(context.Background(), runRecord.ID)
+	defer release()
+
+	// The cancel that the registry never hears about.
+	require.NoError(t, store.CancelRun(context.Background(), runRecord.ID))
+	require.NoError(t, runCtx.Err(), "no event was delivered, so nothing has cancelled the context yet")
+
+	reconciler := newCancelReconciler(registry, store)
+	require.Equal(t, 1, reconciler.reconcile(context.Background()),
+		"the sweep must cancel the run whose event was lost")
+	require.ErrorIs(t, runCtx.Err(), context.Canceled)
+}
+
+// The sweep is a background loop over every run this node is executing, so
+// "does nothing when there is nothing to do" is a correctness property, not a
+// nicety: a sweep that cancelled a healthy run would kill jobs on a timer.
+func TestCancelReconcilerLeavesRunningRunsAlone(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	jobID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-reconcile-noop"}).Error)
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	registry := newCancelRegistry()
+	runCtx, release := registry.register(context.Background(), runRecord.ID)
+	defer release()
+
+	reconciler := newCancelReconciler(registry, store)
+	for range 3 {
+		require.Zero(t, reconciler.reconcile(context.Background()))
+	}
+	require.NoError(t, runCtx.Err(), "a running run must survive every sweep")
+}
+
+// The sweep must also leave alone the terminal statuses that are NOT a
+// cancellation. `succeeded`/`failed` are written by the engine's own completion
+// defer, which is still using the run context to finalize the run at that
+// instant; cancelling there would abort a correct completion. `skipped` is a
+// run created terminal by the dataset-hold gate and never has an engine.
+func TestCancelReconcilerIgnoresNonCancelledTerminalRuns(t *testing.T) {
+	for _, status := range []run.Status{run.StatusSucceeded, run.StatusFailed, run.StatusSkipped} {
+		t.Run(string(status), func(t *testing.T) {
+			db := jobdeftestutil.OpenTestDB(t)
+			t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+			store := run.NewStore(db)
+			jobID := uuid.New()
+			require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-reconcile-terminal"}).Error)
+			runRecord, err := store.Start(jobID, nil)
+			require.NoError(t, err)
+			require.NoError(t, db.Model(&models.JobRun{}).
+				Where("id = ?", runRecord.ID).
+				Update("status", string(status)).Error)
+
+			registry := newCancelRegistry()
+			runCtx, release := registry.register(context.Background(), runRecord.ID)
+			defer release()
+
+			require.Zero(t, newCancelReconciler(registry, store).reconcile(context.Background()))
+			require.NoError(t, runCtx.Err())
+		})
+	}
+}
+
+// The sweep must count and narrate a lost cancel exactly ONCE, and it must not
+// count a cancel that the event already delivered.
+//
+// Both hazards come from the same fact: cancel() leaves entries in the registry
+// for their own release funcs to remove, so a cancelled run — however it was
+// cancelled — stays in the sweep's input for as long as its engine takes to
+// drain. A sweep that counted every registered entry of every cancelled run
+// would increment caesium_run_cancel_reconciled_total on every ordinary
+// cancellation and log the same incident once per tick, which would make the
+// one metric that means "the bus lost an event" mean nothing at all.
+func TestCancelReconcilerCountsOnlyContextsNothingElseHadCancelled(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	jobID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "cancel-reconcile-once"}).Error)
+
+	dropped, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+	delivered, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	registry := newCancelRegistry()
+	_, releaseDropped := registry.register(context.Background(), dropped.ID)
+	defer releaseDropped()
+	deliveredCtx, releaseDelivered := registry.register(context.Background(), delivered.ID)
+	defer releaseDelivered()
+
+	require.NoError(t, store.CancelRun(context.Background(), dropped.ID))
+	require.NoError(t, store.CancelRun(context.Background(), delivered.ID))
+	// The event reached this one: its context is already cancelled, but its
+	// entry is still registered because the engine has not finished draining.
+	require.Equal(t, 1, registry.cancel(delivered.ID))
+	require.ErrorIs(t, deliveredCtx.Err(), context.Canceled)
+
+	reconciler := newCancelReconciler(registry, store)
+	require.Equal(t, 1, reconciler.reconcile(context.Background()),
+		"only the run whose event was lost is the sweep's work; the other was already stopped")
+	require.Zero(t, reconciler.reconcile(context.Background()),
+		"a run the sweep has already cancelled is not a fresh incident on the next tick")
+}
+
+// countingLookup stands in for the run store so the loop's lifecycle can be
+// driven on a millisecond ticker without a database.
+type countingLookup struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingLookup) CancelledRunIDs(context.Context, []uuid.UUID) ([]uuid.UUID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return nil, nil
+}
+
+func (c *countingLookup) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// The sweep runs for the life of the server, so it has to die with it: a loop
+// that outlived the shutdown context would be a goroutine leak in every test
+// binary and every restart. (`just unit-test` runs with -race, which is what
+// makes the concurrent reads here meaningful.)
+func TestStartRunCancelReconcilerStopsWithItsContext(t *testing.T) {
+	// The loop sweeps defaultCancelRegistry, so give it something to find.
+	runID := uuid.New()
+	_, release := RegisterRunCancel(context.Background(), runID)
+	defer release()
+
+	lookup := &countingLookup{}
+	ctx, cancel := context.WithCancel(context.Background())
+	StartRunCancelReconciler(ctx, lookup, time.Millisecond)
+
+	require.Eventually(t, func() bool { return lookup.count() > 0 }, 5*time.Second, time.Millisecond,
+		"the reconciler never swept")
+
+	cancel()
+	require.Eventually(t, func() bool {
+		before := lookup.count()
+		time.Sleep(50 * time.Millisecond)
+		return lookup.count() == before
+	}, 5*time.Second, 10*time.Millisecond, "the reconciler kept sweeping after its context was cancelled")
+}
+
+func TestStartRunCancelReconcilerIsDisabledByANonPositiveInterval(t *testing.T) {
+	lookup := &countingLookup{}
+	StartRunCancelReconciler(t.Context(), lookup, 0)
+	StartRunCancelReconciler(t.Context(), nil, time.Millisecond)
+
+	time.Sleep(50 * time.Millisecond)
+	require.Zero(t, lookup.count(), "interval 0 is the documented off switch; it must start no loop at all")
 }
 
 // TestRunLocalCancelStopsAtom is the end of the chain A3 exists for: a run

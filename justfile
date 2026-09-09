@@ -616,6 +616,7 @@ integration-test-podman: build integration-runner
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
         -e CAESIUM_CACHE_ENABLED=true \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     cli_dir={{ repo_dir }}/.tmp/caesium-cli-podman
@@ -677,6 +678,7 @@ integration-up: build-test
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 integration-up-distributed: build-test
