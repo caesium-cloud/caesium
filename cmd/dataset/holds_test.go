@@ -15,6 +15,11 @@ import (
 
 func executeHoldsPage(t *testing.T, server string, args ...string) (string, error) {
 	t.Helper()
+	return executeDatasetCommand(t, server, newHoldsCommand(), args...)
+}
+
+func executeDatasetCommand(t *testing.T, server string, command *cobra.Command, args ...string) (string, error) {
+	t.Helper()
 	priorServer, priorNamespace, priorKey := serverFlag, namespaceFlag, apiKeyFlag
 	defer func() { serverFlag, namespaceFlag, apiKeyFlag = priorServer, priorNamespace, priorKey }()
 	var stdout, stderr bytes.Buffer
@@ -22,12 +27,41 @@ func executeHoldsPage(t *testing.T, server string, args ...string) (string, erro
 	root.PersistentFlags().StringVar(&serverFlag, "server", server, "Server")
 	root.PersistentFlags().StringVar(&namespaceFlag, "namespace", "", "Namespace")
 	root.PersistentFlags().StringVar(&apiKeyFlag, "api-key", "", "API key")
-	root.AddCommand(newHoldsCommand())
+	root.AddCommand(command)
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs(append([]string{"holds"}, args...))
+	root.SetArgs(append([]string{command.Name()}, args...))
 	err := root.ExecuteContext(t.Context())
 	return stdout.String(), err
+}
+
+func TestHoldsCommandNamespaceSelection(t *testing.T) {
+	t.Setenv(apiKeyEnvVar, "")
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		namespace string
+		filtered  bool
+	}{
+		{name: "default empty namespace", filtered: true},
+		{name: "empty namespace alias", args: []string{"--namespace", "_"}, filtered: true},
+		{name: "explicit namespace", args: []string{"--namespace", "tenant"}, namespace: "tenant", filtered: true},
+		{name: "all namespaces", args: []string{"--all-namespaces"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, tc.filtered, r.URL.Query().Has("namespace"))
+				require.Equal(t, tc.namespace, r.URL.Query().Get("namespace"))
+				require.NoError(t, json.NewEncoder(w).Encode(holdsResponse{Holds: []datasetHold{}, Limit: 50}))
+			}))
+			defer server.Close()
+			_, err := executeHoldsPage(t, server.URL, tc.args...)
+			require.NoError(t, err)
+		})
+	}
+	stdout, err := executeHoldsPage(t, "invalid-server", "--all-namespaces", "--namespace", "tenant")
+	require.ErrorContains(t, err, "--all-namespaces and --namespace cannot be used together")
+	require.Empty(t, stdout)
 }
 
 // A 55-row HTTP feed makes the older holds unreachable under the previous CLI.

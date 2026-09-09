@@ -3,6 +3,7 @@ package dataset
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,61 +11,93 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
-var releaseReason string
-var releaseTolerate []string
-var releaseJSON bool
+var errNoActiveHold = errors.New("no active hold exists")
 
-var releaseCmd = &cobra.Command{
-	Use:   "release <name> --reason <reason> [--namespace <ns>]",
-	Short: "Release the active hold on an exact dataset identity",
-	Long:  "Release the active hold on a dataset. Slashes remain part of the dataset name; use --namespace for a separate namespace. Tolerance windows are recorded as advisory evidence and do not suppress future breaches.",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		namespace, name, err := splitDatasetRef(args[0])
-		if err != nil {
+var releaseCmd = newReleaseCommand()
+
+func newReleaseCommand() *cobra.Command {
+	var releaseReason string
+	var releaseTolerate []string
+	var releaseJSON bool
+	cmd := &cobra.Command{
+		Use:   "release <name> --reason <reason> [--namespace <ns>]",
+		Short: "Release the active hold on an exact dataset identity",
+		Long:  "Release the active hold on a dataset. Slashes remain part of the dataset name; use --namespace for a separate namespace. Tolerance windows are recorded as advisory evidence and do not suppress future breaches.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			namespace, name, err := splitDatasetRef(args[0])
+			if err != nil {
+				return err
+			}
+			reason := strings.TrimSpace(releaseReason)
+			if reason == "" {
+				return fmt.Errorf("--reason is required")
+			}
+			tolerances, err := parseReleaseTolerances(releaseTolerate)
+			if err != nil {
+				return err
+			}
+			holdID, err := fetchActiveHold(cmd, namespace, name)
+			if err != nil {
+				return err
+			}
+			payload, err := json.Marshal(struct {
+				Reason   string            `json:"reason"`
+				Tolerate map[string]string `json:"tolerate,omitempty"`
+			}{reason, tolerances})
+			if err != nil {
+				return err
+			}
+			body, err := request(cmd, http.MethodPost, serverBase()+"/v1/datasets/holds/"+url.PathEscape(holdID)+"/release", bytes.NewReader(payload))
+			if err != nil {
+				var statusErr *httpStatusError
+				if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
+					return releaseConflict(cmd, namespace, name, holdID, err)
+				}
+				return err
+			}
+			if releaseJSON {
+				return cliutil.WritePrettyJSON(cmd, body, "dataset release")
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Released hold %s on dataset %s/%s\n", holdID, displayNamespace(namespace), name)
 			return err
-		}
-		reason := strings.TrimSpace(releaseReason)
-		if reason == "" {
-			return fmt.Errorf("--reason is required")
-		}
-		tolerances, err := parseReleaseTolerances(releaseTolerate)
-		if err != nil {
-			return err
-		}
-		// Filter on BOTH identity columns, including an explicit empty namespace.
-		// This cannot accidentally select a same-named hold in another namespace
-		// and does not depend on the target being in the feed's first page.
-		params := url.Values{"status": {"active"}, "namespace": {namespace}, "name": {name}}
-		body, err := request(cmd, http.MethodGet, serverBase()+"/v1/datasets/holds?"+params.Encode(), nil)
-		if err != nil {
-			return err
-		}
-		holdID, err := resolveActiveHold(body, namespace, name)
-		if err != nil {
-			return err
-		}
-		payload, err := json.Marshal(struct {
-			Reason   string            `json:"reason"`
-			Tolerate map[string]string `json:"tolerate,omitempty"`
-		}{reason, tolerances})
-		if err != nil {
-			return err
-		}
-		body, err = request(cmd, http.MethodPost, serverBase()+"/v1/datasets/holds/"+url.PathEscape(holdID)+"/release", bytes.NewReader(payload))
-		if err != nil {
-			return err
-		}
-		if releaseJSON {
-			return cliutil.WritePrettyJSON(cmd, body, "dataset release")
-		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Released hold %s on dataset %s/%s\n", holdID, displayNamespace(namespace), name)
-		return err
-	},
+		},
+	}
+	cmd.Flags().StringVar(&releaseReason, "reason", "", "Required justification for releasing the hold")
+	cmd.Flags().StringArrayVar(&releaseTolerate, "tolerate", nil, "Record an advisory assertion window (<assertion>=<duration>); repeatable")
+	cmd.Flags().BoolVar(&releaseJSON, "json", false, "Print JSON")
+	return cmd
+}
+
+func fetchActiveHold(cmd *cobra.Command, namespace, name string) (string, error) {
+	// The exact filtered feed also covers holds on emitted datasets that have
+	// no registered DatasetState and therefore cannot be read through Detail.
+	params := url.Values{"status": {"active"}, "namespace": {namespace}, "name": {name}}
+	body, err := request(cmd, http.MethodGet, serverBase()+"/v1/datasets/holds?"+params.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	return resolveActiveHold(body, namespace, name)
+}
+
+func releaseConflict(cmd *cobra.Command, namespace, name, holdID string, conflict error) error {
+	currentID, err := fetchActiveHold(cmd, namespace, name)
+	identity := displayNamespace(namespace) + "/" + name
+	if errors.Is(err, errNoActiveHold) {
+		return fmt.Errorf("%w; no active hold is currently recorded for dataset %s", conflict, identity)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; current hold state for dataset %s could not be verified: %v", conflict, identity, err)
+	}
+	if currentID != holdID {
+		return fmt.Errorf("%w; dataset %s is still held by newer active hold %s; inspect it before retrying release", conflict, identity, currentID)
+	}
+	return fmt.Errorf("%w; dataset %s is still held by active hold %s; inspect it before retrying release", conflict, identity, currentID)
 }
 
 func resolveActiveHold(body []byte, namespace, name string) (string, error) {
@@ -74,7 +107,7 @@ func resolveActiveHold(body []byte, namespace, name string) (string, error) {
 	}
 	identity := displayNamespace(namespace) + "/" + name
 	if result.Total == 0 && len(result.Holds) == 0 {
-		return "", fmt.Errorf("no active hold exists for dataset %s", identity)
+		return "", fmt.Errorf("%w for dataset %s (namespace %q; use --namespace to target another namespace)", errNoActiveHold, identity, displayNamespace(namespace))
 	}
 	if result.Total != 1 || len(result.Holds) != 1 {
 		return "", fmt.Errorf("could not resolve a unique active hold for dataset %s", identity)
@@ -99,7 +132,7 @@ func parseReleaseTolerances(entries []string) (map[string]string, error) {
 			return nil, fmt.Errorf("--tolerate requires <assertion>=<duration>")
 		}
 		switch assertion {
-		case "min", "max", "deltaFromBaseline", "maxLag", "missing":
+		case runstore.AssertionMin, runstore.AssertionMax, runstore.AssertionDeltaFromBaseline, runstore.AssertionMaxLag, runstore.AssertionMissing:
 		default:
 			return nil, fmt.Errorf("--tolerate: %q is not an assertion kind (min, max, deltaFromBaseline, maxLag, missing)", assertion)
 		}
@@ -113,10 +146,4 @@ func parseReleaseTolerances(entries []string) (map[string]string, error) {
 		result[assertion] = duration
 	}
 	return result, nil
-}
-
-func init() {
-	releaseCmd.Flags().StringVar(&releaseReason, "reason", "", "Required justification for releasing the hold")
-	releaseCmd.Flags().StringArrayVar(&releaseTolerate, "tolerate", nil, "Record an advisory assertion window (<assertion>=<duration>); repeatable")
-	releaseCmd.Flags().BoolVar(&releaseJSON, "json", false, "Print JSON")
 }
