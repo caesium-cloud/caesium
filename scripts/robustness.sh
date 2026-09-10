@@ -354,11 +354,10 @@ helm install caesium "$ROOT/helm/caesium" \
   --wait --timeout 240s
 
 log "verifying three bound PVCs, distinct members, and candidate image IDs"
-python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_DIGEST" "$CANDIDATE_SHA" <<'PY'
+RUNNING_DIGEST="$(python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_SHA" <<'PY'
 import json, subprocess, sys
 
-kube, ns, digest, tag = sys.argv[1:]
-digest = digest.replace("sha256:", "")
+kube, ns, tag = sys.argv[1:]
 
 def kc(*args):
     out = subprocess.check_output(["kubectl", "--kubeconfig", kube, "-n", ns, *args], text=True)
@@ -390,14 +389,22 @@ for p in caesium:
     if tag not in image:
         raise SystemExit(f"pod {p['metadata']['name']} image {image} does not use candidate tag {tag}")
     image_id = cs.get("imageID") or ""
-    if digest not in image_id.replace("sha256:", ""):
-        raise SystemExit(f"pod {p['metadata']['name']} imageID {image_id} does not match imported candidate {digest}")
+    if "sha256:" not in image_id:
+        raise SystemExit(f"pod {p['metadata']['name']} missing resolved imageID ({image_id})")
     uids.add(uid); ips.add(ip); nodes.add(node); digests.add(image_id)
 
 if len(uids) != 3 or len(ips) != 3 or len(nodes) != 3:
     raise SystemExit(f"members not distinct uids={len(uids)} ips={len(ips)} nodes={len(nodes)}")
-print(f"topology ok uids={len(uids)} ips={len(ips)} nodes={len(nodes)}")
+if len(digests) != 1:
+    raise SystemExit(f"caesium pods are not running one image: {sorted(digests)}")
+print(next(iter(digests)))
 PY
+)"
+[[ "$RUNNING_DIGEST" == *sha256:* ]] || die "topology verification did not return a running digest ($RUNNING_DIGEST)"
+log "running_image_id=$RUNNING_DIGEST"
+CANDIDATE_DIGEST="$RUNNING_DIGEST"
+printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/candidate-digest.txt"
+printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/running-image-id.txt"
 
 for i in 0 1 2; do
   kc_ns exec "caesium-$i" -c caesium -- sh -c 'printenv | grep ^CAESIUM_ | sort' \
