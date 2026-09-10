@@ -58,6 +58,16 @@ export interface CallbackRun {
   callback_id: string;
   status: string;
   error?: string;
+  /**
+   * Status code the callback target answered with. Absent when the attempt
+   * never got a response (connect/TLS failure, timeout) — which is what
+   * separates a transient network failure from a permanent 4xx.
+   */
+  http_status?: number;
+  /** Response body, truncated and secret-scrubbed server-side. */
+  response_body?: string;
+  /** Delivery attempts that preceded this one: 0 on the first dispatch. */
+  retry_count?: number;
   started_at: string;
   completed_at?: string;
 }

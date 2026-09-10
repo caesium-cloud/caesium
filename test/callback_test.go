@@ -5,6 +5,7 @@ package test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -193,6 +194,148 @@ steps:
 	s.True(receiver.Succeeded(), "the healed receiver must have accepted the retried delivery")
 }
 
+// callbackRunResponse mirrors the `callbacks[]` entries of
+// GET /v1/jobs/:id/runs/:run_id (internal/run.CallbackRun). It is declared here
+// rather than folded into runResponse so the assertion names the exact JSON keys
+// the Console reads.
+type callbackRunResponse struct {
+	ID           string `json:"id"`
+	CallbackID   string `json:"callback_id"`
+	Status       string `json:"status"`
+	Error        string `json:"error"`
+	HTTPStatus   int    `json:"http_status"`
+	ResponseBody string `json:"response_body"`
+	RetryCount   int    `json:"retry_count"`
+}
+
+type runCallbacksResponse struct {
+	ID        string                `json:"id"`
+	Status    string                `json:"status"`
+	Callbacks []callbackRunResponse `json:"callbacks"`
+}
+
+// TestRunCallbackFailureDetail drives the enriched CallbackRun fields through
+// their real surface: a job whose callback points at a receiver that answers
+// 500 with a body, then GET /v1/jobs/:id/runs/:run_id to prove `http_status`,
+// `response_body` and `retry_count` are actually persisted and serialised.
+// A unit test on the dispatcher proves the sender; only this proves the wiring
+// all the way to the JSON the run detail page reads.
+//
+// The retry leg then re-dispatches through the shipped REST endpoint and
+// asserts the second attempt row carries retry_count=1, which is the field's
+// whole point: how many deliveries this callback has already burned.
+//
+// Same lane constraint as TestRunRetryCallbacksCLI — the receiver binds inside
+// the test runner process, which shares the server's network namespace only on
+// the docker and podman lanes.
+func (s *IntegrationTestSuite) TestRunCallbackFailureDetail() {
+	if s.engineType == "kubernetes" {
+		s.T().Skipf("callback receiver runs in the test process and is not reachable from the caesium server pod under CAESIUM_TEST_ENGINE=%s; covered on the docker + podman lanes, where the test runner shares the server's network namespace", s.engineType)
+	}
+
+	receiver := newFlakyCallbackReceiver() // never healed: every delivery 500s
+	defer receiver.Close()
+
+	alias := fmt.Sprintf("integration-callback-detail-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    cron: "0 3 * * *"
+callbacks:
+  - type: notification
+    configuration:
+      url: %q
+steps:
+  - name: run
+    image: alpine:3.23
+    command: ["sh", "-c", "echo callback-detail-ok"]
+`, alias, receiver.URL())
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	jobEntry := s.requireJobByAlias(alias)
+	s.Require().NotNil(jobEntry)
+
+	runID := s.triggerRun(jobEntry.ID)
+	s.Require().Equal("succeeded", s.awaitRun(jobEntry.ID, runID, runTimeout).Status)
+
+	first := s.awaitCallbackAttempts(jobEntry.ID, runID, 1)[0]
+	s.Equal("failed", first.Status)
+	s.Equal(http.StatusInternalServerError, first.HTTPStatus,
+		"the rejecting status code must reach the API, not just the formatted error string")
+	s.Contains(first.ResponseBody, callbackReceiverDownBody,
+		"the target's response body must be recorded so a 500 can be triaged without the receiver's logs")
+	s.Equal(0, first.RetryCount, "the run-completion dispatch is the first attempt")
+
+	// Heal the receiver and re-dispatch through the shipped retry endpoint. The
+	// endpoint propagates a still-failing delivery as a 500, so healing first
+	// keeps this assertion about the recorded detail rather than about the
+	// retry endpoint's error semantics (already covered by
+	// TestRunRetryCallbacksCLI).
+	receiver.Heal()
+
+	resp, err := s.doRequest(http.MethodPost,
+		fmt.Sprintf("%s/v1/jobs/%s/runs/%s/callbacks/retry", s.caesiumURL, jobEntry.ID, runID), nil)
+	s.Require().NoError(err)
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().NoError(resp.Body.Close())
+	s.Require().Equal(http.StatusAccepted, resp.StatusCode, "retry request failed: %s", string(body))
+
+	attempts := s.awaitCallbackAttempts(jobEntry.ID, runID, 2)
+	byRetryCount := make(map[int]callbackRunResponse, len(attempts))
+	for _, attempt := range attempts {
+		byRetryCount[attempt.RetryCount] = attempt
+	}
+	s.Require().Len(byRetryCount, 2, "each attempt records the deliveries that preceded it")
+
+	s.Equal("failed", byRetryCount[0].Status)
+	s.Equal(http.StatusInternalServerError, byRetryCount[0].HTTPStatus)
+
+	retried, ok := byRetryCount[1]
+	s.Require().True(ok, "the retry must record retry_count=1")
+	s.Equal("succeeded", retried.Status)
+	s.Equal(http.StatusOK, retried.HTTPStatus,
+		"the healed receiver's 200 must be recorded too, not only failure statuses")
+}
+
+// awaitCallbackAttempts polls the run detail endpoint until at least want
+// completed callback attempts are visible. Callback dispatch is asynchronous
+// with respect to the run's terminal status, so the rows appear after the run
+// is already succeeded.
+func (s *IntegrationTestSuite) awaitCallbackAttempts(jobID, runID string, want int) []callbackRunResponse {
+	s.T().Helper()
+
+	var attempts []callbackRunResponse
+	s.Require().Eventually(func() bool {
+		var detail runCallbacksResponse
+		if err := s.tryGetJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s", jobID, runID), &detail); err != nil {
+			return false
+		}
+		completed := make([]callbackRunResponse, 0, len(detail.Callbacks))
+		for _, cb := range detail.Callbacks {
+			if cb.Status == "succeeded" || cb.Status == "failed" {
+				completed = append(completed, cb)
+			}
+		}
+		if len(completed) < want {
+			return false
+		}
+		attempts = completed
+		return true
+	}, 60*time.Second, 250*time.Millisecond,
+		"expected at least %d completed callback attempts on run %s", want, runID)
+
+	return attempts
+}
+
 // flakyCallbackReceiver answers 500 until Heal is called, then 200. It records
 // every delivery so a test can prove a retry actually reached the wire. It
 // listens inside the test runner container, which shares the server's network
@@ -206,13 +349,18 @@ type flakyCallbackReceiver struct {
 	succeeded atomic.Bool
 }
 
+// callbackReceiverDownBody is the body an unhealed receiver answers with. It is
+// a constant because TestRunCallbackFailureDetail asserts it survives the round
+// trip into CallbackRun.response_body.
+const callbackReceiverDownBody = "callback receiver is down"
+
 func newFlakyCallbackReceiver() *flakyCallbackReceiver {
 	r := &flakyCallbackReceiver{}
 	r.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		defer req.Body.Close()
 		r.calls.Add(1)
 		if !r.healed.Load() {
-			http.Error(w, "callback receiver is down", http.StatusInternalServerError)
+			http.Error(w, callbackReceiverDownBody, http.StatusInternalServerError)
 			return
 		}
 		r.succeeded.Store(true)

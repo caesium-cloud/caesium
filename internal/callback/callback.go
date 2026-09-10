@@ -10,10 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -23,6 +25,46 @@ import (
 type Handler interface {
 	Handle(ctx context.Context, cfg json.RawMessage, meta Metadata) error
 }
+
+// Result carries the transport-level detail of one delivery attempt. It is what
+// turns a CallbackRun's flat error string into something an operator can
+// triage: the status the target answered with, the body it answered with, and
+// how many requests the handler actually sent.
+type Result struct {
+	// HTTPStatus is the response status code, or 0 when the attempt never
+	// produced a response (connect/TLS failure, timeout, a configuration error
+	// that stopped the handler before it sent anything) or the handler is not
+	// HTTP-based.
+	HTTPStatus int
+	// ResponseBody is the response body as read by the handler. The dispatcher
+	// scrubs and truncates it before persisting; handlers pass it through raw.
+	ResponseBody string
+	// Attempts is the number of requests the handler actually sent — 0 when it
+	// failed before sending, 1 for a single-shot delivery, N when the handler
+	// retried internally.
+	Attempts int
+}
+
+// DetailedHandler is the richer form of Handler, implemented by handlers that
+// can report transport-level detail about a delivery. The dispatcher prefers it
+// when a handler provides it and falls back to Handler otherwise, so a
+// third-party handler keeps working and simply records no status/body.
+type DetailedHandler interface {
+	Handler
+	HandleWithResult(ctx context.Context, cfg json.RawMessage, meta Metadata) (Result, error)
+}
+
+// maxResponseBodyBytes caps the response body persisted on a CallbackRun. A
+// target that answers a failed delivery with an HTML error page or a stack
+// trace would otherwise push an unbounded blob through Raft on every attempt.
+const maxResponseBodyBytes = 4096
+
+// callbackScrubber removes secret-looking material from text a callback target
+// sent back before it is persisted and served over the API. It carries no known
+// secret values (the dispatcher has no env context), so it applies the
+// conservative high-entropy heuristic only — enough to keep a webhook that
+// echoes an Authorization header out of the run detail page.
+var callbackScrubber = incident.NewScrubber(nil)
 
 // Metadata captures the job/run context sent to callbacks.
 type Metadata struct {
@@ -282,6 +324,7 @@ func (d *Dispatcher) execute(ctx context.Context, meta Metadata, callbacks []mod
 
 func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, meta Metadata) error {
 	started := time.Now().UTC()
+
 	runRecord := &models.CallbackRun{
 		ID:         uuid.New(),
 		CallbackID: cb.ID,
@@ -291,7 +334,7 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 		StartedAt:  started,
 	}
 
-	if err := d.db.WithContext(ctx).Create(runRecord).Error; err != nil {
+	if err := d.createAttempt(ctx, runRecord); err != nil {
 		return fmt.Errorf("record callback run: %w", err)
 	}
 	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryCallback).Inc()
@@ -299,13 +342,14 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 
 	handler, ok := lookupHandler(cb.Type)
 	if !ok {
-		updateErr := d.completeCallbackRun(ctx, runRecord.ID, models.CallbackRunStatusFailed, "no handler registered for callback type")
+		updateErr := d.completeCallbackRun(ctx, runRecord.ID, models.CallbackRunStatusFailed,
+			"no handler registered for callback type", Result{})
 		return errors.Join(fmt.Errorf("no handler registered for callback type %q", cb.Type), updateErr)
 	}
 
 	rawCfg := json.RawMessage(cb.Configuration)
 	callCtx, cancel := context.WithTimeout(ctx, d.timeout)
-	err := handler.Handle(callCtx, rawCfg, meta)
+	result, err := invokeHandler(callCtx, handler, rawCfg, meta)
 	cancel()
 
 	status := models.CallbackRunStatusSucceeded
@@ -317,7 +361,7 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 
 	metrics.CallbackRunsTotal.WithLabelValues(meta.JobID.String(), string(status)).Inc()
 
-	if updateErr := d.completeCallbackRun(ctx, runRecord.ID, status, errMsg); updateErr != nil {
+	if updateErr := d.completeCallbackRun(ctx, runRecord.ID, status, errMsg, result); updateErr != nil {
 		return errors.Join(err, updateErr)
 	}
 
@@ -328,14 +372,179 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 	return nil
 }
 
-func (d *Dispatcher) completeCallbackRun(ctx context.Context, id uuid.UUID, status models.CallbackRunStatus, errMsg string) error {
+// invokeHandler prefers the DetailedHandler form so the dispatcher can record
+// the status/body/attempt detail, and falls back to the plain Handler contract
+// for handlers that do not implement it.
+func invokeHandler(ctx context.Context, handler Handler, cfg json.RawMessage, meta Metadata) (Result, error) {
+	if detailed, ok := handler.(DetailedHandler); ok {
+		return detailed.HandleWithResult(ctx, cfg, meta)
+	}
+	return Result{}, handler.Handle(ctx, cfg, meta)
+}
+
+// attemptOrdinalSQL is the retry ordinal as a scalar sub-select: the attempts
+// already recorded for this callback on this run. It is embedded in the INSERT
+// that writes the new attempt rather than read by a separate COUNT, so the
+// ordinal is allocated by the same statement that consumes it.
+const attemptOrdinalSQL = "(SELECT COUNT(*) FROM callback_runs WHERE callback_id = ? AND job_run_id = ?)"
+
+// createAttempt inserts the attempt row and allocates its retry ordinal
+// ATOMICALLY, so two deliveries of the same callback on the same run can never
+// claim the same ordinal.
+//
+// The read-then-write shape this replaced (COUNT, then Create) raced across
+// server processes: two concurrent `retry-callbacks` requests both read one
+// prior row and both persisted retry_count=1 for three actual deliveries. Two
+// mechanisms close it, one per dialect family, because no single one is
+// sufficient everywhere:
+//
+//   - sqlite/dqlite: the ordinal is a sub-select inside the INSERT. SQLite
+//     evaluates a statement's expressions only after it holds the write lock,
+//     and dqlite funnels every writer through the Raft leader, so a second
+//     INSERT cannot observe a count taken before the first one committed. A
+//     surrounding transaction would NOT be enough on its own — a deferred
+//     transaction takes its read snapshot before the write lock, which is
+//     exactly the race being fixed.
+//   - postgres: MVCC READ COMMITTED lets a sub-select miss a concurrent
+//     uncommitted INSERT, so the sub-select alone is not enough. The callback
+//     row is locked FOR UPDATE first, which serialises allocation per callback
+//     across sessions and therefore across processes. (Same dialect-aware
+//     shape as run.lockJobRunForPartitionRetryTx.)
+//
+// The whole unit is retried on transient contention because statements issued
+// inside a transaction bypass the connection pool's per-statement retry (see
+// pkg/db/retry.go); a rolled-back attempt leaves no row, so re-running it is
+// safe and re-reads the ordinal.
+func (d *Dispatcher) createAttempt(ctx context.Context, record *models.CallbackRun) error {
+	now := time.Now().UTC()
+
+	return withAttemptContentionRetry(ctx, func() error {
+		return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockCallbackForAttemptTx(tx, record.CallbackID); err != nil {
+				return err
+			}
+			return tx.Model(&models.CallbackRun{}).Create(map[string]any{
+				"id":          record.ID,
+				"callback_id": record.CallbackID,
+				"job_id":      record.JobID,
+				"job_run_id":  record.JobRunID,
+				"status":      record.Status,
+				"error":       "",
+				"http_status": 0,
+				// Written by completeCallbackRun; the column is NOT NULL, so a
+				// map-based insert has to name it.
+				"response_body": "",
+				"retry_count":   gorm.Expr(attemptOrdinalSQL, record.CallbackID, record.JobRunID),
+				"started_at":    record.StartedAt,
+				"created_at":    now,
+				"updated_at":    now,
+			}).Error
+		})
+	})
+}
+
+// lockCallbackForAttemptTx takes the per-callback allocation lock the dialect
+// needs, if any. sqlite and dqlite serialise writers already and cannot parse
+// FOR UPDATE, so there is nothing to take there.
+func lockCallbackForAttemptTx(tx *gorm.DB, callbackID uuid.UUID) error {
+	if tx == nil || tx.Dialector == nil {
+		return errors.New("callback: attempt allocation requires a database dialect")
+	}
+	stmt, err := attemptOrdinalLockSQL(tx.Name())
+	if err != nil {
+		return err
+	}
+	if stmt == "" {
+		return nil
+	}
+	var locked struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	// Unscoped by construction: `callbacks` is soft-deleted and a retired
+	// callback's in-flight run still records attempts against it.
+	return tx.Raw(stmt, callbackID).Scan(&locked).Error
+}
+
+func attemptOrdinalLockSQL(dialect string) (string, error) {
+	switch dialect {
+	case "postgres":
+		return "SELECT id FROM callbacks WHERE id = ? FOR UPDATE", nil
+	case "dqlite", "sqlite", "sqlite3":
+		return "", nil
+	default:
+		return "", fmt.Errorf("callback: unsupported dialect %q for retry ordinal allocation", dialect)
+	}
+}
+
+// withAttemptContentionRetry re-runs a whole attempt transaction on transient
+// dqlite/SQLite contention, on the shared repo-wide backoff schedule.
+func withAttemptContentionRetry(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var err error
+	for attempt := 0; ; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		err = fn()
+		if err == nil || !dqlite.IsContentionError(err) {
+			return err
+		}
+		if attempt >= len(db.BusyRetryBackoffs) {
+			return err
+		}
+		metrics.DBBusyRetriesTotal.Inc()
+		timer := time.NewTimer(db.BusyRetryBackoffs[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// sanitizeResponseBody prepares a callback target's response body for
+// persistence: secret-looking material is scrubbed first (so truncation cannot
+// leave an unscrubbable token fragment behind) and the result is then capped.
+func sanitizeResponseBody(body string) string {
+	if body == "" {
+		return ""
+	}
+	scrubbed := callbackScrubber.Scrub(body)
+	if len(scrubbed) > maxResponseBodyBytes {
+		scrubbed = scrubbed[:maxResponseBodyBytes]
+	}
+	return scrubbed
+}
+
+func (d *Dispatcher) completeCallbackRun(
+	ctx context.Context,
+	id uuid.UUID,
+	status models.CallbackRunStatus,
+	errMsg string,
+	result Result,
+) error {
 	now := time.Now().UTC()
 	updates := map[string]any{
-		"status":       status,
-		"completed_at": &now,
+		"status":        status,
+		"completed_at":  &now,
+		"http_status":   result.HTTPStatus,
+		"response_body": sanitizeResponseBody(result.ResponseBody),
+	}
+	if result.Attempts > 1 {
+		// A handler that retried internally burned attempts this row is the
+		// only record of, so they count as retries too. Added to the ordinal
+		// the INSERT allocated rather than recomputed from it, so this update
+		// cannot resurrect a stale count.
+		updates["retry_count"] = gorm.Expr("retry_count + ?", result.Attempts-1)
 	}
 	if errMsg != "" {
-		updates["error"] = errMsg
+		// The error quotes the same response body the target sent, so it goes
+		// through the same scrubber. It is not truncated: the handler already
+		// bounded the body it quotes.
+		updates["error"] = callbackScrubber.Scrub(errMsg)
 	}
 	if err := d.db.WithContext(ctx).
 		Model(&models.CallbackRun{}).

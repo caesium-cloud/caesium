@@ -237,6 +237,10 @@ See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example �
 - `callbacks.configuration` is stored as JSON. The built-in `notification` callback accepts `url`/`webhook_url` plus optional `headers` and `user_agent` keys.
 - Callback payloads POST a JSON body containing job/run metadata (`job_id`, `job_alias`, `run_id`, `status`, `error`, `started_at`, `completed_at`) and task entries (`task_id`, `engine`, `image`, `command`, `status`, `runtime_id`, `error`).
 - Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
+- Each attempt also records the transport detail needed to triage a failed hook, exposed on `callbacks[]` in `GET /v1/jobs/:id/runs/:run_id` and rendered in the Console's run detail Callbacks section:
+  - `http_status` — the status code the target answered with. Omitted when the attempt never got a response at all (DNS/connect/TLS failure, timeout), which is how a transient network failure is distinguished from a permanent `4xx`.
+  - `response_body` — the target's response body, truncated to 4 KiB and passed through the secret scrubber before it is stored.
+  - `retry_count` — the delivery attempts that preceded this one for the same callback on the same run: `0` for the dispatch at run completion, `1` for the first `retry-callbacks` retry, and so on. Each retry writes its own attempt row.
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 - `metadata.priority` accepts `high`, `normal`, or `low` and orders future run/task scheduling without preempting work already running.
 - `metadata.concurrency` controls run-level admission for the same job with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`).

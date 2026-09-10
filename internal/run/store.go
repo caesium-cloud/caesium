@@ -136,12 +136,24 @@ func taskStatusFromResult(result string) TaskStatus {
 }
 
 type CallbackRun struct {
-	ID          uuid.UUID      `json:"id"`
-	CallbackID  uuid.UUID      `json:"callback_id"`
-	Status      CallbackStatus `json:"status"`
-	Error       string         `json:"error,omitempty"`
-	StartedAt   time.Time      `json:"started_at"`
-	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	ID         uuid.UUID      `json:"id"`
+	CallbackID uuid.UUID      `json:"callback_id"`
+	Status     CallbackStatus `json:"status"`
+	Error      string         `json:"error,omitempty"`
+	// HTTPStatus is the status code the callback target answered with, omitted
+	// when the attempt never got a response (transport failure) or the handler
+	// is not HTTP-based. It is what separates a transient network failure from a
+	// permanent 4xx on the run detail page.
+	HTTPStatus int `json:"http_status,omitempty"`
+	// ResponseBody is the target's response body, scrubbed and truncated at
+	// write time (see internal/callback).
+	ResponseBody string `json:"response_body,omitempty"`
+	// RetryCount is the number of delivery attempts that preceded this one for
+	// the same callback on the same run: 0 for the run-completion dispatch, N
+	// for the Nth retry.
+	RetryCount  int        `json:"retry_count"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 type TaskRun struct {
@@ -5847,12 +5859,15 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 		return nil
 	}
 	return &CallbackRun{
-		ID:          model.ID,
-		CallbackID:  model.CallbackID,
-		Status:      CallbackStatus(model.Status),
-		Error:       model.Error,
-		StartedAt:   model.StartedAt,
-		CompletedAt: model.CompletedAt,
+		ID:           model.ID,
+		CallbackID:   model.CallbackID,
+		Status:       CallbackStatus(model.Status),
+		Error:        model.Error,
+		HTTPStatus:   model.HTTPStatus,
+		ResponseBody: model.ResponseBody,
+		RetryCount:   model.RetryCount,
+		StartedAt:    model.StartedAt,
+		CompletedAt:  model.CompletedAt,
 	}
 }
 
