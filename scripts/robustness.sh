@@ -281,19 +281,22 @@ done
 
 load_kind_image() {
   local img="$1"
-  local tar="$ARTIFACTS/load-$(printf '%s' "$img" | tr '/:' '__').tar"
-  log "saving $img to $tar"
-  docker save -o "$tar" "$img"
-  kind load image-archive --name "$ROBUSTNESS_ID" "$tar"
-  rm -f "$tar"
+  log "kind load docker-image $img"
+  kind load docker-image --name "$ROBUSTNESS_ID" "$img"
 }
 
-# kind load of a multi-arch tag (alpine:3.23) fails with
-# "ctr: content digest ... not found". Flatten to a single-platform local tag.
+# Multi-arch tags and buildx attestation lists fail kind import
+# ("ctr: content digest ... not found"). Flatten the task image to one
+# platform without provenance, then load by name so pod ImageIDs match.
 TASK_ARCH="$(docker image inspect --format '{{.Architecture}}' "$TASK_IMAGE")"
 FLAT_TASK="caesium-robustness-task:${ROBUSTNESS_ID}"
 log "flattening TASK_IMAGE $TASK_IMAGE ($TASK_ARCH) -> $FLAT_TASK"
-printf 'FROM %s\n' "$TASK_IMAGE" | docker build --platform "linux/${TASK_ARCH}" -t "$FLAT_TASK" -
+BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build \
+  --provenance=false --sbom=false \
+  --platform "linux/${TASK_ARCH}" \
+  -t "$FLAT_TASK" - <<EOF
+FROM ${TASK_IMAGE}
+EOF
 TASK_IMAGE="$FLAT_TASK"
 CAESIUM_ROBUSTNESS_TASK_IMAGE="$TASK_IMAGE"
 
