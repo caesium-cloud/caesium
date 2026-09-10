@@ -1114,21 +1114,29 @@ k8s-down:
 #   CAESIUM_LOAD_CONCURRENCY   — runs triggered in parallel (default: 1)
 #   CAESIUM_MANUAL_TRIGGER_API_KEY — API key if auth is enabled
 #
-load-test:
+load-test: builder
     #!/usr/bin/env bash
     set -euo pipefail
-    report_file="${CAESIUM_LOAD_OUTPUT:-docs/load-baseline-$(date +%Y-%m-%d).md}"
-    echo "Running load harness — report will be written to ${report_file}"
-    go run ./test/load/harness.go \
+    # Host networking preserves localhost URLs on Linux and Docker Desktop
+    # installations with host networking enabled. No daemon socket is needed.
+    # Output paths are relative to the mounted checkout (absolute paths must
+    # be inside {{ bld_dir }}). Configure flags with CAESIUM_LOAD_* variables.
+    {{ container_cli }} run --rm --platform {{ platform }} --network host \
+        -v "{{ repo_dir }}:{{ bld_dir }}" -w "{{ bld_dir }}" \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY \
+        {{ local_builder_ref }}:{{ tag }} go run ./test/load \
         -server "${CAESIUM_LOAD_SERVER:-http://127.0.0.1:8080}" \
-        -jobs "${CAESIUM_LOAD_JOBS:-10}" \
-        -fan-out "${CAESIUM_LOAD_FAN_OUT:-4}" \
-        -depth "${CAESIUM_LOAD_DEPTH:-3}" \
-        -task-duration "${CAESIUM_LOAD_TASK_DURATION:-1s}" \
-        -concurrency "${CAESIUM_LOAD_CONCURRENCY:-1}" \
+        -jobs "${CAESIUM_LOAD_JOBS-10}" \
+        -fan-out "${CAESIUM_LOAD_FAN_OUT-4}" \
+        -depth "${CAESIUM_LOAD_DEPTH-3}" \
+        -task-duration "${CAESIUM_LOAD_TASK_DURATION-1s}" \
+        -concurrency "${CAESIUM_LOAD_CONCURRENCY-1}" \
+        -sample-rate "${CAESIUM_LOAD_SAMPLE_RATE-5s}" \
+        -timeout "${CAESIUM_LOAD_TIMEOUT-30m}" \
         -engine "${CAESIUM_LOAD_ENGINE:-docker}" \
-        -api-key "${CAESIUM_MANUAL_TRIGGER_API_KEY:-}" \
-        -output "${report_file}"
+        -image "${CAESIUM_LOAD_IMAGE:-busybox:1.36.1}" \
+        -output "${CAESIUM_LOAD_OUTPUT:-}" \
+        -json-output "${CAESIUM_LOAD_JSON_OUTPUT:-}"
 
 # Port-forward to the Caesium service (run in background or separate terminal)
 k8s-port-forward:
