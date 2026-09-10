@@ -1,0 +1,226 @@
+{
+  "cases": [
+    {
+      "name": "good",
+      "want_pass": true,
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "good_leftover_insert_still_batched",
+      "want_pass": true,
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 4,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "lost_batching_insert",
+      "want_pass": false,
+      "must_match": "batching",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "lost_batching_events",
+      "want_pass": false,
+      "must_match": "batching",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "extra_statements_same_completions",
+      "want_pass": false,
+      "must_match": "batching",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 20,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "over_budget_same_completions",
+      "want_pass": false,
+      "must_match": "over budget",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 80,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 80,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "missing_event_statements",
+      "want_pass": false,
+      "must_match": "missing evidence",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "missing_completions",
+      "want_pass": false,
+      "must_match": "missing evidence",
+      "observed": {
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "zero_completions_with_sql",
+      "want_pass": false,
+      "must_match": "completions",
+      "observed": {
+        "completions": 0,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
+      "name": "empty_observation",
+      "want_pass": false,
+      "must_match": "missing evidence",
+      "observed": {}
+    },
+    {
+      "name": "reserved_command_nonzero",
+      "want_pass": false,
+      "must_match": "command",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 2,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 1,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 1,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 1,
+          "checkpoint": 0
+        }
+      }
+    }
+  ]
+}

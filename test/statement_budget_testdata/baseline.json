@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "workload": {
+    "tasks": 2,
+    "expected_completions": 1,
+    "description": "Two sequential alpine:3.23 echo steps, HTTP-triggered, cache disabled, no sleep. Measured on the default local integration-up executor."
+  },
+  "categories": {
+    "task_run_insert": {
+      "mode": "bound",
+      "writes": 2,
+      "statements": 1,
+      "min_writes": 2,
+      "min_statements": 1,
+      "write_slack": 4,
+      "justification": "RegisterTasks inserts both task_runs in one statement. write_slack allows at most two leftover 2-task jobs after the quiet wait. When writes stay at 2, statements must stay at 1 so an unbatched INSERT cannot hide behind matching completions."
+    },
+    "task_run_status": {
+      "mode": "bound",
+      "writes": 5,
+      "statements": 5,
+      "min_writes": 4,
+      "min_statements": 3,
+      "write_slack": 15,
+      "justification": "Local path is StartTask+CompleteTask per step plus one predecessor-decrement UPDATE (5 rows / 5 statements). min_writes 4 is start+complete of both tasks. Slack covers one leftover job, claim-path double counting, and a couple of dispatch releases on hosted CI runners. Same-work extra statements still fail the isolated batching rule."
+    },
+    "event_insert": {
+      "mode": "bound",
+      "writes": 6,
+      "statements": 5,
+      "min_writes": 4,
+      "min_statements": 3,
+      "write_slack": 12,
+      "justification": "Instrumented events: 1 register ready, 2 started, 2 succeeded, 1 successor ready. Extract completion batches succeeded+ready (6 rows / 5 statements). Uninstrumented run_started/run_completed are out of scope. Slack covers leftover jobs; same-work extra statements fail isolated batching."
+    },
+    "lease_renewal": {
+      "mode": "skip",
+      "reason": "Timer-driven worker heartbeats and reclaim loops are not isolated on the shared integration server and are not assumed deterministic."
+    },
+    "callback": {
+      "mode": "skip",
+      "reason": "This DAG declares no callbacks. Leftover jobs from earlier suite methods may still write callback_runs, so an exact zero would be a false bound."
+    },
+    "command": {
+      "mode": "zero",
+      "reason": "Reserved for future run_commands. This workload must not emit it; a non-zero delta is unexpected new SQL work."
+    },
+    "checkpoint": {
+      "mode": "zero",
+      "reason": "Reserved for future run_checkpoints. The default local lane must not emit it for this DAG."
+    }
+  }
+}
