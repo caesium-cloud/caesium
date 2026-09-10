@@ -58,6 +58,7 @@ type dataViolationResponse struct {
 	BaselineMedian  *float64 `json:"baseline_median,omitempty"`
 	BaselineSamples int      `json:"baseline_samples,omitempty"`
 	Seeding         bool     `json:"seeding,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
 	Message         string   `json:"message"`
 }
 

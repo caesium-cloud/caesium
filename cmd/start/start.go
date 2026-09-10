@@ -553,6 +553,10 @@ func start(cmd *cobra.Command, args []string) error {
 		incidentsvc.SetApprovedActionExecutor(incExecutor)
 
 		incidentSub := incident.NewSubscriber(bus, incConn, dqlite.IsLocalLeader, vars.AgentIncidentCooldown)
+		// Same event sink as incExecutor above: persisted first so
+		// incident_opened survives a restart and is queryable from /v1/events,
+		// mirroring approval_requested / agent_action_executed (#419).
+		incidentSub.SetEventSink(incEventStore)
 		incidentSub.SetRemediator(incExecutor, incident.DefaultRuleSet())
 		runAsync(func() {
 			log.Info("launching incident subscriber", "cooldown", vars.AgentIncidentCooldown)

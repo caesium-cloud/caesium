@@ -47,6 +47,10 @@ test("job detail secondary views are deep-linkable and close with browser back",
 
   await page.goto(`/jobs/${job.id}/yaml`);
   await expect(page.getByRole("dialog", { name: "Job Definition (YAML)" })).toBeVisible();
+  // The manifest is fetched from GET /v1/jobs/:id/manifest, so a rendered
+  // alias proves the endpoint is wired through the tab (and not rebuilt
+  // client-side from the page's other queries).
+  await expect(page.getByTestId("job-manifest-yaml")).toContainText(String(definition.metadata?.alias));
 
   await page.goto(`/jobs/${job.id}`);
   await page.getByRole("link", { name: "Config" }).click();

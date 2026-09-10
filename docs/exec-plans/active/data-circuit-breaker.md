@@ -317,11 +317,19 @@ pending. F follows in its dependency-ordered waves, then N-1. Wave 4 is not comp
   verdict's samples persisted and became the baseline after a retry-then-
   success; P2s — warn-mode samples polluted the baseline, failover resets
   leaked samples, `ResetInFlightTasks` lost its status predicate on Postgres.
-  **Filed, not fixed:** [#437](https://github.com/caesium-cloud/caesium/issues/437)
-  (a truncated/unreadable marker stream reads as a missing metric) and
+  **Filed, then fixed:** [#437](https://github.com/caesium-cloud/caesium/issues/437)
+  (a truncated/unreadable marker stream read as a missing metric) — both
+  executor seams now hand the evaluator a `run.MetricsCapture` and a lost
+  observation records the warn-only `unavailable` kind with a `log_unreadable`
+  / `marker_stream_truncated` reason; and
   [#438](https://github.com/caesium-cloud/caesium/issues/438)
-  (`InsertDatasetMetrics` has no claim fence) — #438 is **fixed** in
-  [#453](https://github.com/caesium-cloud/caesium/pull/453). Also learned: `just lint` runs
+  (`InsertDatasetMetrics` had no claim fence), closed by
+  [#453](https://github.com/caesium-cloud/caesium/pull/453). The two compose at
+  the one seam: the claim decides whether this attempt may record anything, the
+  capture decides what a metric's absence means if it may — so a superseded
+  worker whose marker stream was also lost records nothing at all, not a
+  warn-only `unavailable` verdict on the replacement attempt's row. Also
+  learned: `just lint` runs
   `go fmt .` on the root package only, so gofmt drift under `internal/` is not
   caught locally — CI's lint job is the check.
 
@@ -819,13 +827,19 @@ executors), so it never re-touches the executor call sites.
       is firing on every run.
       **C1 note:** the design's third "clean" predicate (non-held) lands beside
       the `violated` filter in `cleanSampleQuery`.
-      **Known limitation (issue filed by the orchestrator):** a truncated or
-      unreadable marker stream is indistinguishable from a missing metric — the
-      executors' `MetricsTruncated` flag is not threaded into the seam yet, so a
-      lost observation reads as "never emitted" and, under `onViolation: fail`,
-      reddens a run for an infrastructure reason. Documented on
-      `EvaluateDataAssertions`; closing it means widening the three executor call
-      sites. **`data_violation_recorded` has no incident consumer:** it reaches
+      **Known limitation, since CLOSED by
+      [#437](https://github.com/caesium-cloud/caesium/issues/437):** a truncated
+      or unreadable marker stream used to be indistinguishable from a missing
+      metric, so a lost observation read as "never emitted" and, under
+      `onViolation: fail`, reddened a run for an infrastructure reason. Both
+      executor seams now return a `run.MetricsCapture` (samples plus
+      `Truncated`/`Unreadable`), and the evaluator downgrades the affected
+      `missing` verdicts to the `unavailable` kind: warn-only whatever
+      `onViolation` says, never opening a hold, counted under
+      `caesium_data_assertions_total{result="unavailable"}`, and carrying a
+      bounded `reason` (`log_unreadable` | `marker_stream_truncated`). A metric
+      that DID arrive is still judged on its real value, and a clean, readable
+      run that emits nothing still records `missing`. **`data_violation_recorded` has no incident consumer:** it reaches
       the persisted event store and notification policies only —
       `classifierFailureTypes` is untouched, and F1 keys data-quality incidents
       off C1's `dataset_held`.

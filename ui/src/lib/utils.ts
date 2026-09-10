@@ -18,6 +18,41 @@ export function parseJSONConfig(raw?: string | null): Record<string, unknown> | 
   }
 }
 
+/**
+ * An atom's `command` arrives as the JSON array string the server stores
+ * (models.Atom.Command), but task-run rows can carry an already-decoded array
+ * or a plain shell string. Normalize all three into argv.
+ */
+export function normalizeCommand(command?: string | string[]): string[] {
+  if (!command) {
+    return []
+  }
+  if (Array.isArray(command)) {
+    return command.map(String)
+  }
+
+  const trimmed = command.trim()
+  if (!trimmed) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) {
+      return parsed.map(String)
+    }
+  } catch {
+    // Non-JSON command strings are already displayable.
+  }
+
+  return [command]
+}
+
+export function formatCommandForDisplay(command?: string | string[]): string {
+  const normalized = normalizeCommand(command)
+  return normalized.length > 0 ? normalized.join(" ") : "N/A"
+}
+
 export function formatDurationNs(value?: number | null): string {
   if (!value) {
     return "0s"

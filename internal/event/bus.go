@@ -106,6 +106,16 @@ const (
 	// Incident lifecycle events (agent-in-the-loop D2). Emitted on the existing
 	// /events stream so the Console incidents surface (Stream U) can live-update
 	// the feed, timeline, and approval inbox without polling.
+	//
+	// TypeIncidentOpened is the FIRST lifecycle event for any incident,
+	// published by internal/incident.Subscriber.handleFailure the moment
+	// Store.OpenOrAppend reports OutcomeOpened (a brand-new incident row, not an
+	// occurrence folded into an existing one — see OutcomeAppended). Without it
+	// a consumer of the event stream could see every later lifecycle event
+	// (approval_requested, incident_status_changed, ...) but never the
+	// incident's own start (#419). The payload carries incident_id, job_id,
+	// run_id/task_id/task_name when known, the classifier's class, status, and
+	// dedupe_key — the same correlation shape as its siblings below.
 	TypeIncidentOpened        Type = "incident_opened"
 	TypeIncidentStatusChanged Type = "incident_status_changed"
 	TypeAgentActionRecorded   Type = "agent_action_recorded"

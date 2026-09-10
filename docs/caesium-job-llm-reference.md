@@ -167,7 +167,7 @@ steps:
 | `env` | map | no | Environment variables (values may be `secret://` URIs). `${CAESIUM_PARAM_<NAME>}` is interpolated from run parameters **before** the cache hash and container start so a trigger param can reach a non-shell reagent (`GIT_REF: "${CAESIUM_PARAM_SHA}"`). Missing params fail the task. Only the braced form is expanded — not `$CAESIUM_PARAM_*`, `${CAESIUM_OUTPUT_*}`, or shell defaults. Param keys are case-insensitive and collisions (`SHA` vs `sha`) are rejected. `secret://` env values are not interpolatable: a substitution that produces or changes a `secret://` URI fails the task. |
 | `next` / `dependsOn` | string or array | no | DAG edges — fan-out / fan-in (see [DAG Wiring](#dag-wiring-rules)) |
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
-| `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
+| `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always`. A failure-tolerant rule (`all_done`/`always`/`one_success`/`all_failed`) runs the step regardless of the server's failure policy: under the default `CAESIUM_TASK_FAILURE_POLICY=halt` a failure skips every not-yet-started `all_success` step (`run halted after task "<name>" failed`) but still runs tolerant cleanup/notify steps whose rule is satisfied. |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
 | `datasets` | object | no | Freshness and contract surface: `consumes` (dataset names or `{name, schema}` objects) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs plus optional `schema`/`schemaFrom`/`version`). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
@@ -534,10 +534,20 @@ caesium dev --once --path job.yaml      # Run job locally against Docker
 caesium dev --path job.yaml             # Watch mode — re-run on file save
 caesium job diff --path jobs/           # Preview creates/updates/deletes vs server
 caesium job apply --path jobs/          # Deploy definitions to running server
+caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
 ```
+
+`caesium job export` calls `GET /v1/jobs/:id/manifest`, which rebuilds the
+manifest server-side from the stored job (the inverse of the apply importer) and
+answers `application/yaml` — or the same `Definition` as JSON with
+`?format=json`. Stdout carries the manifest and nothing else. Two details were
+never persisted and so cannot come back: a volume's alternative per-engine
+`sources` (and its `accessMode`), and job-level `serviceAccountName` /
+`podAnnotations` / `automountServiceAccountToken`, which return on each
+Kubernetes step instead (equivalent, since step-level overrides job-level).
 
 `caesium blame` is intentionally scoped to the data stored in `dag_snapshot`:
 topology, step image, and step command. It does not track behavior-only changes

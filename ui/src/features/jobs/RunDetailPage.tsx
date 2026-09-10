@@ -20,11 +20,12 @@ import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type CallbackRun, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
+import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats } from "./cache-utils";
+import { CallbackRunsSection } from "./CallbackRunsSection";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
 import { ReplayDialog } from "./ReplayDialog";
@@ -613,44 +614,3 @@ function parseTimestamp(value: string | undefined): number | undefined {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-function CallbackRunsSection({ callbacks }: { callbacks: CallbackRun[] }) {
-  return (
-    <Card data-testid="run-callbacks-section">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm">Callbacks</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {callbacks.map((callback) => {
-          const failed = callback.status?.toLowerCase() === "failed";
-          return (
-            <div
-              key={callback.id}
-              data-testid="run-callback-row"
-              className={`rounded-md border px-3 py-2 ${
-                failed ? "border-danger/40 bg-danger/5" : "border-border/50 bg-obsidian/20"
-              }`}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <StatusBadge status={callback.status} size="sm" />
-                <span className="font-mono text-xs text-text-2">
-                  callback {shortId(callback.callback_id)}
-                </span>
-                <span className="font-mono text-[10px] text-text-4">
-                  run {shortId(callback.id)}
-                </span>
-              </div>
-              {callback.error ? (
-                <div
-                  data-testid="run-callback-error"
-                  className={`mt-2 break-words font-mono text-xs ${failed ? "text-danger" : "text-text-3"}`}
-                >
-                  {callback.error}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </CardContent>
-    </Card>
-  );
-}

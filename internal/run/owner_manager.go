@@ -385,6 +385,86 @@ func (m *OwnerManager) Owns(runID uuid.UUID) bool {
 	return ok
 }
 
+// ApplyTerminalRows folds terminal task_runs rows the STORE resolved into this
+// owner's in-memory state — the runStateInvalidator half the halt sweep needs.
+//
+// Every other terminal transition on the in-memory lane originates HERE
+// (CompleteInstance stages it, persists it, then publishes it), so the state
+// and the rows never disagree. The halt sweep is the one writer that goes the
+// other way: it resolves rows in SQL from a worker or the run-completion
+// waiter, and this state consumes neither task_skipped events nor the row
+// scalar. Without this the halted step stayed on the ready queue (every
+// dispatch of it refused, the row already skipped) and the cleanup the sweep
+// released never entered the queue — a run the waiter kept alive forever for a
+// step nobody would dispatch.
+//
+// Rows are applied in terminal_sequence order through ApplyTerminalRow, the
+// same transition recovery replays persisted terminal rows with: the stored
+// sequence is adopted (not re-stamped), successors whose rule is now satisfied
+// are pushed ready, and unsatisfied ones are left alone because the sweep
+// persisted their skips as rows of their own, which arrive in this same
+// batch. If the fold completes the DAG the run is finalized exactly as a
+// completion that completes it would be. A run this node does not own is a
+// no-op: a takeover rebuilds from the rows, which already carry the sweep.
+func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun) {
+	if len(rows) == 0 {
+		return
+	}
+	or, ok := m.get(runID)
+	if !ok {
+		return
+	}
+	or.mu.Lock()
+	applied := 0
+	for i := range rows {
+		row := &rows[i]
+		if !IsTerminal(TaskStatus(row.Status)) {
+			continue
+		}
+		// Same identity rule as recovery: a fanned instance is keyed by its
+		// row, an unfanned step by its catalog task.
+		id := row.TaskID
+		if row.ID != uuid.Nil && (row.PartitionCount > 0 || row.PartitionValue != "") {
+			id = row.ID
+		}
+		if ts, known := or.state.TaskState(id); !known || IsTerminal(ts.Status) {
+			continue
+		}
+		or.state.ApplyTerminalRow(id, TaskStatus(row.Status), row.TerminalSequence)
+		applied++
+	}
+	if applied == 0 {
+		or.mu.Unlock()
+		return
+	}
+	or.checkpointMaybe()
+	complete := or.state.IsComplete()
+	hasFailures := or.state.HasFailures()
+	or.mu.Unlock()
+
+	log.Info("owner manager: folded store-resolved terminal rows into run state",
+		"run_id", runID, "rows", applied, "complete", complete)
+
+	if complete {
+		var runErr error
+		if hasFailures {
+			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
+		}
+		if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
+			// Same reasoning as CompleteInstance: a partition retry reopened
+			// work this state never saw, so release without a checkpoint and
+			// let recovery rebuild from the rows.
+			if rErr := m.Release(runID); rErr != nil {
+				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", rErr)
+			}
+			return
+		} else if cErr != nil {
+			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
+		}
+		m.Drop(runID)
+	}
+}
+
 // Ready returns the run's current ready queue in dispatch order, or nil if the
 // run is not owned by this node.
 func (m *OwnerManager) Ready(runID uuid.UUID) []uuid.UUID {

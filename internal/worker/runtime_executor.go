@@ -530,12 +530,18 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+			// The row may still have failed under this claim — a final attempt
+			// that reported a failure RESULT terminalizes it through the
+			// completion route above, and a later delivery is refused — so the
+			// halt is decided from the durable row, not from this outcome.
+			e.haltRunAfterFailure(taskRun)
 			return
 		}
 		log.Error("failed to persist worker task failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
 	}
 
 	if !e.continueOnFailure {
+		e.haltRunAfterFailure(taskRun)
 		return
 	}
 
@@ -550,6 +556,41 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if skipErr := e.store.SkipTask(taskRun.JobRunID, taskID, reason); skipErr != nil {
 			log.Error("failed to persist skipped descendant task", "run_id", taskRun.JobRunID, "task_id", taskID, "error", skipErr)
 		}
+	}
+}
+
+// haltRunAfterFailure is the distributed worker's half of
+// CAESIUM_TASK_FAILURE_POLICY=halt: stop the run from admitting new work.
+//
+// The failure transaction already resolved THIS task's successors by trigger
+// rule (the store's route-completeness contract: an all_done consumer is
+// released, an all_success one skipped with its rule reason). What halt adds is
+// the rest of the DAG — every step that has not started and is not
+// failure-tolerant is skipped right here, before the owner's next dispatch tick
+// can claim it, so the only work that starts after a failure is the work whose
+// trigger rule says it should. The local executor issues the same sweep
+// (internal/job/job.go haltUnstarted) and the run-completion waiter repeats it
+// as a belt-and-braces pass; all three share run.Store.HaltUnstartedTasks.
+//
+// It sweeps only when the durable row really is failed. The caller can reach
+// here on a claim mismatch, and a mismatch also means "resolved out from under
+// me" — cancelled by a concurrency replace, reclaimed by another node whose
+// attempt may yet succeed — and halting a run on a failure that did not happen
+// would strand every step of it.
+func (e *runtimeExecutor) haltRunAfterFailure(taskRun *models.TaskRun) {
+	if e.continueOnFailure || taskRun == nil {
+		return
+	}
+	var row models.TaskRun
+	if err := e.store.DB().Select("status").First(&row, "id = ?", taskRun.ID).Error; err != nil {
+		log.Error("failed to read task row before halting run", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
+		return
+	}
+	if row.Status != string(run.TaskStatusFailed) {
+		return
+	}
+	if _, err := e.store.HaltUnstartedTasks(taskRun.JobRunID, taskRun.TaskID, nil); err != nil {
+		log.Error("failed to halt unstarted tasks after failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
 	}
 }
 
@@ -805,24 +846,38 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	var taskOutput map[string]string
 	var branchSelections []string
 	var partitions []pkgtask.Partition
-	var datasetMetrics []pkgtask.DatasetMetricSample
+	// metricsCapture carries the samples AND how completely they were read: a
+	// log this executor could not fetch or parse, and a metrics scan that
+	// overflowed its cap, both mean a declared metric's absence proves nothing
+	// (issue #437). The evaluator downgrades those verdicts to `unavailable`
+	// instead of failing the task for an infrastructure fault.
+	var metricsCapture run.MetricsCapture
 	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
-	if logErr == nil {
+	if logErr != nil {
+		metricsCapture.Unreadable = true
+		log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
+			"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", logErr)
+	} else {
 		markers, parseErr := pkgtask.CaptureMarkersWithLimits(logs, pkgtask.MaxLogSnapshotBytes, 0, env.Variables().FanOutMaxPartitions)
 		if closeErr := logs.Close(); closeErr != nil {
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
-		if parseErr != nil {
+		switch {
+		case parseErr != nil:
 			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 				return nil, parseErr
 			}
+			metricsCapture.Unreadable = true
 			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)
-		} else if markers != nil {
+		case markers == nil:
+			metricsCapture.Unreadable = true
+		default:
 			taskOutput = markers.Output
 			partitions = markers.Partitions
-			datasetMetrics = markers.Metrics
+			metricsCapture.Samples = markers.Metrics
 			if markers.MetricsTruncated {
+				metricsCapture.Truncated = true
 				log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
 					"task_id", taskRun.TaskID, "cap_bytes", pkgtask.MaxMetricsBytes)
 			}
@@ -898,7 +953,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// same run and poison the median. The local executor cannot produce that
 	// (its seam runs only when execErr == nil), and the two executors must
 	// baseline a job identically.
-	if err := e.runDataAssertions(taskRun, datasetMetrics); err != nil {
+	if err := e.runDataAssertions(taskRun, metricsCapture); err != nil {
 		return nil, err
 	}
 
@@ -962,12 +1017,19 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 // exactly what the row carried when this worker claimed it: claim_attempt makes
 // it a token rather than a name, so even this worker RE-claiming the same row
 // does not let its superseded attempt write.
-func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, samples []pkgtask.DatasetMetricSample) error {
+//
+// The capture, not a bare sample slice, is what crosses this seam: it is the
+// only place that knows whether an absent metric was never emitted or merely
+// never read, and the evaluator cannot reconstruct that afterwards. The two
+// travel together and answer different questions — the claim decides whether
+// this attempt may record anything, the capture decides what a metric's
+// absence means if it may.
+func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, capture run.MetricsCapture) error {
 	if taskRun == nil {
 		return nil
 	}
 	claim := &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
-	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, samples)
+	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, capture)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

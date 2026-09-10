@@ -1461,22 +1461,25 @@ func TestFanOutPartitionRetryResumesOnlyTheResetInstance(t *testing.T) {
 	require.Equal(t, 2, f.engine.createCount("fail"), "the failed instance re-executes exactly once more")
 }
 
-// TestFanOutPartitionRetryInShutdownWindowPreservesPendingSuccessor drives the
+// TestFanOutPartitionRetryInShutdownWindowKeepsReleasedSuccessor drives the
 // race the completion fence exists for through the real local Run surface.
 // The first engine has left runFannedGroup and halted, but its deferred
 // Store.Complete is paused before the status write. RetryPartition then resets
 // the failed instance while the JobRun still says running, so the HTTP handler
 // would not start another engine. Complete must refuse, and the old engine must
-// launch a replacement WITHOUT first skipping the pending successor.
-func TestFanOutPartitionRetryInShutdownWindowPreservesPendingSuccessor(t *testing.T) {
+// launch a replacement that runs ONLY the reset instance — not the `always`
+// successor the group's failure already released and ran (#401: under halt a
+// failure-tolerant successor executes; before that it sat pending and the
+// pre-fix completion sweep destroyed it).
+func TestFanOutPartitionRetryInShutdownWindowKeepsReleasedSuccessor(t *testing.T) {
 	testFanOutPartitionRetryInShutdownWindow(t, true)
 }
 
 // TestFanOutPartitionRetryReplacementFailureTerminatesOnce pins the failure
 // side of the same recovery. A replacement that fails the partition again must
-// leave the run terminal-failed, preserve ordinary halt semantics for the
-// never-dispatched successor, clear retry provenance, and dispatch completion
-// callbacks exactly once (from the replacement, never the superseded engine).
+// leave the run terminal-failed, leave the already-run successor alone, clear
+// retry provenance, and dispatch completion callbacks exactly once (from the
+// replacement, never the superseded engine).
 func TestFanOutPartitionRetryReplacementFailureTerminatesOnce(t *testing.T) {
 	testFanOutPartitionRetryInShutdownWindow(t, false)
 }
@@ -1492,8 +1495,10 @@ func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) 
 	}, 0)
 	f.addDownstream(t)
 	// `always` makes the successor ready when the failed group first resolves,
-	// but the job-level halt policy leaves it undispatched. That is the pending
-	// catalog task the pre-fix completion sweep destroyed.
+	// and under the job-level halt policy a failure-tolerant successor is
+	// dispatched (#401), so it runs in the FIRST engine, before the completion
+	// fence. The replacement must recognize that terminal row and not run it
+	// again.
 	for _, taskModel := range f.taskSvc.tasks {
 		if taskModel.ID == f.downstream {
 			taskModel.TriggerRule = string(schema.TriggerRuleAlways)
@@ -1559,8 +1564,9 @@ func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) 
 	require.NoError(t, f.db.
 		Where("job_run_id = ? AND task_id = ?", jobRun.ID, f.downstream).
 		First(&successorBefore).Error)
-	require.Equal(t, string(run.TaskStatusPending), successorBefore.Status,
-		"precondition: job-level halt must leave the ready successor undispatched")
+	require.Equal(t, string(run.TaskStatusSucceeded), successorBefore.Status,
+		"precondition: the `always` successor is released by the group failure and runs under halt")
+	require.Len(t, f.engine.createRequestsForTask(f.downstream), 1)
 
 	if retrySucceeds {
 		f.engine.mu.Lock()
@@ -1577,14 +1583,14 @@ func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) 
 
 	wantRunStatus := string(run.StatusFailed)
 	wantPartitionStatus := string(run.TaskStatusFailed)
-	wantSuccessorStatus := string(run.TaskStatusPending)
-	wantSuccessorCreates := 0
 	if retrySucceeds {
 		wantRunStatus = string(run.StatusSucceeded)
 		wantPartitionStatus = string(run.TaskStatusSucceeded)
-		wantSuccessorStatus = string(run.TaskStatusSucceeded)
-		wantSuccessorCreates = 1
 	}
+	// The successor ran once, in the first engine, whichever way recovery
+	// goes: the replacement executes the reset instance and nothing else.
+	wantSuccessorStatus := string(run.TaskStatusSucceeded)
+	wantSuccessorCreates := 1
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -1608,7 +1614,7 @@ func testFanOutPartitionRetryInShutdownWindow(t *testing.T, retrySucceeds bool) 
 	require.NoError(t, f.db.First(&successorAfter, "id = ?", successorBefore.ID).Error)
 	require.Equal(t, wantSuccessorStatus, successorAfter.Status)
 	require.Len(t, f.engine.createRequestsForTask(f.downstream), wantSuccessorCreates,
-		"the successor must run only when recovery succeeds")
+		"recovery must not re-run the successor the first engine already ran")
 	require.Equal(t, int32(1), callbackCount.Load(),
 		"only the replacement engine may dispatch terminal callbacks")
 

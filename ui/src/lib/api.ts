@@ -58,6 +58,16 @@ export interface CallbackRun {
   callback_id: string;
   status: string;
   error?: string;
+  /**
+   * Status code the callback target answered with. Absent when the attempt
+   * never got a response (connect/TLS failure, timeout) — which is what
+   * separates a transient network failure from a permanent 4xx.
+   */
+  http_status?: number;
+  /** Response body, truncated and secret-scrubbed server-side. */
+  response_body?: string;
+  /** Delivery attempts that preceded this one: 0 on the first dispatch. */
+  retry_count?: number;
   started_at: string;
   completed_at?: string;
 }
@@ -187,8 +197,7 @@ export interface JobTask {
   atom_id: string;
   name: string;
   // next_id is not a column on models.Task — the server never emits it. It is
-  // kept because job-detail-manifest's fallbackNext still reads it when a task
-  // object comes from somewhere other than this endpoint.
+  // kept for task objects that come from somewhere other than this endpoint.
   next_id?: string;
   // Omitted by the server when empty (`json:"node_selector,omitempty"` on the
   // model), hence optional.
@@ -1154,6 +1163,30 @@ async function requestURL<T>(
   return JSON.parse(text) as T;
 }
 
+// requestText fetches a non-JSON body verbatim. GET /v1/jobs/:id/manifest
+// answers `application/yaml` — the same bytes the CLI writes to a file — so it
+// must not go through request<T>'s JSON.parse.
+async function requestText(endpoint: string, accept: string): Promise<string> {
+  const headers = withAuthHeaders({ Accept: accept });
+
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    credentials: "include",
+    headers,
+  });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new ApiError(401, "Authentication required", "authentication_required");
+  }
+
+  if (!response.ok) {
+    const message = parseErrorMessage(await response.text());
+    throw new ApiError(response.status, message, classifyApiError(response.status, message));
+  }
+
+  return response.text();
+}
+
 function parseErrorMessage(text: string): string {
   if (!text) {
     return "";
@@ -1306,6 +1339,11 @@ export const api = {
       },
     ),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
+  // The server reconstructs the authoring manifest from the stored job (the
+  // inverse of the apply importer), so the YAML tab renders exactly what
+  // `caesium job export` writes instead of rebuilding it in the browser.
+  getJobManifest: (jobId: string) =>
+    requestText(`/jobs/${encodeURIComponent(jobId)}/manifest`, "application/yaml"),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
   getJobCache: (jobId: string) => request<JobCacheResponse>(`/jobs/${jobId}/cache`),
   deleteJobCache: (jobId: string) => request<void>(`/jobs/${jobId}/cache`, { method: "DELETE" }),

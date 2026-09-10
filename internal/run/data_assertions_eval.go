@@ -10,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 )
 
 // DefaultBaselineMinSamples is the cold-start floor when
@@ -35,6 +36,26 @@ const (
 	// produces. A step that stops emitting `rowCount` must not silently pass,
 	// so "no sample" is a breach of the contract rather than a skipped check.
 	AssertionMissing = "missing"
+	// AssertionUnavailable is AssertionMissing's honest twin: the metric was
+	// not observed, but the marker stream itself was LOST, so the evaluator
+	// cannot tell "the step stopped emitting it" from "the observation never
+	// reached us". It is an INFRASTRUCTURE verdict, not a data one — recorded
+	// and surfaced, counted under result="unavailable", and never enforced
+	// whatever onViolation says (see DataViolation.Enforceable).
+	AssertionUnavailable = "unavailable"
+)
+
+// Reasons carried on an AssertionUnavailable violation. They are a bounded
+// enum, so an operator reading a verdict — or a dashboard grouping them — sees
+// WHICH way the observation was lost rather than only that it was.
+const (
+	// UnavailableLogUnreadable: the task's log could not be fetched or parsed,
+	// so no marker of any kind could be read.
+	UnavailableLogUnreadable = "log_unreadable"
+	// UnavailableStreamTruncated: the ##caesium::metrics scan overflowed its
+	// pkgtask.MaxMetricsBytes cap and dropped samples, so a declared metric
+	// that did not arrive may simply have been one of the dropped ones.
+	UnavailableStreamTruncated = "marker_stream_truncated"
 )
 
 // DataViolation is one recorded data-assertion breach — the data-quality
@@ -83,14 +104,74 @@ type DataViolation struct {
 	// configured minimum samples, so this violation is recorded and surfaced
 	// but NEVER enforced, whatever onViolation says.
 	Seeding bool `json:"seeding,omitempty"`
+	// Reason names HOW an AssertionUnavailable verdict lost its observation —
+	// one of the Unavailable* constants. Empty on every other assertion kind.
+	Reason string `json:"reason,omitempty"`
 	// Message is the human-readable rendering, mirroring how a
 	// pkgtask.SchemaViolation carries its own message.
 	Message string `json:"message"`
 }
 
-// Enforceable reports whether this violation may escalate (fail a task, and —
-// once Stream C lands — hold a dataset). A seeding verdict never can.
-func (v DataViolation) Enforceable() bool { return !v.Seeding }
+// Enforceable reports whether this violation may escalate (fail a task or hold
+// a dataset). Two verdicts never can:
+//
+//   - a SEEDING one, judged against a baseline too short to trust;
+//   - an UNAVAILABLE one, where the marker stream was lost. Failing a run
+//     because an observation did not reach us reddens it for an infrastructure
+//     reason rather than a data one, and breaking the circuit on it would hold
+//     a dataset nobody has any evidence against.
+func (v DataViolation) Enforceable() bool {
+	return !v.Seeding && v.Assertion != AssertionUnavailable
+}
+
+// MarkUnavailable rewrites the `missing` verdicts of a contract that was
+// evaluated against a LOST marker stream into `unavailable` ones, carrying the
+// reason the stream was lost.
+//
+// Only `missing` is rewritten, and that is the whole point: a metric that DID
+// arrive was judged against its real value, so a min/max/delta/maxLag breach
+// stands exactly as it would on a clean run — a truncated stream must not
+// launder a genuine breach into an infrastructure excuse. What it cannot judge
+// is a metric that is absent, because a lost stream makes "the step stopped
+// emitting it" and "the sample was dropped on the way here" indistinguishable.
+//
+// It is pure, like the rest of this file, so a backtest replaying recorded
+// history can reproduce the same verdicts.
+func MarkUnavailable(violations []DataViolation, reason string) []DataViolation {
+	if reason == "" {
+		return violations
+	}
+	for i := range violations {
+		if violations[i].Assertion != AssertionMissing {
+			continue
+		}
+		violations[i].Assertion = AssertionUnavailable
+		violations[i].Reason = reason
+		violations[i].Message = unavailableMessage(violations[i].Metric, reason)
+	}
+	return violations
+}
+
+// unavailableMessage renders the operator-facing sentence for a lost
+// observation. It says the marker stream was lost, names how, and states that
+// the verdict is warn-only — the three things someone looking at a green run
+// with a recorded violation needs to know.
+func unavailableMessage(metric, reason string) string {
+	switch reason {
+	case UnavailableLogUnreadable:
+		return fmt.Sprintf(
+			"declared metric %q could not be observed: this task's log could not be read, so its ##caesium::metrics stream was lost; recorded as unavailable rather than missing, and never enforced",
+			metric)
+	case UnavailableStreamTruncated:
+		return fmt.Sprintf(
+			"declared metric %q could not be observed: the ##caesium::metrics stream exceeded its %d-byte cap and dropped samples, so this metric may simply have been one of them; recorded as unavailable rather than missing, and never enforced",
+			metric, pkgtask.MaxMetricsBytes)
+	default:
+		return fmt.Sprintf(
+			"declared metric %q could not be observed: the ##caesium::metrics stream was lost (%s); recorded as unavailable rather than missing, and never enforced",
+			metric, reason)
+	}
+}
 
 // String renders the violation for a task failure message: it names the
 // dataset, the metric and the assertion, which is what an operator reading a
