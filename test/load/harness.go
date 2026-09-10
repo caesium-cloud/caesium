@@ -593,8 +593,11 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 		return r, err
 	}
 	fmt.Fprintln(os.Stderr, "Waiting for server to be ready...")
-	if err := h.waitForServer(ctx); err != nil {
-		return finish("server_unavailable", err)
+	readyCtx, readyCancel := context.WithTimeout(ctx, 30*time.Second)
+	readyErr := h.waitForServer(readyCtx)
+	readyCancel()
+	if readyErr != nil {
+		return finish("server_unavailable", readyErr)
 	}
 	jobs, err := h.applyJobs(ctx)
 	if err != nil {
@@ -670,6 +673,22 @@ dispatch:
 		samples = append(samples, end)
 	}
 	sampleErr := errors.Join(collected.err, err)
+	// A completed workload must expose both SQL statements and rows. Empty
+	// category vectors are only legitimate before the first measured write.
+	if err == nil {
+		for _, family := range []string{"caesium_db_writes_total", "caesium_db_statements_total"} {
+			found := false
+			for key := range end.counters {
+				if strings.HasPrefix(key, family+"{") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				sampleErr = errors.Join(sampleErr, fmt.Errorf("final sample missing required %s", family))
+			}
+		}
+	}
 	for i := 1; i < len(samples); i++ {
 		for key, previous := range samples[i-1].counters {
 			value, present := samples[i].counters[key]

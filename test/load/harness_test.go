@@ -255,6 +255,9 @@ func TestRequiredSamplesFailClosed(t *testing.T) {
 		delay   time.Duration
 	}{
 		{"baseline HTTP", func(int32) (int, string) { return 503, validMetrics }, 0},
+		{"missing write families", func(int32) (int, string) {
+			return 200, "# TYPE caesium_db_busy_retries_total counter\ncaesium_db_busy_retries_total 0\n"
+		}, 0},
 		{"baseline empty", func(int32) (int, string) { return 200, "" }, 0},
 		{"wrong family type", func(int32) (int, string) {
 			return 200, "# TYPE caesium_db_busy_retries_total gauge\ncaesium_db_busy_retries_total 0\n"
