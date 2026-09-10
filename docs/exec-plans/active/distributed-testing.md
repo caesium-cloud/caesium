@@ -168,9 +168,11 @@ takeover without deleting its network identity, the initial design uses **one
 kind control-plane node and three kind workers on one CI host**, required pod
 anti-affinity across worker hostnames, and one Caesium replica per worker.
 The runner/recorder lives on the control-plane node, outside all faulted pods.
-The recorder must not run on a stopped worker; cordon the selected owner worker
-before stopping kubelet so new task pods can schedule on survivors. Existing
-task containers continue independently of the killed Caesium process. This costs
+The recorder must not run on a stopped worker; cordon the intended owner worker
+**before triggering the fixture**, and require every fixture task pod to run on
+surviving workers. Kubernetes engine completion depends on kubelet publishing
+PodSucceeded/PodFailed to the API; a task container on the stopped worker cannot
+supply that evidence even if it exits. This costs
 more containers than one kind node but allows a bounded, externally observed
 SIGKILL and controlled restart without changing production code.
 
@@ -250,7 +252,9 @@ bounded contexts. Require three distinct members with voter roles and an agreed
 leader, plus a successful HTTP write/read. `GET /v1/system/nodes` supplements
 membership with seed/local fallbacks and does not expose the leader, so it is
 diagnostic only. No new product API is needed. Apply the blocked two-step fixture
-through `POST /v1/jobdefs/apply` or the candidate CLI, trigger directly against
+through `POST /v1/jobdefs/apply` or the candidate CLI. Select the intended owner
+pod, map its kind worker, and cordon that worker **before** triggering any fixture
+task. Trigger directly against
 the selected leader/nonleader pod's HTTP address, retain its 202 run UUID, and
 query the actual lease via the existing read-only surface:
 
@@ -267,7 +271,8 @@ explicit step name and a newly generated attempt nonce to the sink before
 blocking; the sink persists that start before releasing the response. Run/task
 public reads correlate the nonce/step with the actual task-run identity. Require
 lease, ready topology and blocked-effect evidence before killing the mapped
-owner. Refresh the leader immediately before the kill; a changed owner/leader
+owner, and assert every pre-fault fixture task pod is placed on a surviving
+worker. Refresh the leader immediately before the kill; a changed owner/leader
 relationship invalidates that subcase rather than passing the wrong case.
 
 The owned host controller maps `$OWNER_POD` to `$OWNER_KIND_NODE` and extracts
@@ -275,7 +280,9 @@ its current Caesium container ID from `status.containerStatuses`. With all
 identities checked against the created cluster, use:
 
 ```sh
+# Before fixture trigger (not merely before SIGKILL):
 kubectl --kubeconfig "$ARTIFACTS/kubeconfig" cordon "$OWNER_KIND_NODE"
+# After triggering and verifying owner, task placement and blocked-effect evidence:
 docker exec "$OWNER_KIND_NODE" systemctl stop kubelet
 docker exec "$OWNER_KIND_NODE" ctr -n k8s.io tasks kill --signal SIGKILL "$OWNER_CONTAINER_ID"
 docker exec "$OWNER_KIND_NODE" ctr -n k8s.io tasks list
