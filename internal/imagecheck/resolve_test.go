@@ -186,11 +186,15 @@ func TestResolver_NonSha256Rejected(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDigestUnavailable)
 }
 
-func TestResolver_UnsupportedEngineUnavailable(t *testing.T) {
-	// Kubernetes has no DigestFunc wired, so it must report unavailable rather
-	// than panic or return an empty digest.
-	r := NewResolver()
+func TestResolver_UnwiredEngineUnavailable(t *testing.T) {
+	// An engine explicitly unwired (nil DigestFunc) must report unavailable
+	// rather than panic or return an empty digest.
+	r := NewResolver(WithEngineDigestFunc(models.AtomEngineKubernetes, nil))
 	_, err := r.Resolve(context.Background(), models.AtomEngineKubernetes, "alpine:3.23", time.Minute)
+	assert.ErrorIs(t, err, ErrDigestUnavailable)
+
+	// And an engine the resolver has never heard of.
+	_, err = r.Resolve(context.Background(), models.AtomEngine("firecracker"), "alpine:3.23", time.Minute)
 	assert.ErrorIs(t, err, ErrDigestUnavailable)
 }
 

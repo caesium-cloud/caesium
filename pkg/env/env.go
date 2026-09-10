@@ -1,6 +1,7 @@
 package env
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -17,6 +18,14 @@ func Process() error {
 	next := &Environment{MaxParallelTasks: runtime.NumCPU()}
 
 	if err := envconfig.Process("caesium", next); err != nil {
+		// envconfig's ParseError echoes the offending value. For the registry
+		// credential mapping that value is exactly what an operator might have
+		// mistakenly set to a literal credential, so report the key and cause
+		// without the value.
+		var perr *envconfig.ParseError
+		if errors.As(err, &perr) && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
+			return fmt.Errorf("failed to process environment variables: %s: %w", perr.KeyName, perr.Err)
+		}
 		return fmt.Errorf("failed to process environment variables: %w", err)
 	}
 	variables = next
@@ -169,6 +178,12 @@ type Environment struct {
 	// before it is re-resolved. Short by design so steady-state runs avoid the
 	// registry round-trip while a moving tag is still detected promptly.
 	CacheDigestTTL time.Duration `envconfig:"CACHE_DIGEST_TTL" default:"5m"`
+	// RegistryAuth maps registry hosts to the secret:// reference holding their
+	// pull credentials (`host=secret://...,host=secret://...`). The image digest
+	// resolver (cache.pinDigests) uses them to authenticate its manifest lookups
+	// on every engine and Docker's pull-to-resolve fallback; unmapped registries
+	// are probed anonymously. See RegistryAuth for the exact syntax.
+	RegistryAuth RegistryAuth `envconfig:"REGISTRY_AUTH"`
 	// OutputRefMaxBytes bounds the payload size a step may reference via the
 	// ##caesium::output-ref large-object protocol, checked against the size the
 	// producer reports in the reference marker. 0 (the default) means unbounded —

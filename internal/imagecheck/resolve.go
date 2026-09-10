@@ -7,26 +7,28 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/docker/docker/api/types/image"
+	dockerregistry "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 )
 
 // ErrDigestUnavailable is returned when a digest cannot be resolved for an
-// image — e.g. the engine does not expose one at task-spec construction time
-// (Kubernetes resolves digests in the kubelet pull status, not before the pod
-// exists). Callers treat this as "fall back to the literal tag": a cache miss
-// is always safe, so an unresolved digest never produces a stale hit, it only
-// declines the extra tamper-evidence for that step.
+// image — the registry is unreachable, rejects the configured credentials, the
+// tag does not exist, or the engine has no DigestFunc wired. Callers treat this
+// as "fall back to the literal tag": a cache miss is always safe, so an
+// unresolved digest never produces a stale hit, it only declines the extra
+// tamper-evidence for that step.
 var ErrDigestUnavailable = errors.New("imagecheck: image digest unavailable")
 
 // DigestFunc resolves a single image reference to its content digest
-// (sha256:...). Implementations may perform network I/O (a registry pull or
-// inspect); the Resolver wraps them with a short-TTL cache so steady-state runs
-// pay the cost at most once per TTL window.
+// (sha256:...). Implementations may perform network I/O (a registry manifest
+// HEAD, an engine inspect or pull); the Resolver wraps them with a short-TTL
+// cache so steady-state runs pay the cost at most once per TTL window.
 type DigestFunc func(ctx context.Context, imageRef string) (string, error)
 
 type cachedDigest struct {
@@ -65,10 +67,16 @@ func negativeTTL(ttl time.Duration) time.Duration {
 // with digestTTL: 0 re-resolves every check (immediate moved-tag detection)
 // while others reuse the steady-state default and pay no registry round-trip.
 type Resolver struct {
-	now     func() time.Time
-	mu      sync.Mutex
-	entries map[string]cachedDigest
+	now      func() time.Time
+	mu       sync.Mutex
+	entries  map[string]cachedDigest
 	byEngine map[models.AtomEngine]DigestFunc
+	registry *RegistryClient
+	// credentials is the operator-configured registry credential source. It
+	// is settable after construction (SetCredentials) because the process-wide
+	// Default() resolver may be built before the secret providers are, and it
+	// is read on every lookup so a later SetCredentials takes effect.
+	credentials atomic.Pointer[CredentialFunc]
 }
 
 // ResolverOption configures a Resolver.
@@ -92,7 +100,8 @@ func Default() *Resolver {
 }
 
 // WithEngineDigestFunc registers (or overrides) the DigestFunc for an engine.
-// Primarily a test seam; production wiring uses NewResolver's defaults.
+// Primarily a test seam; production wiring uses NewResolver's defaults. A nil
+// fn unwires the engine (Resolve reports ErrDigestUnavailable for it).
 func WithEngineDigestFunc(engine models.AtomEngine, fn DigestFunc) ResolverOption {
 	return func(r *Resolver) { r.byEngine[engine] = fn }
 }
@@ -106,30 +115,84 @@ func WithClock(now func() time.Time) ResolverOption {
 	}
 }
 
-// NewResolver builds a Resolver. By default the Docker engine resolves via the
-// local Docker daemon: it inspects the image (using its content config digest /
-// RepoDigests) and, only if the image is not already present locally, pulls it
-// first so a digest is available. The cache TTL is supplied per Resolve call.
+// WithRegistryClient overrides the engine-independent registry client used for
+// Podman/Kubernetes resolution and as Docker's fallback (test seam).
+func WithRegistryClient(rc *RegistryClient) ResolverOption {
+	return func(r *Resolver) {
+		if rc != nil {
+			r.registry = rc
+		}
+	}
+}
+
+// WithCredentialSource sets the registry credential source at construction
+// time; SetCredentials does the same on a live Resolver.
+func WithCredentialSource(fn CredentialFunc) ResolverOption {
+	return func(r *Resolver) { r.SetCredentials(fn) }
+}
+
+// NewResolver builds a Resolver with a DigestFunc wired for every engine:
 //
-// Registry auth limitation: the pull-if-absent path uses an anonymous pull
-// (no RegistryAuth is sent), so digest resolution for an image that must be
-// pulled from a *private* registry will fail and the step falls back to the
-// literal tag — which is always safe (a cache miss is never a stale hit).
-// Images already present locally (the steady-state case, and any image the
-// runtime already pulled) resolve without auth. Wiring RegistryAuth from the
-// secret providers is a tracked follow-up. Podman and Kubernetes have no
-// pre-run digest source wired here yet, so they also fall back to the tag.
+//   - Docker resolves via the local Docker daemon first (inspecting the image
+//     for its RepoDigest / config digest — no network I/O when the image is
+//     already present, the steady-state case). When the image is absent it
+//     asks the registry directly (a manifest HEAD, no layers pulled) and, only
+//     if that fails too, pulls the image with the configured registry
+//     credentials and inspects it.
+//   - Podman and Kubernetes resolve through the engine-independent registry
+//     client: neither exposes a pre-run digest source (the kubelet resolves
+//     digests in the pod's pull status, after the pod exists), so the server
+//     asks the registry itself.
+//
+// Registry credentials come from SetCredentials / WithCredentialSource
+// (CredentialsFromSecrets over CAESIUM_REGISTRY_AUTH in the server). Without a
+// credential source every registry is probed anonymously, so a private image
+// that is not already present locally still falls back to the literal tag —
+// which is always safe (a cache miss is never a stale hit). The cache TTL is
+// supplied per Resolve call.
 func NewResolver(opts ...ResolverOption) *Resolver {
 	r := &Resolver{
 		now:      time.Now,
 		entries:  make(map[string]cachedDigest),
 		byEngine: make(map[models.AtomEngine]DigestFunc),
 	}
-	r.byEngine[models.AtomEngineDocker] = dockerDigestFunc
 	for _, opt := range opts {
 		opt(r)
 	}
+	if r.registry == nil {
+		r.registry = NewRegistryClient(WithCredentials(r.lookupCredentials))
+	}
+	defaults := map[models.AtomEngine]DigestFunc{
+		models.AtomEngineDocker:     r.dockerDigest,
+		models.AtomEnginePodman:     r.registry.ResolveDigest,
+		models.AtomEngineKubernetes: r.registry.ResolveDigest,
+	}
+	for engine, fn := range defaults {
+		if _, overridden := r.byEngine[engine]; !overridden {
+			r.byEngine[engine] = fn
+		}
+	}
 	return r
+}
+
+// SetCredentials installs (or replaces) the registry credential source. A nil
+// fn reverts to anonymous probing. Safe to call concurrently with Resolve.
+func (r *Resolver) SetCredentials(fn CredentialFunc) {
+	if fn == nil {
+		r.credentials.Store(nil)
+		return
+	}
+	r.credentials.Store(&fn)
+}
+
+// lookupCredentials is the CredentialFunc handed to the registry client and
+// the Docker pull path; it dereferences whatever SetCredentials last stored.
+func (r *Resolver) lookupCredentials(ctx context.Context, registry string) (Credentials, bool, error) {
+	fn := r.credentials.Load()
+	if fn == nil {
+		return Credentials{}, false, nil
+	}
+	return (*fn)(ctx, registry)
 }
 
 // Resolve returns the content digest (sha256:...) for the image run by the
@@ -178,8 +241,8 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 
 	fn := r.byEngine[engine]
 	if fn == nil {
-		// No backend for this engine is a stable condition (e.g. k8s/podman),
-		// so cache it negatively to avoid re-evaluating on every check.
+		// No backend for this engine is a stable condition, so cache it
+		// negatively to avoid re-evaluating on every check.
 		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
 	}
@@ -240,31 +303,53 @@ func getDockerClient() (*client.Client, error) {
 	return dockerCli, dockerCliErr
 }
 
-// dockerDigestFunc resolves a digest via the local Docker daemon. It inspects
-// the image first; if the image is already present (the common case) no network
-// I/O happens. Only when the image is absent does it pull it (anonymously —
-// see the NewResolver doc for the private-registry caveat) and re-inspect.
-func dockerDigestFunc(ctx context.Context, imageRef string) (string, error) {
+// dockerDigest is the Docker engine's DigestFunc: the local daemon, then the
+// registry, then an authenticated pull (see dockerResolve).
+func (r *Resolver) dockerDigest(ctx context.Context, imageRef string) (string, error) {
 	cli, err := getDockerClient()
 	if err != nil {
 		return "", fmt.Errorf("docker client: %w", err)
 	}
+	return dockerResolve(ctx, cli, r.registry.ResolveDigest, r.lookupCredentials, imageRef)
+}
 
-	digest, err := dockerInspectDigest(ctx, cli, imageRef)
-	if err == nil && digest != "" {
+// dockerResolve resolves a digest for the Docker engine in three tiers:
+//
+//  1. Inspect the image in the local daemon. Present images (the common case)
+//     resolve with no network I/O at all.
+//  2. Ask the registry for the manifest digest (a HEAD; no layers move). This
+//     is the engine-independent path Podman/Kubernetes use, with the same
+//     credentials.
+//  3. Pull the image with the configured registry credentials and inspect it
+//     again — the pre-existing behaviour, kept as the last resort so a registry
+//     that cannot serve manifest HEADs (or is reachable only by the daemon)
+//     still resolves.
+func dockerResolve(ctx context.Context, cli client.ImageAPIClient, registryResolve DigestFunc, creds CredentialFunc, imageRef string) (string, error) {
+	digest, inspectErr := dockerInspectDigest(ctx, cli, imageRef)
+	if inspectErr == nil && digest != "" {
 		return digest, nil
 	}
 
+	if registryResolve != nil {
+		digest, registryErr := registryResolve(ctx, imageRef)
+		if registryErr == nil && digest != "" {
+			return digest, nil
+		}
+		log.Debug("docker: image not present locally and registry lookup failed; pulling to resolve digest",
+			"image", imageRef, "registry_error", registryErr)
+	}
+
 	// Not present (or no usable digest yet): pull, then inspect again.
-	if pullErr := dockerPull(ctx, cli, imageRef); pullErr != nil {
-		// Prefer surfacing the inspect error if we had one; otherwise the pull error.
-		if err != nil {
-			return "", err
+	if pullErr := dockerPull(ctx, cli, imageRef, creds); pullErr != nil {
+		// The pull error is the actionable one (auth, unreachable registry,
+		// credential lookup); keep the inspect error as context.
+		if inspectErr != nil {
+			return "", fmt.Errorf("%w (not present locally: %v)", pullErr, inspectErr)
 		}
 		return "", pullErr
 	}
 
-	digest, err = dockerInspectDigest(ctx, cli, imageRef)
+	digest, err := dockerInspectDigest(ctx, cli, imageRef)
 	if err != nil {
 		return "", err
 	}
@@ -294,8 +379,17 @@ func dockerInspectDigest(ctx context.Context, cli client.ImageAPIClient, imageRe
 	return "", nil
 }
 
-func dockerPull(ctx context.Context, cli client.ImageAPIClient, imageRef string) error {
-	r, err := cli.ImagePull(ctx, imageRef, image.PullOptions{})
+// dockerPull pulls imageRef through the daemon, sending the operator-configured
+// registry credentials (if any for the image's registry) as RegistryAuth.
+func dockerPull(ctx context.Context, cli client.ImageAPIClient, imageRef string, creds CredentialFunc) error {
+	opts := image.PullOptions{}
+	registryAuth, err := dockerRegistryAuth(ctx, creds, imageRef)
+	if err != nil {
+		return err
+	}
+	opts.RegistryAuth = registryAuth
+
+	r, err := cli.ImagePull(ctx, imageRef, opts)
 	if err != nil {
 		return err
 	}
@@ -305,6 +399,35 @@ func dockerPull(ctx context.Context, cli client.ImageAPIClient, imageRef string)
 		return err
 	}
 	return nil
+}
+
+// dockerRegistryAuth builds the base64 RegistryAuth value the Docker API
+// expects for imageRef's registry, or "" when no credentials are configured
+// for it (anonymous pull, the pre-existing behaviour).
+func dockerRegistryAuth(ctx context.Context, creds CredentialFunc, imageRef string) (string, error) {
+	if creds == nil {
+		return "", nil
+	}
+	ref, err := ParseReference(imageRef)
+	if err != nil {
+		return "", err
+	}
+	c, ok, err := creds(ctx, ref.Registry)
+	if err != nil {
+		return "", fmt.Errorf("registry %s: credentials: %w", ref.Registry, err)
+	}
+	if !ok {
+		return "", nil
+	}
+	encoded, err := dockerregistry.EncodeAuthConfig(dockerregistry.AuthConfig{
+		Username:      c.Username,
+		Password:      c.Password,
+		ServerAddress: ref.Registry,
+	})
+	if err != nil {
+		return "", fmt.Errorf("registry %s: encode auth: %w", ref.Registry, err)
+	}
+	return encoded, nil
 }
 
 // repoDigest picks the sha256 digest from a list of RepoDigests entries (each
