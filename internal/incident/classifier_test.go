@@ -19,6 +19,7 @@ func TestClassifyStructuredSignals(t *testing.T) {
 		{"schema_event", Signal{EventType: string(event.TypeSchemaViolationRecorded)}, ClassSchemaViolation},
 		{"schema_flag", Signal{EventType: string(event.TypeTaskFailed), HasSchemaViolations: true}, ClassSchemaViolation},
 		{"startup_failure", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.StartupFailure)}, ClassTransientInfra},
+		{"resource_failure_oom", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.ResourceFailure), OOMKilled: true}, ClassOOM},
 		{"resource_failure", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.ResourceFailure)}, ClassTransientInfra},
 	}
 	for _, tc := range cases {

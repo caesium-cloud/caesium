@@ -37,6 +37,14 @@ config:
     # exercise the live evaluator here too (mirrors the justfile/ci.yml server blocks).
     - name: CAESIUM_DATA_ASSERTIONS_ENABLED
       value: "true"
+    # Observe resources on every self-server lane; H-2 adds the kind OOM/
+    # requests+limits and metrics-server assertions after static limits ship.
+    - name: CAESIUM_RESOURCE_STATS_ENABLED
+      value: "true"
+    - name: CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL
+      value: "100ms"
+    - name: CAESIUM_RIGHT_SIZING_ENABLED
+      value: "true"
     # Enable contract enforcement so the apply-time 409 scenarios run here too
     # (mirrors the justfile lanes and the ci.yml docker-run server blocks).
     - name: CAESIUM_CONTRACT_ENFORCEMENT

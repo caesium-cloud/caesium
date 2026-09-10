@@ -1,0 +1,11 @@
+FROM golang:1.27.1-alpine3.23 AS build
+WORKDIR /src
+COPY build/stress/main.go ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /resource-stress main.go
+
+FROM alpine:3.23
+COPY --from=build /resource-stress /usr/local/bin/resource-stress
+# Alpine supplies sh/touch for the test harness to release --wait-file after
+# it has observed the live task container and applied its test-only OOM limit.
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/resource-stress"]

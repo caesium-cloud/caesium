@@ -20,6 +20,16 @@ const (
 )
 
 var (
+	TaskOOMKillsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "caesium_task_oom_kills_total", Help: "Runtime-confirmed OOM-killed task attempts.",
+	}, []string{"job_id", "task_id", "engine"})
+	TaskMemoryPeakBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "caesium_task_memory_peak_bytes", Help: "Observed task attempt memory peaks, including OOM lower bounds; sampling may miss brief spikes.",
+		Buckets: prometheus.ExponentialBuckets(1024*1024, 4, 9),
+	}, []string{"job_id", "task_id", "engine"})
+	TaskCPUSecondsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "caesium_task_cpu_seconds_total", Help: "Observed CPU seconds across completed task attempts.",
+	}, []string{"job_id", "task_id", "engine"})
 	JobRunsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_job_runs_total",
@@ -733,6 +743,7 @@ var (
 func Register() {
 	registerOnce.Do(func() {
 		prometheus.MustRegister(
+			TaskOOMKillsTotal, TaskMemoryPeakBytes, TaskCPUSecondsTotal,
 			JobRunsTotal,
 			JobRunDurationSeconds,
 			TaskRunsTotal,

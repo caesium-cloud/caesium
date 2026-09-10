@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/containers/podman/v5/libpod/define"
 )
 
@@ -24,6 +25,9 @@ func (a *Atom) State() atom.State {
 }
 
 func (a *Atom) Result() atom.Result {
+	if env.Variables().ResourceStatsEnabled && a.ResourceOutcome().OOMKilled {
+		return atom.ResourceFailure
+	}
 	if result, ok := resultMap[int(a.metadata.State.ExitCode)]; ok {
 		return result
 	}
@@ -50,4 +54,16 @@ func (a *Atom) StartedAt() time.Time {
 
 func (a *Atom) StoppedAt() time.Time {
 	return a.metadata.State.FinishedAt
+}
+
+func (a *Atom) ResourceOutcome() atom.ResourceOutcome {
+	if a.metadata == nil || a.metadata.State == nil {
+		return atom.ResourceOutcome{}
+	}
+	out := atom.ResourceOutcome{OOMKilled: a.metadata.State.OOMKilled}
+	if a.metadata.HostConfig != nil && a.metadata.HostConfig.Memory > 0 {
+		value := a.metadata.HostConfig.Memory
+		out.MemoryLimitBytes = &value
+	}
+	return out
 }
