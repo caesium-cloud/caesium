@@ -708,6 +708,7 @@ integration-up-distributed: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
         -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
@@ -728,6 +729,7 @@ integration-up-distributed: build-test
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 integration-up-owner-memory: build-test
@@ -749,6 +751,7 @@ integration-up-owner-memory: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
         -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
@@ -771,6 +774,7 @@ integration-up-owner-memory: build-test
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 # The infra lane runs its own server so it can coexist with the default lane,
@@ -817,6 +821,7 @@ integration-up-infra: build-test build-reagents
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         -e CAESIUM_CACHE_ENABLED=true \
         -e {{ infra_deploy_key_env }}={{ infra_deploy_key_value }} \
         {{ local_image_ref }}:{{ tag }}-test start
@@ -897,7 +902,15 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 lint: builder-full
