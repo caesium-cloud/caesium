@@ -609,6 +609,78 @@ func (s *IntegrationTestSuite) requireEscalationEvent(incidentID, wantSummary st
 		"incident %s escalated but nothing reached the event stream", incidentID)
 }
 
+// TestIncidentOpenedEventObservable is #419: opening an incident must announce
+// TypeIncidentOpened on the persisted event stream, exactly like its lifecycle
+// siblings incident_status_changed / approval_requested / agent_action_executed
+// (SetEventSink, the same seam PR #390 wired for those). Before the fix,
+// `TypeIncidentOpened` was defined and never published — a consumer of the
+// event stream (`why`, receipts, any incident-lifecycle UI/alerting) could see
+// every later lifecycle event but not the incident's own start. Driven through
+// the real failing-run surface, the same one requireEscalationEvent uses for
+// incident_escalated.
+func (s *IntegrationTestSuite) TestIncidentOpenedEventObservable() {
+	s.requireAuthLane()
+
+	alias := fmt.Sprintf("incident-opened-%d", time.Now().UnixNano())
+	s.applyDefinition(failingJobDefinition(alias, s.engineType))
+
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	s.Require().Equal("failed", run.Status, "the gate step must fail so an incident opens")
+
+	incident := s.awaitIncidentForJobTask(job.ID, "gate", 60*time.Second)
+
+	s.requireIncidentOpenedEvent(incident.ID, job.ID, runID, 30*time.Second)
+}
+
+// requireIncidentOpenedEvent polls the persisted event stream for the
+// incident_opened event belonging to one incident. Like requireEscalationEvent,
+// it reads /v1/events rather than the incident row: the row is what looked
+// healthy while #419's gap left the event unpublished — GET /v1/incidents
+// showing the incident proves nothing about whether anything watching the
+// stream ever saw it open.
+func (s *IntegrationTestSuite) requireIncidentOpenedEvent(incidentID, jobID, runID string, timeout time.Duration) {
+	s.T().Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, evt := range s.readSSEBacklog("/v1/events", time.Second) {
+			if evt.Type != event.TypeIncidentOpened {
+				continue
+			}
+			var payload struct {
+				IncidentID string `json:"incident_id"`
+				JobID      string `json:"job_id"`
+				RunID      string `json:"run_id"`
+				TaskName   string `json:"task_name"`
+				Class      string `json:"class"`
+				Status     string `json:"status"`
+				DedupeKey  string `json:"dedupe_key"`
+			}
+			if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.IncidentID != incidentID {
+				continue
+			}
+			s.Require().Equal(jobID, payload.JobID,
+				"incident_opened must carry the job the incident belongs to")
+			s.Require().Equal(runID, payload.RunID,
+				"incident_opened must carry the run that triggered it")
+			s.Require().Equal("gate", payload.TaskName,
+				"incident_opened must name the failing task, mirroring the other incident events")
+			s.Require().Equal("open", payload.Status)
+			s.Require().NotEmpty(payload.Class,
+				"incident_opened must carry the classifier's verdict")
+			s.Require().NotEmpty(payload.DedupeKey)
+			return
+		}
+	}
+	s.Require().Fail("no incident_opened event was delivered",
+		"incident %s opened but nothing reached the event stream", incidentID)
+}
+
 // TestIncidentApprovedActionRedriveRecoversAfterCrash gives the approval redrive sweeper
 // its only integration coverage.
 //

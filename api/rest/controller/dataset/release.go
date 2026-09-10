@@ -36,7 +36,11 @@ type releaseRequest struct {
 }
 
 // toleranceAssertions is the bounded set of assertion kinds a tolerance window
-// may name — the same enum DataViolation.Assertion carries.
+// may name — the enforceable subset of the enum DataViolation.Assertion
+// carries. `unavailable` is deliberately absent: it never opens a hold (the
+// marker stream was lost, which is evidence of nothing), so there is nothing to
+// snooze and accepting it would promise suppression of a verdict that already
+// suppresses itself.
 var toleranceAssertions = map[string]struct{}{
 	runstore.AssertionMin:               {},
 	runstore.AssertionMax:               {},

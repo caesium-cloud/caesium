@@ -84,6 +84,279 @@ fencing. Timed-out operations may have committed. Linearizability applies only
 to operations whose contract supports a sequential specification; asynchronous
 progress and eventual delivery need separate checkers.
 
+### A1 decision record — W1-alpha, 2026-09-09
+
+**Audit base: `5a89c851593930de95990b6c5dea0709bb9956aa`.** This is a
+source/route/chart audit and an executable design for B1, not runtime fault
+evidence. No cluster, proxy, clock, or quorum-loss experiment was run for A1.
+`D` below means documented and traced in code; `I` means inferred from code and
+awaiting conformance evidence; `U` means unresolved or stronger product behavior
+that these tests must not silently promise. Even a D entry still needs an
+executed scenario before it is coverage. Q1–Q6 remain open except for the narrow
+B1 design choices here.
+
+#### Operation identities and checkable contracts
+
+The recorder assigns a unique **operation ID** before each HTTP invocation and
+retains endpoint/node, arguments, invocation/response monotonic times, response
+body/status, and transport errors. This ID is a recorder correlation key, not
+a server idempotency token. Preserve job UUID, run UUID, task-run UUID, partition
+identity, recorded attempt, lease owner/generation, and event sequence separately.
+A catalog task UUID alone is ambiguous for fan-out; task `attempt` resets on
+operator retry and is not a globally unique execution epoch. No server field
+called `execution_generation` exists at this base. A2 must keep the following
+contract IDs stable; C1 must model only the resolved subset of each entry.
+
+| Contract / class | Operation and acknowledgement | Safety oracle and identity | Liveness, assumptions, and unresolved scope |
+| --- | --- | --- | --- |
+| DT-ADMIT-01 / I, safety | `POST /v1/jobs/:id/run`: 202 **with a run body and UUID** follows `Store.Start` and its run-creation transaction. A bare 202 can mean queued/skipped and is a different outcome. | The acknowledged run UUID remains publicly readable after the selected one-process crash and cannot become a different job. Record the job/run and request parameters; do not retry a lost response as if it were idempotent. | Quorum, retained storage, healthy executor, reachable fixture image and sink required. No HTTP admission latency bound. Lease acquisition happens **after** the run transaction and failure is logged, so 202 alone does not prove an owner lease or registered DAG. B1 waits for both. |
+| DT-OWNER-01 / D+I, safety/liveness | Run creation, owner dispatch, and lease takeover; there is no public lease-mutation endpoint. The harness observes `run_leases` through the existing read-only database HTTP query. | `AcquireExpiredLeases` atomically changes the expired lease owner and increments `generation`; require one observed authoritative lease row, new surviving owner, and increasing generation. Distinguish this authority from already-running external attempts. | Lease expiry uses node wall clocks. B1 uses one host with no injected clock skew, one killed owner, two surviving voters, and no concurrent retry/cancel. Recovery is expected after expiry and successful dispatch/recovery; an exact production time bound is unmeasured. |
+| DT-COMPLETE-01 / D+U, safety | `POST /internal/complete`, 200 with `accepted=true`; request carries run/task/task-run UUIDs, worker node and owner generation. | `internal/dispatch/dispatch.go` rejects wrong/expired owner and stale generation with 409 before the normal completion path, then checks task identity/claim. Preserve refusal reason and assert no task/state/effect mutation for a rejected stale request. | An HTTP precheck is not proof of an atomic lease-and-completion fence: takeover between validation and commit, especially `CompleteTaskOwner`, remains a B3 adversarial case. Do not call every old-generation race resolved from the handler checks alone. |
+| DT-TERMINAL-01 / I+U, safety | Run/task completion observed by `GET /v1/jobs/:id/runs/:run_id` and partition reads; no standalone public completion API. | `CompleteIfActive` conditionally finalizes a nonterminal run and suppresses a second terminal event. Within a run execution with no retry, a terminal outcome must not regress. Partition identities and terminal sequences are checked separately. | Across-retry terminal fencing is **unresolved**: `readmitRetryTx` reopens the same run UUID; `retryResetColumns` clears claims/evidence and resets attempt to 1; checkpoint invalidation and task claim guards do not supply a durable run execution epoch to `CompleteIfActive`. No claim of stale-coordinator rejection across retry is made. |
+| DT-RETRY-01 / D+I, compatibility/safety | `POST /v1/jobs/:id/runs/:run_id/retry` returns 202 after retry reset; partition retry uses `/tasks/:task_id/partitions/:index/retry`. These are distinct policies. | Reconcile retained succeeded instances and reset failed instances by task-run UUID. Targeted partition retry must satisfy the existing compatibility/quiescence checks and use frozen persisted recipe fields; rejected requests must not alter state. | Whole-run retry must not be assumed to have every targeted-partition restriction or every agent retry admission check. `RetryFromFailureAdmitted` and ordinary REST `RetryFromFailure` differ. Edit-after-failure, concurrent retries and stale completion need separate scenarios; no new replay or exactly-once guarantee. |
+| DT-DAG-01 / D+I, safety/liveness | Job apply/create followed by run trigger and public DAG/partition/run reads; apply acknowledgement is not acknowledgement of a run. | Frozen instance identity, explicit edges, branch/trigger rules and whole predecessor groups govern readiness. A satisfied fan-in cannot be inferred from one successful partition. Assert starts against independently recorded predecessor completions for a selected deterministic fixture. | All required successful predecessors, capacity, engine and dependencies must return. Halt/continue/tolerant-rule behavior follows the execution base, not an unmerged sibling fix; no starvation-freedom promise. |
+| DT-CANCEL-01 / D+U, safety/liveness | Trigger under concurrency `replace` reaches `CancelRun`; `DELETE /v1/jobs/:id/queue/:queue_id` cancels queued work. This base has **no standalone active-run cancel REST route**. | Observe old run/task rows become cancelled, claims cleared, and fixture task stop/effect timestamps. Preserve races with completion as distinct histories. A 202 for the replacement is not an acknowledgement that the old external process is already dead. | Local bus notification has periodic cancellation reconciliation; distributed execution checks claims. Progress requires runnable worker, reachable runtime/DB and enabled reconciliation. Neither zero post-cancel effects nor a universal stop deadline is established, especially during quorum loss. |
+| DT-EVENT-01 / D+I, delivery | `GET /v1/events?run_id=...` with `Last-Event-ID`; persisted execution events are also observable through the read-only DB surface. First stream bytes are not an acknowledgement that a run finished. | Event store sequence identifies a persisted event **within the selected database/store lifetime**, not a gap-free global counter across clusters/shards. Keep duplicate and out-of-order live deliveries, filters and resume cursor. Check persisted rows versus catch-up and an independent raw effect ledger. | Pending durable events are replayed; delivery is at-least-once. In-process subscriber buffer overflow can drop delivery even when a row is marked dispatched; reconnect/catch-up and downstream reconciliation are separate from uninterrupted-stream reliability. Retention, recorder loss or missing store scope makes completeness inconclusive. |
+| DT-AUTH-01 / D+I, authorization/safety | Public authenticated operations plus cross-node `POST /internal/dispatch` and `/internal/complete` on the dedicated mTLS listener; a TLS-authenticated peer with a wrong internal token returns 401 before DB/task handling. Public role/scope denial uses the configured middleware. | For each denied operation, record principal/scope without secrets and compare task/run/effect observations before/after. Test invalid certificate, valid-certificate/wrong-token, and valid-token stale generation separately. | Startup requires all explicit mTLS material paths or automatic provisioning from a shared token. This base enforces the dedicated TLS listener; the operations guide's older recommendation-only wording is stale. Public authorization scenarios must enable their actual auth configuration. |
+| DT-RECOVER-01 / I, liveness | B1 owner process crash after DT-ADMIT-01 plus a verified lease and blocked DAG. | Surviving owner finishes the **same accepted run**, legal successors execute, final public state agrees with raw starts/completions, and restarted old member rejoins with retained volume. Duplicate task attempts are retained, not automatically failures. | Recovery needs majority, surviving capacity, readable durable state, no clock jump, healthy Kubernetes API and released sink barrier. A test watchdog is a finite regression limit, not a production SLO. No arbitrary-effect exactly-once, power-loss, disk-loss, partition or concurrent-retry claim. |
+| DT-QUORUM-01 / U, availability/safety | All mutating routes in this table, especially trigger, retry, apply/create, replace/queue cancellation and internal completion. | A transport timeout/disconnect is **possibly committed**. Reconcile by recorded identities after healing; do not report a rejected mutation from client timeout or an empty response. | No mutation endpoint currently has an A1-verified bounded quorum-loss rejection/deadline/status contract. Missing response, late commit and late error remain legal uncertainty in B3 until the endpoint-specific experiment below resolves them. |
+
+Code anchors for this record are `api/rest/bind/bind.go`,
+`api/rest/controller/job/run/{post,retry,partitions}.go`,
+`api/rest/service/run/run.go`, `internal/run/{store,store_instance,lease,owner_manager}.go`,
+`internal/dispatch/{dispatch,loop}.go`, `internal/worker/runtime_executor.go`,
+`internal/event/{store,bus,bus_dispatch}.go`, and
+`api/rest/controller/event/stream.go`. These qualify the operations guide's
+historical ClaimNext-only failover description: the current dispatch loop also
+acquires expired owner leases and recovers owner state. No runbook changes are
+claimed in A1; N-1 owns that reconciliation.
+
+#### Quorum-loss cancellation evidence still required
+
+`api/rest/service/run/run.go` stores the request context but its `Start`, `Get`
+and `List` delegate to context-free store methods. REST whole-run retry similarly
+calls `RetryFromFailure` without passing the request context. Job creation uses
+`db.Transaction(ctx, ...)`; other context-aware operations pass contexts into
+GORM, but that alone does not prove native-driver cancellation. The configured
+dqlite busy timeout is 5 seconds; the eight contention backoffs in
+`pkg/db/retry.go` sum to 2.27 seconds **before jitter and time spent in calls**.
+These are not HTTP deadlines. Whole-transaction and pool retry layers, native
+leader discovery, and `context.WithoutCancel` for event marking must not be
+summed into an invented end-to-end bound. The internal listener has 15-second
+read/write timeouts (`internal/dispatch/internal_server.go`); socket write expiry
+does not cancel or roll back an already-running handler transaction.
+
+After B1 supplies the owned cluster, a bounded follow-up records each selected
+endpoint on the isolated minority and surviving side: send one identified
+mutation while two voters are unreachable, use 5-second and 15-second client
+deadlines in separate cases, hold the fault for at most 30 seconds, heal, then
+observe for up to 120 seconds. Capture actual request cancellation/handler or
+driver return evidence when available, HTTP status/body, retry logs/counters,
+and post-heal public state. Repeat with response loss after an observable commit.
+These durations bound the **experiment**, not the product. If existing diagnostics
+cannot establish server cancellation, leave it unresolved; adding diagnostics
+outside A1/B2's allowed event hook requires a scoped amendment. A 409 from a
+retry handler or completion handler can wrap a DB error and does not by itself
+prove an application-level refusal without state reconciliation.
+
+#### B1 harness selection and command contract
+
+Choose the existing Helm StatefulSet, headless discovery and kind lifecycle,
+with three persistent Caesium replicas. No Testcontainers dependency or custom
+database bootstrap is necessary. To make a process crash last through lease
+takeover without deleting its network identity, the initial design uses **one
+kind control-plane node and three kind workers on one CI host**, required pod
+anti-affinity across worker hostnames, and one Caesium replica per worker.
+The runner/recorder lives on the control-plane node, outside all faulted pods.
+The recorder must not run on a stopped worker; cordon the intended owner worker
+**before triggering the fixture**, and require every fixture task pod to run on
+surviving workers. Kubernetes engine completion depends on kubelet publishing
+PodSucceeded/PodFailed to the API; a task container on the stopped worker cannot
+supply that evidence even if it exits. This costs
+more containers than one kind node but allows a bounded, externally observed
+SIGKILL and controlled restart without changing production code.
+
+B1 creates its existing assigned `test-values-robustness.yaml` and generated
+temporary kind/runner manifests. Set `replicaCount=3`, persistence enabled,
+`kubernetes.engine.enabled=true`, `CAESIUM_EXECUTION_MODE=distributed`,
+`CAESIUM_RUN_OWNER_ENABLED=true`, `CAESIUM_RUN_OWNER_IN_MEMORY=true`,
+`CAESIUM_DATABASE_SHARDS=1`, `CAESIUM_DATABASE_VOTERS=3`,
+`CAESIUM_DATABASE_STANDBYS=0`, shared test-only internal/manual API keys,
+`CAESIUM_DATABASE_CONSOLE_ENABLED=true`, run lease TTL `30s`, dispatch interval
+`1s`, worker lease TTL `30s`, reclaim interval `1s`, and worker pool size `2`.
+Record effective environment on every member. Use bounded polling and an initial
+120-second recovery watchdog after the fault/barrier release; calibrate it in
+B1 and report its result without presenting 120 seconds as a production promise.
+Do not inherit unrelated data-plane/cache gates from a mutable sibling values file.
+For B1, leave all three explicit mTLS path settings unset and use a generated
+shared internal token of at least 32 bytes: `cmd/start/start.go` provisions the
+cluster CA and node certificates through `internal/dispatch/pki` and serves peer
+traffic on `https://podIP:8443`. Require successful provisioning on all members
+and actual dispatch/capability traffic before faulting. The dqlite membership
+RPC on 9001 is separate from this HTTPS listener; the test helper under B1's
+owned `test/robustness/cluster/` can use the existing dqlite client without the
+dispatch client certificate. B2 authenticated negative cases must obtain valid
+test material using the supported provisioning/static-material paths, then vary
+the token or certificate independently; no TLS-verification bypass.
+
+The following is the exact **proposed B1 interface**, not commands already shipped
+or run in A1. B1 must implement these inputs and fail-closed observations in
+`scripts/robustness.sh` and `build/Dockerfile.robustness`, then record actual
+image IDs/digests, kind node image digest, versions and exit statuses in its PR.
+`TASK_IMAGE` and `KIND_IMAGE` must be resolved/pinned for the test architecture,
+not guessed digests. Build the candidate without image-skip mode:
+
+```sh
+CANDIDATE_SHA=$(git rev-parse HEAD)
+ROBUSTNESS_ID="robustness-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+ARTIFACTS=$(mktemp -d)
+CAESIUM_SKIP_IMAGE_BUILD=false just tag="$CANDIDATE_SHA" build-release
+docker image inspect "caesiumcloud/caesium:$CANDIDATE_SHA"
+docker build --build-arg "BUILDER_IMAGE=caesiumcloud/caesium-builder:$CANDIDATE_SHA" \
+  --build-arg "CAESIUM_IMAGE=caesiumcloud/caesium:$CANDIDATE_SHA" \
+  -f build/Dockerfile.robustness -t "caesiumcloud/caesium-robustness:$CANDIDATE_SHA" .
+CAESIUM_ROBUSTNESS_ID="$ROBUSTNESS_ID" CAESIUM_ROBUSTNESS_ARTIFACTS="$ARTIFACTS" \
+  CAESIUM_ROBUSTNESS_IMAGE="caesiumcloud/caesium-robustness:$CANDIDATE_SHA" \
+  CAESIUM_ROBUSTNESS_SERVER_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  CAESIUM_ROBUSTNESS_KIND_IMAGE="$KIND_IMAGE" CAESIUM_ROBUSTNESS_TASK_IMAGE="$TASK_IMAGE" \
+  bash scripts/robustness.sh
+```
+
+The script uses `kind create cluster --name "$ROBUSTNESS_ID" --image "$KIND_IMAGE"
+--config "$ARTIFACTS/kind.yaml" --kubeconfig "$ARTIFACTS/kubeconfig" --wait 120s`;
+every `kubectl`/Helm call supplies that kubeconfig explicitly. Load candidate,
+runner and task images using `kind load docker-image --name "$ROBUSTNESS_ID"`.
+Install with `helm install caesium ./helm/caesium --kubeconfig
+"$ARTIFACTS/kubeconfig" --namespace "$ROBUSTNESS_ID" --create-namespace --values
+helm/caesium/ci/test-values-robustness.yaml --set image.tag="$CANDIDATE_SHA"
+--wait --timeout 240s`. Verify three bound PVCs, three distinct pod UIDs/IPs and
+worker nodes, and running image IDs matching the loaded candidate per platform.
+A healthy `/health` or three Ready pods is insufficient membership proof.
+
+Inside the builder, compile `go test -tags=integration -c ./test/robustness
+-o /out/robustness.test`; root `./test` does not contain this package. The runner
+image includes the test binary, matching CLI, runtime libraries and recorder.
+An in-cluster runner pod executes `/bin/robustness.test -test.v
+-test.run '^TestOwnerCrash$' -test.timeout 15m`, with required `owner_is_leader`
+and `owner_is_not_leader` subtests counted explicitly. Its HTTP sink listens on
+`0.0.0.0:8090`, exposed by an owned `robustness-recorder` Service; test task pods
+use `http://robustness-recorder:8090`. Require a real task pod to POST/GET a
+unique connectivity probe before triggering the fault fixture. The controller
+copies raw append-only records to `$ARTIFACTS`; missing recorder data is
+inconclusive. Runner RBAC is restricted to its owned namespace; host controller
+alone owns kind-node process control.
+
+For discovery, the runner invokes the existing go-dqlite client dependency's
+`Leader` and `Cluster` RPCs directly against each advertised `podIP:9001`, with
+bounded contexts. Require three distinct members with voter roles and an agreed
+leader, plus a successful HTTP write/read. `GET /v1/system/nodes` supplements
+membership with seed/local fallbacks and does not expose the leader, so it is
+diagnostic only. No new product API is needed. Apply the blocked two-step fixture
+through `POST /v1/jobdefs/apply` or the candidate CLI. Select the intended owner
+pod, map its kind worker, and cordon that worker **before** triggering any fixture
+task. Trigger directly against
+the selected leader/nonleader pod's HTTP address, retain its 202 run UUID, and
+query the actual lease via the existing read-only surface:
+
+```sh
+curl --fail-with-body -H 'Content-Type: application/json' \
+  --data "{\"sql\":\"SELECT run_id, owner_node, generation, lease_expires_at FROM run_leases WHERE run_id = '$RUN_ID'\",\"limit\":1}" \
+  "http://$SURVIVOR_IP:8080/v1/database/query"
+```
+
+This request runs from the in-cluster runner with any required public credentials;
+the documented SQL interpolates only a validated returned UUID. `claimed_by`
+identifies the worker, not the run owner. The fixture sends `CAESIUM_RUN_ID`, an
+explicit step name and a newly generated attempt nonce to the sink before
+blocking; the sink persists that start before releasing the response. Run/task
+public reads correlate the nonce/step with the actual task-run identity. Require
+lease, ready topology and blocked-effect evidence before killing the mapped
+owner, and assert every pre-fault fixture task pod is placed on a surviving
+worker. Refresh the leader immediately before the kill; a changed owner/leader
+relationship invalidates that subcase rather than passing the wrong case.
+
+The owned host controller maps `$OWNER_POD` to `$OWNER_KIND_NODE` and extracts
+its current Caesium container ID from `status.containerStatuses`. With all
+identities checked against the created cluster, use:
+
+```sh
+# Before fixture trigger (not merely before SIGKILL):
+kubectl --kubeconfig "$ARTIFACTS/kubeconfig" cordon "$OWNER_KIND_NODE"
+# After triggering and verifying owner, task placement and blocked-effect evidence:
+docker exec "$OWNER_KIND_NODE" systemctl stop kubelet
+docker exec "$OWNER_KIND_NODE" ctr -n k8s.io tasks kill --signal SIGKILL "$OWNER_CONTAINER_ID"
+docker exec "$OWNER_KIND_NODE" ctr -n k8s.io tasks list
+# After survivor takeover/completion observations, including fault evidence:
+docker exec "$OWNER_KIND_NODE" systemctl start kubelet
+kubectl --kubeconfig "$ARTIFACTS/kubeconfig" uncordon "$OWNER_KIND_NODE"
+```
+
+Strip the verified `containerd://` prefix before passing the container ID.
+Require observed process exit/stopped task before the controller opens the sink
+barrier, then generation increase and completion on a survivor while the old
+kubelet remains stopped. Register restart cleanup **before** stopping kubelet.
+The untouched pod sandbox and PVC preserve address/storage for rejoin; verify
+that they actually do. Failure to restart/rejoin is a failing or blocked B1
+result, not permission to silently replace the disk. The script must diagnose
+an unavailable `systemctl`/`ctr` in the selected node image before faulting.
+`kubectl delete --force` alone does not prove process death. Teardown deletes
+only the recorded cluster/name and artifact-owned resources. Demonstrate two
+distinct IDs concurrently before claiming isolation; neither uses host API ports
+or the user's current Kubernetes context.
+
+#### Proxy and clock decision; EX-HOOKS handoff
+
+The bounded **static** proxy check inspected the chart's discovery ConfigMap,
+StatefulSet environment, `pkg/dqlite/dqlite.go`, and
+`internal/dispatch/loop.go` at this base. Bootstrap seeds use headless DNS, but
+`CAESIUM_NODE_ADDRESS=$(POD_IP):9001` is passed to dqlite `WithAddress`; dispatch
+derives peers from the advertised host and, in production owner mode, the
+dedicated HTTPS internal port 8443 (API-port HTTP is the test/non-mTLS fallback).
+Replacing only
+`CAESIUM_DATABASE_NODES` with Toxiproxy seeds therefore does not establish that
+later Raft or worker routes cross the proxy. **Do not adopt proxies in B1.**
+A live routing spike remains unrun: budget one owned cluster and at most 30
+minutes, record discovered addresses and per-proxy connection counters, disable
+one proposed peer route in each direction, and verify both Raft and worker HTTP
+traffic use the injector with no direct bypass before/after rejoin. Failure or
+insufficient visibility selects external namespace/network fault controls for
+B2, subject to their own activation proof; it does not authorize an address
+refactor or call a seed-only proxy a partition test.
+
+| Clock option | Decision and limits |
+| --- | --- |
+| Injectable `Now`/timer seam through lease store, dispatch/owner renewal and worker renewal | Deferred. All participants and expiry comparisons would need the same explicit clock contract and quiescence control. It adds overlapping production-file ownership without helping the first real crash/commit scenario; any later proposal needs an enumerated amendment and sibling handoff. |
+| Existing Go `testing/synctest` | Use C2 for isolated Go timer/channel/cancellation logic. The pinned builder is Go 1.27.1; the [Go documentation](https://go.dev/blog/testing-time) describes fake time and bubble quiescence. Real sockets, process lifetime and native dqlite do not become deterministic. No full-cluster simulated-time claim. |
+| Short test-only lease/config intervals | Use supported environment settings in B1 with measured fault/expiry observations and a generous watchdog. Shortening a lease can create contention artifacts; keep defaults unless a measured runtime need justifies the recorded change. It does not simulate skew or prove a hard recovery SLO. |
+| External process STOP/CONT | B2 can freeze an actual owner past its lease and resume stale work without changing the host clock. Record signals and observed process state. Pause is distinct from SIGKILL, disk failure and clock skew; none substitutes for the others. |
+
+The only justified production boundary for B2 is **after an event is durably
+committed but before its first `bus.Publish`**. In `internal/event/bus_dispatch.go`
+both `PublishAndMarkBusDispatched` (after its deferred-transaction early return)
+and `BusDispatcher.DispatchOnce` (after reading pending rows, before the publish
+loop) can publish the same event. A test-only predicate keyed by run/event must
+cover both paths so the background dispatcher cannot bypass an armed pause.
+Arm it on every publisher process before the fixture operation, observe the committed row independently,
+record entry into the hook, kill that process, then disarm survivors/restart and
+check durable replay. Store marking remains after publication. No store, lease,
+owner completion, worker runtime or new request hook is allocated. Controls must
+be absent/inert in release images and not expose an unauthenticated product fault
+endpoint; B2 must demonstrate a release-image baseline.
+
+EX-HOOKS snapshot: the last commit touching `bus_dispatch.go` is
+`573edfee95c3a93d8c5058c1b067a27b6e28f915` (PR #423), present in this base.
+PR #442 is merged at `995ae8b3c29208c7a87ce6f028460d0c3256cd9a`.
+Read-only inspection of all eight open PR file lists on 2026-09-09 (#449, #450,
+#454, #456, #459, #460, #462, #463) found no `bus_dispatch.go` writer.
+The active arc, circuit-breaker, right-sizing, backtesting and window plans
+reserve neighboring `bus.go`, notification, runtime and metrics surfaces, not
+this dispatch file. In particular #459 changes event types/startup, and #449
+changes runtime/resource and CI surfaces; neither is a transferred ownership
+claim. **Current file owner for the proposed hook is distributed-testing B2,
+but future dispatch still requires a refreshed open-PR/base check and exclusive
+reservation.** This snapshot is not a perpetual handoff or evidence that those
+open sibling PRs merged. No review messages were sent.
+
 ### Open decisions and external prerequisites
 
 These questions were offered during brainstorming and remain unanswered. None
@@ -101,13 +374,31 @@ within their resolved contract and available test infrastructure.
 
 ## Progress (as of 2026-09-09)
 
-No implementation waves have shipped. All 27 implementation items are unchecked.
-N-1 below is a mandatory wave-close documentation checkpoint, not another
-implementation item or a new agent role. The plan PR
-adds this document and proposed-work links in `docs/ci.md`, `docs/roadmap.md`,
-and `docs/README.md`. Review revisions preserve existing item IDs; E5, F4, and
-G5–G7 add early guards and split the former G3 scope.
-It makes no claim that testing infrastructure or product behavior has changed.
+No implementation waves have shipped. All 27 implementation items remain
+unchecked pending merged acceptance evidence. W1 selected the three independent
+ready items A1, E1 and G1 from base `5a89c851` (plan PR #461). The execution
+endpoint is review PRs; no implementation or repository-setting change has
+been merged by this wave, and no later-wave item has been dispatched.
+
+| W1 stream | Item / PR | Reviewed implementation evidence and disposition |
+| --- | --- | --- |
+| α | A1 / [#465](https://github.com/caesium-cloud/caesium/pull/465) | Decision-record content at `4c1576c1` independently reviewed. The pre-trigger task-placement finding is fixed; no remaining confirmed findings. Structural/link checks pass. Cluster, proxy and quorum-loss experiments remain explicitly unrun. |
+| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), draft | Candidate `db270bcc`: focused container race tests, vet and lint pass; final live success/bad-image/unavailable cases return 0/1/1 with reconciled counts. Serial execution has 37 samples and early/middle coverage in all three runs. Independent review has no findings. Full integration passes (204 scenarios, 33 expected mode skips; 635.306 seconds); full unit testing is blocked only by the inherited index failure below. |
+| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), draft | Candidate `d3589cec`: 15 Python validators and actionlint pass. Native Chromium fail-once proof exits 1 despite a passing retry. Credential exposure in trace/report contents is fixed and independently rechecked; sanitized HTML/trace remain readable. Both hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); sanitized uploads were downloaded and verified against tested merge candidate `357ed12d` (parents: execution base and `d3589cec`). Full unit gates remain blocked by the inherited index failure. |
+| Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), ready for review | Candidate `948cd50f`: one-line `docs/README.md` convention repair; exact containerized guardrail and independent review pass. This is a separately scoped controller prerequisite, not an E1/G1 change or N-1 completion. |
+
+The inherited unit blocker is `TestDocsREADMEIndexesEveryTopLevelDoc` reporting
+`extra=[distributed-testing.md]` after #461 added a nested Markdown link to the
+index. It reproduced in the full local E1 unit suite and arm64 CI with README
+and guardrail blobs unchanged from the execution base. #467 preserves the plan
+entry using the surrounding section's inline-code path convention; it changes
+no guardrail or test floor. Implementation PRs must refresh affected checks
+after this prerequisite lands before readiness can be claimed.
+
+**W1/N-1 remains pending.** The shared runbook still describes the previously
+shipped behavior. Its synchronization follows merged implementation PRs; this
+interim dashboard update records open work only. Pending checks and stronger
+unresolved contracts are not passing or shipped evidence.
 
 The orchestrator owns this dashboard, merged PR links, candidate/merge SHAs,
 verification artifacts, and blockers. An item checked in an unmerged PR is
@@ -118,13 +409,13 @@ assigning another wave number.
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 ready; A2 follows A1/G1 |
+| A | Contracts and scenario evidence (2 items) | P0 | A1 in review #465; A2 awaits merged A1/G1 |
 | B | Real multi-node robustness (3 items) | P0 | B1 follows A1 and ships the first pod-kill regression |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 follows A1; pure models stay in the unit lane |
 | D | Developer and Console journeys (3 items) | P0 | Depends on A1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 ready; E5 is an early count guard; E4 needs Q2/Q5 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 draft #466; E5 awaits merged E1; E4 needs Q2/Q5 |
 | F | Upgrades, durability, and sustained faults (4 items) | P1 | F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 ready; G3/G5 establish the early required gate |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 draft #464; G3/G5 remain dependency-blocked |
 
 ## Streams
 

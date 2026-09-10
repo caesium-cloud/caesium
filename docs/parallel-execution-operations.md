@@ -14,7 +14,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CAESIUM_MAX_PARALLEL_TASKS` | `runtime.NumCPU()` | Max local task concurrency within a job run (`local` mode). |
-| `CAESIUM_TASK_FAILURE_POLICY` | `halt` | Task failure behavior: `halt` or `continue`. |
+| `CAESIUM_TASK_FAILURE_POLICY` | `halt` | What a task failure does to the rest of the run. `halt` stops admitting new work: every not-yet-started step with the default `all_success` trigger rule is skipped (`run halted after task "<name>" failed`); started work finishes; steps with a failure-tolerant rule (`all_done`, `always`, `one_success`, `all_failed`) still run when their rule is satisfied. `continue` admits everything and skips only the failed step's `all_success` descendants. Identical on both executors; the run ends `failed` either way. See `job-definitions.md`. |
 | `CAESIUM_TASK_TIMEOUT` | `0` | Per-task timeout (`0` disables timeout). |
 | `CAESIUM_EXECUTION_MODE` | `local` | `local` or `distributed` execution model. |
 | `CAESIUM_CANCEL_RECONCILE_INTERVAL` | `15s` | How often a node re-checks its in-flight local runs against their stored status and stops the containers of any that are already `cancelled`. `0` disables the sweep. |

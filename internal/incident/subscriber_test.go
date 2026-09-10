@@ -2,6 +2,9 @@ package incident
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,4 +226,216 @@ func TestSubscriberRemediatesOnSuccess(t *testing.T) {
 		}
 		return inc.Status == models.IncidentStatusClosed && inc.ClosedAt != nil
 	}, 3*time.Second, 10*time.Millisecond)
+}
+
+// TestSubscriberPublishesIncidentOpened is #419's contract: opening an
+// incident must announce TypeIncidentOpened on the shared event stream,
+// persisted through the same event.Store path as approval_requested /
+// agent_action_executed (SetEventSink, PR #390's seam) so it survives a
+// restart and is queryable from /v1/events — not just fanned out in memory.
+func TestSubscriberPublishesIncidentOpened(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	sub := NewSubscriber(bus, db, nil, 0)
+	sub.SetEventSink(event.NewStore(db))
+
+	opened, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeIncidentOpened}})
+	require.NoError(t, err)
+
+	ready := make(chan struct{})
+	go func() { _ = sub.StartWithReady(ctx, ready) }()
+	<-ready
+
+	jobID, runID, taskID := seedFailedTask(t, db, "Error: permission denied reading /secure")
+	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()})
+
+	var evt event.Event
+	select {
+	case evt = <-opened:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for incident_opened")
+	}
+
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+
+	require.Equal(t, jobID, evt.JobID)
+	require.Equal(t, runID, evt.RunID)
+	require.Equal(t, taskID, evt.TaskID)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+	require.Equal(t, inc.ID.String(), payload["incident_id"])
+	require.Equal(t, jobID.String(), payload["job_id"])
+	require.Equal(t, runID.String(), payload["run_id"])
+	require.Equal(t, taskID.String(), payload["task_id"])
+	require.Equal(t, "extract", payload["task_name"])
+	require.Equal(t, string(ClassAuthFailure), payload["class"])
+	require.Equal(t, string(models.IncidentStatusOpen), payload["status"])
+	require.Equal(t, inc.DedupeKey, payload["dedupe_key"])
+
+	// The event is PERSISTED, not merely fanned out in memory — the /v1/events
+	// backlog replay (api/rest/controller/event/stream.go) only ever sees rows
+	// in the event store.
+	var persisted int64
+	require.NoError(t, db.Model(&models.ExecutionEvent{}).
+		Where("type = ?", string(event.TypeIncidentOpened)).Count(&persisted).Error)
+	require.EqualValues(t, 1, persisted)
+}
+
+// TestSubscriberDoesNotRepublishIncidentOpenedOnAppend pins that a second
+// failure folding into the SAME incident (an appended occurrence, not a fresh
+// open) does not re-announce incident_opened — that would misrepresent one
+// incident as opening twice on every consumer of the event stream.
+func TestSubscriberDoesNotRepublishIncidentOpenedOnAppend(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	sub := NewSubscriber(bus, db, nil, 0)
+	sub.SetEventSink(event.NewStore(db))
+
+	opened, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeIncidentOpened}})
+	require.NoError(t, err)
+
+	ready := make(chan struct{})
+	go func() { _ = sub.StartWithReady(ctx, ready) }()
+	<-ready
+
+	jobID, runID, taskID := seedFailedTask(t, db, "quota exceeded: too many requests")
+	evt := event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()}
+	bus.Publish(evt)
+
+	select {
+	case <-opened:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the first incident_opened")
+	}
+
+	bus.Publish(evt)
+	require.Eventually(t, func() bool {
+		var inc models.Incident
+		if err := db.First(&inc).Error; err != nil {
+			return false
+		}
+		return inc.OccurrenceCount == 2
+	}, 3*time.Second, 10*time.Millisecond, "the second failure must fold into the same incident")
+
+	select {
+	case second := <-opened:
+		t.Fatalf("incident_opened must not republish on an appended occurrence: %+v", second)
+	case <-time.After(500 * time.Millisecond):
+		// Expected: nothing else arrives.
+	}
+
+	var persisted int64
+	require.NoError(t, db.Model(&models.ExecutionEvent{}).
+		Where("type = ?", string(event.TypeIncidentOpened)).Count(&persisted).Error)
+	require.EqualValues(t, 1, persisted)
+}
+
+// failNextInsertInto arms a one-shot failure on the next INSERT this DB issues
+// against table. It is a real transaction abort — gorm sees the error before
+// the statement runs, so an enclosing transaction rolls back exactly as a
+// genuine durable-write failure would (mirrors
+// internal/run/owner_commit_atomicity_test.go's failNextUpdate, scoped to
+// Create instead of Update).
+func failNextInsertInto(t *testing.T, db *gorm.DB, table string) *atomic.Bool {
+	t.Helper()
+	var armed atomic.Bool
+	callbackName := "test:fail_next_insert_" + table
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement == nil || tx.Statement.Table != table {
+			return
+		}
+		if armed.CompareAndSwap(true, false) {
+			_ = tx.AddError(errors.New("injected durable write failure"))
+		}
+	}))
+	t.Cleanup(func() {
+		_ = db.Callback().Create().Remove(callbackName)
+	})
+	return &armed
+}
+
+// TestSubscriberIncidentOpenedSurvivesEventInsertFailureThenRedelivery is the
+// #459 review's exact reproduction, driven through the real Subscriber wiring
+// with a REAL event.Store over the execution_events table (not just Store's
+// generic OnOpen hook, which store_test.go covers directly):
+//
+//	one-shot execution_events insert failure, restore writes, redeliver the
+//	failure → before the fix: one incident with occurrence_count=2 and ZERO
+//	incident_opened rows, because the incident commit and the event insert
+//	were two separate transactions.
+//
+// After the fix, the failing first delivery rolls back the incident row
+// along with the failed event insert (OnOpen runs inside OpenOrAppend's
+// transaction), so nothing is left to "append" to; the redelivered failure
+// opens a genuinely fresh incident with its incident_opened event persisted
+// and published on the live bus.
+func TestSubscriberIncidentOpenedSurvivesEventInsertFailureThenRedelivery(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	sub := NewSubscriber(bus, db, nil, 0)
+	sub.SetEventSink(event.NewStore(db))
+
+	opened, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeIncidentOpened}})
+	require.NoError(t, err)
+
+	jobID, runID, taskID := seedFailedTask(t, db, "Error: permission denied reading /secure")
+	evt := event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()}
+
+	armed := failNextInsertInto(t, db, "execution_events")
+	armed.Store(true)
+
+	// First delivery: the companion event insert fails mid-transaction.
+	// handleFailure is called directly (not through the async bus) so the
+	// negative assertions below are deterministic, not eventually-true.
+	sub.handleFailure(ctx, evt)
+	require.False(t, armed.Load(), "the injected failure must actually have fired")
+
+	testutil.AssertCount(t, db, &models.Incident{}, 0)
+	var incidentOpenedRows int64
+	require.NoError(t, db.Model(&models.ExecutionEvent{}).
+		Where("type = ?", string(event.TypeIncidentOpened)).Count(&incidentOpenedRows).Error)
+	require.EqualValues(t, 0, incidentOpenedRows,
+		"a rolled-back open must leave no incident_opened row behind")
+
+	// Redelivery: the same underlying failure is processed again. The
+	// injected failure was one-shot and already fired, so the write path is
+	// effectively "restored".
+	sub.handleFailure(ctx, evt)
+
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, 1, inc.OccurrenceCount,
+		"redelivery after a fully rolled-back attempt must open fresh, not append to a ghost incident")
+
+	require.NoError(t, db.Model(&models.ExecutionEvent{}).
+		Where("type = ?", string(event.TypeIncidentOpened)).Count(&incidentOpenedRows).Error)
+	require.EqualValues(t, 1, incidentOpenedRows,
+		"the companion event must be persisted once redelivery succeeds — the #459 gap")
+
+	select {
+	case got := <-opened:
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(got.Payload, &payload))
+		require.Equal(t, inc.ID.String(), payload["incident_id"],
+			"the redelivered open must still publish incident_opened on the live bus")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for incident_opened on the redelivered attempt")
+	}
 }

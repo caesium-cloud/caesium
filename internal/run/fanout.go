@@ -774,7 +774,7 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 				return tmplErr
 			}
 			if isTemplate {
-				reason := fmt.Sprintf("fan-out producer %q did not produce a partition list", producer)
+				reason := unexpandedTemplateSkipReason(producer)
 				skipped, skipErr := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, reason, pendingEvents, counts)
 				if skipErr != nil {
 					return skipErr
@@ -799,6 +799,13 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 		}
 	}
 	return nil
+}
+
+// unexpandedTemplateSkipReason is the reason stamped on a fanned step whose
+// producer never emitted a partition list — shared by advanceCrossStepSuccessorsTx
+// and skipTaskAndDescendantsTx so the two cascades cannot drift.
+func unexpandedTemplateSkipReason(producer string) string {
+	return fmt.Sprintf("fan-out producer %q did not produce a partition list", producer)
 }
 
 // unexpandedFanOutTemplateTx reports whether a task's rows in this run are

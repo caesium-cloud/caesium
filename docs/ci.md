@@ -375,24 +375,44 @@ Lanes that set server env inline and do **not** go through any
   separately. After `helm test`, the Go invocation runs the full suite
   across three shards.
 
-### Known gap (re-verified at this doc's HEAD)
+### Parity rule and its guardrail
 
-`integration-up-distributed` and `integration-up-owner-memory` (justfile) do
-not set `CAESIUM_CACHE_ENABLED=true`, unlike `integration-up` and
-`integration-up-infra` (the latter's comment explains why it's needed: without
-it, every "must not be cached" assertion passes vacuously). The
-`podman-integration-test` instance of this same gap (`CAESIUM_DATABASE_SHARDS`,
-`CAESIUM_FANOUT_MAX_PARTITIONS`) was closed by Stream D1(b) (PR #422).
+`integration-up-distributed`, `integration-up-owner-memory`,
+`integration-up-infra`, and `integration-up-agent` (justfile) must each set
+every `CAESIUM_*` feature-gate env var that `integration-up` sets, plus
+whatever lane-specific vars that lane legitimately needs (distributed
+topology, auth, agent remediation, etc.). Each of these recipes starts its
+own server rather than inheriting from `integration-up`, so a feature that
+only adds env to `integration-up` silently stops being exercised on the
+others unless the same env is copied over by hand, in the same PR.
 
-`integration-up-agent` is missing four variables that every other
-`integration-up*` recipe sets: `CAESIUM_CACHE_ENABLED`,
+This was true in practice: `integration-up-distributed` and
+`integration-up-owner-memory` were missing `CAESIUM_CACHE_ENABLED=true` (so
+every "must not be cached" assertion passed vacuously on those two lanes),
+and `integration-up-agent` was additionally missing
 `CAESIUM_RUN_QUEUE_ENABLED` (and its dequeuer/interval siblings),
 `CAESIUM_RATE_LIMIT_PRUNER_ENABLED` (and its interval sibling), and
-`CAESIUM_FANOUT_MAX_PARTITIONS`.
+`CAESIUM_FANOUT_MAX_PARTITIONS`. Closed by
+[issue #425](https://github.com/caesium-cloud/caesium/issues/425); the
+`podman-integration-test` instance of this same class of gap
+(`CAESIUM_DATABASE_SHARDS`, `CAESIUM_FANOUT_MAX_PARTITIONS`) was closed
+earlier by Stream D1(b) (PR #422).
 
-This is a known, tracked gap, not a fixed one — see
-[issue #425](https://github.com/caesium-cloud/caesium/issues/425) for the
-exact diff and remediation.
+The same guard also catches drift introduced across two PRs merging close
+together: while #450 was open, #447 added `CAESIUM_CANCEL_RECONCILE_INTERVAL`
+to `integration-up` (and `integration-test-podman`), which the merge-eligibility
+review on #450 flagged as a new omission on all four tracking recipes before
+either PR landed. #450 picked up the var on all five `integration-up*`
+recipes so the two PRs are parity-safe in either merge order.
+
+`TestIntegrationUpRecipesTrackBaselineEnv`
+(`internal/guardrails/guardrails_test.go`) enforces this going forward: it
+parses `justfile`, diffs each `integration-up-*` recipe's `CAESIUM_*` env vars
+against `integration-up`'s, and fails on anything missing that isn't in that
+test's explicit `integrationUpEnvAllowlist` (empty today — every recipe
+tracks full parity). Add a new feature-gate var to `integration-up` and this
+test fails everywhere else until you copy it over or add a justified
+allowlist entry explaining why that lane is exempt.
 
 ## 6. Release procedure (for `v*` tags)
 

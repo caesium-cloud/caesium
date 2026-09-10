@@ -84,6 +84,10 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger)
 		g.GET("/jobs/:id", job.Get)
 		g.GET("/jobs/:id/tasks", job.Tasks)
 		g.GET("/jobs/:id/dag", job.DAG)
+		// Round-trip a live job back to its authoring manifest (YAML by
+		// default, ?format=json for API callers). Read-only, so it reuses the
+		// viewer role GET /v1/jobs/:id sits at.
+		g.GET("/jobs/:id/manifest", job.Manifest)
 		g.GET("/jobs/:id/queue", jobqueue.List)
 		g.DELETE("/jobs/:id/queue/:queue_id", jobqueue.Delete)
 		g.GET("/jobs/:id/runs", run.List)

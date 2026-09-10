@@ -1372,12 +1372,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 	// A resumed per-partition retry executes the reset instance and whatever
 	// its success releases — nothing else. Under the halt failure policy the
-	// original engine's first failure cleared its queue, leaving roots it had
-	// not reached pending with indegree 0; seeding them here would resurrect
-	// work the halt deliberately suppressed (a publish step, say) on the back
-	// of an unrelated retry. So when retry-reset instances exist, only the
-	// nodes that own one enter the initial queue; their successors are
-	// released through the ordinary in-loop path.
+	// original engine's first failure resolved every not-yet-dispatched
+	// intolerant step as skipped (haltUnstarted), so those cannot come back;
+	// but a tolerant root the halt left dispatchable, or a row registered
+	// before that sweep existed, can still sit pending with indegree 0, and
+	// seeding it here would resurrect work on the back of an unrelated retry.
+	// So when retry-reset instances exist, only the nodes that own one enter
+	// the initial queue; their successors are released through the ordinary
+	// in-loop path.
 	retryOwners := make(map[uuid.UUID]struct{})
 	if pendingRetries, err := store.PendingPartitionRetries(runID); err != nil {
 		log.Warn("failed to read pending partition retries for re-entry", "run_id", runID, "error", err)
@@ -1416,7 +1418,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// and the instance's TaskRun primary key for a fan-out partition, where N
 	// sibling rows share (runID, taskID) and every store write and container name
 	// must therefore be keyed on the instance, not the catalog task.
-	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, []pkgtask.DatasetMetricSample, *run.TaskLogSnapshot, error) {
+	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 		// taskRef is what the run store resolves this execution to; see
 		// loadTaskRunByIDOrUnique for the primary-key-or-task-ID contract.
 		taskRef := taskID
@@ -1437,16 +1439,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 		spec := runner.spec
 		taskQuarantined := taskQuarantine[taskID] || runQuarantined
 		if taskQuarantined {
-			return "", nil, nil, nil, nil, nil, ErrLocalQuarantinedReplayUnsupported
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, ErrLocalQuarantinedReplayUnsupported
 		}
 		interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 		spec.Env = interpolated
 		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 		if len(secretIdentities) > 0 {
 			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
@@ -1472,11 +1474,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			Spec:    spec,
 		})
 		if err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
 		if err := store.StartTask(runID, taskRef, a.ID()); err != nil {
-			return "", nil, nil, nil, nil, nil, err
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
 		waitResult := make(chan struct {
@@ -1516,7 +1518,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// failed Stop is reported rather than swallowed — "cancelled" and
 		// "cancelled but the container is still out there" are different
 		// operational facts.
-		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, []pkgtask.DatasetMetricSample, *run.TaskLogSnapshot, error) {
+		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
@@ -1524,18 +1526,18 @@ func (j *job) Run(ctx context.Context) (err error) {
 			switch {
 			case errors.Is(taskCtx.Err(), context.DeadlineExceeded):
 				if stopErr != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
 				if ctx.Err() != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
-				return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			case errors.Is(taskCtx.Err(), context.Canceled):
 				if stopErr != nil {
-					return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
 				}
-				return "", nil, nil, nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
 			}
 			// taskCtx is still live, so this is a genuine wait failure rather
 			// than a cancellation arriving by the other door. The stop is
@@ -1544,9 +1546,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 				log.Warn("failed to stop atom after engine wait error", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", stopErr)
 			}
 			if waitErr != nil {
-				return "", nil, nil, nil, nil, nil, waitErr
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, waitErr
 			}
-			return "", nil, nil, nil, nil, nil, taskCtx.Err()
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, taskCtx.Err()
 		}
 
 		select {
@@ -1571,29 +1573,44 @@ func (j *job) Run(ctx context.Context) (err error) {
 			var branchNames []string
 			var logSnapshot *run.TaskLogSnapshot
 			var partitions []pkgtask.Partition
-			var datasetMetrics []pkgtask.DatasetMetricSample
+			// metricsCapture carries the samples AND how completely they were
+			// read: a log this executor could not fetch or parse, and a metrics
+			// scan that overflowed its cap, both mean a declared metric's
+			// absence proves nothing (issue #437). The evaluator downgrades
+			// those verdicts to `unavailable` instead of failing the task for
+			// an infrastructure fault.
+			var metricsCapture run.MetricsCapture
 			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
-			if logErr == nil {
+			if logErr != nil {
+				metricsCapture.Unreadable = true
+				log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
+					"job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", logErr)
+			} else {
 				maxParts := env.Variables().FanOutMaxPartitions
 				markers, parseErr := pkgtask.CaptureMarkersWithLimits(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64(), maxParts)
 				if closeErr := logStream.Close(); closeErr != nil {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
-				if parseErr != nil {
+				switch {
+				case parseErr != nil:
 					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
 						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
-							return "", nil, nil, nil, nil, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
+							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
 						}
-						return "", nil, nil, nil, nil, nil, parseErr
+						return "", nil, nil, nil, run.MetricsCapture{}, nil, parseErr
 					}
+					metricsCapture.Unreadable = true
 					log.Warn("failed to parse task markers", "task_id", taskID, "error", parseErr)
-				} else if markers != nil {
+				case markers == nil:
+					metricsCapture.Unreadable = true
+				default:
 					taskOutput = markers.Output
 					branchNames = markers.Branches
 					partitions = markers.Partitions
-					datasetMetrics = markers.Metrics
+					metricsCapture.Samples = markers.Metrics
 					if markers.MetricsTruncated {
+						metricsCapture.Truncated = true
 						log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
 							"task_id", taskID, "cap_bytes", pkgtask.MaxMetricsBytes)
 					}
@@ -1610,7 +1627,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				ID:    a.ID(),
 				Force: true,
 			})
-			return string(a.Result()), taskOutput, branchNames, partitions, datasetMetrics, logSnapshot, stopErr
+			return string(a.Result()), taskOutput, branchNames, partitions, metricsCapture, logSnapshot, stopErr
 		}
 	}
 
@@ -2103,7 +2120,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if taskTimeout > 0 {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			result, output, branches, _, datasetMetrics, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
+			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
 			cancel()
 
 			if execErr == nil {
@@ -2129,7 +2146,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation and keyed on THIS
 				// instance's row: a fanned step records its samples per
 				// partition (see run.EvaluateDataAssertions).
-				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, datasetMetrics); err != nil {
+				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, metricsCapture); err != nil {
 					execErr = err
 				}
 			}
@@ -2776,7 +2793,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, branchNames, partitions, datasetMetrics, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner, outputEnv)
+			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner, outputEnv)
 			cancel()
 
 			if execErr == nil {
@@ -2799,7 +2816,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation. The unfanned
 				// path has one row per (run, task), so the catalog task id
 				// resolves it unambiguously.
-				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, datasetMetrics); err != nil {
+				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
 					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}
@@ -2936,6 +2953,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 	active := 0
 	halt := false
 	deferred := make(map[uuid.UUID]time.Time)
+	// dispatched records every node handed to the pool. The halt sweep below
+	// must never resolve one of these: its row is still `pending` in SQL until
+	// executeAtom's StartTask, so the store cannot tell it from a node this loop
+	// has not reached, and skipping it would record a container that ran as
+	// skipped.
+	dispatched := make(map[uuid.UUID]bool)
 
 	moveDueDeferred := func() bool {
 		now := time.Now().UTC()
@@ -2987,6 +3010,49 @@ func (j *job) Run(ctx context.Context) (err error) {
 			active--
 			return err
 		}
+		dispatched[taskID] = true
+		return nil
+	}
+
+	// haltUnstarted is the local executor's half of the `halt` failure policy.
+	// The store resolves every not-yet-dispatched step whose trigger rule is not
+	// failure-tolerant as skipped (run.Store.HaltUnstartedTasks — the same
+	// primitive the distributed worker calls, so both lanes stamp the same rows
+	// with the same reason), and this brings the in-memory DAG into line: each
+	// skipped node is retired and its successors advanced through
+	// propagateSkipped, which is what releases an `all_done` cleanup that sits
+	// downstream of a halted branch. Nothing here touches `halt`: that flag is
+	// the hard stop for dispatch errors and cancellation, whereas a policy halt
+	// keeps the loop running for the tolerant successors it deliberately leaves
+	// dispatchable.
+	haltUnstarted := func(failedID uuid.UUID) error {
+		candidates := make([]uuid.UUID, 0, len(tasks))
+		for _, t := range tasks {
+			if !processed[t.ID] && !dispatched[t.ID] {
+				candidates = append(candidates, t.ID)
+			}
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+		skipped, err := store.HaltUnstartedTasks(runID, failedID, candidates)
+		if err != nil {
+			return err
+		}
+		for _, id := range skipped {
+			if processed[id] {
+				continue
+			}
+			taskOutcomes[id] = run.TaskStatusSkipped
+			processed[id] = true
+			terminalTasks++
+			delete(inQueue, id)
+			delete(deferred, id)
+			if err := propagateSkipped(id); err != nil {
+				return err
+			}
+		}
+		queue = slices.DeleteFunc(queue, func(id uuid.UUID) bool { return processed[id] })
 		return nil
 	}
 
@@ -3088,16 +3154,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if runErr == nil {
 				runErr = result.err
 			}
-			if !continueOnFailure {
-				halt = true
-				queue = queue[:0]
-				continue
-			}
-
-			// With continueOnFailure: skip only downstream tasks whose trigger
-			// rules require all predecessors to succeed. Tasks with all_done,
-			// all_failed, or always rules are left to the normal indegree path
-			// so they can still run / evaluate their own rule.
+			// Under BOTH failure policies the failed node's descendants resolve
+			// the same way: skip only the downstream tasks whose trigger rules
+			// require all predecessors to succeed. Tasks with all_done,
+			// all_failed, always or one_success rules are left to the normal
+			// indegree path so they can still run / evaluate their own rule.
+			// The policies differ only in what happens to everything ELSE, and
+			// that is haltUnstarted's job at the end of this branch.
 			skipReason := fmt.Sprintf("skipped due to failed dependency task %s", result.id)
 			skipDescendantsFiltered(
 				adjacency, predecessors, triggerRuleByTask,
@@ -3174,6 +3237,23 @@ func (j *job) Run(ctx context.Context) (err error) {
 					}
 				}
 			}
+
+			// `halt`: stop admitting new work. Every step not yet dispatched
+			// whose rule is not failure-tolerant is resolved skipped, in the
+			// store and here; the tolerant ones stay dispatchable and the loop
+			// keeps running them (and whatever they release) to completion.
+			// Work already dispatched finishes on its own. The run still ends
+			// failed on runErr, whatever the cleanup steps then do.
+			if !continueOnFailure && !halt {
+				if err := haltUnstarted(result.id); err != nil {
+					log.Error("failed to halt unstarted tasks", "run_id", runID, "task_id", result.id, "error", err)
+					if runErr == nil {
+						runErr = err
+					}
+					halt = true
+					queue = queue[:0]
+				}
+			}
 			continue
 		}
 
@@ -3213,6 +3293,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 				// Skip successors already handled by branch filtering in the store.
 				if skippedSet[successor] {
+					continue
+				}
+				// …and successors this loop already retired: a join the halt
+				// sweep (or a failed sibling predecessor) skipped while this
+				// predecessor was still running. Re-evaluating its rule here
+				// would count it terminal a second time.
+				if processed[successor] {
 					continue
 				}
 
@@ -3293,6 +3380,12 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 	var (
 		ticker = time.NewTicker(pollInterval)
 		ch     <-chan event.Event
+		// haltedAt is the failed-task count the last halt sweep was issued
+		// for; a failure count above it means a new failure to halt on.
+		haltedAt = 0
+		// stallTicks counts consecutive ticks that found nothing running and
+		// nothing releasable; see the stall check for why one is not enough.
+		stallTicks = 0
 	)
 	defer ticker.Stop()
 
@@ -3365,15 +3458,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 
 			liveCount := max(len(snapshot.Tasks), taskCount)
 
-			// readyPending counts rows the dispatcher can still pick up right
-			// now: pending with every predecessor resolved. It is the difference
-			// between "nothing more will happen" and "nothing has happened yet".
-			readyPending := 0
-
 			for _, taskState := range snapshot.Tasks {
-				if taskState.Status == run.TaskStatusPending && taskState.OutstandingPredecessors == 0 {
-					readyPending++
-				}
 				switch taskState.Status {
 				case run.TaskStatusFailed:
 					failed++
@@ -3397,6 +3482,9 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				return fmt.Errorf("run %s cancelled", runID)
 			}
 
+			// The run is complete when the STORE says every row is terminal —
+			// the route-completeness contract, not a guess about whether the
+			// dispatcher will do anything else.
 			terminal := failed + succeeded + skipped + cached + cancelled
 			if terminal == liveCount {
 				if cancelled > 0 {
@@ -3408,38 +3496,65 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				return nil
 			}
 
-			if failed > 0 && running == 0 {
-				// `failed > 0 && running == 0` is a heuristic for "nothing more
-				// will happen", and under the CONTINUE policy it fired too
-				// early: a failed predecessor releases its rule-tolerant
-				// successors in the same transaction that records the failure
-				// (outstanding_predecessors → 0, task_ready), and for the
-				// moment between that commit and the dispatcher's next tick
-				// nothing is running — so this declared the run stalled and
-				// finalized it, after which ClaimNext's `jr.status = running`
-				// predicate refuses the row forever. The local Kahn loop under
-				// the same policy runs those successors, so this was a
-				// distributed-only defect, not a policy difference.
-				//
-				// A row that is pending with no outstanding predecessors is
-				// exactly the thing the dispatcher is about to claim, so it is
-				// not a stall. Deliberately scoped to continueOnFailure: under
-				// `halt` BOTH executors stop dispatching after a failure (the
-				// Kahn loop clears its queue), and waiting here would make the
-				// distributed lane run a tolerant successor the local lane
-				// refuses to — re-creating the mode-dependent divergence the
-				// route-completeness contract exists to prevent. Whether `halt`
-				// should release rule-tolerant successors at all is a product
-				// decision for both executors, filed rather than smuggled in
-				// here.
-				if continueOnFailure && readyPending > 0 {
+			if failed == 0 {
+				continue
+			}
+
+			// `halt`: the worker that recorded the failure has already swept
+			// the run (runtime_executor.go), so this pass is normally a no-op.
+			// It is kept because a failure can be recorded by a path that is
+			// not a worker — the owner failing a producer whose expansion could
+			// not be planned, say — and because a worker can die between its
+			// failure write and its sweep. HaltUnstartedTasks is pending-only,
+			// so repeating it is free; it is re-issued whenever the failed
+			// count grows so a second failure halts what the first left
+			// dispatchable.
+			if !continueOnFailure && failed > haltedAt {
+				if _, err := store.HaltUnstartedTasks(runID, uuid.Nil, nil); err != nil {
+					// Retry on the next tick rather than finalize the run on a
+					// transient store error; the worker's own sweep has most
+					// likely already done the work.
+					log.Warn("failed to halt unstarted tasks; retrying next tick", "run_id", runID, "error", err)
 					continue
 				}
-				if continueOnFailure {
-					return fmt.Errorf("run %s has %d failed task(s) and %d unresolved pending task(s)", runID, failed, taskCount-terminal)
-				}
-				return fmt.Errorf("run %s halted after %d failed task(s)", runID, failed)
+				haltedAt = failed
+				continue
 			}
+
+			if running > 0 {
+				continue
+			}
+
+			// Nothing is running and something has failed. That used to be
+			// read as "nothing more will happen", and it fired too early: a
+			// failed predecessor releases its rule-tolerant successors in the
+			// same transaction that records the failure, and for the moment
+			// between that commit and the dispatcher's next tick nothing is
+			// running — so the run was finalized, after which the claim
+			// predicates' `jr.status = running` refused the released row
+			// forever. A pending step whose predecessors are all terminal is
+			// exactly what the dispatcher is about to claim (or the cascade
+			// about to skip), so it is not a stall; only a run with NO such
+			// step is. The store answers that from the run's edges, so the
+			// in-memory owner lane, which never decrements the row scalar,
+			// gets the same answer as the SQL lanes.
+			releasable, err := store.HasReleasablePending(runID)
+			if err != nil {
+				return err
+			}
+			if releasable {
+				stallTicks = 0
+				continue
+			}
+			// The snapshot and the readiness query are two reads: a pending row
+			// can be claimed, run and complete between them, in which case the
+			// run is finished, not stalled. Only two consecutive ticks that
+			// agree — the second re-reads the snapshot first — count as a stall.
+			stallTicks++
+			if stallTicks < 2 {
+				continue
+			}
+			return fmt.Errorf("run %s has %d failed task(s) and %d unresolved pending task(s)", runID, failed, liveCount-terminal)
 		}
 	}
 }

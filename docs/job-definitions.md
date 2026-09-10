@@ -229,10 +229,18 @@ See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example �
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - Steps support retry controls via `retries`, `retryDelay`, and `retryBackoff`.
-- Steps support Airflow-style trigger rules via `triggerRule`. Supported values are `all_success`, `all_done`, `all_failed`, `one_success`, and `always`.
+- Steps support Airflow-style trigger rules via `triggerRule`. Supported values are `all_success` (the default: every predecessor succeeded), `all_done` (every predecessor reached a terminal status, including `failed` and `skipped`), `all_failed`, `one_success`, and `always` (an alias of `all_done`). A step whose rule is not satisfied once its predecessors resolve is skipped with the reason `trigger rule "<rule>" not satisfied`.
+- Trigger rules and the server's failure policy (`CAESIUM_TASK_FAILURE_POLICY`, default `halt`) compose as follows. Under both policies a failed step resolves its own successors by their rules: an `all_success` successor is skipped, an `all_done`/`always`/`one_success`/`all_failed` one is evaluated and runs if satisfied. The policies differ only in what happens to the **rest** of the DAG:
+  - `halt` stops the run from admitting new work. Every step that has not started and whose rule is `all_success` is skipped with the reason `run halted after task "<name>" failed`, on the local and the distributed executor alike. Steps that have already started (including a fan-out group with at least one started instance) finish on their own. Steps with a failure-tolerant rule (`all_done`, `always`, `one_success`, `all_failed`) are never halted: they are evaluated as their predecessors resolve — the failure itself, the halt-skips, and later completions — so a cleanup or notification step runs "no matter what" even in an otherwise-halted run, and an `all_done` step downstream of a halted branch still runs because a skipped predecessor satisfies `all_done`. An `all_success` step downstream of a tolerant step is still new work and is halted.
+  - `continue` admits everything: independent branches run to completion and only the failed step's `all_success` descendants are skipped.
+  - Under either policy the run ends `failed` once any step has failed, whatever the cleanup steps then do; `continue` (and a tolerant rule) changes how much work runs, not whether the run succeeds. No task row is left `pending` on a terminal run.
 - `callbacks.configuration` is stored as JSON. The built-in `notification` callback accepts `url`/`webhook_url` plus optional `headers` and `user_agent` keys.
 - Callback payloads POST a JSON body containing job/run metadata (`job_id`, `job_alias`, `run_id`, `status`, `error`, `started_at`, `completed_at`) and task entries (`task_id`, `engine`, `image`, `command`, `status`, `runtime_id`, `error`).
 - Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
+- Each attempt also records the transport detail needed to triage a failed hook, exposed on `callbacks[]` in `GET /v1/jobs/:id/runs/:run_id` and rendered in the Console's run detail Callbacks section:
+  - `http_status` — the status code the target answered with. Omitted when the attempt never got a response at all (DNS/connect/TLS failure, timeout), which is how a transient network failure is distinguished from a permanent `4xx`.
+  - `response_body` — the target's response body, truncated to 4 KiB and passed through the secret scrubber before it is stored.
+  - `retry_count` — the delivery attempts that preceded this one for the same callback on the same run: `0` for the dispatch at run completion, `1` for the first `retry-callbacks` retry, and so on. Each retry writes its own attempt row.
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 - `metadata.priority` accepts `high`, `normal`, or `low` and orders future run/task scheduling without preempting work already running.
 - `metadata.concurrency` controls run-level admission for the same job with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`).
@@ -642,6 +650,19 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - `caesium job apply` preserves task and callback ordering during reconciliation using stable importer positions rather than rewriting creation timestamps.
 - Updated jobs include a unified diff showing the fields that will change.
 - Run the diff command before applying changes to confirm the preview matches the expected plan.
+
+## Exporting Job Definitions
+
+- `GET /v1/jobs/:id/manifest` reconstructs a deployed job's authoring manifest from the stored job, trigger, steps, atoms, DAG edges, callbacks, and dataset declarations. It is the read-side inverse of `POST /v1/jobdefs/apply` (both field mappings live in `internal/jobdef`: `Exporter` and `Importer`).
+  - Responds `Content-Type: application/yaml` by default — the exact bytes `caesium job apply` consumes. Add `?format=json` for the same `pkg/jobdef.Definition` as JSON.
+  - `:id` accepts a full job UUID or an unambiguous UUID prefix, like `GET /v1/jobs/:id`, and requires the same `viewer` role.
+- `caesium job export <alias|job-id>` writes that manifest to stdout, or to a file with `--output/-o`. Nothing but the manifest is written to stdout (the `--output` confirmation goes to stderr), so `caesium job export nightly-etl > nightly-etl.job.yaml` is byte-exact.
+- The output is re-appliable: `caesium job lint` accepts it, `caesium job diff` against the server it came from reports no changes for that alias, and re-applying it is a no-op.
+- Two authoring details are not persisted and therefore cannot be recovered:
+  - A volume's alternative per-engine `sources`. Only the source each step's own engine resolved is stored, so a volume declared for docker + podman + kubernetes comes back carrying just the engines this job's steps mount it with (as `source` when that is a single engine, `sources` when more than one). Its optional `accessMode` is not persisted at all.
+  - Job-level `metadata.serviceAccountName` / `podAnnotations` / `automountServiceAccountToken`. Apply merges them into every Kubernetes step's stored spec, so they come back on each step. Step-level values override job-level ones, which makes the exported manifest semantically identical.
+- Redundant defaults are omitted rather than materialised, so an exported manifest never gains a field the author did not write: `type: task`, `triggerRule: all_success`, a per-step `replaySafe` already covered by a job-level one, and `metadata.datasets.skipWhenFresh: true`. A DAG that was auto-linked sequentially (no `next`/`dependsOn` anywhere) is re-emitted with explicit `next` edges, which is the same graph.
+- The Console's job-detail **YAML** tab renders this endpoint's response, so it shows exactly what the CLI writes.
 
 ## Secret References
 
