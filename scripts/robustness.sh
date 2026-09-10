@@ -288,6 +288,15 @@ load_kind_image() {
   rm -f "$tar"
 }
 
+# kind load of a multi-arch tag (alpine:3.23) fails with
+# "ctr: content digest ... not found". Flatten to a single-platform local tag.
+TASK_ARCH="$(docker image inspect --format '{{.Architecture}}' "$TASK_IMAGE")"
+FLAT_TASK="caesium-robustness-task:${ROBUSTNESS_ID}"
+log "flattening TASK_IMAGE $TASK_IMAGE ($TASK_ARCH) -> $FLAT_TASK"
+printf 'FROM %s\n' "$TASK_IMAGE" | docker build --platform "linux/${TASK_ARCH}" -t "$FLAT_TASK" -
+TASK_IMAGE="$FLAT_TASK"
+CAESIUM_ROBUSTNESS_TASK_IMAGE="$TASK_IMAGE"
+
 log "loading images into $ROBUSTNESS_ID"
 load_kind_image "$CANONICAL_SERVER_IMAGE"
 if [[ "$SERVER_IMAGE" != "$CANONICAL_SERVER_IMAGE" ]]; then
