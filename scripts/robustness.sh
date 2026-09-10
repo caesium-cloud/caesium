@@ -279,13 +279,22 @@ for node in "${KIND_NODES[@]}"; do
 done
 [[ "$WORKER_COUNT" -eq 3 ]] || die "expected 3 kind workers, found $WORKER_COUNT"
 
+load_kind_image() {
+  local img="$1"
+  local tar="$ARTIFACTS/load-$(printf '%s' "$img" | tr '/:' '__').tar"
+  log "saving $img to $tar"
+  docker save -o "$tar" "$img"
+  kind load image-archive --name "$ROBUSTNESS_ID" "$tar"
+  rm -f "$tar"
+}
+
 log "loading images into $ROBUSTNESS_ID"
-kind load docker-image --name "$ROBUSTNESS_ID" "$CANONICAL_SERVER_IMAGE"
+load_kind_image "$CANONICAL_SERVER_IMAGE"
 if [[ "$SERVER_IMAGE" != "$CANONICAL_SERVER_IMAGE" ]]; then
-  kind load docker-image --name "$ROBUSTNESS_ID" "$SERVER_IMAGE"
+  load_kind_image "$SERVER_IMAGE"
 fi
-kind load docker-image --name "$ROBUSTNESS_ID" "$RUNNER_IMAGE"
-kind load docker-image --name "$ROBUSTNESS_ID" "$TASK_IMAGE"
+load_kind_image "$RUNNER_IMAGE"
+load_kind_image "$TASK_IMAGE"
 
 TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 (( ${#TOKEN} >= 32 )) || die "generated internal token is shorter than 32 bytes"
