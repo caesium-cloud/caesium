@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,94 @@ class GateTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_ci_config_discovers_all_validator_tests(self):
+        commands = [line.strip() for step in JOBS["ci-config"]["steps"]
+                    for line in step.get("run", "").splitlines()
+                    if "unittest discover" in line]
+        self.assertEqual(commands, ["python3 -m unittest discover -s scripts -p 'test_*.py' -v"])
+        # Execute the workflow's selector on an additional validator module. A
+        # narrowed pattern would silently miss its failure and return success.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "test_extra_validator.py").write_text(
+                "import unittest\n"
+                "class ExtraValidator(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.fail('extra validator was discovered')\n"
+            )
+            command = shlex.split(commands[0])
+            command[0] = sys.executable
+            command[command.index("-s") + 1] = tmp
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("extra validator was discovered", result.stderr)
+            self.assertIn("Ran 1 test", result.stderr)
+
+    def test_browser_diagnostics_survive_setup_and_test_failures(self):
+        for name, container in (("ui-e2e", "caesium-server"),
+                                ("ui-e2e-auth", "caesium-server-auth")):
+            with self.subTest(job=name):
+                steps = JOBS[name]["steps"]
+                collect = next(step for step in steps if step.get("name") == "Collect browser diagnostics")
+                upload = next(step for step in steps if step.get("name") == "Upload browser diagnostics")
+                cleanup = steps[-1]
+                browser = next(step for step in steps if step.get("id") == "playwright")
+                self.assertLess(steps.index(browser), steps.index(collect))
+                self.assertLess(steps.index(collect), steps.index(upload))
+                self.assertLess(steps.index(upload), steps.index(cleanup))
+                for step in (collect, upload, cleanup):
+                    self.assertEqual(step["if"], "always()")
+                for step in (browser, collect, upload):
+                    self.assertFalse(step.get("continue-on-error", False))
+                self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+                self.assertEqual(upload["with"]["if-no-files-found"], "error")
+                self.assertEqual(upload["with"]["path"].splitlines(), [
+                    "ui/playwright-report/", "ui/test-results/",
+                    "ui/playwright-results.json", "ui/ci-diagnostics/",
+                ])
+                self.assertIn(name, upload["with"]["name"])
+                # Run the real collection script with a failed setup and a
+                # missing server, then with a failed test and retained logs.
+                for setup_failed in (False, True):
+                    with self.subTest(setup_failed=setup_failed), tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        docker = root / "docker"
+                        docker.write_text(
+                            '#!/bin/sh\n'
+                            'if [ "$1" = logs ]; then\n'
+                            '  echo "server diagnostic for $2 bootstrap csk_fixture-secret_123"\n'
+                            f'  exit {1 if setup_failed else 0}\n'
+                            'fi\necho "container status"\n'
+                        )
+                        docker.chmod(0o755)
+                        outcomes = {
+                            "server": {"outcome": "failure" if setup_failed else "success",
+                                       "conclusion": "failure" if setup_failed else "success",
+                                       "outputs": {"sensitive": "must not appear"}},
+                            "playwright": {"outcome": "skipped" if setup_failed else "failure",
+                                           "conclusion": "skipped" if setup_failed else "failure"},
+                        }
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", collect["run"]], cwd=tmp,
+                            env={**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"],
+                                 "STEP_RESULTS": json.dumps(outcomes), "CANDIDATE_SHA": "candidate",
+                                 "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": name},
+                            capture_output=True, text=True,
+                        )
+                        self.assertEqual(result.returncode, int(setup_failed), result.stderr)
+                        reports = root / "ui/ci-diagnostics"
+                        report = json.loads((reports / "outcomes.json").read_text())
+                        self.assertEqual(report["candidate_sha"], "candidate")
+                        self.assertEqual(report["steps"]["playwright"]["outcome"],
+                                         "skipped" if setup_failed else "failure")
+                        self.assertNotIn("must not appear", json.dumps(report))
+                        server_log = (reports / "server.log").read_text()
+                        self.assertIn(container, server_log)
+                        self.assertIn("[REDACTED_API_KEY]", server_log)
+                        self.assertNotIn("csk_fixture-secret_123", server_log)
+                        self.assertIn("container status", (reports / "containers.log").read_text())
+                        if setup_failed:
+                            self.assertIn("::error::Could not collect", result.stdout)
+
     def test_gate_selectors_match_actual_job_conditions(self):
         for name, selectors in SELECTORS.items():
             with self.subTest(job=name):
