@@ -374,13 +374,31 @@ within their resolved contract and available test infrastructure.
 
 ## Progress (as of 2026-09-09)
 
-No implementation waves have shipped. All 27 implementation items are unchecked.
-N-1 below is a mandatory wave-close documentation checkpoint, not another
-implementation item or a new agent role. The plan PR
-adds this document and proposed-work links in `docs/ci.md`, `docs/roadmap.md`,
-and `docs/README.md`. Review revisions preserve existing item IDs; E5, F4, and
-G5–G7 add early guards and split the former G3 scope.
-It makes no claim that testing infrastructure or product behavior has changed.
+No implementation waves have shipped. All 27 implementation items remain
+unchecked pending merged acceptance evidence. W1 selected the three independent
+ready items A1, E1 and G1 from base `5a89c851` (plan PR #461). The execution
+endpoint is review PRs; no implementation or repository-setting change has
+been merged by this wave, and no later-wave item has been dispatched.
+
+| W1 stream | Item / PR | Reviewed implementation evidence and disposition |
+| --- | --- | --- |
+| α | A1 / [#465](https://github.com/caesium-cloud/caesium/pull/465) | Decision-record content at `4c1576c1` independently reviewed. The pre-trigger task-placement finding is fixed; no remaining confirmed findings. Structural/link checks pass. Cluster, proxy and quorum-loss experiments remain explicitly unrun. |
+| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), draft | Candidate `db270bcc`: focused container race tests, vet and lint pass; final live success/bad-image/unavailable cases return 0/1/1 with reconciled counts. Serial execution has 37 samples and early/middle coverage in all three runs. Independent review has no findings. Full integration is in progress; full unit testing is blocked by the inherited index failure below. |
+| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), draft | Candidate `d3589cec`: 15 Python validators and actionlint pass. Native Chromium fail-once proof exits 1 despite a passing retry. Credential exposure in trace/report contents is fixed and independently rechecked; sanitized HTML/trace remain readable. Current-head hosted CI/artifact verification is pending. |
+| Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), ready for review | Candidate `948cd50f`: one-line `docs/README.md` convention repair; exact containerized guardrail and independent review pass. This is a separately scoped controller prerequisite, not an E1/G1 change or N-1 completion. |
+
+The inherited unit blocker is `TestDocsREADMEIndexesEveryTopLevelDoc` reporting
+`extra=[distributed-testing.md]` after #461 added a nested Markdown link to the
+index. It reproduced in the full local E1 unit suite and arm64 CI with README
+and guardrail blobs unchanged from the execution base. #467 preserves the plan
+entry using the surrounding section's inline-code path convention; it changes
+no guardrail or test floor. Implementation PRs must refresh affected checks
+after this prerequisite lands before readiness can be claimed.
+
+**W1/N-1 remains pending.** The shared runbook still describes the previously
+shipped behavior. Its synchronization follows merged implementation PRs; this
+interim dashboard update records open work only. Pending checks and stronger
+unresolved contracts are not passing or shipped evidence.
 
 The orchestrator owns this dashboard, merged PR links, candidate/merge SHAs,
 verification artifacts, and blockers. An item checked in an unmerged PR is
@@ -391,13 +409,13 @@ assigning another wave number.
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 ready; A2 follows A1/G1 |
+| A | Contracts and scenario evidence (2 items) | P0 | A1 in review #465; A2 awaits merged A1/G1 |
 | B | Real multi-node robustness (3 items) | P0 | B1 follows A1 and ships the first pod-kill regression |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 follows A1; pure models stay in the unit lane |
 | D | Developer and Console journeys (3 items) | P0 | Depends on A1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 ready; E5 is an early count guard; E4 needs Q2/Q5 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 draft #466; E5 awaits merged E1; E4 needs Q2/Q5 |
 | F | Upgrades, durability, and sustained faults (4 items) | P1 | F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 ready; G3/G5 establish the early required gate |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 draft #464; G3/G5 remain dependency-blocked |
 
 ## Streams
 
