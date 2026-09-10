@@ -43,6 +43,28 @@
       }
     },
     {
+      "name": "leftover_insert_lost_batching",
+      "want_pass": false,
+      "must_match": "batching",
+      "observed": {
+        "completions": 1,
+        "writes": {
+          "task_run_insert": 4,
+          "task_run_status": 5,
+          "event_insert": 6,
+          "command": 0,
+          "checkpoint": 0
+        },
+        "statements": {
+          "task_run_insert": 3,
+          "task_run_status": 5,
+          "event_insert": 5,
+          "command": 0,
+          "checkpoint": 0
+        }
+      }
+    },
+    {
       "name": "lost_batching_insert",
       "want_pass": false,
       "must_match": "batching",

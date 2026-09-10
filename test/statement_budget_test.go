@@ -106,10 +106,6 @@ func TestStatementBudgetComparator(t *testing.T) {
 	runStatementBudgetComparator(t)
 }
 
-func (s *IntegrationTestSuite) TestStatementBudgetComparator() {
-	runStatementBudgetComparator(s.T())
-}
-
 func runStatementBudgetComparator(t *testing.T) {
 	t.Helper()
 	budget := loadStatementBudget(t)
@@ -218,8 +214,8 @@ steps:
 
 	after := s.scrapeDBBudget()
 	delta := dbBudgetDelta(before, after)
-	completions := budget.Workload.ExpectedCompletions
-	delta.Completions = &completions
+	observedCompletions := 1
+	delta.Completions = &observedCompletions
 
 	for cat, spec := range budget.Categories {
 		if spec.Mode != "skip" {
@@ -415,12 +411,15 @@ func evaluateBoundCategory(cat string, spec categoryBudget, obs statementBudgetO
 	}
 	maxStmts := spec.Statements
 	if writes > spec.Writes {
-		maxStmts = spec.Statements + (writes - spec.Writes)
+		extraWrites := writes - spec.Writes
+		if spec.Writes > 0 && spec.Statements > 0 {
+			maxStmts = spec.Statements + math.Ceil(extraWrites*spec.Statements/spec.Writes)
+		} else {
+			maxStmts = spec.Statements + extraWrites
+		}
 	}
-	if writes <= spec.Writes && stmts > spec.Statements {
+	if stmts > maxStmts {
 		findings = append(findings, fmt.Sprintf("%s: lost batching: %.0f statements for %.0f writes; baseline is %.0f statement(s) for %.0f writes (same completions do not waive SQL work)", cat, stmts, writes, spec.Statements, spec.Writes))
-	} else if stmts > maxStmts {
-		findings = append(findings, fmt.Sprintf("%s: statements %.0f over budget %.0f", cat, stmts, maxStmts))
 	}
 	return findings
 }
