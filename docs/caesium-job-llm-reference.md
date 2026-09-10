@@ -534,10 +534,20 @@ caesium dev --once --path job.yaml      # Run job locally against Docker
 caesium dev --path job.yaml             # Watch mode — re-run on file save
 caesium job diff --path jobs/           # Preview creates/updates/deletes vs server
 caesium job apply --path jobs/          # Deploy definitions to running server
+caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
 ```
+
+`caesium job export` calls `GET /v1/jobs/:id/manifest`, which rebuilds the
+manifest server-side from the stored job (the inverse of the apply importer) and
+answers `application/yaml` — or the same `Definition` as JSON with
+`?format=json`. Stdout carries the manifest and nothing else. Two details were
+never persisted and so cannot come back: a volume's alternative per-engine
+`sources` (and its `accessMode`), and job-level `serviceAccountName` /
+`podAnnotations` / `automountServiceAccountToken`, which return on each
+Kubernetes step instead (equivalent, since step-level overrides job-level).
 
 `caesium blame` is intentionally scoped to the data stored in `dag_snapshot`:
 topology, step image, and step command. It does not track behavior-only changes

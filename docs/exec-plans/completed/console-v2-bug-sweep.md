@@ -252,6 +252,9 @@ already present in the responses the page fetches.
       rebuilds the jobdef root fields from loaded job/task/trigger/atom/DAG data
       and unflattens persisted trigger `defaultParams`; Vitest covers the
       reconstructed field names and omits runtime IDs/state.
+      Superseded by issue #407: the tab now renders
+      `GET /v1/jobs/:id/manifest` and the client-side builder is deleted (see
+      the Rejected note below).
 
 #### Rejected / deferred for Stream C
 
@@ -260,6 +263,12 @@ already present in the responses the page fetches.
   long-term fix (the CLI could share it), but it is deferred: the UI already
   has every field it needs to reconstruct client-side (C3), and a new endpoint
   widens scope without unblocking anything in this sweep.
+  **RESOLVED — the endpoint now exists** (issue #407). `GET /v1/jobs/:id/manifest`
+  is served by `api/rest/controller/job/manifest.go` on top of
+  `internal/jobdef.Exporter` (the inverse of `Importer`), `caesium job export
+  <alias|id>` consumes it, and the YAML tab calls it via `api.getJobManifest`
+  instead of reconstructing client-side — `job-detail-manifest.ts` and its test
+  are deleted. See `docs/job-definitions.md` § Exporting Job Definitions.
 
 ### Stream D — Run detail & execution timeline
 
