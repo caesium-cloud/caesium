@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/freshness"
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
@@ -612,6 +615,15 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Fatal("secret resolver configuration failure", "error", err)
 	}
 	triggerhttp.SetSecretResolver(resolver)
+	// Registry credentials for image digest resolution (cache.pinDigests):
+	// CAESIUM_REGISTRY_AUTH maps registry hosts to secret:// references that the
+	// same provider chain resolves. Installed on the shared resolver so both the
+	// local and worker execution lanes authenticate the same way.
+	imagecheck.Default().SetCredentials(imagecheck.CredentialsFromSecrets(vars.RegistryAuth, resolver))
+	if len(vars.RegistryAuth) > 0 {
+		hosts := slices.Sorted(maps.Keys(vars.RegistryAuth))
+		log.Info("registry credentials configured for image digest resolution", "registries", hosts)
+	}
 	eventRouter := triggerevent.ConfigureDefaultRouter(db.Connection())
 	if err := eventRouter.Reload(ctx); err != nil {
 		log.Fatal("event trigger router initial load failure", "error", err)

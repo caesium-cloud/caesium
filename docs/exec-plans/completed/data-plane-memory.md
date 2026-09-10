@@ -81,7 +81,10 @@ autonomously via `exec-plan-wave`.
   per-resolve-call. Review: 2 gemini HIGH (Docker client reuse; honest
   registry-auth scoping) + 2 MEDIUM. **Deferred follow-ups:** private-registry
   `RegistryAuth` wiring for digest resolution; Podman/k8s pre-run digest
-  resolution (both documented in code/docs).
+  resolution (both documented in code/docs) — **both shipped via #405** (an
+  engine-independent registry manifest-HEAD resolver wired for every engine,
+  with credentials from `CAESIUM_REGISTRY_AUTH` → `secret://` providers, also
+  used as Docker's pull `RegistryAuth`).
 - **B1 (Stream B) — DAG topology versioning.** PR #213 → merge `a48943f`.
   Append-only `dag_snapshot` model (topology + per-edge provenance, content-hash
   dedup incl. image+command) replaces the destructive edge hard-delete. Review:
