@@ -353,3 +353,36 @@ func TestReporterRejectsDuplicateRunIdentity(t *testing.T) {
 		t.Fatalf("report=%+v err=%v", r, err)
 	}
 }
+
+func TestPeriodicCoverageUsesExecutionWindowNotScrapeLatency(t *testing.T) {
+	for _, slowPeriodic := range []bool{false, true} {
+		t.Run(fmt.Sprint("slowPeriodic=", slowPeriodic), func(t *testing.T) {
+			f := &fixture{}
+			if slowPeriodic {
+				f.delay = 60 * time.Millisecond
+			}
+			var metrics atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/metrics" {
+					if metrics.Add(1) == 2 {
+						time.Sleep(400 * time.Millisecond)
+					}
+					fmt.Fprint(w, validMetrics)
+					return
+				}
+				f.serve(w, req)
+			}))
+			defer srv.Close()
+			cfg := fixtureConfig(srv.URL)
+			cfg.jobCount = 1
+			r, err := newHarness(cfg).run(context.Background())
+			if slowPeriodic {
+				if err == nil || r.failure != "metrics_missing" {
+					t.Fatalf("late scrape incorrectly establishes coverage: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("fast workload need not sample during slow final scrape: %v", err)
+			}
+		})
+	}
+}
