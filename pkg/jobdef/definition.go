@@ -685,6 +685,41 @@ func (p RemediationClassPolicy) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// MarshalYAML keys the class constraint on ABSENT vs EXPLICITLY EMPTY, exactly
+// as MarshalJSON does. The JSON method alone is not enough: the manifest is
+// also re-SERIALISED to YAML (GET /v1/jobs/:id/manifest and `caesium job
+// export`), and `yaml:"allow,omitempty"` erases an empty slice just as readily
+// as the json tag did — so an exported job whose class block declared
+// `allow: []` came back as `auth_failure: {}`, re-parsed as nil, and re-applied
+// as "unconfigured", inheriting the surrounding permissions it was written to
+// deny.
+func (p RemediationClassPolicy) MarshalYAML() (any, error) {
+	return remediationConstraintsYAML{
+		Allow:           nilOrRef(p.Allow),
+		ParamOverrides:  nilOrRef(p.ParamOverrides),
+		RequireApproval: nilOrRef(p.RequireApproval),
+	}, nil
+}
+
+// remediationConstraintsYAML is remediationConstraintsJSON's YAML twin; see
+// that type for why the fields are pointers. Field order matches the struct it
+// stands in for so an unset block serialises byte-identically to before.
+type remediationConstraintsYAML struct {
+	Allow           *[]string            `yaml:"allow,omitempty"`
+	ParamOverrides  *map[string][]string `yaml:"paramOverrides,omitempty"`
+	RequireApproval *[]string            `yaml:"requireApproval,omitempty"`
+}
+
+// remediationAutonomyYAML is the autonomy block's YAML wire shape. PerClass
+// keeps plain omitempty for the reason MarshalJSON documents: an empty per-class
+// map and an absent one are the same policy.
+type remediationAutonomyYAML struct {
+	Allow           *[]string                         `yaml:"allow,omitempty"`
+	ParamOverrides  *map[string][]string              `yaml:"paramOverrides,omitempty"`
+	PerClass        map[string]RemediationClassPolicy `yaml:"perClass,omitempty"`
+	RequireApproval *[]string                         `yaml:"requireApproval,omitempty"`
+}
+
 // remediationConstraintsJSON is the wire shape for the three narrowing fields
 // an autonomy block and a per-class block share.
 //
@@ -761,6 +796,19 @@ func (a RemediationAutonomy) MarshalJSON() ([]byte, error) {
 		},
 		PerClass: a.PerClass,
 	})
+}
+
+// MarshalYAML is MarshalJSON's YAML twin, for the same absent-vs-empty reason:
+// `allow: []` is the shipped triage-only posture ("configured, grants nothing")
+// and must survive a manifest export intact rather than decaying into
+// "unconfigured" — which the tier defaults then read as tier 0/1 autonomous.
+func (a RemediationAutonomy) MarshalYAML() (any, error) {
+	return remediationAutonomyYAML{
+		Allow:           nilOrRef(a.Allow),
+		ParamOverrides:  nilOrRef(a.ParamOverrides),
+		PerClass:        a.PerClass,
+		RequireApproval: nilOrRef(a.RequireApproval),
+	}, nil
 }
 
 // RemediationEscalation configures the forced hand-off when remediation does

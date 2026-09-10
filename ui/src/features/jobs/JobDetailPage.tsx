@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, MoreHorizontal, Pause, Play, Settings2, ShieldCheck, XCircle, Zap } from "lucide-react";
-import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
 import { NotFoundState } from "@/components/not-found-state";
@@ -31,7 +30,6 @@ import { CacheView } from "./CacheView";
 import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
-import { buildJobAuthoringManifest, formatCommandForDisplay } from "./job-detail-manifest";
 import { formatPriority, formatQueueParams, isStaleQueueRow, queuePendingReason } from "./queue-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
@@ -40,7 +38,7 @@ import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
+import { formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
 
@@ -135,6 +133,20 @@ export function JobDetailPage() {
     queryKey: ["trigger", job?.trigger_id],
     queryFn: () => (job?.trigger_id ? api.getTrigger(job.trigger_id) : Promise.resolve(null)),
     enabled: !!job?.trigger_id,
+  });
+
+  // The manifest is reconstructed server-side (GET /v1/jobs/:id/manifest), the
+  // inverse of the apply importer, so this tab and `caesium job export` render
+  // byte-identical YAML. Fetched only while the YAML tab is open.
+  const {
+    data: jobManifest,
+    isLoading: isLoadingManifest,
+    error: manifestError,
+  } = useQuery({
+    queryKey: ["job", jobId, "manifest"],
+    queryFn: () => api.getJobManifest(jobId),
+    enabled: secondaryView === "definition",
+    staleTime: 30_000,
   });
 
   const { data: features } = useQuery({
@@ -380,10 +392,6 @@ export function JobDetailPage() {
     [tasks],
   );
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
-  const jobManifest = useMemo(
-    () => job ? buildJobAuthoringManifest({ job, tasks, trigger, atoms, dag }) : null,
-    [job, tasks, trigger, atoms, dag],
-  );
 
   if (isLoading || (featuredRunId && isLoadingFeaturedRun)) {
     return <div className="p-8">Loading...</div>;
@@ -611,21 +619,11 @@ export function JobDetailPage() {
                 <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
               )}
               {secondaryView === "definition" && (
-                <div className="space-y-3">
-                  <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
-                    <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                    <div>
-                      <div className="font-medium text-warning">Reconstructed from loaded job-detail data</div>
-                      <div className="mt-1 text-text-3">
-                        Root callbacks are not exposed by this page&apos;s loaded endpoints. Original multi-engine
-                        volume declarations are represented from resolved mounts when possible.
-                      </div>
-                    </div>
-                  </div>
-                  <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
-                    {yamlStringify(jobManifest)}
-                  </pre>
-                </div>
+                <JobManifestView
+                  manifest={jobManifest}
+                  isLoading={isLoadingManifest}
+                  error={manifestError}
+                />
               )}
               {secondaryView === "backfills" && (
                 <BackfillsView jobId={job.id} />
@@ -892,6 +890,52 @@ function RemediationOverview({
 }
 
 /* ── Secondary view components ── */
+
+function JobManifestView({
+  manifest,
+  isLoading,
+  error,
+}: {
+  manifest?: string;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  if (isLoading) {
+    return <div className="p-8 text-center text-muted-foreground">Loading manifest...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="flex gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-text-2">
+        <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <div>
+          <div className="font-medium text-destructive">Could not export this job&apos;s manifest</div>
+          <div className="mt-1 text-text-3">{error instanceof Error ? error.message : String(error)}</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
+        <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+        <div>
+          <div className="font-medium text-warning">Reconstructed from the stored job</div>
+          <div className="mt-1 text-text-3">
+            Identical to <span className="font-mono">caesium job export</span>. Two authoring details are not
+            persisted and cannot be recovered: a volume&apos;s alternative per-engine sources (only the ones this
+            job&apos;s steps resolved survive) and its <span className="font-mono">accessMode</span>. Job-level
+            workload identity comes back on each Kubernetes step, which is equivalent.
+          </div>
+        </div>
+      </div>
+      <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs" data-testid="job-manifest-yaml">
+        {manifest}
+      </pre>
+    </div>
+  );
+}
 
 function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
   return (

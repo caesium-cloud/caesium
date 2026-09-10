@@ -643,6 +643,19 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - Updated jobs include a unified diff showing the fields that will change.
 - Run the diff command before applying changes to confirm the preview matches the expected plan.
 
+## Exporting Job Definitions
+
+- `GET /v1/jobs/:id/manifest` reconstructs a deployed job's authoring manifest from the stored job, trigger, steps, atoms, DAG edges, callbacks, and dataset declarations. It is the read-side inverse of `POST /v1/jobdefs/apply` (both field mappings live in `internal/jobdef`: `Exporter` and `Importer`).
+  - Responds `Content-Type: application/yaml` by default — the exact bytes `caesium job apply` consumes. Add `?format=json` for the same `pkg/jobdef.Definition` as JSON.
+  - `:id` accepts a full job UUID or an unambiguous UUID prefix, like `GET /v1/jobs/:id`, and requires the same `viewer` role.
+- `caesium job export <alias|job-id>` writes that manifest to stdout, or to a file with `--output/-o`. Nothing but the manifest is written to stdout (the `--output` confirmation goes to stderr), so `caesium job export nightly-etl > nightly-etl.job.yaml` is byte-exact.
+- The output is re-appliable: `caesium job lint` accepts it, `caesium job diff` against the server it came from reports no changes for that alias, and re-applying it is a no-op.
+- Two authoring details are not persisted and therefore cannot be recovered:
+  - A volume's alternative per-engine `sources`. Only the source each step's own engine resolved is stored, so a volume declared for docker + podman + kubernetes comes back carrying just the engines this job's steps mount it with (as `source` when that is a single engine, `sources` when more than one). Its optional `accessMode` is not persisted at all.
+  - Job-level `metadata.serviceAccountName` / `podAnnotations` / `automountServiceAccountToken`. Apply merges them into every Kubernetes step's stored spec, so they come back on each step. Step-level values override job-level ones, which makes the exported manifest semantically identical.
+- Redundant defaults are omitted rather than materialised, so an exported manifest never gains a field the author did not write: `type: task`, `triggerRule: all_success`, a per-step `replaySafe` already covered by a job-level one, and `metadata.datasets.skipWhenFresh: true`. A DAG that was auto-linked sequentially (no `next`/`dependsOn` anywhere) is re-emitted with explicit `next` edges, which is the same graph.
+- The Console's job-detail **YAML** tab renders this endpoint's response, so it shows exactly what the CLI writes.
+
 ## Secret References
 
 - Sensitive values should be referenced using `secret://` URIs rather than inlining credentials inside manifests.
