@@ -396,6 +396,123 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	}
 }
 
+// integrationUpBaselineRecipe is the justfile recipe every other
+// integration-up* recipe below must track for CAESIUM_* env parity (docs/ci.md
+// §5, "Parity rule and its guardrail"). Each of those recipes starts its own
+// server rather than inheriting from this one, so a feature-gate var added
+// only here silently stops being exercised on the others (issue #425).
+const integrationUpBaselineRecipe = "integration-up"
+
+// integrationUpTrackingRecipes are the justfile recipes checked against
+// integrationUpBaselineRecipe.
+var integrationUpTrackingRecipes = []string{
+	"integration-up-distributed",
+	"integration-up-owner-memory",
+	"integration-up-infra",
+	"integration-up-agent",
+}
+
+// integrationUpEnvAllowlist names, per tracking recipe, baseline env vars
+// that recipe is intentionally allowed to omit. Empty today: every recipe in
+// integrationUpTrackingRecipes carries full CAESIUM_* parity with
+// integration-up (plus whatever lane-specific vars it legitimately needs on
+// top). Add an entry here only alongside a comment explaining why the var
+// does not apply to that lane — never to silence a real drift.
+var integrationUpEnvAllowlist = map[string][]string{}
+
+// TestIntegrationUpRecipesTrackBaselineEnv guards against the class of bug
+// fixed in #425: integration-up-distributed, integration-up-owner-memory, and
+// integration-up-agent each start their own Caesium server (rather than
+// inheriting integration-up's), so a feature-gate env var added only to
+// integration-up silently stopped being exercised on those lanes (e.g.
+// CAESIUM_CACHE_ENABLED, CAESIUM_RUN_QUEUE_ENABLED, and siblings). This test
+// parses justfile and fails if any integration-up-* recipe in
+// integrationUpTrackingRecipes is missing a CAESIUM_* var that
+// integration-up sets, unless it's named in integrationUpEnvAllowlist.
+func TestIntegrationUpRecipesTrackBaselineEnv(t *testing.T) {
+	root := repoRoot(t)
+
+	justfileBytes, err := os.ReadFile(filepath.Join(root, "justfile"))
+	if err != nil {
+		t.Fatalf("read justfile: %v", err)
+	}
+
+	recipes := parseJustfileRecipeEnvVars(string(justfileBytes))
+
+	baseline, ok := recipes[integrationUpBaselineRecipe]
+	if !ok || len(baseline) == 0 {
+		t.Fatalf("could not locate %s recipe's CAESIUM_* env vars in justfile; recipe parsing may be broken", integrationUpBaselineRecipe)
+	}
+
+	for _, name := range integrationUpTrackingRecipes {
+		vars, ok := recipes[name]
+		if !ok || len(vars) == 0 {
+			t.Fatalf("could not locate %s recipe's CAESIUM_* env vars in justfile; recipe parsing may be broken", name)
+		}
+
+		allowed := make(map[string]struct{}, len(integrationUpEnvAllowlist[name]))
+		for _, v := range integrationUpEnvAllowlist[name] {
+			allowed[v] = struct{}{}
+		}
+
+		missing := make([]string, 0)
+		for v := range baseline {
+			if _, present := vars[v]; present {
+				continue
+			}
+			if _, exempt := allowed[v]; exempt {
+				continue
+			}
+			missing = append(missing, v)
+		}
+		sort.Strings(missing)
+
+		if len(missing) > 0 {
+			t.Errorf("%s is missing CAESIUM_* env var(s) that %s sets: %v (add them to the recipe, or a justified entry to integrationUpEnvAllowlist)",
+				name, integrationUpBaselineRecipe, missing)
+		}
+	}
+}
+
+// parseJustfileRecipeEnvVars extracts, for every top-level justfile recipe
+// (a line matching `^name:` with no leading whitespace), the set of
+// `CAESIUM_*` env var names referenced anywhere in its indented body (e.g. on
+// `-e CAESIUM_X=...` lines). A blank line or a new top-level line (recipe,
+// comment, or variable assignment) ends the current recipe's body.
+func parseJustfileRecipeEnvVars(justfile string) map[string]map[string]struct{} {
+	headerRe := regexp.MustCompile(`^([A-Za-z0-9_-]+):`)
+	envRe := regexp.MustCompile(`CAESIUM_[A-Z0-9_]+`)
+
+	recipes := make(map[string]map[string]struct{})
+	current := ""
+
+	for _, line := range strings.Split(justfile, "\n") {
+		if line == "" {
+			current = ""
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			if m := headerRe.FindStringSubmatch(line); m != nil {
+				current = m[1]
+				if _, ok := recipes[current]; !ok {
+					recipes[current] = make(map[string]struct{})
+				}
+			} else {
+				current = ""
+			}
+			continue
+		}
+		if current == "" {
+			continue
+		}
+		for _, v := range envRe.FindAllString(line, -1) {
+			recipes[current][v] = struct{}{}
+		}
+	}
+
+	return recipes
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 
