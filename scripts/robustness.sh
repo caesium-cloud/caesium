@@ -21,15 +21,22 @@ require_env() {
   fi
 }
 
-require_env CANDIDATE_SHA
-require_env ROBUSTNESS_ID
-require_env ARTIFACTS
 require_env CAESIUM_ROBUSTNESS_ID
 require_env CAESIUM_ROBUSTNESS_ARTIFACTS
 require_env CAESIUM_ROBUSTNESS_IMAGE
 require_env CAESIUM_ROBUSTNESS_SERVER_IMAGE
 require_env CAESIUM_ROBUSTNESS_KIND_IMAGE
 require_env CAESIUM_ROBUSTNESS_TASK_IMAGE
+
+# A1's documented invocation exports only CAESIUM_*; parent-shell assignments
+# of CANDIDATE_SHA/ROBUSTNESS_ID/ARTIFACTS are not in the child environment.
+ROBUSTNESS_ID="${ROBUSTNESS_ID:-$CAESIUM_ROBUSTNESS_ID}"
+ARTIFACTS="${ARTIFACTS:-$CAESIUM_ROBUSTNESS_ARTIFACTS}"
+if [[ -z "${CANDIDATE_SHA:-}" ]]; then
+  CANDIDATE_SHA="${CAESIUM_ROBUSTNESS_SERVER_IMAGE##*:}"
+fi
+[[ -n "$CANDIDATE_SHA" && "$CANDIDATE_SHA" != "$CAESIUM_ROBUSTNESS_SERVER_IMAGE" ]] \
+  || die "CANDIDATE_SHA is required (export it, or use caesiumcloud/caesium:<sha> as CAESIUM_ROBUSTNESS_SERVER_IMAGE)"
 
 [[ "$ROBUSTNESS_ID" == "$CAESIUM_ROBUSTNESS_ID" ]] || die "ROBUSTNESS_ID ($ROBUSTNESS_ID) != CAESIUM_ROBUSTNESS_ID ($CAESIUM_ROBUSTNESS_ID)"
 [[ "$ARTIFACTS" == "$CAESIUM_ROBUSTNESS_ARTIFACTS" ]] || die "ARTIFACTS ($ARTIFACTS) != CAESIUM_ROBUSTNESS_ARTIFACTS ($CAESIUM_ROBUSTNESS_ARTIFACTS)"
@@ -503,29 +510,30 @@ PY
 }
 
 task_dead() {
-  local node="$1" cid="$2" listing="$3"
-  python3 - "$cid" "$listing" <<'PY'
+  local cid="$1" listing="$2" seen="$3"
+  python3 - "$cid" "$listing" "$seen" <<'PY'
 import sys
 cid = sys.argv[1].strip()
 listing = sys.argv[2]
+seen = sys.argv[3] == "1"
 short = cid[:12] if len(cid) >= 12 else cid
-if not cid:
+if not cid or len(short) < 8:
     raise SystemExit("empty container id")
-low = listing.lower()
-if "gone" in low or "not found" in low or "no such" in low:
-    raise SystemExit(0)
 matched = False
 for line in listing.splitlines():
-    if cid in line or short in line:
-        matched = True
-        l = line.lower()
-        if "running" in l:
-            raise SystemExit("container still running")
-        if any(s in l for s in ("stopped", "exited", "killed", "unknown")):
-            raise SystemExit(0)
-if not matched:
+    if cid not in line and short not in line:
+        continue
+    matched = True
+    l = line.lower()
+    if "running" in l:
+        raise SystemExit("container still running")
+    if any(s in l for s in ("stopped", "exited", "killed")):
+        raise SystemExit(0)
+if matched:
+    raise SystemExit("container still present without stopped evidence")
+if seen:
     raise SystemExit(0)
-raise SystemExit("container still present without stopped evidence")
+raise SystemExit("container id never appeared in ctr tasks list")
 PY
 }
 
@@ -571,16 +579,29 @@ handle_host_request() {
         LAST_REQUEST_ID="$request_id"
         return 0
       fi
-      docker exec "$node" ctr -n k8s.io tasks kill --signal SIGKILL "$cid" >"$ARTIFACTS/ctr-kill-$cid.txt" 2>&1 || true
-      listing="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
-      printf '%s\n' "$listing" >"$ARTIFACTS/ctr-tasks-after-kill.txt"
+      listing=""
+      killed=0
+      seen_cid=0
+      for _try in $(seq 1 20); do
+        docker exec "$node" ctr -n k8s.io tasks kill --signal SIGKILL "$cid" >"$ARTIFACTS/ctr-kill-$cid.txt" 2>&1 || true
+        listing="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
+        printf '%s\n' "$listing" >"$ARTIFACTS/ctr-tasks-after-kill.txt"
+        short_cid="${cid:0:12}"
+        if [[ "$listing" == *"$cid"* || "$listing" == *"$short_cid"* ]]; then
+          seen_cid=1
+        fi
+        if task_dead "$cid" "$listing" "$seen_cid"; then
+          killed=1
+          break
+        fi
+        sleep 1
+      done
       evidence="$(printf 'kubelet stopped on %s\nctr kill %s\n%s\n' "$node" "$cid" "$listing")"
-      if ! task_dead "$node" "$cid" "$listing"; then
+      if [[ "$killed" -ne 1 ]]; then
         write_ack "$request_id" "$action" "failed" "$evidence" "process still running"
         LAST_REQUEST_ID="$request_id"
         return 0
       fi
-      evidence="${evidence}"$'\n'"GONE"
       write_ack "$request_id" "$action" "ok" "$evidence"
       ;;
     restart)

@@ -52,6 +52,11 @@ type Task struct {
 	Error     string `json:"error,omitempty"`
 }
 
+type CatalogTask struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 type QueryResponse struct {
 	RowCount int              `json:"row_count"`
 	Columns  []map[string]any `json:"columns"`
@@ -166,6 +171,25 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 		return Run{}, raw, fmt.Errorf("run job_id %s does not match %s", run.JobID, id)
 	}
 	return run, raw, nil
+}
+
+func (h *HTTP) ListJobTasks(ctx context.Context, base, jobID string) ([]CatalogTask, error) {
+	jid, err := uuid.Parse(jobID)
+	if err != nil {
+		return nil, err
+	}
+	status, raw, err := h.Do(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/v1/jobs/"+jid.String()+"/tasks", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("list job tasks status %d: %s", status, truncate(raw, 1024))
+	}
+	var tasks []CatalogTask
+	if err := json.Unmarshal(raw, &tasks); err != nil {
+		return nil, fmt.Errorf("decode job tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 func (h *HTTP) GetRun(ctx context.Context, base, jobID, runID string) (Run, error) {

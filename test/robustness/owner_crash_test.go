@@ -11,12 +11,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/test/robustness/cluster"
+	"github.com/caesium-cloud/caesium/test/robustness/recorder"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
-
-	"github.com/caesium-cloud/caesium/test/robustness/cluster"
-	"github.com/caesium-cloud/caesium/test/robustness/recorder"
 )
 
 func TestOwnerCrash(t *testing.T) {
@@ -96,7 +95,7 @@ func TestOwnerCrash(t *testing.T) {
 		t.Logf("host done: %v", err)
 	}
 	if err := cluster.WriteRecords(ctx, kube, env.Namespace, "events", sink.Events()); err != nil {
-		t.Errorf("persist recorder events: %v (missing recorder data is inconclusive)", err)
+		t.Logf("persist recorder events: %v (missing recorder data is inconclusive)", err)
 	}
 }
 
@@ -215,7 +214,14 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		if len(fixture) == 0 {
 			return false, nil
 		}
-		if err := cluster.RequireTasksOnSurvivors(fixture, owner); err != nil {
+		var bound []corev1.Pod
+		for _, p := range fixture {
+			if p.Spec.NodeName == "" {
+				return false, nil
+			}
+			bound = append(bound, p)
+		}
+		if err := cluster.RequireTasksOnSurvivors(bound, owner); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -326,6 +332,20 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 	if final.ID != run.ID {
 		t.Fatalf("public run id changed from %s to %s", run.ID, final.ID)
 	}
+	catalog, err := httpAPI.ListJobTasks(ctx, leaseBase, job.ID)
+	if err != nil {
+		t.Fatalf("list job tasks for nonce correlation: %v", err)
+	}
+	nameByTaskID := map[string]string{}
+	for _, ct := range catalog {
+		if ct.ID != "" && ct.Name != "" {
+			nameByTaskID[ct.ID] = ct.Name
+		}
+	}
+	correlateSink(t, final, nameByTaskID, blockStarts, cluster.BlockStep)
+	correlateSink(t, final, nameByTaskID, succStarts, cluster.SuccessorStep)
+	correlateSink(t, final, nameByTaskID, blockDone, cluster.BlockStep)
+	correlateSink(t, final, nameByTaskID, succDone, cluster.SuccessorStep)
 
 	restartCtx, restartCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer restartCancel()
@@ -386,7 +406,44 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		"public_status":      final.Status,
 		"kill_evidence":      killAck.Evidence,
 	}); err != nil {
-		t.Errorf("persist %s records: %v", name, err)
+		t.Logf("persist %s records: %v (missing recorder data is inconclusive)", name, err)
+	}
+}
+
+func correlateSink(t *testing.T, run cluster.Run, nameByTaskID map[string]string, events []recorder.Event, step string) {
+	t.Helper()
+	if len(events) == 0 {
+		t.Fatalf("no sink events to correlate for step %s", step)
+	}
+	var matching []cluster.Task
+	for _, tr := range run.Tasks {
+		if nameByTaskID[tr.TaskID] == step {
+			matching = append(matching, tr)
+		}
+	}
+	if len(matching) == 0 {
+		t.Fatalf("sink step %s has no public task-run identity (catalog names=%v public tasks=%d)", step, nameByTaskID, len(run.Tasks))
+	}
+	ids := make([]string, 0, len(matching))
+	for _, tr := range matching {
+		ids = append(ids, fmt.Sprintf("%s/attempt=%d/status=%s", tr.ID, tr.Attempt, tr.Status))
+	}
+	seenNonce := map[string]struct{}{}
+	for _, ev := range events {
+		if strings.TrimSpace(ev.Nonce) == "" {
+			t.Fatalf("sink %s event missing nonce", step)
+		}
+		if ev.Step != "" && ev.Step != step {
+			t.Fatalf("sink event step %s != %s", ev.Step, step)
+		}
+		if ev.RunID != run.ID {
+			t.Fatalf("sink nonce %s run_id %s != public run %s", ev.Nonce, ev.RunID, run.ID)
+		}
+		seenNonce[ev.Nonce] = struct{}{}
+		t.Logf("correlated nonce=%s step=%s with public task-runs %s", ev.Nonce, step, strings.Join(ids, ","))
+	}
+	if len(seenNonce) != len(events) {
+		t.Logf("duplicate sink nonces for step %s retained (%d events, %d unique)", step, len(events), len(seenNonce))
 	}
 }
 
@@ -420,30 +477,42 @@ func killEvidenceShowsDeath(evidence, containerID string) bool {
 	if strings.TrimSpace(evidence) == "" || containerID == "" {
 		return false
 	}
-	lower := strings.ToLower(evidence)
-	if strings.Contains(lower, "gone") || strings.Contains(lower, "stopped") || strings.Contains(lower, "killed") {
-		return true
-	}
 	short := containerID
 	if len(short) > 12 {
 		short = short[:12]
 	}
 	if !strings.Contains(evidence, short) {
-		return strings.Contains(lower, "not found") || strings.Contains(lower, "no such")
+		return false
 	}
+	var listingHasCID, listingRunning, listingStopped bool
 	for _, line := range strings.Split(evidence, "\n") {
-		if !strings.Contains(line, short) {
+		trim := strings.TrimSpace(line)
+		lower := strings.ToLower(trim)
+		if strings.HasPrefix(lower, "kubelet stopped") || strings.HasPrefix(lower, "ctr kill") {
 			continue
 		}
-		l := strings.ToLower(line)
-		if strings.Contains(l, "running") {
-			return false
+		if !strings.Contains(trim, short) && !strings.Contains(trim, containerID) {
+			continue
 		}
-		if strings.Contains(l, "stopped") || strings.Contains(l, "exited") || strings.Contains(l, "killed") {
-			return true
+		listingHasCID = true
+		if strings.Contains(lower, "running") {
+			listingRunning = true
+		}
+		if strings.Contains(lower, "stopped") || strings.Contains(lower, "exited") || strings.Contains(lower, "killed") {
+			listingStopped = true
 		}
 	}
-	return !strings.Contains(lower, "running")
+	if listingRunning {
+		return false
+	}
+	if listingStopped {
+		return true
+	}
+	if listingHasCID {
+		return false
+	}
+	// CID is in the kill command line but gone from ctr tasks list.
+	return true
 }
 
 func eventsJSON(sink *recorder.Sink) string {

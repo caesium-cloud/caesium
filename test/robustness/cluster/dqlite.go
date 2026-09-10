@@ -5,6 +5,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -153,8 +154,8 @@ func WaitMembership(ctx context.Context, addresses []string) (Membership, error)
 }
 
 func HostIP(addr string) string {
-	host, _, ok := strings.Cut(addr, ":")
-	if !ok {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
 		return addr
 	}
 	return host
