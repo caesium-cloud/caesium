@@ -582,14 +582,20 @@ handle_host_request() {
       listing=""
       killed=0
       seen_cid=0
+      short_cid="${cid:0:12}"
+      before="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
+      printf '%s\n' "$before" >"$ARTIFACTS/ctr-tasks-before-kill.txt"
+      if [[ "$before" == *"$cid"* || "$before" == *"$short_cid"* ]]; then
+        seen_cid=1
+      else
+        write_ack "$request_id" "$action" "failed" "$before" "owner container $cid not in ctr tasks list before kill"
+        LAST_REQUEST_ID="$request_id"
+        return 0
+      fi
       for _try in $(seq 1 20); do
         docker exec "$node" ctr -n k8s.io tasks kill --signal SIGKILL "$cid" >"$ARTIFACTS/ctr-kill-$cid.txt" 2>&1 || true
         listing="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
         printf '%s\n' "$listing" >"$ARTIFACTS/ctr-tasks-after-kill.txt"
-        short_cid="${cid:0:12}"
-        if [[ "$listing" == *"$cid"* || "$listing" == *"$short_cid"* ]]; then
-          seen_cid=1
-        fi
         if task_dead "$cid" "$listing" "$seen_cid"; then
           killed=1
           break
