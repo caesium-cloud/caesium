@@ -664,9 +664,16 @@ dispatch:
 	}
 	close(queue)
 	workers.Wait()
+	workloadFinished := time.Now()
 	close(stopSamples)
 	collected := <-sampled
-	samples = append(samples, collected.samples...)
+	for _, sample := range collected.samples {
+		// A slow scrape that finishes after the workers cannot establish coverage
+		// of execution. The explicit final scrape records the post-workload state.
+		if sample.ts.Before(workloadFinished) {
+			samples = append(samples, sample)
+		}
+	}
 	end, err = sampleMetrics(ctx, h.client)
 	if err == nil {
 		end.phase = "final"
@@ -697,7 +704,13 @@ dispatch:
 			}
 		}
 	}
-	if len(collected.samples) == 0 && time.Since(baseline.ts) >= h.cfg.sampleRate {
+	periodicSamples := 0
+	for _, sample := range samples {
+		if sample.phase == "periodic" {
+			periodicSamples++
+		}
+	}
+	if periodicSamples == 0 && workloadFinished.Sub(baseline.ts) >= h.cfg.sampleRate {
 		sampleErr = errors.Join(sampleErr, errors.New("missing periodic samples during workload"))
 	}
 	if ctx.Err() != nil {
