@@ -374,28 +374,29 @@ within their resolved contract and available test infrastructure.
 
 ## Progress (as of 2026-09-10)
 
-**W1 is awaiting implementation merges and N-1; it is not complete.** A1's
-reviewed decision record is merged. E1 and G1 are implemented, verified and
-ready for review, but remain open and unchecked. The other 24 implementation
-items have not been dispatched. W1 selected A1, E1 and G1 from `5a89c851`
-(plan PR #461); its current implementation candidates include master
-`dd35ba42`. The execution endpoint remains review PRs. No repository settings
-have changed and no W2 work has started.
+**W1 implementation is merged; W1/N-1 is in [#469](https://github.com/caesium-cloud/caesium/pull/469).**
+A1, E1 and G1 have merged acceptance evidence and are checked. The other 24
+implementation items remain undispatched. This documentation checkpoint is
+based on merged master `646c9219`, which includes all three items and the index
+prerequisite. Merging #469 completes W1/N-1; until then, resume this checkpoint
+rather than dispatching W2. No repository settings have changed.
 
 | W1 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
 | α | A1 / [#465](https://github.com/caesium-cloud/caesium/pull/465), merged | Merge `39957b9d67621a88049decd39879a74b79520618`. Decision record independently reviewed; pre-trigger task-placement finding fixed. Structural/link checks pass. This completes the decision record, not runtime fault certification: cluster, proxy and quorum-loss experiments remain unrun and stronger contracts remain unresolved. |
-| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), ready for review | Candidate `9174179615341cc9059d9bad0ecb3931facb20b4`. [CI run 34499466191](https://github.com/caesium-cloud/caesium/actions/runs/34499466191): all 35 executed checks pass; tag-only publish skipped. Full local containerized lint/unit pass. Fresh product live success/bad-image/unavailable cases return 0/1/1 with reconciled counts; successful serial workload has 3/3 runs and 37 samples across 7.0212 seconds, with early/middle coverage in each run. Independent and external reviews have no actionable findings. Awaiting merge. |
-| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), ready for review | Candidate `7fcc1fd75b235066b27d66328d4293a34ce424b9`. [CI run 34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605): all 35 executed checks pass; tag-only publish skipped. All 15 Python validators and actionlint pass. Native Chromium fail-once proof using unchanged G1 configuration exits 1 despite a passing retry. Fresh hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); both uploaded artifacts were recursively checked for API-key tokens. Tested merge `ffe74c5a` has parents `dd35ba42` and `7fcc1fd7`. Independent and external reviews have no actionable findings. Awaiting merge. |
+| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), merged | Merge `646c92197ae2f8c4277583712e5a164ce3a2a005`; verified candidate `9174179615341cc9059d9bad0ecb3931facb20b4`. [CI run 34499466191](https://github.com/caesium-cloud/caesium/actions/runs/34499466191): all 35 executed checks pass; tag-only publish skipped. Full local containerized lint/unit pass. Fresh product live success/bad-image/unavailable cases return 0/1/1 with reconciled counts; successful serial workload has 3/3 runs and 37 samples across 7.0212 seconds, with early/middle coverage in each run. Independent and external reviews have no actionable findings. |
+| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), merged | Merge `80273d3fe29ecf3a9df84d868a085df944959d3c`; verified candidate `7fcc1fd75b235066b27d66328d4293a34ce424b9`. [CI run 34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605): all 35 executed checks pass; tag-only publish skipped. All 15 Python validators and actionlint pass. Native Chromium fail-once proof using unchanged G1 configuration exits 1 despite a passing retry. Fresh hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); both uploaded artifacts were recursively checked for API-key tokens. Tested merge `ffe74c5a` has parents `dd35ba42` and `7fcc1fd7`. Independent and external reviews have no actionable findings. |
 | Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), merged | Merge `2d28607feb50412b273abefc0aae94da64bf0099`. The one-line README convention repair is incorporated in both candidates. The formerly failing index guardrail now passes locally and on both CI architectures. No guardrail or test floor changed; this is not N-1 completion. |
 
-**W1/N-1 remains pending.** After E1 and G1 merge, author the dedicated runbook
-sync from their merged base, update their checkboxes and merge SHAs here, and
-record the N-1 PR and merge SHA. The shared runbook continues to describe the
-previously shipped behavior until that checkpoint lands. Do not close W1 or
-dispatch W2 before N-1 is merged. No additional implementation defect or CI
-blocker is known at the recorded candidates; merge authorization and subsequent
-review/base changes still need to be assessed when resuming.
+**W1/N-1 — [#469](https://github.com/caesium-cloud/caesium/pull/469): merge pending.**
+This PR synchronizes `docs/ci.md` with shipped load-harness exit/report behavior,
+browser diagnostics and Python validator discovery, and updates the README and
+roadmap status links. Its merge SHA is unavailable until merge; on resume,
+resolve #469's live merge commit and record it in the next Progress update.
+The presence of this checkpoint on the default branch, together with #469's
+verified merged state, closes W1 without another status-only PR. The overall
+27-item plan remains active; new multi-node fault guarantees and calibrated
+performance gates have not shipped in W1.
 
 ### Resume and tracking rules
 
@@ -408,10 +409,10 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile these
 rows against live PR state, head/merge SHAs, reviews and current-head checks.
-Resume W1's existing branches/PRs while it is unfinished. Keep E1/G1 unchecked
-until verified merge; checkboxes mean merged acceptance evidence, while the
-rows distinguish implementation and verification from merge. Once N-1 lands,
-select the next dependency-ready items while preserving unresolved Q1–Q6 and
+Resume #469 while W1/N-1 is unfinished. Checkboxes mean merged acceptance
+evidence; rows distinguish implementation and verification from merge. Once
+N-1 is verified merged, record its merge SHA and select W2 in that invocation;
+choose dependency-ready items while preserving unresolved Q1–Q6 and
 shared-file ownership. Dependency readiness alone does not authorize dispatch
 before the current wave's checkpoint.
 
@@ -419,13 +420,13 @@ before the current wave's checkpoint.
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 merged #465; A2 awaits merged G1 and W1/N-1 |
+| A | Contracts and scenario evidence (2 items) | P0 | A1 and G1 merged; A2 undispatched until W1/N-1 |
 | B | Real multi-node robustness (3 items) | P0 | A1 prerequisite merged; B1 undispatched until W1/N-1 |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | A1 prerequisite merged; C1 undispatched until W1/N-1 |
 | D | Developer and Console journeys (3 items) | P0 | A1 prerequisite merged; D1 undispatched until W1/N-1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 ready #466, awaiting merge; E5 awaits merged E1; E4 needs Q2/Q5 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466; E2/E5 dependency-ready after W1/N-1; E4 needs Q2/Q5 |
 | F | Upgrades, durability, and sustained faults (4 items) | P1 | Undispatched; F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 ready #464, awaiting merge; G3/G5 remain dependency-blocked |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464; G3/G5 remain dependency-blocked |
 
 ## Streams
 
@@ -503,7 +504,7 @@ below is mandatory, including append-only edits.
 
 ### Stream E — Performance with correctness
 
-- [ ] E1. Make the existing load harness report and exit honestly.
+- [x] E1. Make the existing load harness report and exit honestly.
   Files: `test/load/harness.go`, new `test/load/harness_test.go`, `justfile` (load-test recipe only).
   Depends on: none.
   Verify: reject invalid/zero configuration, use an overall deadline, sample metrics concurrently with submission, and return failure when expected runs fail, time out, cannot be triggered, or required samples are missing. Emit versioned machine-readable results with exact expected/observed counts and a usable failure classification. A live successful workload exits zero; deliberate bad-image and unavailable-server workloads exit nonzero. A controlled slow workload proves samples cover early and middle execution, including concurrency=1. Validate the reporter with fixtures as well as the live runs. Preserve useful existing human reports and execute the recipe inside the repository's containerized toolchain.
@@ -552,7 +553,7 @@ below is mandatory, including append-only edits.
 
 ### Stream G — Diagnostics, coverage, and enforceable CI
 
-- [ ] G1. Preserve first-attempt failures and discover all Python validator tests
+- [x] G1. Preserve first-attempt failures and discover all Python validator tests
   Files: `ui/playwright.config.ts`, `.github/workflows/ci.yml`, `scripts/test_ci.py`.
   Depends on: none.
   Verify: Make browser retries retain diagnostic evidence without erasing initial failure; a temporary controlled fail-once scenario must fail and upload its trace. Upload reports/screenshots/video/server logs including setup failure, and retain structured outcomes. In the same PR widen ci-config discovery from `test_ci.py` to `test_*.py` and assert that command in `scripts/test_ci.py`; a temporary extra matching test that fails must fail ci-config. This ensures A2's `test_test_evidence.py`, E3's `test_compare_performance.py`, and G2's `test_coverage.py` run immediately when introduced. Keep upload errors visible without masking the original failure; no automatic quarantine, reduced floors, or erased first attempts.
