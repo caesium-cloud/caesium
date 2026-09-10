@@ -178,7 +178,6 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		}
 	})
 
-	triggeredAt := time.Now().UTC()
 	run, raw, err := httpAPI.TriggerRun(ctx, owner.HTTPBase(), job.ID)
 	if err != nil {
 		t.Fatalf("DT-ADMIT-01 trigger against %s: %v", owner.HTTPBase(), err)
