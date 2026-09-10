@@ -308,6 +308,36 @@ fi
 load_kind_image "$RUNNER_IMAGE"
 load_kind_image "$TASK_IMAGE"
 
+imported_digest() {
+  local node="$1" needle="$2"
+  docker exec "$node" ctr -n k8s.io images ls | python3 -c '
+import sys
+needle = sys.argv[1]
+for line in sys.stdin:
+    if needle not in line:
+        continue
+    for tok in line.split():
+        if tok.startswith("sha256:") and len(tok) > 20:
+            print(tok)
+            raise SystemExit
+raise SystemExit("no sha256 digest for " + needle)
+' "$needle"
+}
+
+WORKER_NODE=""
+for n in "${KIND_NODES[@]}"; do
+  if [[ "$n" != *control-plane* ]]; then
+    WORKER_NODE="$n"
+    break
+  fi
+done
+[[ -n "$WORKER_NODE" ]] || die "no kind worker for imported digest"
+IMPORTED_DIGEST="$(imported_digest "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}")"
+log "host_image_id=$CANDIDATE_DIGEST imported_digest=$IMPORTED_DIGEST"
+CANDIDATE_DIGEST="$IMPORTED_DIGEST"
+printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/candidate-digest.txt"
+printf '%s\n' "$IMPORTED_DIGEST" >"$ARTIFACTS/imported-digest.txt"
+
 TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 (( ${#TOKEN} >= 32 )) || die "generated internal token is shorter than 32 bytes"
 printf '%s\n' "$TOKEN" >"$ARTIFACTS/internal-token.txt"
@@ -324,10 +354,10 @@ helm install caesium "$ROOT/helm/caesium" \
   --wait --timeout 240s
 
 log "verifying three bound PVCs, distinct members, and candidate image IDs"
-python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_DIGEST" <<'PY'
+python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_DIGEST" "$CANDIDATE_SHA" <<'PY'
 import json, subprocess, sys
 
-kube, ns, digest = sys.argv[1:]
+kube, ns, digest, tag = sys.argv[1:]
 digest = digest.replace("sha256:", "")
 
 def kc(*args):
@@ -356,9 +386,12 @@ for p in caesium:
     if "control-plane" in node or "controlplane" in node:
         raise SystemExit(f"pod {p['metadata']['name']} on control-plane node {node}")
     cs = next(c for c in p["status"]["containerStatuses"] if c["name"] == "caesium")
+    image = cs.get("image") or ""
+    if tag not in image:
+        raise SystemExit(f"pod {p['metadata']['name']} image {image} does not use candidate tag {tag}")
     image_id = cs.get("imageID") or ""
     if digest not in image_id.replace("sha256:", ""):
-        raise SystemExit(f"pod {p['metadata']['name']} imageID {image_id} does not match candidate {digest}")
+        raise SystemExit(f"pod {p['metadata']['name']} imageID {image_id} does not match imported candidate {digest}")
     uids.add(uid); ips.add(ip); nodes.add(node); digests.add(image_id)
 
 if len(uids) != 3 or len(ips) != 3 or len(nodes) != 3:
