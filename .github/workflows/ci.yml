@@ -845,6 +845,8 @@ jobs:
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
             -e CAESIUM_CACHE_ENABLED=true \
+            -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+            -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
             -e CAESIUM_DATABASE_SHARDS=4 \
             -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
             --user 0:0 \

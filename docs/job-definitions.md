@@ -728,6 +728,33 @@ Two consequences of the frozen fields are worth calling out for operators:
 - Run `caesium job schema --doc` to print the generated schema reference (also stored in `docs/job-schema-reference.md`).
 - Append `--summary --path <dir>` to produce a conformance report that aggregates trigger types, engines, and callbacks used in the supplied manifests. Add `--markdown` to emit the report as Markdown for CI artifacts.
 
+## Image Digest Pinning and Private Registries
+
+`cache.pinDigests: true` (job- or step-level; global default `CAESIUM_CACHE_PIN_DIGESTS`) resolves each step's image tag to its content digest and folds the digest — not the mutable tag — into the cache key, so a tag that is re-pushed produces a cache **miss** instead of a stale hit. The resolved digest is recorded as `resolved_image_digest` on the task run and in the reproduce descriptor. The tag→digest mapping is a perf cache reused for `cache.digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, `5m`); `digestTTL: 0` re-resolves on every check.
+
+Resolution works on every engine:
+
+| Engine | How the digest is resolved |
+|---|---|
+| `docker` | The local daemon first (an image that is already present costs no network I/O); if absent, a registry manifest `HEAD`; if that fails too, a pull using the credentials below, then inspect. |
+| `podman`, `kubernetes` | Directly against the registry (Docker Registry HTTP API v2 manifest `HEAD` — no layers are pulled). Neither engine exposes a pre-run digest source, so the server asks the registry itself. |
+
+Resolution failures (registry unreachable, tag missing, credentials rejected) fall back to the literal tag and are logged; a cache miss is always safe, so an unresolved digest never serves a stale result — it only loses the tamper-evidence for that step.
+
+### Registry credentials
+
+Private registries are authenticated with `CAESIUM_REGISTRY_AUTH`, a comma-separated map of registry host to the `secret://` reference that holds the pull credentials. The credential itself never appears in the environment; it is resolved through the same secret providers as job `env` values (`env`, `k8s`, `vault`):
+
+```sh
+CAESIUM_REGISTRY_AUTH="ghcr.io=secret://env/GHCR_PULL,registry.example.com:5000=secret://vault/kv/data/registry#pull,docker.io=secret://k8s/regcred?key=.dockerconfigjson"
+```
+
+- Hosts match case-insensitively. Docker Hub may be written as `docker.io`, `index.docker.io`, or the `config.json` form `https://index.docker.io/v1/`. A host without a port matches that host on any port; a host with a port matches exactly and wins.
+- The referenced secret's value may be `username:password` (the password may contain colons), a JSON object `{"username": "...", "password": "..."}`, or a Docker `config.json` / Kubernetes `.dockerconfigjson` document — so an existing `imagePullSecret` can be reused verbatim. Token-based registries fit the same shape (`oauth2accesstoken:<token>` for GCR, `AWS:<token>` for ECR, `<user>:<PAT>` for GHCR).
+- Unmapped registries are probed anonymously (public images, including Docker Hub's anonymous token flow, still resolve). A registry that demands credentials none are configured for fails resolution with a message naming the host and this variable; credentials are never logged or echoed in errors.
+- The same credentials are sent as `RegistryAuth` when the Docker digest path has to pull an image. They do **not** configure the engines' own runtime pulls: the Docker/Podman daemons keep using their credential stores and Kubernetes its `imagePullSecrets`, exactly as before.
+- Loopback registries (`localhost`, `127.0.0.0/8`, `::1`) are addressed over plain HTTP, matching the Docker daemon's default insecure-registry rule; everything else is HTTPS.
+
 ## Git Sync Configuration
 
 - Enable continuous Git ingestion by setting `CAESIUM_JOBDEF_GIT_ENABLED=true` in the scheduler environment.

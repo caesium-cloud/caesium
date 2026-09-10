@@ -493,31 +493,34 @@ design:
       `imagecheck.Default().Resolve(ctx, engine, ref, 0)` (TTL 0 forces a fresh
       registry round-trip; a `@sha256:` reference is trusted verbatim by
       `digestFromReference`); `imagecheck.ErrDigestUnavailable` is the refusal.
-      **Engine limitation (verified, decides the v1 rule):**
-      `imagecheck.NewResolver` wires a digest backend for
-      `models.AtomEngineDocker` only (`r.byEngine[models.AtomEngineDocker] =
-      dockerDigestFunc`), and `Resolve` returns `ErrDigestUnavailable` +
-      `cacheNegative` whenever `fn == nil` — so podman and k8s baselines can
-      *never* resolve a tag. **v1 rule (revised 2026-09-06 after review):** a
-      candidate whose digest cannot be established is **refused on every
-      engine** with a typed `ErrCandidateUnpinned` whose message names the
-      accepted form (`image@sha256:…`) and the CLI flag that produces it —
-      accepting a mutable tag on podman/kubernetes would let each replay task
-      resolve the image independently at container-create time, so a tag that
-      moves during an N-run backtest (or workers holding different cached
-      versions) would combine results from different images under one
-      candidate verdict, which is exactly the identity guarantee the design
-      requires. A `@sha256:` candidate reference is accepted on any engine
-      (`digestFromReference` short-circuits before the backend lookup), so the
-      helm/kind and podman lanes stay usable: their scenarios pass a digest
-      reference obtained in the harness (`docker manifest inspect` / image
-      inspect on the fixture image), and D2's `--image` gains a
-      `--resolve-digest` behaviour (default on) that pins client-side before
-      submission using the local container CLI or a registry manifest HEAD,
-      so an operator can still type a tag. The engine-independent registry
-      resolver that would let the server resolve tags for podman/k8s itself is
-      the Plan 0 N-3 follow-up ("Podman/k8s pre-run digest resolution"); when it
-      ships, the refusal narrows to genuinely unresolvable references. No
+      **Engine coverage (revised 2026-09-09, #405 shipped):**
+      `imagecheck.NewResolver` now wires a digest backend for **every**
+      engine: docker resolves via the local daemon, then the registry, then an
+      authenticated pull; podman and kubernetes resolve through the
+      engine-independent registry client (`imagecheck.RegistryClient`, a
+      manifest `HEAD` with bearer/basic auth from `CAESIUM_REGISTRY_AUTH` →
+      `secret://` providers). `Resolve` still returns `ErrDigestUnavailable`
+      + `cacheNegative` when the registry is unreachable, rejects the
+      configured credentials, or the tag does not exist — those are the
+      *genuinely unresolvable* references. **v1 rule (revised 2026-09-06 after
+      review; scope narrowed 2026-09-09):** a candidate whose digest cannot be
+      established is **refused on every engine** with a typed
+      `ErrCandidateUnpinned` whose message names the accepted form
+      (`image@sha256:…`) and the CLI flag that produces it — accepting a
+      mutable tag on podman/kubernetes would let each replay task resolve the
+      image independently at container-create time, so a tag that moves
+      during an N-run backtest (or workers holding different cached versions)
+      would combine results from different images under one candidate
+      verdict, which is exactly the identity guarantee the design requires.
+      With #405 the refusal fires only for references the server itself cannot
+      resolve (no `ErrDigestUnavailable` is engine-dependent any more), so a
+      plain tag on a reachable registry — public or private with
+      `CAESIUM_REGISTRY_AUTH` — is pinned server-side on podman/k8s exactly as
+      on docker. A `@sha256:` candidate reference is still accepted on any
+      engine (`digestFromReference` short-circuits before the backend lookup),
+      and D2's `--image` keeps its `--resolve-digest` behaviour (default on)
+      that pins client-side before submission, so an operator can type a tag
+      even where the server has no registry credentials. No
       `digest_unresolved` caveat state exists — a backtest either has one digest
       for all N runs or it is not created.
       Replay's own fan-out

@@ -175,6 +175,12 @@ type TaskRun struct {
 	Quarantine       bool            `json:"quarantine"`
 	CacheHit         bool            `json:"cache_hit"`
 	ReplaySafe       bool            `json:"replay_safe"`
+	// ResolvedImageDigest is the content digest (sha256:...) the image tag
+	// resolved to when cache.pinDigests is on — the value folded into the
+	// cache key in place of the mutable tag. Empty when pinning is off or the
+	// digest could not be resolved (the key fell back to the tag). Read
+	// surface: it is how an operator sees whether a step was actually pinned.
+	ResolvedImageDigest string `json:"resolved_image_digest,omitempty"`
 	// The remaining frozen execution inputs. They are `json:"-"` because they
 	// are not API surface — they exist so the LOCAL executor can run a task from
 	// the same row the distributed worker runs it from (issue #354). The
@@ -5605,6 +5611,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
 		Quarantine:              model.Quarantine,
 		ReplaySafe:              model.ReplaySafe,
+		ResolvedImageDigest:     model.ResolvedImageDigest,
 		CacheEnabled:            model.CacheEnabled,
 		CacheTTL:                model.CacheTTL,
 		CacheVersion:            model.CacheVersion,
