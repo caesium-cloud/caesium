@@ -43,6 +43,7 @@ wget -qO- "${RECORDER}/probe/${PROBE_ID}"
 		Steps: []jobdef.Step{
 			{
 				Name:    ProbeStep,
+				Type:    jobdef.StepTypeTask,
 				Engine:  jobdef.EngineKubernetes,
 				Image:   taskImage,
 				Command: []string{"sh", "-c", script},
@@ -95,6 +96,7 @@ wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$
 		Steps: []jobdef.Step{
 			{
 				Name:    BlockStep,
+				Type:    jobdef.StepTypeTask,
 				Engine:  jobdef.EngineKubernetes,
 				Image:   taskImage,
 				Command: []string{"sh", "-c", block},
@@ -102,6 +104,7 @@ wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$
 			},
 			{
 				Name:      SuccessorStep,
+				Type:      jobdef.StepTypeTask,
 				Engine:    jobdef.EngineKubernetes,
 				Image:     taskImage,
 				Command:   []string{"sh", "-c", successor},
