@@ -73,7 +73,7 @@ func (s *Sink) Start() error {
 	mux.HandleFunc("/release", s.handleRelease)
 	mux.HandleFunc("/records", s.handleRecords)
 
-	ln, err := net.Listen("tcp", ListenAddr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ListenAddr)
 	if err != nil {
 		return err
 	}
