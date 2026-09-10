@@ -372,50 +372,60 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-09)
+## Progress (as of 2026-09-10)
 
-No implementation waves have shipped. All 27 implementation items remain
-unchecked pending merged acceptance evidence. W1 selected the three independent
-ready items A1, E1 and G1 from base `5a89c851` (plan PR #461). The execution
-endpoint is review PRs; no implementation or repository-setting change has
-been merged by this wave, and no later-wave item has been dispatched.
+**W1 is awaiting implementation merges and N-1; it is not complete.** A1's
+reviewed decision record is merged. E1 and G1 are implemented, verified and
+ready for review, but remain open and unchecked. The other 24 implementation
+items have not been dispatched. W1 selected A1, E1 and G1 from `5a89c851`
+(plan PR #461); its current implementation candidates include master
+`dd35ba42`. The execution endpoint remains review PRs. No repository settings
+have changed and no W2 work has started.
 
-| W1 stream | Item / PR | Reviewed implementation evidence and disposition |
+| W1 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
-| α | A1 / [#465](https://github.com/caesium-cloud/caesium/pull/465) | Decision-record content at `4c1576c1` independently reviewed. The pre-trigger task-placement finding is fixed; no remaining confirmed findings. Structural/link checks pass. Cluster, proxy and quorum-loss experiments remain explicitly unrun. |
-| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), draft | Candidate `db270bcc`: focused container race tests, vet and lint pass; final live success/bad-image/unavailable cases return 0/1/1 with reconciled counts. Serial execution has 37 samples and early/middle coverage in all three runs. Independent review has no findings. Full integration passes (204 scenarios, 33 expected mode skips; 635.306 seconds); full unit testing is blocked only by the inherited index failure below. |
-| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), draft | Candidate `d3589cec`: 15 Python validators and actionlint pass. Native Chromium fail-once proof exits 1 despite a passing retry. Credential exposure in trace/report contents is fixed and independently rechecked; sanitized HTML/trace remain readable. Both hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); sanitized uploads were downloaded and verified against tested merge candidate `357ed12d` (parents: execution base and `d3589cec`). Full unit gates remain blocked by the inherited index failure. |
-| Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), ready for review | Candidate `948cd50f`: one-line `docs/README.md` convention repair; exact containerized guardrail and independent review pass. This is a separately scoped controller prerequisite, not an E1/G1 change or N-1 completion. |
+| α | A1 / [#465](https://github.com/caesium-cloud/caesium/pull/465), merged | Merge `39957b9d67621a88049decd39879a74b79520618`. Decision record independently reviewed; pre-trigger task-placement finding fixed. Structural/link checks pass. This completes the decision record, not runtime fault certification: cluster, proxy and quorum-loss experiments remain unrun and stronger contracts remain unresolved. |
+| β | E1 / [#466](https://github.com/caesium-cloud/caesium/pull/466), ready for review | Candidate `9174179615341cc9059d9bad0ecb3931facb20b4`. [CI run 34499466191](https://github.com/caesium-cloud/caesium/actions/runs/34499466191): all 35 executed checks pass; tag-only publish skipped. Full local containerized lint/unit pass. Fresh product live success/bad-image/unavailable cases return 0/1/1 with reconciled counts; successful serial workload has 3/3 runs and 37 samples across 7.0212 seconds, with early/middle coverage in each run. Independent and external reviews have no actionable findings. Awaiting merge. |
+| γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), ready for review | Candidate `7fcc1fd75b235066b27d66328d4293a34ce424b9`. [CI run 34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605): all 35 executed checks pass; tag-only publish skipped. All 15 Python validators and actionlint pass. Native Chromium fail-once proof using unchanged G1 configuration exits 1 despite a passing retry. Fresh hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); both uploaded artifacts were recursively checked for API-key tokens. Tested merge `ffe74c5a` has parents `dd35ba42` and `7fcc1fd7`. Independent and external reviews have no actionable findings. Awaiting merge. |
+| Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), merged | Merge `2d28607feb50412b273abefc0aae94da64bf0099`. The one-line README convention repair is incorporated in both candidates. The formerly failing index guardrail now passes locally and on both CI architectures. No guardrail or test floor changed; this is not N-1 completion. |
 
-The inherited unit blocker is `TestDocsREADMEIndexesEveryTopLevelDoc` reporting
-`extra=[distributed-testing.md]` after #461 added a nested Markdown link to the
-index. It reproduced in the full local E1 unit suite and arm64 CI with README
-and guardrail blobs unchanged from the execution base. #467 preserves the plan
-entry using the surrounding section's inline-code path convention; it changes
-no guardrail or test floor. Implementation PRs must refresh affected checks
-after this prerequisite lands before readiness can be claimed.
+**W1/N-1 remains pending.** After E1 and G1 merge, author the dedicated runbook
+sync from their merged base, update their checkboxes and merge SHAs here, and
+record the N-1 PR and merge SHA. The shared runbook continues to describe the
+previously shipped behavior until that checkpoint lands. Do not close W1 or
+dispatch W2 before N-1 is merged. No additional implementation defect or CI
+blocker is known at the recorded candidates; merge authorization and subsequent
+review/base changes still need to be assessed when resuming.
 
-**W1/N-1 remains pending.** The shared runbook still describes the previously
-shipped behavior. Its synchronization follows merged implementation PRs; this
-interim dashboard update records open work only. Pending checks and stronger
-unresolved contracts are not passing or shipped evidence.
+### Resume and tracking rules
 
-The orchestrator owns this dashboard, merged PR links, candidate/merge SHAs,
-verification artifacts, and blockers. An item checked in an unmerged PR is
-proposed completion, not shipped evidence. Resume an unfinished wave before
-assigning another wave number.
+The committed plan is the shared progress record; PR bodies hold detailed
+candidate evidence. The machine-local `.codex/runs/distributed-testing/w1/state.md`
+is a recovery aid, not a replacement for this dashboard. The orchestrator keeps
+Progress current when PRs are published, revised, verified or merged, including
+at a review-only endpoint. Interim Progress corrections do not wait for N-1;
+N-1 consolidates the shared runbook after implementation merges.
+
+On every `exec-plan-wave` invocation, fetch the current base and reconcile these
+rows against live PR state, head/merge SHAs, reviews and current-head checks.
+Resume W1's existing branches/PRs while it is unfinished. Keep E1/G1 unchecked
+until verified merge; checkboxes mean merged acceptance evidence, while the
+rows distinguish implementation and verification from merge. Once N-1 lands,
+select the next dependency-ready items while preserving unresolved Q1–Q6 and
+shared-file ownership. Dependency readiness alone does not authorize dispatch
+before the current wave's checkpoint.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 in review #465; A2 awaits merged A1/G1 |
-| B | Real multi-node robustness (3 items) | P0 | B1 follows A1 and ships the first pod-kill regression |
-| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 follows A1; pure models stay in the unit lane |
-| D | Developer and Console journeys (3 items) | P0 | Depends on A1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 draft #466; E5 awaits merged E1; E4 needs Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 draft #464; G3/G5 remain dependency-blocked |
+| A | Contracts and scenario evidence (2 items) | P0 | A1 merged #465; A2 awaits merged G1 and W1/N-1 |
+| B | Real multi-node robustness (3 items) | P0 | A1 prerequisite merged; B1 undispatched until W1/N-1 |
+| C | Reference models, generated tests, and checker validation (3 items) | P0 | A1 prerequisite merged; C1 undispatched until W1/N-1 |
+| D | Developer and Console journeys (3 items) | P0 | A1 prerequisite merged; D1 undispatched until W1/N-1; expanded support needs Q4 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 ready #466, awaiting merge; E5 awaits merged E1; E4 needs Q2/Q5 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | Undispatched; F4 follows F1 without B3; F2 adds cluster qualification |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 ready #464, awaiting merge; G3/G5 remain dependency-blocked |
 
 ## Streams
 
@@ -430,7 +440,7 @@ below is mandatory, including append-only edits.
 
 ### Stream A — Contracts and evidence
 
-- [ ] A1. Resolve the first fault contracts and choose the smallest usable harness
+- [x] A1. Resolve the first fault contracts and choose the smallest usable harness
   Files: `docs/exec-plans/active/distributed-testing.md` (A1 Strategic Decisions record only).
   Depends on: none.
   Verify: Name each public operation, identity, acknowledgement point, safety/liveness oracle, fault/clock assumptions, and unresolved guarantee, including rejection while quorum is absent. First compare the existing Helm StatefulSet/headless membership plus CI kind setup with Testcontainers/Toxiproxy; the default B1 design reuses the chart, enables persistence, and kills a pod. Record exact image, node/owner discovery, test runner, and recorder reachability commands. A bounded spike must establish whether peer address advertisement permits proxies before adopting them. Compare a small injectable clock seam in lease/owner/worker renewal with existing Go timer test facilities, short test-only lease configuration, and external process pause; a clock seam does not replace real crash/commit faults. Enumerate any indispensable event-dispatch hook and sibling handoff, rather than assigning five product files speculatively. B1's supported owner-crash contract can be settled independently of the later partition/clock/storage envelope; retain unresolved Q1–Q6 entries.
