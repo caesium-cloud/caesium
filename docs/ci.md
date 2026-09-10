@@ -8,8 +8,8 @@ general execution-mode / worker / dqlite env reference (what each
 [parallel-execution-operations.md](parallel-execution-operations.md) — this
 doc does not repeat that material, only the CI-specific wiring.
 
-Proposed improvements to distributed failure testing, developer/Console
-journeys, coverage evidence, and performance regression gates are tracked in
+Shipped W1 load reporting and browser evidence, plus remaining distributed
+failure tests, developer/Console journeys and performance gates, are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
 That plan does not change the current required checks described below.
 
@@ -258,7 +258,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
-| `ci-config` | ubuntu-24.04 | — | 5 | actionlint + `scripts/test_ci.py` | none |
+| `ci-config` | ubuntu-24.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
 | `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-24.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
 | `ci-ok` | ubuntu-24.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
 | `publish` | ubuntu-24.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |
@@ -343,6 +343,94 @@ Per-lane `-run` filters, `-timeout` values, and PASS-floor variables
 [parallel-execution-operations.md](parallel-execution-operations.md) and the
 justfile recipes named above for the current values; they change more often
 than this doc should need to.
+
+### Browser outcomes and diagnostics (distributed-testing W1/G1)
+
+CI retains two Playwright retries for diagnosis and sets `failOnFlakyTests`:
+a test that fails initially and passes on retry still fails the lane. Both
+`ui-e2e` and `ui-e2e-auth` always attempt collection and upload before server
+cleanup, including after setup or test failure. A collection or upload failure
+is also visible as a failing step. Missing reports after an early setup failure
+are not evidence of a passing browser suite.
+
+Download `ui-e2e-diag-<run_attempt>` and `ui-e2e-auth-diag-<run_attempt>` from
+the run. They contain structured `ci-diagnostics/outcomes.json` (candidate SHA,
+run/attempt/job and step outcomes/conclusions), server/container logs, and
+available Playwright JSON/HTML reports plus failure traces/screenshots/video.
+Only sanitized copies from `ui/ci-artifacts/` are uploaded. Redaction covers
+`csk_` API-key tokens in text, trace ZIP entries and the HTML report's embedded
+ZIP; malformed archives fail collection without falling back to raw copies.
+This token-specific redaction is not a general secret detector. For PR runs,
+`candidate_sha` identifies GitHub's tested merge commit; verify its parents
+against the intended PR head and base before reusing the evidence.
+
+The local workflow checks are:
+
+```sh
+actionlint .github/workflows/ci.yml
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+Wildcard discovery includes new matching validator modules. Existing validators
+exercise setup/test failure outcomes, artifact sanitization, malformed archive
+refusal and an additional failing module. W1's native fail-once Chromium proof
+returned exit 1 after a successful retry. Its refreshed hosted run
+[34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605)
+passed 28 default and 8 auth tests without skips or flaky outcomes; both
+sanitized artifacts were downloaded and checked. This establishes the current
+browser evidence path, not later multi-node fault coverage.
+
+### Load-harness reports and failure handling (distributed-testing W1/E1)
+
+`just load-test` runs the Go harness in the builder image against an
+already-running server. It creates synthetic jobs and triggers real work, so
+use a dedicated test server with metrics available and the selected runtime
+configured. Supply `CAESIUM_MANUAL_TRIGGER_API_KEY` through the environment when
+required by the server. The recipe uses host networking: localhost requires
+Linux or Docker Desktop host-networking support. Relative output paths resolve
+inside the mounted checkout; create their parent directory first.
+
+For example, against a test server reachable on port 18087:
+
+```sh
+mkdir -p .tmp/load
+CAESIUM_LOAD_SERVER=http://127.0.0.1:18087 \
+CAESIUM_LOAD_JOBS=3 CAESIUM_LOAD_FAN_OUT=1 CAESIUM_LOAD_DEPTH=1 \
+CAESIUM_LOAD_TASK_DURATION=2s CAESIUM_LOAD_CONCURRENCY=1 \
+CAESIUM_LOAD_SAMPLE_RATE=200ms CAESIUM_LOAD_TIMEOUT=90s \
+CAESIUM_LOAD_OUTPUT=.tmp/load/report.txt \
+CAESIUM_LOAD_JSON_OUTPUT=.tmp/load/report.json \
+just load-test
+```
+
+The human summary goes to stdout by default. Set `CAESIUM_LOAD_JSON_OUTPUT=-`
+for JSON on stdout and the human summary on stderr. Output files are opt-in,
+with no automatic dated baseline file. JSON `schema_version: 1` records configuration without
+credentials, expected/observed/outcome counts, per-run identity/status/times,
+samples, row/statement deltas, failure class and workload interval. `observed`
+means an acknowledged run ID; an uncertain trigger response does not prove
+that the server rejected the write. Reconcile all expected work, including
+untriggered work and uncertain admission, before interpreting throughput.
+
+Exit 0 requires successful expected work and valid measurements. Failed,
+cancelled, skipped, unconfirmed, untriggered or timed-out work; missing/reset
+required counters; invalid configuration; and output errors return nonzero.
+Sampling runs alongside submission/execution, including serial workloads;
+scrapes arriving after execution do not establish workload coverage. Defaults
+include concurrency 1, sampling every 5 seconds and a 30-minute overall timeout;
+choose a sample interval appropriate to short workloads. Engine and image can
+be set with `CAESIUM_LOAD_ENGINE` and `CAESIUM_LOAD_IMAGE`.
+
+The final E1 live proof at `91741796` used the example workload and a fresh
+product image: exit 0 with 3/3 successful runs and 37 samples across 7.0212
+seconds, including early/middle samples in every run. A deliberately invalid
+image returned exit 1 with 2/2 failed runs; an unavailable server returned
+exit 1 with both expected runs untriggered and none observed. Full local
+lint/unit and all executed checks in
+[run 34499466191](https://github.com/caesium-cloud/caesium/actions/runs/34499466191)
+passed. These are correctness checks for reporting, not calibrated performance
+SLOs, an arrival-rate driver, or proof of multi-node fault tolerance. Those
+remain later plan items.
 
 ## 5. Server env per lane, and the silent-drift rule
 
