@@ -70,7 +70,9 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 
 ### Active Exec Plans
 
-Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans that have a design record are linked from that record above; plans whose design of record is a superpowers spec are listed here. All of the current plans belong to the closed-loop arc and run in the order below; the arc doc is the umbrella (not itself a wave target) and wins on cross-plan ordering, while each child plan (and its design record above) wins on how a stream is built.
+Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans with a design record are linked above. The closed-loop feature plans run in the order below: the arc is their umbrella (not itself a wave target) and owns their cross-plan ordering, while each child plan and design owns implementation details. Cross-cutting plans are listed separately and coordinate shared files with those feature owners.
+
+- [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md): Cross-cutting test plan outside the closed-loop feature sequence; reuses the existing Helm topology for an early required failure gate, adds SQL-work and later timing budgets, and consolidates operating guidance in `ci.md`.
 
 - `exec-plans/active/closed-loop-arc.md`: **Umbrella — the arc.** Thesis (three loops — data, compute, time — over the shared data-plane memory, with backtesting as the proof), the plan sequence, cross-plan synergies, shared conventions 1–8, file-conflict rules, arc acceptance criteria, and the parked/filed/deleted decisions.
 - `exec-plans/completed/trust-the-substrate.md`: **Plan 0 — trust the substrate.** Fix the six ledger bugs, close the tier-3 approval loop, widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, delete dead scaffolding, file the unfiled follow-ups.
