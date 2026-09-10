@@ -49,6 +49,20 @@ type OpenParams struct {
 	// Cooldown suppresses re-opening within this window after the last incident
 	// for the same key closed. Zero disables cooldown suppression.
 	Cooldown time.Duration
+	// OnOpen, when set, runs INSIDE the same transaction that inserts a
+	// freshly OPENED incident row — never on an appended occurrence or a
+	// cooldown-suppressed skip. It exists so a caller's companion durable
+	// write (the incident_opened event, for Subscriber) commits atomically
+	// with the incident row instead of racing it in a second transaction.
+	//
+	// If OnOpen returns an error, the WHOLE transaction rolls back, the
+	// incident row included, and OpenOrAppend returns that error. This is
+	// deliberate: a redelivery of the same triggering failure then finds no
+	// row for the dedupe key and opens a genuinely fresh incident, so the
+	// companion write gets another atomic shot instead of the failure being
+	// silently absorbed as an appended occurrence with the companion write
+	// permanently missing (#459 review finding on PR #459 / issue #419).
+	OnOpen func(tx *gorm.DB, inc *models.Incident) error
 }
 
 // OpenOutcome describes what OpenOrAppend did.
@@ -127,38 +141,59 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// append — a race with the leader's timer supervisor or success path —
 	// appendOccurrence finds no active row (ErrRecordNotFound); retry, and the
 	// now-free key lets the insert win instead of dropping the failure.
+	//
+	// The whole attempt — the conditional insert, the winning branch's OnOpen
+	// hook, and the losing branch's appendOccurrence — runs in ONE transaction.
+	// A failure anywhere inside rolls back everything the attempt did,
+	// including the incident insert: see OnOpen's doc comment for why that
+	// matters (#459 review).
 	const maxOpenAttempts = 3
 	for range maxOpenAttempts {
-		res := s.db.WithContext(ctx).
-			Clauses(clause.OnConflict{
+		var outcome OpenOutcome
+		var result *models.Incident
+		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			res := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "active_dedupe_key"}},
 				DoNothing: true,
 			}).
-			Create(inc)
-		if res.Error != nil {
-			return nil, "", res.Error
-		}
-		if res.RowsAffected == 1 {
-			return inc, OutcomeOpened, nil
-		}
+				Create(inc)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 1 {
+				if p.OnOpen != nil {
+					if err := p.OnOpen(tx, inc); err != nil {
+						return err
+					}
+				}
+				result, outcome = inc, OutcomeOpened
+				return nil
+			}
 
-		existing, err := s.appendOccurrence(ctx, key, p, now)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+			existing, err := s.appendOccurrence(tx, key, p, now)
+			if err != nil {
+				return err
+			}
+			result, outcome = existing, OutcomeAppended
+			return nil
+		})
+		if txErr != nil {
+			if errors.Is(txErr, gorm.ErrRecordNotFound) {
 				// The twin closed between the conflict and the append; the dedupe
 				// key is free now — retry the insert.
 				continue
 			}
-			return nil, "", err
+			return nil, "", txErr
 		}
-		return existing, OutcomeAppended, nil
+		return result, outcome, nil
 	}
 	return nil, "", fmt.Errorf("incident: OpenOrAppend exhausted retries opening incident for dedupe key %q", key)
 }
 
 // appendOccurrence increments the occurrence counter on the open incident for
-// key and advances its remediation target / last error.
-func (s *Store) appendOccurrence(ctx context.Context, key string, p OpenParams, now time.Time) (*models.Incident, error) {
+// key and advances its remediation target / last error. Runs on tx, the same
+// transaction as OpenOrAppend's conditional insert attempt.
+func (s *Store) appendOccurrence(tx *gorm.DB, key string, p OpenParams, now time.Time) (*models.Incident, error) {
 	updates := map[string]any{
 		"occurrence_count": gorm.Expr("occurrence_count + 1"),
 		"updated_at":       now,
@@ -172,15 +207,13 @@ func (s *Store) appendOccurrence(ctx context.Context, key string, p OpenParams, 
 	if p.RunID != nil {
 		updates["run_id"] = *p.RunID
 	}
-	if err := s.db.WithContext(ctx).
-		Model(&models.Incident{}).
+	if err := tx.Model(&models.Incident{}).
 		Where("active_dedupe_key = ?", key).
 		Updates(updates).Error; err != nil {
 		return nil, err
 	}
 	var existing models.Incident
-	if err := s.db.WithContext(ctx).
-		Where("active_dedupe_key = ?", key).
+	if err := tx.Where("active_dedupe_key = ?", key).
 		First(&existing).Error; err != nil {
 		return nil, err
 	}

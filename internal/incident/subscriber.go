@@ -55,6 +55,12 @@ type Subscriber struct {
 	// deployments and tests take no autonomous action.
 	executor *Executor
 	rules    *Rules
+	// eventStore is the durable event store used to persist TypeIncidentOpened
+	// atomically with the incident row that opens it (see SetEventSink and
+	// OpenParams.OnOpen). Nil unless wired, so a subscriber under test still
+	// opens incidents and still publishes incident_opened to the live bus,
+	// just without a durable row backing it.
+	eventStore *event.Store
 }
 
 // NewSubscriber constructs an incident subscriber.
@@ -67,6 +73,23 @@ func NewSubscriber(bus event.Bus, db *gorm.DB, leaderCheck LeaderCheck, cooldown
 		leaderCheck: leaderCheck,
 		cooldown:    cooldown,
 	}
+}
+
+// SetEventSink wires the durable event store this subscriber persists
+// TypeIncidentOpened through, IN THE SAME TRANSACTION as the incident row
+// that opens it (OpenParams.OnOpen, handleFailure) — the same seam PR #390
+// added on Executor (SetEventSink) for approval_requested /
+// agent_action_executed, made atomic per the #459 review finding: persisting
+// the event as a second, separate transaction after the incident commit left
+// a window where a failed/interrupted event insert stranded an incident with
+// no companion event and no way to recover it. The bus itself is already
+// required by NewSubscriber (it is how the subscriber consumes
+// failure/success events), so only the store is set here. Wired once at
+// startup (cmd/start.go) behind the remediation master gate; nil-safe —
+// without it incident_opened still reaches the live bus, just with no durable
+// row behind it (so a restart or a quiet subscriber loses it).
+func (s *Subscriber) SetEventSink(store *event.Store) {
+	s.eventStore = store
 }
 
 // SetRemediator wires the deterministic-rule executor and rule table so that
@@ -323,6 +346,26 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		Cooldown:               s.cooldown,
 	}
 
+	// Build (and, when an event store is wired, durably persist) the
+	// incident_opened event INSIDE the same transaction OpenOrAppend uses to
+	// insert a freshly opened incident row. OnOpen only runs on the winning
+	// (OutcomeOpened) branch, never on an appended occurrence. If the event
+	// insert fails, OnOpen's error rolls the WHOLE transaction back — the
+	// incident row included — so a redelivery of this same failure retries a
+	// genuinely fresh open instead of landing on OutcomeAppended with
+	// incident_opened permanently missing (#459 review finding on PR #459 /
+	// issue #419: previously the incident commit and the event insert were
+	// two separate transactions, so a failure in the second one left an
+	// orphan incident with no companion event and no way to recover it).
+	var openedEvt event.Event
+	params.OnOpen = func(tx *gorm.DB, inc *models.Incident) error {
+		openedEvt = buildIncidentOpenedEvent(inc, class)
+		if s.eventStore == nil {
+			return nil
+		}
+		return s.eventStore.AppendTx(tx, &openedEvt)
+	}
+
 	inc, outcome, err := s.store.OpenOrAppend(ctx, params)
 	if err != nil {
 		log.Error("incident: failed to open/append incident", "job_id", fc.jobID, "class", class, "error", err)
@@ -341,6 +384,23 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		"outcome", outcome,
 		"occurrences", inc.OccurrenceCount,
 	)
+
+	// Announce the incident's birth on the shared event stream — exactly once,
+	// only on a freshly OPENED incident (never on an appended occurrence, which
+	// is the same incident continuing, not a new one). Without this, `why`,
+	// receipts, and any incident-lifecycle UI/alerting can see every later
+	// lifecycle event (approval_requested, incident_status_changed, ...) but not
+	// the incident's own start (#419).
+	//
+	// The row (when an event store is wired) is ALREADY persisted by OnOpen
+	// above, atomically with the incident. This is best-effort delivery to any
+	// LIVE subscriber, mirroring Executor.publishEvent /
+	// notification.Watcher.persistAndPublish; a miss here (nobody subscribed
+	// at the moment it fired) is recovered by the durable BusDispatcher sweep
+	// over bus_dispatch_pending rows, because the row exists either way.
+	if outcome == OutcomeOpened && s.bus != nil {
+		event.PublishAndMarkBusDispatched(ctx, s.bus, s.eventStore, openedEvt)
+	}
 
 	// Phase-0 deterministic remediation: only on a freshly OPENED incident (not on
 	// an appended recurrence, which would double-fire the rule), run the class's
@@ -493,4 +553,51 @@ func (s *Subscriber) taskRanGreen(ctx context.Context, evt event.Event) bool {
 		}
 	}
 	return true
+}
+
+// buildIncidentOpenedEvent constructs (without persisting or publishing) the
+// TypeIncidentOpened event for a freshly opened incident. The payload mirrors
+// the sibling incident lifecycle events (approval_requested,
+// agent_action_executed, incident_status_changed): ids sufficient to
+// correlate against /v1/incidents plus the classifier's verdict, so
+// `why`/receipts/the events API never have to look the incident up to explain
+// when and why it started.
+//
+// Kept as a plain function (not a *Subscriber method) so it can run inside
+// OpenParams.OnOpen, which Store invokes with only a *gorm.DB and the
+// *models.Incident — see handleFailure.
+func buildIncidentOpenedEvent(inc *models.Incident, class FailureClass) event.Event {
+	payload := map[string]any{
+		"incident_id": inc.ID.String(),
+		"job_id":      inc.JobID.String(),
+		"class":       string(class),
+		"status":      string(inc.Status),
+		"dedupe_key":  inc.DedupeKey,
+	}
+	if inc.RunID != nil {
+		payload["run_id"] = inc.RunID.String()
+	}
+	if inc.TaskID != nil {
+		payload["task_id"] = inc.TaskID.String()
+	}
+	if inc.TaskName != "" {
+		payload["task_name"] = inc.TaskName
+	}
+	if inc.BackfillID != nil {
+		payload["backfill_id"] = inc.BackfillID.String()
+	}
+
+	evt := event.Event{
+		Type:      event.TypeIncidentOpened,
+		JobID:     inc.JobID,
+		Timestamp: inc.OpenedAt,
+		Payload:   encodeEventPayload(payload),
+	}
+	if inc.RunID != nil {
+		evt.RunID = *inc.RunID
+	}
+	if inc.TaskID != nil {
+		evt.TaskID = *inc.TaskID
+	}
+	return evt
 }
