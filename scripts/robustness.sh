@@ -599,14 +599,33 @@ PY
 }
 
 handle_host_request() {
-  local action request_id node cid pod evidence listing
-  action="$(kc_ns get configmap robustness-host-request -o jsonpath='{.data.action}' 2>/dev/null || true)"
-  request_id="$(kc_ns get configmap robustness-host-request -o jsonpath='{.data.request_id}' 2>/dev/null || true)"
+  local action request_id node cid pod evidence listing reqjson
+  reqjson="$(kc_ns get configmap robustness-host-request -o json 2>/dev/null || true)"
+  [[ -n "$reqjson" ]] || return 0
+  eval "$(REQUEST_JSON="$reqjson" python3 - <<'PY'
+import json, os, shlex
+cm = json.loads(os.environ["REQUEST_JSON"])
+data = cm.get("data") or {}
+payload = data.get("payload") or "{}"
+try:
+    obj = json.loads(payload)
+except Exception:
+    obj = {}
+def pick(*keys):
+    for k in keys:
+        v = obj.get(k) or data.get(k) or ""
+        if v:
+            return str(v)
+    return ""
+print("request_id="+shlex.quote(pick("request_id")))
+print("action="+shlex.quote(pick("action")))
+print("node="+shlex.quote(pick("owner_kind_node")))
+print("cid="+shlex.quote(pick("owner_container_id")))
+print("pod="+shlex.quote(pick("owner_pod")))
+PY
+)"
   [[ -n "$action" && -n "$request_id" ]] || return 0
   [[ "$request_id" != "$LAST_REQUEST_ID" ]] || return 0
-  node="$(kc_ns get configmap robustness-host-request -o jsonpath='{.data.owner_kind_node}' 2>/dev/null || true)"
-  cid="$(kc_ns get configmap robustness-host-request -o jsonpath='{.data.owner_container_id}' 2>/dev/null || true)"
-  pod="$(kc_ns get configmap robustness-host-request -o jsonpath='{.data.owner_pod}' 2>/dev/null || true)"
   log "host request action=$action id=$request_id pod=$pod node=$node cid=$cid"
 
   case "$action" in

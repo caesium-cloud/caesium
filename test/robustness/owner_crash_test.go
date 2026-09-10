@@ -165,6 +165,18 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		t.Fatalf("cordon %s: %v", owner.Node, err)
 	}
 	t.Logf("cordon ack: %s", cordonAck.Evidence)
+	t.Cleanup(func() {
+		restartCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if _, err := cluster.RequestHost(restartCtx, kube, env.Namespace, cluster.HostRequest{
+			RequestID:     uuid.NewString(),
+			Action:        cluster.ActionRestart,
+			OwnerPod:      owner.Name,
+			OwnerKindNode: owner.Node,
+		}); err != nil {
+			t.Logf("cleanup restart/uncordon %s: %v", owner.Node, err)
+		}
+	})
 
 	triggeredAt := time.Now().UTC()
 	run, raw, err := httpAPI.TriggerRun(ctx, owner.HTTPBase(), job.ID)
@@ -203,7 +215,7 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		}
 		var fixture []corev1.Pod
 		for _, p := range pods {
-			if p.CreationTimestamp.Time.Before(triggeredAt.Add(-5 * time.Second)) {
+			if !strings.Contains(p.Name, run.ID) {
 				continue
 			}
 			if strings.Contains(strings.ToLower(p.Name), "probe") {
