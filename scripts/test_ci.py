@@ -1,6 +1,8 @@
 """Regression checks for the CI gate, path selection and full-suite wiring."""
 
+import base64
 import copy
+import io
 import fnmatch
 import itertools
 import json
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 import yaml
 
@@ -125,10 +128,7 @@ class WorkflowTests(unittest.TestCase):
                     self.assertFalse(step.get("continue-on-error", False))
                 self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
                 self.assertEqual(upload["with"]["if-no-files-found"], "error")
-                self.assertEqual(upload["with"]["path"].splitlines(), [
-                    "ui/playwright-report/", "ui/test-results/",
-                    "ui/playwright-results.json", "ui/ci-diagnostics/",
-                ])
+                self.assertEqual(upload["with"]["path"], "ui/ci-artifacts/")
                 self.assertIn(name, upload["with"]["name"])
                 # Run the real collection script with a failed setup and a
                 # missing server, then with a failed test and retained logs.
@@ -144,6 +144,24 @@ class WorkflowTests(unittest.TestCase):
                             'fi\necho "container status"\n'
                         )
                         docker.chmod(0o755)
+                        trace = io.BytesIO()
+                        with zipfile.ZipFile(trace, "w", zipfile.ZIP_DEFLATED) as archive:
+                            archive.writestr("0-trace.network", json.dumps({
+                                "headers": {"Authorization": "Bearer csk_trace-secret_456"},
+                            }))
+                            archive.writestr("0-trace.trace", '{"type":"context-options"}\n')
+                            archive.writestr("resources/page.html", "<p>csk_snapshot-secret_789</p>")
+                            archive.writestr("resources/image.png", b"\x89PNG\r\n\x1a\n")
+                        (root / "ui/test-results").mkdir(parents=True)
+                        (root / "ui/test-results/trace.zip").write_bytes(trace.getvalue())
+                        (root / "ui/playwright-report").mkdir()
+                        (root / "ui/playwright-report/index.html").write_text(
+                            '<template id="playwrightReportBase64">data:application/zip;base64,'
+                            + base64.b64encode(trace.getvalue()).decode() + '</template>'
+                        )
+                        (root / "ui/playwright-results.json").write_text(
+                            '{"error":"csk_json-secret_123","status":"flaky"}'
+                        )
                         outcomes = {
                             "server": {"outcome": "failure" if setup_failed else "success",
                                        "conclusion": "failure" if setup_failed else "success",
@@ -159,7 +177,8 @@ class WorkflowTests(unittest.TestCase):
                             capture_output=True, text=True,
                         )
                         self.assertEqual(result.returncode, int(setup_failed), result.stderr)
-                        reports = root / "ui/ci-diagnostics"
+                        artifacts = root / "ui/ci-artifacts"
+                        reports = artifacts / "ci-diagnostics"
                         report = json.loads((reports / "outcomes.json").read_text())
                         self.assertEqual(report["candidate_sha"], "candidate")
                         self.assertEqual(report["steps"]["playwright"]["outcome"],
@@ -172,6 +191,47 @@ class WorkflowTests(unittest.TestCase):
                         self.assertIn("container status", (reports / "containers.log").read_text())
                         if setup_failed:
                             self.assertIn("::error::Could not collect", result.stdout)
+                        # Both the standalone trace and HTML's embedded ZIP
+                        # retain readable entries while removing credentials.
+                        html = (artifacts / "playwright-report/index.html").read_text()
+                        embedded = re.search(r"base64,([A-Za-z0-9+/=]+)", html)[1]
+                        for data in ((artifacts / "test-results/trace.zip").read_bytes(),
+                                     base64.b64decode(embedded)):
+                            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                                self.assertIsNone(archive.testzip())
+                                self.assertEqual(archive.read("resources/image.png"), b"\x89PNG\r\n\x1a\n")
+                                for entry in archive.infolist():
+                                    self.assertNotIn(b"csk_", archive.read(entry))
+                                headers = json.loads(archive.read("0-trace.network"))["headers"]
+                                self.assertEqual(headers["Authorization"], "Bearer [REDACTED_API_KEY]")
+                        structured = json.loads((artifacts / "playwright-results.json").read_text())
+                        self.assertEqual(structured, {"error": "[REDACTED_API_KEY]", "status": "flaky"})
+
+    def test_malformed_browser_archive_never_uploads_raw_credentials(self):
+        for name in ("ui-e2e", "ui-e2e-auth"):
+            collect = next(step for step in JOBS[name]["steps"]
+                           if step.get("name") == "Collect browser diagnostics")
+            with self.subTest(job=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                docker = root / "docker"
+                docker.write_text('#!/bin/sh\necho "diagnostic csk_server_secret"\n')
+                docker.chmod(0o755)
+                (root / "ui/test-results").mkdir(parents=True)
+                (root / "ui/test-results/trace.zip").write_bytes(b"invalid zip csk_trace_secret")
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", collect["run"]], cwd=tmp,
+                    env={**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"],
+                         "STEP_RESULTS": "{}", "CANDIDATE_SHA": "candidate",
+                         "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_JOB": name},
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                artifacts = root / "ui/ci-artifacts"
+                self.assertTrue((artifacts / "ci-diagnostics/outcomes.json").is_file())
+                self.assertFalse((artifacts / "test-results/trace.zip").exists())
+                for path in artifacts.rglob("*"):
+                    if path.is_file():
+                        self.assertNotIn(b"csk_", path.read_bytes())
 
     def test_gate_selectors_match_actual_job_conditions(self):
         for name, selectors in SELECTORS.items():

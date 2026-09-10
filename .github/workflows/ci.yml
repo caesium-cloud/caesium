@@ -634,10 +634,33 @@ jobs:
           PYTHON
           # Artifact bytes do not honor the runner's add-mask directives.
           python3 - <<'PYTHON'
+          import base64
+          import io
           from pathlib import Path
           import re
           import subprocess
           import sys
+          import zipfile
+
+          def sanitize(data, archive=False):
+              if archive:
+                  output = io.BytesIO()
+                  with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(output, "w") as target:
+                      for entry in source.infolist():
+                          target.writestr(entry, sanitize(source.read(entry), entry.filename.endswith(".zip")))
+                  return output.getvalue()
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return data  # Preserve binary images, fonts and video.
+              # Playwright HTML embeds a base64 ZIP containing its JSON report.
+              text = re.sub(
+                  r"data:application/zip;base64,([A-Za-z0-9+/=]+)",
+                  lambda match: "data:application/zip;base64," + base64.b64encode(
+                      sanitize(base64.b64decode(match[1], validate=True), archive=True)
+                  ).decode("ascii"), text,
+              )
+              return re.sub(r"csk_[A-Za-z0-9_-]+", "[REDACTED_API_KEY]", text).encode("utf-8")
 
           status = 0
           for filename, command in (
@@ -651,6 +674,18 @@ jobs:
               if result.returncode:
                   print(f"::error::Could not collect {filename}; see diagnostic artifact")
                   status = 1
+          # Upload only the sanitized copy. A malformed archive fails this
+          # step without falling back to raw traces, snapshots or reports.
+          for source in (Path("ui/ci-diagnostics"), Path("ui/playwright-results.json"),
+                         Path("ui/test-results"), Path("ui/playwright-report")):
+              files = source.rglob("*") if source.is_dir() else [source]
+              for path in files:
+                  if not path.is_file():
+                      continue
+                  clean = sanitize(path.read_bytes(), path.suffix == ".zip")
+                  target = Path("ui/ci-artifacts") / path.relative_to("ui")
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(clean)
           sys.exit(status)
           PYTHON
       - name: Upload browser diagnostics
@@ -658,11 +693,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ui-e2e-diag-${{ github.run_attempt }}
-          path: |
-            ui/playwright-report/
-            ui/test-results/
-            ui/playwright-results.json
-            ui/ci-diagnostics/
+          path: ui/ci-artifacts/
           if-no-files-found: error
           retention-days: 14
       - name: Stop Caesium server
@@ -771,10 +802,33 @@ jobs:
           PYTHON
           # Artifact bytes do not honor the runner's add-mask directives.
           python3 - <<'PYTHON'
+          import base64
+          import io
           from pathlib import Path
           import re
           import subprocess
           import sys
+          import zipfile
+
+          def sanitize(data, archive=False):
+              if archive:
+                  output = io.BytesIO()
+                  with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(output, "w") as target:
+                      for entry in source.infolist():
+                          target.writestr(entry, sanitize(source.read(entry), entry.filename.endswith(".zip")))
+                  return output.getvalue()
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return data  # Preserve binary images, fonts and video.
+              # Playwright HTML embeds a base64 ZIP containing its JSON report.
+              text = re.sub(
+                  r"data:application/zip;base64,([A-Za-z0-9+/=]+)",
+                  lambda match: "data:application/zip;base64," + base64.b64encode(
+                      sanitize(base64.b64decode(match[1], validate=True), archive=True)
+                  ).decode("ascii"), text,
+              )
+              return re.sub(r"csk_[A-Za-z0-9_-]+", "[REDACTED_API_KEY]", text).encode("utf-8")
 
           status = 0
           for filename, command in (
@@ -788,6 +842,18 @@ jobs:
               if result.returncode:
                   print(f"::error::Could not collect {filename}; see diagnostic artifact")
                   status = 1
+          # Upload only the sanitized copy. A malformed archive fails this
+          # step without falling back to raw traces, snapshots or reports.
+          for source in (Path("ui/ci-diagnostics"), Path("ui/playwright-results.json"),
+                         Path("ui/test-results"), Path("ui/playwright-report")):
+              files = source.rglob("*") if source.is_dir() else [source]
+              for path in files:
+                  if not path.is_file():
+                      continue
+                  clean = sanitize(path.read_bytes(), path.suffix == ".zip")
+                  target = Path("ui/ci-artifacts") / path.relative_to("ui")
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(clean)
           sys.exit(status)
           PYTHON
       - name: Upload browser diagnostics
@@ -795,11 +861,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ui-e2e-auth-diag-${{ github.run_attempt }}
-          path: |
-            ui/playwright-report/
-            ui/test-results/
-            ui/playwright-results.json
-            ui/ci-diagnostics/
+          path: ui/ci-artifacts/
           if-no-files-found: error
           retention-days: 14
       - name: Stop auth-enabled Caesium server
