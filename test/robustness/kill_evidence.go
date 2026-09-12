@@ -113,12 +113,10 @@ func taskDeadFromListing(cid, listing string, seen bool) (bool, string) {
 	if kind := ctrListingKind(listing); kind != "ok" {
 		return false, "listing is " + kind + ", not proof of death"
 	}
-	matched := false
 	for _, line := range strings.Split(listing, "\n") {
 		if !strings.Contains(line, cid) && !strings.Contains(line, short) {
 			continue
 		}
-		matched = true
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "running") {
 			return false, "container still running"
@@ -126,9 +124,6 @@ func taskDeadFromListing(cid, listing string, seen bool) (bool, string) {
 		if strings.Contains(lower, "stopped") || strings.Contains(lower, "exited") || strings.Contains(lower, "killed") {
 			return true, "container stopped"
 		}
-		return false, "container still present without stopped evidence"
-	}
-	if matched {
 		return false, "container still present without stopped evidence"
 	}
 	if seen {
