@@ -79,5 +79,11 @@ func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
 		value := c.metadata.HostConfig.Memory
 		out.MemoryLimitBytes = &value
 	}
+	// Docker inspect can omit OOMKilled on a cgroup OOM, observed on arm64,
+	// while still reporting exit 137 against an applied memory limit. That
+	// inspect pair is the evidence; a 137 with no limit remains SIGKILL.
+	if !out.OOMKilled && env.Variables().ResourceStatsEnabled && c.metadata.State.ExitCode == 137 && out.MemoryLimitBytes != nil {
+		out.OOMKilled = true
+	}
 	return out
 }

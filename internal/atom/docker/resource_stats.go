@@ -66,6 +66,12 @@ func (e *dockerEngine) inspectWaitOutcome(ctx context.Context, id string) (atom.
 	if !env.Variables().ResourceStatsEnabled || metadata.State == nil || metadata.State.ExitCode != 137 || metadata.State.OOMKilled {
 		return final, nil
 	}
+	// An applied memory limit plus exit 137 is already enough for
+	// ResourceOutcome to classify the OOM; do not wait for a flag Docker may
+	// never set.
+	if metadata.HostConfig != nil && metadata.HostConfig.Memory > 0 {
+		return final, nil
+	}
 	settleCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)

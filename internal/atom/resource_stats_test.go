@@ -89,3 +89,13 @@ func TestResourceSamplerOOMLowerBoundAndUnavailableMeasurements(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceSamplerOOMRaisesSampledPeakToLimit(t *testing.T) {
+	s := &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
+	close(s.done)
+	s.reducer.add(ResourceStats{MemoryBytes: new(int64(41291776))})
+	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: true, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	require.True(t, out.OOMKilled)
+	require.Equal(t, int64(64*1024*1024), *out.PeakMemoryBytes)
+	require.Equal(t, "oom_inferred", out.StatsSource)
+}
