@@ -104,6 +104,17 @@ def extract_shas(*texts: str) -> list[str]:
     return out
 
 
+_INSPECT_SKIP = {
+    "rootfs",
+    "layers",
+    "history",
+    "graphdriver",
+    "metadata",
+    "config",
+    "containerconfig",
+}
+
+
 def identities_from_inspect(data) -> list[str]:
     texts: list[str] = []
 
@@ -111,6 +122,8 @@ def identities_from_inspect(data) -> list[str]:
         if isinstance(obj, dict):
             for key, val in obj.items():
                 lk = str(key).lower()
+                if lk in _INSPECT_SKIP:
+                    continue
                 if lk in {"id", "digest", "imagedigest", "imageid"}:
                     texts.append(str(val or ""))
                 elif lk in {"repodigests", "repotags"}:
@@ -118,7 +131,6 @@ def identities_from_inspect(data) -> list[str]:
                         texts.extend(str(x) for x in val)
                     else:
                         texts.append(str(val or ""))
-                    walk(val)
                 else:
                     walk(val)
         elif isinstance(obj, list):
@@ -313,6 +325,14 @@ def _self_test() -> int:
     ids = identities_from_inspect(inspect)
     check("inspect config id", ("sha256:" + ("a" * 64)) in ids)
     check("inspect manifest id", ("sha256:" + ("b" * 64)) in ids)
+    layered = {
+        "Id": "sha256:" + ("a" * 64),
+        "RootFS": {"Layers": ["sha256:" + ("1" * 64)]},
+        "GraphDriver": {"Data": {"MergedDir": "sha256:" + ("2" * 64)}},
+    }
+    lids = identities_from_inspect(layered)
+    check("rootfs layers ignored", ("sha256:" + ("1" * 64)) not in lids)
+    check("graphdriver ignored", ("sha256:" + ("2" * 64)) not in lids)
     ok, _ = identities_match(ids, "containerd://sha256:" + ("a" * 64))
     check("running config maps", ok)
     ok, _ = identities_match(ids, "docker-pullable://x@sha256:" + ("b" * 64))

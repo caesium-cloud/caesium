@@ -361,7 +361,6 @@ done
 python3 "$HOSTLOGIC" collect-identities \
   "$ARTIFACTS/server-image.json" \
   "$ARTIFACTS/imported-digest.txt" \
-  "$ARTIFACTS/ctr-image-info.txt" \
   "$ARTIFACTS/crictl-inspecti.json" \
   "$ARTIFACTS/host-image-id.txt" \
   >"$ARTIFACTS/candidate-identities.txt" \
