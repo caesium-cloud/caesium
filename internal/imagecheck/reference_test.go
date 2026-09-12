@@ -7,6 +7,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPinReference(t *testing.T) {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const other = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	assert.Equal(t, "registry.example.com/app:v1@"+digest, PinReference("registry.example.com/app:v1", digest))
+	assert.Equal(t, "alpine:3.23@"+digest, PinReference("alpine:3.23", digest))
+	assert.Equal(t, "registry.example.com/app:v1@"+digest, PinReference("registry.example.com/app:v1@"+other, digest),
+		"a previously pinned digest is replaced with the resolved one")
+	assert.Equal(t, "registry.example.com/app:v1@"+digest, PinReference("registry.example.com/app:v1@"+digest, digest))
+	assert.Equal(t, "registry.example.com/app:v1", PinReference("registry.example.com/app:v1", ""),
+		"an unresolved digest must leave the mutable tag alone")
+	assert.Equal(t, "registry.example.com/app:v1", PinReference("registry.example.com/app:v1", "sha256:short"))
+	assert.Equal(t, "", PinReference("", digest))
+	assert.Equal(t, "alpine:3.23@"+digest, PinReference("  alpine:3.23  ", "  "+digest+"  "))
+}
+
 func TestParseReference(t *testing.T) {
 	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	cases := []struct {
