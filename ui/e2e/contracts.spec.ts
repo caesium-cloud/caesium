@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
+import { expect, test, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 import { stringify } from "yaml";
 import { applyDefinitions, findJobByAlias, type FixtureDefinition } from "./helpers/fixtures";
 
@@ -80,7 +80,7 @@ test("operator can acknowledge a breaking contract finding from the JobDefs diff
 
   await page.goto("/jobdefs");
   const editedProducerYaml = stringify(buildProducerDefinition(producerAlias, []));
-  await page.locator(".cm-content[contenteditable='true']").fill(editedProducerYaml);
+  await replaceJobDefsEditorContents(page, editedProducerYaml);
   await expect(page.getByText("1 step")).toBeVisible();
   const diffResponsePromise = page.waitForResponse(
     (response) => response.url().includes("/v1/jobdefs/diff") && response.request().method() === "POST",
@@ -238,6 +238,13 @@ async function diffResponseBodyForDiagnostics(response: APIResponse): Promise<st
   } catch {
     return body;
   }
+}
+
+async function replaceJobDefsEditorContents(page: Page, contents: string) {
+  const editor = page.locator(".cm-content[contenteditable='true']");
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.insertText(contents);
 }
 
 function truncateForDiagnostics(value: string, limit = 12_000): string {
