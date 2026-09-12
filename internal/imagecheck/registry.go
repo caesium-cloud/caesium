@@ -59,21 +59,43 @@ const maxRedirects = 10
 
 // registryRedirectPolicy is the http.Client CheckRedirect every RegistryClient
 // uses: a redirect target is held to the same transport policy as the original
-// request, and Authorization is dropped whenever the redirect leaves the host
-// it was issued for (Go already strips it across domains; this makes the rule
-// explicit and host-exact, so a credential for auth.example never reaches
-// auth2.example even as a subdomain).
+// request, and Authorization is dropped whenever the hop leaves the host the
+// credentials were issued for.
+//
+// Comparison is against via[0] (the authorized origin), not the previous hop.
+// net/http copies Authorization from the initial request onto every hop whose
+// host is that origin or a subdomain of it, so a chain like
+//
+//	auth.example -> child.auth.example -> child.auth.example
+//
+// would reattach the original Basic on the second child hop if we only
+// compared against via[len(via)-1]. Host-exact: a credential for auth.example
+// never reaches auth2.example even as a subdomain.
 func registryRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("imagecheck: stopped after %d redirects", maxRedirects)
 	}
 	if err := checkTransportURL(req.URL); err != nil {
-		return fmt.Errorf("redirect from %s: %w", via[len(via)-1].URL.Host, err)
+		from := req.URL.Host
+		if len(via) > 0 && via[len(via)-1].URL != nil {
+			from = via[len(via)-1].URL.Host
+		}
+		return fmt.Errorf("redirect from %s: %w", from, err)
 	}
-	if req.URL.Host != via[len(via)-1].URL.Host {
+	if !sameRedirectOrigin(req, via) {
 		req.Header.Del("Authorization")
 	}
 	return nil
+}
+
+// sameRedirectOrigin reports whether req is still on the host that originally
+// received Authorization. via[0] is that origin; an empty via (should not
+// happen — CheckRedirect is only called after a hop) is treated as a leave.
+func sameRedirectOrigin(req *http.Request, via []*http.Request) bool {
+	if req == nil || req.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return false
+	}
+	return req.URL.Host == via[0].URL.Host
 }
 
 // withRedirectPolicy returns a shallow copy of c with the registry redirect

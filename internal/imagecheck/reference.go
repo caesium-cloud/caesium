@@ -49,6 +49,27 @@ type Reference struct {
 	Digest string
 }
 
+// PinReference rewrites imageRef so a runtime create/pull addresses digest
+// rather than a mutable tag. A locally cached tag can point at older content
+// than the registry currently serves; executing the tag would run that older
+// image while pinDigests recorded the registry digest. The tag is kept when
+// present (`app:v1@sha256:...`) so logs stay readable. An empty or invalid
+// digest is a no-op so callers can pass the unresolved value through.
+func PinReference(imageRef, digest string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	digest = strings.TrimSpace(digest)
+	if imageRef == "" || !digestPattern.MatchString(digest) {
+		return imageRef
+	}
+	if at := strings.LastIndex(imageRef, "@"); at >= 0 {
+		imageRef = imageRef[:at]
+	}
+	if imageRef == "" {
+		return imageRef
+	}
+	return imageRef + "@" + digest
+}
+
 // ParseReference splits an image reference into registry, repository, tag and
 // digest following Docker's rules: the first path component is a registry host
 // when it contains a "." or ":" or is "localhost"; otherwise the reference is a

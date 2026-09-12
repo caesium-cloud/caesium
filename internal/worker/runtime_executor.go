@@ -49,6 +49,17 @@ type runtimeExecutor struct {
 	// nil in production → defaults to dispatch.PostComplete; tests inject a fake.
 	completePost   completePoster
 	secretResolver secret.Resolver
+	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
+	// imagecheck.Default(); tests inject a stub so Create can be asserted
+	// against a known digest without a registry.
+	imageResolver *imagecheck.Resolver
+}
+
+func (e *runtimeExecutor) digestResolver() *imagecheck.Resolver {
+	if e != nil && e.imageResolver != nil {
+		return e.imageResolver
+	}
+	return imagecheck.Default()
 }
 
 func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string, resolvers ...secret.Resolver) TaskExecutor {
@@ -298,7 +309,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			if descriptor != nil && descriptor.Runtime.ResolvedImageDigest != "" {
 				resolvedImageDigest = descriptor.Runtime.ResolvedImageDigest
 			} else if cacheCfg.PinDigests {
-				if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
+				if digest, derr := e.digestResolver().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
 					resolvedImageDigest = digest
 				}
 			}
@@ -443,7 +454,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, attempt >= maxAttempts)
 		if execErr == nil {
 			// Store successful result in cache, including any partition list this
 			// producer emitted: a later hit replays the result without running
@@ -676,7 +687,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, finalAttempt bool) ([]pkgtask.Partition, error) {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -757,7 +768,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
-		Image:   taskRun.Image,
+		Image:   imagecheck.PinReference(taskRun.Image, resolvedImageDigest),
 		Command: command,
 		Spec:    spec,
 	})

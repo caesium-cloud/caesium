@@ -168,6 +168,10 @@ type job struct {
 	newPodmanEngine        func(context.Context) atom.Engine
 	atomPollInterval       time.Duration
 	secretResolver         secret.Resolver
+	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
+	// imagecheck.Default(); tests inject a stub so Create can be asserted
+	// against a known digest without a registry.
+	imageResolver *imagecheck.Resolver
 	// beforeComplete is an unexported test seam for the window between an
 	// engine deciding to finalize the run and the completion write beginning —
 	// the DAG loop's shutdown window, and the aborted-resume finalizer's.
@@ -365,6 +369,10 @@ type atomRunner struct {
 	schemaValidation string
 	spec             container.Spec
 	engine           atom.Engine
+	// resolvedImageDigest is the content digest pinDigests resolved for this
+	// task. Create pins the runtime image to it so a locally cached tag cannot
+	// execute older content than the cache key recorded.
+	resolvedImageDigest string
 }
 
 const (
@@ -497,6 +505,13 @@ func WithSecretResolver(resolver secret.Resolver) JobOption {
 	return func(j *job) {
 		j.secretResolver = resolver
 	}
+}
+
+func (j *job) digestResolver() *imagecheck.Resolver {
+	if j != nil && j.imageResolver != nil {
+		return j.imageResolver
+	}
+	return imagecheck.Default()
 }
 
 // withPartitionRetryReplacement flags an engine as the replacement started
@@ -1432,7 +1447,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 			atomName = fmt.Sprintf("%s-attempt%d", atomName, attempt)
 		}
 
-		log.Info("running atom", "job_id", j.id, "task_id", taskID, "instance_id", instanceID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
+		image := imagecheck.PinReference(runner.image, runner.resolvedImageDigest)
+		log.Info("running atom", "job_id", j.id, "task_id", taskID, "instance_id", instanceID, "image", image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
 		taskQuarantined := taskQuarantine[taskID] || runQuarantined
@@ -1467,7 +1483,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		a, err := runner.engine.Create(&atom.EngineCreateRequest{
 			Name:    atomName,
-			Image:   runner.image,
+			Image:   image,
 			Command: runner.command,
 			Spec:    spec,
 		})
@@ -1792,10 +1808,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if engineKind == "" {
 				engineKind = models.AtomEngineDocker
 			}
-			if digest, derr := imagecheck.Default().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
+			if digest, derr := j.digestResolver().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
 				resolvedImageDigest = digest
 			}
 		}
+		runner.resolvedImageDigest = resolvedImageDigest
 
 		return cacheCfg, taskHashInputArgs{
 			JobAlias:             j.alias,

@@ -218,6 +218,93 @@ func TestRegistryClient_CrossHostRedirectDropsAuthorization(t *testing.T) {
 	assertCredentialNeverLeft(t, rt, "")
 }
 
+// Go copies Authorization from the INITIAL request onto every hop whose host
+// is that origin or a subdomain of it. Comparing only against the previous
+// hop lets a chain like
+//
+//	auth.example -> child.auth.example -> child.auth.example
+//
+// reattach the original Basic on the second child hop (host equals previous).
+// Strip against the authorized origin on every hop.
+func TestRegistryClient_MultiHopSubdomainRedirectDoesNotReattachAuthorization(t *testing.T) {
+	c, rt := newRecordingClient(t, func(req *http.Request) *http.Response {
+		switch req.URL.Host {
+		case "registry.example.com":
+			if req.Header.Get("Authorization") == "Bearer tok" {
+				return manifestOK()
+			}
+			return bearerChallenge("https://auth.example/token")
+		case "auth.example":
+			return redirectTo("https://child.auth.example/hop")
+		case "child.auth.example":
+			if req.URL.Path == "/hop" {
+				return redirectTo("https://child.auth.example/final")
+			}
+			return tokenOK()
+		}
+		return nil
+	})
+
+	got, err := c.ResolveDigest(context.Background(), "registry.example.com/team/app:1.0")
+	require.NoError(t, err)
+	assert.Equal(t, testDigest, got)
+
+	var sawOrigin, sawHop, sawFinal bool
+	for _, r := range rt.seen() {
+		switch {
+		case strings.Contains(r.url, "://auth.example/"):
+			sawOrigin = true
+			assert.True(t, strings.HasPrefix(r.authorization, "Basic "), "the original token endpoint receives the credentials")
+		case strings.Contains(r.url, "://child.auth.example/hop"):
+			sawHop = true
+			assert.Empty(t, r.authorization, "the first child hop must not carry Authorization")
+		case strings.Contains(r.url, "://child.auth.example/final"):
+			sawFinal = true
+			assert.Empty(t, r.authorization, "a later same-host hop must not reattach the original Authorization")
+		}
+	}
+	assert.True(t, sawOrigin && sawHop && sawFinal, "the multi-hop token redirect must be followed")
+	assertCredentialNeverLeft(t, rt, "")
+}
+
+// Same-host hops keep Authorization: the credential is still for the origin
+// it was issued to.
+func TestRegistryClient_SameHostRedirectKeepsAuthorization(t *testing.T) {
+	c, rt := newRecordingClient(t, func(req *http.Request) *http.Response {
+		switch req.URL.Host {
+		case "registry.example.com":
+			if req.Header.Get("Authorization") == "Bearer tok" {
+				return manifestOK()
+			}
+			return bearerChallenge("https://auth.example/token")
+		case "auth.example":
+			if req.URL.Path == "/token" {
+				return redirectTo("https://auth.example/token2")
+			}
+			return tokenOK()
+		}
+		return nil
+	})
+
+	got, err := c.ResolveDigest(context.Background(), "registry.example.com/team/app:1.0")
+	require.NoError(t, err)
+	assert.Equal(t, testDigest, got)
+
+	var sawToken, sawToken2 bool
+	for _, r := range rt.seen() {
+		switch {
+		case strings.Contains(r.url, "://auth.example/token?"):
+			sawToken = true
+			assert.True(t, strings.HasPrefix(r.authorization, "Basic "))
+		case strings.Contains(r.url, "://auth.example/token2"):
+			sawToken2 = true
+			assert.True(t, strings.HasPrefix(r.authorization, "Basic "), "a same-host hop must keep the credentials")
+		}
+	}
+	assert.True(t, sawToken && sawToken2)
+	assertCredentialNeverLeft(t, rt, "")
+}
+
 // The explicitly permitted path: loopback registries (the integration stub,
 // a local dev registry) speak plain HTTP for both the manifest and the token
 // endpoint, matching the Docker daemon's default insecure-registry rule.
@@ -266,6 +353,33 @@ func mustParse(t *testing.T, raw string) *url.URL {
 	u, err := url.Parse(raw)
 	require.NoError(t, err)
 	return u
+}
+
+func TestRegistryRedirectPolicy_StripsAgainstOriginalOrigin(t *testing.T) {
+	origin, err := http.NewRequest(http.MethodGet, "https://auth.example/token", nil)
+	require.NoError(t, err)
+	origin.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
+
+	hop1, err := http.NewRequest(http.MethodGet, "https://child.auth.example/hop", nil)
+	require.NoError(t, err)
+	hop1.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
+	require.NoError(t, registryRedirectPolicy(hop1, []*http.Request{origin}))
+	assert.Empty(t, hop1.Header.Get("Authorization"), "leaving the authorized origin must strip Authorization")
+
+	hop2, err := http.NewRequest(http.MethodGet, "https://child.auth.example/final", nil)
+	require.NoError(t, err)
+	// net/http re-copies Authorization from the initial request because dest is
+	// a subdomain of origin. The previous hop already had it stripped.
+	hop2.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
+	require.NoError(t, registryRedirectPolicy(hop2, []*http.Request{origin, hop1}))
+	assert.Empty(t, hop2.Header.Get("Authorization"), "must strip against via[0], not the previous hop")
+
+	sameHost, err := http.NewRequest(http.MethodGet, "https://auth.example/token2", nil)
+	require.NoError(t, err)
+	sameHost.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
+	require.NoError(t, registryRedirectPolicy(sameHost, []*http.Request{origin}))
+	assert.Equal(t, "Basic dXNlcjpzZWNyZXQ=", sameHost.Header.Get("Authorization"),
+		"a same-host hop must keep the credentials")
 }
 
 func TestCheckTransportURL(t *testing.T) {

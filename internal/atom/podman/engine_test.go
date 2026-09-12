@@ -271,6 +271,44 @@ func (s *PodmanTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+// TestCreatePullsDigestWhenTagIsAlreadyPresent is the engine half of the
+// warm-tag/moved-tag case: ImageExists(tag) would return true for the stale
+// local content, but Create is given the digest-pinned ref, so presence is
+// checked (and pulled) against that identity.
+func (s *PodmanTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	pinned := testImage + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", pinned).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImagePull", pinned).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", mock.MatchedBy(func(spec *specgen.SpecGenerator) bool {
+			return spec != nil && spec.Image == pinned
+		})).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockPodmanBackend).AssertNotCalled(s.T(), "ImageExists", testImage)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
 // TestCreateSetsHealthLogDestination guards a podman API trap: the specgen
 // field carries no `omitempty` (upstream defers that to v6.0), so an unset
 // HealthLogDestination is serialized as "" rather than omitted. Podman servers

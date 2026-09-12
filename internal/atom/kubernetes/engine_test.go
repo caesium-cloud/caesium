@@ -81,6 +81,36 @@ func (s *KubernetesTestSuite) TestCreate() {
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 
+// TestCreateUsesDigestPinnedImage locks the kubelet-facing half of pinDigests:
+// PullIfNotPresent on a mutable tag would reuse whatever digest is already
+// present locally. A digest-pinned Image is a different identity, so the
+// kubelet pulls B even when tag A is warm.
+func (s *KubernetesTestSuite) TestCreateUsesDigestPinnedImage() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	pinned := testImage + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	podMatcher := mock.MatchedBy(func(pod *v1.Pod) bool {
+		if len(pod.Spec.Containers) != 1 {
+			return false
+		}
+		c := pod.Spec.Containers[0]
+		return c.Image == pinned && c.ImagePullPolicy == v1.PullIfNotPresent
+	})
+
+	s.engine.backend.(*mockKubernetesBackend).
+		On("Create", podMatcher).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+}
+
 func (s *KubernetesTestSuite) TestCreateAppliesSpec() {
 	req := &atom.EngineCreateRequest{
 		Name:    testAtomID,

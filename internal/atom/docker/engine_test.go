@@ -475,6 +475,44 @@ func (s *DockerTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+// TestCreatePullsDigestWhenTagIsAlreadyPresent is the engine half of the
+// warm-tag/moved-tag case: ImageInspect(tag) would succeed for the stale
+// local content, but Create is given the digest-pinned ref, so inspect/pull
+// use that identity.
+func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	pinned := testImage + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", pinned).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == pinned
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImageInspect", testImage)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestCreatePullError() {
 	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
