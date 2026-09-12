@@ -167,20 +167,6 @@ func StripContainerdPrefix(id string) string {
 	return id
 }
 
-func NormalizeImageDigest(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if i := strings.LastIndex(raw, "sha256:"); i >= 0 {
-		hex := raw[i+len("sha256:"):]
-		if j := strings.IndexAny(hex, " \t@"); j >= 0 {
-			hex = hex[:j]
-		}
-		if hex != "" {
-			return "sha256:" + hex
-		}
-	}
-	return raw
-}
-
 func ListOptions() metav1.ListOptions {
 	return metav1.ListOptions{LabelSelector: CaesiumSelector()}
 }

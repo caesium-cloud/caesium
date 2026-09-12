@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+HOSTLOGIC="$ROOT/test/robustness/hostlogic.py"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -56,6 +57,8 @@ require_cmd kubectl
 require_cmd helm
 require_cmd docker
 require_cmd python3
+[[ -f "$HOSTLOGIC" ]] || die "missing $HOSTLOGIC"
+python3 "$HOSTLOGIC" self-test >/dev/null || die "hostlogic.py self-test failed"
 
 mkdir -p "$ARTIFACTS"
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
@@ -92,6 +95,27 @@ record_cluster() {
   local name="$1"
   if ! grep -qxF "$name" "$OWNED_CLUSTERS" 2>/dev/null; then
     printf '%s\n' "$name" >>"$OWNED_CLUSTERS"
+  fi
+}
+
+unrecord_cluster() {
+  local name="$1"
+  if [[ ! -f "$OWNED_CLUSTERS" ]]; then
+    return 0
+  fi
+  grep -vxF "$name" "$OWNED_CLUSTERS" >"$OWNED_CLUSTERS.tmp" || true
+  mv "$OWNED_CLUSTERS.tmp" "$OWNED_CLUSTERS"
+}
+
+require_absent_cluster() {
+  local name="$1" clusters nodes
+  clusters="$(kind get clusters 2>&1)" || die "kind get clusters failed: $clusters"
+  if printf '%s\n' "$clusters" | grep -qxF "$name"; then
+    die "kind cluster $name already exists; refusing to claim or delete it"
+  fi
+  nodes="$(docker ps -a --format '{{.Names}}' 2>&1)" || die "docker ps failed: $nodes"
+  if printf '%s\n' "$nodes" | grep -qxF "${name}-control-plane"; then
+    die "docker container ${name}-control-plane already exists; refusing to claim cluster $name"
   fi
 }
 
@@ -176,9 +200,11 @@ esac
 [[ "$KIND_ARCH" == "$HOST_NORM" || "$KIND_ARCH" == "$HOST_ARCH" ]] || die "KIND_IMAGE architecture $KIND_ARCH does not match host $HOST_ARCH"
 [[ "$TASK_ARCH" == "$HOST_NORM" || "$TASK_ARCH" == "$HOST_ARCH" ]] || die "TASK_IMAGE architecture $TASK_ARCH does not match host $HOST_ARCH"
 
-CANDIDATE_DIGEST="$(docker image inspect --format '{{.Id}}' "$SERVER_IMAGE")"
+HOST_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$SERVER_IMAGE")"
+CANDIDATE_DIGEST="$HOST_IMAGE_ID"
 log "candidate_digest=$CANDIDATE_DIGEST"
 printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/candidate-digest.txt"
+printf '%s\n' "$HOST_IMAGE_ID" >"$ARTIFACTS/host-image-id.txt"
 docker image inspect "$KIND_IMAGE" >"$ARTIFACTS/kind-image.json"
 docker image inspect "$SERVER_IMAGE" >"$ARTIFACTS/server-image.json"
 docker image inspect "$RUNNER_IMAGE" >"$ARTIFACTS/runner-image.json"
@@ -209,6 +235,11 @@ EOF
 
 SUFFIX="$(printf '%s' "$ROBUSTNESS_ID" | tr -cd 'a-z0-9' | tail -c 8)"
 ISO_NAME="iso${SUFFIX}"
+[[ "$ISO_NAME" != "$ROBUSTNESS_ID" ]] || die "isolation cluster name collided with $ROBUSTNESS_ID"
+require_absent_cluster "$ISO_NAME"
+require_absent_cluster "$ROBUSTNESS_ID"
+# Record only after absence is confirmed so a pre-existing cluster is never
+# owned or deleted. A create that fails mid-way is this invocation's cluster.
 record_cluster "$ISO_NAME"
 record_cluster "$ROBUSTNESS_ID"
 
@@ -250,13 +281,11 @@ PRI_CTX="$(kc config current-context)"
 [[ "$ISO_CTX" != "$PRI_CTX" ]] || die "isolation failed: contexts collide ($ISO_CTX)"
 log "isolation proof passed for $ISO_NAME and $ROBUSTNESS_ID"
 if kind delete cluster --name "$ISO_NAME"; then
-  grep -vxF "$ISO_NAME" "$OWNED_CLUSTERS" >"$OWNED_CLUSTERS.tmp" || true
-  mv "$OWNED_CLUSTERS.tmp" "$OWNED_CLUSTERS"
+  unrecord_cluster "$ISO_NAME"
   rm -f "$ISO_KUBECONFIG"
 else
   die "failed to delete isolation cluster $ISO_NAME"
 fi
-record_cluster "$ROBUSTNESS_ID"
 
 log "diagnosing systemctl/ctr on kind workers before any fault"
 KIND_NODES=()
@@ -308,20 +337,9 @@ fi
 load_kind_image "$RUNNER_IMAGE"
 load_kind_image "$TASK_IMAGE"
 
-imported_digest() {
+imported_identities() {
   local node="$1" needle="$2"
-  docker exec "$node" ctr -n k8s.io images ls | python3 -c '
-import sys
-needle = sys.argv[1]
-for line in sys.stdin:
-    if needle not in line:
-        continue
-    for tok in line.split():
-        if tok.startswith("sha256:") and len(tok) > 20:
-            print(tok)
-            raise SystemExit
-raise SystemExit("no sha256 digest for " + needle)
-' "$needle"
+  docker exec "$node" ctr -n k8s.io images ls | python3 "$HOSTLOGIC" ctr-image-shas "$needle"
 }
 
 WORKER_NODE=""
@@ -332,11 +350,20 @@ for n in "${KIND_NODES[@]}"; do
   fi
 done
 [[ -n "$WORKER_NODE" ]] || die "no kind worker for imported digest"
-IMPORTED_DIGEST="$(imported_digest "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}")"
-log "host_image_id=$CANDIDATE_DIGEST imported_digest=$IMPORTED_DIGEST"
-CANDIDATE_DIGEST="$IMPORTED_DIGEST"
-printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/candidate-digest.txt"
-printf '%s\n' "$IMPORTED_DIGEST" >"$ARTIFACTS/imported-digest.txt"
+imported_identities "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}" >"$ARTIFACTS/imported-digest.txt"
+for ref in "caesiumcloud/caesium:${CANDIDATE_SHA}" "docker.io/caesiumcloud/caesium:${CANDIDATE_SHA}"; do
+  docker exec "$WORKER_NODE" ctr -n k8s.io images info "$ref" >>"$ARTIFACTS/ctr-image-info.txt" 2>/dev/null || true
+done
+python3 "$HOSTLOGIC" collect-identities \
+  "$ARTIFACTS/server-image.json" \
+  "$ARTIFACTS/imported-digest.txt" \
+  "$ARTIFACTS/ctr-image-info.txt" \
+  "$ARTIFACTS/host-image-id.txt" \
+  >"$ARTIFACTS/candidate-identities.txt" \
+  || die "failed to collect candidate image identities"
+IMPORTED_DIGEST="$(head -n1 "$ARTIFACTS/imported-digest.txt")"
+log "host_image_id=$HOST_IMAGE_ID imported_digest=$IMPORTED_DIGEST identities=$(tr '\n' ',' <"$ARTIFACTS/candidate-identities.txt" | sed 's/,$//')"
+[[ -s "$ARTIFACTS/candidate-identities.txt" ]] || die "candidate identity set is empty"
 
 TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 (( ${#TOKEN} >= 32 )) || die "generated internal token is shorter than 32 bytes"
@@ -354,10 +381,14 @@ helm install caesium "$ROOT/helm/caesium" \
   --wait --timeout 240s
 
 log "verifying three bound PVCs, distinct members, and candidate image IDs"
-RUNNING_DIGEST="$(python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_SHA" <<'PY'
-import json, subprocess, sys
+EXPECTED_IDENTITIES="$(paste -sd, "$ARTIFACTS/candidate-identities.txt")"
+RUNNING_DIGEST="$(python3 - "$KUBECONFIG_PATH" "$NAMESPACE" "$CANDIDATE_SHA" "$EXPECTED_IDENTITIES" <<'PY'
+import json, re, subprocess, sys
 
-kube, ns, tag = sys.argv[1:]
+kube, ns, tag, expected = sys.argv[1:]
+want = {"sha256:" + m.group(1).lower() for m in re.finditer(r"sha256:([0-9a-fA-F]{64})", expected)}
+if not want:
+    raise SystemExit("expected candidate identities are empty")
 
 def kc(*args):
     out = subprocess.check_output(["kubectl", "--kubeconfig", kube, "-n", ns, *args], text=True)
@@ -389,8 +420,11 @@ for p in caesium:
     if tag not in image:
         raise SystemExit(f"pod {p['metadata']['name']} image {image} does not use candidate tag {tag}")
     image_id = cs.get("imageID") or ""
-    if "sha256:" not in image_id:
+    got = {"sha256:" + m.group(1).lower() for m in re.finditer(r"sha256:([0-9a-fA-F]{64})", image_id)}
+    if not got:
         raise SystemExit(f"pod {p['metadata']['name']} missing resolved imageID ({image_id})")
+    if not (got & want):
+        raise SystemExit(f"pod {p['metadata']['name']} imageID {image_id} does not match loaded candidate {sorted(want)}")
     uids.add(uid); ips.add(ip); nodes.add(node); digests.add(image_id)
 
 if len(uids) != 3 or len(ips) != 3 or len(nodes) != 3:
@@ -401,10 +435,12 @@ print(next(iter(digests)))
 PY
 )"
 [[ "$RUNNING_DIGEST" == *sha256:* ]] || die "topology verification did not return a running digest ($RUNNING_DIGEST)"
-log "running_image_id=$RUNNING_DIGEST"
-CANDIDATE_DIGEST="$RUNNING_DIGEST"
-printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/candidate-digest.txt"
-printf '%s\n' "$CANDIDATE_DIGEST" >"$ARTIFACTS/running-image-id.txt"
+log "running_image_id=$RUNNING_DIGEST expected_identities=$EXPECTED_IDENTITIES"
+python3 "$HOSTLOGIC" image-match "$ARTIFACTS/candidate-identities.txt" "$RUNNING_DIGEST" \
+  || die "running image identity does not match loaded candidate"
+printf '%s\n' "$RUNNING_DIGEST" >"$ARTIFACTS/running-image-id.txt"
+# Keep the expected identity set. Do not redefine the candidate as the observed running ID.
+CANDIDATE_DIGEST="$EXPECTED_IDENTITIES"
 
 for i in 0 1 2; do
   kc_ns exec "caesium-$i" -c caesium -- sh -c 'printenv | grep ^CAESIUM_ | sort' \
@@ -533,7 +569,7 @@ spec:
         - name: CAESIUM_ROBUSTNESS_SERVER_IMAGE
           value: ${CANONICAL_SERVER_IMAGE}
         - name: CAESIUM_ROBUSTNESS_CANDIDATE_DIGEST
-          value: ${CANDIDATE_DIGEST}
+          value: "${CANDIDATE_DIGEST}"
         - name: CAESIUM_MANUAL_TRIGGER_API_KEY
           value: caesium-robustness-manual-key
       resources:
@@ -570,32 +606,13 @@ PY
     --dry-run=client -o yaml | kc apply -f -
 }
 
+listing_valid() {
+  python3 "$HOSTLOGIC" listing-valid <<<"$1"
+}
+
 task_dead() {
   local cid="$1" listing="$2" seen="$3"
-  python3 - "$cid" "$listing" "$seen" <<'PY'
-import sys
-cid = sys.argv[1].strip()
-listing = sys.argv[2]
-seen = sys.argv[3] == "1"
-short = cid[:12] if len(cid) >= 12 else cid
-if not cid or len(short) < 8:
-    raise SystemExit("empty container id")
-matched = False
-for line in listing.splitlines():
-    if cid not in line and short not in line:
-        continue
-    matched = True
-    l = line.lower()
-    if "running" in l:
-        raise SystemExit("container still running")
-    if any(s in l for s in ("stopped", "exited", "killed")):
-        raise SystemExit(0)
-if matched:
-    raise SystemExit("container still present without stopped evidence")
-if seen:
-    raise SystemExit(0)
-raise SystemExit("container id never appeared in ctr tasks list")
-PY
+  python3 "$HOSTLOGIC" task-dead "$cid" "$seen" <<<"$listing"
 }
 
 handle_host_request() {
@@ -663,8 +680,15 @@ PY
       killed=0
       seen_cid=0
       short_cid="${cid:0:12}"
-      before="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
+      before=""
+      before_rc=0
+      before="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1)" || before_rc=$?
       printf '%s\n' "$before" >"$ARTIFACTS/ctr-tasks-before-kill.txt"
+      if [[ "$before_rc" -ne 0 ]] || ! listing_valid "$before"; then
+        write_ack "$request_id" "$action" "failed" "$before" "ctr tasks list before kill failed (rc=$before_rc)"
+        LAST_REQUEST_ID="$request_id"
+        return 0
+      fi
       if [[ "$before" == *"$cid"* || "$before" == *"$short_cid"* ]]; then
         seen_cid=1
       else
@@ -672,19 +696,28 @@ PY
         LAST_REQUEST_ID="$request_id"
         return 0
       fi
+      last_list_err=""
       for _try in $(seq 1 20); do
-        docker exec "$node" ctr -n k8s.io tasks kill --signal SIGKILL "$cid" >"$ARTIFACTS/ctr-kill-$cid.txt" 2>&1 || true
-        listing="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1 || true)"
+        kill_rc=0
+        docker exec "$node" ctr -n k8s.io tasks kill --signal SIGKILL "$cid" >"$ARTIFACTS/ctr-kill-$cid.txt" 2>&1 || kill_rc=$?
+        list_rc=0
+        listing="$(docker exec "$node" ctr -n k8s.io tasks list 2>&1)" || list_rc=$?
         printf '%s\n' "$listing" >"$ARTIFACTS/ctr-tasks-after-kill.txt"
+        if [[ "$list_rc" -ne 0 ]] || ! listing_valid "$listing"; then
+          last_list_err="ctr tasks list after kill failed (rc=$list_rc)"
+          sleep 1
+          continue
+        fi
         if task_dead "$cid" "$listing" "$seen_cid"; then
           killed=1
           break
         fi
+        last_list_err="process still running (kill_rc=$kill_rc)"
         sleep 1
       done
       evidence="$(printf 'kubelet stopped on %s\nctr kill %s\n%s\n' "$node" "$cid" "$listing")"
       if [[ "$killed" -ne 1 ]]; then
-        write_ack "$request_id" "$action" "failed" "$evidence" "process still running"
+        write_ack "$request_id" "$action" "failed" "$evidence" "${last_list_err:-process still running}"
         LAST_REQUEST_ID="$request_id"
         return 0
       fi
@@ -733,5 +766,25 @@ pass_line() {
 pass_line 'TestOwnerCrash/owner_is_leader' || die "required subtest owner_is_leader did not PASS"
 pass_line 'TestOwnerCrash/owner_is_not_leader' || die "required subtest owner_is_not_leader did not PASS"
 pass_line 'TestOwnerCrash ' || die "TestOwnerCrash parent did not PASS"
+
+kc_ns get cm robustness-records -o json >"$ARTIFACTS/robustness-records.json" \
+  || die "inconclusive: failed to export robustness-records ConfigMap"
+kc_ns get cm robustness-records -o yaml >"$ARTIFACTS/robustness-records.yaml" \
+  || die "inconclusive: failed to export robustness-records.yaml"
+python3 "$HOSTLOGIC" records-ok "$ARTIFACTS/robustness-records.json" \
+  || die "inconclusive: exported recorder artifacts are missing or unreadable"
+python3 - "$ARTIFACTS/robustness-records.json" "$ARTIFACTS" <<'PY'
+import json, pathlib, sys
+cm = json.loads(pathlib.Path(sys.argv[1]).read_text())
+out = pathlib.Path(sys.argv[2]) / "records"
+out.mkdir(exist_ok=True)
+data = cm.get("data") or {}
+for key in ("events", "owner_is_leader", "owner_is_not_leader"):
+    raw = data.get(key)
+    if not raw:
+        raise SystemExit(f"missing {key}")
+    json.loads(raw)
+    (out / f"{key}.json").write_text(raw if raw.endswith("\n") else raw + "\n")
+PY
 
 log "B1 robustness passed; artifacts in $ARTIFACTS"

@@ -95,7 +95,7 @@ func TestOwnerCrash(t *testing.T) {
 		t.Logf("host done: %v", err)
 	}
 	if err := cluster.WriteRecords(ctx, kube, env.Namespace, "events", sink.Events()); err != nil {
-		t.Logf("persist recorder events: %v (missing recorder data is inconclusive)", err)
+		t.Fatalf("inconclusive: persist recorder events: %v", err)
 	}
 }
 
@@ -203,6 +203,9 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		return len(sink.StartsFor(run.ID, cluster.BlockStep)) > 0, nil
 	}); err != nil {
 		t.Fatalf("blocked-effect start missing before kill (inconclusive): %v events=%s", err, eventsJSON(sink))
+	}
+	if n := len(sink.StartsFor(run.ID, cluster.SuccessorStep)); n != 0 {
+		t.Fatalf("successor started while block was held (pre-fault starts=%d events=%s)", n, eventsJSON(sink))
 	}
 
 	placeCtx, placeCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -328,11 +331,8 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 	blockDone := sink.CompletionsFor(run.ID, cluster.BlockStep)
 	succStarts := sink.StartsFor(run.ID, cluster.SuccessorStep)
 	succDone := sink.CompletionsFor(run.ID, cluster.SuccessorStep)
-	if len(blockStarts) == 0 || len(blockDone) == 0 {
-		t.Fatalf("recorder missing block start/complete (inconclusive): starts=%d completes=%d", len(blockStarts), len(blockDone))
-	}
-	if len(succStarts) == 0 || len(succDone) == 0 {
-		t.Fatalf("legal successor did not execute: starts=%d completes=%d", len(succStarts), len(succDone))
+	if err := checkSuccessorOrdering(sink.Events(), run.ID, cluster.BlockStep, cluster.SuccessorStep); err != nil {
+		t.Fatalf("successor ordering: %v events=%s", err, eventsJSON(sink))
 	}
 	if len(blockStarts) > 1 {
 		t.Logf("duplicate block attempts retained: %d", len(blockStarts))
@@ -357,6 +357,13 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 	correlateSink(t, final, nameByTaskID, succStarts, cluster.SuccessorStep)
 	correlateSink(t, final, nameByTaskID, blockDone, cluster.BlockStep)
 	correlateSink(t, final, nameByTaskID, succDone, cluster.SuccessorStep)
+	var pub []publicTask
+	for _, tr := range final.Tasks {
+		pub = append(pub, publicTask{Step: nameByTaskID[tr.TaskID], Status: tr.Status})
+	}
+	if err := checkPublicTerminalAgreement(pub, cluster.BlockStep, cluster.SuccessorStep); err != nil {
+		t.Fatalf("public terminal task states: %v", err)
+	}
 
 	restartCtx, restartCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer restartCancel()
@@ -417,7 +424,7 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		"public_status":      final.Status,
 		"kill_evidence":      killAck.Evidence,
 	}); err != nil {
-		t.Logf("persist %s records: %v (missing recorder data is inconclusive)", name, err)
+		t.Fatalf("inconclusive: persist %s records: %v", name, err)
 	}
 }
 
@@ -482,48 +489,6 @@ func dqliteAddresses(topo cluster.Topology) []string {
 		out = append(out, m.DqliteAddr())
 	}
 	return out
-}
-
-func killEvidenceShowsDeath(evidence, containerID string) bool {
-	if strings.TrimSpace(evidence) == "" || containerID == "" {
-		return false
-	}
-	short := containerID
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	if !strings.Contains(evidence, short) {
-		return false
-	}
-	var listingHasCID, listingRunning, listingStopped bool
-	for _, line := range strings.Split(evidence, "\n") {
-		trim := strings.TrimSpace(line)
-		lower := strings.ToLower(trim)
-		if strings.HasPrefix(lower, "kubelet stopped") || strings.HasPrefix(lower, "ctr kill") {
-			continue
-		}
-		if !strings.Contains(trim, short) && !strings.Contains(trim, containerID) {
-			continue
-		}
-		listingHasCID = true
-		if strings.Contains(lower, "running") {
-			listingRunning = true
-		}
-		if strings.Contains(lower, "stopped") || strings.Contains(lower, "exited") || strings.Contains(lower, "killed") {
-			listingStopped = true
-		}
-	}
-	if listingRunning {
-		return false
-	}
-	if listingStopped {
-		return true
-	}
-	if listingHasCID {
-		return false
-	}
-	// CID is in the kill command line but gone from ctr tasks list.
-	return true
 }
 
 func eventsJSON(sink *recorder.Sink) string {

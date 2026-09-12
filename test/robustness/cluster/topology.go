@@ -144,12 +144,8 @@ func RequireReadyTopology(ctx context.Context, kube *kubernetes.Clientset, ns, c
 		if m.ContainerID == "" {
 			return Topology{}, fmt.Errorf("pod %s missing container ID", m.Name)
 		}
-		if candidateDigest != "" {
-			got := NormalizeImageDigest(m.ImageID)
-			want := NormalizeImageDigest(candidateDigest)
-			if got == "" || (want != "" && got != want) {
-				return Topology{}, fmt.Errorf("pod %s image digest %q does not match candidate %q", m.Name, m.ImageID, candidateDigest)
-			}
+		if candidateDigest != "" && !ImageIDMatchesCandidate(m.ImageID, candidateDigest) {
+			return Topology{}, fmt.Errorf("pod %s image digest %q does not match candidate %q", m.Name, m.ImageID, candidateDigest)
 		}
 		if m.PVCName == "" || m.VolumeName == "" {
 			return Topology{}, fmt.Errorf("pod %s missing bound PVC/volume (pvc=%q volume=%q)", m.Name, m.PVCName, m.VolumeName)
