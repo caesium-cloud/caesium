@@ -1,0 +1,26 @@
+# Keep robustness test sources in this context (root .dockerignore drops *_test.go).
+justfile
+README.md
+LICENSE
+
+docs
+build
+!build/triage-agent.sh
+tools
+caesium
+
+.github
+.circleci
+.gitignore
+.devcontainer
+.claude
+.git
+
+ui/node_modules
+ui/dist
+
+helm
+coverage.txt
+.tmp
+**/__pycache__
+*.tar.gz

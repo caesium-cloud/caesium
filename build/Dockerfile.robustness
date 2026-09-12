@@ -1,0 +1,27 @@
+# Robustness runner: compiled TestOwnerCrash plus the candidate CLI.
+ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
+ARG CAESIUM_IMAGE=caesiumcloud/caesium:latest
+
+FROM ${BUILDER_IMAGE} AS compile
+WORKDIR /bld/caesium
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    mkdir -p ui/dist /out && touch ui/dist/index.html && \
+    CGO_ENABLED=0 go test -tags=integration -c ./test/robustness -o /out/robustness.test
+RUN if ldd /out/robustness.test >/tmp/ldd.out 2>/dev/null; then \
+      tr -s '[:blank:]' '\n' </tmp/ldd.out | grep '^/' | \
+        xargs -I % sh -c 'mkdir -p /runtime$(dirname %); cp % /runtime%'; \
+    else \
+      mkdir -p /runtime; \
+    fi
+
+FROM ${CAESIUM_IMAGE} AS robustness
+USER 0:0
+COPY --from=compile /runtime/ /
+COPY --from=compile /out/robustness.test /bin/robustness.test
+RUN chmod 0755 /bin/robustness.test /bin/caesium && \
+    test -x /bin/robustness.test && test -x /bin/caesium
+USER 10001:10001
+WORKDIR /
+ENTRYPOINT ["/bin/robustness.test"]
