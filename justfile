@@ -28,6 +28,8 @@ local_image_ref := if podman == "true" { "localhost/" + repo + "/" + image } els
 local_builder_ref := if podman == "true" { "localhost/" + repo + "/" + builder_image } else { repo + "/" + builder_image }
 triage_agent_image := repo + "/triage-agent"
 local_triage_agent_ref := if podman == "true" { "localhost/" + triage_agent_image } else { triage_agent_image }
+stress_image := repo + "/resource-stress"
+local_stress_ref := if podman == "true" { "localhost/" + stress_image } else { stress_image }
 
 # The unit-pipeline reagent images (git-source, tf-discover, tf-warm, tf-runner)
 # publish under the same Docker Hub org as the product image.
@@ -46,7 +48,7 @@ port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
 contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
-agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/(TestAgent|TestAuth|TestIncident|TestScoped|TestHold)")
+agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/(TestAgent|TestAuth|TestIncident|TestScoped|TestHold|TestResourceStats)")
 # Minimum number of suite scenarios the auth lane must actually execute. The
 # lane used to pass in 0.068s with every scenario skipped on an env guard the
 # runner container never received; the recipe now counts `--- PASS` lines and
@@ -59,10 +61,10 @@ agent_integration_min_pass := env("CAESIUM_AGENT_INTEGRATION_MIN_PASS", "3")
 distributed_integration_min_pass := env("CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS", "20")
 owner_memory_integration_min_pass := env("CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS", "14")
 # Suite-qualified: a bare method name matches no test at all.
-infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
+infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/(TestInfra|TestResourceStats)")
 infra_integration_min_pass := env("CAESIUM_INFRA_INTEGRATION_MIN_PASS", "6")
 # When true, product-image recipes (build / build-test / build-reagents /
-# build-triage-agent) skip if the tagged image already exists. CI sets this
+# build-triage-agent / build-stress) skip if the tagged image already exists. CI sets this
 # after docker-loading the images job's artifacts so the integration lanes
 # never recompile. Local default is false: a stale image must not silently
 # skip a rebuild after you edit source.
@@ -180,6 +182,22 @@ build-triage-agent: validate-platform
             -t {{ triage_agent_image }}:latest \
             -f build/Dockerfile.triage-agent .; \
     fi
+
+# The fixture is always built from this checkout locally. CI loads the exact
+# product artifact first; a missing tag fails closed instead of rebuilding.
+build-stress: validate-platform
+    @if [ "{{ skip_image_build }}" = "true" ]; then \
+        {{ container_cli }} image inspect {{ local_stress_ref }}:{{ tag }} >/dev/null || exit 1; \
+        echo "Stress image {{ local_stress_ref }}:{{ tag }} already present, skipping build (CAESIUM_SKIP_IMAGE_BUILD=true)."; \
+    else \
+        {{ container_cli }} build --platform {{ platform }} \
+            -t {{ local_stress_ref }}:{{ tag }} \
+            -f build/Dockerfile.stress .; \
+    fi
+
+# Verify the fixture's real resident allocation, release barrier, and OOM signal.
+stress-image-test: build-stress
+    bash build/stress/smoke.sh {{ container_cli }} {{ local_stress_ref }}:{{ tag }}
 
 # ---------------------------------------------------------------------------
 # The unit-pipeline reagents (docs/superpowers/specs/…-infrastructure-deployment…).
@@ -404,6 +422,7 @@ integration-test: integration-runner
     if {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_TEST_SHARD_INDEX \
         -e CAESIUM_TEST_SHARD_COUNT \
@@ -443,6 +462,7 @@ integration-test-distributed: integration-runner
     { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_EXECUTION_MODE=distributed \
@@ -450,7 +470,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -484,6 +504,7 @@ integration-test-owner-memory: integration-runner
     { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_EXECUTION_MODE=distributed \
@@ -492,7 +513,7 @@ integration-test-owner-memory: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestHaltPolicy)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestHaltPolicy|TestResourceStats)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -558,6 +579,7 @@ integration-test-agent: integration-runner
     {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
@@ -604,10 +626,12 @@ integration-down-infra:
 # Requires Podman to be installed and the Podman socket to be active
 
 # (run: systemctl --user enable --now podman.socket).
-integration-test-podman: build integration-runner
+integration-test-podman: build build-stress integration-runner
     #!/usr/bin/env bash
     set -euo pipefail
     PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
+    docker save {{ local_stress_ref }}:{{ tag }} | podman load
+    podman image inspect {{ local_stress_ref }}:{{ tag }} >/dev/null
     docker rm -f caesium-server-podman >/dev/null 2>&1 || true
     docker run -d --name caesium-server-podman \
         --platform {{ platform }} \
@@ -619,6 +643,9 @@ integration-test-podman: build integration-runner
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -634,6 +661,9 @@ integration-test-podman: build integration-runner
     if docker run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -e CAESIUM_TEST_ENGINE=podman \
+        -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
+        -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-podman/caesium \
         -e CAESIUM_TEST_SHARD_INDEX \
         -e CAESIUM_TEST_SHARD_COUNT \
@@ -657,7 +687,7 @@ hydrate:
         -v {{ repo_dir }}/docs/examples:/examples:ro \
         {{ local_image_ref }}:{{ tag }} job apply --server http://127.0.0.1:{{ port }} --path /examples
 
-integration-up: build-test
+integration-up: build-stress build-test
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
     # Keep this CI path sharded to exercise the multi-shard database router.
     {{ container_cli }} run -d --platform {{ platform }} \
@@ -674,6 +704,9 @@ integration-up: build-test
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -688,7 +721,7 @@ integration-up: build-test
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
-integration-up-distributed: build-test
+integration-up-distributed: build-stress build-test
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
     # Keep this CI path sharded to exercise the multi-shard database router.
     {{ container_cli }} run -d --platform {{ platform }} \
@@ -705,6 +738,9 @@ integration-up-distributed: build-test
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -732,7 +768,7 @@ integration-up-distributed: build-test
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
-integration-up-owner-memory: build-test
+integration-up-owner-memory: build-stress build-test
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
     {{ container_cli }} run -d --platform {{ platform }} \
         --name {{ it_container }} \
@@ -748,6 +784,9 @@ integration-up-owner-memory: build-test
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -795,7 +834,7 @@ integration-up-owner-memory: build-test
 # default lane, podman, and the ui-e2e/ui-e2e-auth blocks in ci.yml).
 
 # Start the infra lane's server (own container, reagent images built).
-integration-up-infra: build-test build-reagents
+integration-up-infra: build-stress build-test build-reagents
     {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
     {{ container_cli }} run -d --platform {{ platform }} \
         --name {{ infra_it_container }} \
@@ -811,6 +850,9 @@ integration-up-infra: build-test build-reagents
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -842,6 +884,7 @@ integration-test-infra: integration-runner
     { {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_RESOURCE_STRESS_IMAGE={{ local_stress_ref }}:{{ tag }} \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-infra/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
@@ -872,7 +915,7 @@ integration-test-infra: integration-runner
     echo "infra integration lane executed $passes scenario(s) (minimum {{ infra_integration_min_pass }})"; \
     {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
 
-integration-up-agent: build-test build-triage-agent
+integration-up-agent: build-stress build-test build-triage-agent
     {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
     {{ container_cli }} run -d --platform {{ platform }} \
         --name {{ agent_it_container }} \
@@ -899,6 +942,9 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -959,6 +1005,9 @@ ui-e2e: build-release
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+            -e CAESIUM_RIGHT_SIZING_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -1001,6 +1050,9 @@ ui-e2e-auth: build-release
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -1092,6 +1144,12 @@ k8s-distributed: build-release k8s-registry-up
             --set-string config.extraEnv[2].value=fail \
             --set config.extraEnv[3].name=CAESIUM_CACHE_PIN_DIGESTS \
             --set-string config.extraEnv[3].value=true \
+            --set config.extraEnv[4].name=CAESIUM_RESOURCE_STATS_ENABLED \
+            --set-string config.extraEnv[4].value=true \
+            --set config.extraEnv[5].name=CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL \
+            --set-string config.extraEnv[5].value=100ms \
+            --set config.extraEnv[6].name=CAESIUM_RIGHT_SIZING_ENABLED \
+            --set-string config.extraEnv[6].value=true \
             --set kubernetes.engine.enabled=true \
             --set persistence.enabled=false \
             --wait

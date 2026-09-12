@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
@@ -151,4 +152,9 @@ func (s *PodmanTestSuite) SetupTest() {
 
 func TestPodmanTestSuite(t *testing.T) {
 	suite.Run(t, new(PodmanTestSuite))
+}
+
+func (m *mockPodmanBackend) ContainerStats(ctx context.Context, id string) (atom.ResourceStats, error) {
+	args := m.Called(id)
+	return args.Get(0).(atom.ResourceStats), args.Error(1)
 }

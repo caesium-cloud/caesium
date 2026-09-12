@@ -228,6 +228,20 @@ func TestSubscriberRemediatesOnSuccess(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond)
 }
 
+func TestSubscriberPropagatesRuntimeOOMEvidence(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+	jobID, runID, taskID := seedFailedTask(t, db, "no diagnostic log")
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runID).Updates(map[string]any{"result": "resource_failure", "oom_killed": true, "exit_code": nil}).Error)
+	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()})
+	waitForIncidents(t, db, 1)
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, string(ClassOOM), inc.Class)
+}
+
 // TestSubscriberPublishesIncidentOpened is #419's contract: opening an
 // incident must announce TypeIncidentOpened on the shared event stream,
 // persisted through the same event.Store path as approval_requested /

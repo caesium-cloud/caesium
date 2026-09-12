@@ -248,7 +248,7 @@ func (e *dockerEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 	case <-waitCtx.Done():
 		return nil, waitCtx.Err()
 	}
-	return e.Get(&atom.EngineGetRequest{ID: req.ID})
+	return e.inspectWaitOutcome(waitCtx, req.ID)
 }
 
 // Stop and remove a Caesium Docker container. Since Caesium

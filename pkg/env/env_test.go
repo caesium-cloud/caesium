@@ -173,3 +173,18 @@ func (s *EnvTestSuite) TestProcessInvalidLogLevelFailure() {
 func TestEnvTestSuite(t *testing.T) {
 	suite.Run(t, new(EnvTestSuite))
 }
+
+func (s *EnvTestSuite) TestResourceStatsGateAndSampleInterval() {
+	s.T().Setenv("CAESIUM_RESOURCE_STATS_ENABLED", "false")
+	s.T().Setenv("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL", "10s")
+	s.Require().NoError(Process())
+	s.False(Variables().ResourceStatsEnabled)
+	s.Equal(10*time.Second, Variables().ResourceStatsSampleInterval)
+	s.T().Setenv("CAESIUM_RESOURCE_STATS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL", "100ms")
+	s.Require().NoError(Process())
+	s.True(Variables().ResourceStatsEnabled)
+	s.Equal(100*time.Millisecond, Variables().ResourceStatsSampleInterval)
+	s.T().Setenv("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL", "0")
+	s.ErrorContains(Process(), "CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL must be greater than 0")
+}

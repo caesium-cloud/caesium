@@ -352,5 +352,94 @@ class IntegrationRunnerTests(unittest.TestCase):
         self.assertIn("Precompiled integration test binary is missing", result.stderr)
 
 
+class ResourceHarnessTests(unittest.TestCase):
+    def test_exact_fixture_is_built_before_each_product_artifact(self):
+        for arch, job in (("amd64", "images"), ("arm64", "images-arm64")):
+            steps = JOBS[job]["steps"]
+            build = next(i for i, step in enumerate(steps) if "stress-image-test" in step.get("run", ""))
+            save = next(i for i, step in enumerate(steps) if step.get("with", {}).get("name") == f"product-{arch}")
+            self.assertLess(build, save)
+            self.assertIn(f"tag=${{{{ env.IMAGE_TAG }}}}-{arch}", steps[build]["run"])
+            self.assertIn(f"caesiumcloud/resource-stress:${{{{ env.IMAGE_TAG }}}}-{arch}", steps[save]["with"]["images"])
+
+    def test_every_local_server_and_runner_receives_resource_configuration(self):
+        for recipe in (
+            "integration-test", "integration-test-distributed", "integration-test-owner-memory",
+            "integration-test-agent", "integration-test-infra", "integration-test-podman",
+            "ui-e2e", "ui-e2e-auth",
+        ):
+            with self.subTest(recipe=recipe):
+                result = subprocess.run(
+                    ["just", "--dry-run", "tag=harness-evidence", recipe], cwd=ROOT,
+                    env={**os.environ, "CAESIUM_PODMAN": "false"}, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = result.stdout + result.stderr
+                # These recipes call their server recipe in a shell command,
+                # not a just dependency; dry-run does not recursively execute it.
+                server = {
+                    "integration-test": "integration-up",
+                    "integration-test-distributed": "integration-up-distributed",
+                    "integration-test-owner-memory": "integration-up-owner-memory",
+                    "integration-test-agent": "integration-up-agent",
+                    "integration-test-infra": "integration-up-infra",
+                }.get(recipe)
+                if server:
+                    self.assertIn(f"just tag=harness-evidence {server}", commands)
+                    startup = subprocess.run(
+                        ["just", "--dry-run", "tag=harness-evidence", server], cwd=ROOT,
+                        env={**os.environ, "CAESIUM_PODMAN": "false"}, capture_output=True, text=True,
+                    )
+                    self.assertEqual(startup.returncode, 0, startup.stderr)
+                    commands += startup.stdout + startup.stderr
+                for setting in ("RESOURCE_STATS_ENABLED=true", "RESOURCE_STATS_SAMPLE_INTERVAL=100ms", "RIGHT_SIZING_ENABLED=true"):
+                    self.assertIn(f"-e CAESIUM_{setting}", commands)
+                if recipe.startswith("integration-test"):
+                    self.assertIn("-e CAESIUM_RESOURCE_STRESS_IMAGE=caesiumcloud/resource-stress:harness-evidence", commands)
+                    self.assertIn("build/Dockerfile.stress", commands)
+                if recipe in ("integration-test-distributed", "integration-test-owner-memory", "integration-test-agent", "integration-test-infra"):
+                    self.assertIn("|TestResourceStats)", commands)
+
+    def test_inline_servers_and_foreign_image_stores_receive_same_fixture(self):
+        for job in ("ui-e2e", "ui-e2e-auth", "podman-integration-test"):
+            commands = "\n".join(step.get("run", "") for step in JOBS[job]["steps"])
+            for setting in ("RESOURCE_STATS_ENABLED=true", "RESOURCE_STATS_SAMPLE_INTERVAL=100ms", "RIGHT_SIZING_ENABLED=true"):
+                self.assertIn(f"-e CAESIUM_{setting}", commands)
+        exact = "caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64"
+        for job, transfer in (("podman-integration-test", f"docker save {exact} | podman load"), ("helm-integration-test", f"kind load docker-image {exact}")):
+            commands = "\n".join(step.get("run", "") for step in JOBS[job]["steps"])
+            self.assertIn(transfer, commands)
+            self.assertIn(f"-e CAESIUM_RESOURCE_STRESS_IMAGE={exact}", commands)
+        values = yaml.safe_load((ROOT / "helm/caesium/ci/test-values-k8s.yaml").read_text())
+        helm_env = {item["name"]: item["value"] for item in values["config"]["extraEnv"]}
+        self.assertEqual(helm_env["CAESIUM_RESOURCE_STATS_ENABLED"], "true")
+        self.assertEqual(helm_env["CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL"], "100ms")
+        self.assertEqual(helm_env["CAESIUM_RIGHT_SIZING_ENABLED"], "true")
+
+    def test_podman_monitor_and_oom_evidence_are_verified(self):
+        steps = JOBS["podman-integration-test"]["steps"]
+        commands = "\n".join(step.get("run", "") for step in steps)
+        self.assertIn("releases/download/v2.2.1/conmon.amd64", commands)
+        self.assertIn("1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6", commands)
+        self.assertIn("sha256sum --check --strict", commands)
+        self.assertIn('log_driver = "k8s-file"', commands)
+        self.assertIn("bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64", commands)
+
+    def test_missing_ci_fixture_fails_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command_log = Path(tmp) / "commands"
+            fake_cli = Path(tmp) / "fake-container-cli"
+            fake_cli.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$RESOURCE_HARNESS_COMMAND_LOG"\nexit 7\n')
+            fake_cli.chmod(0o755)
+            result = subprocess.run(
+                ["just", "tag=harness-evidence", "build-stress"], cwd=ROOT,
+                env={**os.environ, "CAESIUM_SKIP_IMAGE_BUILD": "true", "CAESIUM_PODMAN": "false",
+                     "CAESIUM_CONTAINER_CLI": str(fake_cli), "RESOURCE_HARNESS_COMMAND_LOG": str(command_log)},
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(command_log.read_text().splitlines(), ["image inspect caesiumcloud/resource-stress:harness-evidence"])
+
+
 if __name__ == "__main__":
     unittest.main()
