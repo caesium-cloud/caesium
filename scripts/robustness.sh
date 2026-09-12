@@ -350,14 +350,19 @@ for n in "${KIND_NODES[@]}"; do
   fi
 done
 [[ -n "$WORKER_NODE" ]] || die "no kind worker for imported digest"
-imported_identities "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}" >"$ARTIFACTS/imported-digest.txt"
+docker exec "$WORKER_NODE" ctr -n k8s.io images ls >"$ARTIFACTS/ctr-images-ls.txt" 2>/dev/null || true
+python3 "$HOSTLOGIC" ctr-image-shas "caesiumcloud/caesium:${CANDIDATE_SHA}" \
+  <"$ARTIFACTS/ctr-images-ls.txt" >"$ARTIFACTS/imported-digest.txt" \
+  || imported_identities "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}" >"$ARTIFACTS/imported-digest.txt"
 for ref in "caesiumcloud/caesium:${CANDIDATE_SHA}" "docker.io/caesiumcloud/caesium:${CANDIDATE_SHA}"; do
   docker exec "$WORKER_NODE" ctr -n k8s.io images info "$ref" >>"$ARTIFACTS/ctr-image-info.txt" 2>/dev/null || true
+  docker exec "$WORKER_NODE" crictl inspecti "$ref" >>"$ARTIFACTS/crictl-inspecti.json" 2>/dev/null || true
 done
 python3 "$HOSTLOGIC" collect-identities \
   "$ARTIFACTS/server-image.json" \
   "$ARTIFACTS/imported-digest.txt" \
   "$ARTIFACTS/ctr-image-info.txt" \
+  "$ARTIFACTS/crictl-inspecti.json" \
   "$ARTIFACTS/host-image-id.txt" \
   >"$ARTIFACTS/candidate-identities.txt" \
   || die "failed to collect candidate image identities"

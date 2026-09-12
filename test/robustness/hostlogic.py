@@ -105,19 +105,27 @@ def extract_shas(*texts: str) -> list[str]:
 
 
 def identities_from_inspect(data) -> list[str]:
-    if isinstance(data, dict):
-        items = [data]
-    elif isinstance(data, list):
-        items = data
-    else:
-        return []
     texts: list[str] = []
-    for img in items:
-        if not isinstance(img, dict):
-            continue
-        texts.append(str(img.get("Id") or ""))
-        for rd in img.get("RepoDigests") or []:
-            texts.append(str(rd))
+
+    def walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                lk = str(key).lower()
+                if lk in {"id", "digest", "imagedigest", "imageid"}:
+                    texts.append(str(val or ""))
+                elif lk in {"repodigests", "repotags"}:
+                    if isinstance(val, list):
+                        texts.extend(str(x) for x in val)
+                    else:
+                        texts.append(str(val or ""))
+                    walk(val)
+                else:
+                    walk(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
     return extract_shas(*texts)
 
 
@@ -234,12 +242,26 @@ def _cmd_ctr_image_shas(argv: list[str]) -> int:
         print("usage: ctr-image-shas <needle>", file=sys.stderr)
         return 2
     needle = argv[0]
-    texts = [ln for ln in _read_stdin().splitlines() if needle in ln]
-    shas = extract_shas(*texts)
-    if not shas:
+    matched: set[str] = set()
+    line_shas: list[list[str]] = []
+    for ln in _read_stdin().splitlines():
+        shas = extract_shas(ln)
+        line_shas.append(shas)
+        if needle in ln:
+            matched.update(shas)
+    out: list[str] = []
+    seen: set[str] = set()
+    for shas in line_shas:
+        if not (matched & set(shas)):
+            continue
+        for ident in shas:
+            if ident not in seen:
+                seen.add(ident)
+                out.append(ident)
+    if not out:
         print("no sha256 digest for " + needle, file=sys.stderr)
         return 1
-    sys.stdout.write("\n".join(shas) + "\n")
+    sys.stdout.write("\n".join(out) + "\n")
     return 0
 
 
@@ -297,6 +319,40 @@ def _self_test() -> int:
     check("running manifest maps", ok)
     ok, _ = identities_match(ids, "sha256:" + ("c" * 64))
     check("unknown running fails", not ok)
+    crictl = {
+        "status": {
+            "id": "sha256:" + ("d" * 64),
+            "repoDigests": ["docker.io/caesiumcloud/caesium@sha256:" + ("e" * 64)],
+            "repoTags": ["docker.io/caesiumcloud/caesium:tag"],
+        }
+    }
+    cids = identities_from_inspect(crictl)
+    check("crictl status.id", ("sha256:" + ("d" * 64)) in cids)
+    check("crictl repoDigest", ("sha256:" + ("e" * 64)) in cids)
+    ctr_listing = (
+        "REF TYPE DIGEST SIZE\n"
+        "docker.io/caesiumcloud/caesium:tag application/vnd.oci.image.manifest.v1+json sha256:"
+        + ("f" * 64)
+        + " 1.0MiB\n"
+        "docker.io/library/import-2026-09-12:latest application/vnd.oci.image.manifest.v1+json sha256:"
+        + ("f" * 64)
+        + " 1.0MiB\n"
+        "docker.io/library/alpine:3.23 application/vnd.oci.image.manifest.v1+json sha256:"
+        + ("0" * 64)
+        + " 1.0MiB\n"
+    )
+    old_stdin = sys.stdin
+    sys.stdin = io.StringIO(ctr_listing)
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            rc = _cmd_ctr_image_shas(["caesiumcloud/caesium:tag"])
+    finally:
+        sys.stdin = old_stdin
+    alias_out = buf.getvalue()
+    check("ctr alias rc", rc == 0)
+    check("ctr alias includes shared import digest", ("sha256:" + ("f" * 64)) in alias_out)
+    check("ctr alias excludes unrelated alpine", ("sha256:" + ("0" * 64)) not in alias_out)
 
     cm = {
         "data": {
