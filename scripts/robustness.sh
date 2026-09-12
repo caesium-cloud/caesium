@@ -726,11 +726,12 @@ if [[ "$RUNNER_PHASE" != "Succeeded" ]]; then
   die "runner phase=$RUNNER_PHASE (log: $ARTIFACTS/robustness.test.log)"
 fi
 
-grep -E '^--- PASS: TestOwnerCrash/owner_is_leader' "$ARTIFACTS/robustness.test.log" >/dev/null \
-  || die "required subtest owner_is_leader did not PASS"
-grep -E '^--- PASS: TestOwnerCrash/owner_is_not_leader' "$ARTIFACTS/robustness.test.log" >/dev/null \
-  || die "required subtest owner_is_not_leader did not PASS"
-grep -E '^--- PASS: TestOwnerCrash ' "$ARTIFACTS/robustness.test.log" >/dev/null \
-  || die "TestOwnerCrash parent did not PASS"
+# Go indents subtest PASS lines; BSD grep also treats a leading --- pattern as options.
+pass_line() {
+  grep -e "--- PASS: $1" "$ARTIFACTS/robustness.test.log" >/dev/null
+}
+pass_line 'TestOwnerCrash/owner_is_leader' || die "required subtest owner_is_leader did not PASS"
+pass_line 'TestOwnerCrash/owner_is_not_leader' || die "required subtest owner_is_not_leader did not PASS"
+pass_line 'TestOwnerCrash ' || die "TestOwnerCrash parent did not PASS"
 
 log "B1 robustness passed; artifacts in $ARTIFACTS"
