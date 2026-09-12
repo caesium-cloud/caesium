@@ -20,9 +20,10 @@ Flags:
 Exit status:
   0  every required scenario passed (or used an allowed skip)
   1  failed closed: invalid schema, duplicate IDs, missing scenario,
-     unexpected skip, disabled gate, wrong artifact identity, absent
-     fault-activation evidence, failed observations, invented pass, or
-     --strict with inconclusive evidence
+     unexpected skip, disabled gate, wrong topology/mode/feature flags,
+     wrong or missing scenario artifact identity, absent fault-activation
+     evidence, failed observations, invented pass, or --strict with
+     inconclusive evidence
   2  no hard failures, but at least one required scenario is inconclusive
      (missing recorder, checker timeout, insufficient samples)
 """
@@ -379,6 +380,15 @@ def validate_report_schema(doc):
             _require(scenario, "candidate_sha", str, path, issues, nonempty=True)
         if "candidate_digest" in scenario:
             _require(scenario, "candidate_digest", str, path, issues, nonempty=True)
+        require_observed_config = status in REPORT_STATUSES and status != "skip"
+        if require_observed_config or "topology" in scenario:
+            _validate_topology(scenario.get("topology"), f"{path}.topology", issues, sid or "")
+        if require_observed_config or "mode" in scenario:
+            _validate_mode(scenario.get("mode"), f"{path}.mode", issues, sid or "")
+        if require_observed_config or "feature_flags" in scenario:
+            _validate_feature_flags(
+                scenario.get("feature_flags"), f"{path}.feature_flags", issues, sid or ""
+            )
         if "observations" in scenario and not isinstance(scenario["observations"], list):
             issues.append(_fail("schema", f"{path}.observations must be a list", sid or ""))
         elif "observations" in scenario and any(not isinstance(item, str) for item in scenario["observations"]):
@@ -417,6 +427,40 @@ def validate_report_schema(doc):
 
 def _allowed_skip_reasons(scenario):
     return {item["reason"] for item in scenario.get("allowed_skips") or [] if isinstance(item, dict) and "reason" in item}
+
+
+def _compare_observed_mapping(expected, actual, label, code, sid):
+    """Fail closed when observed evidence does not satisfy manifest requirements."""
+    issues = []
+    if not isinstance(expected, dict):
+        return issues
+    if not isinstance(actual, dict):
+        issues.append(_fail(
+            code,
+            f"scenario {sid!r} {label} is missing from evidence",
+            sid,
+        ))
+        return issues
+    mismatches = []
+    for key, value in expected.items():
+        if key not in actual:
+            mismatches.append(f"{key} missing")
+        elif actual[key] != value:
+            mismatches.append(f"{key} {actual[key]!r} != {value!r}")
+    if mismatches:
+        issues.append(_fail(
+            code,
+            f"scenario {sid!r} {label} does not match the manifest: " + ", ".join(mismatches),
+            sid,
+        ))
+    return issues
+
+
+def _scenario_identity(result, field):
+    """Return the scenario's own identity field; do not inherit the report header."""
+    if field not in result:
+        return None
+    return result.get(field)
 
 
 def compare_report(manifest, report, require_gate=None):
@@ -486,23 +530,57 @@ def _compare_scenario(scenario, result, report):
     if status == "fail":
         issues.append(_fail("failed", f"scenario {sid!r} reported fail", sid))
 
+    issues.extend(_compare_observed_mapping(
+        scenario.get("topology"),
+        result.get("topology"),
+        "topology",
+        "wrong-topology",
+        sid,
+    ))
+    issues.extend(_compare_observed_mapping(
+        scenario.get("mode"),
+        result.get("mode"),
+        "mode",
+        "wrong-mode",
+        sid,
+    ))
+    issues.extend(_compare_observed_mapping(
+        scenario.get("feature_flags"),
+        result.get("feature_flags"),
+        "feature flags",
+        "wrong-feature-flags",
+        sid,
+    ))
+
     evidence = scenario.get("evidence") or {}
     top_sha = report.get("candidate_sha")
     top_digest = report.get("candidate_digest")
-    result_sha = result.get("candidate_sha", top_sha)
-    result_digest = result.get("candidate_digest", top_digest)
+    result_sha = _scenario_identity(result, "candidate_sha")
+    result_digest = _scenario_identity(result, "candidate_digest")
     if evidence.get("require_candidate_sha"):
-        if not _is_sha(top_sha) or not _is_sha(result_sha) or result_sha != top_sha:
+        if not isinstance(result_sha, str) or not result_sha.strip():
             issues.append(_fail(
                 "wrong-artifact-identity",
-                f"scenario {sid!r} candidate SHA is missing or does not match the report",
+                f"scenario {sid!r} candidate SHA is missing from scenario evidence",
+                sid,
+            ))
+        elif not _is_sha(top_sha) or not _is_sha(result_sha) or result_sha != top_sha:
+            issues.append(_fail(
+                "wrong-artifact-identity",
+                f"scenario {sid!r} candidate SHA does not match the report",
                 sid,
             ))
     if evidence.get("require_candidate_digest"):
-        if not _is_digest(top_digest) or not _is_digest(result_digest) or result_digest != top_digest:
+        if not isinstance(result_digest, str) or not result_digest.strip():
             issues.append(_fail(
                 "wrong-artifact-identity",
-                f"scenario {sid!r} candidate digest is missing or does not match the report",
+                f"scenario {sid!r} candidate digest is missing from scenario evidence",
+                sid,
+            ))
+        elif not _is_digest(top_digest) or not _is_digest(result_digest) or result_digest != top_digest:
+            issues.append(_fail(
+                "wrong-artifact-identity",
+                f"scenario {sid!r} candidate digest does not match the report",
                 sid,
             ))
     expected_identity = (evidence.get("artifact_identity") or "")

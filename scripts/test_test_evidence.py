@@ -36,7 +36,10 @@ def scenario(contract_id, **overrides):
             "engine": "kubernetes",
         },
         "mode": {"execution": "distributed", "owner": "enabled", "surface": "http"},
-        "feature_flags": {"CAESIUM_EXECUTION_MODE": "distributed"},
+        "feature_flags": {
+            "CAESIUM_EXECUTION_MODE": "distributed",
+            "CAESIUM_RUN_OWNER_ENABLED": "true",
+        },
         "expected_observations": [{"id": "obs_a", "description": "observed A"}],
         "allowed_skips": [],
         "evidence": {
@@ -73,6 +76,9 @@ def passing_result(sc, **overrides):
         "artifact_identity": sc["evidence"]["artifact_identity"],
         "candidate_sha": SHA,
         "candidate_digest": DIGEST,
+        "topology": dict(sc.get("topology") or {}),
+        "mode": dict(sc.get("mode") or {}),
+        "feature_flags": dict(sc.get("feature_flags") or {}),
         "observations": [item["id"] for item in sc["expected_observations"]],
         "recorder": {"present": True, "sample_count": max(sc["evidence"]["min_samples"], 1)},
         "checker": {"timed_out": False},
@@ -297,7 +303,123 @@ class EvidenceReportTests(unittest.TestCase):
         report["scenarios"][0]["candidate_sha"] = "b" * 40
         result = run_checker(manifest, report)
         self.assertEqual(result.returncode, 1, output(result))
-        self.assertIn("wrong-artifact-identity", output(result))
+        text = output(result)
+        self.assertIn("wrong-artifact-identity", text)
+        self.assertIn("does not match the report", text)
+
+    def test_missing_scenario_identity_fails_under_strict(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        for item in report["scenarios"]:
+            del item["candidate_sha"]
+            del item["candidate_digest"]
+        result = run_checker(manifest, report, extra=("--strict",))
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-artifact-identity", text)
+        self.assertIn("missing from scenario evidence", text)
+        self.assertIn("candidate SHA", text)
+        self.assertIn("candidate digest", text)
+
+    def test_missing_scenario_candidate_sha_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        del report["scenarios"][0]["candidate_sha"]
+        result = run_checker(manifest, report)
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-artifact-identity", text)
+        self.assertIn("candidate SHA is missing from scenario evidence", text)
+
+    def test_missing_scenario_candidate_digest_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        del report["scenarios"][0]["candidate_digest"]
+        result = run_checker(manifest, report)
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-artifact-identity", text)
+        self.assertIn("candidate digest is missing from scenario evidence", text)
+
+    def test_wrong_topology_mode_and_feature_flags_fail_under_strict(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        for item in report["scenarios"]:
+            item["topology"] = {
+                "kind": "single-process",
+                "replicas": 1,
+                "persistence": False,
+                "engine": "docker",
+            }
+            item["mode"] = {
+                "execution": "local",
+                "owner": "disabled",
+                "surface": "unit",
+            }
+            item["feature_flags"] = {"CAESIUM_RUN_OWNER_ENABLED": "false"}
+        result = run_checker(manifest, report, extra=("--strict",))
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-topology", text)
+        self.assertIn("wrong-mode", text)
+        self.assertIn("wrong-feature-flags", text)
+        self.assertIn("CAESIUM_RUN_OWNER_ENABLED", text)
+
+    def test_topology_mismatch_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        report["scenarios"][0]["topology"] = {
+            "kind": "single-process",
+            "replicas": 1,
+            "persistence": False,
+            "engine": "docker",
+        }
+        result = run_checker(manifest, report)
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-topology", text)
+        self.assertNotIn("wrong-mode", text)
+        self.assertNotIn("wrong-feature-flags", text)
+
+    def test_mode_mismatch_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        report["scenarios"][0]["mode"] = {
+            "execution": "local",
+            "owner": "disabled",
+            "surface": "unit",
+        }
+        result = run_checker(manifest, report)
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("wrong-mode", output(result))
+
+    def test_feature_flag_mismatch_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        report["scenarios"][0]["feature_flags"] = {
+            "CAESIUM_EXECUTION_MODE": "distributed",
+            "CAESIUM_RUN_OWNER_ENABLED": "false",
+        }
+        result = run_checker(manifest, report)
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("wrong-feature-flags", text)
+        self.assertIn("CAESIUM_RUN_OWNER_ENABLED", text)
+
+    def test_missing_observed_configuration_fails(self):
+        manifest = fixture_manifest()
+        report = passing_report(manifest)
+        for item in report["scenarios"]:
+            del item["topology"]
+            del item["mode"]
+            del item["feature_flags"]
+        result = run_checker(manifest, report, extra=("--strict",))
+        self.assertEqual(result.returncode, 1, output(result))
+        text = output(result)
+        self.assertIn("schema", text)
+        self.assertIn("topology", text)
+        self.assertIn("mode", text)
+        self.assertIn("feature_flags", text)
 
     def test_absent_fault_activation_fails(self):
         manifest = fixture_manifest()
