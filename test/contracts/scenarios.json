@@ -1,0 +1,915 @@
+{
+  "schema_version": 1,
+  "required_contract_ids": [
+    "DT-ADMIT-01",
+    "DT-OWNER-01",
+    "DT-COMPLETE-01",
+    "DT-TERMINAL-01",
+    "DT-RETRY-01",
+    "DT-DAG-01",
+    "DT-CANCEL-01",
+    "DT-EVENT-01",
+    "DT-AUTH-01",
+    "DT-RECOVER-01",
+    "DT-QUORUM-01"
+  ],
+  "scenarios": [
+    {
+      "id": "b1-owner-crash-leader",
+      "name": "Owner crash while the owner is the dqlite leader",
+      "selector": "TestOwnerCrash/owner_is_leader",
+      "contract_ids": [
+        "DT-ADMIT-01",
+        "DT-OWNER-01",
+        "DT-DAG-01",
+        "DT-RECOVER-01"
+      ],
+      "status": "absent",
+      "owner_item": "B1",
+      "registered_by": "G3",
+      "gates": [],
+      "notes": "Planned B1 regression. G3 registers the selector and early gate after B1 exists; not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_RUN_OWNER_IN_MEMORY": "true",
+        "CAESIUM_DATABASE_SHARDS": "1",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "CAESIUM_DATABASE_STANDBYS": "0",
+        "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
+        "kubernetes.engine.enabled": "true",
+        "run_lease_ttl": "30s",
+        "dispatch_interval": "1s",
+        "worker_lease_ttl": "30s",
+        "reclaim_interval": "1s",
+        "worker_pool_size": "2"
+      },
+      "expected_observations": [
+        {
+          "id": "http_202_with_run_uuid",
+          "description": "POST /v1/jobs/:id/run returns 202 with a run body and UUID."
+        },
+        {
+          "id": "run_uuid_publicly_readable_after_fault",
+          "description": "The acknowledged run UUID remains publicly readable after the owner SIGKILL."
+        },
+        {
+          "id": "run_uuid_bound_to_same_job",
+          "description": "The acknowledged run UUID does not become a different job."
+        },
+        {
+          "id": "authoritative_lease_generation_increased",
+          "description": "Exactly one authoritative lease row is observed with a new surviving owner and increasing generation."
+        },
+        {
+          "id": "surviving_owner_completed_same_run",
+          "description": "A surviving owner finishes the same accepted run."
+        },
+        {
+          "id": "legal_successors_executed",
+          "description": "Legal DAG successors execute after the blocked predecessor completes."
+        },
+        {
+          "id": "public_state_matches_raw_effects",
+          "description": "Final public state agrees with the recorder's raw starts and completions."
+        },
+        {
+          "id": "restarted_member_rejoined_retained_volume",
+          "description": "The restarted old member rejoins with its retained volume."
+        },
+        {
+          "id": "three_dqlite_voters_and_leader",
+          "description": "Three distinct dqlite voters and an agreed leader are observed before the fault."
+        },
+        {
+          "id": "fixture_task_on_surviving_worker",
+          "description": "Every pre-fault fixture task pod is placed on a surviving worker."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-owner-crash",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "owner-sigkill",
+        "required_observations": [
+          "owner_kind_node_cordoned_before_fixture",
+          "owner_container_sigkill",
+          "process_exit_before_sink_barrier_release",
+          "kubelet_stopped_during_survivor_takeover"
+        ]
+      }
+    },
+    {
+      "id": "b1-owner-crash-nonleader",
+      "name": "Owner crash while the owner is not the dqlite leader",
+      "selector": "TestOwnerCrash/owner_is_not_leader",
+      "contract_ids": [
+        "DT-ADMIT-01",
+        "DT-OWNER-01",
+        "DT-DAG-01",
+        "DT-RECOVER-01"
+      ],
+      "status": "absent",
+      "owner_item": "B1",
+      "registered_by": "G3",
+      "gates": [],
+      "notes": "Planned B1 regression. G3 registers the selector and early gate after B1 exists; not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_RUN_OWNER_IN_MEMORY": "true",
+        "CAESIUM_DATABASE_SHARDS": "1",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "CAESIUM_DATABASE_STANDBYS": "0",
+        "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
+        "kubernetes.engine.enabled": "true",
+        "run_lease_ttl": "30s",
+        "dispatch_interval": "1s",
+        "worker_lease_ttl": "30s",
+        "reclaim_interval": "1s",
+        "worker_pool_size": "2"
+      },
+      "expected_observations": [
+        {
+          "id": "http_202_with_run_uuid",
+          "description": "POST /v1/jobs/:id/run returns 202 with a run body and UUID."
+        },
+        {
+          "id": "run_uuid_publicly_readable_after_fault",
+          "description": "The acknowledged run UUID remains publicly readable after the owner SIGKILL."
+        },
+        {
+          "id": "run_uuid_bound_to_same_job",
+          "description": "The acknowledged run UUID does not become a different job."
+        },
+        {
+          "id": "authoritative_lease_generation_increased",
+          "description": "Exactly one authoritative lease row is observed with a new surviving owner and increasing generation."
+        },
+        {
+          "id": "surviving_owner_completed_same_run",
+          "description": "A surviving owner finishes the same accepted run."
+        },
+        {
+          "id": "legal_successors_executed",
+          "description": "Legal DAG successors execute after the blocked predecessor completes."
+        },
+        {
+          "id": "public_state_matches_raw_effects",
+          "description": "Final public state agrees with the recorder's raw starts and completions."
+        },
+        {
+          "id": "restarted_member_rejoined_retained_volume",
+          "description": "The restarted old member rejoins with its retained volume."
+        },
+        {
+          "id": "three_dqlite_voters_and_leader",
+          "description": "Three distinct dqlite voters and an agreed leader are observed before the fault."
+        },
+        {
+          "id": "fixture_task_on_surviving_worker",
+          "description": "Every pre-fault fixture task pod is placed on a surviving worker."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-owner-crash",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "owner-sigkill",
+        "required_observations": [
+          "owner_kind_node_cordoned_before_fixture",
+          "owner_container_sigkill",
+          "process_exit_before_sink_barrier_release",
+          "kubelet_stopped_during_survivor_takeover"
+        ]
+      }
+    },
+    {
+      "id": "b2-event-sse-history",
+      "name": "Public event stream versus persisted event history",
+      "selector": "TestFaults/sse_and_persisted",
+      "contract_ids": [
+        "DT-EVENT-01"
+      ],
+      "status": "absent",
+      "owner_item": "B2",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B2 recorder/SSE comparison. Sequence is store-lifetime scoped; not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "persisted_events_vs_catchup",
+          "description": "Persisted event rows match SSE catch-up for the selected store lifetime."
+        },
+        {
+          "id": "duplicates_retained",
+          "description": "Duplicate live deliveries are retained rather than dropped from the history."
+        },
+        {
+          "id": "sequence_scoped_to_store_lifetime",
+          "description": "Event sequence identity is not treated as a gap-free global counter."
+        },
+        {
+          "id": "independent_raw_effect_ledger",
+          "description": "Raw task-effect ledger is compared separately from SSE evidence."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-events",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "b2-durable-event-before-publish",
+      "name": "Kill after durable event commit and before first publish",
+      "selector": "TestFaults/durable_event_before_publish",
+      "contract_ids": [
+        "DT-EVENT-01"
+      ],
+      "status": "absent",
+      "owner_item": "B2",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B2 instrumented crash; blocked without EX-HOOKS. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "durable_event_committed_before_kill",
+          "description": "The event row is observed committed independently before the publisher is killed."
+        },
+        {
+          "id": "durable_replay_after_restart",
+          "description": "Survivors or restart replay the durable event; delivery remains at-least-once."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-events",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "kill-after-durable-event-before-publish",
+        "required_observations": [
+          "hook_entered_before_publish",
+          "publisher_process_killed",
+          "committed_row_observed_before_kill"
+        ]
+      }
+    },
+    {
+      "id": "b3-stale-generation-complete",
+      "name": "Stale owner generation completion is refused without mutation",
+      "selector": "TestCore/stale_generation_complete",
+      "contract_ids": [
+        "DT-COMPLETE-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 stale-generation case. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "stale_generation_rejected_409",
+          "description": "POST /internal/complete with a stale owner generation returns 409."
+        },
+        {
+          "id": "refusal_reason_preserved",
+          "description": "The refusal reason is preserved on the rejected request."
+        },
+        {
+          "id": "rejected_request_no_mutation",
+          "description": "The rejected stale request causes no task, state, or effect mutation."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "stale-generation-complete",
+        "required_observations": [
+          "request_carries_stale_generation",
+          "completion_rejected_before_commit"
+        ]
+      }
+    },
+    {
+      "id": "b3-terminal-no-regress",
+      "name": "Terminal run outcome does not regress without retry",
+      "selector": "TestCore/terminal_no_regress",
+      "contract_ids": [
+        "DT-TERMINAL-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 within-run terminal fencing. Across-retry fencing remains unresolved. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "terminal_outcome_does_not_regress",
+          "description": "Within a run execution with no retry, a terminal outcome does not regress."
+        },
+        {
+          "id": "second_terminal_event_suppressed",
+          "description": "A second terminal event is suppressed by CompleteIfActive."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "b3-frozen-retry-recipe",
+      "name": "Frozen retry recipe and rejected retry leave state unchanged",
+      "selector": "TestCore/frozen_retry_recipe",
+      "contract_ids": [
+        "DT-RETRY-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 retry compatibility case. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "retry_returns_202",
+          "description": "POST /v1/jobs/:id/runs/:run_id/retry returns 202 after retry reset."
+        },
+        {
+          "id": "frozen_persisted_recipe_fields",
+          "description": "Targeted retry uses frozen persisted recipe fields."
+        },
+        {
+          "id": "rejected_retry_no_state_change",
+          "description": "A rejected retry request does not alter state."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "b3-fan-in-predecessors",
+      "name": "Fan-in starts only after the whole predecessor group",
+      "selector": "TestCore/fan_in_predecessors",
+      "contract_ids": [
+        "DT-DAG-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 fan-out/fan-in fixture. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "starts_match_recorded_predecessor_completions",
+          "description": "Successor starts are checked against independently recorded predecessor completions."
+        },
+        {
+          "id": "fan_in_requires_whole_predecessor_group",
+          "description": "A satisfied fan-in is not inferred from one successful partition."
+        },
+        {
+          "id": "frozen_instance_identity",
+          "description": "Frozen instance identity and explicit edges govern readiness."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "b3-cancel-completion-race",
+      "name": "Cancellation races with completion preserve distinct histories",
+      "selector": "TestCore/cancel_completion_race",
+      "contract_ids": [
+        "DT-CANCEL-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 cancel/completion race. This base has no standalone active-run cancel REST route. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "old_run_tasks_cancelled",
+          "description": "Old run and task rows become cancelled and claims are cleared."
+        },
+        {
+          "id": "completion_race_history_preserved",
+          "description": "Races with completion are preserved as distinct histories."
+        },
+        {
+          "id": "replacement_202_is_not_process_death_ack",
+          "description": "A 202 for the replacement is not treated as acknowledgement that the old process is dead."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "cancel-completion-race",
+        "required_observations": [
+          "cancel_or_replace_issued",
+          "completion_path_also_observed"
+        ]
+      }
+    },
+    {
+      "id": "b3-wrong-token-internal",
+      "name": "Wrong internal token is denied without task mutation",
+      "selector": "TestCore/wrong_token_internal",
+      "contract_ids": [
+        "DT-AUTH-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 cross-node negative auth. Valid-token stale generation is a separate scenario. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "internal_tls": "provisioned"
+      },
+      "expected_observations": [
+        {
+          "id": "valid_cert_wrong_token_401",
+          "description": "A TLS-authenticated peer with a wrong internal token returns 401 before DB/task handling."
+        },
+        {
+          "id": "denied_operation_no_mutation",
+          "description": "Denied dispatch/complete operations cause no task, run, or effect mutation."
+        },
+        {
+          "id": "principal_scope_recorded_without_secrets",
+          "description": "The denied principal/scope is recorded without secrets."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "wrong-internal-token",
+        "required_observations": [
+          "wrong_token_sent_on_internal_listener",
+          "request_rejected_before_task_handling"
+        ]
+      }
+    },
+    {
+      "id": "b3-quorum-loss-uncertain-write",
+      "name": "Quorum-loss mutation remains possibly committed",
+      "selector": "TestCore/quorum_loss_uncertain_write",
+      "contract_ids": [
+        "DT-QUORUM-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Planned B3 quorum-loss case. No A1-verified bounded rejection contract; timeout is not rejection. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "timeout_recorded_as_possibly_committed",
+          "description": "A transport timeout or disconnect is recorded as possibly committed."
+        },
+        {
+          "id": "no_rejection_inferred_from_client_timeout",
+          "description": "Client timeout or an empty response is not reported as a rejected mutation."
+        },
+        {
+          "id": "post_heal_identity_reconciliation",
+          "description": "After healing, recorded identities are reconciled instead of assuming rejection."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "minority-isolation",
+        "required_observations": [
+          "two_voters_unreachable",
+          "identified_mutation_sent_during_fault",
+          "fault_healed_before_final_read"
+        ]
+      }
+    },
+    {
+      "id": "d3-console-cluster-recovery",
+      "name": "Console converges on durable outcome after owner crash",
+      "selector": "ui/e2e/cluster-recovery.spec.ts",
+      "contract_ids": [
+        "DT-RECOVER-01"
+      ],
+      "status": "absent",
+      "owner_item": "D3",
+      "registered_by": "D3",
+      "gates": [],
+      "notes": "Planned D3 browser journey against the B3 cluster. Not proven.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "browser"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "browser_observed_fault_while_connected",
+          "description": "The fault is observed while the browser is connected, not only via a final screenshot."
+        },
+        {
+          "id": "ui_converges_on_durable_outcome",
+          "description": "The UI converges on the independently checked durable run outcome and retained logs."
+        },
+        {
+          "id": "no_duplicate_or_false_terminal_success",
+          "description": "Duplicate or stale rows and false terminal success are rejected."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "ui-e2e-cluster-recovery",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "owner-sigkill",
+        "required_observations": [
+          "owner_fault_while_browser_connected",
+          "ui_reconnect_through_supported_entry"
+        ]
+      }
+    },
+    {
+      "id": "e5-sql-work-budget",
+      "name": "SQL-work budget in the existing integration suite",
+      "selector": "IntegrationTestSuite/TestStatementBudget",
+      "contract_ids": [],
+      "category": "sql-work-budget",
+      "status": "absent",
+      "owner_item": "E5",
+      "registered_by": "G3",
+      "gates": [],
+      "notes": "Planned E5 existing-suite budget. G3 registers the selector after E5 exists; not proven.",
+      "topology": {
+        "kind": "integration-existing",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker",
+        "voters": 1,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "standalone",
+        "owner": "disabled",
+        "surface": "http+cli"
+      },
+      "feature_flags": {
+        "CAESIUM_TEST_ENGINE": "docker"
+      },
+      "expected_observations": [
+        {
+          "id": "statement_counter_delta_within_budget",
+          "description": "Per-category deltas of caesium_db_statements_total stay within the recorded budget."
+        },
+        {
+          "id": "write_counter_delta_within_budget",
+          "description": "Per-category deltas of caesium_db_writes_total stay within the recorded budget."
+        },
+        {
+          "id": "workload_completed_successfully",
+          "description": "The fixed successful HTTP/CLI workload still completes."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "integration-sql-work-budget",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    }
+  ]
+}
