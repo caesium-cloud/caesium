@@ -28,8 +28,8 @@ func TestResourceOOMUsesInspectAndHonorsGate(t *testing.T) {
 	}{
 		{name: "inspect OOM", enabled: "true", exit: 137, inspect: true, memory: limit, wantOOM: true, want: atom.ResourceFailure},
 		{name: "inspect OOM gate off", enabled: "false", exit: 137, inspect: true, memory: limit, wantOOM: true, want: atom.Killed},
-		{name: "limit without inspect OOM", enabled: "true", exit: 137, memory: limit, wantOOM: true, want: atom.ResourceFailure},
-		{name: "limit without inspect OOM gate off", enabled: "false", exit: 137, memory: limit, want: atom.Killed},
+		{name: "SIGKILL with limit", enabled: "true", exit: 137, memory: limit, want: atom.Killed},
+		{name: "SIGKILL with limit gate off", enabled: "false", exit: 137, memory: limit, want: atom.Killed},
 		{name: "SIGKILL without limit", enabled: "true", exit: 137, want: atom.Killed},
 		{name: "success with limit", enabled: "true", memory: limit, want: atom.Success},
 	} {
@@ -103,7 +103,7 @@ func TestWaitCapturesLateOOMEvidenceWithoutInferringSIGKILL(t *testing.T) {
 		{name: "ordinary SIGKILL", enabled: true},
 		{name: "gate disabled", lateOOM: true},
 		{name: "replacement runtime", enabled: true, lateOOM: true, restarted: true},
-		{name: "limit without inspect OOM", enabled: true, memory: 64 * 1024 * 1024},
+		{name: "SIGKILL with limit", enabled: true, memory: 64 * 1024 * 1024},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", fmt.Sprint(tc.enabled))
@@ -128,12 +128,12 @@ func TestWaitCapturesLateOOMEvidenceWithoutInferringSIGKILL(t *testing.T) {
 			final, err := engine.Wait(&atom.EngineWaitRequest{ID: "runtime", Context: context.Background()})
 			require.NoError(t, err)
 			want := atom.Killed
-			if tc.enabled && !tc.restarted && (tc.lateOOM || tc.memory > 0) {
+			if tc.enabled && tc.lateOOM && !tc.restarted {
 				want = atom.ResourceFailure
 			}
 			require.Equal(t, want, final.Result())
 			require.Equal(t, want == atom.ResourceFailure, final.(*Atom).ResourceOutcome().OOMKilled)
-			if !tc.enabled || tc.memory > 0 {
+			if !tc.enabled {
 				require.Equal(t, 1, calls)
 			}
 		})

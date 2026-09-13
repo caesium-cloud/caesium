@@ -99,3 +99,12 @@ func TestResourceSamplerOOMRaisesSampledPeakToLimit(t *testing.T) {
 	require.Equal(t, int64(64*1024*1024), *out.PeakMemoryBytes)
 	require.Equal(t, "oom_inferred", out.StatsSource)
 }
+
+func TestResourceSamplerSIGKILLWithLimitDoesNotInferOOM(t *testing.T) {
+	s := &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
+	close(s.done)
+	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: false, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	require.False(t, out.OOMKilled)
+	require.Nil(t, out.PeakMemoryBytes)
+	require.Equal(t, "none", out.StatsSource)
+}

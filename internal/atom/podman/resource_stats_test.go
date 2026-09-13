@@ -19,22 +19,30 @@ import (
 
 func TestResourceOOMUsesInspectAndHonorsGate(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, env.Process()) })
-	for _, enabled := range []string{"false", "true"} {
-		t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", enabled)
-		require.NoError(t, env.Process())
-		metadata := newContainer("runtime", &define.InspectContainerState{ExitCode: 137, OOMKilled: true})
-		metadata.HostConfig = &define.InspectContainerHostConfig{Memory: 64 * 1024 * 1024}
-		a := &Atom{metadata: metadata}
-		want := atom.Killed
-		if enabled == "true" {
-			want = atom.ResourceFailure
-		}
-		require.Equal(t, want, a.Result())
-		require.Equal(t, 137, *a.ExitCode())
-		require.True(t, a.ResourceOutcome().OOMKilled)
-		require.Equal(t, int64(64*1024*1024), *a.ResourceOutcome().MemoryLimitBytes)
-		a.metadata.State.OOMKilled = false
-		require.Equal(t, atom.Killed, a.Result())
+	limit := int64(64 * 1024 * 1024)
+	for _, tc := range []struct {
+		name    string
+		enabled string
+		inspect bool
+		wantOOM bool
+		want    atom.Result
+	}{
+		{name: "inspect OOM", enabled: "true", inspect: true, wantOOM: true, want: atom.ResourceFailure},
+		{name: "inspect OOM gate off", enabled: "false", inspect: true, wantOOM: true, want: atom.Killed},
+		{name: "SIGKILL with limit", enabled: "true", want: atom.Killed},
+		{name: "SIGKILL with limit gate off", enabled: "false", want: atom.Killed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", tc.enabled)
+			require.NoError(t, env.Process())
+			metadata := newContainer("runtime", &define.InspectContainerState{ExitCode: 137, OOMKilled: tc.inspect})
+			metadata.HostConfig = &define.InspectContainerHostConfig{Memory: limit}
+			a := &Atom{metadata: metadata}
+			require.Equal(t, tc.want, a.Result())
+			require.Equal(t, 137, *a.ExitCode())
+			require.Equal(t, tc.wantOOM, a.ResourceOutcome().OOMKilled)
+			require.Equal(t, limit, *a.ResourceOutcome().MemoryLimitBytes)
+		})
 	}
 }
 
