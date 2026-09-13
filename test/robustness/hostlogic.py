@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import tempfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 SHA_RE = re.compile(r"sha256:([0-9a-fA-F]{64})")
 LISTING_ERROR_MARKERS = (
@@ -113,6 +113,22 @@ _INSPECT_SKIP = {
     "config",
     "containerconfig",
 }
+
+
+def identities_from_json_text(raw: str) -> list[str] | None:
+    """Parse a single JSON value as inspect identities.
+
+    Returns None when *raw* is not JSON. Concatenated or otherwise
+    malformed JSON returns an empty list so leftover candidate A cannot
+    leak into candidate B via unrestricted SHA extraction.
+    """
+    raw_s = (raw or "").strip()
+    if not raw_s or not (raw_s.startswith("{") or raw_s.startswith("[")):
+        return None
+    try:
+        return identities_from_inspect(json.loads(raw_s))
+    except json.JSONDecodeError:
+        return []
 
 
 def identities_from_inspect(data) -> list[str]:
@@ -217,17 +233,18 @@ def _cmd_collect_identities(argv: list[str]) -> int:
         if os.path.isfile(arg):
             with open(arg, encoding="utf-8") as fh:
                 raw = fh.read()
-            raw_s = raw.strip()
-            if raw_s.startswith("{") or raw_s.startswith("["):
-                try:
-                    expected.extend(identities_from_inspect(json.loads(raw)))
-                    continue
-                except json.JSONDecodeError:
-                    pass
-            texts.append(raw)
+            ids = identities_from_json_text(raw)
+            if ids is not None:
+                expected.extend(ids)
+            else:
+                texts.append(raw)
             continue
         texts.append(arg)
     extra = _read_stdin() if read_stdin else ""
+    extra_ids = identities_from_json_text(extra)
+    if extra_ids is not None:
+        expected.extend(extra_ids)
+        extra = ""
     expected.extend(extract_shas(*texts, extra))
     if not expected:
         print("no sha256 identities collected", file=sys.stderr)
@@ -404,6 +421,57 @@ def _self_test() -> int:
         check("collect-identities rc", rc == 0)
         check("collect-identities config", ("sha256:" + ("a" * 64)) in out)
         check("collect-identities manifest", ("sha256:" + ("b" * 64)) in out)
+
+        id_a = "sha256:" + ("9" * 64)
+        id_b = "sha256:" + ("8" * 64)
+        layer = "sha256:" + ("1" * 64)
+        leftover_doc = {"status": {"id": id_a, "repoDigests": []}}
+        current_doc = {
+            "status": {"id": id_b},
+            "info": {"image": {"spec": {"rootfs": {"diff_ids": [layer]}}}},
+        }
+        concat_path = os.path.join(td, "crictl-inspecti.json")
+        with open(concat_path, "w", encoding="utf-8") as fh:
+            json.dump(leftover_doc, fh)
+            fh.write("\n")
+            json.dump(current_doc, fh)
+            fh.write("\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+            main(["collect-identities", concat_path])
+        check("concat leftover-only does not accept A", id_a not in buf.getvalue())
+        extra_b = os.path.join(td, "current-b.txt")
+        with open(extra_b, "w", encoding="utf-8") as fh:
+            fh.write(id_b + "\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["collect-identities", concat_path, extra_b])
+        out = buf.getvalue()
+        check("concat leftover rc", rc == 0)
+        check("concat leftover does not accept A", id_a not in out)
+        check("concat leftover still has B from extra", id_b in out)
+        check("concat leftover does not take layer via fallback", layer not in out)
+
+        array_path = os.path.join(td, "inspect-array.json")
+        with open(array_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                [
+                    {
+                        "status": {"id": id_a},
+                        "RootFS": {"Layers": [layer]},
+                    },
+                    current_doc,
+                ],
+                fh,
+            )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["collect-identities", array_path])
+        out = buf.getvalue()
+        check("inspect array rc", rc == 0)
+        check("inspect array accepts A", id_a in out)
+        check("inspect array accepts B", id_b in out)
+        check("inspect array ignores layers", layer not in out)
 
     if failures:
         print("self-test failed: " + ", ".join(failures), file=sys.stderr)

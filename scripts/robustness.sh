@@ -78,6 +78,9 @@ NAMESPACE="$ROBUSTNESS_ID"
 VALUES="$ROOT/helm/caesium/ci/test-values-robustness.yaml"
 LAST_REQUEST_ID=""
 : >"$OWNED_CLUSTERS"
+# Truncate append-only identity files so a reused ARTIFACTS dir cannot mix candidates.
+: >"$ARTIFACTS/crictl-inspecti.json"
+: >"$ARTIFACTS/ctr-image-info.txt"
 
 # Never inherit the caller's kube context.
 unset KUBECONFIG || true
@@ -354,10 +357,41 @@ docker exec "$WORKER_NODE" ctr -n k8s.io images ls >"$ARTIFACTS/ctr-images-ls.tx
 python3 "$HOSTLOGIC" ctr-image-shas "caesiumcloud/caesium:${CANDIDATE_SHA}" \
   <"$ARTIFACTS/ctr-images-ls.txt" >"$ARTIFACTS/imported-digest.txt" \
   || imported_identities "$WORKER_NODE" "caesiumcloud/caesium:${CANDIDATE_SHA}" >"$ARTIFACTS/imported-digest.txt"
+: >"$ARTIFACTS/ctr-image-info.txt"
 for ref in "caesiumcloud/caesium:${CANDIDATE_SHA}" "docker.io/caesiumcloud/caesium:${CANDIDATE_SHA}"; do
   docker exec "$WORKER_NODE" ctr -n k8s.io images info "$ref" >>"$ARTIFACTS/ctr-image-info.txt" 2>/dev/null || true
-  docker exec "$WORKER_NODE" crictl inspecti "$ref" >>"$ARTIFACTS/crictl-inspecti.json" 2>/dev/null || true
 done
+python3 - "$WORKER_NODE" "$ARTIFACTS/crictl-inspecti.json" \
+  "caesiumcloud/caesium:${CANDIDATE_SHA}" \
+  "docker.io/caesiumcloud/caesium:${CANDIDATE_SHA}" <<'PY'
+import json, subprocess, sys
+
+node, dest, *refs = sys.argv[1:]
+docs = []
+for ref in refs:
+    try:
+        raw = subprocess.check_output(
+            ["docker", "exec", node, "crictl", "inspecti", ref],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        continue
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(parsed, list):
+        docs.extend(parsed)
+    else:
+        docs.append(parsed)
+with open(dest, "w", encoding="utf-8") as fh:
+    json.dump(docs, fh, indent=2)
+    fh.write("\n")
+PY
 python3 "$HOSTLOGIC" collect-identities \
   "$ARTIFACTS/server-image.json" \
   "$ARTIFACTS/imported-digest.txt" \
