@@ -1,0 +1,10 @@
+# HELP caesium_db_statements_total Total distinct SQL statements executed by category.
+# TYPE caesium_db_statements_total counter
+caesium_db_statements_total_extra{category="task_run_insert"} 99
+caesium_db_statements_total{category="task_run_insert"} 2
+caesium_db_statements_total{category="task_run_status"} 5
+# HELP caesium_db_writes_total Total durable database writes by category.
+# TYPE caesium_db_writes_total counter
+caesium_db_writes_total{category="task_run_insert"} 2
+caesium_db_writes_total{category="task_run_status"} 5
+caesium_db_writes_total{category="event_insert"} 6
