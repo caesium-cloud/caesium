@@ -40,6 +40,20 @@ func (s *Store) SetTaskResourceOutcome(runID, taskRef uuid.UUID, outcome TaskRes
 	if outcome.CPUSeconds != nil && (*outcome.CPUSeconds < 0 || math.IsNaN(*outcome.CPUSeconds) || math.IsInf(*outcome.CPUSeconds, 0)) {
 		return fmt.Errorf("resource CPU observation must be finite and nonnegative")
 	}
+	// Nil means unavailable; a zero is not a sampled measurement.
+	if outcome.PeakMemoryBytes != nil && *outcome.PeakMemoryBytes == 0 {
+		outcome.PeakMemoryBytes = nil
+	}
+	if outcome.CPUSeconds != nil && *outcome.CPUSeconds == 0 {
+		outcome.CPUSeconds = nil
+	}
+	if outcome.StatsSource == "sampled" && outcome.PeakMemoryBytes == nil && outcome.CPUSeconds == nil {
+		if outcome.OOMKilled {
+			outcome.StatsSource = "oom_inferred"
+		} else {
+			outcome.StatsSource = "none"
+		}
+	}
 	switch outcome.StatsSource {
 	case "sampled", "oom_inferred", "none":
 	default:

@@ -60,16 +60,16 @@ func (cli *podmanClient) ContainerStats(ctx context.Context, id string) (atom.Re
 	// zero values when the container is neither running nor paused, and every
 	// numeric field is serialised unconditionally, so the pointers alone cannot
 	// separate "unavailable" from "measured zero". SystemNano is stamped only on
-	// the measured path, so require it before accepting any measurement.
+	// the measured path. A measured zero is still not an observation.
 	if sample.SystemNano == 0 || sample.SystemNano > math.MaxInt64 {
 		return atom.ResourceStats{}, atom.ErrStatsUnavailable
 	}
 	out := atom.ResourceStats{SampledAt: time.Unix(0, int64(sample.SystemNano))}
-	if sample.MemUsage != nil && *sample.MemUsage <= math.MaxInt64 {
+	if sample.MemUsage != nil && *sample.MemUsage > 0 && *sample.MemUsage <= math.MaxInt64 {
 		value := int64(*sample.MemUsage)
 		out.MemoryBytes = &value
 	}
-	if sample.CPUNano != nil {
+	if sample.CPUNano != nil && *sample.CPUNano > 0 {
 		cpu := float64(*sample.CPUNano) / 1e9
 		out.CPUSeconds = &cpu
 	}

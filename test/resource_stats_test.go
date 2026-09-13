@@ -175,14 +175,12 @@ steps:
 			task := observation.Tasks[0]
 			s.requireInjectedLimit(s.taskLog(job.ID, runID, s.jobTaskIDByName(job.ID, "measure")), 64)
 			s.Require().NotNil(task.ExitCode)
-			s.Require().NotNil(task.PeakMemoryBytes, "runtime observation must survive the full server read path")
 			s.Equal(tc.oom, task.OOMKilled)
 			if tc.oom {
 				s.Equal("failed", completed.Status)
 				s.Equal("resource_failure", task.Result)
 				s.Equal(137, *task.ExitCode)
 				s.requireOOMMemoryObservation(task, 64)
-				s.Contains([]string{"oom_inferred", "sampled"}, task.StatsSource)
 				if s.authAPIKey != "" {
 					s.Require().Eventually(func() bool {
 						var list approvalIncidentList
@@ -201,6 +199,7 @@ steps:
 				s.Equal("succeeded", completed.Status)
 				s.Equal(0, *task.ExitCode)
 				s.Equal("sampled", task.StatsSource)
+				s.Require().NotNil(task.PeakMemoryBytes, "runtime observation must survive the full server read path")
 				s.GreaterOrEqual(*task.PeakMemoryBytes, int64(16*1024*1024))
 				s.Require().NotNil(task.CPUSeconds)
 				s.Greater(*task.CPUSeconds, 0.0)
@@ -284,21 +283,29 @@ steps:
 	s.True(oom.OOMKilled)
 	s.Equal("resource_failure", oom.Result)
 	s.Require().NotNil(healthy.PeakMemoryBytes)
-	s.Require().NotNil(oom.PeakMemoryBytes)
 	s.GreaterOrEqual(*healthy.PeakMemoryBytes, int64(128*1024*1024))
 	s.requireOOMMemoryObservation(oom, 64)
-	s.NotEqual(*healthy.PeakMemoryBytes, *oom.PeakMemoryBytes, "sibling outcomes must not overwrite one another")
+	if oom.PeakMemoryBytes != nil {
+		s.NotEqual(*healthy.PeakMemoryBytes, *oom.PeakMemoryBytes, "sibling outcomes must not overwrite one another")
+	}
 	s.NotEqual(healthy.TaskRunID, oom.TaskRunID)
 }
 
 // A sampled peak can miss a fast OOM. Only an inspected limit is a justified
-// lower bound. Podman 4.9 does not persist a live update into that inspect spec.
+// lower bound. Podman 4.9 does not persist a live update into that inspect spec,
+// and a zero sample is unavailable rather than a measurement.
 func (s *IntegrationTestSuite) requireOOMMemoryObservation(task resourceTaskObservation, limitMiB int64) {
 	s.T().Helper()
-	s.Require().NotNil(task.PeakMemoryBytes)
-	if s.engineType == "podman" && task.StatsSource == "sampled" {
-		s.Greater(*task.PeakMemoryBytes, int64(0), "retain actual samples when the terminal limit is unavailable")
-	} else {
+	switch task.StatsSource {
+	case "sampled":
+		s.Require().NotNil(task.PeakMemoryBytes)
+		s.Greater(*task.PeakMemoryBytes, int64(0), "sampled must be an actual measurement")
+	case "oom_inferred":
+		if task.PeakMemoryBytes == nil {
+			return
+		}
 		s.GreaterOrEqual(*task.PeakMemoryBytes, limitMiB*1024*1024)
+	default:
+		s.Failf("unexpected stats source", "%q", task.StatsSource)
 	}
 }

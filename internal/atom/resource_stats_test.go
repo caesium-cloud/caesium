@@ -14,6 +14,7 @@ func TestResourceReducerKeepsPeakAndCumulativeCPU(t *testing.T) {
 	r.add(ResourceStats{MemoryBytes: new(int64(12)), CPUSeconds: new(2.0)})
 	r.add(ResourceStats{MemoryBytes: new(int64(8)), CPUSeconds: new(1.0)})
 	r.add(ResourceStats{MemoryBytes: new(int64(-1)), CPUSeconds: new(math.NaN())})
+	r.add(ResourceStats{MemoryBytes: new(int64(0)), CPUSeconds: new(0.0)})
 	require.Equal(t, int64(12), *r.peak)
 	require.Equal(t, 2.0, *r.cpu)
 	r.add(ResourceStats{})
@@ -107,4 +108,22 @@ func TestResourceSamplerSIGKILLWithLimitDoesNotInferOOM(t *testing.T) {
 	require.False(t, out.OOMKilled)
 	require.Nil(t, out.PeakMemoryBytes)
 	require.Equal(t, "none", out.StatsSource)
+}
+
+func TestResourceSamplerZeroSampleIsUnavailable(t *testing.T) {
+	s := &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
+	close(s.done)
+	s.reducer.add(ResourceStats{MemoryBytes: new(int64(0)), CPUSeconds: new(0.0)})
+	out := s.Stop(nil)
+	require.Nil(t, out.PeakMemoryBytes)
+	require.Nil(t, out.CPUSeconds)
+	require.Equal(t, "none", out.StatsSource)
+
+	s = &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
+	close(s.done)
+	s.reducer.add(ResourceStats{MemoryBytes: new(int64(0)), CPUSeconds: new(0.0)})
+	out = s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: true}})
+	require.True(t, out.OOMKilled)
+	require.Nil(t, out.PeakMemoryBytes)
+	require.Equal(t, "oom_inferred", out.StatsSource)
 }

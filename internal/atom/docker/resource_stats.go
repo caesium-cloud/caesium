@@ -34,16 +34,16 @@ func (e *dockerEngine) Stats(req *atom.EngineStatsRequest) (atom.ResourceStats, 
 	if err := json.NewDecoder(response.Body).Decode(&sample); err != nil {
 		return atom.ResourceStats{}, err
 	}
-	// Empty stats responses from stopped/unavailable containers are not zeros.
+	// Empty or zero stats from stopped/unavailable containers are not measurements.
 	if sample.Read.IsZero() {
 		return atom.ResourceStats{}, atom.ErrStatsUnavailable
 	}
 	out := atom.ResourceStats{SampledAt: sample.Read}
-	if sample.MemoryStats.Usage != nil && *sample.MemoryStats.Usage <= math.MaxInt64 {
+	if sample.MemoryStats.Usage != nil && *sample.MemoryStats.Usage > 0 && *sample.MemoryStats.Usage <= math.MaxInt64 {
 		memory := int64(*sample.MemoryStats.Usage)
 		out.MemoryBytes = &memory
 	}
-	if sample.CPUStats.CPUUsage.TotalUsage != nil {
+	if sample.CPUStats.CPUUsage.TotalUsage != nil && *sample.CPUStats.CPUUsage.TotalUsage > 0 {
 		cpu := float64(*sample.CPUStats.CPUUsage.TotalUsage) / 1e9
 		out.CPUSeconds = &cpu
 	}

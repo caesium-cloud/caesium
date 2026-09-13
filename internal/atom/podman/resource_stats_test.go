@@ -97,9 +97,8 @@ func TestContainerStatsRejectsUnmeasuredReport(t *testing.T) {
 			cpu:      2.5,
 		},
 		{
-			name:     "an idle sampled container keeps its genuine zeros",
-			stats:    define.ContainerStats{ContainerID: id, Name: "measure", SystemNano: 1700000000000000000},
-			measured: true,
+			name:  "a measured record of zeros is still unavailable",
+			stats: define.ContainerStats{ContainerID: id, Name: "measure", SystemNano: 1700000000000000000},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

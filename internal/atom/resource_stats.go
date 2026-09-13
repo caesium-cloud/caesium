@@ -61,11 +61,11 @@ type resourceReducer struct {
 }
 
 func (r *resourceReducer) add(stats ResourceStats) {
-	if stats.MemoryBytes != nil && *stats.MemoryBytes >= 0 && (r.peak == nil || *stats.MemoryBytes > *r.peak) {
+	if stats.MemoryBytes != nil && *stats.MemoryBytes > 0 && (r.peak == nil || *stats.MemoryBytes > *r.peak) {
 		value := *stats.MemoryBytes
 		r.peak = &value
 	}
-	if stats.CPUSeconds != nil && validCPU(*stats.CPUSeconds) && (r.cpu == nil || *stats.CPUSeconds > *r.cpu) {
+	if stats.CPUSeconds != nil && validCPU(*stats.CPUSeconds) && *stats.CPUSeconds > 0 && (r.cpu == nil || *stats.CPUSeconds > *r.cpu) {
 		value := *stats.CPUSeconds
 		r.cpu = &value
 	}
@@ -125,7 +125,13 @@ func (s *ResourceSampler) Stop(final Atom) ResourceSummary {
 		return ResourceSummary{}
 	}
 	s.once.Do(func() { s.cancel(); <-s.done })
-	out := ResourceSummary{PeakMemoryBytes: s.reducer.peak, CPUSeconds: s.reducer.cpu, StatsSource: "none"}
+	out := ResourceSummary{StatsSource: "none"}
+	if s.reducer.peak != nil && *s.reducer.peak > 0 {
+		out.PeakMemoryBytes = s.reducer.peak
+	}
+	if s.reducer.cpu != nil && *s.reducer.cpu > 0 {
+		out.CPUSeconds = s.reducer.cpu
+	}
 	if out.PeakMemoryBytes != nil || out.CPUSeconds != nil {
 		out.StatsSource = "sampled"
 	}

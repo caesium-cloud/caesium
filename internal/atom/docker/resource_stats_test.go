@@ -55,26 +55,33 @@ func TestResourceOOMUsesInspectAndHonorsGate(t *testing.T) {
 
 func TestResourceStatsDockerDecodesSnapshotAndRejectsAbsence(t *testing.T) {
 	for _, tc := range []struct {
+		name      string
 		body      string
 		available bool
+		memory    int64
+		cpu       float64
 	}{
-		{`{"read":"2026-09-09T00:00:00Z","memory_stats":{"usage":4096},"cpu_stats":{"cpu_usage":{"total_usage":2500000000}}}`, true},
-		{`{}`, false},
-		{`{"read":"2026-09-09T00:00:00Z"}`, false},
+		{name: "measured", body: `{"read":"2026-09-09T00:00:00Z","memory_stats":{"usage":4096},"cpu_stats":{"cpu_usage":{"total_usage":2500000000}}}`, available: true, memory: 4096, cpu: 2.5},
+		{name: "empty", body: `{}`},
+		{name: "timestamp without usage", body: `{"read":"2026-09-09T00:00:00Z"}`},
+		{name: "measured zeros", body: `{"read":"2026-09-09T00:00:00Z","memory_stats":{"usage":0},"cpu_stats":{"cpu_usage":{"total_usage":0}}}`},
 	} {
-		backend := &mockDockerBackend{}
-		backend.On("ContainerStatsOneShot", "runtime").Return(container.StatsResponseReader{Body: io.NopCloser(strings.NewReader(tc.body))}, nil).Once()
-		engine := &dockerEngine{ctx: context.Background(), backend: backend}
-		stats, err := engine.Stats(&atom.EngineStatsRequest{ID: "runtime"})
-		if tc.available {
-			require.NoError(t, err)
-			require.Equal(t, int64(4096), *stats.MemoryBytes)
-			require.Equal(t, 2.5, *stats.CPUSeconds)
-		} else {
-			require.ErrorIs(t, err, atom.ErrStatsUnavailable)
-			require.Nil(t, stats.MemoryBytes)
-		}
-		backend.AssertExpectations(t)
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &mockDockerBackend{}
+			backend.On("ContainerStatsOneShot", "runtime").Return(container.StatsResponseReader{Body: io.NopCloser(strings.NewReader(tc.body))}, nil).Once()
+			engine := &dockerEngine{ctx: context.Background(), backend: backend}
+			stats, err := engine.Stats(&atom.EngineStatsRequest{ID: "runtime"})
+			if tc.available {
+				require.NoError(t, err)
+				require.Equal(t, tc.memory, *stats.MemoryBytes)
+				require.Equal(t, tc.cpu, *stats.CPUSeconds)
+			} else {
+				require.ErrorIs(t, err, atom.ErrStatsUnavailable)
+				require.Nil(t, stats.MemoryBytes)
+				require.Nil(t, stats.CPUSeconds)
+			}
+			backend.AssertExpectations(t)
+		})
 	}
 }
 

@@ -88,6 +88,29 @@ func TestResourceOutcomeGateOffDoesNotWrite(t *testing.T) {
 	require.NoError(t, (&Store{}).SetTaskResourceOutcome(uuid.New(), uuid.New(), TaskResourceOutcome{}))
 }
 
+func TestResourceOutcomeZeroSampleIsUnavailable(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, env.Process()) })
+	t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", "true")
+	require.NoError(t, env.Process())
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	jr, err := store.Start(uuid.New(), nil)
+	require.NoError(t, err)
+	row := models.TaskRun{ID: uuid.New(), JobRunID: jr.ID, TaskID: uuid.New(), AtomID: uuid.New(), Engine: models.AtomEngineDocker, Status: "running", RuntimeID: "runtime", Attempt: 1}
+	require.NoError(t, db.Create(&row).Error)
+	require.NoError(t, store.SetTaskResourceOutcome(jr.ID, row.ID, TaskResourceOutcome{
+		RuntimeID: row.RuntimeID, Attempt: 1, ExitCode: new(137),
+		ResourceSummary: atom.ResourceSummary{PeakMemoryBytes: new(int64(0)), CPUSeconds: new(0.0), OOMKilled: true, StatsSource: "sampled"},
+	}))
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", row.ID).Error)
+	require.True(t, persisted.OOMKilled)
+	require.Nil(t, persisted.PeakMemoryBytes)
+	require.Nil(t, persisted.CPUSeconds)
+	require.Equal(t, "oom_inferred", persisted.StatsSource)
+}
+
 func TestResourceOutcomeQuarantinePersistsWithoutProductionMetrics(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, env.Process()) })
 	t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", "true")
