@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/pkg/container"
 )
 
@@ -196,6 +197,26 @@ func TestReconstructImageOverrideMarksEnvelopeAndFidelity(t *testing.T) {
 	details := strings.Join(image.Details, "; ")
 	if !strings.Contains(details, "OVERRIDDEN") || !strings.Contains(details, "candidate") {
 		t.Fatalf("image fidelity details = %#v, want override marker and ref", image.Details)
+	}
+}
+
+func TestReconstructLocalImageIDDoesNotPinNameAtDigest(t *testing.T) {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "build"
+	desc.Runtime.Image = "locally-built:dev"
+	desc.Runtime.ResolvedImageDigest = imagecheck.MarkImageIDDigest(configID)
+
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	if env.Image != configID {
+		t.Fatalf("Image = %q, want local config ID %q", env.Image, configID)
+	}
+	if env.ImagePullMode != "DIGEST" {
+		t.Fatalf("ImagePullMode = %q, want DIGEST", env.ImagePullMode)
 	}
 }
 

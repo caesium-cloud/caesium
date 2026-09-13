@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -184,4 +185,81 @@ func TestRuntimeExecutorLeavesTagWhenPinDigestsOff(t *testing.T) {
 
 	require.NotNil(t, engine.createReq)
 	require.Equal(t, imageTag, engine.createReq.Image)
+}
+
+func TestRuntimeExecutorCreatesLocalConfigImageID(t *testing.T) {
+	const imageTag = "locally-built:dev"
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	marked := imagecheck.MarkImageIDDigest(configID)
+
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	now := time.Now().UTC()
+	trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(trigger).Error)
+	job := &models.Job{ID: uuid.New(), Alias: "worker-local-id", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(job).Error)
+	atomModel := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     imageTag,
+		Command:   `["sh","-c","true"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "subject", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(task).Error)
+	jobRun := &models.JobRun{
+		ID:          uuid.New(),
+		JobID:       job.ID,
+		TriggerID:   trigger.ID,
+		TriggerType: string(trigger.Type),
+		Status:      string(run.StatusRunning),
+		StartedAt:   now,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, db.Create(jobRun).Error)
+	taskRun := &models.TaskRun{
+		ID:              uuid.New(),
+		JobRunID:        jobRun.ID,
+		TaskID:          task.ID,
+		AtomID:          atomModel.ID,
+		Engine:          models.AtomEngineDocker,
+		Image:           imageTag,
+		Command:         atomModel.Command,
+		Status:          string(run.TaskStatusRunning),
+		ClaimedBy:       "node-a",
+		Attempt:         1,
+		MaxAttempts:     1,
+		CacheEnabled:    true,
+		CachePinDigests: true,
+		CacheDigestTTL:  0,
+		CacheVersion:    1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	require.NoError(t, db.Create(taskRun).Error)
+
+	engine := &captureCreateEngine{}
+	executor := &runtimeExecutor{
+		store:         store,
+		localSink:     NewLocalSink(store),
+		imageResolver: stubImageResolver(marked),
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}
+	executor.Execute(context.Background(), taskRun)
+
+	require.NotNil(t, engine.createReq)
+	require.Equal(t, configID, engine.createReq.Image,
+		"Create must execute the local config ID, not locally-built:dev@<configID>")
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", taskRun.ID).Error)
+	require.Equal(t, marked, persisted.ResolvedImageDigest)
 }

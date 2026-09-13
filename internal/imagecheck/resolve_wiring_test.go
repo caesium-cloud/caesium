@@ -158,9 +158,10 @@ func TestDockerResolve_FallsBackToAuthenticatedPull(t *testing.T) {
 }
 
 func TestDockerResolve_AnonymousPullWhenNoCredentials(t *testing.T) {
+	const pulledConfig = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	cli := &pullingFakeClient{
 		inspectErr: errors.New("No such image"),
-		afterPull:  image.InspectResponse{ID: "sha256:pulledconfig"},
+		afterPull:  image.InspectResponse{ID: pulledConfig},
 	}
 	registryResolve := func(_ context.Context, _ string) (string, error) {
 		return "", errors.New("unreachable")
@@ -168,8 +169,28 @@ func TestDockerResolve_AnonymousPullWhenNoCredentials(t *testing.T) {
 
 	got, err := dockerResolve(context.Background(), cli, registryResolve, noCredentials, "app:1.0")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:pulledconfig", got)
+	assert.Equal(t, MarkImageIDDigest(pulledConfig), got)
 	assert.Empty(t, cli.pullOpts.RegistryAuth, "no credentials -> anonymous pull, exactly the pre-existing behaviour")
+}
+
+func TestDockerResolve_LocalImageWithoutRepoDigestsMarksImageID(t *testing.T) {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cli := &pullingFakeClient{inspectBefore: image.InspectResponse{
+		ID:          configID,
+		RepoDigests: nil,
+	}}
+	registryCalled := false
+	registryResolve := func(_ context.Context, _ string) (string, error) {
+		registryCalled = true
+		return "sha256:fromregistry", nil
+	}
+
+	got, err := dockerResolve(context.Background(), cli, registryResolve, noCredentials, "locally-built:dev")
+	require.NoError(t, err)
+	assert.Equal(t, MarkImageIDDigest(configID), got)
+	assert.False(t, registryCalled, "a local image must not consult the registry")
+	assert.Equal(t, 0, cli.pullCalls, "a local image must not be pulled")
+	assert.Equal(t, configID, PinReference("locally-built:dev", got))
 }
 
 func TestDockerResolve_CredentialLookupErrorAbortsPull(t *testing.T) {

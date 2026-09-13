@@ -130,3 +130,54 @@ func TestPinDigestsOffLeavesMutableTag(t *testing.T) {
 	require.Len(t, created, 1)
 	require.Equal(t, imageTag, created[0].Image)
 }
+
+func TestPinDigestsExecutesLocalConfigImageID(t *testing.T) {
+	const imageTag = "locally-built:dev"
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	marked := imagecheck.MarkImageIDDigest(configID)
+
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	jobModel := &models.Job{ID: jobID, Alias: "pin-local-id", TriggerID: uuid.New()}
+	require.NoError(t, db.Create(jobModel).Error)
+
+	taskModel := &models.Task{
+		ID:          taskID,
+		JobID:       jobID,
+		AtomID:      atomID,
+		Name:        "subject",
+		CacheConfig: datatypes.JSON(`{"ttl":"1h","pinDigests":true,"digestTTL":0}`),
+	}
+	taskSvc := &fakeTaskService{tasks: models.Tasks{taskModel}}
+	catalogAtom := fakeModelAtom(atomID)
+	catalogAtom.Image = imageTag
+	catalogAtom.Engine = models.AtomEngineDocker
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{atomID: catalogAtom}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+	opts = append(opts, func(j *job) { j.imageResolver = stubImageResolver(marked) })
+
+	require.NoError(t, New(jobModel, opts...).Run(context.Background()))
+
+	created := engine.createRequestsForTask(taskID)
+	require.Len(t, created, 1)
+	require.Equal(t, configID, created[0].Image,
+		"Create must execute the local config ID, not locally-built:dev@<configID>")
+
+	frozen := taskRunByID(latestRunSnapshot(t, store, jobID), taskID)
+	require.NotNil(t, frozen)
+	require.Equal(t, marked, frozen.ResolvedImageDigest)
+}

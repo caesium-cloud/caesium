@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -492,6 +493,9 @@ func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
 		On("ImageInspect", pinned).
 		Return(errdefs.NotFound(io.EOF))
 	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", digest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", pinned).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
@@ -510,6 +514,82 @@ func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
 	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImageInspect", testImage)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateExecutesLocalConfigIDWithoutPull is the no-RepoDigests execution
+// path: dockerInspectDigest marks inspect.ID, PinReference returns the image
+// ID, and Create inspects that ID instead of name@digest (which the classic
+// reference store cannot resolve) or pulling from a registry.
+func (s *DockerTestSuite) TestCreateExecutesLocalConfigIDWithoutPull() {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	pinned := imagecheck.PinReference("locally-built:dev", imagecheck.MarkImageIDDigest(configID))
+	s.Equal(configID, pinned)
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", configID).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == configID
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImageInspect", "locally-built:dev@"+configID)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateRewritesNameAtConfigIDToLocalImageID covers the probe that failed
+// before PinReference learned about config IDs: ImageInspect(tag) succeeds
+// but ImageInspect(tag@configID) is "reference does not exist". Create must
+// inspect the digest as an image ID and not attempt a registry pull.
+func (s *DockerTestSuite) TestCreateRewritesNameAtConfigIDToLocalImageID() {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	naivePin := "locally-built:dev@" + configID
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   naivePin,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", naivePin).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", configID).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == configID
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 

@@ -255,12 +255,14 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 		return "", ErrDigestUnavailable
 	}
 	digest = strings.TrimSpace(digest)
-	if !strings.HasPrefix(digest, "sha256:") {
+	canonical, ok := canonicalResolvedDigest(digest)
+	if !ok {
 		log.Warn("image digest resolution returned a non-sha256 value; falling back to tag",
 			"engine", engine, "image", imageRef, "digest", digest)
 		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
 	}
+	digest = canonical
 
 	if ttl > 0 {
 		r.mu.Lock()
@@ -363,8 +365,9 @@ func dockerResolve(ctx context.Context, cli client.ImageAPIClient, registryResol
 // prefers a RepoDigest (the registry manifest digest, stable across hosts), and
 // falls back to the image's own config digest (inspect.ID) when there are no
 // RepoDigests — which is the case for locally built or never-pushed images.
-// Using the config digest there gives a valid, content-addressed cache key and
-// avoids a doomed registry pull for an image that exists only locally.
+// Config IDs are returned with ImageIDPrefix so PinReference executes them as
+// image IDs instead of name@digest pins the classic Docker reference store
+// cannot resolve.
 func dockerInspectDigest(ctx context.Context, cli client.ImageAPIClient, imageRef string) (string, error) {
 	inspect, err := cli.ImageInspect(ctx, imageRef)
 	if err != nil {
@@ -373,10 +376,29 @@ func dockerInspectDigest(ctx context.Context, cli client.ImageAPIClient, imageRe
 	if digest := repoDigest(imageRef, inspect.RepoDigests); digest != "" {
 		return digest, nil
 	}
-	if strings.HasPrefix(inspect.ID, "sha256:") {
-		return inspect.ID, nil
+	// A config digest is content-addressed and valid as a cache key, but it is
+	// not a repository digest: PinReference must execute it as the image ID.
+	if digestPattern.MatchString(inspect.ID) {
+		return MarkImageIDDigest(inspect.ID), nil
 	}
 	return "", nil
+}
+
+// canonicalResolvedDigest accepts a repository digest (sha256:...) or a local
+// image-ID digest (id:sha256:...). Anything else is rejected so callers fall
+// back to the tag.
+func canonicalResolvedDigest(digest string) (string, bool) {
+	digest = strings.TrimSpace(digest)
+	if rest, ok := strings.CutPrefix(digest, ImageIDPrefix); ok {
+		if !strings.HasPrefix(rest, "sha256:") {
+			return "", false
+		}
+		return MarkImageIDDigest(rest), true
+	}
+	if !strings.HasPrefix(digest, "sha256:") {
+		return "", false
+	}
+	return digest, true
 }
 
 // dockerPull pulls imageRef through the daemon, sending the operator-configured

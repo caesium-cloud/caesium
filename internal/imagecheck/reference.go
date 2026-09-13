@@ -33,6 +33,13 @@ var (
 	digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
+// ImageIDPrefix marks a resolved digest that is a local engine image ID
+// (Docker inspect.ID / config digest) rather than a registry repository
+// digest. dockerInspectDigest prepends this when RepoDigests is empty so
+// PinReference can execute the ID itself; a repository digest stays
+// unprefixed and is pinned as name@digest.
+const ImageIDPrefix = "id:"
+
 // Reference is a parsed container image reference, split into the parts the
 // registry API addresses: the registry host (with port), the repository path
 // under /v2/, and the tag and/or digest.
@@ -55,10 +62,26 @@ type Reference struct {
 // image while pinDigests recorded the registry digest. The tag is kept when
 // present (`app:v1@sha256:...`) so logs stay readable. An empty or invalid
 // digest is a no-op so callers can pass the unresolved value through.
+//
+// A digest prefixed with ImageIDPrefix is a local config ID, not a repository
+// digest. Docker's classic reference store does not register those as
+// name@digest, so PinReference returns the image ID (`sha256:...`) which
+// Create/inspect can address. Repository/manifest digests stay name@digest.
 func PinReference(imageRef, digest string) string {
 	imageRef = strings.TrimSpace(imageRef)
 	digest = strings.TrimSpace(digest)
-	if imageRef == "" || !digestPattern.MatchString(digest) {
+	imageID := false
+	if rest, ok := strings.CutPrefix(digest, ImageIDPrefix); ok {
+		imageID = true
+		digest = rest
+	}
+	if !digestPattern.MatchString(digest) {
+		return imageRef
+	}
+	if imageID {
+		return digest
+	}
+	if imageRef == "" {
 		return imageRef
 	}
 	if at := strings.LastIndex(imageRef, "@"); at >= 0 {
@@ -68,6 +91,19 @@ func PinReference(imageRef, digest string) string {
 		return imageRef
 	}
 	return imageRef + "@" + digest
+}
+
+// MarkImageIDDigest prefixes a local config digest so PinReference executes
+// it as an image ID. Repository digests must not be marked.
+func MarkImageIDDigest(digest string) string {
+	digest = strings.TrimSpace(digest)
+	if digest == "" {
+		return ""
+	}
+	if strings.HasPrefix(digest, ImageIDPrefix) {
+		return digest
+	}
+	return ImageIDPrefix + digest
 }
 
 // ParseReference splits an image reference into registry, repository, tag and

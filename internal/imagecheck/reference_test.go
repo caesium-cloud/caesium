@@ -23,6 +23,20 @@ func TestPinReference(t *testing.T) {
 	assert.Equal(t, "alpine:3.23@"+digest, PinReference("  alpine:3.23  ", "  "+digest+"  "))
 }
 
+func TestPinReference_LocalImageID(t *testing.T) {
+	const digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	marked := MarkImageIDDigest(digest)
+
+	assert.Equal(t, digest, PinReference("locally-built:dev", marked),
+		"a local config ID must execute as the image ID, not name@digest")
+	assert.Equal(t, digest, PinReference("locally-built:dev@sha256:dead", marked))
+	assert.Equal(t, digest, PinReference("  locally-built:dev  ", "  "+marked+"  "))
+	assert.Equal(t, "locally-built:dev@"+digest, PinReference("locally-built:dev", digest),
+		"an unmarked digest is still a repository pin")
+	assert.Equal(t, marked, MarkImageIDDigest(marked), "marking is idempotent")
+	assert.Equal(t, "", MarkImageIDDigest(""))
+}
+
 func TestParseReference(t *testing.T) {
 	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	cases := []struct {
