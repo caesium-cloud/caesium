@@ -3,6 +3,7 @@ import {
   applyAndRun,
   applyDefinitions,
   awaitRun,
+  expectNetworkFailuresDuring,
   failOnUnexpectedPageErrors,
   findJobByAlias,
   loadFixtureDefinition,
@@ -74,10 +75,15 @@ test("the console recovers live updates after a real network interruption", asyn
   // A REAL browser-level network cut (not a mocked response) — this is the
   // actual condition the SSE client's onerror/reconnect path and the
   // polling fallback (JobDetailPage's streamHealthy-gated refetchInterval)
-  // exist for.
-  await context.setOffline(true);
-  await page.waitForTimeout(2_000);
-  await context.setOffline(false);
+  // exist for. Chrome auto-logs a net::ERR_* console error for any request
+  // caught mid-flight by the cut; scope the allowance for that to just this
+  // interval (see expectNetworkFailuresDuring) so an unexpected network
+  // failure elsewhere in this spec, or in any other spec, still fails.
+  await expectNetworkFailuresDuring(page, async () => {
+    await context.setOffline(true);
+    await page.waitForTimeout(2_000);
+    await context.setOffline(false);
+  });
 
   // By the time the connection is restored and either the reconnected
   // stream or the polling fallback catches up, the held step should have

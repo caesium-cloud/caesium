@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { parseAllDocuments } from "yaml";
 
 /**
@@ -152,22 +152,60 @@ export function uniqueSuffix(): string {
 }
 
 /**
- * Chrome auto-logs a console error for every failed resource load — both a
- * non-2xx HTTP response ("Failed to load resource: the server responded
- * with a status of ...") AND a network-level failure ("Failed to load
- * resource: net::ERR_...", e.g. ERR_INTERNET_DISCONNECTED while
- * network-recovery.spec.ts's real `context.setOffline(true)` case is
- * offline). Both fire for entirely intentional scenarios in this directory
- * (SYNTHETIC 401/403/etc. response mocks; a real network cut; a fanned
+ * Chrome auto-logs a console error for every non-2xx HTTP response
+ * ("Failed to load resource: the server responded with a status of ...").
+ * That fires for every intentional SYNTHETIC 401/403/etc. response-mock test
+ * in this directory, and for ordinary in-product error paths (e.g. a fanned
  * task's log viewer probing without a selected instance yet, which the
- * backend answers 400 by design — see LogViewer.tsx/taskLogsURL). The whole
- * "Failed to load resource:" prefix is Chrome's own internal wording for
- * mirroring the network tab into the console, not something application
- * code would ever coincidentally produce — the real regression signal is a
- * genuine console.error CALL from application code or an uncaught
- * pageerror, neither of which this prefix matches.
+ * backend answers 400 by design — see LogViewer.tsx/taskLogsURL). It is
+ * expected browser-generated noise mirroring the network tab, not a JS
+ * exception — the real regression signal is a genuine console.error CALL
+ * from application code or an uncaught pageerror, neither of which this
+ * pattern matches. This exception applies globally, in every spec: an
+ * HTTP-status resource failure is never a surprise regardless of which test
+ * produces it.
  */
-const RESOURCE_LOAD_ERROR = /^Failed to load resource:/;
+const HTTP_STATUS_RESOURCE_LOAD_ERROR = /^Failed to load resource: the server responded with a status of \d+/;
+
+/**
+ * Chrome also auto-logs a network-level failure ("Failed to load resource:
+ * net::ERR_...", e.g. ERR_INTERNET_DISCONNECTED) for a request that never
+ * got an HTTP response at all — this fires while
+ * network-recovery.spec.ts's real `context.setOffline(true)` case is
+ * offline. UNLIKE the HTTP-status case above, this is deliberately NOT
+ * allowlisted globally: a genuine net::ERR_FAILED/net::ERR_CONNECTION_REFUSED
+ * for an application request while the browser is expected to be online is
+ * exactly the regression this guard exists to catch. Only a test that
+ * deliberately induces the condition gets a pass, and only for the window it
+ * names via expectNetworkFailuresDuring below — every other spec, and the
+ * rest of that spec's own tests, keep the guard strict.
+ */
+const NETWORK_LEVEL_RESOURCE_LOAD_ERROR = /^Failed to load resource: net::ERR_/;
+
+/** Pages currently inside a window where a real network-level resource failure is expected; see expectNetworkFailuresDuring. */
+const networkFailuresExpected = new WeakSet<Page>();
+
+/**
+ * Runs `fn`, temporarily allowing NETWORK_LEVEL_RESOURCE_LOAD_ERROR console
+ * errors on `page` to pass failOnUnexpectedPageErrors()'s guard instead of
+ * failing the test. Scope this tightly around the specific interval that
+ * induces the failure (e.g. a `context.setOffline(true)` /
+ * `setOffline(false)` pair) rather than the whole test — outside that
+ * window, and in every other test/spec, an unexpected net::ERR_* failure
+ * still fails the test.
+ */
+export async function expectNetworkFailuresDuring<T>(page: Page, fn: () => Promise<T>): Promise<T> {
+  networkFailuresExpected.add(page);
+  try {
+    return await fn();
+  } finally {
+    // Give console events queued during the window (e.g. an in-flight
+    // request that was aborted right as the network went offline) time to
+    // flush before re-tightening the guard.
+    await page.waitForTimeout(500);
+    networkFailuresExpected.delete(page);
+  }
+}
 
 /**
  * Registers a `beforeEach`/`afterEach` pair for the CALLING spec file that
@@ -185,7 +223,8 @@ export function failOnUnexpectedPageErrors(): void {
     page.on("console", (msg) => {
       if (msg.type() !== "error") return;
       const text = msg.text();
-      if (RESOURCE_LOAD_ERROR.test(text)) return;
+      if (HTTP_STATUS_RESOURCE_LOAD_ERROR.test(text)) return;
+      if (NETWORK_LEVEL_RESOURCE_LOAD_ERROR.test(text) && networkFailuresExpected.has(page)) return;
       errors.push(`console.error: ${text}`);
     });
     page.on("pageerror", (err) => {
