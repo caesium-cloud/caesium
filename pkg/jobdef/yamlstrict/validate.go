@@ -11,6 +11,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RequireMapping reports a stable, user-facing error when a document root has
+// the wrong YAML shape. Callers use this before decoding through private alias
+// types so implementation-only type names never leak into diagnostics.
+func RequireMapping(node *yaml.Node, documentName string) error {
+	root := contentNode(node)
+	if root != nil && root.Kind == yaml.MappingNode {
+		return nil
+	}
+	line := 0
+	if root != nil {
+		line = root.Line
+	}
+	return fmt.Errorf("%s must be a YAML mapping (line %d)", documentName, line)
+}
+
 // ValidateKnownFields rejects mapping keys that are not represented by the
 // YAML tags on target. Errors include the YAML path and source line.
 func ValidateKnownFields(node *yaml.Node, target any) error {

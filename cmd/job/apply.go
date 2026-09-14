@@ -41,10 +41,7 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 		if len(defs) == 0 {
-			if _, err := fmt.Fprintln(cmd.OutOrStdout(), "No job definitions found."); err != nil {
-				return err
-			}
-			return nil
+			return errors.New("no job definitions selected")
 		}
 
 		allowBreaking, err := allowBreakingFromFlags()

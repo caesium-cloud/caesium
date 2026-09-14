@@ -30,6 +30,9 @@ type File struct {
 
 // UnmarshalYAML makes harness assertions fail closed on misspelled fields.
 func (f *File) UnmarshalYAML(value *yaml.Node) error {
+	if err := yamlstrict.RequireMapping(value, "Harness manifest"); err != nil {
+		return err
+	}
 	if err := yamlstrict.ValidateKnownFields(value, File{}); err != nil {
 		return err
 	}

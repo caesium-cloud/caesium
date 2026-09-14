@@ -2,6 +2,7 @@ package jobdef
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +24,13 @@ steps:
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `YAML path metadata.schemaValidaton (line 5): unknown field "schemaValidaton"`)
 	require.Contains(t, err.Error(), `YAML path steps[0].dependsON (line 12): unknown field "dependsON"`)
+}
+
+func TestParseRejectsNonMappingRootWithoutInternalTypeName(t *testing.T) {
+	_, err := Parse([]byte("- apiVersion: v1\n  kind: Job\n"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Job manifest must be a YAML mapping (line 1)")
+	require.NotContains(t, err.Error(), "plainDefinition")
 }
 
 func TestParseKeepsFreeFormMapsAndCustomDatasetShapes(t *testing.T) {
@@ -139,6 +147,46 @@ steps:
     cache: {ttl: never, chain: values, version: 2, pinDigests: true, digestTTL: 0}
 `))
 	require.NoError(t, err)
+}
+
+func TestParseValidatesCacheShapeAndEnabledType(t *testing.T) {
+	for name, cache := range map[string]string{
+		"shape":   `"enabled"`,
+		"enabled": `{enabled: "false"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(`apiVersion: v1
+kind: Job
+metadata:
+  alias: strict-cache-type
+  cache: ` + cache + `
+trigger: {type: http, configuration: {path: strict-cache-type}}
+steps: [{name: extract, image: alpine:3.23}]
+`))
+			require.Error(t, err)
+			if name == "shape" {
+				require.Contains(t, err.Error(), "metadata.cache must be a boolean or mapping")
+			} else {
+				require.Contains(t, err.Error(), "metadata.cache.enabled must be a boolean")
+			}
+		})
+	}
+}
+
+func TestParseResolvesCacheEnabledMapField(t *testing.T) {
+	def, err := Parse([]byte(`apiVersion: v1
+kind: Job
+metadata:
+  alias: strict-cache-enabled
+  cache: {enabled: false, ttl: 30m}
+trigger: {type: http, configuration: {path: strict-cache-enabled}}
+steps: [{name: extract, image: alpine:3.23}]
+`))
+	require.NoError(t, err)
+
+	cfg := ResolveCacheConfig(nil, def.Metadata.Cache, true, time.Hour, false, envDigestTTL)
+	require.False(t, cfg.Enabled)
+	require.Equal(t, 30*time.Minute, cfg.TTL)
 }
 
 func TestParseRejectsRecursiveCacheAliasesWithoutRecursingForever(t *testing.T) {

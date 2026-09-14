@@ -173,7 +173,7 @@ steps:
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `fanOut` | object | no | Materialize N parallel instances from a predecessor's `##caesium::partitions` marker: `{from, env?, maxPartitions, maxParallel?, onEmpty?, failurePolicy?}`. Scheduling metadata — excluded from the cache hash. Each instance gets `$CAESIUM_PARTITION` and `$CAESIUM_PARTITION_JSON`. `dependsOn` on a partition object is a scheduling instruction, not data. |
-| `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, `{ttl: "never"}` for no expiry at all, `{chain: "values"}` (see [Cache chain](#cache-chain-breaking-a-noisy-upstream)), or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}`. Digests resolve on every engine (docker via the local daemon, podman/kubernetes via a registry manifest HEAD); private registries are authenticated server-side with `CAESIUM_REGISTRY_AUTH` (`host=secret://...` pairs — see [Image Digest Pinning and Private Registries](job-definitions.md#image-digest-pinning-and-private-registries)); there is no per-step credential field |
+| `cache` | bool or object | no | Task caching — `true`, `{enabled: false}`, `{ttl: "12h", version: 2}`, `{ttl: "never"}` for no expiry at all, `{chain: "values"}` (see [Cache chain](#cache-chain-breaking-a-noisy-upstream)), or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). A mapping enables caching unless `enabled: false` is explicit; `enabled` must be a boolean. The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}`. Digests resolve on every engine (docker via the local daemon, podman/kubernetes via a registry manifest HEAD); private registries are authenticated server-side with `CAESIUM_REGISTRY_AUTH` (`host=secret://...` pairs — see [Image Digest Pinning and Private Registries](job-definitions.md#image-digest-pinning-and-private-registries)); there is no per-step credential field |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
 | `volumeMounts` | array | no | Mount a declared job volume: `{volume, path, readOnly?, subPath?}` |
@@ -545,14 +545,17 @@ source file, YAML path, and line before validation, execution, or apply. This
 includes fields inside steps and Harness expectations. Intentionally open maps
 such as `env`, trigger/callback `configuration`, annotations, and JSON Schema
 objects still accept arbitrary keys. Files with a `.job.yaml` or `.job.yml`
-suffix are always treated as intended Caesium Jobs, so a misspelled or missing
-header cannot be skipped during a directory scan. Other YAML kinds, including
-Kubernetes `batch/v1` Jobs, may coexist in scanned directories and are ignored.
+suffix are treated as intended Caesium Jobs, so a misspelled or missing header
+cannot be skipped during a directory scan. Grouped API versions are the
+exception: Kubernetes `batch/v1` Jobs and other grouped Kubernetes resources
+may coexist in scanned directories or multi-document `.job.yaml` files and are
+ignored.
 
-`caesium test --path` fails when it selects zero Job definitions, and
-`caesium test --scenario` fails when it selects zero scenarios. This prevents
-an empty or mismatched path from producing a successful pre-production check.
-`caesium dev --once` likewise fails when its path selects no Jobs.
+`caesium job apply`, `caesium job lint`, `caesium test --path`, and
+`caesium dev --once` fail when they select zero Job definitions.
+`caesium test --scenario` likewise fails when it selects zero scenarios. This
+prevents an empty or mismatched path from producing a successful check or
+deployment.
 
 `caesium job export` calls `GET /v1/jobs/:id/manifest`, which rebuilds the
 manifest server-side from the stored job (the inverse of the apply importer) and

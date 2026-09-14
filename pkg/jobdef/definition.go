@@ -68,6 +68,9 @@ type Definition struct {
 // definition. Keeping this check on Definition makes every YAML ingestion path
 // strict, including CLI apply, Git sync, diff, and Parse.
 func (d *Definition) UnmarshalYAML(value *yaml.Node) error {
+	if err := yamlstrict.RequireMapping(value, "Job manifest"); err != nil {
+		return err
+	}
 	if err := yamlstrict.ValidateKnownFields(value, Definition{}); err != nil {
 		return err
 	}
@@ -1123,29 +1126,39 @@ func (d *Definition) Validate() error {
 	return nil
 }
 
-// validateCacheConfigs rejects an unknown `cache.chain` value at job and step
-// level. It is deliberately the ONLY new cache validation: an unparseable
+// validateCacheConfigs validates the scalar-or-mapping cache shape plus fields
+// whose invalid values would silently reverse policy. An unparseable
 // `cache.ttl` keeps its historical silent-ignore behaviour, because manifests
 // carrying one apply cleanly today and turning that into an error would break
-// them. `chain` is new, so nothing can already depend on a typo being ignored —
-// and silently ignoring a misspelt `chain: value` would leave the user with the
-// transitive cascade they were trying to break, with no signal.
+// them. `chain` and `enabled` are validated because ignoring either changes the
+// cache policy the author explicitly selected.
 func validateCacheConfigs(d *Definition) error {
-	if err := validateCacheChainValue("metadata.cache", d.Metadata.Cache); err != nil {
+	if err := validateCacheValue("metadata.cache", d.Metadata.Cache); err != nil {
 		return err
 	}
 	for i := range d.Steps {
-		if err := validateCacheChainValue(fmt.Sprintf("steps[%d].cache", i), d.Steps[i].Cache); err != nil {
+		if err := validateCacheValue(fmt.Sprintf("steps[%d].cache", i), d.Steps[i].Cache); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateCacheChainValue(path string, raw any) error {
+func validateCacheValue(path string, raw any) error {
+	if raw == nil {
+		return nil
+	}
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil
+		if _, ok := raw.(bool); ok {
+			return nil
+		}
+		return fmt.Errorf("%s must be a boolean or mapping", path)
+	}
+	if enabled, present := m["enabled"]; present {
+		if _, ok := enabled.(bool); !ok {
+			return fmt.Errorf("%s.enabled must be a boolean", path)
+		}
 	}
 	chain, present := m["chain"]
 	if !present {
@@ -2652,6 +2665,9 @@ func applyCache(cfg *CacheConfig, raw any) {
 		cfg.Enabled = v
 	case map[string]any:
 		cfg.Enabled = true
+		if enabled, ok := v["enabled"].(bool); ok {
+			cfg.Enabled = enabled
+		}
 		if ttl, ok := v["ttl"]; ok {
 			if s, ok := ttl.(string); ok {
 				// The literal `ttl: never` disables expiry outright; every other

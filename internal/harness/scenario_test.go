@@ -73,6 +73,17 @@ scenarios:
 	require.Contains(t, err.Error(), `YAML path scenarios[0].expect.tasks[0].logContain (line 10)`)
 }
 
+func TestCollectScenariosRejectsNonMappingRootWithoutInternalTypeName(t *testing.T) {
+	dir := t.TempDir()
+	scenarioPath := filepath.Join(dir, "sequence.scenario.yaml")
+	require.NoError(t, os.WriteFile(scenarioPath, []byte("- apiVersion: v1\n  kind: Harness\n"), 0o644))
+
+	_, err := CollectScenarios([]string{scenarioPath})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Harness manifest must be a YAML mapping (line 1)")
+	require.NotContains(t, err.Error(), "plainFile")
+}
+
 func TestCollectScenariosParsesImpactExpectation(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.job.yaml"), []byte(`

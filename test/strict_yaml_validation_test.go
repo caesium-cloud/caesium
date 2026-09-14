@@ -3,9 +3,11 @@
 package test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func (s *IntegrationTestSuite) TestStrictJobFieldsRejectedAcrossCLIPaths() {
@@ -157,4 +159,90 @@ func (s *IntegrationTestSuite) TestDevOnceFailsWhenNoJobsSelected() {
 	out, err := s.runCLIRaw("dev", "--once", "--path", dir)
 	s.Error(err, "expected non-zero exit when no jobs are selected")
 	s.Contains(out, "no job definitions selected")
+}
+
+func (s *IntegrationTestSuite) TestApplyPruneRejectsKindTypoAndKeepsLiveJob() {
+	suffix := time.Now().UnixNano()
+	protectedAlias := fmt.Sprintf("strict-prune-protected-%d", suffix)
+	desiredAlias := fmt.Sprintf("strict-prune-desired-%d", suffix)
+	manifest := func(alias, kind string) string {
+		return fmt.Sprintf(`apiVersion: v1
+kind: %s
+metadata: {alias: %s}
+trigger: {type: http, configuration: {path: %s}}
+steps: [{name: run, image: alpine:3.23, command: [echo, safe]}]
+`, kind, alias, alias)
+	}
+
+	dir := s.T().TempDir()
+	protectedPath := filepath.Join(dir, "protected.yaml")
+	desiredPath := filepath.Join(dir, "desired.yaml")
+	s.Require().NoError(os.WriteFile(protectedPath, []byte(strings.TrimSpace(s.injectEngine(manifest(protectedAlias, "Job")))), 0o644))
+	s.Require().NoError(os.WriteFile(desiredPath, []byte(strings.TrimSpace(s.injectEngine(manifest(desiredAlias, "Job")))), 0o644))
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	before := s.requireJobByAlias(protectedAlias)
+
+	s.Require().NoError(os.WriteFile(protectedPath, []byte(strings.TrimSpace(s.injectEngine(manifest(protectedAlias, "job")))), 0o644))
+	out, err := s.runCLIRaw("job", "apply", "--path", dir, "--prune", "--server", s.caesiumURL)
+	s.Error(err, "a likely Caesium kind typo must abort apply --prune")
+	s.Contains(out, "unsupported kind: job")
+	s.NotContains(out, "Applied")
+	after := s.requireJobByAlias(protectedAlias)
+	s.Equal(before.ID, after.ID, "failed apply --prune must leave the existing job active")
+}
+
+func (s *IntegrationTestSuite) TestJobApplyAndLintFailWhenNoDefinitionsSelected() {
+	dir := s.T().TempDir()
+	commands := [][]string{
+		{"job", "lint", "--path", dir},
+		{"job", "apply", "--path", dir, "--server", "http://127.0.0.1:1"},
+		{"job", "apply", "--path", dir, "--prune", "--server", "http://127.0.0.1:1"},
+	}
+	for _, args := range commands {
+		s.Run(strings.Join(args[:2], " "), func() {
+			out, err := s.runCLIRaw(args...)
+			s.Error(err, "empty manifest selections must return non-zero")
+			s.Contains(out, "no job definitions selected")
+			s.NotContains(out, "Applied")
+			s.NotContains(out, "Validated")
+		})
+	}
+}
+
+func (s *IntegrationTestSuite) TestJobLintAcceptsKubernetesInMultiDocumentJobFile() {
+	path := filepath.Join(s.T().TempDir(), "mixed.job.yaml")
+	manifest := `apiVersion: batch/v1
+kind: Job
+metadata: {name: kubernetes-backup}
+spec: {template: {}}
+---
+apiVersion: v1
+kind: Job
+metadata: {alias: caesium-mixed}
+trigger: {type: http, configuration: {path: caesium-mixed}}
+steps: [{name: run, image: alpine:3.23}]
+`
+	s.Require().NoError(os.WriteFile(path, []byte(strings.TrimSpace(s.injectEngine(manifest))), 0o644))
+
+	out, err := s.runCLIRaw("job", "lint", "--path", path)
+	s.NoError(err, out)
+	s.Contains(out, "Validated 1 job definition(s)")
+	s.NotContains(out, "unknown YAML fields")
+}
+
+func (s *IntegrationTestSuite) TestJobLintRejectsInvalidCacheEnabledType() {
+	dir := s.writeJobManifest(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: invalid-cache-enabled
+  cache: {enabled: "false"}
+trigger: {type: http, configuration: {path: invalid-cache-enabled}}
+steps: [{name: run, image: alpine:3.23}]
+`)
+	defer os.RemoveAll(dir)
+
+	out, err := s.runCLIRaw("job", "lint", "--path", dir)
+	s.Error(err)
+	s.Contains(out, "metadata.cache.enabled must be a boolean")
 }

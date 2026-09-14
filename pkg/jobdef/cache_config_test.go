@@ -28,6 +28,21 @@ func TestResolveCacheConfig_PinDigestsJobLevel(t *testing.T) {
 	assert.True(t, cfg.PinDigests, "job-level pinDigests should enable digest pinning")
 }
 
+func TestResolveCacheConfig_EnabledMapField(t *testing.T) {
+	jobDisabled := map[string]any{"enabled": false, "ttl": "30m"}
+	cfg := ResolveCacheConfig(nil, jobDisabled, true, time.Hour, false, envDigestTTL)
+	assert.False(t, cfg.Enabled, "metadata cache.enabled:false must override the environment default")
+	assert.Equal(t, 30*time.Minute, cfg.TTL)
+
+	stepDisabled := map[string]any{"enabled": false}
+	cfg = ResolveCacheConfig(stepDisabled, true, true, time.Hour, false, envDigestTTL)
+	assert.False(t, cfg.Enabled, "step cache.enabled:false must override the job default")
+
+	stepEnabled := map[string]any{"enabled": true}
+	cfg = ResolveCacheConfig(stepEnabled, false, false, time.Hour, false, envDigestTTL)
+	assert.True(t, cfg.Enabled, "step cache.enabled:true must override the job default")
+}
+
 func TestResolveCacheConfig_StepOverridesJob(t *testing.T) {
 	job := map[string]any{"pinDigests": true}
 	step := map[string]any{"pinDigests": false}

@@ -96,9 +96,10 @@ func appendDefinitions(path string, defs *[]schema.Definition, validate bool) er
 }
 
 // isCaesiumDocument identifies a Caesium job from its raw header before typed
-// decoding. Kubernetes Jobs use grouped API versions such as batch/v1 and are
-// intentionally left alone; ungrouped Job versions are Caesium manifests so an
-// unsupported or missing version still reaches validation instead of vanishing.
+// decoding. Grouped API versions such as Kubernetes batch/v1 are intentionally
+// left alone even in .job.yaml files. Ungrouped Job headers, case variants, job
+// filename suffixes, and documents with both Caesium trigger and steps fields
+// reach validation so malformed jobs cannot silently vanish from an apply.
 func isCaesiumDocument(path string, document *yaml.Node) (bool, error) {
 	root := documentRoot(document)
 	if root == nil || root.Kind != yaml.MappingNode {
@@ -108,15 +109,21 @@ func isCaesiumDocument(path string, document *yaml.Node) (bool, error) {
 	if err := document.Decode(&header); err != nil {
 		return false, err
 	}
+	_, hasTrigger := header["trigger"]
+	_, hasSteps := header["steps"]
+	looksLikeCaesium := hasTrigger && hasSteps
+	apiVersion, apiVersionOK := header["apiVersion"].(string)
+	if apiVersionOK && strings.Contains(strings.TrimSpace(apiVersion), "/") && !looksLikeCaesium {
+		return false, nil
+	}
 	if isJobManifestPath(path) {
 		return true, nil
 	}
 	kind, kindOK := header["kind"].(string)
-	if !kindOK || strings.TrimSpace(kind) != schema.KindJob {
-		return false, nil
+	if kindOK && strings.EqualFold(strings.TrimSpace(kind), schema.KindJob) {
+		return true, nil
 	}
-	apiVersion, apiVersionOK := header["apiVersion"].(string)
-	return !apiVersionOK || !strings.Contains(strings.TrimSpace(apiVersion), "/"), nil
+	return looksLikeCaesium, nil
 }
 
 func isBlankDocument(document *yaml.Node) bool {

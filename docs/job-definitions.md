@@ -489,13 +489,14 @@ Cache can be enabled at the job level or overridden per step. Step-level setting
 
 | Scope | Field | Example |
 |-------|-------|---------|
-| Job default | `metadata.cache` | `true`, `{ttl: "24h"}`, or `{chain: "values"}` |
-| Step override | `steps[].cache` | `true`, `false`, or `{ttl: "12h", version: 2, chain: "values"}` |
+| Job default | `metadata.cache` | `true`, `{enabled: false, ttl: "24h"}`, or `{chain: "values"}` |
+| Step override | `steps[].cache` | `true`, `false`, or `{enabled: false, ttl: "12h", version: 2, chain: "values"}` |
 | Global | env `CAESIUM_CACHE_ENABLED=true` | Enables caching for all jobs |
 
 ### Configuration Options
 
 - **`true` / `false`** -- enable or disable caching.
+- **`enabled`** -- explicit boolean enable/disable inside the mapping form. A mapping enables caching when this field is omitted.
 - **`ttl`** -- duration string controlling how long an entry remains valid (e.g. `"1h"`, `"24h"`, `"7d"`). Expired entries are ignored and the task re-executes. The literal `ttl: never` suppresses expiry entirely and overrides any inherited `CAESIUM_CACHE_TTL` default -- use it for a step keyed on a content fingerprint, which should not be re-executed just because a wall clock moved.
 - **`version`** -- integer that forms part of the cache key. Bump this value to force re-execution without modifying the rest of the manifest.
 - **`chain`** -- `transitive` (default) or `values`; selects whether predecessor *identity hashes* enter this step's key. See [Cache Chain](#cache-chain).

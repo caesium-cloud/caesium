@@ -187,6 +187,51 @@ spec:
 	require.Empty(t, defs)
 }
 
+func TestCollectDefinitions_SkipsKubernetesJobsInJobNamedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "backup.job.yaml", `
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kubernetes-backup
+spec:
+  template: {}
+`)
+	writeFile(t, dir, "mixed.job.yaml", `
+apiVersion: batch/v1
+kind: Job
+metadata: {name: kubernetes-migration}
+spec: {template: {}}
+---
+apiVersion: v1
+kind: Job
+metadata: {alias: caesium-job}
+trigger: {type: http, configuration: {path: caesium-job}}
+steps: [{name: run, image: alpine:3.23}]
+`)
+
+	defs, err := CollectDefinitions([]string{dir}, true)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	require.Equal(t, "caesium-job", defs[0].Metadata.Alias)
+}
+
+func TestCollectDefinitions_FailsClosedOnLikelyCaesiumKindTypo(t *testing.T) {
+	dir := writeTestFile(t, "typo.yaml", `
+apiVersion: v1
+kind: job
+metadata: {alias: typo-job}
+trigger: {type: http, configuration: {path: typo-job}}
+steps: [{name: run, image: alpine:3.23}]
+`)
+
+	defs, err := CollectDefinitions([]string{dir}, true)
+	require.Error(t, err)
+	require.Nil(t, defs)
+	require.Contains(t, err.Error(), "typo.yaml")
+	require.Contains(t, err.Error(), "unsupported kind: job")
+}
+
 func TestCollectDefinitions_RecognizesAliasedAndMergedJobHeaders(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "aliases.yaml", `
