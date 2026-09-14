@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/assert"
@@ -489,12 +490,19 @@ func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
 		Command: []string{"test"},
 	}
 
+	const staleID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	s.engine.backend.(*mockDockerBackend).
 		On("ImageInspect", pinned).
 		Return(errdefs.NotFound(io.EOF))
 	s.engine.backend.(*mockDockerBackend).
 		On("ImageInspect", digest).
 		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", testImage).
+		Return(image.InspectResponse{
+			ID:          staleID,
+			RepoDigests: []string{testImage + "@" + staleID},
+		}, nil)
 	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", pinned).
 		Return()
@@ -513,7 +521,6 @@ func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
 	c, err := s.engine.Create(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
-	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImageInspect", testImage)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
@@ -590,6 +597,105 @@ func (s *DockerTestSuite) TestCreateRewritesNameAtConfigIDToLocalImageID() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
 	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateUsesLocalTagWhenNameAtManifestDigestMissing is the retag case
+// pinDigests hits in integration: alpine is present with a RepoDigest, the
+// job names a local tag of that image, and PinReference produces
+// localTag@manifestDigest. Docker cannot inspect or pull that name@digest
+// (the digest is registered as alpine@sha256:..., and inspect.ID is the
+// config digest). Create must run the already-present local tag/ID.
+func (s *DockerTestSuite) TestCreateUsesLocalTagWhenNameAtManifestDigestMissing() {
+	const (
+		localTag        = "caesium-pindigest-1:stable"
+		manifestDigest  = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		configID        = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		canonicalDigest = "docker.io/library/alpine@" + manifestDigest
+	)
+	pinned := localTag + "@" + manifestDigest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", manifestDigest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", localTag).
+		Return(image.InspectResponse{
+			ID:          configID,
+			RepoDigests: []string{canonicalDigest},
+		}, nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			if cfg == nil {
+				return false
+			}
+			switch cfg.Image {
+			case localTag, configID, canonicalDigest:
+				return true
+			default:
+				return false
+			}
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreatePullsRegistryDigestPinWhenAbsent() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const name = "registry.example.com/app:v1"
+	pinned := name + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", digest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", name).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", pinned).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == pinned
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 

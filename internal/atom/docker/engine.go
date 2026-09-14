@@ -213,15 +213,11 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
 		} else if !cerrdefs.IsNotFound(err) {
 			return "", err
 		}
-		// name@<configID> is not a repository digest on Docker's classic
-		// store. If the digest itself is a local image ID, execute that.
-		if id := localConfigImageID(imageRef); id != "" && id != imageRef {
-			if _, err := e.backend.ImageInspect(e.ctx, id); err == nil {
-				log.Info("docker image present as local id", "image", imageRef, "id", id)
-				return id, nil
-			} else if !cerrdefs.IsNotFound(err) {
-				return "", err
-			}
+
+		if localRef, ok, err := e.resolvePresentPinnedImage(imageRef); err != nil {
+			return "", err
+		} else if ok {
+			return localRef, nil
 		}
 	}
 
@@ -243,6 +239,85 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
 
 	log.Info("docker image pulled", "image", imageRef)
 	return imageRef, nil
+}
+
+// resolvePresentPinnedImage maps a name@digest pin onto an image the local
+// daemon can already run. Docker's classic store registers manifest digests
+// under the original repository (alpine@sha256:...), not a locally retagged
+// name (caesium-pindigest:stable@sha256:...). Config IDs are likewise not
+// name@digest references.
+func (e *dockerEngine) resolvePresentPinnedImage(imageRef string) (string, bool, error) {
+	name, digest, ok := splitPinnedImage(imageRef)
+	if !ok {
+		return "", false, nil
+	}
+
+	if digest != imageRef {
+		if _, err := e.backend.ImageInspect(e.ctx, digest); err == nil {
+			log.Info("docker image present as local id", "image", imageRef, "id", digest)
+			return digest, true, nil
+		} else if !cerrdefs.IsNotFound(err) {
+			return "", false, err
+		}
+	}
+
+	if name == "" || name == imageRef {
+		return "", false, nil
+	}
+
+	inspect, err := e.backend.ImageInspect(e.ctx, name)
+	if err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	localRef, ok := localImageForDigest(name, inspect, digest)
+	if !ok {
+		return "", false, nil
+	}
+	log.Info("docker image present as local tag", "image", imageRef, "local", localRef)
+	return localRef, true, nil
+}
+
+// splitPinnedImage splits a name@sha256:... pin into its name and digest.
+// A digest-only reference yields an empty name.
+func splitPinnedImage(imageRef string) (name, digest string, ok bool) {
+	digest = localConfigImageID(imageRef)
+	if digest == "" {
+		return "", "", false
+	}
+	imageRef = strings.TrimSpace(imageRef)
+	if at := strings.LastIndex(imageRef, "@"); at > 0 {
+		return imageRef[:at], digest, true
+	}
+	return "", digest, true
+}
+
+// localImageForDigest returns a create-able local reference when inspect
+// describes the pinned digest: the config ID, the original tag, or a matching
+// RepoDigest.
+func localImageForDigest(name string, inspect image.InspectResponse, digest string) (string, bool) {
+	if digest == "" {
+		return "", false
+	}
+	if inspect.ID == digest {
+		return inspect.ID, true
+	}
+	for _, rd := range inspect.RepoDigests {
+		if localConfigImageID(rd) != digest {
+			continue
+		}
+		if inspect.ID != "" {
+			return inspect.ID, true
+		}
+		if name != "" {
+			return name, true
+		}
+		return rd, true
+	}
+	return "", false
 }
 
 // localConfigImageID extracts a sha256 image ID from a digest-only reference
