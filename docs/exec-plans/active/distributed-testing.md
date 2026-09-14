@@ -372,14 +372,17 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-10)
+## Progress (as of 2026-09-14)
 
-**W1 implementation is merged; W1/N-1 is in [#469](https://github.com/caesium-cloud/caesium/pull/469).**
-A1, E1 and G1 have merged acceptance evidence and are checked. The other 24
-implementation items remain undispatched. This documentation checkpoint is
-based on merged master `646c9219`, which includes all three items and the index
-prerequisite. Merging #469 completes W1/N-1; until then, resume this checkpoint
-rather than dispatching W2. No repository settings have changed.
+**W1 is closed and W2 implementation is merged; W2/N-1 is this PR.**
+A1, A2, B1, E1, E5 and G1 have merged acceptance evidence and are checked. The
+other 21 implementation items remain undispatched. This documentation checkpoint
+is based on merged master `f3f5ce3a`, which includes all three W2 items. No
+repository settings have changed, and no new lane has been added to `ci-ok`:
+the owner-crash robustness runner is still invoked by hand, and G3 owns wiring
+it. W2 delivers the first real multi-node owner-crash regression, an SQL-work
+budget inside the existing required integration lane, and a fail-closed
+scenario/evidence validator whose manifest rows are all still `absent`.
 
 | W1 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
@@ -388,20 +391,28 @@ rather than dispatching W2. No repository settings have changed.
 | γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), merged | Merge `80273d3fe29ecf3a9df84d868a085df944959d3c`; verified candidate `7fcc1fd75b235066b27d66328d4293a34ce424b9`. [CI run 34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605): all 35 executed checks pass; tag-only publish skipped. All 15 Python validators and actionlint pass. Native Chromium fail-once proof using unchanged G1 configuration exits 1 despite a passing retry. Fresh hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); both uploaded artifacts were recursively checked for API-key tokens. Tested merge `ffe74c5a` has parents `dd35ba42` and `7fcc1fd7`. Independent and external reviews have no actionable findings. |
 | Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), merged | Merge `2d28607feb50412b273abefc0aae94da64bf0099`. The one-line README convention repair is incorporated in both candidates. The formerly failing index guardrail now passes locally and on both CI architectures. No guardrail or test floor changed; this is not N-1 completion. |
 
-**W1/N-1 — [#469](https://github.com/caesium-cloud/caesium/pull/469): merge pending.**
-This PR synchronizes `docs/ci.md` with shipped load-harness exit/report behavior,
-browser diagnostics and Python validator discovery, and updates the README and
-roadmap status links. Its merge SHA is unavailable until merge; on resume,
-resolve #469's live merge commit and record it in the next Progress update.
-The presence of this checkpoint on the default branch, together with #469's
-verified merged state, closes W1 without another status-only PR. The overall
-27-item plan remains active; new multi-node fault guarantees and calibrated
-performance gates have not shipped in W1.
+**W1/N-1 — [#469](https://github.com/caesium-cloud/caesium/pull/469), merged.**
+Merge `79d8add59386881c763fc3185c7ad91e606b1470`. It synchronized `docs/ci.md`
+with shipped load-harness exit/report behavior, browser diagnostics and Python
+validator discovery, and updated the README and roadmap status links. W1 is
+closed; no further status-only PR is owed for it.
+
+| W2 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | B1 / [#472](https://github.com/caesium-cloud/caesium/pull/472), merged | Merge `f3f5ce3ab68d57709127a0b2807e670e7d39726a`; verified candidate `b716c6dbe0b65757f8e4c5984e2e7f98993b9ac4`. Live kind proof `B1_KIND_OK` on 2026-09-12: `TestOwnerCrash` PASS in 123.22s, `owner_is_leader` 63.21s (recovery 33.086s) and `owner_is_not_leader` 57.38s (recovery 35.090s), generation 1→2 in both, owner `10.244.1.3` → `10.244.3.3`. Three persistent replicas on distinct nodes/IPs/UIDs with bound PVCs; dqlite reported 3 voters and leader `10.244.1.3:9001`; connectivity probe observed before the fault; kill path was cordon → `systemctl stop kubelet` + `ctr tasks kill SIGKILL` with observed death; old kubelet restarted and uncordoned; two isolated cluster IDs coexisted before the extra was deleted; 2 duplicate block attempts retained and sink nonces correlated to public task-run UUIDs. `helm lint`/`helm template` against `test-values-robustness.yaml`, `bash -n scripts/robustness.sh` and `git diff --check` pass. **Limits:** the live proof is orchestrator-owned (image build plus a 4-node cluster) and the lane is **not** wired into CI — G3 owns that. Remaining product risk recorded by the PR: `POST /v1/database/query` issues `PRAGMA query_only`, which native dqlite may reject; a 500 there is a product-console gap, not permission to skip lease observation. |
+| β | E5 / [#471](https://github.com/caesium-cloud/caesium/pull/471), merged | Merge `4bc19ac98389ccd3fd61382e9f9ec40ad37949a6`; verified candidate `86917428a4eb5c29d4aec9a2608634a94e88b2c8`. Live `just integration-test` from the item worktree PASS in 610.355s: `TestStatementBudgetFixedWorkload` PASS (2.42s) with `lease_renewal` and `callback` skipped with logged reasons (both deltas 0), the recorded comparator profiles PASS including the leftover-plus-lost-batching fixture, and `TestStatementBudgetParseCounterRejectsPrefixOnlyName` PASS. **Limits:** the scenario gates the measured `caesium_db_statements_total` / `caesium_db_writes_total` categories only — not latency, not uninstrumented queries. `lease_renewal` and leftover `callback` traffic are reported as skipped with reasons instead of false exact bounds; `command`/`checkpoint` are asserted zero. `test/contracts/scenarios.json` was deliberately not edited, so G3 still has to register `TestStatementBudgetFixedWorkload`. |
+| γ | A2 / [#470](https://github.com/caesium-cloud/caesium/pull/470), merged | Merge `0c42e549f5983fb4c8bf78cbfdf9fae698b21f41`; verified candidate `56db7bf755035b57e905e389f060970b61c920e9`. `python3 -m unittest scripts/test_test_evidence.py -v` 29 tests OK; `python3 -m unittest discover -s scripts -p 'test_*.py' -v` 44 tests OK; `git diff --check` clean. **Limits:** every committed manifest row is `status: absent` with empty `gates`, so the catalog names planned B1/B2/B3/D3/E5/G3 scenarios and proves none of them; G3 registers selectors and the early gate after the tests exist. Verification was Python-only (no Docker), and this PR invented no passing CI evidence. |
+| W2/N-1 | this PR | Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the three merged W2 items. Its merge SHA is unavailable until merge; resolve it on the next invocation and record it here. |
+
+The overall 27-item plan remains active. W2 does not promote anything into the
+enforced aggregate: the minimum credible gate still needs G3's lane wiring and
+G5's promotion, and calibrated performance budgets, partitions, upgrades and
+Console fault journeys have not shipped.
 
 ### Resume and tracking rules
 
 The committed plan is the shared progress record; PR bodies hold detailed
-candidate evidence. The machine-local `.codex/runs/distributed-testing/w1/state.md`
+candidate evidence. The machine-local `.codex/runs/distributed-testing/w<n>/state.md`
 is a recovery aid, not a replacement for this dashboard. The orchestrator keeps
 Progress current when PRs are published, revised, verified or merged, including
 at a review-only endpoint. Interim Progress corrections do not wait for N-1;
@@ -409,24 +420,32 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile these
 rows against live PR state, head/merge SHAs, reviews and current-head checks.
-Resume #469 while W1/N-1 is unfinished. Checkboxes mean merged acceptance
+Resume the W2/N-1 PR while it is unfinished. Checkboxes mean merged acceptance
 evidence; rows distinguish implementation and verification from merge. Once
-N-1 is verified merged, record its merge SHA and select W2 in that invocation;
-choose dependency-ready items while preserving unresolved Q1–Q6 and
+W2/N-1 is verified merged, record its merge SHA and select **W3** in that
+invocation; choose dependency-ready items while preserving unresolved Q1–Q6 and
 shared-file ownership. Dependency readiness alone does not authorize dispatch
 before the current wave's checkpoint.
+
+Dependency-ready after W2: **G3 first, then G5** — they are sequential writers of
+`.github/workflows/ci.yml` and `scripts/test_ci.py` and together complete the
+minimum credible gate — plus **C1, D1, D2, F1, E2 and G2**, whose Files lists do
+not intersect the workflow chain. **B2 stays blocked** on C1 and on the EX-HOOKS
+handoff; do not dispatch it on B1's merge alone. G5 must not be run in parallel
+with G3, and G2/A2's Python test files are discovered by G1's wildcard rather
+than edited into the workflow.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 and G1 merged; A2 undispatched until W1/N-1 |
-| B | Real multi-node robustness (3 items) | P0 | A1 prerequisite merged; B1 undispatched until W1/N-1 |
-| C | Reference models, generated tests, and checker validation (3 items) | P0 | A1 prerequisite merged; C1 undispatched until W1/N-1 |
-| D | Developer and Console journeys (3 items) | P0 | A1 prerequisite merged; D1 undispatched until W1/N-1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466; E2/E5 dependency-ready after W1/N-1; E4 needs Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | Undispatched; F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464; G3/G5 remain dependency-blocked |
+| A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Every manifest row is still `absent`; G3 then B3/D3/G6 own later rows |
+| B | Real multi-node robustness (3 items) | P0 | B1 merged #472 and manually reproducible; B2 blocked on C1 and EX-HOOKS; B3 needs A2 + B2 + G3 |
+| C | Reference models, generated tests, and checker validation (3 items) | P0 | A1 prerequisite merged; C1 dependency-ready for W3; C2 follows C1 |
+| D | Developer and Console journeys (3 items) | P0 | A1/G1 prerequisites merged; D1 and D2 dependency-ready for W3; D3 needs B3/D2; expanded support needs Q4 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466 and E5 merged #471; E2 dependency-ready for W3; E3 needs D2/C2; E4 needs Q2/Q5 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | Undispatched; F1 dependency-ready for W3; F4 follows F1 without B3; F2 adds cluster qualification |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464; G2 and G3 dependency-ready for W3 after A2/B1/E5; G5 follows G3 in the same workflow chain |
 
 ## Streams
 
@@ -446,17 +465,19 @@ below is mandatory, including append-only edits.
   Depends on: none.
   Verify: Name each public operation, identity, acknowledgement point, safety/liveness oracle, fault/clock assumptions, and unresolved guarantee, including rejection while quorum is absent. First compare the existing Helm StatefulSet/headless membership plus CI kind setup with Testcontainers/Toxiproxy; the default B1 design reuses the chart, enables persistence, and kills a pod. Record exact image, node/owner discovery, test runner, and recorder reachability commands. A bounded spike must establish whether peer address advertisement permits proxies before adopting them. Compare a small injectable clock seam in lease/owner/worker renewal with existing Go timer test facilities, short test-only lease configuration, and external process pause; a clock seam does not replace real crash/commit faults. Enumerate any indispensable event-dispatch hook and sibling handoff, rather than assigning five product files speculatively. B1's supported owner-crash contract can be settled independently of the later partition/clock/storage envelope; retain unresolved Q1–Q6 entries.
 
-- [ ] A2. Introduce a scenario manifest and a validator for complete evidence.
+- [x] A2. Introduce a scenario manifest and a validator for complete evidence.
   Files: new `test/contracts/scenarios.json`, new `scripts/check-test-evidence.py`, new `scripts/test_test_evidence.py`.
   Depends on: A1, G1.
   Verify: each included contract maps to named real-surface scenarios and required topology/mode/feature flags, expected observations, and allowed skips with reasons. Validate schema and duplicate IDs, then reject synthetic reports with missing scenarios, unexpected skips, disabled gates, wrong artifact identity, absent fault-activation evidence, or checker timeouts. Distinguish pass, fail, and inconclusive. The manifest must not contain rows marked proven for scenarios that do not yet exist; G3 reconciles the early gate and G6 the full suite.
+  Merged: [#470](https://github.com/caesium-cloud/caesium/pull/470), merge `0c42e549f5983fb4c8bf78cbfdf9fae698b21f41` (W2-γ). Delivered the catalog covering all 11 A1 contract IDs with topology, mode, feature flags, expected observations, skip policy, identity fields and fault-activation requirements, plus the stdlib-only fail-closed checker (exit 0 pass / 1 fail / 2 inconclusive, or 1 with `--strict`) and its unit module, which G1's wildcard already discovers. Limits: every committed row is `status: absent` with empty `gates`, so no scenario is proven and the unbuilt B1/B2/B3/D3/E5/G3 rows are named as planned only; G3 registers selectors and the early gate. Verified with Python alone — no Docker, no live report.
 
 ### Stream B — Real multi-node robustness
 
-- [ ] B1. Reuse the Helm topology and ship the first real owner-crash regression
+- [x] B1. Reuse the Helm topology and ship the first real owner-crash regression
   Files: new `test/robustness/cluster/`, new `test/robustness/owner_crash_test.go`, new `test/robustness/recorder/`, new `scripts/robustness.sh`, new `build/Dockerfile.robustness`, new `helm/caesium/ci/test-values-robustness.yaml`.
   Depends on: A1.
   Verify: Use the existing chart and CI kind lifecycle with replicaCount=3 and persistence enabled, candidate images loaded into an owned cluster, and unique namespaces/volumes. Do not invoke the Docker Desktop registry recipe unchanged or alter a user's current cluster. Put Docker/Kubernetes-dependent Go drivers and their helpers behind `//go:build integration`; compile their runner in the container toolchain. Observe three real dqlite members and a quorum, apply/trigger a blocked multi-step job through HTTP/CLI, identify its actual owner, terminate that pod without graceful application shutdown, and observe a surviving owner finish the accepted run. Exercise owner=leader and owner!=leader, then restart/rejoin the old pod with its retained volume. Use a small HTTP effect sink hosted by the test runner outside the faulted pods; persist raw starts/completions and verify public final state. This is a complete named regression, not scaffolding waiting for C1/B2/B3. Reject accidental single-node startup, missing task/sink connectivity, absent kill evidence, and wrong candidate image digests. Demonstrate two isolated harness instances coexist and clean up only owned resources; no Testcontainers dependency is required for this first topology.
+  Merged: [#472](https://github.com/caesium-cloud/caesium/pull/472), merge `f3f5ce3ab68d57709127a0b2807e670e7d39726a` (W2-α). Delivered `scripts/robustness.sh` (owned kind cluster of 1 control-plane + 3 workers, candidate/runner/task image load, three persistent Helm replicas with required hostname anti-affinity), `build/Dockerfile.robustness`, `helm/caesium/ci/test-values-robustness.yaml`, and the integration-tagged `test/robustness/` runner with `TestOwnerCrash` covering `owner_is_leader` and `owner_is_not_leader`. The in-cluster runner sits on the control-plane node with namespace-scoped RBAC, records start/complete nonces through a sink on `:8090`, correlates them to public task-run identity after recovery, retains duplicate attempts, and reads membership through dqlite `Leader`/`Cluster` RPCs against `podIP:9001` plus a UUID-validated `POST /v1/database/query` lease read. The host controller cordons the owner worker before triggering and kills via `systemctl stop kubelet` + `ctr tasks kill`, requiring the container ID to appear in `ctr tasks list` and then stop or disappear. Limits: the passing run is an orchestrator-owned live kind proof of candidate `b716c6db` (2026-09-12), **not** a CI lane — G3 wires the runner, image and selectors. `PRAGMA query_only` inside `POST /v1/database/query` may be rejected by native dqlite; that is a recorded product risk, not permission to skip lease observation.
 
 - [ ] B2. Add targeted faults and correlate public event and effect histories
   Files: new `test/robustness/faults/`, new `test/robustness/history/`, new `test/robustness/faults_test.go`, `test/robustness/recorder/` (created by B1), new `internal/testfault/`, `internal/event/bus_dispatch.go` (only A1-approved dispatch hook; EX-HOOKS required), `build/Dockerfile.robustness` (created by B1).
@@ -524,10 +545,11 @@ below is mandatory, including append-only edits.
   Depends on: E3.
   Verify: satisfy Q2/Q5 with repeated same-code control runs on the chosen runner, sufficient tail samples, and a reviewed workload-specific decision rule. Record absolute SLOs, bounded relative degradation, uncertainty/non-inferiority method, aggregation/multiple-comparison policy, and minimum sample sizes. Pass only when evidence establishes the allowed bound and correctness/SLOs pass; fail material regression; classify inadequate evidence as inconclusive, with a bounded rerun policy that blocks the strict gate if unresolved. Keep both a target-base comparison and a versioned fixed baseline to expose cumulative regression. Intentional budget changes require visible rationale and review; neutral performance is valid and optimization claims must identify tradeoffs. No promotion before calibration evidence exists.
 
-- [ ] E5. Add an early SQL-work budget inside the existing integration suite
+- [x] E5. Add an early SQL-work budget inside the existing integration suite
   Files: new `test/statement_budget_test.go`, new `test/statement_budget_testdata/`.
   Depends on: E1.
   Verify: Run fixed successful workloads through real HTTP/CLI and assert per-category deltas of the existing `caesium_db_statements_total` and `caesium_db_writes_total`. The tagged scenario is discovered by the current `IntegrationTestSuite` and sharding, so it gates with the existing required integration lane before E4. Isolate the server/workload and use bounded, workload-driven categories; timer-driven lease renewals, replay, and unrelated traffic are not assumed deterministic. Establish a repeatable count baseline and explicit justified tolerance on existing CI runners; where a category cannot be isolated, report that limitation rather than imposing a false exact bound. Demonstrate detection of an instrumented extra-statement/lost-batching mutation while completion counts still match. This guards the measured SQL-work classes and needs neither paid runners nor timing SLO decisions Q2/Q5; it does not prove latency or cover uninstrumented queries.
+  Merged: [#471](https://github.com/caesium-cloud/caesium/pull/471), merge `4bc19ac98389ccd3fd61382e9f9ec40ad37949a6` (W2-β). Delivered `test/statement_budget_test.go` and `test/statement_budget_testdata/`. `TestStatementBudgetFixedWorkload` is an `IntegrationTestSuite` method, so the existing required Docker integration lane and its sharding discover it without workflow edits: it applies a 2-step sequential `alpine:3.23` HTTP job through the CLI, starts it with `run start` (stdout captured separately from stderr), waits on HTTP until the run and both tasks succeed, and asserts per-category deltas of `caesium_db_statements_total` and `caesium_db_writes_total` against `statement_budget_testdata/baseline.json`. `TestStatementBudgetComparator` replays recorded profiles from `cases.json` so lost batching, extra statements with matching completions, leftover work hiding unbatched inserts, and missing evidence all fail; the labeled scrape rejects prefix-only metric names. Limits: `lease_renewal` and leftover `callback` categories are declared `skip` with reasons rather than exact bounds, `command`/`checkpoint` must stay zero, and the budget guards measured SQL-work classes only. `test/contracts/scenarios.json` was left to G3.
 
 ### Stream F — Compatibility, durability, and sustained operation
 

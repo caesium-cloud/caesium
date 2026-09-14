@@ -8,10 +8,13 @@ general execution-mode / worker / dqlite env reference (what each
 [parallel-execution-operations.md](parallel-execution-operations.md) — this
 doc does not repeat that material, only the CI-specific wiring.
 
-Shipped W1 load reporting and browser evidence, plus remaining distributed
-failure tests, developer/Console journeys and performance gates, are tracked in
+Shipped W1 load reporting and browser evidence, the W2 owner-crash robustness
+runner, integration SQL-work budget and scenario evidence validator, plus the
+remaining distributed failure tests, developer/Console journeys and performance
+gates, are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
-That plan does not change the current required checks described below.
+That plan has not changed the current required checks described below: the
+robustness runner is still invoked by hand and is not a CI job.
 
 ## 1. Required-to-merge checks
 
@@ -431,6 +434,152 @@ lint/unit and all executed checks in
 passed. These are correctness checks for reporting, not calibrated performance
 SLOs, an arrival-rate driver, or proof of multi-node fault tolerance. Those
 remain later plan items.
+
+### Owner-crash robustness runner (distributed-testing W2/B1)
+
+**Not a CI job.** `scripts/robustness.sh` is run by hand; wiring it into the
+workflow, the bake file and the scenario selectors is plan item G3. Nothing in
+`ci-ok` executes it today, so a green PR is not evidence that owner crash
+recovery still works.
+
+It needs `kind`, `kubectl`, `helm`, `docker` and `python3` on the host and
+builds a 4-node kind cluster (1 control plane + 3 workers) with three
+persistent Caesium replicas from `helm/caesium/ci/test-values-robustness.yaml`,
+so budget several minutes and a few GB. It never touches the caller's kube
+context: `KUBECONFIG` is unset and every `kubectl`/`helm` call passes
+`--kubeconfig "$ARTIFACTS/kubeconfig"` explicitly. Teardown removes only the
+clusters recorded in `$ARTIFACTS/owned-clusters.txt`; set
+`CAESIUM_ROBUSTNESS_KEEP_CLUSTER=1` to keep them for debugging.
+
+```sh
+docker build --build-arg "BUILDER_IMAGE=caesiumcloud/caesium-builder:$CANDIDATE_SHA" \
+  --build-arg "CAESIUM_IMAGE=caesiumcloud/caesium:$CANDIDATE_SHA" \
+  -f build/Dockerfile.robustness -t "caesiumcloud/caesium-robustness:$CANDIDATE_SHA" .
+CAESIUM_ROBUSTNESS_ID="$ROBUSTNESS_ID" CAESIUM_ROBUSTNESS_ARTIFACTS="$ARTIFACTS" \
+  CAESIUM_ROBUSTNESS_IMAGE="caesiumcloud/caesium-robustness:$CANDIDATE_SHA" \
+  CAESIUM_ROBUSTNESS_SERVER_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  CAESIUM_ROBUSTNESS_KIND_IMAGE="$KIND_IMAGE" CAESIUM_ROBUSTNESS_TASK_IMAGE="$TASK_IMAGE" \
+  bash scripts/robustness.sh
+```
+
+All six `CAESIUM_ROBUSTNESS_*` variables are required. `ROBUSTNESS_ID` must be a
+lowercase DNS-1123 name of at most 47 characters — it names both the kind
+cluster and the namespace, which is what lets two instances coexist.
+`CANDIDATE_SHA`, `ROBUSTNESS_ID` and `ARTIFACTS` default from the exported
+`CAESIUM_*` values, so `CAESIUM_ROBUSTNESS_SERVER_IMAGE` must be tagged
+`caesiumcloud/caesium:<sha>` unless `CANDIDATE_SHA` is exported too.
+`build/Dockerfile.robustness` compiles `go test -tags=integration -c
+./test/robustness` in the builder image; the root `./test` binary does not
+contain that package, so it has to be built separately. The runner pod executes
+`/bin/robustness.test -test.v -test.run '^TestOwnerCrash$' -test.timeout 15m`.
+
+Host-side logic lives in `test/robustness/hostlogic.py`, and the script aborts
+unless `python3 "$HOSTLOGIC" self-test` passes first. The Go helpers are in
+`test/robustness/cluster/` (HTTP, dqlite membership, job fixtures, image
+identity, topology), `test/robustness/recorder/` (the effect sink) and
+`test/robustness/{dag_order,kill_evidence}.go`; the hermetic parts of those have
+ordinary `_test.go` neighbours that `just unit-test` already runs.
+
+What a pass proves: three real dqlite voters agree on a leader; a blocked
+two-step fixture is admitted with a run UUID; the mapped owner worker is
+cordoned *before* the fixture is triggered and then SIGKILLed via
+`systemctl stop kubelet` plus `ctr -n k8s.io tasks kill`, with the container ID
+required to appear in `ctr tasks list` and then stop or disappear; the lease
+generation increases and a surviving owner completes the same accepted run;
+the old member restarts and rejoins with its retained PVC; two isolated harness
+instances coexist. `owner_is_leader` and `owner_is_not_leader` are both
+required subtests. Raw sink records are copied into `$ARTIFACTS`.
+
+What it does not prove: nothing about partitions, clock skew, storage loss,
+quorum-loss rejection bounds, or exactly-once external effects — duplicate task
+attempts are *retained as legal*, not treated as failures. The recovery
+watchdog is a finite regression limit, not a production SLO. Missing recorder
+data is inconclusive, never a pass. `POST /v1/database/query` issues
+`PRAGMA query_only`, which native dqlite may reject; if the lease read 500s,
+treat it as a product-console gap rather than a reason to skip the observation.
+
+### Integration SQL-work budget (distributed-testing W2/E5)
+
+`TestStatementBudgetFixedWorkload` in `test/statement_budget_test.go` is an
+`IntegrationTestSuite` method, so the existing required Docker integration lanes
+run it with no workflow change; `test/shard_test.go` reflects the same `Test*`
+methods testify discovers and gives an unlisted scenario a default 1000 ms
+cost when balancing shards. Run it locally with the usual recipe:
+
+```sh
+just integration-up
+just integration-test
+```
+
+It applies a 2-step sequential `alpine:3.23` HTTP job through the CLI, waits for
+the server to go quiet, starts the run with `run start` (stdout captured apart
+from stderr so the run UUID parses), waits on HTTP until the run and both tasks
+succeed, and compares per-category deltas of `caesium_db_statements_total` and
+`caesium_db_writes_total` against `test/statement_budget_testdata/baseline.json`.
+
+Each category in that baseline picks one of three modes. `bound` sets expected
+writes/statements plus `min_*` floors and a `write_slack` allowance for leftover
+work from earlier suite methods, and keeps the write:statement ratio pinned so
+an unbatched INSERT cannot hide behind a matching completion count. `zero`
+(`command`, `checkpoint`) must not move at all. `skip` records why a category is
+not bounded: `lease_renewal` is timer-driven on a shared server and
+`callback` can carry leftover traffic, so both are logged with their deltas
+instead of getting a false exact bound. Refresh the baseline by re-measuring on
+the lane, not by widening slack until it passes.
+
+`TestStatementBudgetComparator` feeds the recorded profiles in
+`test/statement_budget_testdata/cases.json` through the same checker so its
+detection is itself tested: lost batching, extra statements with matching
+completions, leftover work concealing unbatched inserts, over-budget counts,
+missing evidence and a non-zero reserved category all have to fail, while good
+and good-with-leftover profiles have to pass.
+`TestStatementBudgetParseCounterRejectsPrefixOnlyName` pins the labeled scrape
+against `test/statement_budget_testdata/metrics_prefix.prom` so a prefix-only
+metric name is not accepted as the counter.
+
+Limits: this budgets the instrumented SQL-work classes for one fixed workload on
+the default local executor. It is not a latency check, it does not see
+uninstrumented queries, and it does not replace E4's calibrated performance
+budgets. It is also not yet registered in the scenario manifest — G3 owns that.
+
+### Scenario manifest and evidence validator (distributed-testing W2/A2)
+
+`test/contracts/scenarios.json` is the machine-readable catalog of the
+real-surface scenarios that are supposed to cover A1's eleven `DT-*` contract
+IDs. Each row carries a selector, contract IDs, owning plan item, registering
+item, required topology/mode/feature flags, expected observations, allowed skips
+with reasons, artifact identity fields and fault-activation requirements.
+
+**Every committed row is currently `status: absent` with empty `gates`.** The
+file names planned scenarios; it certifies none of them. G3 registers the B1 and
+E5 selectors and the early gate, and G6 the full suite. Do not read a row as
+coverage.
+
+`scripts/check-test-evidence.py` validates an evidence report against that
+manifest. It is fail-closed and stdlib-only:
+
+```sh
+python3 scripts/check-test-evidence.py \
+  --manifest test/contracts/scenarios.json \
+  --report "$ARTIFACTS/evidence.json" \
+  --require early --strict
+```
+
+`--require <gate>` narrows the check to scenarios listing that gate (for example
+`early` or `full`); omit it to require every scenario. Exit 0 means every
+required scenario passed or used an allowed skip. Exit 1 is a hard failure:
+invalid schema, duplicate IDs, a missing scenario, an unexpected skip, a
+disabled gate, wrong topology/mode/feature flags, wrong or missing artifact
+identity, absent fault-activation evidence, failed observations, a `pass`
+invented for an `absent` row, or `--strict` over inconclusive evidence. Exit 2
+means no hard failure but at least one required scenario is inconclusive —
+missing recorder data, a checker timeout, insufficient samples. **Inconclusive
+is never a pass**; use `--strict` where a gate must not accept it.
+
+`scripts/test_test_evidence.py` covers the checker. It needs no separate
+command: the `ci-config` job already runs the wildcard discovery documented
+under "Browser outcomes and diagnostics" above, which picks up every
+`scripts/test_*.py` module including this one.
 
 ## 5. Server env per lane, and the silent-drift rule
 

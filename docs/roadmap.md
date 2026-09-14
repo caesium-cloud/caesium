@@ -319,7 +319,7 @@ Features that were previously on the roadmap and are now shipped:
 
 ## Related Documents
 
-- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — W1 contract decisions, honest load reports and browser diagnostics merged; multi-node faults, developer/Console journeys and calibrated performance gates remain planned; operating guidance in [ci.md](ci.md)
+- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — W1 contract decisions, honest load reports and browser diagnostics merged, plus W2's first real owner-crash robustness regression, integration SQL-work budget and fail-closed scenario evidence validator; the robustness runner is still manual (CI wiring and gate promotion are the next items), and developer/Console journeys and calibrated performance gates remain planned; operating guidance in [ci.md](ci.md)
 - [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel (re-scored 2026-09-05)
 - [Closed-Loop Orchestration — The Arc](exec-plans/active/closed-loop-arc.md) — the Phase 5 umbrella: program-level source of truth sequencing Plans 0–4 and the closing "tell it" wave
 - [Exec Plan: Trust the Substrate](exec-plans/completed/trust-the-substrate.md) — Plan 0 of the arc: known-bug fixes, widened auth-enabled integration lane, CI gating, `v0.1.0` with a downloadable CLI, dead-scaffolding removal, unfiled follow-ups filed
