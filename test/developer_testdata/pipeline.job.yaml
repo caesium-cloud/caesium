@@ -1,0 +1,33 @@
+# Fixture for the D1 binary-driven developer journey (distributed-testing
+# W3-gamma): a small, explicit three-step DAG used to exercise `caesium job
+# apply` followed by `caesium job export` (the "apply, and inspect" leg of
+# the local development workflow documented in CLAUDE.md). metadata.alias is
+# rewritten with a unique suffix by stageDeveloperTestdata before every apply,
+# so this file is never applied verbatim.
+apiVersion: v1
+kind: Job
+metadata:
+  alias: developer-journey-pipeline
+  labels:
+    team: platform
+  annotations:
+    purpose: "distributed-testing W3-gamma developer journey fixture"
+trigger:
+  type: cron
+  configuration:
+    cron: "0 3 * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extracting"]
+    next: transform
+  - name: transform
+    image: alpine:3.23
+    command: ["sh", "-c", "echo transforming"]
+    dependsOn: extract
+    next: load
+  - name: load
+    image: alpine:3.23
+    command: ["sh", "-c", "echo loading"]
+    dependsOn: transform

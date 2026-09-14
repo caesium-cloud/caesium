@@ -487,7 +487,7 @@ below is mandatory, including append-only edits.
 
 ### Stream D — Developer and Console journeys
 
-- [ ] D1. Extend binary-driven developer workflows and cleanup assertions.
+- [x] D1. Extend binary-driven developer workflows and cleanup assertions.
   Files: `test/local_dev_test.go`, new `test/developer_journey_test.go`, new `test/developer_testdata/`.
   Depends on: A1.
   Verify: use the container-built release CLI in an empty temporary workspace for lint, preview, dev-once, watch/edit, interrupt, apply, and inspect. Check malformed input, paths with spaces, unavailable engines, cancellation/timeouts, and owned-resource cleanup. Parse JSON exclusively from stdout captured separately from stderr and assert exit status. Preserve existing helpers; testscript is an optional future harness substitution, not a reason to rewrite working tests. Run the currently shipped Linux architectures; add native platforms only after Q4 confirms support. Inspect the job-definition reference before writing any YAML fixtures.
