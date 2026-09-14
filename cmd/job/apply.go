@@ -8,15 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	jobdefsvc "github.com/caesium-cloud/caesium/api/rest/service/jobdef"
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -89,68 +87,7 @@ func init() {
 }
 
 func collectDefinitions(paths []string) ([]schema.Definition, error) {
-	if len(paths) == 0 {
-		paths = []string{"."}
-	}
-
-	var defs []schema.Definition
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if info.IsDir() {
-			if err := filepath.WalkDir(p, func(path string, d os.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					return walkErr
-				}
-				if d.IsDir() {
-					return nil
-				}
-				if !isYAML(path) {
-					return nil
-				}
-				return appendDefinitions(path, &defs)
-			}); err != nil {
-				return nil, err
-			}
-		} else {
-			if !isYAML(p) {
-				return nil, fmt.Errorf("%s is not a YAML file", p)
-			}
-			if err := appendDefinitions(p, &defs); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return defs, nil
-}
-
-func appendDefinitions(path string, defs *[]schema.Definition) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	for {
-		var def schema.Definition
-		if err := dec.Decode(&def); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		if isBlankDefinition(&def) {
-			continue
-		}
-		if err := def.Validate(); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		*defs = append(*defs, def)
-	}
-
-	return nil
+	return internaljobdef.CollectDefinitions(paths, true)
 }
 
 func applyProvenanceFromFlags() *jobdefsvc.ApplyProvenance {
@@ -241,25 +178,4 @@ func sendApplyRequest(ctx context.Context, server, apiKey string, defs []schema.
 	}
 
 	return &applyResp, nil
-}
-
-func isYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
-}
-
-func isBlankDefinition(def *schema.Definition) bool {
-	if def == nil {
-		return true
-	}
-	if strings.TrimSpace(def.Metadata.Alias) != "" {
-		return false
-	}
-	if def.APIVersion != "" || def.Kind != "" {
-		return false
-	}
-	if def.Trigger.Type != "" || len(def.Steps) > 0 || len(def.Callbacks) > 0 {
-		return false
-	}
-	return true
 }

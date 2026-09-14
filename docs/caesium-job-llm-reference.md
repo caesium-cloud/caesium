@@ -540,6 +540,20 @@ caesium test --path jobs/               # Full validation suite
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
 ```
 
+All local manifest commands reject unknown structural fields and report the
+source file, YAML path, and line before validation, execution, or apply. This
+includes fields inside steps and Harness expectations. Intentionally open maps
+such as `env`, trigger/callback `configuration`, annotations, and JSON Schema
+objects still accept arbitrary keys. Files with a `.job.yaml` or `.job.yml`
+suffix are always treated as intended Caesium Jobs, so a misspelled or missing
+header cannot be skipped during a directory scan. Other YAML kinds, including
+Kubernetes `batch/v1` Jobs, may coexist in scanned directories and are ignored.
+
+`caesium test --path` fails when it selects zero Job definitions, and
+`caesium test --scenario` fails when it selects zero scenarios. This prevents
+an empty or mismatched path from producing a successful pre-production check.
+`caesium dev --once` likewise fails when its path selects no Jobs.
+
 `caesium job export` calls `GET /v1/jobs/:id/manifest`, which rebuilds the
 manifest server-side from the stored job (the inverse of the apply importer) and
 answers `application/yaml` — or the same `Definition` as JSON with

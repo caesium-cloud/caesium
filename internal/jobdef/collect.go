@@ -62,27 +62,27 @@ func appendDefinitions(path string, defs *[]schema.Definition, validate bool) er
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	for {
-		var def schema.Definition
-		if err := dec.Decode(&def); err != nil {
+		var document yaml.Node
+		if err := dec.Decode(&document); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			// Distinguish YAML syntax errors (which should be surfaced) from
-			// type-mismatch errors caused by non-Caesium YAML (which should
-			// be skipped). Re-decode the same document into a generic map: if
-			// that also fails, the YAML itself is malformed.
-			if isSyntaxError(data) {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			// Valid YAML that doesn't fit the Definition struct (e.g. a K8s
-			// Deployment whose metadata shape differs). Skip the file.
-			return nil
+			return fmt.Errorf("%s: %w", path, err)
 		}
-		if isBlankDefinition(&def) {
+		if isBlankDocument(&document) {
 			continue
 		}
-		if !isCaesiumDefinition(&def) {
+		isJob, err := isCaesiumDocument(path, &document)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if !isJob {
 			continue
+		}
+
+		var def schema.Definition
+		if err := document.Decode(&def); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
 		}
 		if validate {
 			if err := def.Validate(); err != nil {
@@ -95,41 +95,51 @@ func appendDefinitions(path string, defs *[]schema.Definition, validate bool) er
 	return nil
 }
 
-// isSyntaxError returns true if the raw bytes contain malformed YAML that
-// cannot be decoded into any structure. A successful decode into a generic
-// map means the YAML is syntactically valid but simply doesn't match the
-// Definition schema (e.g. a Helm chart or Kubernetes manifest).
-func isSyntaxError(data []byte) bool {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	for {
-		var raw map[string]any
-		if err := dec.Decode(&raw); err != nil {
-			return !errors.Is(err, io.EOF)
+// isCaesiumDocument identifies a Caesium job from its raw header before typed
+// decoding. Kubernetes Jobs use grouped API versions such as batch/v1 and are
+// intentionally left alone; ungrouped Job versions are Caesium manifests so an
+// unsupported or missing version still reaches validation instead of vanishing.
+func isCaesiumDocument(path string, document *yaml.Node) (bool, error) {
+	root := documentRoot(document)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return isJobManifestPath(path), nil
+	}
+	var header map[string]any
+	if err := document.Decode(&header); err != nil {
+		return false, err
+	}
+	if isJobManifestPath(path) {
+		return true, nil
+	}
+	kind, kindOK := header["kind"].(string)
+	if !kindOK || strings.TrimSpace(kind) != schema.KindJob {
+		return false, nil
+	}
+	apiVersion, apiVersionOK := header["apiVersion"].(string)
+	return !apiVersionOK || !strings.Contains(strings.TrimSpace(apiVersion), "/"), nil
+}
+
+func isBlankDocument(document *yaml.Node) bool {
+	root := documentRoot(document)
+	return root == nil || (root.Kind == yaml.ScalarNode && root.Tag == "!!null")
+}
+
+func documentRoot(document *yaml.Node) *yaml.Node {
+	if document == nil {
+		return nil
+	}
+	if document.Kind == yaml.DocumentNode {
+		if len(document.Content) == 0 {
+			return nil
 		}
+		return document.Content[0]
 	}
+	return document
 }
 
-// isCaesiumDefinition returns true if the definition looks like a Caesium
-// job (has kind=Job and a recognised apiVersion). This allows silently
-// skipping non-Caesium YAML that happens to live in the same directory tree.
-func isCaesiumDefinition(def *schema.Definition) bool {
-	return def.Kind == schema.KindJob && def.APIVersion == schema.APIVersionV1
-}
-
-func isBlankDefinition(def *schema.Definition) bool {
-	if def == nil {
-		return true
-	}
-	if strings.TrimSpace(def.Metadata.Alias) != "" {
-		return false
-	}
-	if def.APIVersion != "" || def.Kind != "" {
-		return false
-	}
-	if def.Trigger.Type != "" || len(def.Steps) > 0 || len(def.Callbacks) > 0 {
-		return false
-	}
-	return true
+func isJobManifestPath(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".job.yaml") || strings.HasSuffix(lower, ".job.yml")
 }
 
 // IsYAML returns true if the file path has a .yaml or .yml extension.

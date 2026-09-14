@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/caesium-cloud/caesium/pkg/jobdef/yamlstrict"
 	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"gopkg.in/yaml.v3"
 )
@@ -61,6 +62,22 @@ type Definition struct {
 	Callbacks  []Callback `yaml:"callbacks,omitempty" json:"callbacks,omitempty"`
 	Volumes    []Volume   `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	Steps      []Step     `yaml:"steps" json:"steps"`
+}
+
+// UnmarshalYAML rejects unknown manifest fields before decoding the typed
+// definition. Keeping this check on Definition makes every YAML ingestion path
+// strict, including CLI apply, Git sync, diff, and Parse.
+func (d *Definition) UnmarshalYAML(value *yaml.Node) error {
+	if err := yamlstrict.ValidateKnownFields(value, Definition{}); err != nil {
+		return err
+	}
+	type plainDefinition Definition
+	var decoded plainDefinition
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*d = Definition(decoded)
+	return nil
 }
 
 const (
@@ -121,7 +138,7 @@ type Metadata struct {
 	// ReplaySafe marks every step in this job as eligible for quarantined replay.
 	// The effective per-step value is snapshotted onto TaskRun when the task runs.
 	ReplaySafe                   bool              `yaml:"replaySafe,omitempty" json:"replaySafe,omitempty"`
-	Cache                        any               `yaml:"cache,omitempty" json:"cache"`
+	Cache                        any               `yaml:"cache,omitempty" json:"cache" yamlstrict:"enabled,ttl,chain,version,pinDigests,digestTTL"`
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
@@ -884,7 +901,7 @@ type Step struct {
 	// Datasets declares the datasets this step consumes and produces. It is
 	// scheduling metadata for freshness and does not affect the cache hash.
 	Datasets       *StepDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
-	Cache          any           `yaml:"cache,omitempty" json:"cache"`
+	Cache          any           `yaml:"cache,omitempty" json:"cache" yamlstrict:"enabled,ttl,chain,version,pinDigests,digestTTL"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 

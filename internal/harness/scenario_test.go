@@ -51,6 +51,28 @@ scenarios:
 	require.Equal(t, "harness-job", def.Metadata.Alias)
 }
 
+func TestCollectScenariosRejectsUnknownAssertionFields(t *testing.T) {
+	dir := t.TempDir()
+	scenarioPath := filepath.Join(dir, "typo.scenario.yaml")
+	require.NoError(t, os.WriteFile(scenarioPath, []byte(`apiVersion: v1
+kind: Harness
+scenarios:
+  - name: typo
+    path: ./job.job.yaml
+    expect:
+      tasks:
+        - name: extract
+          outputs: {rows: "999"}
+          logContain: [THIS-MUST-NOT-PASS]
+`), 0o644))
+
+	_, err := CollectScenarios([]string{scenarioPath})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), scenarioPath)
+	require.Contains(t, err.Error(), `YAML path scenarios[0].expect.tasks[0].outputs (line 9)`)
+	require.Contains(t, err.Error(), `YAML path scenarios[0].expect.tasks[0].logContain (line 10)`)
+}
+
 func TestCollectScenariosParsesImpactExpectation(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.job.yaml"), []byte(`
