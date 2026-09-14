@@ -238,12 +238,16 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
 
     const isSingleNodeDAG = layoutedNodes.length === 1 && layoutedEdges.length === 0;
     const dagMaxZoom = isSingleNodeDAG ? 2.2 : 1.5;
+    // A dense DAG can need to fit below the old 0.1 floor when the run page
+    // has less vertical space than its default canvas height.
+    const dagMinZoom = isSingleNodeDAG ? 0.1 : 0.05;
     const fitViewOptions = useMemo(
       () => ({
         padding: isSingleNodeDAG ? 0.06 : 0.2,
+        minZoom: dagMinZoom,
         maxZoom: dagMaxZoom,
       }),
-      [isSingleNodeDAG, dagMaxZoom]
+      [isSingleNodeDAG, dagMinZoom, dagMaxZoom]
     );
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -252,7 +256,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
 
   return (
     <>
-      <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
+      <div className="relative h-full w-full overflow-hidden rounded-lg bg-dag-bg">
         <ReactFlow
           nodes={layoutedNodes}
           edges={layoutedEdges}
@@ -261,11 +265,11 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
           onNodeClick={handleNodeClick}
           fitView
           fitViewOptions={fitViewOptions}
-          minZoom={0.1}
+          minZoom={dagMinZoom}
           maxZoom={dagMaxZoom}
         >
           <Background gap={20} />
-          <Controls />
+          <Controls fitViewOptions={fitViewOptions} />
         </ReactFlow>
       </div>
 

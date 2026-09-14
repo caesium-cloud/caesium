@@ -512,6 +512,7 @@ export function RunDetailPage() {
         </div>
         <div
           ref={dagContainerRef}
+          data-testid="run-dag-canvas-viewport"
           className="relative overflow-hidden bg-card"
           style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
         >
@@ -613,4 +614,3 @@ function parseTimestamp(value: string | undefined): number | undefined {
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
-
