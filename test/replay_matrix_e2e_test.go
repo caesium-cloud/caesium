@@ -403,7 +403,6 @@ metadata:
   replaySafe: true
   cache:
     ttl: %q
-  timeout: 1s
   sla:
     duration: 1s
 trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
