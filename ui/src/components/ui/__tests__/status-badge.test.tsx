@@ -42,4 +42,9 @@ describe("<StatusBadge />", () => {
     expect(screen.getByText("open")).toBeInTheDocument();
     expect(screen.getByText("open")).toHaveAttribute("data-status", "open");
   });
+
+  it("keeps the canonical key when an incident label contains spaces", () => {
+    render(<StatusBadge status="awaiting_approval" domain="incident" />);
+    expect(screen.getByText("awaiting approval")).toHaveAttribute("data-status", "awaiting_approval");
+  });
 });

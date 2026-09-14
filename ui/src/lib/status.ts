@@ -1,3 +1,10 @@
+import type {
+  KnownAgentActionStatus,
+  KnownAgentSessionState,
+  KnownIncidentStatus,
+} from "./api";
+import { AGENT_ACTION_STATUSES, AGENT_SESSION_STATES, INCIDENT_STATUSES } from "./api";
+
 /**
  * Canonical status semantics for the operator console.
  *
@@ -18,20 +25,6 @@ export type RunStatus =
 
 /** Status sources use distinct lifecycles even where their strings overlap. */
 export type StatusDomain = "run" | "incident" | "agent-action" | "agent-session";
-
-export type IncidentStatus =
-  | "open"
-  | "triaging"
-  | "awaiting_approval"
-  | "remediated"
-  | "escalated"
-  | "closed"
-  | "suppressed"
-  | "abandoned";
-
-export type AgentActionStatus = "proposed" | "approved" | "rejected" | "executing" | "executed" | "failed";
-
-export type AgentSessionStatus = "pending" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
 
 export interface StatusMeta {
   /** Lowercase display label, e.g. "running". */
@@ -101,27 +94,27 @@ const META: Record<RunStatus, StatusMeta> = {
   },
 };
 
-const INCIDENT_META: Record<IncidentStatus, StatusMeta> = {
+const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   open: {
     label: "open",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
-    dotClass: "animate-gold-pulse",
+    dotClass: "",
   },
   triaging: {
     label: "triaging",
     fg: "hsl(var(--cyan-glow))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
-    dotClass: "animate-cyan-pulse",
+    dotClass: "",
   },
   awaiting_approval: {
     label: "awaiting approval",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
-    dotClass: "animate-gold-pulse",
+    dotClass: "",
   },
   remediated: {
     label: "remediated",
@@ -160,7 +153,7 @@ const INCIDENT_META: Record<IncidentStatus, StatusMeta> = {
   },
 };
 
-const AGENT_ACTION_META: Record<AgentActionStatus, StatusMeta> = {
+const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
   proposed: {
     label: "proposed",
     fg: "hsl(var(--cyan-glow))",
@@ -187,7 +180,7 @@ const AGENT_ACTION_META: Record<AgentActionStatus, StatusMeta> = {
     fg: "hsl(var(--cyan-glow))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
-    dotClass: "animate-cyan-pulse",
+    dotClass: "",
   },
   executed: {
     label: "executed",
@@ -205,7 +198,7 @@ const AGENT_ACTION_META: Record<AgentActionStatus, StatusMeta> = {
   },
 };
 
-const AGENT_SESSION_META: Record<AgentSessionStatus, StatusMeta> = {
+const AGENT_SESSION_META: Record<KnownAgentSessionState, StatusMeta> = {
   pending: {
     label: "pending",
     fg: "hsl(var(--gold))",
@@ -231,6 +224,12 @@ const AGENT_SESSION_META: Record<AgentSessionStatus, StatusMeta> = {
     dotClass: "",
   },
 };
+
+const DOMAIN_META = {
+  incident: INCIDENT_META,
+  "agent-action": AGENT_ACTION_META,
+  "agent-session": AGENT_SESSION_META,
+} as const;
 
 const UNKNOWN: StatusMeta = {
   label: "unknown",
@@ -280,27 +279,37 @@ export function statusMetaForDomain(
   status: string | null | undefined,
   domain: StatusDomain = "run",
 ): StatusMeta {
-  if (!status) return UNKNOWN;
-  const key = String(status).trim().toLowerCase();
+  const key = statusKeyForDomain(status, domain);
+  if (key === "unknown") return UNKNOWN;
   if (domain === "run") {
-    if (key in META) return META[key as RunStatus];
-    const aliased = ALIASES[key];
-    if (aliased) return META[aliased];
-    return UNKNOWN;
+    return META[key as RunStatus];
   }
 
-  const domainMeta = {
-    incident: INCIDENT_META,
-    "agent-action": AGENT_ACTION_META,
-    "agent-session": AGENT_SESSION_META,
-  }[domain];
-  if (Object.prototype.hasOwnProperty.call(domainMeta, key)) {
-    return domainMeta[key as keyof typeof domainMeta];
-  }
-  return UNKNOWN;
+  const domainMeta = hasOwn(DOMAIN_META, domain) ? DOMAIN_META[domain] : undefined;
+  return domainMeta && hasOwn(domainMeta, key) ? domainMeta[key] : UNKNOWN;
 }
 
-export const ALL_RUN_STATUSES: RunStatus[] = [
+/** The canonical machine-readable key rendered in `data-status`. */
+export function statusKeyForDomain(
+  status: string | null | undefined,
+  domain: StatusDomain = "run",
+): string {
+  if (!status) return "unknown";
+  const key = String(status).trim().toLowerCase();
+  if (domain === "run") {
+    if (hasOwn(META, key)) return key;
+    return hasOwn(ALIASES, key) ? ALIASES[key] : "unknown";
+  }
+
+  const domainMeta = hasOwn(DOMAIN_META, domain) ? DOMAIN_META[domain] : undefined;
+  return domainMeta && hasOwn(domainMeta, key) ? key : "unknown";
+}
+
+function hasOwn<T extends object>(record: T, key: string): key is keyof T & string {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+export const ALL_RUN_STATUSES = [
   "running",
   "succeeded",
   "failed",
@@ -308,33 +317,8 @@ export const ALL_RUN_STATUSES: RunStatus[] = [
   "paused",
   "cached",
   "skipped",
-];
+] as const satisfies readonly RunStatus[];
 
-export const ALL_INCIDENT_STATUSES: IncidentStatus[] = [
-  "open",
-  "triaging",
-  "awaiting_approval",
-  "remediated",
-  "escalated",
-  "closed",
-  "suppressed",
-  "abandoned",
-];
-
-export const ALL_AGENT_ACTION_STATUSES: AgentActionStatus[] = [
-  "proposed",
-  "approved",
-  "rejected",
-  "executing",
-  "executed",
-  "failed",
-];
-
-export const ALL_AGENT_SESSION_STATUSES: AgentSessionStatus[] = [
-  "pending",
-  "running",
-  "succeeded",
-  "failed",
-  "timed_out",
-  "cancelled",
-];
+export const ALL_INCIDENT_STATUSES = INCIDENT_STATUSES;
+export const ALL_AGENT_ACTION_STATUSES = AGENT_ACTION_STATUSES;
+export const ALL_AGENT_SESSION_STATUSES = AGENT_SESSION_STATES;

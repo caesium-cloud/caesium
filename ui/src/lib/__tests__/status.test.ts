@@ -6,6 +6,7 @@ import {
   ALL_RUN_STATUSES,
   statusMeta,
   statusMetaForDomain,
+  statusKeyForDomain,
 } from "../status";
 
 describe("statusMeta", () => {
@@ -81,8 +82,20 @@ describe("statusMeta", () => {
   });
 
   it("falls back for inherited property names in every explicit domain", () => {
+    expect(statusMetaForDomain("constructor", "run").label).toBe("unknown");
+    expect(statusKeyForDomain("__proto__", "run")).toBe("unknown");
     expect(statusMetaForDomain("constructor", "incident").label).toBe("unknown");
     expect(statusMetaForDomain("__proto__", "agent-action").label).toBe("unknown");
     expect(statusMetaForDomain("toString", "agent-session").label).toBe("unknown");
+    expect(statusMetaForDomain("length", "constructor" as never).label).toBe("unknown");
+    expect(statusKeyForDomain("length", "constructor" as never)).toBe("unknown");
+    expect(statusMetaForDomain("open", "unknown-domain" as never).label).toBe("unknown");
+  });
+
+  it("keeps resting incident and action states still", () => {
+    expect(statusMetaForDomain("open", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("triaging", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("awaiting_approval", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("executing", "agent-action").dotClass).toBe("");
   });
 });
