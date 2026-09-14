@@ -188,11 +188,16 @@ const networkFailuresExpected = new WeakSet<Page>();
 /**
  * Runs `fn`, temporarily allowing NETWORK_LEVEL_RESOURCE_LOAD_ERROR console
  * errors on `page` to pass failOnUnexpectedPageErrors()'s guard instead of
- * failing the test. Scope this tightly around the specific interval that
- * induces the failure (e.g. a `context.setOffline(true)` /
- * `setOffline(false)` pair) rather than the whole test — outside that
- * window, and in every other test/spec, an unexpected net::ERR_* failure
- * still fails the test.
+ * failing the test. Scope this to just the test(s) that deliberately induce
+ * a real network failure (e.g. via `context.setOffline()`) — outside that,
+ * and in every other test/spec, an unexpected net::ERR_* failure still
+ * fails the test. Prefer wrapping just the inducing interval when the
+ * failure is reliably confined to it; wrap the whole test body when the
+ * induced condition's after-effects (reconnect attempts, a real OS/CI-level
+ * network blip while recovering) are not reliably confined to a narrower
+ * window — see network-recovery.spec.ts for why its one real-offline test
+ * wraps its full body rather than just the `setOffline(true)`/`(false)`
+ * pair.
  */
 export async function expectNetworkFailuresDuring<T>(page: Page, fn: () => Promise<T>): Promise<T> {
   networkFailuresExpected.add(page);
