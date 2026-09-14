@@ -82,4 +82,21 @@ describe("mergeTerminalRunUpdate", () => {
       expect.objectContaining({ id: "callback-run-2", status: "succeeded" }),
     ]);
   });
+
+  it("accepts a later terminal callback result without regressing it to running", () => {
+    const runningRun: JobRun = {
+      ...persistedRun,
+      callbacks: [{ ...callback, status: "running", error: undefined, completed_at: undefined }],
+    };
+    const terminalEventRun: JobRun = {
+      ...persistedRun,
+      callbacks: [{ ...callback, completed_at: "2026-09-14T00:00:02Z" }],
+    };
+
+    const merged = mergeTerminalRunUpdate(runningRun, terminalEventRun);
+
+    expect(merged.callbacks).toEqual([
+      expect.objectContaining({ status: "failed", completed_at: "2026-09-14T00:00:02Z" }),
+    ]);
+  });
 });

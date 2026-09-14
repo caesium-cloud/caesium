@@ -27,7 +27,7 @@ import {
 import { BackfillDialog } from "./BackfillDialog";
 import { BackfillsView } from "./BackfillsView";
 import { CacheView } from "./CacheView";
-import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
+import { describeCachePolicy, getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { formatPriority, formatQueueParams, isStaleQueueRow, queuePendingReason } from "./queue-utils";
@@ -262,7 +262,8 @@ export function JobDetailPage() {
     queryKey: ["job", jobId, "runs", featuredRunId],
     queryFn: () => api.getJobRun(jobId, featuredRunId!),
     enabled: !!featuredRunId,
-    refetchInterval: streamHealthy ? false : featuredRunSummary?.status === "running" ? 5000 : 15000,
+    refetchInterval: (query) =>
+      !streamHealthy || isTerminalRunStatus(query.state.data?.status ?? featuredRunSummary?.status) ? 5000 : false,
   });
 
   useEffect(() => {
@@ -284,16 +285,22 @@ export function JobDetailPage() {
 
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const completedRun = e.payload as JobRun | undefined;
+          if (completedRun?.tasks) {
+            return mergeTerminalRunUpdate(old, completedRun);
+          }
           if (completedRun?.id === featuredRunId) {
-            return completedRun?.tasks ? completedRun : { ...old, ...completedRun, status: "succeeded" };
+            return { ...old, ...completedRun, status: "succeeded" };
           }
           return old;
         }
 
         if (e.type === "run_failed") {
           const failedRun = e.payload as JobRun | undefined;
+          if (failedRun?.tasks) {
+            return mergeTerminalRunUpdate(old, failedRun);
+          }
           if (failedRun?.id === featuredRunId) {
-            return failedRun?.tasks ? failedRun : { ...old, ...failedRun, status: "failed" };
+            return { ...old, ...failedRun, status: "failed" };
           }
           return old;
         }

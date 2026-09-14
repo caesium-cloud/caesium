@@ -78,6 +78,10 @@ interface TaskRunMetadata {
 }
 
 interface JobDAGProps {
+  /**
+   * The DAG canvas fills its parent. Embed it only in a container with a
+   * resolved height (for example `useDagHeight` plus a pixel fallback).
+   */
   dag: JobDAGResponse;
   atoms: Record<string, Atom>;
   taskDefinitions?: Record<string, JobTask>;

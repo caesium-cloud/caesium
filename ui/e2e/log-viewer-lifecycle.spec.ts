@@ -42,7 +42,15 @@ test("switching and closing the log panel does not leave a disposed terminal cal
   const logText = panel.getByTestId("task-log-plaintext");
   await expect(logText).toContainText("processing alpha", { timeout: 30_000 });
 
-  await panel.getByPlaceholder("Filter visible rows").fill("processing alpha");
-  await expect(logText).toContainText("processing alpha");
+  // Changing the instance must replace the terminal buffer. A no-op picker
+  // would leave alpha visible after bravo has been selected.
+  const picker = panel.getByTestId("log-partition-select");
+  await picker.selectOption({ index: 1 });
+  await expect(logText).toContainText("processing bravo", { timeout: 30_000 });
+  await expect(logText).not.toContainText("processing alpha");
+
+  // Filter the log that is actually loaded, so this assertion fails if the
+  // log-search control stops applying its predicate.
+  await panel.getByPlaceholder("Filter visible rows").fill("not-a-bravo-log-line");
   await expect(logText).not.toContainText("processing bravo");
 });

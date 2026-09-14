@@ -24,7 +24,7 @@ import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun 
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
-import { getRunCacheStats, mergeTerminalRunUpdate } from "./cache-utils";
+import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { CallbackRunsSection } from "./CallbackRunsSection";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
@@ -50,7 +50,8 @@ export function RunDetailPage() {
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
-    refetchInterval: streamHealthy ? false : 5000,
+    refetchInterval: (query) =>
+      !streamHealthy || isTerminalRunStatus(query.state.data?.status) ? 5000 : false,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
