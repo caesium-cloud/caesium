@@ -55,7 +55,15 @@ test.beforeEach(async ({ page }, testInfo) => {
 
   // Force the deterministic fallback font stack (see src/index.css
   // --font-sans/--font-mono) instead of racing the network for Google Fonts.
-  await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
+  // fulfill() with an empty, successful response rather than abort(): an
+  // aborted request makes Chrome log its own "Failed to load resource:
+  // net::ERR_FAILED" console error, which failOnUnexpectedPageErrors()
+  // (correctly) does not otherwise allowlist — an empty stylesheet response
+  // declares no @font-face rules (so no font file request follows) without
+  // the browser treating it as a failure.
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) =>
+    route.fulfill({ status: 200, contentType: "text/css", body: "" }),
+  );
 });
 
 async function readyForScreenshot(page: Page): Promise<void> {

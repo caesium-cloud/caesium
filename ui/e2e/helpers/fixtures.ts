@@ -152,18 +152,22 @@ export function uniqueSuffix(): string {
 }
 
 /**
- * Chrome auto-logs a console error for every non-2xx HTTP response
- * ("Failed to load resource: the server responded with a status of ...").
- * That fires for every intentional SYNTHETIC 401/403/etc. response-mock test
- * in this directory, and for ordinary in-product error paths (e.g. a fanned
+ * Chrome auto-logs a console error for every failed resource load — both a
+ * non-2xx HTTP response ("Failed to load resource: the server responded
+ * with a status of ...") AND a network-level failure ("Failed to load
+ * resource: net::ERR_...", e.g. ERR_INTERNET_DISCONNECTED while
+ * network-recovery.spec.ts's real `context.setOffline(true)` case is
+ * offline). Both fire for entirely intentional scenarios in this directory
+ * (SYNTHETIC 401/403/etc. response mocks; a real network cut; a fanned
  * task's log viewer probing without a selected instance yet, which the
- * backend answers 400 by design — see LogViewer.tsx/taskLogsURL). It is
- * expected browser-generated noise mirroring the network tab, not a JS
- * exception — the real regression signal is a genuine console.error CALL
- * from application code or an uncaught pageerror, neither of which this
- * pattern matches.
+ * backend answers 400 by design — see LogViewer.tsx/taskLogsURL). The whole
+ * "Failed to load resource:" prefix is Chrome's own internal wording for
+ * mirroring the network tab into the console, not something application
+ * code would ever coincidentally produce — the real regression signal is a
+ * genuine console.error CALL from application code or an uncaught
+ * pageerror, neither of which this prefix matches.
  */
-const RESOURCE_LOAD_ERROR = /^Failed to load resource: the server responded with a status of \d+/;
+const RESOURCE_LOAD_ERROR = /^Failed to load resource:/;
 
 /**
  * Registers a `beforeEach`/`afterEach` pair for the CALLING spec file that
