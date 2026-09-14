@@ -46,7 +46,7 @@ export function IncidentRibbon({
           <div className="flex flex-wrap items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-warning" />
             <span className="font-semibold text-text-1">{label}</span>
-            <StatusBadge status={primary.status} size="sm" />
+            <StatusBadge status={primary.status} domain="incident" size="sm" />
             <Badge variant="outline" className="border-warning/30 bg-warning/10 text-[10px] text-warning">
               {formatIncidentClass(primary.class)}
             </Badge>

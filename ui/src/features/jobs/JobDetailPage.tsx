@@ -856,7 +856,7 @@ function RemediationOverview({
                     className="grid gap-3 px-4 py-3 text-sm transition-colors hover:bg-graphite/10 md:grid-cols-[140px_120px_minmax(0,1fr)] md:items-center"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={incident.status} size="sm" />
+                      <StatusBadge status={incident.status} domain="incident" size="sm" />
                       <span className="font-mono text-[10px] text-text-4">{incidentAge(incident)}</span>
                     </div>
                     <Badge variant="outline" className="w-fit border-warning/30 bg-warning/10 text-[10px] text-warning">

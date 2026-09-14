@@ -16,6 +16,23 @@ export type RunStatus =
   | "cached"
   | "skipped";
 
+/** Status sources use distinct lifecycles even where their strings overlap. */
+export type StatusDomain = "run" | "incident" | "agent-action" | "agent-session";
+
+export type IncidentStatus =
+  | "open"
+  | "triaging"
+  | "awaiting_approval"
+  | "remediated"
+  | "escalated"
+  | "closed"
+  | "suppressed"
+  | "abandoned";
+
+export type AgentActionStatus = "proposed" | "approved" | "rejected" | "executing" | "executed" | "failed";
+
+export type AgentSessionStatus = "pending" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
+
 export interface StatusMeta {
   /** Lowercase display label, e.g. "running". */
   label: string;
@@ -84,6 +101,137 @@ const META: Record<RunStatus, StatusMeta> = {
   },
 };
 
+const INCIDENT_META: Record<IncidentStatus, StatusMeta> = {
+  open: {
+    label: "open",
+    fg: "hsl(var(--gold))",
+    bg: "hsl(var(--gold) / 0.12)",
+    border: "hsl(var(--gold) / 0.35)",
+    dotClass: "animate-gold-pulse",
+  },
+  triaging: {
+    label: "triaging",
+    fg: "hsl(var(--cyan-glow))",
+    bg: "hsl(var(--running) / 0.14)",
+    border: "hsl(var(--running) / 0.4)",
+    dotClass: "animate-cyan-pulse",
+  },
+  awaiting_approval: {
+    label: "awaiting approval",
+    fg: "hsl(var(--gold))",
+    bg: "hsl(var(--gold) / 0.12)",
+    border: "hsl(var(--gold) / 0.35)",
+    dotClass: "animate-gold-pulse",
+  },
+  remediated: {
+    label: "remediated",
+    fg: "hsl(var(--success))",
+    bg: "hsl(var(--success) / 0.12)",
+    border: "hsl(var(--success) / 0.3)",
+    dotClass: "",
+  },
+  escalated: {
+    label: "escalated",
+    fg: "hsl(var(--danger))",
+    bg: "hsl(var(--danger) / 0.12)",
+    border: "hsl(var(--danger) / 0.35)",
+    dotClass: "",
+  },
+  closed: {
+    label: "closed",
+    fg: "hsl(var(--text-3))",
+    bg: "hsl(var(--text-4) / 0.18)",
+    border: "hsl(var(--text-4) / 0.3)",
+    dotClass: "",
+  },
+  suppressed: {
+    label: "suppressed",
+    fg: "hsl(var(--text-3))",
+    bg: "hsl(var(--text-4) / 0.18)",
+    border: "hsl(var(--text-4) / 0.3)",
+    dotClass: "",
+  },
+  abandoned: {
+    label: "abandoned",
+    fg: "hsl(var(--danger))",
+    bg: "hsl(var(--danger) / 0.12)",
+    border: "hsl(var(--danger) / 0.35)",
+    dotClass: "",
+  },
+};
+
+const AGENT_ACTION_META: Record<AgentActionStatus, StatusMeta> = {
+  proposed: {
+    label: "proposed",
+    fg: "hsl(var(--cyan-glow))",
+    bg: "hsl(var(--running) / 0.14)",
+    border: "hsl(var(--running) / 0.4)",
+    dotClass: "",
+  },
+  approved: {
+    label: "approved",
+    fg: "hsl(var(--gold))",
+    bg: "hsl(var(--gold) / 0.12)",
+    border: "hsl(var(--gold) / 0.35)",
+    dotClass: "",
+  },
+  rejected: {
+    label: "rejected",
+    fg: "hsl(var(--text-3))",
+    bg: "hsl(var(--text-4) / 0.18)",
+    border: "hsl(var(--text-4) / 0.3)",
+    dotClass: "",
+  },
+  executing: {
+    label: "executing",
+    fg: "hsl(var(--cyan-glow))",
+    bg: "hsl(var(--running) / 0.14)",
+    border: "hsl(var(--running) / 0.4)",
+    dotClass: "animate-cyan-pulse",
+  },
+  executed: {
+    label: "executed",
+    fg: "hsl(var(--success))",
+    bg: "hsl(var(--success) / 0.12)",
+    border: "hsl(var(--success) / 0.3)",
+    dotClass: "",
+  },
+  failed: {
+    label: "failed",
+    fg: "hsl(var(--danger))",
+    bg: "hsl(var(--danger) / 0.12)",
+    border: "hsl(var(--danger) / 0.35)",
+    dotClass: "",
+  },
+};
+
+const AGENT_SESSION_META: Record<AgentSessionStatus, StatusMeta> = {
+  pending: {
+    label: "pending",
+    fg: "hsl(var(--gold))",
+    bg: "hsl(var(--gold) / 0.12)",
+    border: "hsl(var(--gold) / 0.32)",
+    dotClass: "",
+  },
+  running: META.running,
+  succeeded: META.succeeded,
+  failed: META.failed,
+  timed_out: {
+    label: "timed out",
+    fg: "hsl(var(--danger))",
+    bg: "hsl(var(--danger) / 0.12)",
+    border: "hsl(var(--danger) / 0.35)",
+    dotClass: "",
+  },
+  cancelled: {
+    label: "cancelled",
+    fg: "hsl(var(--text-3))",
+    bg: "hsl(var(--text-4) / 0.18)",
+    border: "hsl(var(--text-4) / 0.3)",
+    dotClass: "",
+  },
+};
+
 const UNKNOWN: StatusMeta = {
   label: "unknown",
   fg: "hsl(var(--text-3))",
@@ -121,11 +269,34 @@ const ALIASES: Record<string, RunStatus> = {
  * Falls back to a neutral grey for anything we don't recognize.
  */
 export function statusMeta(status: string | null | undefined): StatusMeta {
+  return statusMetaForDomain(status, "run");
+}
+
+/**
+ * Resolve a status in its source lifecycle. Domains intentionally prevent
+ * identical strings from borrowing a different lifecycle's meaning.
+ */
+export function statusMetaForDomain(
+  status: string | null | undefined,
+  domain: StatusDomain = "run",
+): StatusMeta {
   if (!status) return UNKNOWN;
   const key = String(status).trim().toLowerCase();
-  if (key in META) return META[key as RunStatus];
-  const aliased = ALIASES[key];
-  if (aliased) return META[aliased];
+  if (domain === "run") {
+    if (key in META) return META[key as RunStatus];
+    const aliased = ALIASES[key];
+    if (aliased) return META[aliased];
+    return UNKNOWN;
+  }
+
+  const domainMeta = {
+    incident: INCIDENT_META,
+    "agent-action": AGENT_ACTION_META,
+    "agent-session": AGENT_SESSION_META,
+  }[domain];
+  if (Object.prototype.hasOwnProperty.call(domainMeta, key)) {
+    return domainMeta[key as keyof typeof domainMeta];
+  }
   return UNKNOWN;
 }
 
@@ -137,4 +308,33 @@ export const ALL_RUN_STATUSES: RunStatus[] = [
   "paused",
   "cached",
   "skipped",
+];
+
+export const ALL_INCIDENT_STATUSES: IncidentStatus[] = [
+  "open",
+  "triaging",
+  "awaiting_approval",
+  "remediated",
+  "escalated",
+  "closed",
+  "suppressed",
+  "abandoned",
+];
+
+export const ALL_AGENT_ACTION_STATUSES: AgentActionStatus[] = [
+  "proposed",
+  "approved",
+  "rejected",
+  "executing",
+  "executed",
+  "failed",
+];
+
+export const ALL_AGENT_SESSION_STATUSES: AgentSessionStatus[] = [
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "timed_out",
+  "cancelled",
 ];
