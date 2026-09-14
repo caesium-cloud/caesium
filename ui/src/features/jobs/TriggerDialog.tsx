@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { isSchedulerOwnedParam } from "./rerun-params";
 import {
   Dialog,
   DialogContent,
@@ -25,13 +26,11 @@ export function TriggerDialog({
   onConfirm,
   onOpenChange,
 }: TriggerDialogProps) {
-  const [logicalDate, setLogicalDate] = useState("");
   const [paramLines, setParamLines] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
 
   function handleOpenChange(next: boolean) {
     if (!next) {
-      setLogicalDate("");
       setParamLines("");
       setValidationError(null);
     }
@@ -56,13 +55,7 @@ export function TriggerDialog({
       return;
     }
 
-    const params = { ...parsed.params };
-    const trimmedLogicalDate = logicalDate.trim();
-    if (trimmedLogicalDate) {
-      params.logical_date = trimmedLogicalDate;
-    }
-
-    onConfirm(params);
+    onConfirm(parsed.params);
   }
 
   return (
@@ -76,21 +69,8 @@ export function TriggerDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4 pt-1">
           <div>
-            <label htmlFor="trigger-logical-date" className={labelClassName}>
-              logical_date
-            </label>
-            <input
-              id="trigger-logical-date"
-              value={logicalDate}
-              onChange={(event) => setLogicalDate(event.target.value)}
-              disabled={isPending || disabled}
-              className={inputClassName}
-              placeholder="2026-07-07T12:00:00Z"
-            />
-          </div>
-          <div>
             <label htmlFor="trigger-extra-params" className={labelClassName}>
-              Additional params
+              Run parameters
             </label>
             <textarea
               id="trigger-extra-params"
@@ -137,6 +117,9 @@ function parseParamLines(raw: string): { params: Record<string, string>; error?:
     const value = line.slice(separatorIndex + 1).trim();
     if (!key) {
       return { params: {}, error: `Line ${index + 1} is missing a key` };
+    }
+    if (isSchedulerOwnedParam(key)) {
+      return { params: {}, error: `Parameter "${key}" is reserved for the scheduler. Use Backfill for scheduled dates.` };
     }
     params[key] = value;
   }
