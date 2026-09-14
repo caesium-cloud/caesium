@@ -303,16 +303,20 @@ export interface DailyStats {
   success_rate: number;
 }
 
-export type IncidentStatus =
-  | "open"
-  | "triaging"
-  | "awaiting_approval"
-  | "remediated"
-  | "escalated"
-  | "closed"
-  | "suppressed"
-  | "abandoned"
-  | string;
+export const INCIDENT_STATUSES = [
+  "open",
+  "triaging",
+  "awaiting_approval",
+  "remediated",
+  "escalated",
+  "closed",
+  "suppressed",
+  "abandoned",
+] as const;
+export type KnownIncidentStatus = (typeof INCIDENT_STATUSES)[number];
+
+/** API responses remain forward-compatible with new server states. */
+export type IncidentStatus = KnownIncidentStatus | string;
 
 export interface Incident {
   id: string;
@@ -341,14 +345,9 @@ export interface Incident {
 // `executing` is the claim an approved tier-3 action holds while it dispatches.
 // A row left in it by a process death is a visible stuck state a human resolves —
 // it is deliberately never auto-redriven (see internal/incident/redrive.go).
-export type AgentActionStatus =
-  | "proposed"
-  | "approved"
-  | "rejected"
-  | "executing"
-  | "executed"
-  | "failed"
-  | string;
+export const AGENT_ACTION_STATUSES = ["proposed", "approved", "rejected", "executing", "executed", "failed"] as const;
+export type KnownAgentActionStatus = (typeof AGENT_ACTION_STATUSES)[number];
+export type AgentActionStatus = KnownAgentActionStatus | string;
 export type AgentActionActor = "policy" | "agent" | "human" | string;
 
 export interface AgentAction {
@@ -383,7 +382,9 @@ export interface ApprovalRequest {
   updated_at: string;
 }
 
-export type AgentSessionState = "pending" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled" | string;
+export const AGENT_SESSION_STATES = ["pending", "running", "succeeded", "failed", "timed_out", "cancelled"] as const;
+export type KnownAgentSessionState = (typeof AGENT_SESSION_STATES)[number];
+export type AgentSessionState = KnownAgentSessionState | string;
 
 export interface AgentSession {
   id: string;
