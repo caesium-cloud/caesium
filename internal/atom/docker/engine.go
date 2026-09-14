@@ -243,7 +243,7 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
 
 // resolvePresentPinnedImage maps a name@digest pin onto an image the local
 // daemon can already run. Docker's classic store registers manifest digests
-// under the original repository (alpine@sha256:...), not a locally retagged
+// under the original repository (alpine:3.23@sha256:...), not a locally retagged
 // name (caesium-pindigest:stable@sha256:...). Config IDs are likewise not
 // name@digest references.
 func (e *dockerEngine) resolvePresentPinnedImage(imageRef string) (string, bool, error) {

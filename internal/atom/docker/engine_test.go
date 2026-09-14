@@ -601,17 +601,17 @@ func (s *DockerTestSuite) TestCreateRewritesNameAtConfigIDToLocalImageID() {
 }
 
 // TestCreateUsesLocalTagWhenNameAtManifestDigestMissing is the retag case
-// pinDigests hits in integration: alpine is present with a RepoDigest, the
+// pinDigests hits in integration: alpine:3.23 is present with a RepoDigest, the
 // job names a local tag of that image, and PinReference produces
 // localTag@manifestDigest. Docker cannot inspect or pull that name@digest
-// (the digest is registered as alpine@sha256:..., and inspect.ID is the
+// (the digest is registered as alpine:3.23@sha256:..., and inspect.ID is the
 // config digest). Create must run the already-present local tag/ID.
 func (s *DockerTestSuite) TestCreateUsesLocalTagWhenNameAtManifestDigestMissing() {
 	const (
 		localTag        = "caesium-pindigest-1:stable"
 		manifestDigest  = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		configID        = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-		canonicalDigest = "docker.io/library/alpine@" + manifestDigest
+		canonicalDigest = "docker.io/library/alpine:3.23@" + manifestDigest
 	)
 	pinned := localTag + "@" + manifestDigest
 	req := &atom.EngineCreateRequest{
