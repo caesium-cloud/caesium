@@ -492,10 +492,33 @@ below is mandatory, including append-only edits.
   Depends on: A1.
   Verify: use the container-built release CLI in an empty temporary workspace for lint, preview, dev-once, watch/edit, interrupt, apply, and inspect. Check malformed input, paths with spaces, unavailable engines, cancellation/timeouts, and owned-resource cleanup. Parse JSON exclusively from stdout captured separately from stderr and assert exit status. Preserve existing helpers; testscript is an optional future harness substitution, not a reason to rewrite working tests. Run the currently shipped Linux architectures; add native platforms only after Q4 confirms support. Inspect the job-definition reference before writing any YAML fixtures.
 
-- [ ] D2. Expand functional, visual, accessibility, and scale browser coverage.
+- [x] D2. Expand functional, visual, accessibility, and scale browser coverage.
   Files: new `ui/e2e/accessibility.spec.ts`, new `ui/e2e/visual.spec.ts`, new `ui/e2e/scale.spec.ts`, new `ui/e2e/network-recovery.spec.ts`, new `ui/e2e/visual.spec.ts-snapshots/`, `ui/e2e/helpers/fixtures.ts`, `ui/package.json`, `ui/package-lock.json`, `ui/playwright.config.ts`.
   Depends on: A1, G1.
   Verify: against the live backend, check create/apply or existing authoring workflows, trigger, logs, failure diagnosis, retry/cancel, reload, permission denial, credential expiry, reconnect, and stale-request races. Require keyboard/focus behavior and scoped axe checks. Review deterministic screenshots with fixed fonts, viewport, timestamps, and dataset. Load large DAGs, many partitions, paginated history, and long logs; assert all expected data remains reachable through virtualization/pagination. Fail on unexpected console/page errors. Chromium remains required; Q4 selects additional supported browser projects. Synthetic response manipulation tests are explicitly labeled and do not replace live persistence tests.
+  Note (W3-δ): create/apply, trigger, logs, failure diagnosis, and retry/cancel
+  against the live backend were already real-surface-covered by existing
+  spec files (`operator-flow`, `job-queue`, `replay`, `why`, `blame`); the four
+  new files add accessibility/keyboard, deterministic-visual, scale, and
+  reload/reconnect/credential/race coverage without duplicating that ground.
+  `accessibility.spec.ts` scopes axe to WCAG2/2.1 A+AA critical/serious
+  findings and records a `KNOWN_VIOLATIONS` baseline of real, pre-existing
+  product defects it found (systemic icon-only buttons with no accessible
+  name; several muted-text/badge color tokens below 4.5:1 contrast) — `ui/src/**`
+  is out of this stream's scope, so the gate catches a NEW rule-id regression
+  per page rather than asserting away debt it cannot fix; shrinking that
+  baseline is a future product-code PR. `visual.spec.ts` commits only
+  `-linux.png` baselines (generated in a pinned `mcr.microsoft.com/playwright`
+  container matching the exact npm-resolved version) and each test
+  self-skips off Linux, since `just ui-e2e` runs the browser on whatever host
+  invoked `just`, not in a container — a local darwin/win32 run reports
+  "skipped", and the real per-pixel comparison is CI's `ui-e2e` check.
+  "Paginated history" is covered via the fanned-partition list's own
+  `next_offset` cursor walk (the job run-history list itself has no
+  pagination/virtualization to exercise). `network-recovery.spec.ts`'s
+  permission-denial/credential-expiry cases are SYNTHETIC (this project's
+  default e2e server runs without `CAESIUM_AUTH_MODE`); real scope-based
+  denial is already covered live in `ui/e2e/auth/*`.
 
 - [ ] D3. Exercise the operator journey across actual cluster failure.
   Files: new `ui/e2e/cluster-recovery.spec.ts`, new `ui/e2e/helpers/cluster.ts`, `ui/playwright.config.ts`, `test/contracts/scenarios.json` (created by A2).
