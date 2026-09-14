@@ -308,7 +308,7 @@ function IncidentFeedRow({ incident, jobAlias }: { incident: Incident; jobAlias:
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-text-1">{jobAlias}</span>
-            <StatusBadge status={incident.status} size="sm" />
+            <StatusBadge status={incident.status} domain="incident" size="sm" />
             <Badge variant="outline" className="text-[10px]">
               {formatIncidentClass(incident.class)}
             </Badge>

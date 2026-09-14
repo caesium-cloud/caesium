@@ -1,12 +1,14 @@
 import { type CSSProperties } from "react";
 import { cn } from "@/lib/utils";
-import { statusMeta } from "@/lib/status";
+import { statusMetaForDomain, type StatusDomain } from "@/lib/status";
 
 export type StatusBadgeVariant = "filled" | "soft" | "dot";
 export type StatusBadgeSize = "sm" | "md";
 
 interface StatusBadgeProps {
   status: string;
+  /** Lifecycle the status belongs to; defaults to job and task run statuses. */
+  domain?: StatusDomain;
   variant?: StatusBadgeVariant;
   size?: StatusBadgeSize;
   /** Override the rendered label; defaults to the canonical status label. */
@@ -22,12 +24,13 @@ interface StatusBadgeProps {
  */
 export function StatusBadge({
   status,
+  domain,
   variant = "filled",
   size = "md",
   label,
   className,
 }: StatusBadgeProps) {
-  const meta = statusMeta(status);
+  const meta = statusMetaForDomain(status, domain);
   const text = label ?? meta.label;
 
   const sizing =

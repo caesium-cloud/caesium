@@ -36,4 +36,10 @@ describe("<StatusBadge />", () => {
     render(<StatusBadge status="succeeded" label="Done" />);
     expect(screen.getByText("Done")).toBeInTheDocument();
   });
+
+  it("renders an incident status in its own lifecycle", () => {
+    render(<StatusBadge status="open" domain="incident" />);
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("open")).toHaveAttribute("data-status", "open");
+  });
 });
