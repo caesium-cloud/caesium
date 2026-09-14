@@ -109,6 +109,48 @@ func TestFireAcceptsOptionalParams(t *testing.T) {
 	require.Equal(t, "high", capturedPriority)
 }
 
+func TestFireRejectsSchedulerParamsBeforeLoadingOrFiringTrigger(t *testing.T) {
+	triggerControllerTestMu.Lock()
+	defer triggerControllerTestMu.Unlock()
+
+	origTriggerSvcFactory := triggerServiceFactory
+	origFire := fireHTTPTrigger
+	defer func() {
+		triggerServiceFactory = origTriggerSvcFactory
+		fireHTTPTrigger = origFire
+	}()
+	triggerServiceFactory = func(context.Context) triggersvc.Trigger {
+		t.Fatal("reserved params must be rejected before loading the trigger")
+		return nil
+	}
+	fireHTTPTrigger = func(context.Context, *models.Trigger, map[string]string, string) error {
+		t.Fatal("reserved params must be rejected before firing the trigger")
+		return nil
+	}
+
+	t.Setenv("CAESIUM_MANUAL_TRIGGER_API_KEY", "test-key")
+	require.NoError(t, env.Process())
+	for _, key := range []string{"_trigger_depth", "_derived_from_dataset", "_consumed_watermarks", "_consumed_watermarks_start", "_future_scheduler_field", "logical_date"} {
+		t.Run(key, func(t *testing.T) {
+			body, err := json.Marshal(FireRequest{Params: map[string]string{key: "private-value"}})
+			require.NoError(t, err)
+			e := echo.New()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", bytes.NewReader(body))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			req.Header.Set("X-Caesium-API-Key", "test-key")
+			c := e.NewContext(req, httptest.NewRecorder())
+			c.SetPathValues(echo.PathValues{{Name: "id", Value: uuid.NewString()}})
+
+			err = Fire(c)
+			var httpErr *echo.HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, http.StatusBadRequest, httpErr.Code)
+			require.Contains(t, err.Error(), key)
+			require.NotContains(t, err.Error(), "private-value")
+		})
+	}
+}
+
 func TestFireRejectsMissingAPIKey(t *testing.T) {
 	triggerControllerTestMu.Lock()
 	defer triggerControllerTestMu.Unlock()

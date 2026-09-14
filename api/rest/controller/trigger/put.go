@@ -10,6 +10,7 @@ import (
 	codes "net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/api/rest/controller/manualparams"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -45,6 +46,9 @@ func Fire(c *echo.Context) error {
 	fireReq, err := parseOptionalFireRequest(c.Request().Body)
 	if err != nil {
 		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
+	}
+	if err := manualparams.Validate(fireReq.Params); err != nil {
+		return echo.NewHTTPError(codes.StatusBadRequest, err.Error())
 	}
 	if strings.TrimSpace(fireReq.Priority) != "" {
 		if _, err := runstorage.PriorityValue(fireReq.Priority); err != nil {
