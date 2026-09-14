@@ -356,17 +356,17 @@ func mustParse(t *testing.T, raw string) *url.URL {
 }
 
 func TestRegistryRedirectPolicy_StripsAgainstOriginalOrigin(t *testing.T) {
-	origin, err := http.NewRequest(http.MethodGet, "https://auth.example/token", nil)
+	origin, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://auth.example/token", nil)
 	require.NoError(t, err)
 	origin.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
 
-	hop1, err := http.NewRequest(http.MethodGet, "https://child.auth.example/hop", nil)
+	hop1, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://child.auth.example/hop", nil)
 	require.NoError(t, err)
 	hop1.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
 	require.NoError(t, registryRedirectPolicy(hop1, []*http.Request{origin}))
 	assert.Empty(t, hop1.Header.Get("Authorization"), "leaving the authorized origin must strip Authorization")
 
-	hop2, err := http.NewRequest(http.MethodGet, "https://child.auth.example/final", nil)
+	hop2, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://child.auth.example/final", nil)
 	require.NoError(t, err)
 	// net/http re-copies Authorization from the initial request because dest is
 	// a subdomain of origin. The previous hop already had it stripped.
@@ -374,7 +374,7 @@ func TestRegistryRedirectPolicy_StripsAgainstOriginalOrigin(t *testing.T) {
 	require.NoError(t, registryRedirectPolicy(hop2, []*http.Request{origin, hop1}))
 	assert.Empty(t, hop2.Header.Get("Authorization"), "must strip against via[0], not the previous hop")
 
-	sameHost, err := http.NewRequest(http.MethodGet, "https://auth.example/token2", nil)
+	sameHost, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://auth.example/token2", nil)
 	require.NoError(t, err)
 	sameHost.Header.Set("Authorization", "Basic dXNlcjpzZWNyZXQ=")
 	require.NoError(t, registryRedirectPolicy(sameHost, []*http.Request{origin}))
