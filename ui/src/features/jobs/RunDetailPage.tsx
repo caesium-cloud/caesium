@@ -256,12 +256,13 @@ export function RunDetailPage() {
   );
 
   const triggerMutation = useMutation({
-    mutationFn: () => api.triggerJob(jobId),
-    onSuccess: (newRun) => {
+    mutationFn: ({ jobId: triggeredJobId, params }: { jobId: string; params?: Record<string, string> }) =>
+      api.triggerJob(triggeredJobId, params ? { params } : undefined),
+    onSuccess: (newRun, { jobId: triggeredJobId }) => {
       toast.success("Job triggered");
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      queryClient.invalidateQueries({ queryKey: ["job", triggeredJobId, "runs"] });
       if (newRun?.id) {
-        navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId, runId: newRun.id } });
+        navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId: triggeredJobId, runId: newRun.id } });
       }
     },
     onError: (err: Error) => toast.error(`Failed to trigger: ${err.message}`),
@@ -421,11 +422,14 @@ export function RunDetailPage() {
             variant="outline"
             size="sm"
             className="h-8 text-xs"
-            onClick={() => triggerMutation.mutate()}
+            onClick={() => {
+              const params = run.params && Object.keys(run.params).length > 0 ? { ...run.params } : undefined;
+              triggerMutation.mutate({ jobId, params });
+            }}
             disabled={triggerMutation.isPending}
           >
             <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-            Re-run
+            {triggerMutation.isPending ? "Re-running…" : "Re-run"}
           </Button>
           {isLive && (
             <Button
