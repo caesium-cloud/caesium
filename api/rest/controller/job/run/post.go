@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/manualparams"
+	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"

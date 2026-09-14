@@ -10,7 +10,7 @@ import (
 	codes "net/http"
 	"strings"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/manualparams"
+	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
