@@ -242,9 +242,19 @@ async function diffResponseBodyForDiagnostics(response: APIResponse): Promise<st
 
 async function replaceJobDefsEditorContents(page: Page, contents: string) {
   const editor = page.locator(".cm-content[contenteditable='true']");
-  await editor.click();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.insertText(contents);
+  await expect(editor).toBeVisible();
+
+  const expected = normalizeJobDefsEditorText(contents);
+  await expect(async () => {
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.insertText(contents);
+    expect(normalizeJobDefsEditorText(await editor.innerText())).toBe(expected);
+  }).toPass();
+}
+
+function normalizeJobDefsEditorText(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trimEnd();
 }
 
 function truncateForDiagnostics(value: string, limit = 12_000): string {
