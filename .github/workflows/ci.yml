@@ -207,7 +207,11 @@ jobs:
       - uses: ./.github/actions/bake-images
         with:
           arch: amd64
-          targets: product
+          # `robustness` layers the compiled ./test/robustness binary onto the
+          # same release target, so it shares this bake's graph.
+          targets: |
+            product
+            robustness
           cache-group: product
       - name: Build triage-agent
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
@@ -236,6 +240,10 @@ jobs:
         with:
           name: integration-runner-amd64
           images: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: robustness-amd64
+          images: caesiumcloud/caesium-robustness:${{ env.IMAGE_TAG }}-amd64
       - uses: actions/upload-artifact@v7
         with:
           name: release-cli-amd64
@@ -967,6 +975,65 @@ jobs:
           kubectl logs statefulset/caesium -c caesium || true
           kubectl get pods -A || true
           kubectl describe pods -l cloud.caesium -A || true
+
+  # First persistent three-node robustness lane: B1's owner-crash regression on
+  # kind + the Helm StatefulSet, plus E5's SQL-work budget on the existing
+  # Docker integration server. Both reduce to one scenario evidence report that
+  # scripts/check-test-evidence.py validates against test/contracts/scenarios.json,
+  # failing closed on a missing artifact or scenario, an unexpected skip, a
+  # disabled gate, wrong topology/mode/flags, a wrong candidate identity or
+  # absent fault-activation evidence.
+  #
+  # NOT in ci-ok and NOT a required check: promoting this lane into the
+  # fail-closed aggregate is a separate, explicitly audited step. Every existing
+  # engine/architecture suite keeps running unchanged.
+  early-evidence:
+    needs: [changes, images, helm-lint]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # check-test-evidence.py requires a real commit SHA; the `-amd64` image
+      # tag (and a `v*` tag build's IMAGE_TAG) can never stand in for it.
+      CANDIDATE_SHA: ${{ github.sha }}
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      # Loads the precompiled runner, product and robustness images (no
+      # compiler image) and runs the focused SQL-work-budget scenario.
+      - name: SQL-work budget scenario (existing integration suite)
+        uses: ./.github/actions/run-integration
+        with:
+          arch: amd64
+          recipe: integration-test-sql-budget
+          load-robustness: "true"
+      - name: Three-node owner-crash lane
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 robustness-test
+      - name: Validate scenario evidence
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 check-evidence
+      - name: Upload scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: early-evidence
+          # The lane redacts its generated internal token and kubeconfigs
+          # before this step; see `just robustness-test`.
+          path: .tmp/evidence/
+          if-no-files-found: error
+          retention-days: 7
 
   podman-integration-test:
     needs: [changes, images]

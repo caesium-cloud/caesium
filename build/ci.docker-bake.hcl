@@ -54,6 +54,27 @@ target "integration-runner" {
   tags = ["caesiumcloud/caesium-integration:${IMAGE_TAG}"]
 }
 
+# Early-evidence lane runner. `./test/robustness` is a subpackage, so its tests
+# are NOT in the precompiled ./test binary: this image compiles them explicitly
+# with -tags=integration and layers them onto the candidate release image so the
+# lane's CLI and deployed server come from one build. amd64 only — the lane runs
+# on the hosted amd64 kind runner.
+target "robustness-runner" {
+  context    = "."
+  dockerfile = "build/Dockerfile.robustness"
+  target     = "robustness"
+  args = {
+    BUILDER_IMAGE = BUILDER_IMAGE
+    CAESIUM_IMAGE = "caesium-release"
+  }
+  contexts = { caesium-release = "target:release" }
+  tags     = ["caesiumcloud/caesium-robustness:${IMAGE_TAG}"]
+}
+
+group "robustness" {
+  targets = ["robustness-runner"]
+}
+
 target "reagent-git-source" {
   context    = "."
   dockerfile = "build/Dockerfile.reagents"

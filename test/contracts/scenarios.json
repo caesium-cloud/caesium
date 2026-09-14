@@ -24,11 +24,13 @@
         "DT-DAG-01",
         "DT-RECOVER-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B1",
       "registered_by": "G3",
-      "gates": [],
-      "notes": "Planned B1 regression. G3 registers the selector and early gate after B1 exists; not proven.",
+      "gates": [
+        "early"
+      ],
+      "notes": "Executed by `just robustness-test` (scripts/robustness.sh) on a kind cluster of 1 control-plane + 3 worker nodes with three persistent Helm StatefulSet replicas. Observed topology, mode and flags are read back from the running pods; the fault and recovery evidence comes from the retained recorder records, not from the test's exit status alone.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -53,12 +55,12 @@
         "CAESIUM_DATABASE_VOTERS": "3",
         "CAESIUM_DATABASE_STANDBYS": "0",
         "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
-        "kubernetes.engine.enabled": "true",
-        "run_lease_ttl": "30s",
-        "dispatch_interval": "1s",
-        "worker_lease_ttl": "30s",
-        "reclaim_interval": "1s",
-        "worker_pool_size": "2"
+        "CAESIUM_DATABASE_TYPE": "internal",
+        "CAESIUM_RUN_LEASE_TTL": "30s",
+        "CAESIUM_RUN_OWNER_DISPATCH_INTERVAL": "1s",
+        "CAESIUM_WORKER_LEASE_TTL": "30s",
+        "CAESIUM_WORKER_RECLAIM_INTERVAL": "1s",
+        "CAESIUM_WORKER_POOL_SIZE": "2"
       },
       "expected_observations": [
         {
@@ -131,11 +133,13 @@
         "DT-DAG-01",
         "DT-RECOVER-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B1",
       "registered_by": "G3",
-      "gates": [],
-      "notes": "Planned B1 regression. G3 registers the selector and early gate after B1 exists; not proven.",
+      "gates": [
+        "early"
+      ],
+      "notes": "Executed by `just robustness-test` (scripts/robustness.sh) on a kind cluster of 1 control-plane + 3 worker nodes with three persistent Helm StatefulSet replicas. Observed topology, mode and flags are read back from the running pods; the fault and recovery evidence comes from the retained recorder records, not from the test's exit status alone.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -160,12 +164,12 @@
         "CAESIUM_DATABASE_VOTERS": "3",
         "CAESIUM_DATABASE_STANDBYS": "0",
         "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
-        "kubernetes.engine.enabled": "true",
-        "run_lease_ttl": "30s",
-        "dispatch_interval": "1s",
-        "worker_lease_ttl": "30s",
-        "reclaim_interval": "1s",
-        "worker_pool_size": "2"
+        "CAESIUM_DATABASE_TYPE": "internal",
+        "CAESIUM_RUN_LEASE_TTL": "30s",
+        "CAESIUM_RUN_OWNER_DISPATCH_INTERVAL": "1s",
+        "CAESIUM_WORKER_LEASE_TTL": "30s",
+        "CAESIUM_WORKER_RECLAIM_INTERVAL": "1s",
+        "CAESIUM_WORKER_POOL_SIZE": "2"
       },
       "expected_observations": [
         {
@@ -858,30 +862,33 @@
     {
       "id": "e5-sql-work-budget",
       "name": "SQL-work budget in the existing integration suite",
-      "selector": "IntegrationTestSuite/TestStatementBudget",
+      "selector": "TestIntegrationTestSuite/TestStatementBudgetFixedWorkload",
       "contract_ids": [],
       "category": "sql-work-budget",
-      "status": "absent",
+      "status": "proven",
       "owner_item": "E5",
       "registered_by": "G3",
-      "gates": [],
-      "notes": "Planned E5 existing-suite budget. G3 registers the selector after E5 exists; not proven.",
+      "gates": [
+        "early"
+      ],
+      "notes": "Executed by `just integration-test-sql-budget` against the existing `integration-up` server (sharded database router, Docker engine). The retained /metrics scrape is the independent counter artifact; the suite method name is the exact -test.run selector, which must stay suite-qualified to match anything. This lane runs the `-test` image variant, so it records the server image id it ran (observed_server_image_id) instead of claiming the report's candidate release digest.",
       "topology": {
         "kind": "integration-existing",
         "replicas": 1,
         "persistence": false,
         "engine": "docker",
-        "voters": 1,
-        "standbys": 0,
-        "database_shards": 1
+        "database_shards": 4
       },
       "mode": {
-        "execution": "standalone",
+        "execution": "local",
         "owner": "disabled",
         "surface": "http+cli"
       },
       "feature_flags": {
-        "CAESIUM_TEST_ENGINE": "docker"
+        "CAESIUM_DATABASE_SHARDS": "4",
+        "CAESIUM_CACHE_ENABLED": "true",
+        "CAESIUM_CACHE_PIN_DIGESTS": "true",
+        "CAESIUM_CONTRACT_ENFORCEMENT": "fail"
       },
       "expected_observations": [
         {
@@ -900,7 +907,7 @@
       "allowed_skips": [],
       "evidence": {
         "require_candidate_sha": true,
-        "require_candidate_digest": true,
+        "require_candidate_digest": false,
         "require_recorder": true,
         "artifact_identity": "integration-sql-work-budget",
         "min_samples": 1

@@ -123,7 +123,7 @@ def output(result):
 
 
 class CommittedManifestTests(unittest.TestCase):
-    def test_committed_manifest_is_schema_valid_and_unproven(self):
+    def test_committed_manifest_is_schema_valid_and_honest(self):
         doc = json.loads(MANIFEST_PATH.read_text())
         issues = CHECKER["validate_manifest"](doc)
         self.assertEqual([issue.message for issue in issues], [])
@@ -133,12 +133,19 @@ class CommittedManifestTests(unittest.TestCase):
         covered = set()
         owners = set()
         for item in doc["scenarios"]:
-            self.assertIn(item["status"], ("absent", "unproven"))
-            self.assertNotIn(item["status"], ("proven", "pass", "passing", "passed"))
-            self.assertEqual(item["gates"], [])
+            self.assertIn(item["status"], ("absent", "unproven", "proven"))
+            self.assertNotIn(item["status"], ("pass", "passing", "passed"))
+            # A row may claim `proven` only once a gate actually executes it;
+            # an ungated row must still be absent or unproven.
+            if item["status"] == "proven":
+                self.assertTrue(item["gates"], item["id"])
+            else:
+                self.assertEqual(item["gates"], [], item["id"])
             covered.update(item["contract_ids"])
             owners.add(item["owner_item"])
-            if item["owner_item"] in {"B1", "B2", "B3", "D3", "E5"}:
+            # No runner exists for these owners yet, so they must not claim
+            # evidence of any kind.
+            if item["owner_item"] in {"B2", "B3", "D3"}:
                 self.assertEqual(item["status"], "absent", item["id"])
         self.assertEqual(covered, set(CONTRACTS))
         self.assertTrue({"B1", "E5"} <= owners)
@@ -154,11 +161,32 @@ class CommittedManifestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("cannot report pass", output(result))
 
-    def test_require_early_on_unregistered_committed_gate_fails(self):
+    def test_require_unregistered_committed_gate_fails(self):
         doc = json.loads(MANIFEST_PATH.read_text())
-        result = run_checker(doc, passing_report(doc), extra=("--require", "early"))
+        result = run_checker(doc, passing_report(doc), extra=("--require", "full"))
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("disabled-gate", output(result))
+
+    def test_early_gate_selects_exactly_the_wired_scenarios(self):
+        doc = json.loads(MANIFEST_PATH.read_text())
+        early = sorted(item["id"] for item in doc["scenarios"] if "early" in item["gates"])
+        self.assertEqual(early, [
+            "b1-owner-crash-leader",
+            "b1-owner-crash-nonleader",
+            "e5-sql-work-budget",
+        ])
+        result = run_checker(doc, passing_report(doc), extra=("--require", "early", "--strict"))
+        self.assertEqual(result.returncode, 0, output(result))
+
+    def test_early_gate_fails_when_a_wired_scenario_is_missing(self):
+        doc = json.loads(MANIFEST_PATH.read_text())
+        report = passing_report(doc)
+        report["scenarios"] = [
+            item for item in report["scenarios"] if item["id"] != "e5-sql-work-budget"
+        ]
+        result = run_checker(doc, report, extra=("--require", "early", "--strict"))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("missing-scenario=e5-sql-work-budget", output(result))
 
 
 class ManifestSchemaTests(unittest.TestCase):
