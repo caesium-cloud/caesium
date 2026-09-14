@@ -417,7 +417,15 @@ this base adds two: `dataset_metrics` and `dataset_holds`. `git diff v0.1.0..HEA
 -- internal/models/` adds only these columns to existing tables:
 `callback_runs.http_status/response_body/retry_count`,
 `dataset_declarations.assertions_json/on_violation/release`,
-`jobs.on_upstream_hold`, and `job_runs.skip_reason/data_violations`. Every one is
+`jobs.on_upstream_hold`, `job_runs.skip_reason` and
+`task_runs.data_violations`. **The last two live on different tables**:
+`SkipReason` is a field of `models.JobRun` (`internal/models/run.go:43`) and
+`DataViolations` is a field of `models.TaskRun` (`internal/models/run.go:165`);
+there is no `job_runs.data_violations` column and never will be. `versions.json`
+must carry the delta as explicit `table -> column` pairs, not a shared prefix, and
+the F4 schema assertion must look for each column on the table named here —
+asserting `data_violations` on `job_runs` would fail a correct upgrade while
+leaving the real `task_runs` column unverified. Every added column is
 either nullable or carries a non-null DEFAULT, so a v0.1.0 binary can still
 INSERT into a candidate-migrated table — a necessary but **not** sufficient
 condition for rollback. `TaskRun`'s composite index tag is byte-identical at
@@ -482,7 +490,7 @@ not be tested as if it were.
 | Supported browsers | Chromium only. `ui/playwright.config.ts` declares two projects (`default`, `auth`) and sets no `browserName`, so both run Playwright's Chromium default. D2 keeps Chromium required and adds **no** Firefox/WebKit project in this plan; adding one is a separate product-support decision with its own runner cost under Q1. | `ui/playwright.config.ts`. |
 | Previous release(s) | Exactly `v0.1.0`, pinned by digest. One adjacent pair only. | `gh release list`; Docker Hub tag API. |
 | Mixed-version operation | Permitted only within internal protocol 2 and an identical shard count; F2 may run a mixed window **during** a rolling upgrade but may not claim general N-1/N interoperability, and must not introduce a pre-v2 member. | `internal/dispatch/dispatch.go:78-99`. |
-| Rollback vs restore | **Restore-from-snapshot is the supported recovery; binary rollback is not.** AutoMigrate never removes what it added and no down-migration exists, so a candidate-migrated data directory cannot be returned to its old schema. F4 still runs a rollback attempt as an explicitly labelled exploratory case and records the observed outcome; a passing attempt does not become a product guarantee without a recorded product decision. | `pkg/db/db.go:236-293`; the additive-only delta above. |
+| Rollback vs restore | **Restore-from-snapshot is the *intended* recovery; binary rollback is not.** Restore is not yet qualified: until F2's restore case carries pre-startup snapshot evidence and a passing negative control (below), a rejoin that reads matching rows is peer catch-up, not proof of restore, so this row states policy rather than a demonstrated guarantee. AutoMigrate never removes what it added and no down-migration exists, so a candidate-migrated data directory cannot be returned to its old schema. F4 still runs a rollback attempt as an explicitly labelled exploratory case and records the observed outcome; a passing attempt does not become a product guarantee without a recorded product decision. | `pkg/db/db.go:236-293`; the additive-only delta above. |
 | Backup/restore support | **Absent as a product capability** — an external prerequisite, not a test gap. There is no backup or restore command, route or scheduler; `docs/kubernetes-deployment.md:199-204` delegates to storage-platform tooling. `caesium job export` reconstructs a job manifest only (`cmd/job/export.go`), and `/v1/database/query` is read-only and capped at 1000 rows (`api/rest/service/database/database.go:22-32`), so neither is a state backup. "Restore" in F2 therefore means a **storage-level** snapshot/copy of a stopped member's volume taken by the harness. | as cited. |
 | Storage failure model | Four distinct cases, enumerated below. No process-kill test may be labelled power-loss or disk-loss qualification. | below. |
 
@@ -578,17 +586,40 @@ evidence of a supported upgrade.
    consistent copy; it is never skipped as passing.
 2. **Member removal / replacement.** Nothing in the repository calls go-dqlite's
    `client.Remove`, and `api/rest/bind/bind.go` binds no membership-mutating
-   route; `GET /v1/system/nodes` is read-only. A replaced pod with a fresh PVC
-   generates a **new** node ID (`go-dqlite/v3@v3.0.4 app/app.go:96-105`) and joins,
-   while the dead
-   member's ID stays in the cluster and can only be demoted by go-dqlite's role
-   adjustment, never removed. F2 records the resulting membership as evidence.
+   route; `GET /v1/system/nodes` is read-only. The new-ID/join path is
+   **ordinal-dependent, not universal**: `app.New` generates a new ID and writes
+   the join marker only when a cluster address list is supplied
+   (`go-dqlite/v3@v3.0.4 app/app.go:96-111` — `if len(o.Cluster) == 0 { info.ID =
+   dqlite.BootstrapID }`), and the chart's peer-discovery script always writes an
+   **empty** peer list for ordinal 0
+   (`helm/caesium/templates/configmap.yaml:14-17`). A replaced pod with a fresh
+   PVC therefore behaves differently by ordinal:
+   - **Ordinals ≥ 1** get a non-empty `--cluster` list, generate a new node ID
+     and join; the dead member's ID stays in the cluster and can only be demoted
+     by go-dqlite's role adjustment, never removed. F2 records the resulting
+     membership as evidence.
+   - **Ordinal 0** gets an empty list, so a fresh directory takes the fixed
+     `dqlite.BootstrapID` and initializes a **self-only** node store instead of
+     joining the surviving quorum. There is no product rejoin or re-bootstrap
+     procedure for this; a stable pod address does not help, because the defect
+     is the empty peer list, not the address.
+   No test may therefore promise that "a replaced member joins" without naming
+   the ordinal it replaced; recovering a lost ordinal 0 is prerequisite 5 below.
 3. **Build/version reporting.** No `--version`, no version subcommand, no
    version route. Every lifecycle assertion of "which build is serving" depends
    on external image identity.
 4. **Stable dqlite node address across pod recreation.** Per the finding above.
    Resolving it is product work (a stable per-ordinal address, or reconciling
    `info.yaml` on start); this plan does not authorize that change.
+5. **Ordinal-0 rejoin / re-bootstrap after disk loss.** Per item 2: the chart
+   hands ordinal 0 an empty peer list unconditionally
+   (`helm/caesium/templates/configmap.yaml:14-17`), so a `caesium-0` replaced
+   with a fresh PVC self-bootstraps under `dqlite.BootstrapID` instead of
+   rejoining the surviving quorum. There is no command, route or chart path that
+   recovers it. Resolving it is product work (seed ordinal 0's peer list from its
+   siblings when its data directory is empty, or supply an explicit rejoin
+   procedure); this plan does not authorize that change, and F2's ordinal-0 case
+   reports **blocked-by-prerequisite**.
 
 None of these may be replaced by a test that asserts nothing. A scenario that
 depends on an unresolved prerequisite is reported **blocked** with its evidence.
@@ -602,7 +633,9 @@ not discover subpackages. F4 does **not** need a cluster, B3, or new paid
 infrastructure. `test/lifecycle/versions.json` is the version matrix: for each
 pair, the previous image reference **and resolved digest**, the release asset
 checksums, the protocol version both sides advertise, the shard count, and the
-expected table delta. F4 must not edit `test/contracts/scenarios.json`; that
+expected table delta expressed as explicit `{"table": ..., "column": ...}` pairs
+(so `job_runs.skip_reason` and `task_runs.data_violations` stay on their own
+tables). F4 must not edit `test/contracts/scenarios.json`; that
 file's writer order is A2 → G3 → B3 → D3 → G6, and G6 registers the lifecycle
 scenarios.
 
@@ -653,7 +686,7 @@ YAML per `docs/caesium-job-llm-reference.md`, steps on `alpine:3.23`):
 | Succeeded history | trigger one run to completion | run UUID, task-run UUIDs, terminal status and timestamps |
 | Failed history | trigger a run whose step exits non-zero | run UUID, recorded error, retry eligibility |
 | Queued work | trigger the queued job while its predecessor is running | `run_queue` row id, `claimed_by`/`claimed_at` |
-| Events | the runs above | `GET /v1/events?run_id=` sequence high-water mark |
+| Events | the runs above | for each selected store and run, the full pre-upgrade set of `(sequence, type, task_id, payload)` tuples read from `GET /v1/events?run_id=`, plus the explicit resume cursor chosen below the lowest retained sequence — **not** a high-water mark |
 | Schema | `GET /v1/database/schema` | the 40-table list |
 
 Stop with `docker stop -t 60` so the 30-second grace period
@@ -667,8 +700,20 @@ volume and assert:
    present on its table.
 3. Every recorded job/run/task-run UUID is readable with unchanged terminal
    status, error text and timestamps; the failed run is still failed.
-4. The recorded event sequence replays through `GET /v1/events?run_id=` with
-   `Last-Event-ID`, with no gap below the recorded high-water mark.
+4. Replaying `GET /v1/events?run_id=` with `Last-Event-ID` set to the recorded
+   resume cursor returns, **as a set**, every pre-upgrade `(sequence, type,
+   task_id, payload)` tuple recorded for that run above the cursor. Duplicate
+   and additional deliveries are legal and must not fail the assertion.
+   **A gap-free range or high-water-mark check is invalid here** and must not be
+   written: `ExecutionEvent.Sequence` is a table-wide `autoIncrement` primary key
+   (`internal/models/execution_event.go:12`) while `Store.ListSince` applies
+   `sequence > ?` and *then* filters by `run_id`
+   (`internal/event/store.go:113-150`), so any single run's sequences are
+   legitimately sparse — two interleaved runs can hold `{1,3}` and `{2,4}` and
+   both be complete. Conversely, reaching the same maximum proves nothing about
+   an earlier event surviving. This is exactly DT-EVENT-01's restriction that a
+   sequence identifies an event *within the selected store lifetime* and is not a
+   gap-free counter; the assertion above is the only form that respects it.
 5. The queued row is dequeued and reaches a started run — asserting it merely
    still exists is insufficient, because a stale claim would look identical.
 6. The candidate CLI's `job export` of each alias re-lints and produces no
@@ -737,8 +782,33 @@ recorded in `/var/lib/caesium/dqlite/info.yaml` alongside its current pod IP.
 Seed the same retained-state fixture classes F4 defines, plus in-flight work: a
 run executing at the moment the upgrade starts, and a queued run behind it.
 
-Then `helm upgrade caesium ./helm/caesium --set image.tag="$CANDIDATE_SHA"
---wait --timeout 600s`. A `--wait` timeout is a symptom, not a result: F2 must
+Then upgrade with the **same target and the same values**:
+
+```sh
+helm upgrade caesium ./helm/caesium --kubeconfig "$ARTIFACTS/kubeconfig" \
+  --namespace "$LIFECYCLE_ID" \
+  --values helm/caesium/ci/test-values-lifecycle.yaml \
+  --set image.tag="$CANDIDATE_SHA" --wait --timeout 600s
+```
+
+Every one of those flags is load-bearing and none may be dropped. `helm upgrade`
+does **not** carry the installed overrides forward unless it is given them again
+or `--reuse-values`; re-rendering this chart with only an image override falls
+back to the chart defaults, where `replicaCount: 1` (`helm/caesium/values.yaml:2`)
+and `config.extraEnv` is empty. That would silently scale the release to a single
+member and drop the distributed/run-owner configuration, the three-voter dqlite
+settings, the worker-hostname anti-affinity and the Kubernetes executor RBAC — so
+the run would not exercise the three-member rolling transition this case is
+about, while still reporting success. Omitting `--kubeconfig` and `--namespace`
+likewise risks addressing a different cluster or namespace than the install. F2
+must therefore diff `helm template`/`helm get manifest` before and after the
+upgrade and assert that the **only** change is the image reference: replica
+count, env block, affinity and RBAC must be byte-identical across the
+transition, and a topology change is a harness bug, not a result. If F2 instead
+chooses `--reuse-values`, that is a deliberate choice that must be recorded, and
+the same rendered-diff assertion still applies.
+
+A `--wait` timeout is a symptom, not a result: F2 must
 never assert on the helm exit status alone, and must inspect each pod's phase,
 container exit code and log regardless of how helm returned. Assert, per member
 and in this order:
@@ -754,8 +824,10 @@ and in this order:
    with an agreed leader. This outcome is labelled *address-reuse dependent* and
    is not evidence of a supported upgrade.
 4. Retained state: every pre-upgrade job/run/task-run identity readable with
-   unchanged terminal status; the event sequence replays without a gap below its
-   recorded high-water mark; the queued run reaches a started run; the in-flight
+   unchanged terminal status; the recorded per-run event tuples replay as a set
+   from the explicit resume cursor, allowing duplicates, under exactly the F4
+   rule above (never a gap-free or high-water-mark check); the queued run reaches
+   a started run; the in-flight
    run reaches a legal terminal outcome reconciled against the raw effect ledger
    B1's recorder already provides, with duplicate task attempts retained rather
    than automatically failed.
@@ -766,18 +838,52 @@ and in this order:
 
 Additional F2 cases, each reported pass / fail / blocked with evidence:
 
-- **Membership replacement.** Delete one pod *and* its PVC; assert the
-  replacement generates a new node ID and joins, and record the dead member's
-  leftover entry and role, which no product surface can remove.
+- **Membership replacement (a joining ordinal).** Delete **`caesium-1`** — a
+  non-zero ordinal, chosen precisely because the chart gives it a non-empty peer
+  list — *and* its PVC; assert the replacement generates a new node ID and joins,
+  and record the dead member's leftover entry and role, which no product surface
+  can remove. This case says nothing about ordinal 0 and may not be generalized
+  to it.
+- **Ordinal-0 disk loss (expected blocked).** Delete **`caesium-0`** and its PVC
+  separately. Per the prerequisite above, the empty peer list at
+  `helm/caesium/templates/configmap.yaml:14-17` makes `app.New` take
+  `dqlite.BootstrapID` on the fresh directory and initialize a self-only node
+  store rather than joining the surviving quorum. F2 records the replacement's
+  `info.yaml` ID, its node store, and the surviving members' view of membership,
+  and reports the case **blocked-by-prerequisite** (missing rejoin/bootstrap
+  recovery procedure). A run in which ordinal 0 appears healthy must be checked
+  against the survivors' membership before it is called a rejoin — a self-only
+  bootstrap also answers `/health`.
 - **Snapshot catch-up.** Stop one member long enough for the leader to truncate
   past its index, restart it, and assert it catches up. dqlite's snapshot
   thresholds are unconfigured C defaults (`pkg/dqlite/dqlite.go:164-175` passes
   no `WithSnapshotParams`), so F2 must **measure** the threshold it actually
   crossed rather than assume a number.
 - **Restore.** Stop one member, copy its volume, corrupt or delete the original,
-  restore the copy, restart, and assert the member rejoins and its rows agree
-  with the survivors. If the harness cannot take a consistent copy, report
-  blocked. There is no product restore to exercise.
+  restore the copy, restart. **Rejoining and reading matching rows does not
+  prove the copy was restored** and may not be asserted as such: `dqApp.Open`
+  hands SQL to go-dqlite's driver, which connects through
+  `protocol.NewLeaderConnector` (`go-dqlite/v3@v3.0.4 driver/driver.go:307`), so
+  an HTTP read served by the restarted member can be answered by a **surviving
+  leader**, and any log data missing locally is simply re-replicated from the
+  quorum. A restore that silently lost the copied bytes satisfies both
+  observations. F2 must instead produce:
+  1. **Pre-startup evidence** that the expected snapshot was restored — the
+     copy's manifest (per-file sizes and checksums, and `info.yaml` node ID and
+     address) compared against the restored directory **before** the container
+     starts, not inferred afterwards.
+  2. **An assertion that depends on the snapshot's contents and cannot be
+     supplied by healthy peers** — read the restored member's local state
+     directly rather than through the leader-connected SQL path (for example,
+     inspect the restored data directory, or exercise the member with the other
+     two stopped so no peer can serve or re-replicate the answer).
+  3. **A negative control**: repeat the case with the snapshot omitted or
+     damaged and show the assertion **fails**. An assertion that passes without
+     the snapshot is measuring peer catch-up, not restore.
+  If the harness cannot take a consistent copy, or cannot run the negative
+  control, report the case **blocked** — or scope it explicitly to *member
+  catch-up* and stop using it to qualify the supported snapshot-recovery policy.
+  There is no product restore to exercise.
 - **Rollback.** Only as the recorded-outcome case F1 defines; a `helm rollback`
   that starts is not a supported path.
 
@@ -1004,7 +1110,8 @@ below is mandatory, including append-only edits.
   Files: `docs/exec-plans/active/distributed-testing.md` (F1 decision record only).
   Depends on: A1.
   Verify: add the lifecycle decision record to this plan rather than creating a separate design. Audit existing migrations, release artifacts, chart persistence, membership/replacement procedures, and backup/restore support. Record the exact supported old-to-new paths and allowed rollback/restore behavior, fixture-generation mechanism, retained-run/queue/event cases, and failure assumptions. Distinguish process kill, OS/power loss, lost unflushed writes, and actual disk loss. Deliver the Q4 decisions and exact F2/F3 test procedure; unsupported backup/rollback capabilities become explicit external product prerequisites, not runnable placeholder tests.
-  Note: resolved by the F1 decision record under Strategic Decisions; Q4 is closed there. F4 and F2 are dispatchable without further design. The record is a lifecycle policy and procedure, not upgrade certification — no upgrade, rollback, replacement or restore was executed for F1. Four external product prerequisites are recorded (backup/restore, member removal, build/version reporting, stable dqlite node address); the last one makes F2's upgrade case blocked-by-prerequisite rather than expected-green, and is product work this plan does not authorize.
+  Note: resolved by the F1 decision record under Strategic Decisions; Q4 is closed there. F4 and F2 are dispatchable without further design. The record is a lifecycle policy and procedure, not upgrade certification — no upgrade, rollback, replacement or restore was executed for F1. Five external product prerequisites are recorded (backup/restore, member removal, build/version reporting, stable dqlite node address, ordinal-0 rejoin/re-bootstrap); the stable-address one makes F2's upgrade case blocked-by-prerequisite rather than expected-green, and the ordinal-0 one does the same for its disk-loss case; both are product work this plan does not authorize.
+  Corrected after review: PR #478.
 
 - [ ] F2. Qualify persistent cluster upgrades, replacement, and supported recovery paths
   Files: new `test/lifecycle/cluster_test.go`, `test/lifecycle/versions.json` (created by F4), `scripts/lifecycle-tests.sh` (created by F4), new `helm/caesium/ci/test-values-lifecycle.yaml`.
