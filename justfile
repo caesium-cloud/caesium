@@ -640,6 +640,8 @@ integration-test-podman: build integration-runner
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         --user 0:0 \
@@ -695,6 +697,8 @@ integration-up: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
@@ -726,6 +730,8 @@ integration-up-distributed: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
@@ -769,6 +775,8 @@ integration-up-owner-memory: build-test
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
@@ -832,6 +840,8 @@ integration-up-infra: build-test build-reagents
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
         -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
@@ -920,6 +930,8 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
         -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
         -e CAESIUM_CACHE_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \

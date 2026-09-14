@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/assert"
@@ -472,6 +474,228 @@ func (s *DockerTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	assert.NotNil(s.T(), c)
 	assert.Equal(s.T(), testAtomID, c.ID())
 	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreatePullsDigestWhenTagIsAlreadyPresent is the engine half of the
+// warm-tag/moved-tag case: ImageInspect(tag) would succeed for the stale
+// local content, but Create is given the digest-pinned ref, so inspect/pull
+// use that identity.
+func (s *DockerTestSuite) TestCreatePullsDigestWhenTagIsAlreadyPresent() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	pinned := testImage + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	const staleID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", digest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", testImage).
+		Return(image.InspectResponse{
+			ID:          staleID,
+			RepoDigests: []string{testImage + "@" + staleID},
+		}, nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", pinned).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == pinned
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateExecutesLocalConfigIDWithoutPull is the no-RepoDigests execution
+// path: dockerInspectDigest marks inspect.ID, PinReference returns the image
+// ID, and Create inspects that ID instead of name@digest (which the classic
+// reference store cannot resolve) or pulling from a registry.
+func (s *DockerTestSuite) TestCreateExecutesLocalConfigIDWithoutPull() {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	pinned := imagecheck.PinReference("locally-built:dev", imagecheck.MarkImageIDDigest(configID))
+	s.Equal(configID, pinned)
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", configID).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == configID
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImageInspect", "locally-built:dev@"+configID)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateRewritesNameAtConfigIDToLocalImageID covers the probe that failed
+// before PinReference learned about config IDs: ImageInspect(tag) succeeds
+// but ImageInspect(tag@configID) is "reference does not exist". Create must
+// inspect the digest as an image ID and not attempt a registry pull.
+func (s *DockerTestSuite) TestCreateRewritesNameAtConfigIDToLocalImageID() {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	naivePin := "locally-built:dev@" + configID
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   naivePin,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", naivePin).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", configID).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == configID
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateUsesLocalTagWhenNameAtManifestDigestMissing is the retag case
+// pinDigests hits in integration: alpine:3.23 is present with a RepoDigest, the
+// job names a local tag of that image, and PinReference produces
+// localTag@manifestDigest. Docker cannot inspect or pull that name@digest
+// (the digest is registered as alpine:3.23@sha256:..., and inspect.ID is the
+// config digest). Create must run the already-present local tag/ID.
+func (s *DockerTestSuite) TestCreateUsesLocalTagWhenNameAtManifestDigestMissing() {
+	const (
+		localTag        = "caesium-pindigest-1:stable"
+		manifestDigest  = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		configID        = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		canonicalDigest = "docker.io/library/alpine:3.23@" + manifestDigest
+	)
+	pinned := localTag + "@" + manifestDigest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", manifestDigest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", localTag).
+		Return(image.InspectResponse{
+			ID:          configID,
+			RepoDigests: []string{canonicalDigest},
+		}, nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			if cfg == nil {
+				return false
+			}
+			switch cfg.Image {
+			case localTag, configID, canonicalDigest:
+				return true
+			default:
+				return false
+			}
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", mock.Anything)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreatePullsRegistryDigestPinWhenAbsent() {
+	const digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const name = "registry.example.com/app:v1"
+	pinned := name + "@" + digest
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   pinned,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", pinned).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", digest).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", name).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", pinned).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+			return cfg != nil && cfg.Image == pinned
+		}), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 

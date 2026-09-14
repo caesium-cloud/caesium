@@ -186,11 +186,28 @@ func TestResolver_NonSha256Rejected(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDigestUnavailable)
 }
 
-func TestResolver_UnsupportedEngineUnavailable(t *testing.T) {
-	// Kubernetes has no DigestFunc wired, so it must report unavailable rather
-	// than panic or return an empty digest.
-	r := NewResolver()
+func TestResolver_AcceptsLocalImageIDDigest(t *testing.T) {
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fn := func(_ context.Context, _ string) (string, error) {
+		return MarkImageIDDigest(configID), nil
+	}
+	r := NewResolver(WithEngineDigestFunc(models.AtomEngineDocker, fn))
+
+	got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "locally-built:dev", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, MarkImageIDDigest(configID), got)
+	assert.Equal(t, configID, PinReference("locally-built:dev", got))
+}
+
+func TestResolver_UnwiredEngineUnavailable(t *testing.T) {
+	// An engine explicitly unwired (nil DigestFunc) must report unavailable
+	// rather than panic or return an empty digest.
+	r := NewResolver(WithEngineDigestFunc(models.AtomEngineKubernetes, nil))
 	_, err := r.Resolve(context.Background(), models.AtomEngineKubernetes, "alpine:3.23", time.Minute)
+	assert.ErrorIs(t, err, ErrDigestUnavailable)
+
+	// And an engine the resolver has never heard of.
+	_, err = r.Resolve(context.Background(), models.AtomEngine("firecracker"), "alpine:3.23", time.Minute)
 	assert.ErrorIs(t, err, ErrDigestUnavailable)
 }
 
@@ -255,15 +272,18 @@ func TestDockerInspectDigest_PrefersRepoDigest(t *testing.T) {
 
 func TestDockerInspectDigest_FallsBackToImageID(t *testing.T) {
 	// Locally built / never-pushed images have no RepoDigests; the config
-	// digest (inspect.ID) is a valid content-addressed key and avoids a doomed
-	// registry pull.
+	// digest (inspect.ID) is a valid content-addressed key and is marked so
+	// PinReference executes the image ID rather than a name@digest pin.
+	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	cli := fakeImageAPIClient{inspect: image.InspectResponse{
-		ID:          "sha256:localconfigdigest",
+		ID:          configID,
 		RepoDigests: nil,
 	}}
 	got, err := dockerInspectDigest(context.Background(), cli, "locally-built:dev")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:localconfigdigest", got)
+	assert.Equal(t, MarkImageIDDigest(configID), got)
+	assert.Equal(t, configID, PinReference("locally-built:dev", got),
+		"Create must address the config ID, not locally-built:dev@<configID>")
 }
 
 func TestDockerInspectDigest_EmptyWhenNoUsableDigest(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -148,12 +149,13 @@ func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 // no concept of a creating a Atom without it also starting,
 // so we encapsulate both functions inside docker.Atom.Create.
 func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	if err := e.ensureImagePresent(req.Image); err != nil {
+	imageRef, err := e.ensureImagePresent(req.Image)
+	if err != nil {
 		return nil, err
 	}
 
 	cfg := &dockercontainer.Config{
-		Image: req.Image,
+		Image: imageRef,
 		Cmd:   req.Command,
 		Env:   formatEnv(req.Spec.Env),
 	}
@@ -180,7 +182,7 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		hostCfg = &dockercontainer.HostConfig{Mounts: mounts}
 	}
 
-	log.Info("creating docker container", "image", req.Image)
+	log.Info("creating docker container", "image", imageRef)
 
 	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, req.Name)
 	if err != nil {
@@ -191,7 +193,7 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 
 	log.Info(
 		"starting docker container",
-		"image", req.Image,
+		"image", imageRef,
 		"cmd", req.Command,
 		"id", created.ID,
 	)
@@ -203,13 +205,19 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	return e.Get(&atom.EngineGetRequest{ID: created.ID})
 }
 
-func (e *dockerEngine) ensureImagePresent(imageRef string) error {
+func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
 	if imageRef != "" {
 		if _, err := e.backend.ImageInspect(e.ctx, imageRef); err == nil {
 			log.Info("docker image already present", "image", imageRef)
-			return nil
+			return imageRef, nil
 		} else if !cerrdefs.IsNotFound(err) {
-			return err
+			return "", err
+		}
+
+		if localRef, ok, err := e.resolvePresentPinnedImage(imageRef); err != nil {
+			return "", err
+		} else if ok {
+			return localRef, nil
 		}
 	}
 
@@ -217,7 +225,7 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) error {
 
 	r, err := e.backend.ImagePull(e.ctx, imageRef, image.PullOptions{})
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() {
 		if err := r.Close(); err != nil {
@@ -226,11 +234,106 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) error {
 	}()
 
 	if _, err = io.ReadAll(r); err != nil {
-		return err
+		return "", err
 	}
 
 	log.Info("docker image pulled", "image", imageRef)
-	return nil
+	return imageRef, nil
+}
+
+// resolvePresentPinnedImage maps a name@digest pin onto an image the local
+// daemon can already run. Docker's classic store registers manifest digests
+// under the original repository (alpine:3.23@sha256:...), not a locally retagged
+// name (caesium-pindigest:stable@sha256:...). Config IDs are likewise not
+// name@digest references.
+func (e *dockerEngine) resolvePresentPinnedImage(imageRef string) (string, bool, error) {
+	name, digest, ok := splitPinnedImage(imageRef)
+	if !ok {
+		return "", false, nil
+	}
+
+	if digest != imageRef {
+		if _, err := e.backend.ImageInspect(e.ctx, digest); err == nil {
+			log.Info("docker image present as local id", "image", imageRef, "id", digest)
+			return digest, true, nil
+		} else if !cerrdefs.IsNotFound(err) {
+			return "", false, err
+		}
+	}
+
+	if name == "" || name == imageRef {
+		return "", false, nil
+	}
+
+	inspect, err := e.backend.ImageInspect(e.ctx, name)
+	if err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	localRef, ok := localImageForDigest(name, inspect, digest)
+	if !ok {
+		return "", false, nil
+	}
+	log.Info("docker image present as local tag", "image", imageRef, "local", localRef)
+	return localRef, true, nil
+}
+
+// splitPinnedImage splits a name@sha256:... pin into its name and digest.
+// A digest-only reference yields an empty name.
+func splitPinnedImage(imageRef string) (name, digest string, ok bool) {
+	digest = localConfigImageID(imageRef)
+	if digest == "" {
+		return "", "", false
+	}
+	imageRef = strings.TrimSpace(imageRef)
+	if at := strings.LastIndex(imageRef, "@"); at > 0 {
+		return imageRef[:at], digest, true
+	}
+	return "", digest, true
+}
+
+// localImageForDigest returns a create-able local reference when inspect
+// describes the pinned digest: the config ID, the original tag, or a matching
+// RepoDigest.
+func localImageForDigest(name string, inspect image.InspectResponse, digest string) (string, bool) {
+	if digest == "" {
+		return "", false
+	}
+	if inspect.ID == digest {
+		return inspect.ID, true
+	}
+	for _, rd := range inspect.RepoDigests {
+		if localConfigImageID(rd) != digest {
+			continue
+		}
+		if inspect.ID != "" {
+			return inspect.ID, true
+		}
+		if name != "" {
+			return name, true
+		}
+		return rd, true
+	}
+	return "", false
+}
+
+// localConfigImageID extracts a sha256 image ID from a digest-only reference
+// or a name@digest pin. Empty if imageRef has no digest component.
+func localConfigImageID(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
+	}
+	if at := strings.LastIndex(imageRef, "@"); at >= 0 {
+		imageRef = imageRef[at+1:]
+	}
+	if strings.HasPrefix(imageRef, "sha256:") && !strings.ContainsAny(imageRef, "/@") {
+		return imageRef
+	}
+	return ""
 }
 
 func (e *dockerEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
@@ -527,7 +630,7 @@ func (e *dockerEngine) ensureVolumeSubPaths(resolvedMounts []container.VolumeMou
 // mount.VolumeOptions.Subpath receives (see convertMounts), so the two can
 // never disagree on what "the sub-directory" means.
 func (e *dockerEngine) ensureVolumeSubPath(volumeName, cleanedSubPath string) error {
-	if err := e.ensureImagePresent(e.subpathHelperImage); err != nil {
+	if _, err := e.ensureImagePresent(e.subpathHelperImage); err != nil {
 		return fmt.Errorf("pull subPath helper image for volume %q: %w", volumeName, err)
 	}
 

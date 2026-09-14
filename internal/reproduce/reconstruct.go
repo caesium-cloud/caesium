@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -579,11 +580,7 @@ func imageReference(recorded, digest, override string) (string, string, []Warnin
 			Message: fmt.Sprintf("no resolved image digest recorded for %s; pulling mutable tag is DEGRADED", recorded),
 		}}
 	}
-	base := recorded
-	if before, _, ok := strings.Cut(recorded, "@"); ok {
-		base = before
-	}
-	return base + "@" + digest, "DIGEST", nil
+	return imagecheck.PinReference(recorded, digest), "DIGEST", nil
 }
 
 func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptions, omitted []SecretOmission, resolved []SecretResolution) (*FidelitySummary, []Warning) {
