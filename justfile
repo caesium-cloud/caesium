@@ -82,6 +82,24 @@ agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0
 k8s_registry_port := env("CAESIUM_K8S_REGISTRY_PORT", "5050")
 k8s_registry_name := "caesium-dev-registry"
 
+# Early-evidence lane (distributed-testing G3): B1's three-node owner-crash
+# regression plus E5's SQL-work budget, reduced to one scenario evidence
+# report that scripts/check-test-evidence.py validates against
+# test/contracts/scenarios.json. The lane owns its own kind cluster and
+# namespace; it never touches a pre-existing cluster (scripts/robustness.sh
+# refuses to claim one).
+robustness_image := repo + "/caesium-robustness"
+local_robustness_ref := if podman == "true" { "localhost/" + robustness_image } else { robustness_image }
+robustness_kind_image := env("CAESIUM_ROBUSTNESS_KIND_IMAGE", "kindest/node:v1.36.1")
+robustness_task_image := env("CAESIUM_ROBUSTNESS_TASK_IMAGE", "alpine:3.23")
+evidence_dir := env("CAESIUM_EVIDENCE_DIR", repo_dir + "/.tmp/evidence")
+robustness_artifacts := env("CAESIUM_ROBUSTNESS_ARTIFACTS", evidence_dir + "/robustness")
+# check-test-evidence.py requires a real commit SHA, so a `-amd64` image tag
+# can never stand in for it.
+candidate_sha := env("CANDIDATE_SHA", `git rev-parse HEAD 2>/dev/null || echo unknown`)
+# Suite-qualified: a bare method name matches no test at all.
+sql_budget_run := env("CAESIUM_SQL_BUDGET_RUN", "TestIntegrationTestSuite/TestStatementBudgetFixedWorkload")
+
 validate-platform:
     @if [ "{{ platform }}" != "linux/amd64" ] && [ "{{ platform }}" != "linux/arm64" ]; then \
       echo "Unsupported CAESIUM_PLATFORM '{{ platform }}' (supported: linux/amd64, linux/arm64)"; \
@@ -1041,6 +1059,165 @@ helm-template:
 
 helm-test:
     helm test caesium --timeout 120s
+
+# --------------------------------------------------------------------------
+# Early-evidence lane (distributed-testing G3).
+#
+#   just early-evidence          full lane + evidence validation
+#   just robustness-test         three-node owner-crash regression only
+#   just integration-test-sql-budget   E5's SQL-work budget only
+#   just check-evidence          re-validate already collected fragments
+#
+# CANDIDATE_SHA (default: HEAD) is the candidate identity in the report.
+# CAESIUM_SKIP_IMAGE_BUILD=true consumes preloaded images, as the other CI
+# integration lanes do. Promotion of this lane into ci-ok / required checks is
+# deliberately NOT wired here; that is a separate step.
+# --------------------------------------------------------------------------
+
+# Compiled `./test/robustness` runner plus the candidate CLI. The subpackage
+# tests are NOT in the precompiled ./test binary, so this image builds them
+# explicitly with -tags=integration.
+robustness-runner: validate-platform
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{ skip_image_build }}" = "true" ]; then
+        {{ container_cli }} image inspect {{ local_robustness_ref }}:{{ tag }} >/dev/null
+        echo "Using preloaded {{ local_robustness_ref }}:{{ tag }}"
+        exit 0
+    fi
+    just tag={{ tag }} build-release
+    {{ container_cli }} build --platform {{ platform }} \
+        --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
+        --build-arg CAESIUM_IMAGE={{ local_image_ref }}:{{ tag }} \
+        --target robustness \
+        -t {{ local_robustness_ref }}:{{ tag }} \
+        -f build/Dockerfile.robustness .
+
+robustness-test: robustness-runner
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for cmd in kind kubectl helm python3; do
+        command -v "$cmd" >/dev/null || { echo "required command not found: $cmd" >&2; exit 1; }
+    done
+    artifacts="{{ robustness_artifacts }}"
+    # This directory is wiped; never let a stray env var point it somewhere real.
+    case "$artifacts" in
+        /*/*/*) ;;
+        *) echo "refusing to clear CAESIUM_ROBUSTNESS_ARTIFACTS=$artifacts (want an absolute path at least three levels deep)" >&2; exit 1 ;;
+    esac
+    rm -rf "$artifacts"
+    mkdir -p "$artifacts" "{{ evidence_dir }}"
+    id="${CAESIUM_ROBUSTNESS_ID:-rb-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:20])')}"
+    {{ container_cli }} pull --platform {{ platform }} {{ robustness_kind_image }}
+    {{ container_cli }} pull --platform {{ platform }} {{ robustness_task_image }}
+    status=0
+    CANDIDATE_SHA="{{ candidate_sha }}" \
+    CAESIUM_ROBUSTNESS_ID="$id" \
+    CAESIUM_ROBUSTNESS_ARTIFACTS="$artifacts" \
+    CAESIUM_ROBUSTNESS_IMAGE="{{ local_robustness_ref }}:{{ tag }}" \
+    CAESIUM_ROBUSTNESS_SERVER_IMAGE="{{ local_image_ref }}:{{ tag }}" \
+    CAESIUM_ROBUSTNESS_KIND_IMAGE="{{ robustness_kind_image }}" \
+    CAESIUM_ROBUSTNESS_TASK_IMAGE="{{ robustness_task_image }}" \
+        bash scripts/robustness.sh || status=$?
+    # Strip the run's generated internal token and kubeconfigs before anything
+    # uploads this directory.
+    python3 scripts/collect-evidence.py redact --artifacts "$artifacts" || true
+    if ! python3 scripts/collect-evidence.py robustness \
+            --artifacts "$artifacts" \
+            --candidate-sha "{{ candidate_sha }}" \
+            --out "{{ evidence_dir }}/robustness.json"; then
+        echo "robustness evidence could not be collected from $artifacts" >&2
+        if [ "$status" -eq 0 ]; then status=1; fi
+    fi
+    exit "$status"
+
+# E5's SQL-work budget against the existing `integration-up` server. The full
+# sharded suite still runs this scenario in the `integration` lane; this focused
+# recipe exists so the scenario emits scenario evidence with an observed
+# topology/mode/flag set and a retained /metrics counter artifact.
+integration-test-sql-budget: integration-runner
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just tag={{ tag }} integration-up
+    out="{{ evidence_dir }}/sql-budget"
+    rm -rf "$out"
+    mkdir -p "$out"
+    cli_dir={{ repo_dir }}/.tmp/caesium-cli
+    rm -rf "$cli_dir"
+    mkdir -p "$cli_dir"
+    cli_ctr=$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true)
+    trap '{{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"; {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true' EXIT
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"
+    chmod +x "$cli_dir/caesium"
+    {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true
+    status=0
+    # The test image starts dockerd before caesium; wait for /health here so a
+    # slow daemon start reads as a setup failure, not a budget failure.
+    if ! {{ container_cli }} run --rm --platform {{ platform }} \
+            --network=container:{{ it_container }} \
+            {{ integration_runner_image }} \
+            sh -c 'for _ in $(seq 1 90); do \
+                     wget -q -O /dev/null http://127.0.0.1:{{ port }}/health && exit 0; \
+                     sleep 2; \
+                   done; exit 1'; then
+        echo "caesium server did not become ready; logs:" >&2
+        {{ container_cli }} logs {{ it_container }} 2>&1 | tail -n 100 >&2 || true
+        exit 1
+    fi
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --network=container:{{ it_container }} \
+        -w {{ bld_dir }} \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "{{ sql_budget_run }}"' \
+        2>&1 | tee "$out/statement-budget.log" || status=1
+    # Independent counter artifact, scraped from the same live server.
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        --network=container:{{ it_container }} \
+        {{ integration_runner_image }} \
+        wget -q -O - "http://127.0.0.1:{{ port }}/metrics" >"$out/metrics.prom" || status=1
+    {{ container_cli }} logs {{ it_container }} >"$out/server.log" 2>&1 || true
+    # Fail closed rather than aborting before the evidence is collected: an
+    # absent inspect leaves collect-evidence with nothing to read.
+    {{ container_cli }} inspect {{ it_container }} >"$out/server-inspect.json" || status=1
+    image_id=$({{ container_cli }} image inspect --format '{{ "{{.Id}}" }}' {{ local_image_ref }}:{{ tag }}-test)
+    if ! python3 scripts/collect-evidence.py sql-work-budget \
+            --inspect "$out/server-inspect.json" \
+            --metrics "$out/metrics.prom" \
+            --log "$out/statement-budget.log" \
+            --candidate-sha "{{ candidate_sha }}" \
+            --server-image-id "$image_id" \
+            --out "{{ evidence_dir }}/sql-budget.json"; then
+        echo "SQL-work-budget evidence could not be collected from $out" >&2
+        if [ "$status" -eq 0 ]; then status=1; fi
+    fi
+    if [ "$status" -ne 0 ]; then
+        echo "SQL-work budget failed; caesium server logs:"
+        tail -n 200 "$out/server.log" || true
+    fi
+    exit "$status"
+
+# Merge the lane fragments and fail closed on a missing artifact, a missing or
+# skipped scenario, a disabled gate, wrong topology/mode/flags, a wrong
+# candidate identity or absent fault evidence.
+check-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/collect-evidence.py report \
+        --out "{{ evidence_dir }}/evidence.json" \
+        "{{ evidence_dir }}/sql-budget.json" \
+        "{{ evidence_dir }}/robustness.json"
+    python3 scripts/check-test-evidence.py \
+        --manifest test/contracts/scenarios.json \
+        --report "{{ evidence_dir }}/evidence.json" \
+        --require early \
+        --strict
+
+early-evidence: integration-test-sql-budget robustness-test check-evidence
 
 # Spin up the local dev registry and configure the cluster's containerd to
 # pull from it via host.docker.internal. Idempotent. Targets Docker Desktop
