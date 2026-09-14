@@ -23,8 +23,71 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
 JOBS = WORKFLOW["jobs"]
-SELECTORS = runpy.run_path(str(ROOT / "scripts/ci-ok.py"))["SELECTORS"]
+CI_OK = runpy.run_path(str(ROOT / "scripts/ci-ok.py"))
+SELECTORS = CI_OK["SELECTORS"]
+EVIDENCE_JOB = CI_OK["EVIDENCE_JOB"]
+EVIDENCE_GATE = CI_OK["EVIDENCE_GATE"]
 FLAGS = ("go", "ui", "helm", "reagents", "ci")
+MANIFEST_PATH = ROOT / "test/contracts/scenarios.json"
+MANIFEST = json.loads(MANIFEST_PATH.read_text())
+CANDIDATE_SHA = "b3f1c0de" + "0" * 32
+CANDIDATE_DIGEST = "sha256:" + "cd" * 32
+
+
+def gated_scenarios(manifest=None):
+    return [item for item in (manifest or MANIFEST)["scenarios"]
+            if EVIDENCE_GATE in (item.get("gates") or [])]
+
+
+def evidence_report(sha=CANDIDATE_SHA, digest=CANDIDATE_DIGEST):
+    """A report of the shape the lane uploads, rebuilt from the real manifest.
+
+    Every observed value is echoed from the committed manifest row, so this
+    fixture cannot drift away from what the gate demands.
+    """
+    scenarios = []
+    for item in gated_scenarios():
+        evidence = item.get("evidence") or {}
+        entry = {
+            "id": item["id"],
+            "status": "pass",
+            "topology": dict(item["topology"]),
+            "mode": dict(item["mode"]),
+            "feature_flags": dict(item["feature_flags"]),
+            "artifact_identity": evidence.get("artifact_identity", ""),
+            "observations": [obs["id"] for obs in item["expected_observations"]],
+            "recorder": {"present": True, "sample_count": max(evidence.get("min_samples", 0), 1)},
+            "checker": {"timed_out": False},
+        }
+        if evidence.get("require_candidate_sha"):
+            entry["candidate_sha"] = sha
+        if evidence.get("require_candidate_digest"):
+            entry["candidate_digest"] = digest
+        fault = item.get("fault_activation") or {}
+        if fault.get("required"):
+            entry["fault_activation"] = {
+                "activated": True,
+                "kind": fault["kind"],
+                "observations": list(fault["required_observations"]),
+            }
+        scenarios.append(entry)
+    return {
+        "candidate_sha": sha,
+        "candidate_digest": digest,
+        "gate_enabled": True,
+        "disabled_gates": [],
+        "scenarios": scenarios,
+    }
+
+
+def gate_command(report, manifest=MANIFEST_PATH, sha=CANDIDATE_SHA, jobs=None):
+    return [
+        sys.executable, str(ROOT / "scripts/ci-ok.py"),
+        "--evidence-report", str(report),
+        "--evidence-manifest", str(manifest),
+        "--candidate-sha", sha,
+        *(JOBS["ci-ok"]["needs"] if jobs is None else jobs),
+    ]
 
 
 def selected_outputs(enabled=()):
@@ -44,9 +107,15 @@ def results(outputs):
 
 
 class GateTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.evidence = Path(tmp.name) / "evidence.json"
+        self.evidence.write_text(json.dumps(evidence_report()))
+
     def gate(self, needs, expected):
         result = subprocess.run(
-            [sys.executable, str(ROOT / "scripts/ci-ok.py"), *JOBS["ci-ok"]["needs"]],
+            gate_command(self.evidence),
             env={**os.environ, "NEEDS_JSON": json.dumps(needs)},
             capture_output=True,
             text=True,
@@ -244,9 +313,17 @@ class WorkflowTests(unittest.TestCase):
                         f"needs.changes.outputs.{key} == 'true'" for key in selectors
                     ))
         gate = JOBS["ci-ok"]
-        command = gate["steps"][-1]["run"].replace("\\\n", " ").split()
+        command = shlex.split(gate["steps"][-1]["run"].replace("\\\n", " "))
         self.assertEqual(command[:2], ["python3", "scripts/ci-ok.py"])
-        self.assertEqual(command[2:], gate["needs"])
+        # Named options carry the evidence wiring; the positionals are the
+        # required job names and must be exactly this job's `needs`.
+        positional, rest = [], iter(command[2:])
+        for item in rest:
+            if item.startswith("--"):
+                next(rest)
+            else:
+                positional.append(item)
+        self.assertEqual(positional, gate["needs"])
         for name in gate["needs"]:
             self.assertTrue(set(JOBS[name].get("needs", [])) <= set(gate["needs"]))
 
@@ -374,12 +451,16 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(selected_groups(path) & selectors, path)
 
-    def test_lane_is_not_promoted_into_the_merge_gate(self):
+    def test_lane_is_promoted_into_the_merge_gate_only(self):
+        # G5 promoted the lane into the fail-closed aggregate. The two wrapper
+        # jobs that ARE required contexts keep their existing contract; changing
+        # what they mean is a repository-settings decision, not a workflow one.
         self.assertIn(self.LANE, JOBS)
-        self.assertNotIn(self.LANE, JOBS["ci-ok"]["needs"])
-        self.assertNotIn(self.LANE, SELECTORS)
+        self.assertIn(self.LANE, JOBS["ci-ok"]["needs"])
+        self.assertIn(self.LANE, SELECTORS)
         for name in ("build-and-integration-test", "build-and-integration-test-agent-auth"):
             self.assertNotIn(self.LANE, JOBS[name]["needs"])
+            self.assertEqual(JOBS[name]["needs"], ["changes", "images", "integration"])
 
     def test_required_check_jobs_are_preserved(self):
         for name in ("lint", "unit-test", "unit-test-arm64", "ui-test", "ui-e2e",
@@ -498,6 +579,175 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
             for scenario in self.EARLY:
                 self.assertIn(f"missing-scenario={scenario['id']}",
                               checked.stdout + checked.stderr)
+
+
+class EarlyEvidencePromotionTests(unittest.TestCase):
+    """G5: the early lane is required by the aggregate, and a green job is not enough."""
+
+    LANE = EVIDENCE_JOB
+
+    def gate_step(self):
+        return next(step for step in JOBS["ci-ok"]["steps"] if step.get("name") == "Evaluate merge gate")
+
+    def gate_argv(self):
+        return shlex.split(self.gate_step()["run"].replace("\\\n", " "))
+
+    def run_gate(self, expected, report=evidence_report, manifest=None, sha=CANDIDATE_SHA,
+                 enabled=FLAGS, needs=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+            if report is not None:
+                path.write_text(json.dumps(report() if callable(report) else report))
+            manifest_path = MANIFEST_PATH
+            if manifest is not None:
+                manifest_path = Path(tmp) / "scenarios.json"
+                manifest_path.write_text(json.dumps(manifest))
+            result = subprocess.run(
+                gate_command(path, manifest=manifest_path, sha=sha),
+                env={**os.environ,
+                     "NEEDS_JSON": json.dumps(results(selected_outputs(enabled)) if needs is None else needs)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            return result.stdout + result.stderr
+
+    def test_lane_is_a_required_dependency_of_the_aggregate(self):
+        self.assertIn(self.LANE, JOBS["ci-ok"]["needs"])
+        # The gate's skip policy must be exactly the lane's own path selection,
+        # or a selected lane could vanish and read as an allowed skip.
+        self.assertEqual(set(SELECTORS[self.LANE]), job_selectors(self.LANE))
+        self.assertEqual(SELECTORS[self.LANE], ("go", "helm", "ci"))
+        argv = self.gate_argv()
+        self.assertIn(self.LANE, argv)
+        for name in JOBS["ci-ok"]["needs"]:
+            self.assertIn(name, argv, name)
+
+    def test_gate_step_is_wired_to_the_uploaded_evidence(self):
+        steps = JOBS["ci-ok"]["steps"]
+        download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact"))
+        upload = JOBS[self.LANE]["steps"][-1]
+        self.assertEqual(download["uses"], "actions/download-artifact@v8")
+        self.assertEqual(download["with"]["name"], upload["with"]["name"])
+        self.assertEqual(download["if"], f"needs.{self.LANE}.result == 'success'")
+        self.assertLess(steps.index(download), steps.index(self.gate_step()))
+        argv = self.gate_argv()
+        report = argv[argv.index("--evidence-report") + 1]
+        # The gate must read the artifact where the download step puts it.
+        self.assertEqual(str(Path(report).parent), download["with"]["path"])
+        self.assertEqual(argv[argv.index("--evidence-manifest") + 1], "test/contracts/scenarios.json")
+        # Evidence from another commit cannot satisfy this run.
+        self.assertEqual(argv[argv.index("--candidate-sha") + 1], "${{ github.sha }}")
+        self.assertEqual(JOBS[self.LANE]["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+
+    def test_new_dependency_fails_closed_on_every_bad_result(self):
+        for status in ("failure", "cancelled", "skipped", "timed_out", "unknown", None):
+            with self.subTest(status=status):
+                needs = results(selected_outputs(FLAGS))
+                if status is None:
+                    del needs[self.LANE]
+                else:
+                    needs[self.LANE]["result"] = status
+                self.assertIn(f"{self.LANE}={status or 'missing'}", self.run_gate(1, needs=needs))
+
+    def test_deselected_lane_needs_no_evidence(self):
+        # A docs-only change spends no kind cluster and owes no report.
+        needs = results(selected_outputs(()))
+        self.assertEqual(needs[self.LANE]["result"], "skipped")
+        output = self.run_gate(0, report=None, enabled=(), needs=needs)
+        self.assertIn("deselected by the path filters", output)
+
+    def test_absent_or_foreign_evidence_fails_closed(self):
+        self.assertIn("produced no evidence", self.run_gate(1, report=None))
+        self.assertIn("must be an object", self.run_gate(1, report=[]))
+        self.assertIn("not the tested candidate", self.run_gate(1, sha="a" * 40))
+        report = evidence_report()
+        report["candidate_sha"] = "e" * 40
+        self.assertIn("not the tested candidate", self.run_gate(1, report=report))
+
+    def test_hollow_evidence_fails_closed(self):
+        ids = [item["id"] for item in gated_scenarios()]
+        self.assertEqual(sorted(ids), [
+            "b1-owner-crash-leader", "b1-owner-crash-nonleader", "e5-sql-work-budget",
+        ])
+        for sid in ids:
+            with self.subTest(scenario=sid, mutation="missing"):
+                report = evidence_report()
+                report["scenarios"] = [item for item in report["scenarios"] if item["id"] != sid]
+                self.assertIn(f"scenario {sid!r} is missing", self.run_gate(1, report=report))
+            for status in ("fail", "inconclusive", "timeout", "skip"):
+                with self.subTest(scenario=sid, status=status):
+                    report = evidence_report()
+                    entry = next(item for item in report["scenarios"] if item["id"] == sid)
+                    entry["status"] = status
+                    self.assertIn(f"scenario {sid!r} status {status!r}", self.run_gate(1, report=report))
+        # No report at all, and a report with no scenarios, are both failures.
+        report = evidence_report()
+        report["scenarios"] = []
+        self.assertEqual(len(gated_scenarios()), self.run_gate(1, report=report).count("is missing from the report"))
+
+    def test_absent_fault_activation_fails_closed(self):
+        faulted = [item for item in gated_scenarios() if (item.get("fault_activation") or {}).get("required")]
+        self.assertTrue(faulted, "the early gate must require fault evidence from at least one scenario")
+        for scenario in faulted:
+            sid = scenario["id"]
+            fault = scenario["fault_activation"]
+            for mutation, patch in (
+                ("not activated", {"activated": False}),
+                ("wrong kind", {"kind": "graceful-shutdown"}),
+                ("dropped observation", {"observations": list(fault["required_observations"])[1:]}),
+                ("no fault evidence", None),
+            ):
+                with self.subTest(scenario=sid, mutation=mutation):
+                    report = evidence_report()
+                    entry = next(item for item in report["scenarios"] if item["id"] == sid)
+                    if patch is None:
+                        del entry["fault_activation"]
+                    else:
+                        entry["fault_activation"].update(patch)
+                    output = self.run_gate(1, report=report)
+                    self.assertIn(sid, output)
+                    self.assertIn("fault", output)
+
+    def test_gate_delegates_deep_validation_to_the_scenario_checker(self):
+        # Failures the gate's own exact-scenario pass cannot see must still fail:
+        # they come back from scripts/check-test-evidence.py.
+        sid = gated_scenarios()[0]["id"]
+        mutations = {
+            "wrong-topology": lambda entry, report: entry["topology"].update({"replicas": 1}),
+            "wrong-feature-flags": lambda entry, report: entry["feature_flags"].update(
+                {next(iter(entry["feature_flags"])): "tampered"}),
+            "missing-observation": lambda entry, report: entry["observations"].pop(),
+            "wrong-artifact-identity": lambda entry, report: entry.update({"artifact_identity": "something-else"}),
+            "missing-recorder": lambda entry, report: entry["recorder"].update({"present": False}),
+            "disabled-gate": lambda entry, report: report.update({"gate_enabled": False}),
+            "disabled-gates-list": lambda entry, report: report.update({"disabled_gates": ["early"]}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                report = evidence_report()
+                mutate(next(item for item in report["scenarios"] if item["id"] == sid), report)
+                output = self.run_gate(1, report=report)
+                self.assertIn("check-test-evidence.py exited 1", output)
+
+    def test_an_ungated_manifest_cannot_vacuously_pass(self):
+        manifest = copy.deepcopy(MANIFEST)
+        for item in manifest["scenarios"]:
+            item["gates"] = []
+        output = self.run_gate(1, manifest=manifest)
+        self.assertIn("has no registered scenarios", output)
+
+    def test_honest_evidence_passes(self):
+        output = self.run_gate(0)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("test-evidence passed", output)
+
+    def test_existing_optional_lanes_keep_their_current_status(self):
+        for name in ("helm-integration-test", "podman-integration-test",
+                     "integration-extra", "integration-arm64"):
+            self.assertIn(name, JOBS, name)
+            self.assertNotIn(name, JOBS["ci-ok"]["needs"], name)
+            self.assertNotIn(name, SELECTORS, name)
+            self.assertNotIn(name, self.gate_argv(), name)
 
 
 class IntegrationRunnerTests(unittest.TestCase):
