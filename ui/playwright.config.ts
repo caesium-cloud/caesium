@@ -5,6 +5,13 @@ export default defineConfig({
   timeout: 120_000,
   expect: {
     timeout: 15_000,
+    toHaveScreenshot: {
+      // Small tolerance for sub-pixel anti-aliasing noise between otherwise
+      // identical Linux/Chromium renders — NOT a substitute for generating
+      // baselines on the CI-equivalent platform (see ui/e2e/visual.spec.ts).
+      maxDiffPixelRatio: 0.02,
+      animations: "disabled",
+    },
   },
   fullyParallel: false,
   // Retries collect diagnostics; recovery must not turn a CI failure green.
