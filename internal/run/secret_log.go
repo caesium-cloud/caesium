@@ -57,6 +57,7 @@ func (s *Store) SaveCapturedTaskLogSnapshot(runID, taskRef uuid.UUID, snapshot *
 func WithInvalidatedSecretLogSnapshot(updates map[string]any) map[string]any {
 	updates["log_text"] = gorm.Expr("CASE WHEN log_scrubbed = ? THEN ? ELSE log_text END", true, "")
 	updates["log_truncated"] = gorm.Expr("CASE WHEN log_scrubbed = ? THEN ? ELSE log_truncated END", true, false)
+	updates["log_generation"] = gorm.Expr("CASE WHEN log_scrubbed = ? THEN ? ELSE log_generation END", true, "")
 	return updates
 }
 
@@ -64,18 +65,23 @@ func WithInvalidatedSecretLogSnapshot(updates map[string]any) map[string]any {
 // produced them. Claim is nil on the local lane; distributed writes also carry
 // the claim generation so a reclaimed worker cannot overwrite its successor.
 type SecretLogFence struct {
-	Attempt int
-	Claim   *TaskClaim
+	Attempt    int
+	Claim      *TaskClaim
+	Generation string
 }
 
 // PrepareSecretTaskLog commits the safe routing bit before a secret-bearing
 // runtime starts. Readers must never open its raw runtime log after this write.
 func (s *Store) PrepareSecretTaskLog(runID, taskRef uuid.UUID, fence SecretLogFence) error {
+	if fence.Generation == "" {
+		return ErrTaskClaimMismatch
+	}
 	return s.writeSecretTaskLog(runID, taskRef, fence, map[string]any{
-		"log_scrubbed":  true,
-		"log_text":      "",
-		"log_truncated": false,
-	})
+		"log_scrubbed":   true,
+		"log_text":       "",
+		"log_truncated":  false,
+		"log_generation": fence.Generation,
+	}, false)
 }
 
 // SaveSecretTaskLogSnapshot replaces the cumulative sanitized snapshot while
@@ -88,10 +94,10 @@ func (s *Store) SaveSecretTaskLogSnapshot(runID, taskRef uuid.UUID, fence Secret
 		"log_scrubbed":  true,
 		"log_text":      snapshot.Text,
 		"log_truncated": snapshot.Truncated,
-	})
+	}, true)
 }
 
-func (s *Store) writeSecretTaskLog(runID, taskRef uuid.UUID, fence SecretLogFence, updates map[string]any) error {
+func (s *Store) writeSecretTaskLog(runID, taskRef uuid.UUID, fence SecretLogFence, updates map[string]any, requireGeneration bool) error {
 	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -105,6 +111,14 @@ func (s *Store) writeSecretTaskLog(runID, taskRef uuid.UUID, fence SecretLogFenc
 	if fence.Claim != nil {
 		q = q.Where("claimed_by = ? AND claim_attempt = ?", fence.Claim.ClaimedBy, fence.Claim.ClaimAttempt)
 	}
+	if requireGeneration {
+		q = q.Where("log_generation = ?", fence.Generation)
+	} else {
+		// Prepare is idempotent for its own token but cannot replace a producer
+		// that already established a different generation under the same
+		// attempt/claim identity.
+		q = q.Where("(log_generation = ? OR log_generation = ?)", "", fence.Generation)
+	}
 	res := q.Updates(updates)
 	if res.Error != nil {
 		return res.Error
@@ -115,21 +129,33 @@ func (s *Store) writeSecretTaskLog(runID, taskRef uuid.UUID, fence SecretLogFenc
 	return nil
 }
 
-// TaskLogReadState is the cross-node live-log handoff. It carries only the
-// bounded sanitized snapshot and lifecycle state, never resolved values.
+// TaskLogReadState is the cheap cross-node live-log probe. It carries lifecycle
+// identity plus bounded snapshot metadata, never log text or resolved values.
 type TaskLogReadState struct {
-	Snapshot     *TaskLogSnapshot
 	Status       TaskStatus
 	Attempt      int
 	ClaimedBy    string
 	ClaimAttempt int
 	Scrubbed     bool
+	Generation   string
+	LogBytes     int
+	Truncated    bool
 }
 
 func (s *Store) TaskLogReadStateForInstance(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskLogReadState, error) {
-	var row models.TaskRun
+	var row struct {
+		Status        string
+		Attempt       int
+		ClaimedBy     string
+		ClaimAttempt  int
+		LogScrubbed   bool
+		LogGeneration string
+		LogBytes      int
+		LogTruncated  bool
+	}
 	if err := s.db.WithContext(ctx).
-		Select("status", "attempt", "claimed_by", "claim_attempt", "log_text", "log_truncated", "log_scrubbed").
+		Model(&models.TaskRun{}).
+		Select("status", "attempt", "claimed_by", "claim_attempt", "log_scrubbed", "log_generation", taskLogByteLengthExpression(s.db.Dialector.Name())+" AS log_bytes", "log_truncated").
 		Where("id = ? AND job_run_id = ?", taskRunID, runID).
 		First(&row).Error; err != nil {
 		return nil, err
@@ -137,9 +163,40 @@ func (s *Store) TaskLogReadStateForInstance(ctx context.Context, runID, taskRunI
 	state := &TaskLogReadState{
 		Status: TaskStatus(row.Status), Attempt: row.Attempt,
 		ClaimedBy: row.ClaimedBy, ClaimAttempt: row.ClaimAttempt, Scrubbed: row.LogScrubbed,
-	}
-	if row.LogText != "" || row.LogTruncated {
-		state.Snapshot = &TaskLogSnapshot{Text: row.LogText, Truncated: row.LogTruncated}
+		Generation: row.LogGeneration, LogBytes: row.LogBytes, Truncated: row.LogTruncated,
 	}
 	return state, nil
+}
+
+func taskLogByteLengthExpression(dialect string) string {
+	switch dialect {
+	case "dqlite", "sqlite", "sqlite3":
+		// SQLite length(TEXT) stops at the first NUL. Casting to BLOB keeps
+		// metadata polling sensitive to every byte appended to the snapshot.
+		return "length(CAST(log_text AS BLOB))"
+	default:
+		// PostgreSQL has no BLOB type. OCTET_LENGTH is supported there and is
+		// the correct byte-counting operation for multibyte text.
+		return "octet_length(log_text)"
+	}
+}
+
+// SecretTaskLogSnapshotForGeneration loads text only while the producer token
+// observed by the metadata probe still owns the row. This closes the gap where
+// a replacement can Prepare between the cheap probe and the full-text SELECT.
+func (s *Store) SecretTaskLogSnapshotForGeneration(ctx context.Context, runID, taskRunID uuid.UUID, generation string) (*TaskLogSnapshot, error) {
+	var row models.TaskRun
+	if err := s.db.WithContext(ctx).
+		Select("log_text", "log_truncated").
+		Where("id = ? AND job_run_id = ? AND log_generation = ? AND log_scrubbed = ?", taskRunID, runID, generation, true).
+		First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskClaimMismatch
+		}
+		return nil, err
+	}
+	if row.LogText == "" && !row.LogTruncated {
+		return nil, nil
+	}
+	return &TaskLogSnapshot{Text: row.LogText, Truncated: row.LogTruncated}, nil
 }

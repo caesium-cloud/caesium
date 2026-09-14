@@ -4,12 +4,34 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+type blockingSecretLogReader struct {
+	started chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingSecretLogReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingSecretLogReader) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
+}
 
 type secretLogErrorReader struct {
 	data []byte
@@ -123,4 +145,94 @@ func TestSecretLogCollectorThrottlesFailedSnapshotWritesAndRetriesFinal(t *testi
 
 	require.ErrorContains(t, collector.Close(), "database unavailable")
 	require.Equal(t, 3, writes, "the final close must retry despite the failed-write throttle")
+}
+
+func TestSecretLogCollectorAbortDoesNotWaitForPersistence(t *testing.T) {
+	collector := NewSecretLogCollector(nil, uuid.Nil, uuid.Nil, SecretLogFence{}, []string{"canary"}, 1024)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	collector.persistSnapshot = func(*TaskLogSnapshot) error {
+		close(started)
+		<-release
+		return nil
+	}
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = collector.Write([]byte("safe output"))
+		close(writeDone)
+	}()
+	<-started
+	abortDone := make(chan struct{})
+	go func() {
+		collector.Abort()
+		close(abortDone)
+	}()
+	select {
+	case <-abortDone:
+	case <-time.After(time.Second):
+		t.Fatal("Abort blocked behind snapshot persistence")
+	}
+	close(release)
+	<-writeDone
+}
+
+func TestSecretLogCollectorSkipsOutOfOrderOlderSnapshot(t *testing.T) {
+	collector := NewSecretLogCollector(nil, uuid.Nil, uuid.Nil, SecretLogFence{}, nil, 1024)
+	var persisted []string
+	collector.persistSnapshot = func(snapshot *TaskLogSnapshot) error {
+		persisted = append(persisted, snapshot.Text)
+		return nil
+	}
+	collector.persist(&secretLogPersistRequest{sequence: 2, version: 2, snapshot: &TaskLogSnapshot{Text: "newer"}})
+	collector.persist(&secretLogPersistRequest{sequence: 1, version: 1, snapshot: &TaskLogSnapshot{Text: "older"}})
+	require.Equal(t, []string{"newer"}, persisted)
+	require.Equal(t, "newer", collector.lastText)
+}
+
+func TestSecretLogCollectorClearsTransientErrorAfterSuccessfulRetry(t *testing.T) {
+	collector := NewSecretLogCollector(nil, uuid.Nil, uuid.Nil, SecretLogFence{}, []string{"canary"}, 1024)
+	now := time.Unix(1000, 0)
+	collector.now = func() time.Time { return now }
+	writes := 0
+	collector.persistSnapshot = func(*TaskLogSnapshot) error {
+		writes++
+		if writes == 1 {
+			return errors.New("temporary database failure")
+		}
+		return nil
+	}
+	_, _ = collector.Write([]byte("first "))
+	require.Error(t, collector.Err())
+	now = now.Add(secretLogSnapshotInterval)
+	_, _ = collector.Write([]byte(" second"))
+	require.NoError(t, collector.Err())
+	require.NoError(t, collector.Close())
+}
+
+func TestSecretLogCollectorStopsAfterOwnershipMismatch(t *testing.T) {
+	collector := NewSecretLogCollector(nil, uuid.Nil, uuid.Nil, SecretLogFence{}, []string{"canary"}, 1024)
+	now := time.Unix(1000, 0)
+	collector.now = func() time.Time { return now }
+	writes := 0
+	collector.persistSnapshot = func(*TaskLogSnapshot) error {
+		writes++
+		return ErrTaskClaimMismatch
+	}
+	_, _ = collector.Write([]byte("first"))
+	for range 10 {
+		now = now.Add(secretLogSnapshotInterval)
+		_, _ = collector.Write([]byte("more"))
+	}
+	require.ErrorIs(t, collector.Close(), ErrTaskClaimMismatch)
+	require.Equal(t, 1, writes)
+}
+
+func TestSecretLogDrainTimeoutAbortsAndFailsCapture(t *testing.T) {
+	logs := &blockingSecretLogReader{started: make(chan struct{}), closed: make(chan struct{})}
+	collector := NewSecretLogCollector(nil, uuid.Nil, uuid.Nil, SecretLogFence{}, []string{"canary"}, 1024)
+	results := StartSecretTaskLogCapture(logs, collector, 0, 0)
+	<-logs.started
+	result, timedOut := DrainSecretTaskLogCapture(results, collector, logs, time.Millisecond, time.Second)
+	require.True(t, timedOut)
+	require.Error(t, result.Err)
 }

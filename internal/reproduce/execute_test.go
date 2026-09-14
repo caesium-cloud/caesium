@@ -114,6 +114,28 @@ func TestExecuteUsesDegradedTagPullWhenDigestMissing(t *testing.T) {
 	}
 }
 
+func TestExecutePreservesAuthoritativeOutputForScrubbedLogs(t *testing.T) {
+	desc := basicDescriptor("registry.example.com/team/app:latest")
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	result, err := Execute(context.Background(), desc, env, ExecuteOptions{
+		Puller: &fakePuller{},
+		Runner: fakeRunner{result: &RunResult{Tasks: []TaskResult{{
+			Name: "transform", Status: "succeeded", LogScrubbed: true,
+			Output:  map[string]string{"token": "resolved-secret"},
+			LogText: `##caesium::output {"token":"[REDACTED]"}`,
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := result.Output["token"]; got != "resolved-secret" {
+		t.Fatalf("Output[token] = %q, want authoritative persisted value", got)
+	}
+}
+
 func TestExecuteUsesImageOverrideForPullAndSynthesizedDefinition(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:prod")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

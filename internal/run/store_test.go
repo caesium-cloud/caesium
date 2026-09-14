@@ -1337,7 +1337,7 @@ func TestRetryTaskClearsPreviousExecutionArtifacts(t *testing.T) {
 	require.NoError(t, store.RegisterTask(runRecord.ID, task, atomModel, 0))
 	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
 	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "failure", map[string]string{"rows": "10"}, []string{"branch-a"}))
-	require.NoError(t, store.SaveTaskLogSnapshot(runRecord.ID, task.ID, &TaskLogSnapshot{
+	require.NoError(t, store.SaveCapturedTaskLogSnapshot(runRecord.ID, task.ID, &TaskLogSnapshot{
 		Text:      "previous attempt logs",
 		Truncated: true,
 	}))

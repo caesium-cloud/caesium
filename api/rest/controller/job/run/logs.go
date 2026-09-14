@@ -51,6 +51,10 @@ var scrubbedLogStateLoader = func(ctx context.Context, runID, taskRunID uuid.UUI
 	return runstorage.Default().TaskLogReadStateForInstance(ctx, runID, taskRunID)
 }
 
+var scrubbedLogSnapshotLoader = func(ctx context.Context, runID, taskRunID uuid.UUID, generation string) (*runstorage.TaskLogSnapshot, error) {
+	return runstorage.Default().SecretTaskLogSnapshotForGeneration(ctx, runID, taskRunID, generation)
+}
+
 var scrubbedLogPollInterval = 100 * time.Millisecond
 
 // Logs streams (or replays) one task's container log.
@@ -140,7 +144,8 @@ func Logs(c *echo.Context) error {
 	}
 
 	// Fan-out: resolve which instance's log this is. selected is nil for an
-	// unfanned task, which keeps the collapsed-entry path below byte-identical.
+	// unfanned task, which skips selector-specific instance enumeration. The
+	// authoritative routing lookup below still applies to every task.
 	selected, problem, err := resolveLogInstance(ctx, runID, taskID, taskEntry,
 		strings.TrimSpace(c.QueryParam("task_run_id")), c.QueryParam("partition"))
 	if err != nil {
@@ -163,12 +168,14 @@ func Logs(c *echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(loadErr)
 		}
 		if len(instances) != 1 {
-			return echo.ErrNotFound
+			// A collapsed read model is not authoritative enough to decide that a
+			// runtime log is safe. Fail closed if the instance identity cannot be
+			// resolved uniquely.
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "task log instance unavailable")
 		}
 		authoritative = instances[0]
 	}
 
-	var snapshot *runstorage.TaskLogSnapshot
 	if selected != nil {
 		c.Response().Header().Set(logHeaderTaskRunID, selected.ID.String())
 		if selected.PartitionValue != "" {
@@ -176,10 +183,6 @@ func Logs(c *echo.Context) error {
 		}
 	}
 	taskEntry = authoritative
-	snapshot, err = logSnapshotLoader(ctx, runID, authoritative.ID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-	}
 
 	// A secret-bearing task is never streamed from the runtime: only the executor
 	// that resolved the value can scrub it without persisting or re-resolving the
@@ -187,6 +190,11 @@ func Logs(c *echo.Context) error {
 	// handler tails from any node and across client reconnects.
 	if taskEntry.LogScrubbed {
 		return serveScrubbedTaskLog(c, runID, taskEntry)
+	}
+
+	snapshot, err := logSnapshotLoader(ctx, runID, authoritative.ID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	// A task that has finished has no container left to stream: every engine's
@@ -224,6 +232,9 @@ func serveScrubbedTaskLog(c *echo.Context, runID uuid.UUID, task *runstorage.Tas
 	// Registration marks secret-bearing rows before they are claimed. Match the
 	// ordinary log endpoint during that queueing window instead of opening a
 	// response that the first claim would immediately invalidate.
+	if task.LogGeneration == "" {
+		return writeLogState(c, logStateForTask(task))
+	}
 	if task.Status == runstorage.TaskStatusPending && task.ClaimedBy == "" {
 		return writeLogState(c, logStateForTask(task))
 	}
@@ -236,49 +247,95 @@ func serveScrubbedTaskLog(c *echo.Context, runID uuid.UUID, task *runstorage.Tas
 	initialAttempt := task.Attempt
 	initialClaimedBy := task.ClaimedBy
 	initialClaimAttempt := task.ClaimAttempt
+	initialGeneration := task.LogGeneration
+	loadedBytes := -1
+	loadedTruncated := false
 	for {
 		state, err := scrubbedLogStateLoader(ctx, runID, task.ID)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if committed {
+				log.Warn("ending scrubbed log stream after state read failed",
+					"run_id", runID, "task_run_id", task.ID, "error", err)
+				return nil
+			}
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
 		if !state.Scrubbed {
+			if committed {
+				log.Warn("ending scrubbed log stream after routing state changed",
+					"run_id", runID, "task_run_id", task.ID)
+				return nil
+			}
 			return echo.NewHTTPError(http.StatusServiceUnavailable, "scrubbed log stream unavailable")
 		}
-		if state.Attempt != initialAttempt || state.ClaimedBy != initialClaimedBy || state.ClaimAttempt != initialClaimAttempt {
+		generationChanged := state.Attempt != initialAttempt || state.ClaimedBy != initialClaimedBy ||
+			state.ClaimAttempt != initialClaimAttempt || state.Generation != initialGeneration
+		if generationChanged || state.Status == runstorage.TaskStatusPending {
 			// A retry or replacement claim owns a new cumulative snapshot. End this
 			// producer's stream; reconnecting clients start from the new generation.
-			return nil
+			if committed {
+				return nil
+			}
+			return writeLogState(c, "pending")
 		}
 
-		if snapshot := state.Snapshot; snapshot != nil {
-			text := snapshot.Text
-			if len(text) < len(sent) || !strings.HasPrefix(text, sent) {
-				return echo.NewHTTPError(http.StatusServiceUnavailable, "scrubbed log snapshot changed non-monotonically")
-			}
-			if !committed && taskLogIsFinal(&runstorage.TaskRun{Status: state.Status}) {
-				return writeLogSnapshot(c, snapshot)
-			}
-			if len(text) > len(sent) {
-				res := c.Response()
-				if !committed {
-					res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
-					res.Header().Set(logHeaderSource, "live")
-					if snapshot.Truncated {
-						res.Header().Set(logHeaderTruncated, "true")
+		if state.LogBytes != loadedBytes || state.Truncated != loadedTruncated {
+			snapshot, loadErr := scrubbedLogSnapshotLoader(ctx, runID, task.ID, initialGeneration)
+			if loadErr != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				if errors.Is(loadErr, runstorage.ErrTaskClaimMismatch) {
+					if committed {
+						return nil
 					}
-					res.WriteHeader(http.StatusOK)
-					committed = true
+					return writeLogState(c, "pending")
 				}
-				if _, err := res.Write([]byte(text[len(sent):])); err != nil {
-					return err
+				if committed {
+					log.Warn("ending scrubbed log stream after snapshot read failed",
+						"run_id", runID, "task_run_id", task.ID, "error", loadErr)
+					return nil
 				}
-				if flusher, ok := res.(http.Flusher); ok {
-					flusher.Flush()
+				return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(loadErr)
+			}
+			if snapshot != nil {
+				loadedBytes, loadedTruncated = len([]byte(snapshot.Text)), snapshot.Truncated
+				text := snapshot.Text
+				if len(text) < len(sent) || !strings.HasPrefix(text, sent) {
+					if committed {
+						log.Warn("ending scrubbed log stream after non-monotonic snapshot",
+							"run_id", runID, "task_run_id", task.ID)
+						return nil
+					}
+					return echo.NewHTTPError(http.StatusServiceUnavailable, "scrubbed log snapshot changed non-monotonically")
 				}
-				sent = text
+				if !committed && taskLogIsFinal(&runstorage.TaskRun{Status: state.Status}) {
+					return writeLogSnapshot(c, snapshot)
+				}
+				if len(text) > len(sent) {
+					res := c.Response()
+					if !committed {
+						res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
+						res.Header().Set(logHeaderSource, "live")
+						if snapshot.Truncated {
+							res.Header().Set(logHeaderTruncated, "true")
+						}
+						res.WriteHeader(http.StatusOK)
+						committed = true
+					}
+					if _, err := res.Write([]byte(text[len(sent):])); err != nil {
+						return err
+					}
+					if flusher, ok := res.(http.Flusher); ok {
+						flusher.Flush()
+					}
+					sent = text
+				}
+			} else {
+				loadedBytes, loadedTruncated = 0, false
 			}
 		}
 
@@ -457,9 +514,10 @@ type logInstanceRow struct {
 //   - (nil, *echo.HTTPError) for an unknown selector (404) or an unselected
 //     fanned group (400, body listing the instances).
 //
-// collapsed is the run-detail entry, used to skip the instance query entirely
-// for the overwhelmingly common unfanned case: the collapsed payload reports
-// PartitionCount == 0 there, so no extra read happens on the hot path.
+// collapsed is the run-detail entry used to skip fan-out selection work for an
+// unfanned request. The caller still resolves its one authoritative TaskRun
+// before choosing the raw or scrubbed log route because collapsed/cache views
+// intentionally omit that security-sensitive state.
 func resolveLogInstance(
 	ctx context.Context,
 	runID, taskID uuid.UUID,

@@ -25,7 +25,7 @@ func TestSecretLogCaptureKeepsMarkersRawAndSnapshotExactOnly(t *testing.T) {
 		ID: taskRunID, JobRunID: runID, TaskID: uuid.New(), AtomID: uuid.New(),
 		Status: string(TaskStatusRunning), Attempt: 1,
 	}).Error)
-	fence := SecretLogFence{Attempt: 1}
+	fence := SecretLogFence{Attempt: 1, Generation: uuid.NewString()}
 	require.NoError(t, store.PrepareSecretTaskLog(runID, taskRunID, fence))
 	collector := NewSecretLogCollector(store, runID, taskRunID, fence, []string{"abc"}, 1<<20)
 	raw := "ref=secret://env/QA key=abc normal=AKIAJ83HFKD9SLXMZ7Q2b8Xy1pQ9rT4\n" +
@@ -50,13 +50,20 @@ func TestSecretLogWritesAreAttemptAndClaimFenced(t *testing.T) {
 		Status: string(TaskStatusRunning), Attempt: 2, ClaimedBy: "worker-a", ClaimAttempt: 7,
 	}).Error)
 
-	good := SecretLogFence{Attempt: 2, Claim: &TaskClaim{ClaimedBy: "worker-a", ClaimAttempt: 7}}
+	good := SecretLogFence{Attempt: 2, Claim: &TaskClaim{ClaimedBy: "worker-a", ClaimAttempt: 7}, Generation: uuid.NewString()}
+	require.ErrorIs(t, store.PrepareSecretTaskLog(runID, taskRunID,
+		SecretLogFence{Attempt: 1, Claim: good.Claim, Generation: uuid.NewString()}), ErrTaskClaimMismatch)
+	require.ErrorIs(t, store.PrepareSecretTaskLog(runID, taskRunID,
+		SecretLogFence{Attempt: 2, Claim: &TaskClaim{ClaimedBy: "worker-b", ClaimAttempt: 7}, Generation: uuid.NewString()}), ErrTaskClaimMismatch)
 	require.NoError(t, store.PrepareSecretTaskLog(runID, taskRunID, good))
+	require.ErrorIs(t, store.PrepareSecretTaskLog(runID, taskRunID,
+		SecretLogFence{Attempt: 2, Claim: good.Claim, Generation: uuid.NewString()}), ErrTaskClaimMismatch,
+		"a second producer cannot replace an established generation")
 	require.NoError(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID, good, &TaskLogSnapshot{Text: "safe"}))
 	require.ErrorIs(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID,
-		SecretLogFence{Attempt: 1, Claim: good.Claim}, &TaskLogSnapshot{Text: "stale-attempt"}), ErrTaskClaimMismatch)
+		SecretLogFence{Attempt: 1, Claim: good.Claim, Generation: good.Generation}, &TaskLogSnapshot{Text: "stale-attempt"}), ErrTaskClaimMismatch)
 	require.ErrorIs(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID,
-		SecretLogFence{Attempt: 2, Claim: &TaskClaim{ClaimedBy: "worker-a", ClaimAttempt: 6}},
+		SecretLogFence{Attempt: 2, Claim: &TaskClaim{ClaimedBy: "worker-a", ClaimAttempt: 6}, Generation: good.Generation},
 		&TaskLogSnapshot{Text: "stale-claim"}), ErrTaskClaimMismatch)
 
 	state, err := store.TaskLogReadStateForInstance(context.Background(), runID, taskRunID)
@@ -65,20 +72,22 @@ func TestSecretLogWritesAreAttemptAndClaimFenced(t *testing.T) {
 	require.Equal(t, 2, state.Attempt)
 	require.Equal(t, "worker-a", state.ClaimedBy)
 	require.Equal(t, 7, state.ClaimAttempt)
-	require.Equal(t, "safe", state.Snapshot.Text)
+	snapshot, err := store.TaskLogSnapshotForInstance(context.Background(), runID, taskRunID)
+	require.NoError(t, err)
+	require.Equal(t, "safe", snapshot.Text)
 
 	require.NoError(t, store.SaveCapturedTaskLogSnapshot(runID, taskRunID,
 		&TaskLogSnapshot{Text: "generic-stale-overwrite"}))
-	state, err = store.TaskLogReadStateForInstance(context.Background(), runID, taskRunID)
+	snapshot, err = store.TaskLogSnapshotForInstance(context.Background(), runID, taskRunID)
 	require.NoError(t, err)
-	require.Equal(t, "safe", state.Snapshot.Text,
+	require.Equal(t, "safe", snapshot.Text,
 		"the shared executor final-save seam must leave secret logs to the fenced collector")
 	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRunID).Update("log_scrubbed", false).Error)
 	require.NoError(t, store.SaveCapturedTaskLogSnapshot(runID, taskRunID,
 		&TaskLogSnapshot{Text: "ordinary-final-save"}))
-	state, err = store.TaskLogReadStateForInstance(context.Background(), runID, taskRunID)
+	snapshot, err = store.TaskLogSnapshotForInstance(context.Background(), runID, taskRunID)
 	require.NoError(t, err)
-	require.Equal(t, "ordinary-final-save", state.Snapshot.Text,
+	require.Equal(t, "ordinary-final-save", snapshot.Text,
 		"the same atomic seam must continue to save non-secret task logs")
 }
 
@@ -111,8 +120,65 @@ func TestSecretLogReclaimClearsOnlySanitizedSnapshotAndPreservesClaimCount(t *te
 	require.Equal(t, 4, scrubbed.ClaimAttempt, "returning to pending is not a new claim")
 	require.Empty(t, scrubbed.LogText)
 	require.False(t, scrubbed.LogTruncated)
+	require.Empty(t, scrubbed.LogGeneration)
 	require.Equal(t, "ordinary retained claim", ordinary.LogText)
 	require.True(t, ordinary.LogTruncated)
+}
+
+func TestSecretLogGenerationFencesSameAttemptReplacement(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskRunID := uuid.New(), uuid.New()
+	require.NoError(t, db.Create(&models.JobRun{ID: runID, JobID: uuid.New(), Status: string(StatusRunning)}).Error)
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID: taskRunID, JobRunID: runID, TaskID: uuid.New(), AtomID: uuid.New(),
+		Status: string(TaskStatusRunning), Attempt: 1,
+	}).Error)
+	oldFence := SecretLogFence{Attempt: 1, Generation: uuid.NewString()}
+	require.NoError(t, store.PrepareSecretTaskLog(runID, taskRunID, oldFence))
+	require.NoError(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID, oldFence, &TaskLogSnapshot{Text: "old"}))
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRunID).
+		Updates(WithInvalidatedSecretLogSnapshot(map[string]any{"status": string(TaskStatusPending)})).Error)
+
+	newFence := SecretLogFence{Attempt: 1, Generation: uuid.NewString()}
+	require.NoError(t, store.PrepareSecretTaskLog(runID, taskRunID, newFence))
+	require.ErrorIs(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID, oldFence,
+		&TaskLogSnapshot{Text: "stale overwrite"}), ErrTaskClaimMismatch)
+	require.NoError(t, store.SaveSecretTaskLogSnapshot(runID, taskRunID, newFence,
+		&TaskLogSnapshot{Text: "successor"}))
+	_, err := store.SecretTaskLogSnapshotForGeneration(context.Background(), runID, taskRunID, oldFence.Generation)
+	require.ErrorIs(t, err, ErrTaskClaimMismatch)
+	generationSnapshot, err := store.SecretTaskLogSnapshotForGeneration(context.Background(), runID, taskRunID, newFence.Generation)
+	require.NoError(t, err)
+	require.Equal(t, "successor", generationSnapshot.Text)
+	snapshot, err := store.TaskLogSnapshotForInstance(context.Background(), runID, taskRunID)
+	require.NoError(t, err)
+	require.Equal(t, "successor", snapshot.Text)
+}
+
+func TestTaskLogReadStateCountsSnapshotBytes(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskRunID := uuid.New(), uuid.New()
+	text := "a\x00é"
+	require.NoError(t, db.Create(&models.JobRun{ID: runID, JobID: uuid.New(), Status: string(StatusRunning)}).Error)
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID: taskRunID, JobRunID: runID, TaskID: uuid.New(), AtomID: uuid.New(),
+		Status: string(TaskStatusRunning), Attempt: 1, LogText: text, LogScrubbed: true,
+	}).Error)
+	state, err := store.TaskLogReadStateForInstance(context.Background(), runID, taskRunID)
+	require.NoError(t, err)
+	require.Equal(t, len([]byte(text)), state.LogBytes,
+		"metadata polling must observe embedded NUL and multibyte appends by byte length")
+}
+
+func TestTaskLogByteLengthExpressionByDialect(t *testing.T) {
+	for _, dialect := range []string{"dqlite", "sqlite", "sqlite3"} {
+		require.Equal(t, "length(CAST(log_text AS BLOB))", taskLogByteLengthExpression(dialect))
+	}
+	require.Equal(t, "octet_length(log_text)", taskLogByteLengthExpression("postgres"))
 }
 
 func TestSecretLogRoutingIsRegisteredBeforeExecutionAndSurvivesRetryReset(t *testing.T) {

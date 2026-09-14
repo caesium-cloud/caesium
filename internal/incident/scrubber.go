@@ -65,14 +65,6 @@ func NewScrubber(secretValues []string) *Scrubber {
 	return &Scrubber{secrets: normalizedSecretValues(secretValues, scrubbable)}
 }
 
-// NewExactValueScrubber builds a scrubber for values that are already known to
-// have come from secret:// resolution. Unlike NewScrubber it does not apply the
-// heuristic token pass or the short/common-value guard: provenance is exact,
-// so every non-empty resolved value must be removed from task log text.
-func NewExactValueScrubber(secretValues []string) *Scrubber {
-	return &Scrubber{secrets: normalizedSecretValues(secretValues, func(string) bool { return true })}
-}
-
 func normalizedSecretValues(secretValues []string, keep func(string) bool) []string {
 	seen := make(map[string]struct{}, len(secretValues))
 	kept := make([]string, 0, len(secretValues))
@@ -153,21 +145,6 @@ func (s *Scrubber) Scrub(text string) string {
 		out = strings.ReplaceAll(out, secret, Redacted)
 	}
 	out = s.scrubHighEntropy(out)
-	return out
-}
-
-// ScrubExact removes only the scrubber's explicitly supplied values. It is the
-// task-log policy: marker payloads and ordinary high-entropy identifiers remain
-// readable, while every non-empty value passed to NewExactValueScrubber is
-// replaced.
-func (s *Scrubber) ScrubExact(text string) string {
-	if text == "" {
-		return text
-	}
-	out := text
-	for _, secret := range s.secrets {
-		out = strings.ReplaceAll(out, secret, Redacted)
-	}
 	return out
 }
 

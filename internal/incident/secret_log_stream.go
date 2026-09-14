@@ -68,6 +68,12 @@ func (s *ExactValueStreamScrubber) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if s.truncated {
+		// The bounded public snapshot can no longer change. The raw tee still
+		// delivers every byte to the marker parser; avoid scanning an unbounded
+		// tail against every resolved value merely to discard it.
+		return len(p), nil
+	}
 	s.pending = append(s.pending, p...)
 	s.process(false)
 	return len(p), nil
@@ -102,6 +108,10 @@ func (s *ExactValueStreamScrubber) Snapshot() (string, bool) {
 func (s *ExactValueStreamScrubber) Version() uint64 { return s.version }
 
 func (s *ExactValueStreamScrubber) process(final bool) {
+	if s.truncated {
+		s.pending = nil
+		return
+	}
 	hold := s.maxValue - 1
 	if hold < 0 {
 		hold = 0
@@ -117,10 +127,18 @@ func (s *ExactValueStreamScrubber) process(final bool) {
 			}
 		}
 		if matched {
+			if s.truncated {
+				s.pending = nil
+				return
+			}
 			continue
 		}
 		s.appendOutput(s.pending[:1])
 		s.pending = s.pending[1:]
+		if s.truncated {
+			s.pending = nil
+			return
+		}
 	}
 }
 

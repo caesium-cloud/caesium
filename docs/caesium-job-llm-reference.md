@@ -530,6 +530,10 @@ generated text too. Live and retained log
 reads use that same sanitized snapshot, while structured `##caesium::` markers
 are parsed from the original stream. Matching is exact, including values split
 across runtime chunks; transformed or encoded forms are outside this guarantee.
+If the executor cannot finish draining a secret-bearing runtime log after the
+container exits, it fails the task because unread bytes may contain structured
+outputs or fan-out partitions. It does not report a successful task with
+missing marker data.
 Historical snapshots are unchanged because Caesium does not retain the old
 plaintext needed to repair them and does not re-resolve possibly rotated
 secrets while serving logs.
@@ -600,7 +604,9 @@ Supported assertions:
 - `expect.errorContains`: substring match against the run error
 - `expect.tasks[].status`: expected task status
 - `expect.tasks[].output`: expected output key/value subset
-- `expect.tasks[].logContains`: required log substrings
+- `expect.tasks[].logContains`: required substrings in the retained log text.
+  For secret-bearing tasks this is the sanitized text, so assert
+  `[REDACTED]` (or surrounding safe text), never the resolved plaintext value.
 - `expect.tasks[].schemaViolationCount`: exact number of runtime schema violations
 - `expect.tasks[].cacheHit`: expected cache-hit boolean
 - `expect.tasks[].errorContains`: substring match against the task error

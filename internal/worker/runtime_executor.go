@@ -38,6 +38,11 @@ const (
 	taskFailurePolicyContinue = "continue"
 )
 
+var (
+	secretLogDrainTimeout = run.SecretLogDrainTimeout
+	secretLogAbortTimeout = run.SecretLogAbortTimeout
+)
+
 type runtimeExecutor struct {
 	store             *run.Store
 	taskTimeout       time.Duration
@@ -780,8 +785,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	secretBearing := len(secretIdentities) > 0
 	secretValues := incident.SecretValuesFromEnv(atomSpec.Env, spec.Env)
 	secretLogFence := run.SecretLogFence{
-		Attempt: max(taskRun.Attempt, 1),
-		Claim:   &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt},
+		Attempt:    max(taskRun.Attempt, 1),
+		Claim:      &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt},
+		Generation: uuid.NewString(),
 	}
 	if secretBearing {
 		if err := e.store.PrepareSecretTaskLog(taskRun.JobRunID, taskRun.ID, secretLogFence); err != nil {
@@ -848,14 +854,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	type logCaptureResult struct {
-		markers *pkgtask.Markers
-		err     error
-	}
 	var (
 		secretLogStream    io.ReadCloser
 		secretLogCollector *run.SecretLogCollector
-		secretLogResult    <-chan logCaptureResult
+		secretLogResult    <-chan run.SecretLogCaptureResult
 	)
 	if secretBearing {
 		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
@@ -863,18 +865,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 				"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", streamErr)
 		} else {
 			secretLogStream = stream
-			results := make(chan logCaptureResult, 1)
-			secretLogResult = results
 			collector := run.NewSecretLogCollector(e.store, taskRun.JobRunID, taskRun.ID, secretLogFence,
 				secretValues, pkgtask.MaxLogSnapshotBytes)
 			secretLogCollector = collector
-			go func() {
-				markers, captureErr := run.CaptureSecretTaskLogs(stream, collector, 0, env.Variables().FanOutMaxPartitions)
-				if persistErr := collector.Err(); persistErr != nil {
-					log.Warn("failed to persist scrubbed live task log", "task_id", taskRun.TaskID, "error", persistErr)
-				}
-				results <- logCaptureResult{markers: markers, err: captureErr}
-			}()
+			secretLogResult = run.StartSecretTaskLogCapture(stream, collector, 0, env.Variables().FanOutMaxPartitions)
 		}
 	}
 
@@ -916,19 +910,14 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	var markers *pkgtask.Markers
 	var parseErr error
 	var logErr error
+	var secretLogDrainTimedOut bool
 	if secretLogResult != nil {
-		select {
-		case capture := <-secretLogResult:
-			markers, parseErr = capture.markers, capture.err
-		case <-time.After(5 * time.Second):
-			secretLogCollector.Abort()
-			_ = secretLogStream.Close()
-			select {
-			case capture := <-secretLogResult:
-				markers, parseErr = capture.markers, capture.err
-			case <-time.After(time.Second):
-				logErr = fmt.Errorf("timed out draining scrubbed task log")
-			}
+		capture, timedOut := run.DrainSecretTaskLogCapture(secretLogResult, secretLogCollector, secretLogStream,
+			secretLogDrainTimeout, secretLogAbortTimeout)
+		markers, parseErr = capture.Markers, capture.Err
+		secretLogDrainTimedOut = timedOut
+		if capture.PersistErr != nil {
+			log.Warn("failed to persist scrubbed live task log", "task_id", taskRun.TaskID, "error", capture.PersistErr)
 		}
 	} else {
 		logs, openErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
@@ -956,7 +945,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	} else {
 		switch {
 		case parseErr != nil:
-			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
+			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
 				return nil, parseErr
 			}
 			metricsCapture.Unreadable = true
@@ -986,6 +975,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
 		log.Warn("failed to stop atom after task completion", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
+	}
+	if secretLogDrainTimedOut {
+		return nil, fmt.Errorf("timed out draining scrubbed task log")
 	}
 
 	// Persist the captured log BEFORE any path that can return early. The Stop

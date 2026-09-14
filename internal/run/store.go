@@ -214,6 +214,7 @@ type TaskRun struct {
 	OutputSchema            []byte     `json:"-"`
 	SchemaValidation        string     `json:"-"`
 	LogScrubbed             bool       `json:"-"`
+	LogGeneration           string     `json:"-"`
 	CacheOriginRunID        *uuid.UUID `json:"cache_origin_run_id,omitempty"`
 	CacheCreatedAt          *time.Time `json:"cache_created_at,omitempty"`
 	CacheExpiresAt          *time.Time `json:"cache_expires_at,omitempty"`
@@ -2955,31 +2956,6 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 	return skippedTaskIDs, expansion, err
 }
 
-// SaveTaskLogSnapshot persists the captured log snapshot onto exactly one task
-// run. taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract: a
-// fan-out instance must be addressed by its TaskRun ID, otherwise the snapshot
-// would be broadcast across every sibling row sharing (job_run_id, task_id).
-func (s *Store) SaveTaskLogSnapshot(runID, taskRef uuid.UUID, snapshot *TaskLogSnapshot) error {
-	if snapshot == nil {
-		return nil
-	}
-
-	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		return err
-	}
-
-	return s.db.Model(&models.TaskRun{}).
-		Where("id = ?", row.ID).
-		Updates(map[string]any{
-			"log_text":      snapshot.Text,
-			"log_truncated": snapshot.Truncated,
-		}).Error
-}
-
 // SetTaskExitCode persists the raw process exit code the engine reported at
 // task completion onto the task run. The incident classifier reads this
 // alongside SchemaViolations/Result to bucket a failure into a failure_class.
@@ -5687,6 +5663,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		OutputSchema:            append([]byte(nil), model.OutputSchema...),
 		SchemaValidation:        model.SchemaValidation,
 		LogScrubbed:             model.LogScrubbed,
+		LogGeneration:           model.LogGeneration,
 	}
 
 	if len(model.Output) > 0 {
@@ -6525,6 +6502,7 @@ func retryResetColumns() map[string]any {
 		"branch_selections":       nil,
 		"log_text":                "",
 		"log_truncated":           false,
+		"log_generation":          "",
 		"schema_violations":       nil,
 		"data_violations":         nil,
 		"exit_code":               nil,

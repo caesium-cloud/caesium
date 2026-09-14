@@ -70,6 +70,7 @@ type TaskResult struct {
 	SchemaViolations []pkgtask.SchemaViolation
 	LogText          string
 	LogTruncated     bool
+	LogScrubbed      bool
 	CacheHit         bool
 	Error            string
 }
@@ -275,6 +276,7 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 					SchemaViolations: inst.SchemaViolations,
 					CacheHit:         inst.CacheHit,
 					Error:            inst.Error,
+					LogScrubbed:      inst.LogScrubbed,
 				}
 				snapshot, err := store.TaskLogSnapshotForInstance(context.Background(), runRecord.ID, inst.ID)
 				if err != nil {
@@ -297,6 +299,7 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 			SchemaViolations: taskRun.SchemaViolations,
 			CacheHit:         taskRun.CacheHit,
 			Error:            taskRun.Error,
+			LogScrubbed:      taskRun.LogScrubbed,
 		}
 
 		snapshot, err := store.GetTaskLogSnapshot(runRecord.ID, taskModel.ID)

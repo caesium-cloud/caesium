@@ -36,6 +36,24 @@ func TestExactValueStreamScrubberScrubsBeforeSnapshotLimit(t *testing.T) {
 	require.LessOrEqual(t, len(text), 64)
 }
 
+func TestExactValueStreamScrubberStopsScanningAfterSnapshotCap(t *testing.T) {
+	values := make([]string, 0, 200)
+	for i := range 200 {
+		values = append(values, strings.Repeat("secret", i+1))
+	}
+	s := NewExactValueStreamScrubber(values, 64)
+	_, err := s.Write([]byte(strings.Repeat("ordinary-output-", 20)))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	_, truncated := s.Snapshot()
+	require.True(t, truncated)
+	version := s.Version()
+	_, err = s.Write([]byte(strings.Repeat("unbounded-tail-", 10_000)))
+	require.NoError(t, err)
+	require.Empty(t, s.pending)
+	require.Equal(t, version, s.Version(), "discarded bytes after the cap cannot change public output")
+}
+
 func TestExactValueStreamScrubberAbortDropsPossibleSecretPrefix(t *testing.T) {
 	s := NewExactValueStreamScrubber([]string{"abcdef"}, 1024)
 	_, err := s.Write([]byte("safe\nabc"))
@@ -48,9 +66,14 @@ func TestExactValueStreamScrubberAbortDropsPossibleSecretPrefix(t *testing.T) {
 }
 
 func TestExactValueScrubberLeavesUnrelatedHighEntropyAndSecretURI(t *testing.T) {
-	s := NewExactValueScrubber([]string{"ci-user:ci-pass"})
+	s := NewExactValueStreamScrubber([]string{"ci-user:ci-pass"}, 1024)
 	logText := "ref=secret://env/CAESIUM_IT_REGISTRY_CREDS sha=AKIAJ83HFKD9SLXMZ7Q2b8Xy1pQ9rT4"
-	require.Equal(t, logText, s.ScrubExact(logText))
+	_, err := s.Write([]byte(logText))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	text, truncated := s.Snapshot()
+	require.False(t, truncated)
+	require.Equal(t, logText, text)
 }
 
 func TestExactValueStreamScrubberPrefersOverlappingValueAndDoesNotAccumulate(t *testing.T) {

@@ -82,7 +82,7 @@ func newReadSurfaceFixture(t *testing.T, keys ...string) *readSurfaceFixture {
 func TestTaskLogSnapshotForInstanceReturnsThatInstancesLog(t *testing.T) {
 	f := newReadSurfaceFixture(t, "a", "b", "c")
 	for i, key := range f.keys {
-		require.NoError(t, f.store.SaveTaskLogSnapshot(f.runID, f.instanceIDs[i],
+		require.NoError(t, f.store.SaveCapturedTaskLogSnapshot(f.runID, f.instanceIDs[i],
 			&TaskLogSnapshot{Text: "partition=" + key + "\n"}))
 	}
 
@@ -101,7 +101,7 @@ func TestTaskLogSnapshotForInstanceReturnsThatInstancesLog(t *testing.T) {
 // though a truncated capture can still be non-empty.
 func TestTaskLogSnapshotForInstanceCarriesTruncation(t *testing.T) {
 	f := newReadSurfaceFixture(t, "a", "b")
-	require.NoError(t, f.store.SaveTaskLogSnapshot(f.runID, f.instanceIDs[1],
+	require.NoError(t, f.store.SaveCapturedTaskLogSnapshot(f.runID, f.instanceIDs[1],
 		&TaskLogSnapshot{Text: "head of a very long log", Truncated: true}))
 
 	snapshot, err := f.store.TaskLogSnapshotForInstance(context.Background(), f.runID, f.instanceIDs[1])
@@ -124,7 +124,7 @@ func TestTaskLogSnapshotForInstanceNilWhenNothingCaptured(t *testing.T) {
 // not resolve through a run-scoped route, even though the id alone is unique.
 func TestTaskLogSnapshotForInstanceIsRunScoped(t *testing.T) {
 	f := newReadSurfaceFixture(t, "a")
-	require.NoError(t, f.store.SaveTaskLogSnapshot(f.runID, f.instanceIDs[0],
+	require.NoError(t, f.store.SaveCapturedTaskLogSnapshot(f.runID, f.instanceIDs[0],
 		&TaskLogSnapshot{Text: "partition=a\n"}))
 
 	_, err := f.store.TaskLogSnapshotForInstance(context.Background(), uuid.New(), f.instanceIDs[0])

@@ -46,6 +46,11 @@ import (
 	"gorm.io/gorm"
 )
 
+var (
+	secretLogDrainTimeout = run.SecretLogDrainTimeout
+	secretLogAbortTimeout = run.SecretLogAbortTimeout
+)
+
 // runStartReadBackoffs bounds retries for transient dqlite contention (e.g.
 // "checkpoint in progress") on the idempotent reads the run-start /
 // DAG-materialization path issues. A contention blip on any of these reads
@@ -1283,10 +1288,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
 	taskHashes := make(map[uuid.UUID]string, len(tasks))
 	taskQuarantine := make(map[uuid.UUID]bool, len(tasks))
+	taskAttempts := make(map[uuid.UUID]int, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
 		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
+		taskAttempts[taskState.ID] = max(taskState.Attempt, 1)
 		indegree[taskState.ID] = taskState.OutstandingPredecessors
 		if taskState.PartitionCount > 0 && !run.IsTerminal(taskState.Status) {
 			// The collapsed view carries the FIRST instance's indegree. On
@@ -1471,7 +1478,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 		secretValues := incident.SecretValuesFromEnv(rawSecretEnv, spec.Env)
 		secretBearing := len(secretIdentities) > 0
-		secretLogFence := run.SecretLogFence{Attempt: attempt}
+		secretLogFence := run.SecretLogFence{Attempt: attempt, Generation: uuid.NewString()}
 		if len(secretIdentities) > 0 {
 			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
 			for _, resolved := range secretIdentities {
@@ -1508,14 +1515,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
-		type logCaptureResult struct {
-			markers *pkgtask.Markers
-			err     error
-		}
 		var (
 			secretLogStream    io.ReadCloser
 			secretLogCollector *run.SecretLogCollector
-			secretLogResult    <-chan logCaptureResult
+			secretLogResult    <-chan run.SecretLogCaptureResult
 		)
 		if secretBearing {
 			if stream, streamErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
@@ -1523,19 +1526,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 					"task_id", taskID, "atom_id", a.ID(), "error", streamErr)
 			} else {
 				secretLogStream = stream
-				results := make(chan logCaptureResult, 1)
-				secretLogResult = results
 				collector := run.NewSecretLogCollector(store, runID, taskRef, secretLogFence,
 					secretValues, pkgtask.MaxLogSnapshotBytes)
 				secretLogCollector = collector
-				go func() {
-					markers, captureErr := run.CaptureSecretTaskLogs(stream, collector,
-						vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
-					if persistErr := collector.Err(); persistErr != nil {
-						log.Warn("failed to persist scrubbed live task log", "task_id", taskID, "error", persistErr)
-					}
-					results <- logCaptureResult{markers: markers, err: captureErr}
-				}()
+				secretLogResult = run.StartSecretTaskLogCapture(stream, collector,
+					vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
 			}
 		}
 
@@ -1647,19 +1642,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 			var markers *pkgtask.Markers
 			var parseErr error
 			var logErr error
+			var secretLogDrainTimedOut bool
 			if secretLogResult != nil {
-				select {
-				case capture := <-secretLogResult:
-					markers, parseErr = capture.markers, capture.err
-				case <-time.After(5 * time.Second):
-					secretLogCollector.Abort()
-					_ = secretLogStream.Close()
-					select {
-					case capture := <-secretLogResult:
-						markers, parseErr = capture.markers, capture.err
-					case <-time.After(time.Second):
-						logErr = fmt.Errorf("timed out draining scrubbed task log")
-					}
+				capture, timedOut := run.DrainSecretTaskLogCapture(secretLogResult, secretLogCollector, secretLogStream,
+					secretLogDrainTimeout, secretLogAbortTimeout)
+				markers, parseErr = capture.Markers, capture.Err
+				secretLogDrainTimedOut = timedOut
+				if capture.PersistErr != nil {
+					log.Warn("failed to persist scrubbed live task log", "task_id", taskID, "error", capture.PersistErr)
 				}
 			} else {
 				logStream, openErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
@@ -1688,7 +1678,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			} else {
 				switch {
 				case parseErr != nil:
-					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
+					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
 						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
 							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
@@ -1722,6 +1712,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 				ID:    a.ID(),
 				Force: true,
 			})
+			if secretLogDrainTimedOut {
+				if stopErr != nil {
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("timed out draining scrubbed task log and failed to stop atom: %w", stopErr)
+				}
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("timed out draining scrubbed task log")
+			}
 			return string(a.Result()), taskOutput, branchNames, partitions, metricsCapture, logSnapshot, stopErr
 		}
 	}
@@ -2104,7 +2100,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 			rateLimitFailed bool
 			firstErr        error
 			results         = make(chan instanceResult, len(group.Instances))
-			attempts        = make(map[uuid.UUID]int, len(group.Instances))
 			running         = make(map[uuid.UUID]bool, len(group.Instances))
 		)
 
@@ -2439,11 +2434,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 						noteRateLimited(retryAfter)
 						continue
 					}
-					attempts[row.ID]++
 					j.noteInstanceDispatched(row.ID)
 					running[row.ID] = true
 					inFlight++
-					go dispatch(row.ID, m, attempts[row.ID])
+					// Attempt is durable execution identity. On local re-entry the
+					// row may already be pending at attempt N after a retry reset;
+					// restarting at one would violate the secret-log fence and also
+					// incorrectly repeat first-attempt cache behavior.
+					go dispatch(row.ID, m, max(row.Attempt, 1))
 				}
 			}
 
@@ -2871,7 +2869,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		maxAttempts := max(runner.maxAttempts, 1)
 
 		var lastErr error
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
+		for attempt := max(taskAttempts[taskID], 1); attempt <= maxAttempts; attempt++ {
 			// A cancelled run must not start another attempt. The retry budget
 			// is spent on transient failures, and a cancellation is not one:
 			// without this the cancel that ended attempt N was itself the

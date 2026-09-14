@@ -177,7 +177,11 @@ type TaskRun struct {
 	// LogScrubbed marks output that must be served only from the executor's
 	// sanitized snapshot, never from the runtime's raw log stream. It is a
 	// property of the frozen task spec and therefore survives attempt retries.
-	LogScrubbed             bool   `gorm:"not null;default:false" json:"-"`
+	LogScrubbed bool `gorm:"not null;default:false" json:"-"`
+	// LogGeneration is a per-runtime UUID. Sanitized snapshot writes carry it
+	// in their ownership predicate so a collector from an invalidated runtime
+	// cannot write into a replacement that happens to reuse the same attempt.
+	LogGeneration           string `gorm:"type:text;not null;default:''" json:"-"`
 	Error                   string `json:"error,omitempty"`
 	RuntimeID               string `json:"runtime_id,omitempty"`
 	OutstandingPredecessors int    `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
