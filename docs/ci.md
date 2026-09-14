@@ -8,13 +8,19 @@ general execution-mode / worker / dqlite env reference (what each
 [parallel-execution-operations.md](parallel-execution-operations.md) — this
 doc does not repeat that material, only the CI-specific wiring.
 
-Shipped W1 load reporting and browser evidence, the W2 owner-crash robustness
-runner, integration SQL-work budget and scenario evidence validator, plus the
-remaining distributed failure tests, developer/Console journeys and performance
-gates, are tracked in
+Shipped W1 load reporting and browser evidence; the W2 owner-crash robustness
+runner, integration SQL-work budget and scenario evidence validator; the W3
+`early-evidence` lane and its promotion into `ci-ok`, pure reference models,
+developer-journey CLI scenarios and browser accessibility/visual/scale/recovery
+coverage; plus the remaining distributed failure tests, Console fault journeys
+and performance gates, are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
-That plan has not changed the current required checks described below: the
-robustness runner is still invoked by hand and is not a CI job.
+
+W3 added one job to the workflow (`early-evidence`) and two dependencies to
+`ci-ok` (`early-evidence` and `helm-lint`). It changed **no repository
+settings**: `ci-ok` is still absent from master's required status checks, so
+that promotion gates `v*` publication rather than PR merge. See §1 and
+"Early evidence lane and the promoted gate" in §4.
 
 ## 1. Required-to-merge checks
 
@@ -33,6 +39,28 @@ Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 - `lint`, `unit-test`, `unit-test-arm64`
 - `ui-test`, `ui-e2e`, `ui-e2e-auth`
 - `integration` (all three Docker shards and the agent-auth lane)
+- `helm-lint` and `early-evidence` (distributed-testing G5; see §4)
+
+`early-evidence` is not satisfied by a green job result. `ci-ok` downloads the
+evidence report that lane uploaded and `scripts/ci-ok.py` re-validates it
+against the committed scenario manifest, bound to this run's `github.sha`; an
+absent, foreign or hollow report fails the gate. `helm-lint` is in the set
+because it is `early-evidence`'s unconditional producer — without it a chart
+failure would surface only indirectly, as `early-evidence=skipped`.
+
+**`ci-ok` is not enforced at merge today.** Read at execution time on
+2026-09-14, master's protection lists eight required contexts — `lint`,
+`unit-test`, `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`,
+`build-and-integration-test`, `build-and-integration-test-agent-auth` — with
+`strict: false`, `enforce_admins: false`, one CODEOWNER review, and no
+rulesets. `ci-ok` is absent from that list, so it gates only `publish`
+(`publish.needs`, §3) and the aggregate's new evidence checks block a `v*` tag
+rather than a merge. Running the PATCH command below is the one change that
+makes `ci-ok` — and therefore `early-evidence` — merge-blocking; it is a
+repository-settings change for the CODEOWNER, not a workflow change. Note also
+that with `enforce_admins: false` an admin merge bypasses the eight required
+contexts, so required-check status is a review convention as much as a hard
+gate.
 
 The existing `build-and-integration-test` and
 `build-and-integration-test-agent-auth` check names remain as lightweight,
@@ -114,6 +142,11 @@ Expected output includes `ci-ok` plus the existing eight contexts
 contexts aggregate the matrix; compilation lives in `images` / `reagents`.
 
 ## 2. Why distributed / owner-memory / podman / helm are not required yet
+
+`helm-lint` is a different job from `helm-integration-test` and **was**
+promoted: distributed-testing G5 added it to `ci-ok` because it is the
+`early-evidence` lane's unconditional producer. `helm-integration-test` itself
+stays unpromoted under the criterion below, as do the other lanes named here.
 
 Acceptance Criterion 4 requires the last 5 master runs after D1/H-2 to have
 no failure in the L12 lanes that is not a filed, linked quarantine — not zero
@@ -231,6 +264,7 @@ changes
   ├─ builder ─── images ─────────┬─ integration (3 Docker shards + agent-auth)
   │                              ├─ ui-e2e, ui-e2e-auth (also need ui-test)
   │                              ├─ helm/podman (3 full-suite shards each)
+  │                              ├─ early-evidence (also needs helm-lint)
   │                              └─ integration-extra (also needs reagents)
   ├─ reagents-arm64 ───────────────────┐
   └─ builder-arm64 ─┬─ unit-test-arm64  │
@@ -261,6 +295,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
+| `early-evidence` | ubuntu-24.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
 | `ci-config` | ubuntu-24.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
 | `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-24.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
 | `ci-ok` | ubuntu-24.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
@@ -437,10 +472,20 @@ remain later plan items.
 
 ### Owner-crash robustness runner (distributed-testing W2/B1)
 
-**Not a CI job.** `scripts/robustness.sh` is run by hand; wiring it into the
-workflow, the bake file and the scenario selectors is plan item G3. Nothing in
-`ci-ok` executes it today, so a green PR is not evidence that owner crash
-recovery still works.
+**Superseded by W3/G3 and W3/G5: this is now a CI lane.** The W2 wording this
+subsection used to carry — "not a CI job", run by hand, nothing in `ci-ok`
+executes it — no longer holds. `scripts/robustness.sh` is wired into the
+workflow, the bake file and the scenario selectors; it runs inside
+`early-evidence` on every `go`/`helm`/`ci` pull request, and `ci-ok` fails
+closed on the evidence it produces. Prefer `just robustness-test` (or the
+umbrella `just early-evidence`) over the raw invocation below — see "Early
+evidence lane and the promoted gate" in this section for the lane, its
+artifacts and its enforcement. The rest of this subsection remains the
+reference for the runner itself and for driving it directly when debugging.
+
+One caveat survives in a narrower form: because `ci-ok` is not one of master's
+required status checks (§1), a green *required* set is still not evidence that
+owner-crash recovery works. A green `ci-ok` is.
 
 It needs `kind`, `kubectl`, `helm`, `docker` and `python3` on the host and
 builds a 4-node kind cluster (1 control plane + 3 workers) with three
@@ -450,6 +495,11 @@ context: `KUBECONFIG` is unset and every `kubectl`/`helm` call passes
 `--kubeconfig "$ARTIFACTS/kubeconfig"` explicitly. Teardown removes only the
 clusters recorded in `$ARTIFACTS/owned-clusters.txt`; set
 `CAESIUM_ROBUSTNESS_KEEP_CLUSTER=1` to keep them for debugging.
+
+`just robustness-test` performs the build and invocation below using the
+repository's own tags and artifact directory, then redacts and collects the
+evidence. Use the raw form when you need to pin a specific image or reuse an
+existing artifact directory:
 
 ```sh
 docker build --build-arg "BUILDER_IMAGE=caesiumcloud/caesium-builder:$CANDIDATE_SHA" \
@@ -540,7 +590,11 @@ metric name is not accepted as the counter.
 Limits: this budgets the instrumented SQL-work classes for one fixed workload on
 the default local executor. It is not a latency check, it does not see
 uninstrumented queries, and it does not replace E4's calibrated performance
-budgets. It is also not yet registered in the scenario manifest — G3 owns that.
+budgets. Since W3/G3 it **is** registered in the scenario manifest as
+`e5-sql-work-budget` with `gates: ["early"]`: `just integration-test-sql-budget`
+runs it as a focused scenario that emits evidence with an observed
+topology/mode/flag set and a retained `/metrics` counter artifact, while the
+full sharded suite still runs it in the `integration` lane.
 
 ### Scenario manifest and evidence validator (distributed-testing W2/A2)
 
@@ -550,10 +604,13 @@ IDs. Each row carries a selector, contract IDs, owning plan item, registering
 item, required topology/mode/feature flags, expected observations, allowed skips
 with reasons, artifact identity fields and fault-activation requirements.
 
-**Every committed row is currently `status: absent` with empty `gates`.** The
-file names planned scenarios; it certifies none of them. G3 registers the B1 and
-E5 selectors and the early gate, and G6 the full suite. Do not read a row as
-coverage.
+**Three of the thirteen committed rows are `status: proven` with
+`gates: ["early"]`** — `b1-owner-crash-leader`, `b1-owner-crash-nonleader` and
+`e5-sql-work-budget`, registered by W3/G3 and actually executed by the
+`early-evidence` lane. **Every other row is `status: absent` with empty
+`gates`**: the file names those scenarios and certifies none of them. B2, B3 and
+D3 register theirs once their runners exist, and G6 wires the full suite. Do not
+read an `absent` row as coverage.
 
 `scripts/check-test-evidence.py` validates an evidence report against that
 manifest. It is fail-closed and stdlib-only:
@@ -576,10 +633,298 @@ means no hard failure but at least one required scenario is inconclusive —
 missing recorder data, a checker timeout, insufficient samples. **Inconclusive
 is never a pass**; use `--strict` where a gate must not accept it.
 
-`scripts/test_test_evidence.py` covers the checker. It needs no separate
-command: the `ci-config` job already runs the wildcard discovery documented
-under "Browser outcomes and diagnostics" above, which picks up every
-`scripts/test_*.py` module including this one.
+`scripts/test_test_evidence.py` covers the checker, and
+`scripts/test_collect_evidence.py` covers the collector described in the next
+subsection. Neither needs a separate command: the `ci-config` job already runs
+the wildcard discovery documented under "Browser outcomes and diagnostics"
+above, which picks up every `scripts/test_*.py` module.
+
+### Early evidence lane and the promoted gate (distributed-testing W3/G3, W3/G5)
+
+`early-evidence` is the first CI lane that executes a real multi-node fault, and
+since W3/G5 it is a dependency of the fail-closed `ci-ok` aggregate. It runs on
+`ubuntu-24.04` when the `go`, `helm` or `ci` path filters select it — exactly
+the condition `scripts/ci-ok.py` records in `SELECTORS["early-evidence"]`, so a
+lane that disappears cannot read as an allowed skip.
+
+The job runs three steps, all through `just`:
+
+1. **`integration-test-sql-budget`** — E5's `TestStatementBudgetFixedWorkload`
+   against the ordinary `integration-up` server, retaining the `/metrics`
+   scrape, a `docker inspect` of the live server and the test log as that
+   scenario's evidence.
+2. **`robustness-test`** — B1's `TestOwnerCrash` on an owned kind cluster
+   (1 control plane + 3 workers) with three persistent Helm StatefulSet
+   replicas.
+3. **`check-evidence`** — merges the two fragments into one report and
+   validates it with `check-test-evidence.py --require early --strict`.
+
+`just early-evidence` is the umbrella recipe that runs all three in order.
+Locally it needs `kind`, `kubectl`, `helm`, `docker` and `python3`, several GB
+and several minutes, and it occupies the shared Docker integration container, so
+hold the host lane lock first:
+
+```sh
+just tag=<candidate-sha> early-evidence
+```
+
+Artifacts land under `.tmp/evidence/` (override with `CAESIUM_EVIDENCE_DIR`):
+`sql-budget/` and `robustness/` hold the raw lane output, `sql-budget.json` and
+`robustness.json` are the per-lane fragments, and `evidence.json` is the merged
+report. CI uploads the whole directory as the `early-evidence` artifact with
+`if-no-files-found: error` and 7-day retention. Before anything can upload it,
+`just robustness-test` runs `collect-evidence.py redact` over the artifact
+directory: the run's generated `CAESIUM_INTERNAL_WAKEUP_TOKEN` is replaced
+everywhere it appears and `internal-token.txt` / `kubeconfig*` are deleted. That
+is a targeted scrub of this lane's own generated credentials, not a general
+secret detector.
+
+**`scripts/collect-evidence.py`** is the artifact consumer — stdlib-only, like
+the checker it feeds. Four subcommands: `robustness` and `sql-work-budget` build
+the per-lane fragments, `report` merges fragments into one evidence report for
+`check-test-evidence.py --report`, and `redact` performs the scrub above. It
+never invents an observation: every field it emits is read back out of a file
+the lane actually produced — pod environments, the kind config, bound PVC claim
+names, the recorder records, `docker inspect`, the retained `/metrics` scrape
+and the Go test logs. A missing record, an empty pod-env dump or an unreadable
+`ctr` listing yields `inconclusive`, never `pass`, and env values whose names
+look like credentials are dropped before they can reach the report.
+
+**What the promoted gate enforces.** A green job result is not accepted as
+evidence. `ci-ok` downloads the report only when
+`needs.early-evidence.result == 'success'`, so a lane that ran and left no
+report still fails, and then `scripts/ci-ok.py` requires, fail-closed:
+
+- the report exists, parses, and is an object — an absent file is "the lane
+  produced no evidence", not a pass;
+- `report.candidate_sha` equals this run's `github.sha`, so evidence from
+  another commit cannot satisfy this run;
+- the `early` gate has at least one registered manifest scenario, so an ungated
+  manifest cannot vacuously pass;
+- every `early`-gated manifest row is present with `status: "pass"` and, where
+  the manifest requires fault activation, `activated: true` with the right kind
+  and every required observation;
+- `check-test-evidence.py --require early --strict` exits 0 over the same
+  report, which carries the deeper topology/mode/feature-flag/artifact-identity
+  validation described in the previous subsection.
+
+**Measured cost.** Five green hosted runs took 6m19s, 5m57s, 6m18s, 7m15s and
+7m32s (mean ~6m40s), with no lane flake and no lane retry. The promotion moved
+`ci-ok`'s verdict about 2m07s later; total workflow wall clock was unchanged on
+one attempt (13m12s, with `helm-integration-test` still the critical path) and
++25s on another, where `ci-ok` became the critical path. It costs no new runner
+minutes — the lane already ran on every `go`/`helm`/`ci` PR before the
+promotion; the change is only that `ci-ok` now waits for it.
+
+**Observed fail-closed behaviour.** On
+[run 34868499191](https://github.com/caesium-cloud/caesium/actions/runs/34868499191)
+attempt 1, a transient `images`/`bake-images` failure on a docs-only commit
+skipped the lane although the path filters had selected it, and the gate refused
+for both reasons at once:
+
+```
+ci-ok failed: images=failure, ui-e2e=skipped, ui-e2e-auth=skipped, integration=skipped,
+              early-evidence=skipped,
+              early-evidence evidence: .tmp/evidence/evidence.json is absent; the lane produced no evidence
+```
+
+Attempt 2, with `images` green on identical code, passed. The same behaviour is
+reproducible locally against a real artifact directory: delete
+`.tmp/evidence/sql-budget.json` and `just check-evidence` exits 1 with
+`missing evidence fragment …; the lane did not produce it`; drop a scenario from
+a fragment and it exits 1 with `missing-scenario=<id>`.
+
+**What this gate does and does not prove.** It proves one owner-crash fault on a
+three-member kind/Helm cluster with persistent volumes, plus one SQL-work budget
+on a single-process Docker server, both bound to the tested candidate. It is not
+partition, clock-skew, storage-loss, upgrade or performance equivalence, and no
+timing calibration was waited on. And until `ci-ok` is added to master's
+required status checks (§1), it blocks `v*` publication rather than PR merge.
+
+### Reference models and generated property tests (distributed-testing W3/C1)
+
+`test/model/` is an independent, untagged, pure-Go reference model of the run
+lifecycle. It re-derives readiness declaratively as a fixpoint over the current
+outcome set, deliberately unlike `internal/run`'s incremental predecessor
+counters and in-place ready queue, so agreement between the two is evidence
+rather than a mirror. `internal/run/model_properties_test.go` drives the real
+`RunState` (`NewRunState`, `MarkDispatched`, `ApplyCompletion`, `ReadyTasks`,
+`Clone`, `RequeueExpiredRows`, `AnyLeaseOverdue`, `ApplyExpansion`) against it
+over generated bounded DAGs, and `internal/run/recovery_properties_test.go`
+drives the real `RecoverRunState` / `RecoverRunStateWithFanOut` / `Snapshot` /
+`Restore` / `ValidateCheckpointBlob` over every checkpoint index of a generated
+execution.
+
+There is no separate command — these are ordinary unit tests:
+
+```sh
+just unit-test
+```
+
+`test/model/independence_test.go` keeps that honest mechanically: it enforces
+the package's import allowlist and its no-build-tag rule, so an "independent"
+model that starts a cluster or client, opens a Docker socket, touches the
+network, or imports a product decision function is a test failure rather than a
+broken convention. Porcupine is used for exactly one thing — the run-status
+register, which does have a valid sequential specification. At-least-once event
+delivery, liveness and lease safety have separate models (`events.go`,
+`lease.go`, `oracle.go`), each with a negative control proving the oracle
+rejects a planted defect.
+
+To stress a property harder than the default, raise Rapid's own `-rapid.checks`
+(and optionally `-rapid.steps`) inside the builder image the unit lane uses. The
+C1 evidence used 4000–5000 checks at 60–80 steps on every new property:
+
+```sh
+docker run --rm -v "$PWD":/build -w /build \
+  caesiumcloud/caesium-builder:latest-full \
+  go test ./test/model/ -rapid.checks=5000 -rapid.steps=80
+```
+
+Retained counterexamples are committed as **deterministic source** in
+`test/model/regression_test.go`, not as Rapid `.fail` artifacts. That is a
+deliberate deviation the plan records: a `.fail` file is an opaque bitstream
+tied to the exact sequence of draws a property made, so the first generator
+refactor turns it into a "fail file is no longer valid" log line that runs
+nothing and explains nothing. `test/model/doc.go` documents the workflow —
+commit the `.fail` file while a defect is **open**, so CI reproduces the exact
+case, then transcribe it into `regression_test.go` as a named test and delete
+the artifact when the fix lands.
+
+Limits: a green run proves a *decision function* agrees with a specification on
+hermetic inputs. It proves nothing about wiring — not that the HTTP handler
+calls it, not that the transaction commits, not that a real owner on a real
+cluster reaches the same state. The `early-evidence` lane and the integration
+suites are what establish that. The four counterexamples C1 found were all in
+the new model; the product's `RunState` and recovery paths agreed with it under
+4000+ generated cases per property.
+
+### Developer-journey CLI scenarios (distributed-testing W3/D1)
+
+`test/developer_journey_test.go` adds ten `IntegrationTestSuite` scenarios that
+extend the binary-driven local-dev journey in `test/local_dev_test.go` (which is
+unchanged). They need no workflow change — the existing Docker integration lanes
+discover them like any other suite method, and `test/shard_test.go` places them
+by the same reflection:
+
+```sh
+just integration-up
+just integration-test
+```
+
+They drive the container-built release CLI in an empty temporary workspace and
+capture stdout apart from stderr throughout (`runCLISeparate` / `runCLIStdout`,
+never the stream-merging `runCLIRaw`). Coverage:
+
+- Unparseable YAML (a tab violating block indentation) rejected by **both**
+  collection paths — `internal/jobdef.CollectDefinitions` for `test` and
+  `dev --once`, `cmd/job.collectDefinitions` for `lint`, `preview` and `apply`
+  — plus a schema-invalid definition rejected by `dev --once`, the command that
+  actually executes the DAG.
+- A workspace directory *and* job filename that both contain a literal space.
+- A step declaring `engine: kubernetes` with no reachable kubeconfig or
+  in-cluster config.
+- `--run-timeout` cancelling a run: the container has to be stopped and removed,
+  not merely reported as a nonzero exit.
+- Watch mode: first run, edit-triggered re-run, SIGINT, a graceful "Stopping.",
+  and no surviving container from either run.
+- `job apply` against the live server followed by `job export` — the CLI's own
+  read-back verb — asserting the round-tripped DAG topology and labels.
+
+Two real product defects were found while writing these and **filed rather than
+worked around**, because the owning packages are outside that stream's file
+scope. [#479](https://github.com/caesium-cloud/caesium/issues/479): `caesium dev
+--once` panics inside `internal/atom/kubernetes.NewEngine` (exit 2) on an
+unreachable Kubernetes engine instead of returning a clean error, because
+`internal/job.buildLocalRunners` calls the engine factory with no `recover()`.
+[#480](https://github.com/caesium-cloud/caesium/issues/480): `caesium dev
+--once` ignores SIGINT and orphans its container. The affected assertions
+require only a bounded nonzero exit, so they stay valid once those are fixed.
+
+### Browser accessibility, visual, scale, and recovery coverage (distributed-testing W3/D2)
+
+Four new spec files run in the existing required `ui-e2e` project against the
+live backend, under G1's retry and diagnostic rules. No new job, no new command:
+
+```sh
+just ui-e2e
+just ui-e2e-auth
+```
+
+**`accessibility.spec.ts`** runs `@axe-core/playwright` over the jobs list, run
+detail and its task panel, the Trigger Job dialog and the triggers page, plus
+keyboard and focus checks. It asserts only on WCAG 2.0/2.1 A+AA rules at
+`critical`/`serious` impact; `moderate`/`minor` findings are attached to the
+report but not asserted, so a large, actively-developed page does not flap on
+cosmetic nuances while missing labels and keyboard traps still fail hard. The
+two canvas-rendered widgets that expose no DOM accessibility tree by
+construction — the react-flow DAG canvas and the xterm log terminal — are
+excluded from the scan itself; the plaintext log mirror and the DAG's own
+button/label chrome stay in scope.
+
+`KNOWN_VIOLATIONS` is a **tracked baseline of real, pre-existing product
+defects** the scan found (systemic icon-only buttons with no accessible name;
+several muted-text/badge tokens below the 4.5:1 contrast ratio), filed as
+[#483](https://github.com/caesium-cloud/caesium/issues/483). It is not a pass.
+It is tracked **per violating node, not per whole rule id**, so a newly-broken
+control under an already-known rule still fails. Node identity is matched
+structurally — the leaf element's class set, subset- and order-tolerant,
+ignoring ancestor position — because axe computes the shortest selector that is
+unique given whatever fixture data other concurrently-running specs happen to
+have created, so the same button can be reported under different selectors run
+to run. `color-contrast` is instead matched globally by the violation's own
+`fgColor` within a small RGB tolerance, since these opacity-composited tokens
+report slightly different colors run to run against an unmodified UI; a
+genuinely new foreground token is therefore still reported as new. Shrinking
+this baseline is product-code work; widening it without a product-side
+justification is not.
+
+**`visual.spec.ts`** takes deterministic screenshots clipped to a single
+component (the Trigger Job dialog, a fixed-shape branching DAG, a fanned task's
+partition table), with a fixed viewport, `animations: "disabled"`, Google Fonts
+requests fulfilled empty so the fallback stack is stable, and elapsed-time text
+masked by locator rather than compared pixel-for-pixel.
+
+> **Linux-baseline rule.** Playwright names snapshots per platform, and CI only
+> ever compares `-linux.png`. Only `-linux.png` baselines are committed, and
+> they must be generated inside a Linux container running the exact
+> `@playwright/test` version pinned in `ui/package-lock.json` (for example
+> `mcr.microsoft.com/playwright:v<version>-noble`). A baseline taken on a
+> developer's macOS or Windows machine names a *different* file that CI never
+> reads, so the linux baseline would silently stay missing — which fails the
+> first CI run rather than passing it. Each test self-skips on any other
+> `process.platform`, because `just ui-e2e` runs the browser on whatever host
+> invoked `just`, not in a container: a local darwin run correctly reports these
+> as skipped, and the real per-pixel comparison is CI's `ui-e2e` check. When a
+> baseline legitimately changes, re-take it from the same pinned container (or
+> from CI's actual render) — never from a developer host.
+
+**`scale.spec.ts`** proves a real 18-node DAG renders every node, that 24 live
+pipelines each stay reachable through the pipeline filter, that the fanned
+partition table's virtualization keeps the DOM bounded while every row remains
+reachable by scrolling, and that a real 2000-line log stream is fully reachable
+through the log viewer's search filter. The large 240-row partition set is
+explicitly SYNTHETIC: the e2e server runs with
+`CAESIUM_FANOUT_MAX_PARTITIONS=8`, so a real group that size cannot be produced
+live — only the partitions list response for one real task is replaced.
+
+**`network-recovery.spec.ts`** covers reload-preserves-state, a real
+browser-level network cut via `context.setOffline`, and three explicitly
+labelled SYNTHETIC cases (expired credential, denied mutation, and a delayed
+stale job-detail response that must not clobber a faster subsequent
+navigation). This e2e server runs without `CAESIUM_AUTH_MODE`, so there is no
+live credential surface here; real scope-based denial stays covered against an
+auth-enabled server in `ui/e2e/auth/`.
+
+`ui/e2e/helpers/fixtures.ts` provides the shared `failOnUnexpectedPageErrors`
+guard used by all four files. It fails a test on unexpected console or page
+errors, allowing the browser's own automatic "Failed to load resource: status N"
+logging so the deliberate synthetic error-response cases do not self-trip it.
+The network-level `net::ERR_*` allowance is **file-scoped and opted into only by
+`network-recovery.spec.ts`** (`failOnUnexpectedPageErrors({
+allowNetworkLevelErrors: true })`), because the real offline cut was observed
+producing `net::ERR_NETWORK_CHANGED` noise against later, unrelated tests in
+that same file. Every other spec keeps the strict default.
 
 ## 5. Server env per lane, and the silent-drift rule
 
