@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"math/rand/v2"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -1462,10 +1464,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 		spec.Env = interpolated
+		rawSecretEnv := spec.Env
 		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
+		secretValues := incident.SecretValuesFromEnv(rawSecretEnv, spec.Env)
+		secretBearing := len(secretIdentities) > 0
+		secretLogFence := run.SecretLogFence{Attempt: attempt}
 		if len(secretIdentities) > 0 {
 			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
 			for _, resolved := range secretIdentities {
@@ -1473,6 +1479,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			if err := store.UpdateTaskExecutionDescriptorSecretRefs(runID, taskRef, refs); err != nil {
 				log.Warn("failed to persist task execution descriptor secret identity", "task_id", taskID, "error", err)
+			}
+		}
+		if secretBearing {
+			if err := store.PrepareSecretTaskLog(runID, taskRef, secretLogFence); err != nil {
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("prepare scrubbed task log: %w", err)
 			}
 		}
 		if len(paramEnv) > 0 || len(extraEnv) > 0 {
@@ -1495,6 +1506,37 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		if err := store.StartTask(runID, taskRef, a.ID()); err != nil {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
+		}
+
+		type logCaptureResult struct {
+			markers *pkgtask.Markers
+			err     error
+		}
+		var (
+			secretLogStream    io.ReadCloser
+			secretLogCollector *run.SecretLogCollector
+			secretLogResult    <-chan logCaptureResult
+		)
+		if secretBearing {
+			if stream, streamErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
+				log.Warn("failed to open scrubbed live task log; will retry after completion",
+					"task_id", taskID, "atom_id", a.ID(), "error", streamErr)
+			} else {
+				secretLogStream = stream
+				results := make(chan logCaptureResult, 1)
+				secretLogResult = results
+				collector := run.NewSecretLogCollector(store, runID, taskRef, secretLogFence,
+					secretValues, pkgtask.MaxLogSnapshotBytes)
+				secretLogCollector = collector
+				go func() {
+					markers, captureErr := run.CaptureSecretTaskLogs(stream, collector,
+						vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
+					if persistErr := collector.Err(); persistErr != nil {
+						log.Warn("failed to persist scrubbed live task log", "task_id", taskID, "error", persistErr)
+					}
+					results <- logCaptureResult{markers: markers, err: captureErr}
+				}()
+			}
 		}
 
 		waitResult := make(chan struct {
@@ -1535,6 +1577,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// "cancelled but the container is still out there" are different
 		// operational facts.
 		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
+			if secretLogCollector != nil {
+				secretLogCollector.Abort()
+			}
+			if secretLogStream != nil {
+				_ = secretLogStream.Close()
+			}
 			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
@@ -1596,17 +1644,48 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// those verdicts to `unavailable` instead of failing the task for
 			// an infrastructure fault.
 			var metricsCapture run.MetricsCapture
-			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+			var markers *pkgtask.Markers
+			var parseErr error
+			var logErr error
+			if secretLogResult != nil {
+				select {
+				case capture := <-secretLogResult:
+					markers, parseErr = capture.markers, capture.err
+				case <-time.After(5 * time.Second):
+					secretLogCollector.Abort()
+					_ = secretLogStream.Close()
+					select {
+					case capture := <-secretLogResult:
+						markers, parseErr = capture.markers, capture.err
+					case <-time.After(time.Second):
+						logErr = fmt.Errorf("timed out draining scrubbed task log")
+					}
+				}
+			} else {
+				logStream, openErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+				logErr = openErr
+				if openErr == nil {
+					if secretBearing {
+						collector := run.NewSecretLogCollector(store, runID, taskRef, secretLogFence,
+							secretValues, pkgtask.MaxLogSnapshotBytes)
+						markers, parseErr = run.CaptureSecretTaskLogs(logStream, collector,
+							vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
+						if persistErr := collector.Err(); persistErr != nil {
+							log.Warn("failed to persist scrubbed task log", "task_id", taskID, "error", persistErr)
+						}
+					} else {
+						markers, parseErr = pkgtask.CaptureMarkersWithLimits(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
+						if closeErr := logStream.Close(); closeErr != nil {
+							log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
+						}
+					}
+				}
+			}
 			if logErr != nil {
 				metricsCapture.Unreadable = true
 				log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
 					"job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", logErr)
 			} else {
-				maxParts := env.Variables().FanOutMaxPartitions
-				markers, parseErr := pkgtask.CaptureMarkersWithLimits(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64(), maxParts)
-				if closeErr := logStream.Close(); closeErr != nil {
-					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
-				}
 				switch {
 				case parseErr != nil:
 					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
@@ -2169,7 +2248,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 
 			if execErr != nil {
-				_ = store.SaveTaskLogSnapshot(runID, taskRunID, logSnapshot)
+				_ = store.SaveCapturedTaskLogSnapshot(runID, taskRunID, logSnapshot)
 				// Retries cover execution errors only, matching the unfanned
 				// local path: a container that ran and exited non-zero is a
 				// terminal result, not a transient fault.
@@ -2201,7 +2280,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: completeErr}
 				return
 			}
-			_ = store.SaveTaskLogSnapshot(runID, taskRunID, logSnapshot)
+			_ = store.SaveCapturedTaskLogSnapshot(runID, taskRunID, logSnapshot)
 			var completeSkipped []uuid.UUID
 			if completeRes != nil {
 				completeSkipped = completeRes.SkippedTaskIDs
@@ -2822,7 +2901,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// row whose catalog task has vanished, which a nil-taskModel
 				// guard would instead silently skip.
 				if err := run.ValidateTaskOutputSchema(store, runID, taskID, output, runner.outputSchema, runner.schemaValidation); err != nil {
-					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+					if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}
 					execErr = err
@@ -2834,7 +2913,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// path has one row per (run, task), so the catalog task id
 				// resolves it unambiguously.
 				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
-					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+					if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}
 					execErr = err
@@ -2847,7 +2926,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return nil, completeErr
 				}
 				registerExpansion(completeResult)
-				if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+				if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 					log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 				}
 				if len(output) > 0 {

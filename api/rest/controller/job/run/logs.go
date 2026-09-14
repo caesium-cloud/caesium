@@ -47,6 +47,12 @@ var logSnapshotLoader = func(ctx context.Context, runID, taskRunID uuid.UUID) (*
 	return runstorage.Default().TaskLogSnapshotForInstance(ctx, runID, taskRunID)
 }
 
+var scrubbedLogStateLoader = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskLogReadState, error) {
+	return runstorage.Default().TaskLogReadStateForInstance(ctx, runID, taskRunID)
+}
+
+var scrubbedLogPollInterval = 100 * time.Millisecond
+
 // Logs streams (or replays) one task's container log.
 //
 //	GET /v1/jobs/:id/runs/:run_id/logs?task_id=<uuid>
@@ -146,19 +152,41 @@ func Logs(c *echo.Context) error {
 		return c.JSON(problem.Status, problem)
 	}
 
+	// Run-detail entries are collapsed read models: even an unfanned entry has
+	// its ID rewritten to the catalog task ID, and owner caches may omit internal
+	// routing fields. Resolve the actual TaskRun row before deciding whether raw
+	// runtime logs are safe. A selected fan-out row is already authoritative.
+	authoritative := selected
+	if authoritative == nil {
+		instances, loadErr := logInstanceLoader(ctx, runID, taskID)
+		if loadErr != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(loadErr)
+		}
+		if len(instances) != 1 {
+			return echo.ErrNotFound
+		}
+		authoritative = instances[0]
+	}
+
 	var snapshot *runstorage.TaskLogSnapshot
 	if selected != nil {
-		taskEntry = selected
 		c.Response().Header().Set(logHeaderTaskRunID, selected.ID.String())
 		if selected.PartitionValue != "" {
 			c.Response().Header().Set(logHeaderPartition, selected.PartitionValue)
 		}
-		snapshot, err = logSnapshotLoader(ctx, runID, selected.ID)
-	} else {
-		snapshot, err = runService.GetTaskLogSnapshot(runID, taskID)
 	}
+	taskEntry = authoritative
+	snapshot, err = logSnapshotLoader(ctx, runID, authoritative.ID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
+	// A secret-bearing task is never streamed from the runtime: only the executor
+	// that resolved the value can scrub it without persisting or re-resolving the
+	// secret. That executor publishes a cumulative sanitized snapshot, which this
+	// handler tails from any node and across client reconnects.
+	if taskEntry.LogScrubbed {
+		return serveScrubbedTaskLog(c, runID, taskEntry)
 	}
 
 	// A task that has finished has no container left to stream: every engine's
@@ -187,6 +215,86 @@ func Logs(c *echo.Context) error {
 	}
 
 	return serveTaskLog(c, open, taskEntry, since, snapshot, runEntry.CompletedAt != nil)
+}
+
+// serveScrubbedTaskLog tails cumulative sanitized snapshots and emits only the
+// appended bytes. It preserves the existing one-response live contract for the
+// console while keeping raw Docker/Podman/Kubernetes logs outside the API path.
+func serveScrubbedTaskLog(c *echo.Context, runID uuid.UUID, task *runstorage.TaskRun) error {
+	// Registration marks secret-bearing rows before they are claimed. Match the
+	// ordinary log endpoint during that queueing window instead of opening a
+	// response that the first claim would immediately invalidate.
+	if task.Status == runstorage.TaskStatusPending && task.ClaimedBy == "" {
+		return writeLogState(c, logStateForTask(task))
+	}
+	ctx := c.Request().Context()
+	ticker := time.NewTicker(scrubbedLogPollInterval)
+	defer ticker.Stop()
+
+	var sent string
+	committed := false
+	initialAttempt := task.Attempt
+	initialClaimedBy := task.ClaimedBy
+	initialClaimAttempt := task.ClaimAttempt
+	for {
+		state, err := scrubbedLogStateLoader(ctx, runID, task.ID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		}
+		if !state.Scrubbed {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, "scrubbed log stream unavailable")
+		}
+		if state.Attempt != initialAttempt || state.ClaimedBy != initialClaimedBy || state.ClaimAttempt != initialClaimAttempt {
+			// A retry or replacement claim owns a new cumulative snapshot. End this
+			// producer's stream; reconnecting clients start from the new generation.
+			return nil
+		}
+
+		if snapshot := state.Snapshot; snapshot != nil {
+			text := snapshot.Text
+			if len(text) < len(sent) || !strings.HasPrefix(text, sent) {
+				return echo.NewHTTPError(http.StatusServiceUnavailable, "scrubbed log snapshot changed non-monotonically")
+			}
+			if !committed && taskLogIsFinal(&runstorage.TaskRun{Status: state.Status}) {
+				return writeLogSnapshot(c, snapshot)
+			}
+			if len(text) > len(sent) {
+				res := c.Response()
+				if !committed {
+					res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
+					res.Header().Set(logHeaderSource, "live")
+					if snapshot.Truncated {
+						res.Header().Set(logHeaderTruncated, "true")
+					}
+					res.WriteHeader(http.StatusOK)
+					committed = true
+				}
+				if _, err := res.Write([]byte(text[len(sent):])); err != nil {
+					return err
+				}
+				if flusher, ok := res.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				sent = text
+			}
+		}
+
+		if runstorage.IsTerminal(state.Status) {
+			if committed {
+				return nil
+			}
+			return writeLogState(c, "empty")
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 // logStreamOpener opens the live container log of one task run. It is a

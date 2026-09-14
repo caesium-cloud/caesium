@@ -62,10 +62,22 @@ type Scrubber struct {
 // that fail the over-redaction guard (too short, a denylisted literal, or a
 // bare small number) are dropped from exact-match scrubbing.
 func NewScrubber(secretValues []string) *Scrubber {
+	return &Scrubber{secrets: normalizedSecretValues(secretValues, scrubbable)}
+}
+
+// NewExactValueScrubber builds a scrubber for values that are already known to
+// have come from secret:// resolution. Unlike NewScrubber it does not apply the
+// heuristic token pass or the short/common-value guard: provenance is exact,
+// so every non-empty resolved value must be removed from task log text.
+func NewExactValueScrubber(secretValues []string) *Scrubber {
+	return &Scrubber{secrets: normalizedSecretValues(secretValues, func(string) bool { return true })}
+}
+
+func normalizedSecretValues(secretValues []string, keep func(string) bool) []string {
 	seen := make(map[string]struct{}, len(secretValues))
 	kept := make([]string, 0, len(secretValues))
 	for _, v := range secretValues {
-		if !scrubbable(v) {
+		if v == "" || !keep(v) {
 			continue
 		}
 		if _, dup := seen[v]; dup {
@@ -77,7 +89,7 @@ func NewScrubber(secretValues []string) *Scrubber {
 	sort.SliceStable(kept, func(i, j int) bool {
 		return len(kept[i]) > len(kept[j])
 	})
-	return &Scrubber{secrets: kept}
+	return kept
 }
 
 // SecretValuesFromEnv extracts the resolved values of the env keys whose raw
@@ -141,6 +153,21 @@ func (s *Scrubber) Scrub(text string) string {
 		out = strings.ReplaceAll(out, secret, Redacted)
 	}
 	out = s.scrubHighEntropy(out)
+	return out
+}
+
+// ScrubExact removes only the scrubber's explicitly supplied values. It is the
+// task-log policy: marker payloads and ordinary high-entropy identifiers remain
+// readable, while every non-empty value passed to NewExactValueScrubber is
+// replaced.
+func (s *Scrubber) ScrubExact(text string) string {
+	if text == "" {
+		return text
+	}
+	out := text
+	for _, secret := range s.secrets {
+		out = strings.ReplaceAll(out, secret, Redacted)
+	}
 	return out
 }
 

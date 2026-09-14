@@ -213,6 +213,7 @@ type TaskRun struct {
 	// output against (runtimeExecutor.runSchemaValidation).
 	OutputSchema            []byte     `json:"-"`
 	SchemaValidation        string     `json:"-"`
+	LogScrubbed             bool       `json:"-"`
 	CacheOriginRunID        *uuid.UUID `json:"cache_origin_run_id,omitempty"`
 	CacheCreatedAt          *time.Time `json:"cache_created_at,omitempty"`
 	CacheExpiresAt          *time.Time `json:"cache_expires_at,omitempty"`
@@ -1838,6 +1839,7 @@ func (s *Store) registerTasksTx(
 				SchemaValidation:        schemaValidation,
 				Quarantine:              jobRun.Quarantine,
 				ExecutionDescriptor:     descriptor,
+				LogScrubbed:             TaskSpecHasSecretRefs(atom.ContainerSpec().Env),
 			})
 
 			if emitReady && input.OutstandingPredecessors == 0 && s.eventStore != nil {
@@ -2405,13 +2407,13 @@ func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, owne
 		result := s.db.Model(&models.TaskRun{}).
 			Where("id = ? AND claimed_by = ? AND status = ? AND (owner_generation = ? OR owner_generation = 0)",
 				row.ID, claimedBy, string(TaskStatusRunning), ownerGeneration).
-			Updates(map[string]any{
+			Updates(WithInvalidatedSecretLogSnapshot(map[string]any{
 				"status":           string(TaskStatusPending),
 				"claimed_by":       "",
 				"claim_expires_at": nil,
 				"runtime_id":       "",
 				"started_at":       nil,
-			})
+			}))
 		if result.Error != nil {
 			return result.Error
 		}
@@ -2475,14 +2477,14 @@ func (s *Store) RateLimitTask(ctx context.Context, runID, taskRef uuid.UUID, ret
 		}
 		result := s.db.WithContext(ctx).Model(&models.TaskRun{}).
 			Where("id = ? AND status IN ?", row.ID, []string{string(TaskStatusPending), string(TaskStatusRunning)}).
-			Updates(map[string]any{
+			Updates(WithInvalidatedSecretLogSnapshot(map[string]any{
 				"status":                 string(TaskStatusPending),
 				"claimed_by":             "",
 				"claim_expires_at":       nil,
 				"runtime_id":             "",
 				"started_at":             nil,
 				"rate_limit_retry_after": retryAfter,
-			})
+			}))
 		if result.Error != nil {
 			return result.Error
 		}
@@ -5215,7 +5217,7 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 					// that completed since the pluck is terminal and stays
 					// terminal.
 					Where("id IN ? AND status = ?", chunk, string(TaskStatusRunning)).
-					Updates(map[string]any{
+					Updates(WithInvalidatedSecretLogSnapshot(map[string]any{
 						"status": string(TaskStatusPending),
 						// Clear the claim too, so a new owner taking over a run can re-claim
 						// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
@@ -5229,7 +5231,7 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 						"cache_origin_run_id":    nil,
 						"cache_created_at":       nil,
 						"cache_expires_at":       nil,
-					}).Error; err != nil {
+					})).Error; err != nil {
 					return err
 				}
 			}
@@ -5684,6 +5686,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		CacheTTLNever:           model.CacheTTLNever,
 		OutputSchema:            append([]byte(nil), model.OutputSchema...),
 		SchemaValidation:        model.SchemaValidation,
+		LogScrubbed:             model.LogScrubbed,
 	}
 
 	if len(model.Output) > 0 {

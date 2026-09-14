@@ -170,13 +170,17 @@ type TaskRun struct {
 	// unset (NULL) when the task never produced an exit code (engine wait error,
 	// startup failure before a code was assigned). A value of 0 is a real,
 	// captured success code — distinct from NULL "never captured".
-	ExitCode                *int           `gorm:"type:integer" json:"exit_code,omitempty"`
-	ExecutionDescriptor     datatypes.JSON `gorm:"type:json" json:"-"`
-	LogText                 string         `gorm:"type:text" json:"-"`
-	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`
-	Error                   string         `json:"error,omitempty"`
-	RuntimeID               string         `json:"runtime_id,omitempty"`
-	OutstandingPredecessors int            `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
+	ExitCode            *int           `gorm:"type:integer" json:"exit_code,omitempty"`
+	ExecutionDescriptor datatypes.JSON `gorm:"type:json" json:"-"`
+	LogText             string         `gorm:"type:text" json:"-"`
+	LogTruncated        bool           `gorm:"not null;default:false" json:"-"`
+	// LogScrubbed marks output that must be served only from the executor's
+	// sanitized snapshot, never from the runtime's raw log stream. It is a
+	// property of the frozen task spec and therefore survives attempt retries.
+	LogScrubbed             bool   `gorm:"not null;default:false" json:"-"`
+	Error                   string `json:"error,omitempty"`
+	RuntimeID               string `json:"runtime_id,omitempty"`
+	OutstandingPredecessors int    `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
 	// OwnerGeneration is set to the RunLease.Generation of the owning node when
 	// run-owner mode is active.  Every coordination write by the owner
 	// includes AND (owner_generation = ? OR owner_generation = 0) in its WHERE
