@@ -24,7 +24,7 @@ import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun 
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
-import { getRunCacheStats } from "./cache-utils";
+import { getRunCacheStats, mergeTerminalRunUpdate } from "./cache-utils";
 import { CallbackRunsSection } from "./CallbackRunsSection";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
@@ -110,7 +110,7 @@ export function RunDetailPage() {
 
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const finalRun = e.payload as JobRun;
-          if (finalRun?.tasks) return finalRun;
+          if (finalRun?.tasks) return mergeTerminalRunUpdate(old, finalRun);
           toast.success("Run completed");
           return { ...old, status: "succeeded" };
         }

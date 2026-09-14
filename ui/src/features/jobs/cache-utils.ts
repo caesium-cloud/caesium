@@ -1,4 +1,4 @@
-import type { CacheConfigValue, JobRun, TaskRun } from "@/lib/api";
+import type { CacheConfigValue, CallbackRun, JobRun, TaskRun } from "@/lib/api";
 
 export interface CachePolicySummary {
   enabled: boolean;
@@ -42,6 +42,36 @@ export function getRunCacheStats(run?: Pick<JobRun, "cache_hits" | "executed_tas
     }
   }
   return { cacheHits, executedTasks, totalTasks: tasks.length };
+}
+
+/**
+ * Terminal SSE snapshots are written before completion callbacks are
+ * dispatched. Their `callbacks` collection is therefore often explicitly
+ * empty even when a later REST response has persisted callback deliveries.
+ * Preserve those deliveries while applying the event's task/status updates.
+ * A mismatched payload is ignored as an additional cache fence.
+ */
+export function mergeTerminalRunUpdate(current: JobRun, terminal: JobRun): JobRun {
+  if (terminal.id !== current.id) {
+    return current;
+  }
+
+  return {
+    ...current,
+    ...terminal,
+    callbacks: mergeCallbackRuns(current.callbacks, terminal.callbacks),
+  };
+}
+
+function mergeCallbackRuns(
+  current: CallbackRun[] | undefined,
+  terminal: CallbackRun[] | undefined,
+): CallbackRun[] | undefined {
+  if (!current?.length) return terminal;
+  if (!terminal?.length) return current;
+
+  const currentIDs = new Set(current.map((callback) => callback.id));
+  return [...current, ...terminal.filter((callback) => !currentIDs.has(callback.id))];
 }
 
 export function formatCacheShare(stats: RunCacheStats): string {
