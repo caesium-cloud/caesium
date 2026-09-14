@@ -34,6 +34,7 @@ var (
 )
 
 type dockerBackend interface {
+	ContainerStatsOneShot(context.Context, string) (container.StatsResponseReader, error)
 	ContainerInspect(context.Context, string) (container.InspectResponse, error)
 	ContainerList(context.Context, container.ListOptions) ([]container.Summary, error)
 	ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error)

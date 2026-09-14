@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/docker/docker/api/types/container"
 )
 
@@ -32,6 +33,9 @@ func (c *Atom) State() atom.State {
 // Result returns the result of the Atom. This function
 // maps Docker container exit codes to Caesium Atom results.
 func (c *Atom) Result() atom.Result {
+	if env.Variables().ResourceStatsEnabled && c.ResourceOutcome().OOMKilled {
+		return atom.ResourceFailure
+	}
 	if result, ok := resultMap[c.metadata.State.ExitCode]; ok {
 		return result
 	}
@@ -64,4 +68,16 @@ func (c *Atom) StartedAt() time.Time {
 func (c *Atom) StoppedAt() time.Time {
 	t, _ := time.Parse(time.RFC3339, c.metadata.State.FinishedAt)
 	return t
+}
+
+func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
+	if c.metadata.ContainerJSONBase == nil || c.metadata.State == nil {
+		return atom.ResourceOutcome{}
+	}
+	out := atom.ResourceOutcome{OOMKilled: c.metadata.State.OOMKilled}
+	if c.metadata.HostConfig != nil && c.metadata.HostConfig.Memory > 0 {
+		value := c.metadata.HostConfig.Memory
+		out.MemoryLimitBytes = &value
+	}
+	return out
 }

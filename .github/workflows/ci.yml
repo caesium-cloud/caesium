@@ -110,6 +110,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
       - name: Install actionlint
         run: |
           curl -fsSL --retry 3 -o /tmp/actionlint.tar.gz \
@@ -211,6 +212,8 @@ jobs:
           cache-group: product
       - name: Build triage-agent
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
+      - name: Build and verify resource stress image (amd64)
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
       - name: Extract static CLI (amd64)
         run: |
           set -euo pipefail
@@ -226,6 +229,7 @@ jobs:
           images: >-
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64-test
+            caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - uses: ./.github/actions/save-docker-images
         with:
           name: triage-amd64
@@ -260,6 +264,9 @@ jobs:
           arch: arm64
           targets: product
           cache-group: product
+      - uses: taiki-e/install-action@just
+      - name: Build and verify resource stress image (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 stress-image-test
       - name: Extract static CLI (arm64)
         run: |
           set -euo pipefail
@@ -275,6 +282,7 @@ jobs:
           images: >-
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64-test
+            caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-arm64
       - uses: ./.github/actions/save-docker-images
         with:
           name: integration-runner-arm64
@@ -586,6 +594,9 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+            -e CAESIUM_RIGHT_SIZING_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -741,6 +752,9 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+            -e CAESIUM_RIGHT_SIZING_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -922,6 +936,7 @@ jobs:
         run: |
           docker pull alpine:3.23
           kind load docker-image alpine:3.23
+          kind load docker-image caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
@@ -953,6 +968,7 @@ jobs:
             -e CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }} \
             -e CAESIUM_TEST_SHARD_COUNT=3 \
             -e CAESIUM_TEST_ENGINE=kubernetes \
+            -e CAESIUM_RESOURCE_STRESS_IMAGE=caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=host \
             -w /bld/caesium \
@@ -985,12 +1001,33 @@ jobs:
       - uses: ./.github/actions/load-docker-images
         with:
           name: integration-runner-amd64
+      # Ubuntu 24.04's conmon 2.1.10 loses cgroup-v2 OOM notifications.
+      # Keep the distro Podman API, but use the fixed upstream monitor.
+      - name: Install conmon with cgroup-v2 OOM fixes
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://github.com/containers/conmon/releases/download/v2.2.1/conmon.amd64 \
+            -o "${RUNNER_TEMP}/conmon"
+          echo "1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6  ${RUNNER_TEMP}/conmon" | sha256sum --check --strict
+          sudo install -m 0755 "${RUNNER_TEMP}/conmon" /usr/bin/conmon
+          conmon --version
+          # Upstream's static binary omits journald; use its supported file
+          # driver for both the CLI smoke workload and API-created jobs.
+          mkdir -p "$HOME/.config/containers"
+          printf '%s\n' '[containers]' 'log_driver = "k8s-file"' > "$HOME/.config/containers/containers.conf"
       - name: Enable Podman socket
         run: |
           systemctl --user enable --now podman.socket
           podman info
-      - name: Pre-pull job images via Podman
-        run: podman pull alpine:3.23
+      - name: Load exact stress fixture and pre-pull job images via Podman
+        run: |
+          set -euo pipefail
+          docker save caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 | podman load
+          podman image inspect caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 >/dev/null
+          podman pull alpine:3.23
+      - name: Verify real OOM evidence through Podman
+        run: bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start Caesium with Podman engine
         # This lane starts its OWN server rather than going through
         # `just integration-up`, so it silently drifts red whenever a feature
@@ -1015,6 +1052,9 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+            -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+            -e CAESIUM_RIGHT_SIZING_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
@@ -1038,6 +1078,9 @@ jobs:
             -e CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }} \
             -e CAESIUM_TEST_SHARD_COUNT=3 \
             -e CAESIUM_TEST_ENGINE=podman \
+            -e CAESIUM_RESOURCE_STRESS_IMAGE=caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 \
+            -v "/run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock" \
+            -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=container:caesium-server-podman \
             -w /bld/caesium \
@@ -1207,6 +1250,15 @@ jobs:
             caesiumcloud/caesium:${IMAGE_TAG}-amd64 \
             caesiumcloud/caesium:${IMAGE_TAG}-arm64
           docker manifest push caesiumcloud/caesium:${IMAGE_TAG}
+      - name: Push stress fixture multi-arch manifest
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_TAG }}
+          docker push caesiumcloud/resource-stress:${IMAGE_TAG}-amd64
+          docker push caesiumcloud/resource-stress:${IMAGE_TAG}-arm64
+          docker manifest create caesiumcloud/resource-stress:${IMAGE_TAG} \
+            caesiumcloud/resource-stress:${IMAGE_TAG}-amd64 \
+            caesiumcloud/resource-stress:${IMAGE_TAG}-arm64
+          docker manifest push caesiumcloud/resource-stress:${IMAGE_TAG}
       - name: Push reagent multi-arch manifests
         run: |
           IMAGE_TAG=${{ env.IMAGE_TAG }}

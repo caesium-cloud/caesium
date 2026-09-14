@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -58,15 +59,16 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			if len(expired) == 0 {
 				return nil
 			}
+			updates := TaskResourceResetColumns()
+			maps.Copy(updates, map[string]any{
+				"status":           string(TaskStatusPending),
+				"claimed_by":       "",
+				"claim_expires_at": nil,
+				"runtime_id":       "",
+				"started_at":       nil,
+			})
 			res := tx.Model(&models.TaskRun{}).
-				Where(where, args...).
-				Updates(map[string]any{
-					"status":           string(TaskStatusPending),
-					"claimed_by":       "",
-					"claim_expires_at": nil,
-					"runtime_id":       "",
-					"started_at":       nil,
-				})
+				Where(where, args...).Updates(updates)
 			if res.Error != nil {
 				return res.Error
 			}

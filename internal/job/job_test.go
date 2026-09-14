@@ -1234,3 +1234,7 @@ func TestRunLocalHTTPParamsStoredInRun(t *testing.T) {
 	snapshot := latestRunSnapshot(t, store, jobID)
 	require.Equal(t, "2026-03-10", snapshot.Params["date"], "params should be persisted on the run")
 }
+
+func (e *fakeEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

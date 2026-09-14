@@ -40,7 +40,7 @@ func TestMonitorTaskReturnsPostWaitAtom(t *testing.T) {
 	executor := &runtimeExecutor{}
 	taskRun := &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()}
 
-	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec)
+	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, atom.Success, got.Result(), "monitorTask must return the atom from Wait, not the pre-Wait input")
@@ -53,7 +53,7 @@ func TestMonitorTaskReturnsInputAtomOnWaitError(t *testing.T) {
 	executor := &runtimeExecutor{}
 	taskRun := &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()}
 
-	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec)
+	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec, nil)
 	require.Error(t, err)
 	require.Same(t, preExec, got, "on Wait error monitorTask should return the input atom so the caller can still call Stop with its ID")
 	require.Equal(t, 1, engine.stopCalls, "monitorTask must clean up the atom on Wait error to avoid leaking the underlying container/pod")
@@ -74,7 +74,7 @@ func TestMonitorTaskStopsAtomOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	got, err := executor.monitorTask(ctx, taskRun, engine, preExec)
+	got, err := executor.monitorTask(ctx, taskRun, engine, preExec, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Same(t, preExec, got)
 	require.Equal(t, 1, engine.stopCalls, "monitorTask must clean up the atom on context cancellation to avoid leaks")
@@ -729,4 +729,12 @@ func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
 
 func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(e.logs)), nil
+}
+
+func (e *fakeMonitorEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}
+
+func (e *captureCreateEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
 }

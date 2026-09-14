@@ -5,6 +5,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -37,6 +38,9 @@ func (c *Atom) State() atom.State {
 // Result returns the result of the Atom. This function
 // maps pod container exit codes to Caesium Atom results.
 func (c *Atom) Result() atom.Result {
+	if env.Variables().ResourceStatsEnabled && c.ResourceOutcome().OOMKilled {
+		return atom.ResourceFailure
+	}
 	if term := terminatedState(c.metadata); term != nil {
 		if result, ok := resultMap[term.ExitCode]; ok {
 			return result
@@ -111,4 +115,28 @@ func terminatedState(pod *v1.Pod) *v1.ContainerStateTerminated {
 		}
 	}
 	return nil
+}
+
+func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
+	term := terminatedState(c.metadata)
+	if term == nil {
+		return atom.ResourceOutcome{}
+	}
+	out := atom.ResourceOutcome{OOMKilled: term.Reason == "OOMKilled"}
+	// Match the same container whose terminated state supplied the verdict.
+	for _, status := range c.metadata.Status.ContainerStatuses {
+		if status.State.Terminated != term {
+			continue
+		}
+		for _, spec := range c.metadata.Spec.Containers {
+			if spec.Name == status.Name {
+				if quantity, ok := spec.Resources.Limits[v1.ResourceMemory]; ok && quantity.Sign() > 0 {
+					value := quantity.Value()
+					out.MemoryLimitBytes = &value
+				}
+				return out
+			}
+		}
+	}
+	return out
 }

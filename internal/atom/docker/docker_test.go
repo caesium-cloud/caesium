@@ -165,3 +165,8 @@ func (s *DockerTestSuite) SetupTest() {
 func TestDockerTestSuite(t *testing.T) {
 	suite.Run(t, new(DockerTestSuite))
 }
+
+func (m *mockDockerBackend) ContainerStatsOneShot(ctx context.Context, id string) (dockercontainer.StatsResponseReader, error) {
+	args := m.Called(id)
+	return args.Get(0).(dockercontainer.StatsResponseReader), args.Error(1)
+}

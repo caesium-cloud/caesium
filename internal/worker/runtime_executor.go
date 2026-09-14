@@ -824,20 +824,43 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	finalAtom, monitorErr := e.monitorTask(taskCtx, taskRun, engine, a)
+	var resourceSampler *atom.ResourceSampler
+	vars := env.Variables()
+	if vars.ResourceStatsEnabled {
+		resourceSampler = atom.StartResourceSampler(taskCtx, engine, a.ID(), vars.ResourceStatsSampleInterval)
+		defer resourceSampler.Stop(nil)
+	}
+
+	finalAtom, monitorErr := e.monitorTask(taskCtx, taskRun, engine, a, resourceSampler)
+	if resourceSampler != nil {
+		// monitorTask joins the sampler before error cleanup removes the
+		// runtime. Keep its valid samples even when Wait provides no final
+		// inspect snapshot; the Create snapshot is not exit/OOM evidence.
+		var inspected atom.Atom
+		if monitorErr == nil {
+			inspected = finalAtom
+		}
+		outcome := run.TaskResourceOutcome{ResourceSummary: resourceSampler.Stop(inspected), RuntimeID: a.ID(), Attempt: taskRun.Attempt, ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
+		if inspected != nil {
+			outcome.ExitCode = inspected.ExitCode()
+		}
+		if resourceErr := e.store.SetTaskResourceOutcome(taskRun.JobRunID, taskRun.ID, outcome); resourceErr != nil {
+			log.Warn("failed to persist worker task resource outcome", "task_id", taskRun.TaskID, "error", resourceErr)
+		}
+	}
 	if monitorErr != nil {
 		return nil, monitorErr
 	}
-	// monitorTask returns the post-Wait atom snapshot whose Result/State
-	// reflect actual execution. The original `a` from Create() is pre-execution
-	// state and would report Result=Unknown for the kubernetes engine.
+	// Use the post-Wait snapshot, since Create may still report Unknown.
 	a = finalAtom
 
 	// Capture the raw exit code before Result() folds it into a coarse status and
 	// the incident classifier loses it. Best-effort: a persistence failure must
 	// not fail an otherwise-complete task.
-	if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.ID, a.ExitCode()); err != nil {
-		log.Warn("failed to persist task exit code", "task_id", taskRun.TaskID, "error", err)
+	if resourceSampler == nil {
+		if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.ID, a.ExitCode()); err != nil {
+			log.Warn("failed to persist task exit code", "task_id", taskRun.TaskID, "error", err)
+		}
 	}
 
 	// Parse structured task output and branch markers in a single pass
@@ -1142,15 +1165,16 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 // logs from the live container/pod before teardown.
 //
 // On any error path (deadline exceeded, parent cancellation, engine.Wait
-// failure) monitorTask makes a best-effort engine.Stop before returning, so
-// failures don't leak orphaned containers/pods. The Stop uses a detached
+// failure) monitorTask cancels and joins the sampler, then makes a best-effort
+// engine.Stop before returning, so failures don't leak orphaned containers/pods.
+// The Stop uses a detached
 // context inside each engine implementation so cleanup still runs even when
 // the parent context has been cancelled.
 //
 // Lease renewal is no longer done per-task inside monitorTask. The Worker
 // issues a single batched UPDATE for all in-flight claims via its per-node
 // renewal ticker (see Worker.runLeaseRenewal).
-func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) (atom.Atom, error) {
+func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom, resourceSampler *atom.ResourceSampler) (atom.Atom, error) {
 	waitResult := make(chan struct {
 		atom atom.Atom
 		err  error
@@ -1164,6 +1188,7 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 	}()
 
 	stopAtom := func() error {
+		resourceSampler.Stop(nil)
 		return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 	}
 

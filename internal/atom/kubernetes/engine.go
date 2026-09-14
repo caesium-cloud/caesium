@@ -39,8 +39,9 @@ type Engine interface {
 }
 
 type kubernetesEngine struct {
-	ctx     context.Context
-	backend kubernetesBackend
+	ctx         context.Context
+	backend     kubernetesBackend
+	statsClient rest.Interface
 }
 
 var getKubernetesCore = func(k8sCfg string) corev1.CoreV1Interface {
@@ -79,9 +80,14 @@ func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) Engine {
 		backend = getKubernetesCore(env.Variables().KubernetesConfig)
 	}
 
+	statsClient := backend.RESTClient()
+	if concrete, ok := statsClient.(*rest.RESTClient); ok && concrete == nil {
+		statsClient = nil
+	}
 	return &kubernetesEngine{
-		ctx:     ctx,
-		backend: backend.Pods(env.Variables().KubernetesNamespace),
+		ctx:         ctx,
+		backend:     backend.Pods(env.Variables().KubernetesNamespace),
+		statsClient: statsClient,
 	}
 }
 

@@ -60,16 +60,23 @@ const (
 )
 
 type partitionRow struct {
-	Value       string    `json:"value"`
-	Index       int       `json:"index"`
-	Status      string    `json:"status"`
-	Attempt     int       `json:"attempt"`
-	CacheHit    bool      `json:"cache_hit"`
-	Duration    string    `json:"duration,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	Fingerprint string    `json:"fingerprint,omitempty"`
-	DependsOn   []string  `json:"depends_on,omitempty"`
-	TaskRunID   uuid.UUID `json:"task_run_id"`
+	RuntimeID       string    `json:"runtime_id,omitempty"`
+	Result          string    `json:"result,omitempty"`
+	ExitCode        *int      `json:"exit_code,omitempty"`
+	PeakMemoryBytes *int64    `json:"peak_memory_bytes,omitempty"`
+	CPUSeconds      *float64  `json:"cpu_seconds,omitempty"`
+	StatsSource     string    `json:"stats_source,omitempty"`
+	OOMKilled       bool      `json:"oom_killed,omitempty"`
+	Value           string    `json:"value"`
+	Index           int       `json:"index"`
+	Status          string    `json:"status"`
+	Attempt         int       `json:"attempt"`
+	CacheHit        bool      `json:"cache_hit"`
+	Duration        string    `json:"duration,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Fingerprint     string    `json:"fingerprint,omitempty"`
+	DependsOn       []string  `json:"depends_on,omitempty"`
+	TaskRunID       uuid.UUID `json:"task_run_id"`
 
 	// Absolute RFC3339 timestamps, not only the derived Duration. A skewed
 	// group is diagnosed by WHEN its instances ran — a late-dispatched
@@ -336,6 +343,9 @@ func projectPartitionRows(rows []models.TaskRun) []partitionRow {
 			Error:       r.Error,
 			Fingerprint: r.PartitionFingerprint,
 			TaskRunID:   r.ID,
+			RuntimeID:   r.RuntimeID, Result: r.Result, ExitCode: r.ExitCode,
+			PeakMemoryBytes: r.PeakMemoryBytes, CPUSeconds: r.CPUSeconds,
+			StatsSource: r.StatsSource, OOMKilled: r.OOMKilled,
 		}
 		if r.StartedAt != nil {
 			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339)

@@ -4,8 +4,10 @@ package test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,15 +360,68 @@ func (s *IntegrationTestSuite) dockerClient() *client.Client {
 	return cli
 }
 
+// dockerPull ensures ref is present locally. ImageInspect success skips the
+// registry — GH arm64 runners flake on Docker Hub header timeouts. Transient
+// pull errors retry with short backoff; a persistent failure fails the test.
 func (s *IntegrationTestSuite) dockerPull(cli *client.Client, ref string) {
 	s.T().Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_, inspectErr := cli.ImageInspect(inspectCtx, ref)
+	inspectCancel()
+	if inspectErr == nil {
+		return
+	}
+
+	const attempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		pullCtx, pullCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		lastErr = dockerPullOnce(pullCtx, cli, ref)
+		pullCancel()
+		if lastErr == nil {
+			return
+		}
+		if attempt == attempts || !transientPullErr(lastErr) {
+			break
+		}
+		s.T().Logf("pull %s attempt %d/%d failed (retrying): %v", ref, attempt, attempts, lastErr)
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+	s.Require().NoError(lastErr, "pull %s", ref)
+}
+
+func dockerPullOnce(ctx context.Context, cli *client.Client, ref string) error {
 	r, err := cli.ImagePull(ctx, ref, image.PullOptions{})
-	s.Require().NoError(err, "pull %s", ref)
+	if err != nil {
+		return err
+	}
 	defer func() { _ = r.Close() }()
 	_, err = io.Copy(io.Discard, r)
-	s.Require().NoError(err, "drain pull stream for %s", ref)
+	return err
+}
+
+func transientPullErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "temporarily") ||
+		strings.Contains(msg, "temporary") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "request canceled") ||
+		strings.Contains(msg, "tls handshake") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "service unavailable")
 }
 
 func (s *IntegrationTestSuite) dockerTag(cli *client.Client, source, target string) {

@@ -242,7 +242,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `changes` | ubuntu-24.04 | — | 5 | path filter (`dorny/paths-filter`) | none |
 | `builder` | ubuntu-24.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
 | `builder-arm64` | ubuntu-24.04-arm | `changes` | 30 | arm64 twin of the above | none |
-| `images` | ubuntu-24.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, CLI smoke | none |
+| `images` | ubuntu-24.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
 | `images-arm64` | ubuntu-24.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
 | `reagents` | ubuntu-24.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
 | `reagents-arm64` | ubuntu-24.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
@@ -283,8 +283,8 @@ CAESIUM_TEST_SHARD_INDEX=1 CAESIUM_TEST_SHARD_COUNT=3 just integration-test
 ```
 
 Without those variables, local integration recipes run the full suite.
-Distributed / owner-memory / agent-auth / infra keep their existing mode
-filters and PASS floors. `-count=1` ensures a cached test result never
+Distributed / owner-memory / agent-auth / infra preserve their existing mode
+filters and PASS floors, with `TestResourceStats` added to each filter. `-count=1` ensures a cached test result never
 replaces a live integration run.
 
 `test/shard_timings.json` contains scheduling estimates in milliseconds:
@@ -310,6 +310,42 @@ preserves mode filters/timeouts and exit status, and always runs the tests
 afresh with `-test.count=1`. The same script uses `go test` for normal local
 runs. Set `CAESIUM_INTEGRATION_RUNNER_IMAGE` only when deliberately reusing
 a runner built from the checkout being tested.
+
+Each `images` producer also builds and smoke-tests
+`caesiumcloud/resource-stress:<commit-or-release>-<arch>` from
+`build/Dockerfile.stress`. The bounded fixture allocates and touches 1–1024 MiB,
+accepts `--hold` (up to 5m), and optionally waits for `--wait-file` before
+allocating (`--wait-timeout`, default 60s, maximum 5m). Alpine supplies `touch`
+so a runtime test can observe the waiting container, set a test-only memory
+limit, then release it. Integration scenarios copy the release file through the
+runtime archive API, avoiding an extra process in the measured cgroup.
+`just stress-image-test` proves a 16 MiB successful
+allocation, the release barrier, a real kernel OOM at 128 MiB under a 64 MiB
+limit, and rejected/expired bounds.
+
+The Podman lane retains Ubuntu's Podman API but installs the checksum-pinned
+upstream conmon 2.2.1 monitor with the `k8s-file` log driver (the upstream
+static binary omits journald support). The distro's 2.1.10 predates the
+[cgroup-v2 OOM detection fixes](https://github.com/containers/conmon/commit/5a18896088656306eb7d746b8dbe0cbf9c86f680).
+The same stress smoke test runs through Podman before the server scenarios,
+so missing runtime OOM evidence fails explicitly. Podman 4.9 does not retain
+live memory-limit updates in its inspect spec: its sampled peak remains an
+observation, with no fabricated lower bound from the test's injected limit.
+
+The exact fixture tag travels in `product-<arch>` and is passed to test runners
+as `CAESIUM_RESOURCE_STRESS_IMAGE`. Podman imports that Docker-built artifact
+into its own image store; kind loads it into its nodes. No integration lane
+pulls a mutable fixture tag or rebuilds it in CI. Local integration recipes
+build the current checkout's fixture; `CAESIUM_SKIP_IMAGE_BUILD=true` requires
+that exact fixture tag to exist. The tag-only publish job pushes its multi-arch
+manifest beside the product and reagent images.
+
+Every self-server recipe and inline browser/Podman server enables
+`CAESIUM_RESOURCE_STATS_ENABLED` and `CAESIUM_RIGHT_SIZING_ENABLED`, using a
+100ms stats interval for short tests. The Helm CI values and local
+`k8s-distributed` recipe carry the same env. W1 exercises stats/OOM through the
+existing run REST surface; static resource declarations, escalation, and the
+kind requests/limits + metrics-server assertions remain later plan items.
 
 CI uses `build/ci.docker-bake-cache.hcl` and the `bake-images` composite action
 to persist product and reagent layers with separate target/architecture

@@ -77,6 +77,10 @@ func validate() error {
 		return fmt.Errorf("CAESIUM_FANOUT_MAX_PARTITIONS must be greater than or equal to 1")
 	}
 
+	if variables.ResourceStatsEnabled && variables.ResourceStatsSampleInterval <= 0 {
+		return fmt.Errorf("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL must be greater than 0")
+	}
+
 	if variables.AgentRemediationEnabled {
 		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
 		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
@@ -140,6 +144,8 @@ type Environment struct {
 	InternalWakeupToken            string        `default:"" split_words:"true"`
 	WakeupFanoutMode               string        `default:"full" split_words:"true"`
 	AtomPollInterval               time.Duration `default:"1s" split_words:"true"`
+	ResourceStatsEnabled           bool          `envconfig:"RESOURCE_STATS_ENABLED" default:"false"`
+	ResourceStatsSampleInterval    time.Duration `envconfig:"RESOURCE_STATS_SAMPLE_INTERVAL" default:"10s"`
 	JobdefGitEnabled               bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
 	JobdefGitOnce                  bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
 	JobdefGitInterval              time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`

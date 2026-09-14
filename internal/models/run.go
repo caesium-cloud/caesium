@@ -170,7 +170,16 @@ type TaskRun struct {
 	// unset (NULL) when the task never produced an exit code (engine wait error,
 	// startup failure before a code was assigned). A value of 0 is a real,
 	// captured success code — distinct from NULL "never captured".
-	ExitCode                *int           `gorm:"type:integer" json:"exit_code,omitempty"`
+	ExitCode *int `gorm:"type:integer" json:"exit_code,omitempty"`
+	// Resource observations belong to this task instance's latest attempt.
+	// Nil measurements mean unavailable, never an observed zero. StatsSource is
+	// empty when collection was disabled, otherwise sampled, oom_inferred or none.
+	PeakMemoryBytes         *int64         `gorm:"type:bigint" json:"peak_memory_bytes,omitempty"`
+	CPUSeconds              *float64       `json:"cpu_seconds,omitempty"`
+	StatsSource             string         `gorm:"not null;default:''" json:"stats_source,omitempty"`
+	OOMKilled               bool           `gorm:"not null;default:false" json:"oom_killed,omitempty"`
+	AppliedResources        datatypes.JSON `gorm:"type:json" json:"applied_resources,omitempty"`
+	EscalationLevel         int            `gorm:"not null;default:0" json:"escalation_level,omitempty"`
 	ExecutionDescriptor     datatypes.JSON `gorm:"type:json" json:"-"`
 	LogText                 string         `gorm:"type:text" json:"-"`
 	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`
