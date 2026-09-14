@@ -25,6 +25,7 @@ import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
+import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
@@ -423,7 +424,7 @@ export function RunDetailPage() {
             size="sm"
             className="h-8 text-xs"
             onClick={() => {
-              const params = run.params && Object.keys(run.params).length > 0 ? { ...run.params } : undefined;
+              const params = rerunParams(run.params);
               triggerMutation.mutate({ jobId, params });
             }}
             disabled={triggerMutation.isPending}

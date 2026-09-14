@@ -3,7 +3,9 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
@@ -34,6 +36,12 @@ func Post(c *echo.Context) error {
 	var req PostRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
+	for key := range req.Params {
+		if strings.HasPrefix(key, "_") || key == "logical_date" {
+			return echo.NewHTTPError(http.StatusBadRequest,
+				fmt.Sprintf("run parameter %q is reserved for the scheduler", key))
+		}
 	}
 
 	j, err := jsvc.Service(ctx).Get(id)

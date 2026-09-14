@@ -221,6 +221,7 @@ See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example â€
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
 - `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
+- Manual runs reject scheduler-owned parameter keys (`_`-prefixed keys and `logical_date`) with HTTP 400. Console Re-run preserves business inputs and removes these keys so trigger depth, freshness provenance, and scheduled-slot identity belong to the new execution. Use backfill to execute a scheduled logical slot.
 - HTTP triggers require `configuration.path`. Caesium serves the webhook at `POST /v1/hooks/<path>`. Existing manifests may spell the path as `/hooks/<path>` or `/v1/hooks/<path>`; Caesium normalizes those forms to the same route.
 - HTTP triggers may optionally define `secret`, `signatureScheme`, `signatureHeader`, and `paramMapping` to validate incoming webhook requests and extract JSON payload fields into run parameters.
 - Event triggers require `configuration.events`, a non-empty list of patterns with `type`, optional `source`, and optional string `filter` map. Event `type` accepts exact names or globs such as `webhook.*`; `filter` keys are dot paths into the event `data` payload.
