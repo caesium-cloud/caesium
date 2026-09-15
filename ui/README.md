@@ -85,6 +85,7 @@ Current frontend coverage includes:
 - Task detail panel resize behavior
 - Task node rendering states
 - Job DAG layout/status/edge mapping
+- Effective cache-policy labels for inherited and task-level settings
 
 Browser E2E:
 
