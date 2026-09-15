@@ -167,7 +167,7 @@ func init() {
 // `--server https://caesium.example`. No command positional is valid, so every
 // other leftover argument is an error instead of an ignored target.
 func resolveLintServerArgs(cmd *cobra.Command, args []string) error {
-	if cmd.ArgsLenAtDash() >= 0 {
+	if len(args) > 0 && cmd.ArgsLenAtDash() >= 0 {
 		return fmt.Errorf("unexpected positional argument(s) after --; use --path for manifests and --server <URL> (or --server=<URL>) for server lint")
 	}
 	if lintServer == lintBareServerMarker && len(args) == 0 {
@@ -178,6 +178,9 @@ func resolveLintServerArgs(cmd *cobra.Command, args []string) error {
 		lintServer = args[0]
 		return nil
 	}
+	if lintServer == lintBareServerMarker && len(args) == 1 && looksLikeServerTarget(args[0]) {
+		return fmt.Errorf("--server target %q must include http:// or https://; for example, --server=http://%s", args[0], args[0])
+	}
 	if len(args) == 0 {
 		return nil
 	}
@@ -186,6 +189,10 @@ func resolveLintServerArgs(cmd *cobra.Command, args []string) error {
 
 func isHTTPServerURL(value string) bool {
 	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+}
+
+func looksLikeServerTarget(value string) bool {
+	return strings.Contains(value, ".") || strings.Contains(value, ":")
 }
 
 // LoadDefinitions exposes the same manifest loader used by `caesium job lint`

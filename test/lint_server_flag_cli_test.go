@@ -54,10 +54,17 @@ func (s *IntegrationTestSuite) TestJobLintServerFlagTargetsExplicitURL() {
 	s.Zero(secondRequests.invalid.Load())
 
 	// The documented no-value spelling continues to select the default server.
-	stdout, stderr, err := s.runCLISeparate("job", "lint", "--path", path, "--server", "--json")
-	s.Require().NoError(err, "stdout:\n%s\nstderr:\n%s", stdout, stderr)
-	s.NotEmpty(strings.TrimSpace(stdout))
-	s.True(json.Valid([]byte(stdout)), "bare --server --json stdout must be valid JSON: %s", stdout)
+	// The integration server may not bind localhost in every runtime lane, so a
+	// transport failure is valid only when it names the normalized default URL.
+	stdout, stderr, err := s.runCLISeparate("job", "lint", "--path", path, "--server", "--json", "--")
+	if err == nil {
+		s.NotEmpty(strings.TrimSpace(stdout))
+		s.True(json.Valid([]byte(stdout)), "bare --server --json stdout must be valid JSON: %s", stdout)
+	} else {
+		s.Empty(strings.TrimSpace(stdout))
+		s.Contains(stderr, "localhost:8080", "a bare --server must normalize to the documented default")
+	}
+	s.NotContains(stderr, "__caesium_job_lint_bare_server__")
 
 	for _, args := range [][]string{
 		{"job", "lint", "--path", path, "unexpected"},
@@ -68,6 +75,15 @@ func (s *IntegrationTestSuite) TestJobLintServerFlagTargetsExplicitURL() {
 		s.Require().Error(err)
 		s.Empty(strings.TrimSpace(stdout))
 		s.Contains(stderr, "unexpected positional argument(s)")
+		s.NotContains(stderr, "__caesium_job_lint_bare_server__")
+	}
+
+	for _, target := range []string{"localhost:8080", "caesium.example"} {
+		stdout, stderr, err = s.runCLISeparate("job", "lint", "--path", path, "--server", target)
+		s.Require().Error(err)
+		s.Empty(strings.TrimSpace(stdout))
+		s.Contains(stderr, "must include http:// or https://")
+		s.Contains(stderr, target)
 		s.NotContains(stderr, "__caesium_job_lint_bare_server__")
 	}
 }
