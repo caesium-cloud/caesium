@@ -127,7 +127,39 @@ export function normalizeCacheConfig(raw?: CacheConfigValue): CachePolicySummary
 }
 
 export function describeCachePolicy(raw?: CacheConfigValue): string {
-  const normalized = normalizeCacheConfig(raw);
+  return describeNormalizedCachePolicy(normalizeCacheConfig(raw));
+}
+
+/** Applies job defaults before a task's explicit boolean or partial-map override. */
+export function resolveCachePolicy(task?: CacheConfigValue, job?: CacheConfigValue): CachePolicySummary {
+  const inherited = normalizeCacheConfig(job);
+  if (task === undefined || task === null) {
+    return inherited;
+  }
+  if (typeof task === "boolean") {
+    return { ...inherited, enabled: task };
+  }
+
+  return {
+    enabled: task.enabled ?? true,
+    ttl: task.ttl ?? inherited.ttl,
+    version: task.version ?? inherited.version,
+  };
+}
+
+/** Includes whether the row inherits its job policy or overrides it itself. */
+export function describeEffectiveCachePolicy(task?: CacheConfigValue, job?: CacheConfigValue): string {
+  const policy = describeNormalizedCachePolicy(resolveCachePolicy(task, job));
+  if (task !== undefined && task !== null) {
+    return `Override: ${policy}`;
+  }
+  if (job !== undefined && job !== null) {
+    return `Inherited: ${policy}`;
+  }
+  return "Server default";
+}
+
+function describeNormalizedCachePolicy(normalized: CachePolicySummary): string {
   if (!normalized.enabled) {
     return "Disabled";
   }

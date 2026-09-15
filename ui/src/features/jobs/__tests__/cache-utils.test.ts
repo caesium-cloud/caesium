@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeTerminalRunUpdate } from "../cache-utils";
+import { describeEffectiveCachePolicy, mergeTerminalRunUpdate, resolveCachePolicy } from "../cache-utils";
 import type { CallbackRun, JobRun } from "@/lib/api";
 
 const callback: CallbackRun = {
@@ -98,5 +98,36 @@ describe("mergeTerminalRunUpdate", () => {
     expect(merged.callbacks).toEqual([
       expect.objectContaining({ status: "failed", completed_at: "2026-09-14T00:00:02Z" }),
     ]);
+  });
+});
+
+describe("effective cache policy labels", () => {
+  it("labels an omitted task policy as inheriting its job-level cache", () => {
+    expect(resolveCachePolicy(undefined, true)).toEqual({ enabled: true });
+    expect(describeEffectiveCachePolicy(undefined, true)).toBe("Inherited: Enabled");
+  });
+
+  it("does not misstate the server default when neither job nor task declares cache", () => {
+    expect(describeEffectiveCachePolicy()).toBe("Server default");
+  });
+
+  it("keeps an explicit task opt-out over an enabled job policy", () => {
+    expect(resolveCachePolicy(false, { enabled: true, ttl: "24h", version: 2 })).toEqual({
+      enabled: false,
+      ttl: "24h",
+      version: 2,
+    });
+    expect(describeEffectiveCachePolicy(false, { enabled: true, ttl: "24h", version: 2 })).toBe("Override: Disabled");
+  });
+
+  it("merges inherited ttl and version with partial task overrides", () => {
+    expect(resolveCachePolicy({ ttl: "1h" }, { enabled: true, ttl: "24h", version: 2 })).toEqual({
+      enabled: true,
+      ttl: "1h",
+      version: 2,
+    });
+    expect(describeEffectiveCachePolicy({ ttl: "1h" }, { enabled: true, ttl: "24h", version: 2 })).toBe(
+      "Override: Enabled · TTL 1h · v2",
+    );
   });
 });
