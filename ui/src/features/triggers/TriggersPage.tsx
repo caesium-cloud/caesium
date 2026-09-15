@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { Clock, Globe, Plus, Pencil, Copy, Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
 import {
   describeTrigger,
   getNextFireDate,
@@ -144,8 +144,15 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
   if (!nextDate) return <span className="text-[10px] text-text-4 font-mono">Invalid cron</span>;
 
   return (
-    <span className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20">
+    <span
+      className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20"
+      data-testid="trigger-next-fire"
+    >
       Next: <RelativeTime date={nextDate.toISOString()} />
+      <span className="text-text-4"> · </span>
+      <time dateTime={nextDate.toISOString()} data-testid="trigger-next-fire-timestamp">
+        {formatUTCTimestamp(nextDate)}
+      </time>
     </span>
   );
 }
