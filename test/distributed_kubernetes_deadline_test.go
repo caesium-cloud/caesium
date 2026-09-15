@@ -53,7 +53,7 @@ func (s *IntegrationTestSuite) TestDistributedKubernetesDeadlines() {
 	s.Require().NotEmpty(kubeconfig, "KUBECONFIG must expose the test kind cluster")
 
 	witness := &deadlineWitness{events: make(map[string]time.Time)}
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	listener, err := (&net.ListenConfig{}).Listen(s.T().Context(), "tcp", "0.0.0.0:0")
 	s.Require().NoError(err)
 	server := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
