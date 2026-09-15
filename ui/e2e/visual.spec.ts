@@ -101,14 +101,49 @@ test("a fixed-shape branching DAG renders deterministically once terminal", asyn
   await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
 
   const dagSection = page.getByTestId("run-interactive-dag-section");
-  await expect(dagSection.locator(".react-flow__node")).toHaveCount(4);
+  const dagNodes = dagSection.locator(".react-flow__node");
+  await expect(dagNodes).toHaveCount(4);
+  await dagSection.scrollIntoViewIfNeeded();
+  await dagSection.getByRole("button", { name: /fit view/i }).click();
+
+  // Fit against the visible run-page canvas after its scroll geometry has
+  // settled. This prevents a visual baseline from encoding a node clipped by
+  // an earlier, taller internal canvas.
+  const canvasViewport = dagSection.getByTestId("run-dag-canvas-viewport");
+  await expect.poll(async () => {
+    const canvas = await canvasViewport.boundingBox();
+    const nodes = await Promise.all(Array.from({ length: 4 }, (_unused, index) => dagNodes.nth(index).boundingBox()));
+    return {
+      fits: Boolean(
+        canvas &&
+          nodes.every(
+            (node) =>
+              node &&
+              node.x >= canvas.x &&
+              node.x + node.width <= canvas.x + canvas.width &&
+              node.y >= canvas.y &&
+              node.y + node.height <= canvas.y + canvas.height,
+          ),
+      ),
+      canvas,
+      nodes,
+    };
+  }).toMatchObject({ fits: true });
   await readyForScreenshot(page);
 
-  const durationMasks: Locator[] = [dagSection.locator(".react-flow__node").getByText(DURATION_TEXT)];
+  // The skip reason identifies its branch task by run-scoped UUID. Keep the
+  // skipped node and its stable "Skipped" label visible, but mask that one
+  // dynamic reason alongside elapsed task durations.
+  const branchSkipReason = dagSection.getByText(/^not selected by branch task [0-9a-f-]{8}-/);
+  await expect(branchSkipReason).toHaveCount(1);
+  const dynamicMasks: Locator[] = [
+    dagSection.locator(".react-flow__node").getByText(DURATION_TEXT),
+    branchSkipReason,
+  ];
 
   await expect(dagSection).toHaveScreenshot("branching-dag.png", {
     animations: "disabled",
-    mask: durationMasks,
+    mask: dynamicMasks,
   });
 });
 
