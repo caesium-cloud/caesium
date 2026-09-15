@@ -85,6 +85,7 @@ Current frontend coverage includes:
 - Task detail panel resize behavior
 - Task node rendering states
 - Job DAG layout/status/edge mapping
+- Future cron countdowns, exact UTC next-fire timestamps, and cache-expiry labels
 
 Browser E2E:
 

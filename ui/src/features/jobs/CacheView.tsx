@@ -189,7 +189,7 @@ function CacheEntryRow({
         <RelativeTime date={entry.created_at} />
       </TableCell>
       <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
-        {entry.expires_at ? <RelativeTime date={entry.expires_at} /> : "Never"}
+        {entry.expires_at ? <span data-testid="cache-expiry"><RelativeTime date={entry.expires_at} /></span> : "Never"}
       </TableCell>
       <TableCell className="text-sm">
         <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: entry.run_id }} className="font-mono text-primary hover:underline">
