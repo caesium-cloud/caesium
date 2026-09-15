@@ -52,6 +52,9 @@ const (
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
 	ReasonContention = "contention"
+	// ReasonOwnerNotReady asks a push worker to retry while the memory owner is
+	// rebuilding its state. Falling back to SQL here would create two DAG writers.
+	ReasonOwnerNotReady = "owner_not_ready"
 	// ReasonAmbiguousTask rejects a dispatch that names only a catalog task id
 	// for a fan-out group that is already expanded into N instance rows.  There
 	// is no answer to "run this task" in that case, and every downstream write
@@ -650,8 +653,8 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	// Run-owner in-memory path: when enabled and this node holds the run's
 	// in-memory state, advance the DAG in memory and persist terminal-only rows
-	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
-	// falls through to the SQL path below as a safety net.
+	// (no per-transition SQL advancement). A run not yet tracked must retry:
+	// SQL fallback could otherwise commit across recovery's terminal-tail read.
 	if h.ownerManager != nil {
 		res, omErr := h.ownerManager.CompleteInstance(
 			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
@@ -682,7 +685,14 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 			return
 		}
-		// Not tracked in memory here — fall through to the SQL path.
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "owner is rebuilding run state; retry completion",
+		})
+		return
 	}
 
 	// Rules 3 & 4 are enforced by the ClaimNext-path functions via

@@ -273,6 +273,11 @@ type Store struct {
 	db         *gorm.DB
 	bus        event.Bus
 	eventStore *event.Store
+	// ownerInMemory is captured at construction on every node, including pull
+	// workers. A lease reserves primary terminal advancement for the owner in
+	// distributed memory mode; local and SQL owner-coordination modes retain
+	// their existing Store completion paths.
+	ownerInMemory bool
 
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
@@ -646,11 +651,31 @@ func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
 	}
+	vars := env.Variables()
 	return &Store{
-		db:          conn,
-		eventStore:  event.NewStore(conn),
-		startedRuns: make(map[uuid.UUID]struct{}),
+		db:            conn,
+		eventStore:    event.NewStore(conn),
+		startedRuns:   make(map[uuid.UUID]struct{}),
+		ownerInMemory: ownerMemoryAdvancementMode(vars),
 	}
+}
+
+func ownerMemoryAdvancementMode(vars env.Environment) bool {
+	return vars.RunOwnerEnabled && vars.RunOwnerInMemory &&
+		strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
+}
+
+// fenceSQLTerminalUpdate prevents a pull completion selected before the first
+// lease from advancing the SQL DAG after ownership moved to memory. An expired
+// lease still reserves that lane: its recovery is owner takeover, not SQL
+// advancement using the owner's stale predecessor counters. AcquireLease takes
+// the same JobRun lock, so a completion either commits before lease insertion
+// (and is replayed by recovery) or loses this predicate afterwards.
+func (s *Store) fenceSQLTerminalUpdate(query *gorm.DB, runID uuid.UUID) *gorm.DB {
+	if !s.ownerInMemory {
+		return query
+	}
+	return query.Where("NOT EXISTS (SELECT 1 FROM run_leases WHERE run_id = ?)", runID.String())
 }
 
 // WithLeaseStore enables run-owner lease writing.  Call this from startup
@@ -2753,6 +2778,7 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
 
 			updates := map[string]any{
 				"status":                  string(TaskStatusCached),
@@ -2764,6 +2790,11 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				"cache_expires_at":        source.ExpiresAt,
 				"partition_retry_pending": false,
 			}
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
+			}
+			updates["terminal_sequence"] = seq
 			if len(output) > 0 {
 				encoded, marshalErr := json.Marshal(output)
 				if marshalErr != nil {
@@ -2790,6 +2821,7 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return nil
 			}
 			counts.addTaskRunStatus(1)
+			taskRun.TerminalSequence = seq
 
 			descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, catalogTaskID)
 			if err != nil {
@@ -3375,10 +3407,10 @@ func uuidSetValues(set map[uuid.UUID]struct{}) []uuid.UUID {
 // skipped fan-out instance was therefore invisible to a recovering owner and to
 // the terminal-row replay tail. Allocating MAX(terminal_sequence)+1 for the run
 // keeps the space monotonic and, because it is read inside the caller's
-// transaction, dense across the rows one transaction marks terminal. It can
-// never collide with an owner-allocated value: owner-managed runs return before
-// the SQL lane is reached (dispatch.go short-circuits on res.Owned), and taking
-// max+1 always exceeds anything already persisted.
+// transaction, dense across the rows one transaction marks terminal.
+// The caller must serialize allocation with the terminal write. Primary SQL
+// completion transactions hold the JobRun lock and are fenced once a memory
+// owner lease exists; owner completions retain their in-memory sequence cursor.
 func nextTerminalSequenceTx(tx *gorm.DB, runID uuid.UUID) (int64, error) {
 	var maxSeq int64
 	if err := tx.Model(&models.TaskRun{}).
@@ -3868,9 +3900,15 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
 
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
+			}
 			updates := map[string]any{
 				"status":                  string(status),
+				"terminal_sequence":       seq,
 				"completed_at":            now,
 				"result":                  result,
 				"cache_hit":               false,
@@ -3921,6 +3959,7 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 				return nil
 			}
 			counts.addTaskRunStatus(1)
+			taskRun.TerminalSequence = seq
 
 			if status == TaskStatusFailed {
 				// A non-zero container exit arrives HERE, not on FailTaskClaimed:
@@ -4659,9 +4698,15 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
+			}
 			resultUpdate := updateQuery.
 				Updates(map[string]any{
 					"status":                  string(TaskStatusFailed),
+					"terminal_sequence":       seq,
 					"completed_at":            now,
 					"error":                   errMsg,
 					"cache_hit":               false,
@@ -4681,6 +4726,7 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 			}
 			counts.addTaskRunStatus(1)
 			row.Status = string(TaskStatusFailed)
+			row.TerminalSequence = seq
 
 			// Apply the group's failurePolicy, emit this instance's task_failed
 			// event, and release the fanned step's cross-step successors once the
