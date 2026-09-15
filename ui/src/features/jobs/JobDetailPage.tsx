@@ -946,7 +946,7 @@ function JobManifestView({
 
 function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
   return (
-    <div className="rounded-md border bg-card divide-y">
+    <div className="rounded-md border bg-card divide-y" data-testid="job-runs-list">
       {runs.length === 0 ? (
         <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
       ) : null}
