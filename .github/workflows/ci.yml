@@ -966,6 +966,31 @@ jobs:
             -w /bld/caesium \
             caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
             sh scripts/integration-test.sh
+      - name: Kubernetes mutable-tag cache identity (local and distributed)
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/kubernetes-cache-identity
+          python3 test/kubernetes_cache_identity.py --cli .tmp/caesium-cli/caesium --mode local 2>&1 | tee .tmp/kubernetes-cache-identity/local.log
+          kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          kubectl set env statefulset/caesium CAESIUM_EXECUTION_MODE=distributed
+          kubectl rollout status statefulset/caesium --timeout=240s
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then cat /tmp/port-forward.log; exit 1; fi
+          python3 test/kubernetes_cache_identity.py --cli .tmp/caesium-cli/caesium --mode distributed 2>&1 | tee .tmp/kubernetes-cache-identity/distributed.log
+      - name: Retain Kubernetes cache identity evidence
+        if: always() && matrix.shard == 1
+        uses: actions/upload-artifact@v7
+        with:
+          name: kubernetes-cache-identity
+          path: .tmp/kubernetes-cache-identity/
+          if-no-files-found: error
       - name: Stop port-forward
         if: always()
         run: kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true

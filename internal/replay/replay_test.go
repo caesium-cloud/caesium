@@ -827,3 +827,21 @@ func mustJSONString(t *testing.T, v any) string {
 	require.NoError(t, err)
 	return string(data)
 }
+
+func TestReplayUnresolvedPinnedBaselineReexecutesDespiteLegacyEntry(t *testing.T) {
+	f := newReplayFixture(t)
+	id := f.seedTask(t, seedTaskConfig{name: "unknown", replaySafe: true, result: "success", output: map[string]string{"token": "same"}})
+	var row models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", f.runID, id).First(&row).Error)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	desc.Cache.PinDigests = true
+	require.NoError(t, f.db.Model(&row).Update("execution_descriptor", mustJSON(t, desc)).Error)
+	dispatcher := &recordingDispatcher{}
+	got, err := New(f.store, dispatcher).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.NoError(t, err)
+	require.Len(t, dispatcher.calls, 1)
+	require.Len(t, got.Decisions, 1)
+	require.True(t, got.Decisions[0].Reexecute)
+	require.False(t, got.Decisions[0].CacheHit)
+}

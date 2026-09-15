@@ -819,20 +819,21 @@ func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) m
 // sets the three Partition* fields on top; everything else is identical by
 // construction.
 type taskHashInputArgs struct {
-	JobAlias             string
-	TaskName             string
-	Image                string
-	ResolvedImageDigest  string
-	Command              []string
-	Env                  map[string]string
-	WorkDir              string
-	Mounts               []container.Mount
-	ResolvedVolumeMounts []container.VolumeMount
-	Kubernetes           *container.KubernetesSpec
-	PredecessorHashes    []string
-	PredecessorOutputs   map[string]map[string]string
-	RunParams            map[string]string
-	CacheVersion         int
+	JobAlias                string
+	TaskName                string
+	Image                   string
+	UnresolvedImageIdentity string
+	ResolvedImageDigest     string
+	Command                 []string
+	Env                     map[string]string
+	WorkDir                 string
+	Mounts                  []container.Mount
+	ResolvedVolumeMounts    []container.VolumeMount
+	Kubernetes              *container.KubernetesSpec
+	PredecessorHashes       []string
+	PredecessorOutputs      map[string]map[string]string
+	RunParams               map[string]string
+	CacheVersion            int
 	// Chain is the resolved cache.chain mode. Under CacheChainValues the
 	// PredecessorHashes above are carried for provenance but excluded from the
 	// key; see cache.HashInput.Chain.
@@ -847,24 +848,25 @@ type taskHashInputArgs struct {
 // local executor. See taskHashInputArgs for why it exists.
 func buildTaskHashInput(a taskHashInputArgs) cache.HashInput {
 	return cache.HashInput{
-		JobAlias:             a.JobAlias,
-		TaskName:             a.TaskName,
-		Image:                a.Image,
-		ResolvedImageDigest:  a.ResolvedImageDigest,
-		Command:              a.Command,
-		Env:                  a.Env,
-		WorkDir:              a.WorkDir,
-		Mounts:               a.Mounts,
-		ResolvedVolumeMounts: a.ResolvedVolumeMounts,
-		Kubernetes:           a.Kubernetes,
-		PredecessorHashes:    a.PredecessorHashes,
-		PredecessorOutputs:   a.PredecessorOutputs,
-		RunParams:            a.RunParams,
-		Chain:                a.Chain,
-		Partition:            a.Partition,
-		PartitionFingerprint: a.PartitionFingerprint,
-		PartitionAttributes:  a.PartitionAttributes,
-		CacheVersion:         a.CacheVersion,
+		JobAlias:                a.JobAlias,
+		TaskName:                a.TaskName,
+		Image:                   a.Image,
+		ResolvedImageDigest:     a.ResolvedImageDigest,
+		UnresolvedImageIdentity: a.UnresolvedImageIdentity,
+		Command:                 a.Command,
+		Env:                     a.Env,
+		WorkDir:                 a.WorkDir,
+		Mounts:                  a.Mounts,
+		ResolvedVolumeMounts:    a.ResolvedVolumeMounts,
+		Kubernetes:              a.Kubernetes,
+		PredecessorHashes:       a.PredecessorHashes,
+		PredecessorOutputs:      a.PredecessorOutputs,
+		RunParams:               a.RunParams,
+		Chain:                   a.Chain,
+		Partition:               a.Partition,
+		PartitionFingerprint:    a.PartitionFingerprint,
+		PartitionAttributes:     a.PartitionAttributes,
+		CacheVersion:            a.CacheVersion,
 	}
 }
 
@@ -1881,15 +1883,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 
 		// When digest pinning is on, fold the resolved content digest (not the
-		// mutable tag) into the key. Resolution failures fall back to the tag —
-		// a cache miss is always safe, so an unresolved digest never serves a
-		// stale hit.
+		// mutable tag) into the key. If resolution fails, bypass reuse and
+		// publication and carry run-specific uncertainty into downstream hashes.
 		//
 		// The digest exists only to make a cache key miss on a moved tag, so it
 		// is resolved only when caching is actually on: with the cache disabled
 		// there is no key to protect and the registry round-trip would be pure
 		// cost on every task.
-		var resolvedImageDigest string
+		var resolvedImageDigest, unresolvedImageIdentity string
 		if cacheCfg.Enabled && cacheCfg.PinDigests {
 			// The engine the ROW froze, matching the distributed lane's
 			// imagecheck.Resolve(ctx, taskRun.Engine, taskRun.Image, ...) — the
@@ -1902,26 +1903,36 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			if digest, derr := j.digestResolver().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
 				resolvedImageDigest = digest
+			} else {
+				unresolvedImageIdentity = uuid.NewString()
+				log.Warn("cache bypassed: requested image digest could not be resolved", "task", taskName, "image", runner.image, "error", derr)
+			}
+		}
+		if cacheCfg.Chain != cache.ChainValues && unresolvedImageIdentity == "" {
+			if unknown, err := store.HasUnresolvedPredecessorImage(runID, taskID); unknown || err != nil {
+				unresolvedImageIdentity = uuid.NewString()
+				log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task", taskName, "error", err)
 			}
 		}
 		runner.resolvedImageDigest = resolvedImageDigest
 
 		return cacheCfg, taskHashInputArgs{
-			JobAlias:             j.alias,
-			TaskName:             taskName,
-			Image:                runner.image,
-			ResolvedImageDigest:  resolvedImageDigest,
-			Command:              runner.command,
-			Env:                  mergedEnv,
-			WorkDir:              runner.spec.WorkDir,
-			Mounts:               runner.spec.Mounts,
-			ResolvedVolumeMounts: runner.spec.ResolvedVolumeMounts,
-			Kubernetes:           runner.spec.Kubernetes,
-			PredecessorHashes:    predHashes,
-			PredecessorOutputs:   predOutputs,
-			RunParams:            snapshot.Params,
-			CacheVersion:         cacheCfg.Version,
-			Chain:                cacheCfg.Chain,
+			JobAlias:                j.alias,
+			TaskName:                taskName,
+			Image:                   runner.image,
+			ResolvedImageDigest:     resolvedImageDigest,
+			UnresolvedImageIdentity: unresolvedImageIdentity,
+			Command:                 runner.command,
+			Env:                     mergedEnv,
+			WorkDir:                 runner.spec.WorkDir,
+			Mounts:                  runner.spec.Mounts,
+			ResolvedVolumeMounts:    runner.spec.ResolvedVolumeMounts,
+			Kubernetes:              runner.spec.Kubernetes,
+			PredecessorHashes:       predHashes,
+			PredecessorOutputs:      predOutputs,
+			RunParams:               snapshot.Params,
+			CacheVersion:            cacheCfg.Version,
+			Chain:                   cacheCfg.Chain,
 		}, predHashByID, nil
 	}
 
@@ -2081,6 +2092,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// retry is set when the attempt failed but the instance has attempts
 			// left; the row has already been reset to pending.
 			retry bool
+			// abort stops dispatch if even the pre-execution failure cannot be
+			// persisted. Re-reading that pending row must never redrive it.
+			abort bool
 			err   error
 		}
 
@@ -2116,6 +2130,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
 				return
 			}
+			failIdentity := func(cause error) {
+				persistErr := store.FailTaskInstance(runID, taskRunID, cause)
+				if persistErr != nil {
+					cause = fmt.Errorf("%w; persist partition failure: %v", cause, persistErr)
+				}
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause, abort: persistErr != nil}
+			}
 
 			partEnv := map[string]string{
 				envName: m.partition.Key,
@@ -2145,6 +2166,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 			inputHash := hashInput.Compute()
 			hashInputBlob, blobErr := hashInput.CanonicalJSON(inputHash)
 			if blobErr != nil {
+				if args.UnresolvedImageIdentity != "" {
+					failIdentity(fmt.Errorf("serialize unresolved image identity: %w", blobErr))
+					return
+				}
 				log.Warn("failed to serialize hash-input blob", "task", taskName, "partition", m.partition.Key, "error", blobErr)
 				hashInputBlob = nil
 			}
@@ -2153,9 +2178,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// exactly this row — the same primary-key-or-task-id contract
 			// StartTask/SetTaskExitCode already take.
 			if err := store.SetTaskHashWithBlob(runID, taskRunID, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
+				if args.UnresolvedImageIdentity != "" {
+					failIdentity(fmt.Errorf("persist unresolved image identity: %w", err))
+					return
+				}
 				log.Warn("failed to persist partition hash", "task", taskName, "partition", m.partition.Key, "error", err)
 			}
 			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskRunID, predOutputsByID, predHashByID, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
+				if args.UnresolvedImageIdentity != "" {
+					failIdentity(fmt.Errorf("persist unresolved image execution descriptor: %w", err))
+					return
+				}
 				log.Warn("failed to persist partition descriptor inputs", "task", taskName, "partition", m.partition.Key, "error", err)
 			}
 
@@ -2172,7 +2205,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// and there is no downstream group this hit could silently collapse.
 			// If chained fan-out is ever allowed, this invariant breaks and this
 			// site needs the same gate.
-			if cacheCfg.Enabled {
+			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
 				if attempt == 1 {
 					if entry, found, err := getCacheStore().Get(inputHash); err != nil {
 						log.Warn("cache lookup failed", "task", taskName, "partition", m.partition.Key, "error", err)
@@ -2293,7 +2326,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 			// Publish the successful result so a later run of the same partition
 			// set is a hit. Quarantined replays never publish.
-			if cacheCfg.Enabled && inputHash != "" {
+			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" && inputHash != "" {
 				if taskQuarantined {
 					log.Info("quarantined partition skipped cache publication", "task", taskName, "partition", m.partition.Key)
 				} else {
@@ -2486,6 +2519,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 				sawFailure = true
 				if firstErr == nil {
 					firstErr = res.err
+				}
+				if res.abort {
+					for inFlight > 0 {
+						absorb(<-results)
+					}
+					break
 				}
 				continue
 			}
@@ -2751,7 +2790,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// the cache Entry records which image content the hash covers.
 		resolvedImageDigest := hashArgs.ResolvedImageDigest
 
-		if cacheCfg.Enabled {
+		if cacheCfg.Enabled || hashArgs.UnresolvedImageIdentity != "" {
 			cacheStore := getCacheStore()
 			taskName := ""
 			if taskModel != nil {
@@ -2766,18 +2805,32 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// blob (a missing blob degrades `why` to digest-only, never wrong).
 			blob, blobErr := hashInput.CanonicalJSON(inputHash)
 			if blobErr != nil {
+				if hashArgs.UnresolvedImageIdentity != "" {
+					return nil, fmt.Errorf("serialize unresolved image identity: %w", blobErr)
+				}
 				log.Warn("failed to serialize hash-input blob", "task", taskName, "error", blobErr)
 				blob = nil
 			}
 			hashInputBlob = blob
 			if err := store.SetTaskHashWithBlob(runID, taskID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
+				if hashArgs.UnresolvedImageIdentity != "" {
+					return nil, fmt.Errorf("persist unresolved image identity: %w", err)
+				}
 				log.Warn("failed to persist task hash", "task", taskName, "error", err)
 			}
 			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskID, predOutputsByID, predHashByID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
+				if hashArgs.UnresolvedImageIdentity != "" {
+					return nil, fmt.Errorf("persist unresolved image execution descriptor: %w", err)
+				}
 				log.Warn("failed to persist task execution descriptor inputs", "task", taskName, "error", err)
 			}
 
-			entry, found, err := cacheStore.Get(inputHash)
+			var entry *cache.Entry
+			var found bool
+			var err error
+			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
+				entry, found, err = cacheStore.Get(inputHash)
+			}
 			// A cache entry with no recorded partition list (nil, not merely
 			// empty — see cache.Entry.Partitions) is ambiguous for a task with a
 			// downstream fan-out consumer: it might be a pre-fan-out entry (or
@@ -2931,8 +2984,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 					taskOutputs[taskID] = output
 				}
 
+				// Keep uncertain identity available to downstream tasks even though
+				// this execution cannot publish a cache entry or short-circuit.
+				if inputHash != "" {
+					taskHashes[taskID] = inputHash
+				}
+
 				// Store successful result in cache, reusing the hash computed earlier.
-				if cacheCfg.Enabled && inputHash != "" && run.IsSuccessfulTaskResult(result) {
+				if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" && inputHash != "" && run.IsSuccessfulTaskResult(result) {
 					cacheStore := getCacheStore()
 					taskName := ""
 					if taskModel != nil {

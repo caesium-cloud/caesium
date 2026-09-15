@@ -20,9 +20,8 @@ import (
 // ErrDigestUnavailable is returned when a digest cannot be resolved for an
 // image — the registry is unreachable, rejects the configured credentials, the
 // tag does not exist, or the engine has no DigestFunc wired. Callers treat this
-// as "fall back to the literal tag": a cache miss is always safe, so an
-// unresolved digest never produces a stale hit, it only declines the extra
-// tamper-evidence for that step.
+// as unavailable immutable identity: when pinning is requested, callers must
+// bypass result-cache reuse/publication and propagate uncertainty downstream.
 var ErrDigestUnavailable = errors.New("imagecheck: image digest unavailable")
 
 // DigestFunc resolves a single image reference to its content digest
@@ -60,7 +59,7 @@ func negativeTTL(ttl time.Duration) time.Duration {
 // short, per-call TTL. It is safe for concurrent use. Resolution is
 // engine-aware: each supported engine supplies a DigestFunc; engines without
 // one (or with a nil func) report ErrDigestUnavailable so the caller falls back
-// to the tag.
+// to execution without cache reuse when pinning was requested.
 //
 // The TTL is supplied per Resolve call (not fixed on the Resolver) so different
 // jobs can demand different freshness against the same warm cache — e.g. a job
@@ -148,7 +147,7 @@ func WithCredentialSource(fn CredentialFunc) ResolverOption {
 // (CredentialsFromSecrets over CAESIUM_REGISTRY_AUTH in the server). Without a
 // credential source every registry is probed anonymously, so a private image
 // that is not already present locally still falls back to the literal tag —
-// which is always safe (a cache miss is never a stale hit). The cache TTL is
+// which requires callers to bypass result-cache reuse. The cache TTL is
 // supplied per Resolve call.
 func NewResolver(opts ...ResolverOption) *Resolver {
 	r := &Resolver{
@@ -197,7 +196,7 @@ func (r *Resolver) lookupCredentials(ctx context.Context, registry string) (Cred
 
 // Resolve returns the content digest (sha256:...) for the image run by the
 // given engine. On any resolution failure it returns ErrDigestUnavailable (the
-// underlying cause is logged), so callers can fall back to the tag without
+// underlying cause is logged), so callers can bypass result-cache reuse without
 // special-casing every engine.
 //
 // ttl bounds how long a resolved tag->digest mapping is reused. It is a perf
@@ -249,7 +248,7 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 
 	digest, err := fn(ctx, imageRef)
 	if err != nil {
-		log.Warn("image digest resolution failed; falling back to tag",
+		log.Warn("image digest resolution failed; immutable identity unavailable",
 			"engine", engine, "image", imageRef, "error", err)
 		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
@@ -257,7 +256,7 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 	digest = strings.TrimSpace(digest)
 	canonical, ok := canonicalResolvedDigest(digest)
 	if !ok {
-		log.Warn("image digest resolution returned a non-sha256 value; falling back to tag",
+		log.Warn("image digest resolution returned an invalid sha256 digest; immutable identity unavailable",
 			"engine", engine, "image", imageRef, "digest", digest)
 		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
@@ -390,12 +389,12 @@ func dockerInspectDigest(ctx context.Context, cli client.ImageAPIClient, imageRe
 func canonicalResolvedDigest(digest string) (string, bool) {
 	digest = strings.TrimSpace(digest)
 	if rest, ok := strings.CutPrefix(digest, ImageIDPrefix); ok {
-		if !strings.HasPrefix(rest, "sha256:") {
+		if !digestPattern.MatchString(rest) {
 			return "", false
 		}
 		return MarkImageIDDigest(rest), true
 	}
-	if !strings.HasPrefix(digest, "sha256:") {
+	if !digestPattern.MatchString(digest) {
 		return "", false
 	}
 	return digest, true
@@ -485,7 +484,7 @@ func digestFromReference(ref string) (string, bool) {
 		return "", false
 	}
 	digest := ref[at+1:]
-	if !strings.HasPrefix(digest, "sha256:") || len(digest) <= len("sha256:") {
+	if !digestPattern.MatchString(digest) {
 		return "", false
 	}
 	return digest, true

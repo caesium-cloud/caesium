@@ -766,7 +766,7 @@ Resolution works on every engine:
 | `docker` | The local daemon first (an image that is already present costs no network I/O); if absent, a registry manifest `HEAD`; if that fails too, a pull using the credentials below, then inspect. |
 | `podman`, `kubernetes` | Directly against the registry (Docker Registry HTTP API v2 manifest `HEAD` — no layers are pulled). Neither engine exposes a pre-run digest source, so the server asks the registry itself. |
 
-Resolution failures (registry unreachable, tag missing, credentials rejected) fall back to the literal tag and are logged; a cache miss is always safe, so an unresolved digest never serves a stale result — it only loses the tamper-evidence for that step.
+With pinning requested, a resolved digest is also used for container creation, so execution uses the immutable image recorded in the cache key. Resolution failures (registry unreachable, node-local Kubernetes image, tag missing, credentials rejected) execute the tag while bypassing cache reuse **and publication**. The persisted hash includes a fresh execution-specific `unresolvedImageIdentity`, which prevents transitive downstream tasks from reusing results even when upstream outputs are identical. Explicit `chain: values` retains its documented output-only semantics. `caesium why` and the Console explanation report that requested identity was unavailable and cache reuse/publication was bypassed. Replay re-executes unresolved pinned baselines; a known frozen descriptor digest remains authoritative.
 
 ### Registry credentials
 

@@ -56,6 +56,7 @@ const (
 // renderings of the same fact: the human-readable note for the summary line and
 // the CLI/Console, and the per-field "change" verb for a diff row.
 const (
+	unresolvedImageIdentityNote     = "cache reuse and publication bypassed: immutable image identity unavailable in this task or a transitive predecessor; execution-specific identity protects downstream tasks"
 	predecessorHashesExcludedChange = "excluded (chain: values)"
 	predecessorHashesExcludedNote   = "predecessor hashes excluded (chain: values)"
 )
@@ -99,22 +100,23 @@ type hashInputBlob struct {
 	BlobVersion int    `json:"blobVersion"`
 	Hash        string `json:"hash"`
 
-	JobAlias             string                       `json:"jobAlias,omitempty"`
-	TaskName             string                       `json:"taskName,omitempty"`
-	Image                string                       `json:"image,omitempty"`
-	ResolvedImageDigest  string                       `json:"resolvedImageDigest,omitempty"`
-	Command              []string                     `json:"command,omitempty"`
-	Env                  map[string]envBlobValue      `json:"env,omitempty"`
-	WorkDir              string                       `json:"workDir,omitempty"`
-	Mounts               json.RawMessage              `json:"mounts,omitempty"`
-	ResolvedVolumeMounts json.RawMessage              `json:"resolvedVolumeMounts,omitempty"`
-	Kubernetes           json.RawMessage              `json:"kubernetes,omitempty"`
-	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
-	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
-	RunParams            map[string]string            `json:"runParams,omitempty"`
-	Partition            string                       `json:"partition,omitempty"`
-	PartitionFingerprint string                       `json:"partitionFingerprint,omitempty"`
-	PartitionAttributes  map[string]string            `json:"partitionAttributes,omitempty"`
+	JobAlias                string                       `json:"jobAlias,omitempty"`
+	TaskName                string                       `json:"taskName,omitempty"`
+	Image                   string                       `json:"image,omitempty"`
+	ResolvedImageDigest     string                       `json:"resolvedImageDigest,omitempty"`
+	UnresolvedImageIdentity string                       `json:"unresolvedImageIdentity,omitempty"`
+	Command                 []string                     `json:"command,omitempty"`
+	Env                     map[string]envBlobValue      `json:"env,omitempty"`
+	WorkDir                 string                       `json:"workDir,omitempty"`
+	Mounts                  json.RawMessage              `json:"mounts,omitempty"`
+	ResolvedVolumeMounts    json.RawMessage              `json:"resolvedVolumeMounts,omitempty"`
+	Kubernetes              json.RawMessage              `json:"kubernetes,omitempty"`
+	PredecessorHashes       []string                     `json:"predecessorHashes,omitempty"`
+	PredecessorOutputs      map[string]map[string]string `json:"predecessorOutputs,omitempty"`
+	RunParams               map[string]string            `json:"runParams,omitempty"`
+	Partition               string                       `json:"partition,omitempty"`
+	PartitionFingerprint    string                       `json:"partitionFingerprint,omitempty"`
+	PartitionAttributes     map[string]string            `json:"partitionAttributes,omitempty"`
 	// Chain is the cache chain mode, written by cache.HashInput.CanonicalJSON
 	// only in values mode (absent means the default transitive). It is what tells
 	// the diff that PredecessorHashes never entered this blob's digest.
@@ -255,6 +257,9 @@ func DiffHashInputBlobs(subject, baseline []byte) (*BlobDiff, error) {
 		if len(subject) > 0 {
 			if sb, err := decodeBlob(subject); err == nil {
 				d.SubjectHash = sb.Hash
+				if sb.UnresolvedImageIdentity != "" {
+					d.Notes = append(d.Notes, unresolvedImageIdentityNote)
+				}
 				excluded = excluded || sb.excludesPredecessorHashes()
 			}
 		}
@@ -279,6 +284,9 @@ func DiffHashInputBlobs(subject, baseline []byte) (*BlobDiff, error) {
 		return nil, fmt.Errorf("run: decode baseline hash-input blob: %w", err)
 	}
 
+	if sb.UnresolvedImageIdentity != "" {
+		d.Notes = append(d.Notes, unresolvedImageIdentityNote)
+	}
 	d.SubjectHash = sb.Hash
 	d.BaselineHash = bb.Hash
 	d.HashEqual = sb.Hash != "" && sb.Hash == bb.Hash
@@ -337,6 +345,7 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 
 	addScalar("image", before.Image, after.Image)
 	addScalar("resolvedImageDigest", before.ResolvedImageDigest, after.ResolvedImageDigest)
+	addScalar("unresolvedImageIdentity", before.UnresolvedImageIdentity, after.UnresolvedImageIdentity)
 	addScalar("command", joinCommand(before.Command), joinCommand(after.Command))
 	addScalar("workDir", before.WorkDir, after.WorkDir)
 	if before.CacheVersion != after.CacheVersion {

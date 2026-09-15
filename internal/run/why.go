@@ -416,8 +416,12 @@ func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, row
 	// (the chain is resolved per step, not per partition), and it is populated
 	// even when an instance has no blob at all.
 	valuesMode := false
+	unresolvedImage := false
 	for i := range rows {
 		row := &rows[i]
+		if blob, err := decodeBlob(row.HashInputBlob); err == nil && blob.UnresolvedImageIdentity != "" {
+			unresolvedImage = true
+		}
 		if row.CacheChain == cache.ChainValues {
 			valuesMode = true
 		}
@@ -462,6 +466,9 @@ func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, row
 		group.DurationMS = group.CompletedAt.Sub(*group.StartedAt).Milliseconds()
 	}
 
+	if unresolvedImage {
+		group.Notes = append(group.Notes, unresolvedImageIdentityNote)
+	}
 	if valuesMode {
 		group.Notes = append(group.Notes, predecessorHashesExcludedNote)
 	}
