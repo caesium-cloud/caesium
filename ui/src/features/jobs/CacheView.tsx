@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, type CacheEntry, type Job, type JobRun, type JobTask } from "@/lib/api";
 import { shortId } from "@/lib/utils";
-import { describeCachePolicy } from "./cache-utils";
+import { describeCachePolicy, describeEffectiveCachePolicy } from "./cache-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 
 interface CacheViewProps {
@@ -148,6 +148,7 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
                     key={`${entry.task_name}:${entry.hash}`}
                     entry={entry}
                     task={task}
+                    jobCacheConfig={job.cache_config}
                     jobId={jobId}
                     pending={pendingTaskName === entry.task_name && invalidateTaskMutation.isPending}
                     onInvalidate={(taskName) => {
@@ -168,12 +169,14 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
 function CacheEntryRow({
   entry,
   task,
+  jobCacheConfig,
   jobId,
   pending,
   onInvalidate,
 }: {
   entry: CacheEntry;
   task?: JobTask;
+  jobCacheConfig?: Job["cache_config"];
   jobId: string;
   pending: boolean;
   onInvalidate: (taskName: string) => void;
@@ -184,7 +187,9 @@ function CacheEntryRow({
         <div className="font-medium">{entry.task_name}</div>
         {task?.id ? <div className="text-[10px] font-mono text-muted-foreground">{shortId(task.id)}</div> : null}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">{describeCachePolicy(task?.cache_config)}</TableCell>
+      <TableCell className="text-sm text-muted-foreground" data-testid="cache-entry-policy">
+        {describeEffectiveCachePolicy(task?.cache_config, jobCacheConfig)}
+      </TableCell>
       <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
         <RelativeTime date={entry.created_at} />
       </TableCell>
