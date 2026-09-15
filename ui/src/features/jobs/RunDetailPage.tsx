@@ -376,14 +376,15 @@ export function RunDetailPage() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => window.history.back()}
-          >
-            <History className="mr-1.5 h-3.5 w-3.5" />
-            All runs
+          <Button variant="ghost" size="sm" className="h-8 text-xs" asChild>
+            <Link
+              to="/jobs/$jobId/runs"
+              params={{ jobId }}
+              data-testid="all-runs-link"
+            >
+              <History className="mr-1.5 h-3.5 w-3.5" />
+              All runs
+            </Link>
           </Button>
           {canLaunchReplay ? (
             <Button
