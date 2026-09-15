@@ -291,7 +291,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `integration` | ubuntu-24.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
 | `integration-extra` | ubuntu-24.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
 | `integration-arm64` | ubuntu-24.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
-| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
+| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | locked Playwright container joined to the server namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
@@ -390,6 +390,20 @@ then run in a separate worker and browser, so deliberate offline transitions
 cannot disrupt neighboring tests. Both projects appear in the same report.
 `just ui-e2e` uses the same project selection. A failure in either phase fails
 the job; a failed default dependency prevents the recovery phase from starting.
+
+The CI default lane derives `mcr.microsoft.com/playwright:v<locked-version>-noble`
+from the matching `@playwright/test` and `playwright` lockfile entries, then
+runs it with `--network=container:caesium-server`. The browser therefore keeps
+the production-like `http://127.0.0.1:8080` origin and relative `/v1` requests,
+but does not share the runner's bridge interface while job task containers are
+created through the server's Docker socket. This isolates the browser from an
+observed runner `net::ERR_NETWORK_CHANGED` asset-load interruption that left the
+React root empty in three retained diagnostic attempts; host-bridge churn is a
+suspected trigger validated by this lane, rather than an established cause. It
+does not retry navigation, relax browser assertions, or disable flaky-test
+failures. The whole checkout is mounted so fixtures and the existing
+report/result paths remain available to the host-side sanitizer and artifact
+upload.
 
 CI retains two Playwright retries for diagnosis and sets `failOnFlakyTests`:
 a test that fails initially and passes on retry still fails the lane. Both

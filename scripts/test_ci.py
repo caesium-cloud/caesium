@@ -277,12 +277,30 @@ class WorkflowTests(unittest.TestCase):
                         self.assertEqual(structured, {"error": "[REDACTED_API_KEY]", "status": "flaky"})
 
     def test_default_browser_lane_selects_network_recovery_with_dependencies(self):
+        image = next(step for step in JOBS["ui-e2e"]["steps"]
+                     if step.get("id") == "playwright-image")
         browser = next(step for step in JOBS["ui-e2e"]["steps"]
                        if step.get("id") == "playwright")
-        self.assertEqual(
-            shlex.split(browser["run"]),
-            ["npm", "run", "test:e2e", "--", "--project=network-recovery"],
-        )
+        locked_packages = json.loads((ROOT / "ui/package-lock.json").read_text())["packages"]
+        locked_test_version = locked_packages["node_modules/@playwright/test"]["version"]
+        self.assertEqual(locked_test_version, locked_packages["node_modules/playwright"]["version"])
+        self.assertIn('node_modules/@playwright/test', image["run"])
+        self.assertIn('node_modules/playwright', image["run"])
+        self.assertIn("lockfile versions must match", image["run"])
+        self.assertIn("mcr.microsoft.com/playwright:v{test_version}-noble", image["run"])
+
+        self.assertEqual(browser["env"]["PLAYWRIGHT_IMAGE"], "${{ steps.playwright-image.outputs.image }}")
+        self.assertIn("docker pull \"$PLAYWRIGHT_IMAGE\"", browser["run"])
+        self.assertIn("--network=container:caesium-server", browser["run"])
+        self.assertNotIn("--network=host", browser["run"])
+        self.assertIn('-v "$GITHUB_WORKSPACE:/work"', browser["run"])
+        self.assertIn("-w /work/ui", browser["run"])
+        self.assertIn("--init --ipc=host", browser["run"])
+        self.assertIn("-e CI=true", browser["run"])
+        self.assertIn("-e PLAYWRIGHT_BASE_URL=http://127.0.0.1:8080", browser["run"])
+        self.assertIn("-e CAESIUM_MANUAL_TRIGGER_API_KEY", browser["run"])
+        self.assertIn("npm ci && npm run test:e2e -- --project=network-recovery", browser["run"])
+        self.assertNotIn("npx playwright install", browser["run"])
 
         justfile = (ROOT / "justfile").read_text()
         recipe_start = justfile.index("\nui-e2e:")

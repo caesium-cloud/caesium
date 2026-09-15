@@ -565,17 +565,22 @@ jobs:
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install UI dependencies and browsers
-        id: dependencies
+      - name: Resolve locked Playwright image
+        id: playwright-image
         run: |
-          cd ui
-          npm ci
-          npx playwright install --with-deps chromium
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import json
+
+          packages = json.load(open("ui/package-lock.json"))["packages"]
+          test_version = packages["node_modules/@playwright/test"]["version"]
+          playwright_version = packages["node_modules/playwright"]["version"]
+          if test_version != playwright_version:
+              raise SystemExit(
+                  "@playwright/test and playwright lockfile versions must match: "
+                  f"{test_version} != {playwright_version}"
+              )
+          print(f"image=mcr.microsoft.com/playwright:v{test_version}-noble")
+          PYTHON
       - name: Pre-pull job images
         id: job-images
         run: |
@@ -614,8 +619,19 @@ jobs:
           done
       - name: Run Playwright E2E
         id: playwright
-        working-directory: ui
-        run: npm run test:e2e -- --project=network-recovery
+        env:
+          PLAYWRIGHT_IMAGE: ${{ steps.playwright-image.outputs.image }}
+        run: |
+          docker pull "$PLAYWRIGHT_IMAGE"
+          docker run --rm --init --ipc=host \
+            --network=container:caesium-server \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work/ui \
+            -e CI=true \
+            -e PLAYWRIGHT_BASE_URL=http://127.0.0.1:8080 \
+            -e CAESIUM_MANUAL_TRIGGER_API_KEY \
+            "$PLAYWRIGHT_IMAGE" \
+            /bin/bash -lc 'npm ci && npm run test:e2e -- --project=network-recovery'
       - name: Collect browser diagnostics
         if: always()
         env:
