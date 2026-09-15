@@ -53,6 +53,7 @@ type TaskResult struct {
 	Output       map[string]string
 	LogText      string
 	LogTruncated bool
+	LogScrubbed  bool
 	Error        string
 }
 
@@ -213,7 +214,11 @@ func Execute(ctx context.Context, desc *Descriptor, env *Envelope, opts ExecuteO
 	}
 
 	output := task.Output
-	if strings.TrimSpace(task.LogText) != "" {
+	// Secret-bearing task logs contain a sanitized presentation of marker
+	// lines. The TaskRun.Output column was parsed from the original stream by
+	// the executor and is authoritative; reparsing redacted JSON would replace
+	// correct output values with presentation placeholders.
+	if !task.LogScrubbed && strings.TrimSpace(task.LogText) != "" {
 		markers, err := pkgtask.ParseMarkers(strings.NewReader(task.LogText))
 		if err != nil {
 			return nil, err

@@ -276,6 +276,21 @@ class WorkflowTests(unittest.TestCase):
                         structured = json.loads((artifacts / "playwright-results.json").read_text())
                         self.assertEqual(structured, {"error": "[REDACTED_API_KEY]", "status": "flaky"})
 
+    def test_default_browser_lane_selects_network_recovery_with_dependencies(self):
+        browser = next(step for step in JOBS["ui-e2e"]["steps"]
+                       if step.get("id") == "playwright")
+        self.assertEqual(
+            shlex.split(browser["run"]),
+            ["npm", "run", "test:e2e", "--", "--project=network-recovery"],
+        )
+
+        justfile = (ROOT / "justfile").read_text()
+        recipe_start = justfile.index("\nui-e2e:")
+        recipe_end = justfile.index("\nui-e2e-auth:", recipe_start)
+        recipe = justfile[recipe_start:recipe_end]
+        self.assertIn("npm run test:e2e -- --project=network-recovery", recipe)
+        self.assertNotIn("--no-deps", recipe)
+
     def test_malformed_browser_archive_never_uploads_raw_credentials(self):
         for name in ("ui-e2e", "ui-e2e-auth"):
             collect = next(step for step in JOBS[name]["steps"]

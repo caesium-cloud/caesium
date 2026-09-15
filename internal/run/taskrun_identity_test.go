@@ -62,7 +62,7 @@ func TestAggregatePredecessorStatusesOnePerTask(t *testing.T) {
 // single instance by its TaskRun primary key.
 //
 // Regression: the local executor called StartTask/SetTaskExitCode/
-// SaveTaskLogSnapshot with the catalog task ID. StartTask resolved the row via
+// SaveCapturedTaskLogSnapshot with the catalog task ID. StartTask resolved the row via
 // loadUniqueTaskRun, which returns ErrAmbiguousTaskRun for N>1, so the *first*
 // instance died immediately after its container started — before the deferred
 // engine.Stop that removes the container. The leaked container then made every
@@ -133,7 +133,7 @@ func TestExecutionWritesAddressOneFanOutInstance(t *testing.T) {
 
 	exit := 0
 	require.NoError(t, store.SetTaskExitCode(runRecord.ID, instanceIDs[1], &exit))
-	require.NoError(t, store.SaveTaskLogSnapshot(runRecord.ID, instanceIDs[1], &TaskLogSnapshot{
+	require.NoError(t, store.SaveCapturedTaskLogSnapshot(runRecord.ID, instanceIDs[1], &TaskLogSnapshot{
 		Text: "partition b log",
 	}))
 

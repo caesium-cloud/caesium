@@ -1,10 +1,14 @@
-import { useMemo, useCallback, useState, type ReactNode } from 'react';
+import { useMemo, useCallback, useEffect, useState, type ReactNode } from 'react';
 import ReactFlow, {
   Controls,
   Background,
   MarkerType,
+  useNodesInitialized,
+  useReactFlow,
+  useStore,
   type Node,
   type Edge,
+  type FitViewOptions,
   Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
@@ -78,6 +82,10 @@ interface TaskRunMetadata {
 }
 
 interface JobDAGProps {
+  /**
+   * The DAG canvas fills its parent. Embed it only in a container with a
+   * resolved height (for example `useDagHeight` plus a pixel fallback).
+   */
   dag: JobDAGResponse;
   atoms: Record<string, Atom>;
   taskDefinitions?: Record<string, JobTask>;
@@ -104,6 +112,31 @@ interface NodeEdgeDegree {
   incoming: number;
   outgoing: number;
   total: number;
+}
+
+/**
+ * React Flow fits on initial mount, but its transform is not recalculated
+ * when an enclosing detail page changes the canvas height. The run and job
+ * pages do that while their scroll position is measured, so defer a refit
+ * until React Flow has the final dimensions and measured nodes.
+ */
+function FitViewOnResize({ fitViewOptions }: { fitViewOptions: FitViewOptions }) {
+  const { fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+
+  useEffect(() => {
+    if (!nodesInitialized || width === 0 || height === 0) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      void fitView(fitViewOptions);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitView, fitViewOptions, height, nodesInitialized, width]);
+
+  return null;
 }
 
 export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
@@ -238,12 +271,16 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
 
     const isSingleNodeDAG = layoutedNodes.length === 1 && layoutedEdges.length === 0;
     const dagMaxZoom = isSingleNodeDAG ? 2.2 : 1.5;
+    // A dense DAG can need to fit below the old 0.1 floor when the run page
+    // has less vertical space than its default canvas height.
+    const dagMinZoom = isSingleNodeDAG ? 0.1 : 0.05;
     const fitViewOptions = useMemo(
       () => ({
         padding: isSingleNodeDAG ? 0.06 : 0.2,
+        minZoom: dagMinZoom,
         maxZoom: dagMaxZoom,
       }),
-      [isSingleNodeDAG, dagMaxZoom]
+      [isSingleNodeDAG, dagMinZoom, dagMaxZoom]
     );
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -252,7 +289,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
 
   return (
     <>
-      <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
+      <div className="relative h-full w-full overflow-hidden rounded-lg bg-dag-bg">
         <ReactFlow
           nodes={layoutedNodes}
           edges={layoutedEdges}
@@ -261,11 +298,12 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
           onNodeClick={handleNodeClick}
           fitView
           fitViewOptions={fitViewOptions}
-          minZoom={0.1}
+          minZoom={dagMinZoom}
           maxZoom={dagMaxZoom}
         >
+          <FitViewOnResize fitViewOptions={fitViewOptions} />
           <Background gap={20} />
-          <Controls />
+          <Controls fitViewOptions={fitViewOptions} />
         </ReactFlow>
       </div>
 

@@ -523,6 +523,27 @@ Use `secret://` URIs instead of hardcoding credentials:
 | Kubernetes | `secret://k8s/<secret>/<key>` | `secret://k8s/db-creds/password` |
 | Vault | `secret://vault/<path>?field=<key>` | `secret://vault/secret/data/db?field=password` |
 
+Task log snapshots replace each non-empty resolved environment-secret value
+with `[REDACTED]` before applying the 1 MiB retention cap. If a value occurs in
+that placeholder or the truncation annotation, Caesium removes it from that
+generated text too. Live and retained log
+reads use that same sanitized snapshot, while structured `##caesium::` markers
+are parsed from the original stream. Matching is exact, including values split
+across runtime chunks; transformed or encoded forms are outside this guarantee.
+If the executor cannot finish draining a secret-bearing runtime log after the
+container exits, it fails the task because unread bytes may contain structured
+outputs or fan-out partitions. It does not report a successful task with
+missing marker data.
+Historical snapshots are unchanged because Caesium does not retain the old
+plaintext needed to repair them and does not re-resolve possibly rotated
+secrets while serving logs.
+
+Use a coordinated upgrade before relying on log scrubbing: drain or stop old
+executors and API replicas, upgrade every replica, and only then admit new
+executions. Mixed-version rolling operation cannot guarantee protection because
+old binaries can retain or serve raw logs. The guarantee applies prospectively
+to executions admitted after all replicas run the upgraded version.
+
 ---
 
 ## Local Development Commands
@@ -583,7 +604,9 @@ Supported assertions:
 - `expect.errorContains`: substring match against the run error
 - `expect.tasks[].status`: expected task status
 - `expect.tasks[].output`: expected output key/value subset
-- `expect.tasks[].logContains`: required log substrings
+- `expect.tasks[].logContains`: required substrings in the retained log text.
+  For secret-bearing tasks this is the sanitized text, so assert
+  `[REDACTED]` (or surrounding safe text), never the resolved plaintext value.
 - `expect.tasks[].schemaViolationCount`: exact number of runtime schema violations
 - `expect.tasks[].cacheHit`: expected cache-hit boolean
 - `expect.tasks[].errorContains`: substring match against the task error

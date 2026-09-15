@@ -384,6 +384,13 @@ than this doc should need to.
 
 ### Browser outcomes and diagnostics (distributed-testing W1/G1)
 
+The default browser lane selects the `network-recovery` Playwright project.
+Its `default` dependency runs the ordinary scenarios first; recovery scenarios
+then run in a separate worker and browser, so deliberate offline transitions
+cannot disrupt neighboring tests. Both projects appear in the same report.
+`just ui-e2e` uses the same project selection. A failure in either phase fails
+the job; a failed default dependency prevents the recovery phase from starting.
+
 CI retains two Playwright retries for diagnosis and sets `failOnFlakyTests`:
 a test that fails initially and passes on retry still fails the lane. Both
 `ui-e2e` and `ui-e2e-auth` always attempt collection and upload before server

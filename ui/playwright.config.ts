@@ -33,7 +33,14 @@ export default defineConfig({
   projects: [
     {
       name: "default",
-      testIgnore: "**/auth/**/*.spec.ts",
+      testIgnore: ["**/auth/**/*.spec.ts", "**/network-recovery.spec.ts"],
+    },
+    {
+      // Run offline/reconnect tests last, in a separate worker/browser. On
+      // Linux Chromium, a network-change event can affect neighboring pages.
+      name: "network-recovery",
+      testMatch: "**/network-recovery.spec.ts",
+      dependencies: ["default"],
     },
     {
       name: "auth",

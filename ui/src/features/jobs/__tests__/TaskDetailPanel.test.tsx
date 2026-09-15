@@ -15,7 +15,7 @@ vi.mock("@/lib/auth", () => ({
   withAuthHeaders: () => ({}),
 }));
 
-vi.mock("xterm", () => ({
+vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(function () {
     return {
       loadAddon: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock("xterm", () => ({
   }),
 }));
 
-vi.mock("xterm-addon-fit", () => ({
+vi.mock("@xterm/addon-fit", () => ({
   FitAddon: vi.fn().mockImplementation(function () {
     return {
       fit: fitAddonFit,

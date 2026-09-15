@@ -72,6 +72,9 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   // root + width leaves + join
   expect(run.tasks).toHaveLength(width + 2);
 
+  // CI's default browser height exposed this fit path; make that constrained
+  // viewport explicit so the canvas and page containment are both exercised.
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
   await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
 
@@ -88,6 +91,32 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   await dagSection.getByRole("button", { name: /fit view/i }).click();
   const leafNode = dagSection.locator(".react-flow__node", { hasText: "leaf-15" });
   await expect(leafNode).toBeVisible();
+
+  // The fitted flow must use the visible clipping container, not a taller
+  // child canvas, and the far leaf must then fit within that canvas.
+  const canvasViewport = dagSection.getByTestId("run-dag-canvas-viewport");
+  const reactFlow = dagSection.locator(".react-flow");
+  await expect.poll(async () => {
+    const [viewportBox, flowBox, leafBox] = await Promise.all([
+      canvasViewport.boundingBox(),
+      reactFlow.boundingBox(),
+      leafNode.boundingBox(),
+    ]);
+    if (!viewportBox || !flowBox || !leafBox) {
+      return { fits: false, canvas: viewportBox, flow: flowBox, leaf: leafBox };
+    }
+
+    return {
+      fits:
+        flowBox.y >= viewportBox.y &&
+        flowBox.y + flowBox.height <= viewportBox.y + viewportBox.height &&
+        leafBox.y >= flowBox.y &&
+        leafBox.y + leafBox.height <= flowBox.y + flowBox.height,
+      canvas: viewportBox,
+      flow: flowBox,
+      leaf: leafBox,
+    };
+  }).toMatchObject({ fits: true });
   await expect(leafNode).toBeInViewport();
 });
 

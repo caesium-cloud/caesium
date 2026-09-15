@@ -24,7 +24,7 @@ import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun 
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
-import { getRunCacheStats } from "./cache-utils";
+import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { CallbackRunsSection } from "./CallbackRunsSection";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
@@ -50,7 +50,8 @@ export function RunDetailPage() {
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
-    refetchInterval: streamHealthy ? false : 5000,
+    refetchInterval: (query) =>
+      !streamHealthy || isTerminalRunStatus(query.state.data?.status) ? 5000 : false,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -110,7 +111,7 @@ export function RunDetailPage() {
 
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const finalRun = e.payload as JobRun;
-          if (finalRun?.tasks) return finalRun;
+          if (finalRun?.tasks) return mergeTerminalRunUpdate(old, finalRun);
           toast.success("Run completed");
           return { ...old, status: "succeeded" };
         }
@@ -512,6 +513,7 @@ export function RunDetailPage() {
         </div>
         <div
           ref={dagContainerRef}
+          data-testid="run-dag-canvas-viewport"
           className="relative overflow-hidden bg-card"
           style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
         >
@@ -613,4 +615,3 @@ function parseTimestamp(value: string | undefined): number | undefined {
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
-

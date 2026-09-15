@@ -38,7 +38,7 @@ export default defineConfig({
             },
             {
               name: "vendor-terminal",
-              test: /node_modules[\\/](xterm|xterm-addon-fit)[\\/]/,
+              test: /node_modules[\\/]@xterm[\\/](xterm|addon-fit)[\\/]/,
               priority: 30,
             },
             {

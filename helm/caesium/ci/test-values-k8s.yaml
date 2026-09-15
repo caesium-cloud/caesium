@@ -11,6 +11,9 @@ config:
     # Enable event ingest so the event-trigger/webhook integration scenarios run here.
     - name: CAESIUM_EVENT_INGEST_API_KEY
       value: integration-test-key
+    # Deliberately fake secret shared with Docker lanes for log-redaction tests.
+    - name: CAESIUM_IT_REGISTRY_CREDS
+      value: ci-user:ci-pass
     # Enable the run-queue dequeuer so the concurrency queue strategy scenarios run here.
     - name: CAESIUM_RUN_QUEUE_ENABLED
       value: "true"
