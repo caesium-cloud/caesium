@@ -20,17 +20,45 @@ import (
 // that is absent, and a daemon endpoint that cannot be reached. Stdout carries
 // the per-image verdict while Cobra's command failure stays on stderr.
 func (s *IntegrationTestSuite) TestCheckImagesCLIGatesLocalDockerAvailability() {
+	s.Run("Podman and Kubernetes images are advisory without a Docker probe", func() {
+		missingSocket := filepath.Join(s.T().TempDir(), "docker.sock")
+		for _, engine := range []string{"podman", "kubernetes"} {
+			engine := engine
+			s.Run(engine, func() {
+				imageRef := "caesium-dx-" + engine + "-only:" + uuid.NewString()
+				path := s.writeImageCheckManifest("advisory-"+engine, imageRef, engine)
+				stdout, stderr, err := s.runCLIWithEnv([]string{"DOCKER_HOST=unix://" + missingSocket}, "test", "--path", path, "--check-images")
+				s.Require().NoError(err, "stdout:\n%s\nstderr:\n%s", stdout, stderr)
+				s.Contains(stdout, "ADVISORY  "+imageRef)
+				s.Contains(stdout, "no local Docker daemon probe")
+				if engine == "podman" {
+					s.Contains(stdout, "Podman runtime availability is not checked")
+				} else {
+					s.Contains(stdout, "Kubernetes target availability is not checked")
+				}
+				s.NotContains(stderr, "one or more checks failed")
+			})
+		}
+	})
+
+	s.Run("scenario cannot silently skip requested image check", func() {
+		stdout, stderr, err := s.runCLISeparate("test", "--scenario", s.T().TempDir(), "--check-images")
+		s.Require().Error(err)
+		s.Empty(strings.TrimSpace(stdout))
+		s.Contains(stderr, "--check-images cannot be combined with --scenario")
+	})
+
 	if s.engineType != "docker" {
-		s.T().Skip("--check-images is a local Docker daemon gate; Docker runtime coverage runs in the Docker integration lane")
+		return
 	}
+
 	present := s.presentDockerImageForCheck()
 
 	s.Run("present local image", func() {
-		path := s.writeImageCheckManifest("present", present, "kubernetes")
+		path := s.writeImageCheckManifest("present", present, "")
 		stdout, stderr, err := s.runCLISeparate("test", "--path", path, "--check-images")
 		s.Require().NoError(err, "stdout:\n%s\nstderr:\n%s", stdout, stderr)
-		s.Contains(stdout, "PASS  "+present)
-		s.Contains(stdout, "local Docker daemon; Kubernetes target availability is not checked")
+		s.Contains(stdout, "PASS  "+present+"  (available in local Docker daemon)")
 		s.NotContains(stderr, "one or more checks failed", "a successful image check must not report a command failure")
 	})
 
@@ -39,7 +67,7 @@ func (s *IntegrationTestSuite) TestCheckImagesCLIGatesLocalDockerAvailability() 
 		path := s.writeImageCheckManifest("missing", missing, "")
 		stdout, stderr, err := s.runCLISeparate("test", "--path", path, "--check-images")
 		s.Require().Error(err, "an unavailable local image must make --check-images fail")
-		s.Contains(stdout, "MISS  "+missing+"  (not found in local Docker daemon; local Docker daemon)")
+		s.Contains(stdout, "MISS  "+missing+"  (not found in local Docker daemon)")
 		s.NotContains(stdout, "one or more checks failed", "command diagnostics belong on stderr")
 		s.Contains(stderr, "one or more checks failed")
 	})
@@ -49,16 +77,21 @@ func (s *IntegrationTestSuite) TestCheckImagesCLIGatesLocalDockerAvailability() 
 		missingSocket := filepath.Join(s.T().TempDir(), "docker.sock")
 		stdout, stderr, err := s.runCLIWithEnv([]string{"DOCKER_HOST=unix://" + missingSocket}, "test", "--path", path, "--check-images")
 		s.Require().Error(err, "an unreachable Docker daemon must make --check-images fail")
-		s.Contains(stdout, "FAIL  "+present+"  (local Docker daemon; error:")
+		s.Contains(stdout, "FAIL  "+present+"  (local Docker daemon error:")
 		s.NotContains(stdout, "one or more checks failed", "command diagnostics belong on stderr")
 		s.Contains(stderr, "one or more checks failed")
 	})
 
-	s.Run("scenario cannot silently skip requested image check", func() {
-		stdout, stderr, err := s.runCLISeparate("test", "--scenario", s.T().TempDir(), "--check-images")
-		s.Require().Error(err)
-		s.Empty(strings.TrimSpace(stdout))
-		s.Contains(stderr, "--check-images requires job definitions and cannot be used with --scenario")
+	s.Run("Docker and Kubernetes shared image remains strict", func() {
+		path := s.writeImageCheckManifest("mixed", present, "docker", "kubernetes")
+		missingSocket := filepath.Join(s.T().TempDir(), "docker.sock")
+		stdout, stderr, err := s.runCLIWithEnv([]string{"DOCKER_HOST=unix://" + missingSocket}, "test", "--path", path, "--check-images")
+		s.Require().Error(err, "a Docker target must remain strict when it shares an image with Kubernetes")
+		s.Contains(stdout, "FAIL  "+present+"  (local Docker daemon error:")
+		s.Contains(stdout, "Kubernetes target availability is not checked")
+		s.NotContains(stdout, "ADVISORY  "+present)
+		s.NotContains(stdout, "one or more checks failed")
+		s.Contains(stderr, "one or more checks failed")
 	})
 }
 
@@ -83,12 +116,19 @@ func (s *IntegrationTestSuite) presentDockerImageForCheck() string {
 	return ""
 }
 
-func (s *IntegrationTestSuite) writeImageCheckManifest(suffix, imageRef, engine string) string {
+func (s *IntegrationTestSuite) writeImageCheckManifest(suffix, imageRef string, engines ...string) string {
 	s.T().Helper()
 	dir := s.T().TempDir()
-	engineLine := ""
-	if engine != "" {
-		engineLine = "    engine: " + engine + "\n"
+	var steps strings.Builder
+	for i, engine := range engines {
+		engineLine := ""
+		if engine != "" {
+			engineLine = "    engine: " + engine + "\n"
+		}
+		_, _ = fmt.Fprintf(&steps, "  - name: verify-%d\n    image: %s\n%s    command: [\"sh\", \"-c\", \"true\"]\n", i, imageRef, engineLine)
+	}
+	if len(engines) == 0 {
+		steps.WriteString("  - name: verify\n    image: " + imageRef + "\n    command: [\"sh\", \"-c\", \"true\"]\n")
 	}
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Job
@@ -98,10 +138,7 @@ trigger:
   type: cron
   configuration: {cron: "0 2 * * *"}
 steps:
-  - name: verify
-    image: %s
-%s    command: ["sh", "-c", "true"]
-`, suffix, imageRef, engineLine)
+%s`, suffix, steps.String())
 	path := filepath.Join(dir, "image-check.job.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte(manifest), 0o644))
 	return path

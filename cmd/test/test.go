@@ -40,7 +40,7 @@ func init() {
 func runTest(cmd *cobra.Command, _ []string) error {
 	if len(scenarioPaths) > 0 {
 		if checkImages {
-			return fmt.Errorf("--check-images requires job definitions and cannot be used with --scenario")
+			return fmt.Errorf("--check-images cannot be combined with --scenario")
 		}
 		return runScenarios(cmd)
 	}
@@ -85,21 +85,32 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, "Image availability (local Docker daemon only; no registry pull is attempted):")
 		targets := imageCheckTargets(defs)
-		images := make([]string, len(targets))
-		for i := range targets {
-			images[i] = targets[i].image
+		dockerImages := make([]string, 0, len(targets))
+		for _, target := range targets {
+			if target.usesDocker() {
+				dockerImages = append(dockerImages, target.image)
+			}
 		}
-		results := imagecheck.Check(cmd.Context(), images)
-		for i, r := range results {
-			scope := targets[i].scope()
+		results := make(map[string]imagecheck.Result, len(dockerImages))
+		if len(dockerImages) > 0 {
+			for _, result := range imagecheck.Check(cmd.Context(), dockerImages) {
+				results[result.Image] = result
+			}
+		}
+		for _, target := range targets {
+			if !target.usesDocker() {
+				_, _ = fmt.Fprintf(w, "  ADVISORY  %s  (%s)\n", target.image, target.availabilityDetail("no local Docker daemon probe"))
+				continue
+			}
+			r := results[target.image]
 			switch {
 			case r.Error != nil:
-				_, _ = fmt.Fprintf(w, "  FAIL  %s  (%s; error: %v)\n", r.Image, scope, r.Error)
+				_, _ = fmt.Fprintf(w, "  FAIL  %s  (%s)\n", r.Image, target.availabilityDetail(fmt.Sprintf("local Docker daemon error: %v", r.Error)))
 				allOK = false
 			case r.Available:
-				_, _ = fmt.Fprintf(w, "  PASS  %s  (%s)\n", r.Image, scope)
+				_, _ = fmt.Fprintf(w, "  PASS  %s  (%s)\n", r.Image, target.availabilityDetail("available in local Docker daemon"))
 			default:
-				_, _ = fmt.Fprintf(w, "  MISS  %s  (not found in local Docker daemon; %s)\n", r.Image, scope)
+				_, _ = fmt.Fprintf(w, "  MISS  %s  (%s)\n", r.Image, target.availabilityDetail("not found in local Docker daemon"))
 				allOK = false
 			}
 		}
@@ -145,8 +156,11 @@ func imageCheckTargets(defs []schema.Definition) []imageCheckTarget {
 	return targets
 }
 
-func (t imageCheckTarget) scope() string {
-	scope := "local Docker daemon"
+func (t imageCheckTarget) usesDocker() bool {
+	return slices.Contains(t.engines, schema.EngineDocker)
+}
+
+func (t imageCheckTarget) availabilityDetail(result string) string {
 	var caveats []string
 	if slices.Contains(t.engines, schema.EnginePodman) {
 		caveats = append(caveats, "Podman runtime availability is not checked")
@@ -155,9 +169,9 @@ func (t imageCheckTarget) scope() string {
 		caveats = append(caveats, "Kubernetes target availability is not checked")
 	}
 	if len(caveats) == 0 {
-		return scope
+		return result
 	}
-	return scope + "; " + strings.Join(caveats, "; ")
+	return result + "; " + strings.Join(caveats, "; ")
 }
 
 func runScenarios(cmd *cobra.Command) error {

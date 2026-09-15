@@ -55,7 +55,7 @@ Caesium is designed so job authors can validate, visualize, and execute pipeline
 caesium test --path jobs/ --verbose
 ```
 
-Use `--check-images` to verify local image availability.
+Use `--check-images` to strictly verify images used by Docker steps. Podman- and Kubernetes-only steps report runtime-readiness caveats without probing Docker.
 
 ### Run executable harness scenarios
 
