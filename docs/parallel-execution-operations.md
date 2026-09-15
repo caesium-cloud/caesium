@@ -43,6 +43,9 @@ deadline rather than granting fresh time, while explicitly reopening a terminal
 run starts a new execution window under the same recorded limits. A run timeout
 atomically fails every unfinished task before late worker, owner, or cache-hit
 completion can publish successors.
+Kubernetes cleanup requests a one-second termination grace period. The pod
+remains visible while kubelet terminates it; Caesium does not use zero-grace API
+deletion as evidence that a container has stopped.
 
 ## Cancelling a Run Reaches the Container
 

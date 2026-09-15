@@ -330,6 +330,23 @@ func (s *KubernetesTestSuite) TestStop() {
 	assert.Nil(s.T(), s.engine.Stop(req))
 	backend := s.engine.backend.(*mockKubernetesBackend)
 	s.True(backend.lastDeleteHasDeadline, "the Kubernetes API call must be bounded even when callers request immediate container termination")
+	s.Nil(backend.lastDeleteOptions.GracePeriodSeconds, "ordinary graceful stop retains the pod's configured grace period")
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationForeground, *backend.lastDeleteOptions.PropagationPolicy)
+	backend.AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestForceStopKeepsKubeletTerminationAcknowledgement() {
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	backend.On("Delete", testAtomID).Return()
+
+	s.Require().NoError(s.engine.Stop(&atom.EngineStopRequest{ID: testAtomID, Force: true}))
+	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Equal(int64(1), *backend.lastDeleteOptions.GracePeriodSeconds,
+		"a force stop must shorten grace without immediately erasing a potentially running pod from the API")
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
+	s.True(backend.lastDeleteHasDeadline)
 	backend.AssertExpectations(s.T())
 }
 
@@ -360,7 +377,7 @@ func (s *KubernetesTestSuite) TestStopTimeout() {
 	assert.NotNil(s.T(), s.engine.Stop(req))
 	backend := s.engine.backend.(*mockKubernetesBackend)
 	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
-	s.Equal(int64(0), *backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Equal(int64(1), *backend.lastDeleteOptions.GracePeriodSeconds)
 	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
 	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
 	s.True(backend.lastDeleteHasDeadline, "cleanup must be bounded independently of the expired task context")

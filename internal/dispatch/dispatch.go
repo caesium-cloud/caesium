@@ -137,6 +137,13 @@ type CapabilityAdvertiser interface {
 // retry on ErrOwnerBusy and give up on any other error.
 var ErrOwnerBusy = errors.New("owner busy: retryable")
 
+// ErrOwnerNotReady means recovery has not published the run yet. Workers retain
+// the completion while their execution context and claim remain valid.
+var ErrOwnerNotReady = errors.New("owner recovery pending: retryable")
+
+// ErrOwnerRejected is an authoritative ownership/attempt fence, not a runtime failure.
+var ErrOwnerRejected = errors.New("owner completion fenced")
+
 // ErrPeerUnreachable wraps a TRANSPORT failure talking to a peer probed via
 // GetCapabilities, as distinct from a peer that answered with an unwelcome
 // status (e.g. 404 from a build with no such route).  A caller that needs to
@@ -949,11 +956,18 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 		_ = json.Unmarshal(respBody, &result)
 		return &result, nil
 	}
-	// 503: the owner hit transient contention applying the completion and wants
-	// the worker to retry the same request.  Wrap ErrOwnerBusy so the caller can
-	// distinguish it from a terminal fence rejection (409) via errors.Is.
+	// Recovery is distinct from short write contention so the worker can retain
+	// the result for the lifetime of its claim instead of exhausting that budget.
+	// Unknown 503 bodies retain the existing contention classification.
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		var failure ErrorResponse
+		if json.Unmarshal(respBody, &failure) == nil && failure.Code == ReasonOwnerNotReady {
+			return nil, fmt.Errorf("complete: owner recovery pending: %w", ErrOwnerNotReady)
+		}
 		return nil, fmt.Errorf("complete: owner returned status %d: %w", resp.StatusCode, ErrOwnerBusy)
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("complete: owner returned status %d: %w", resp.StatusCode, ErrOwnerRejected)
 	}
 	return nil, fmt.Errorf("complete: owner returned status %d", resp.StatusCode)
 }

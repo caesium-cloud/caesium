@@ -9,6 +9,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // RunDeadlineError identifies expiry of metadata.runTimeout. It unwraps to
@@ -43,6 +44,25 @@ type TaskExecutionDeadline struct {
 	TaskTimeout time.Duration
 	RunTimeout  time.Duration
 	RunStarted  time.Time
+}
+
+// LocalTaskExecutionTimeout reads recorded timing only when the local executor
+// needs to run a task. Fan-out callers pass the concrete TaskRun primary key;
+// an unfanned catalog task ID must resolve uniquely. Shared run views and event
+// payloads do not decode execution descriptors for this execution-only field.
+// Missing, malformed and unsupported descriptors retain the local executor's
+// existing zero/default fallback; database and identity errors are surfaced.
+func (s *Store) LocalTaskExecutionTimeout(ctx context.Context, runID, taskRef uuid.UUID) (time.Duration, error) {
+	row, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx).Select("id", "job_run_id", "task_id", "execution_descriptor").Session(&gorm.Session{}), runID, taskRef)
+	if err != nil {
+		return 0, err
+	}
+	var descriptor models.TaskExecutionDescriptor
+	if len(row.ExecutionDescriptor) == 0 || json.Unmarshal(row.ExecutionDescriptor, &descriptor) != nil ||
+		descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion {
+		return 0, nil
+	}
+	return descriptor.Timing.TaskTimeout, nil
 }
 
 // TaskExecutionDeadlineForRun loads deadline inputs for one exact TaskRun.

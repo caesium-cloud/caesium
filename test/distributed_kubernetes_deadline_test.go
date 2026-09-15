@@ -18,8 +18,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const distributedKubernetesLateDelay = 12 * time.Second
-
 type deadlineWitness struct {
 	mu     sync.Mutex
 	events map[string]time.Time
@@ -94,8 +92,11 @@ func (s *IntegrationTestSuite) TestDistributedKubernetesDeadlines() {
 		return ok
 	}, 10*time.Second, 100*time.Millisecond, "the Kubernetes pod could not reach the independent witness")
 
-	s.runDistributedKubernetesDeadlineScenario(client, witness, witnessAddress, "task", 6*time.Second, 30*time.Second)
-	s.runDistributedKubernetesDeadlineScenario(client, witness, witnessAddress, "run", 30*time.Second, 8*time.Second)
+	// A run deadline starts at row creation, before dispatch and pod startup.
+	// Leave those stages room even on a busy CI node; the witness below still
+	// waits beyond the selected deadline to prove that the container stopped.
+	s.runDistributedKubernetesDeadlineScenario(client, witness, witnessAddress, "task", 30*time.Second, 2*time.Minute)
+	s.runDistributedKubernetesDeadlineScenario(client, witness, witnessAddress, "run", 2*time.Minute, time.Minute)
 }
 
 func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
@@ -110,8 +111,13 @@ func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
 	marker := "SHOULD_NOT_REACH_" + strings.ToUpper(deadlineKind)
 	startURL := "http://" + witnessAddress + "/" + token + "/started"
 	lateURL := "http://" + witnessAddress + "/" + token + "/late"
+	selectedTimeout := taskTimeout
+	if deadlineKind == "run" {
+		selectedTimeout = runTimeoutLimit
+	}
+	lateDelay := selectedTimeout + 5*time.Second
 	script := fmt.Sprintf("set -eu\nwget -qO /dev/null %q\necho STARTED_%s\ntrap '' TERM\nsleep %d\nwget -qO /dev/null %q\necho %s",
-		startURL, strings.ToUpper(deadlineKind), int(distributedKubernetesLateDelay/time.Second), lateURL, marker)
+		startURL, strings.ToUpper(deadlineKind), int(lateDelay/time.Second), lateURL, marker)
 	metadata := fmt.Sprintf("taskTimeout: %s\n  runTimeout: %s", taskTimeout, runTimeoutLimit)
 	dir := s.writeJobManifest(distributedKubernetesDeadlineManifest(alias, metadata, script))
 	defer os.RemoveAll(dir)
@@ -134,7 +140,7 @@ func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
 			}
 		}
 		return false
-	}, 30*time.Second, 100*time.Millisecond,
+	}, selectedTimeout, 100*time.Millisecond,
 		"task never exposed a distributed worker claim and exact runtime id")
 
 	var podNamespace string
@@ -159,9 +165,9 @@ func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
 		var ok bool
 		startedAt, ok = witness.at(token + "/started")
 		return ok
-	}, 10*time.Second, 100*time.Millisecond, "the deadline pod never reached its positive-control callback")
+	}, selectedTimeout, 100*time.Millisecond, "pod startup did not reach the witness before the configured deadline; inspect scheduling/image-pull events")
 
-	finished := s.awaitRun(job.ID, runID, 30*time.Second)
+	finished := s.awaitRun(job.ID, runID, selectedTimeout+30*time.Second)
 	s.Equal("failed", finished.Status)
 	s.Require().Len(finished.Tasks, 1)
 	s.Equal("failed", finished.Tasks[0].Status)
@@ -188,7 +194,7 @@ func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
 		return true
 	}, 15*time.Second, 100*time.Millisecond, "the exact deadline pod remained present after terminal persistence")
 
-	deadline := startedAt.Add(distributedKubernetesLateDelay + time.Second)
+	deadline := startedAt.Add(lateDelay + time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := witness.at(token + "/late"); ok {
 			s.T().Fatalf("%s deadline pod executed its post-deadline callback", deadlineKind)

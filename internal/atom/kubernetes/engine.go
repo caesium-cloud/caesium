@@ -228,12 +228,12 @@ func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 
 	if req.Force {
 		opts.PropagationPolicy = &bg
-		// Background propagation only controls dependent-object cleanup; it does
-		// not bypass the pod's termination grace period. A deadline stop must
-		// terminate the container immediately, including commands that ignore
-		// SIGTERM and could otherwise keep producing side effects for 30 seconds.
-		zero := int64(0)
-		opts.GracePeriodSeconds = &zero
+		// Use a short graceful deletion for deadline stops and ordinary teardown.
+		// Kubelet kills a TERM-ignoring container after this grace period before
+		// removing the pod. Zero would instead remove the API object without
+		// waiting for kubelet, losing the record of a possibly still-running pod.
+		grace := int64(1)
+		opts.GracePeriodSeconds = &grace
 	}
 
 	apiTimeout := req.Timeout

@@ -210,7 +210,9 @@ func TestRetryUsesTaskTimeoutFrozenOnTheRow(t *testing.T) {
 	require.Error(t, New(jobModel, opts...).Run(context.Background()))
 
 	snapshot := latestRunSnapshot(t, store, jobID)
-	require.Equal(t, 40*time.Millisecond, taskRunByID(snapshot, taskID).TaskTimeout)
+	frozenTimeout, timingErr := store.LocalTaskExecutionTimeout(t.Context(), snapshot.ID, taskID)
+	require.NoError(t, timingErr)
+	require.Equal(t, 40*time.Millisecond, frozenTimeout)
 	_, err := store.RetryFromFailure(snapshot.ID)
 	require.NoError(t, err)
 
@@ -243,7 +245,9 @@ func TestRetryPreservesFrozenZeroTaskTimeout(t *testing.T) {
 	require.Error(t, New(jobModel, opts...).Run(context.Background()))
 
 	snapshot := latestRunSnapshot(t, store, jobID)
-	require.Zero(t, taskRunByID(snapshot, taskID).TaskTimeout)
+	frozenTimeout, timingErr := store.LocalTaskExecutionTimeout(t.Context(), snapshot.ID, taskID)
+	require.NoError(t, timingErr)
+	require.Zero(t, frozenTimeout)
 	_, err := store.RetryFromFailure(snapshot.ID)
 	require.NoError(t, err)
 

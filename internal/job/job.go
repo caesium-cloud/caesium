@@ -760,7 +760,7 @@ func buildLocalRunners(
 			image:       taskState.Image,
 			command:     slices.Clone(taskState.Command),
 			maxAttempts: taskState.MaxAttempts,
-			taskTimeout: taskState.TaskTimeout,
+			taskTimeout: defaultTaskTimeout,
 			// Rebuilt field-for-field from the row, identical to the worker's
 			// construction in runtimeExecutor.Execute. An empty CacheChain —
 			// every row written before that column existed — means transitive,
@@ -777,9 +777,6 @@ func buildLocalRunners(
 			outputSchema:     slices.Clone(taskState.OutputSchema),
 			schemaValidation: taskState.SchemaValidation,
 			spec:             spec,
-		}
-		if runner.taskTimeout == 0 {
-			runner.taskTimeout = defaultTaskTimeout
 		}
 		if runner.maxAttempts < 1 {
 			runner.maxAttempts = 1
@@ -2135,6 +2132,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
 				return
 			}
+			taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskRunID)
+			if timingErr != nil {
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: timingErr}
+				return
+			}
+			if taskTimeout == 0 {
+				taskTimeout = runner.taskTimeout
+			}
 
 			partEnv := map[string]string{
 				envName: m.partition.Key,
@@ -2231,10 +2236,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 			taskCtx := ctx
 			cancel := func() {}
-			if runner.taskTimeout > 0 {
-				taskCtx, cancel = context.WithTimeout(ctx, runner.taskTimeout)
+			if taskTimeout > 0 {
+				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner.taskTimeout, runner, extra)
+			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, runner, extra)
 			cancel()
 			if execErr == nil {
 				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
@@ -2749,7 +2754,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 		if runner == nil {
 			return nil, fmt.Errorf("missing runner for task %s", taskID)
 		}
-
 		// Build predecessor output env vars for this task.
 		predOutputs := make(map[string]map[string]string)
 		predOutputsByID := make(map[uuid.UUID]map[string]string)
@@ -2776,6 +2780,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		if group, ok := lookupFanOutGroup(taskID); ok && len(group.Instances) > 0 {
 			return runFannedGroup(taskID, runner, taskModel, group, outputEnv, predOutputs, predOutputsByID)
+		}
+		taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskID)
+		if timingErr != nil {
+			return nil, timingErr
+		}
+		if taskTimeout == 0 {
+			taskTimeout = runner.taskTimeout
 		}
 
 		// Cache check — attempt to bypass container execution.
@@ -2932,11 +2943,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 			taskCtx := ctx
 			cancel := func() {}
-			if runner.taskTimeout > 0 {
-				taskCtx, cancel = context.WithTimeout(ctx, runner.taskTimeout)
+			if taskTimeout > 0 {
+				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner.taskTimeout, runner, outputEnv)
+			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, taskTimeout, runner, outputEnv)
 			cancel()
 			if execErr == nil {
 				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {

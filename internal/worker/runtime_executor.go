@@ -129,7 +129,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	}
 	if deadline.RunTimeout > 0 {
 		timeouts.runDeadline = deadline.RunStarted.Add(deadline.RunTimeout)
-		if timeouts.runDeadlineError(time.Now()) != nil {
+		if e.deferRunDeadline(taskRun, timeouts, "before_execution", time.Now()) {
 			// The run owner owns the atomic run-timeout transition. Sending this
 			// through the ordinary task-failure sink would lose the typed cause and
 			// could apply failure-policy cascades before the owner fails every
@@ -457,7 +457,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				// absolute deadline immediately before the cached terminal write;
 				// publishing the hit would otherwise release successors after the
 				// run timeout had already won.
-				if timeouts.runDeadlineError(time.Now()) != nil {
+				if e.deferRunDeadline(taskRun, timeouts, "cache_completion", time.Now()) {
 					// See the initial deadline check above: only the run owner may
 					// publish the typed, all-task run-timeout transition.
 					return
@@ -468,18 +468,27 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 					CreatedAt: entry.CreatedAt,
 					ExpiresAt: entry.ExpiresAt,
 				}
+				reportCtx, reportCancel := runCompletionContext(ctx, timeouts)
 				// A cache hit is a completion, and for a fan-out producer it is
 				// the completion that must still expand the group: the cached
 				// partition list stands in for the container output nobody ran.
 				var cacheErr error
 				if withParts, ok := sink.(cachedPartitionSink); ok && len(entry.Partitions) > 0 {
-					cacheErr = withParts.CachedWithPartitions(ctx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections, entry.Partitions)
+					cacheErr = withParts.CachedWithPartitions(reportCtx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections, entry.Partitions)
 				} else {
-					cacheErr = sink.Cached(ctx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections)
+					cacheErr = sink.Cached(reportCtx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections)
 				}
+				reportCancel()
 				if err := cacheErr; err != nil {
 					if errors.Is(err, run.ErrTaskClaimMismatch) {
 						log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+						return
+					}
+					if e.deferRunDeadline(taskRun, timeouts, "cache_report", time.Now()) {
+						return
+					}
+					if errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+						log.Info("worker cache completion canceled", "task_run_id", taskRun.ID, "run_id", taskRun.JobRunID, "error", err)
 						return
 					}
 					log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
@@ -529,7 +538,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return
 		}
 
-		if errors.Is(execErr, context.Canceled) {
+		if errors.Is(execErr, context.Canceled) || (ctx.Err() != nil && errors.Is(execErr, ctx.Err())) {
 			log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
 		}
@@ -604,10 +613,17 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// truthfully resolve it. A resumed owner uses the same anchor, so this does
 	// not grant fresh time if the original owner disappears at the boundary.
 	if run.IsRunDeadlineError(lastErr) {
+		e.deferRunDeadline(taskRun, timeouts, "after_attempt", time.Now())
 		return
 	}
 
-	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
+	failureCtx, failureCancel := runCompletionContext(ctx, timeouts)
+	persistErr := sink.Failed(failureCtx, taskRun, lastErr)
+	failureCancel()
+	if e.deferRunDeadline(taskRun, timeouts, "failure_report", time.Now()) {
+		return
+	}
+	if persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			// The row may still have failed under this claim — a final attempt
@@ -615,6 +631,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			// completion route above, and a later delivery is refused — so the
 			// halt is decided from the durable row, not from this outcome.
 			e.haltRunAfterFailure(taskRun)
+			return
+		}
+		if errors.Is(persistErr, context.Canceled) || (ctx.Err() != nil && errors.Is(persistErr, ctx.Err())) {
+			log.Info("worker failure report canceled", "task_run_id", taskRun.ID, "run_id", taskRun.JobRunID, "error", persistErr)
 			return
 		}
 		log.Error("failed to persist worker task failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
@@ -1089,7 +1109,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		// group's failurePolicy, the in-group skip cascade, the successor
 		// advance). That is deliberately the success sink carrying a failure
 		// result — see the comment on run.completeTask's TaskStatusFailed branch.
-		if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
+		if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions, timeouts); err != nil {
 			return nil, err
 		}
 		return partitions, failure
@@ -1114,11 +1134,34 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	if deadlineErr := timeouts.runDeadlineError(time.Now()); deadlineErr != nil {
 		return nil, deadlineErr
 	}
-	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
+	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions, timeouts); err != nil {
 		return nil, err
 	}
 
 	return partitions, nil
+}
+
+// deferRunDeadline records why no task terminal write is made. The run owner
+// must retain the atomic all-task transition rather than applying task policy.
+func (e *runtimeExecutor) deferRunDeadline(taskRun *models.TaskRun, timeouts executionTimeouts, stage string, now time.Time) bool {
+	if timeouts.runDeadlineError(now) == nil {
+		return false
+	}
+	log.Warn("worker task awaiting atomic run deadline finalization",
+		"reason", "run_owner_finalization_pending", "stage", stage,
+		"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID,
+		"task_run_id", taskRun.ID, "deadline", timeouts.runDeadline,
+		"observed_at", now)
+	return true
+}
+
+// A finished container no longer needs its per-attempt runtime timer, but its
+// completion must still fit the absolute run window and the live claim context.
+func runCompletionContext(parent context.Context, timeouts executionTimeouts) (context.Context, context.CancelFunc) {
+	if timeouts.runDeadline.IsZero() {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadlineCause(parent, timeouts.runDeadline, run.NewRunDeadlineError(timeouts.runTimeout))
 }
 
 // reportCompletion routes a finished attempt's terminal outcome through the
@@ -1132,13 +1175,16 @@ func (e *runtimeExecutor) reportCompletion(
 	taskOutput map[string]string,
 	branchSelections []string,
 	partitions []pkgtask.Partition,
+	timeouts executionTimeouts,
 ) error {
+	reportCtx, cancel := runCompletionContext(ctx, timeouts)
+	defer cancel()
 	if withParts, ok := sink.(interface {
 		SucceededWithPartitions(context.Context, *models.TaskRun, string, map[string]string, []string, []pkgtask.Partition) error
 	}); ok && len(partitions) > 0 {
-		return withParts.SucceededWithPartitions(ctx, taskRun, result, taskOutput, branchSelections, partitions)
+		return withParts.SucceededWithPartitions(reportCtx, taskRun, result, taskOutput, branchSelections, partitions)
 	}
-	return sink.Succeeded(ctx, taskRun, result, taskOutput, branchSelections)
+	return sink.Succeeded(reportCtx, taskRun, result, taskOutput, branchSelections)
 }
 
 // runSchemaValidation records any output-schema violations on THIS INSTANCE's

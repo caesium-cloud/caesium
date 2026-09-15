@@ -193,9 +193,9 @@ func (s *ownerSink) CachedWithPartitions(ctx context.Context, taskRun *models.Ta
 }
 
 // send fills the fencing fields common to every completion and POSTs the
-// envelope to the owner.  When the owner answers 503 (dispatch.ErrOwnerBusy)
-// because of transient contention, send retries the same request with bounded
-// backoff before giving up; a true fence rejection (409) or a network failure
+// envelope to the owner. Recovery waits retain the result until acceptance or
+// context/claim cancellation. Transient contention uses a short bounded retry
+// schedule; a true fence rejection (409) or a network failure
 // is terminal.  A failure to report is logged and surfaced as a dispatch-side
 // metric (the task's claim lease eventually expires and recovery re-dispatches)
 // — the error is never swallowed silently.
@@ -215,6 +215,7 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 
 	url := s.ownerBaseURL + "/internal/complete"
 
+	contentionAttempts := 0
 	for attempt := 0; ; attempt++ {
 		resp, err := s.post(ctx, url, s.token, req)
 		if err == nil {
@@ -231,22 +232,38 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 					"status", req.Status,
 					"reason", resp.Reason,
 				)
-				return fmt.Errorf("owner sink: owner rejected completion: %s", resp.Reason)
+				return fmt.Errorf("owner sink: owner rejected completion %s: %w", resp.Reason, run.ErrTaskClaimMismatch)
 			}
 			return nil
+		}
+
+		if errors.Is(err, dispatch.ErrOwnerRejected) {
+			log.Info("dispatched task: completion ownership fenced", "run_id", req.RunID, "task_run_id", req.TaskRunID, "error", err)
+			return fmt.Errorf("owner sink: completion fenced: %w", run.ErrTaskClaimMismatch)
+		}
+
+		// Recovery duration scales with the run. Keep this already-finished
+		// result until recovery accepts it or the worker loses its context/claim.
+		if errors.Is(err, dispatch.ErrOwnerNotReady) {
+			contentionAttempts = 0
+			if sleepErr := sleepOwnerBusy(ctx, ownerRecoveryRetryDelay); sleepErr != nil {
+				return fmt.Errorf("owner sink: recovery wait aborted: %w", sleepErr)
+			}
+			continue
 		}
 
 		// Transient owner-side contention: the owner asked us to re-send the
 		// identical request once its leader frees up.  Back off and retry until
 		// the schedule (or the context) is exhausted.
-		if errors.Is(err, dispatch.ErrOwnerBusy) && attempt < len(ownerBusyBackoffs) {
-			if sleepErr := sleepOwnerBusy(ctx, ownerBusyBackoffs[attempt]); sleepErr != nil {
+		if errors.Is(err, dispatch.ErrOwnerBusy) && contentionAttempts < len(ownerBusyBackoffs) {
+			if sleepErr := sleepOwnerBusy(ctx, ownerBusyBackoffs[contentionAttempts]); sleepErr != nil {
 				// Context cancelled/expired while backing off. Surface the
 				// cancellation — not ErrOwnerBusy — so the executor's
 				// context.Canceled branch fires: the container already ran to
 				// completion, so it must not be marked failed or re-executed.
 				return fmt.Errorf("owner sink: report completion aborted: %w", sleepErr)
 			}
+			contentionAttempts++
 			continue
 		}
 
@@ -268,6 +285,8 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 		return fmt.Errorf("owner sink: report completion: %w", err)
 	}
 }
+
+const ownerRecoveryRetryDelay = time.Second
 
 // sleepOwnerBusy waits base (minus up to 20% jitter) or returns early if ctx is
 // cancelled.  The jitter de-synchronises a thundering herd of workers all

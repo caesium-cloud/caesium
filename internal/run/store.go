@@ -211,24 +211,23 @@ type TaskRun struct {
 	CacheTTLNever   bool          `json:"-"`
 	// OutputSchema / SchemaValidation are what the worker validates a task's
 	// output against (runtimeExecutor.runSchemaValidation).
-	OutputSchema            []byte        `json:"-"`
-	SchemaValidation        string        `json:"-"`
-	TaskTimeout             time.Duration `json:"-"`
-	LogScrubbed             bool          `json:"-"`
-	LogGeneration           string        `json:"-"`
-	CacheOriginRunID        *uuid.UUID    `json:"cache_origin_run_id,omitempty"`
-	CacheCreatedAt          *time.Time    `json:"cache_created_at,omitempty"`
-	CacheExpiresAt          *time.Time    `json:"cache_expires_at,omitempty"`
-	RateLimitRetryAfter     *time.Time    `json:"rate_limit_retry_after,omitempty"`
-	StartedAt               *time.Time    `json:"started_at,omitempty"`
-	CompletedAt             *time.Time    `json:"completed_at,omitempty"`
-	Error                   string        `json:"error,omitempty"`
-	OutstandingPredecessors int           `json:"outstanding_predecessors"`
-	PartitionValue          string        `json:"partition_value,omitempty"`
-	PartitionIndex          int           `json:"partition_index,omitempty"`
-	PartitionCount          int           `json:"partition_count,omitempty"`
-	PartitionFingerprint    string        `json:"partition_fingerprint,omitempty"`
-	PartitionDependsOn      []string      `json:"partition_depends_on,omitempty"`
+	OutputSchema            []byte     `json:"-"`
+	SchemaValidation        string     `json:"-"`
+	LogScrubbed             bool       `json:"-"`
+	LogGeneration           string     `json:"-"`
+	CacheOriginRunID        *uuid.UUID `json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt          *time.Time `json:"cache_created_at,omitempty"`
+	CacheExpiresAt          *time.Time `json:"cache_expires_at,omitempty"`
+	RateLimitRetryAfter     *time.Time `json:"rate_limit_retry_after,omitempty"`
+	StartedAt               *time.Time `json:"started_at,omitempty"`
+	CompletedAt             *time.Time `json:"completed_at,omitempty"`
+	Error                   string     `json:"error,omitempty"`
+	OutstandingPredecessors int        `json:"outstanding_predecessors"`
+	PartitionValue          string     `json:"partition_value,omitempty"`
+	PartitionIndex          int        `json:"partition_index,omitempty"`
+	PartitionCount          int        `json:"partition_count,omitempty"`
+	PartitionFingerprint    string     `json:"partition_fingerprint,omitempty"`
+	PartitionDependsOn      []string   `json:"partition_depends_on,omitempty"`
 	// PartitionStatusCounts is the per-status histogram of a COLLAPSED fan-out
 	// group: {"succeeded":2,"failed":1,…}. Set only on the collapsed group entry
 	// that run-detail payloads return in place of N instance rows (see
@@ -663,6 +662,12 @@ func NewStore(conn *gorm.DB) *Store {
 func ownerMemoryAdvancementMode(vars env.Environment) bool {
 	return vars.RunOwnerEnabled && vars.RunOwnerInMemory &&
 		strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
+}
+
+// OwnerMemoryAdvancementEnabled returns the coordination mode captured when
+// this Store was constructed, so claim selection and completion share a policy.
+func (s *Store) OwnerMemoryAdvancementEnabled() bool {
+	return s != nil && s.ownerInMemory
 }
 
 // fenceSQLTerminalUpdate prevents a pull completion selected before the first
@@ -4935,9 +4940,13 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 		jobID         uuid.UUID
 		startedAt     time.Time
 		quarantine    bool
+		timedOutTasks []models.TaskRun
+		counts        dbWriteCounts
 	)
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 2)
+		var attemptTimedOutTasks []models.TaskRun
 		var (
 			attemptJobID      uuid.UUID
 			attemptStartedAt  time.Time
@@ -4998,19 +5007,10 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// this absolute deadline and stop the exact atom themselves. Terminal
 			// completion predicates below reject any result racing this write.
 			if runTimedOut {
-				taskResult := tx.Model(&models.TaskRun{}).
-					Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
-					Updates(map[string]any{
-						"status":                  string(TaskStatusFailed),
-						"result":                  "failure",
-						"error":                   errMsg,
-						"completed_at":            now,
-						"claimed_by":              "",
-						"claim_expires_at":        nil,
-						"partition_retry_pending": false,
-					})
-				if taskResult.Error != nil {
-					return taskResult.Error
+				var timeoutErr error
+				attemptTimedOutTasks, timeoutErr = s.failUnfinishedTasksForRunTimeoutTx(tx, runID, errMsg, now, &attemptEvents, &counts)
+				if timeoutErr != nil {
+					return timeoutErr
 				}
 			}
 
@@ -5050,6 +5050,9 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
 					return err
 				}
+				if runTimedOut {
+					counts.addEventInsert(1)
+				}
 				attemptEvents = append(attemptEvents, completionEvent)
 
 				terminalEvent := event.Event{
@@ -5063,6 +5066,9 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
 					return err
 				}
+				if runTimedOut {
+					counts.addEventInsert(1)
+				}
 				attemptEvents = append(attemptEvents, terminalEvent)
 			}
 
@@ -5073,6 +5079,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			jobID = attemptJobID
 			startedAt = attemptStartedAt
 			quarantine = attemptQuarantine
+			timedOutTasks = attemptTimedOutTasks
 		}
 		return txErr
 	})
@@ -5089,6 +5096,19 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// completion write has committed, so retries don't double-count. jobID and
 	// startedAt are guaranteed populated because the transaction succeeded.
 	jobIDStr := jobID.String()
+	counts.commit()
+	if !quarantine {
+		for _, task := range timedOutTasks {
+			if task.Quarantine {
+				continue
+			}
+			engine := string(task.Engine)
+			metrics.TaskRunsTotal.WithLabelValues(jobIDStr, task.TaskID.String(), engine, string(TaskStatusFailed)).Inc()
+			if task.StartedAt != nil {
+				metrics.TaskRunDurationSeconds.WithLabelValues(jobIDStr, engine, string(TaskStatusFailed)).Observe(now.Sub(*task.StartedAt).Seconds())
+			}
+		}
+	}
 	// Only decrement the active gauge if this process incremented it.
 	s.startedMu.Lock()
 	_, started := s.startedRuns[runID]
@@ -5106,6 +5126,53 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 
 	s.publishEvents(pendingEvents...)
 	return true, nil
+}
+
+// failUnfinishedTasksForRunTimeoutTx runs after the caller has finalized and
+// locked the JobRun. Each concrete unfinished row receives its own replay
+// sequence and failure event, without invoking ordinary task failure cascades.
+// Evidence and terminal rows are preserved; metrics are emitted after commit.
+func (s *Store) failUnfinishedTasksForRunTimeoutTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
+	var rows []models.TaskRun
+	if err := tx.Select("id", "task_id", "engine", "started_at", "quarantine").
+		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+		Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	seq, err := nextTerminalSequenceTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	transitioned := make([]models.TaskRun, 0, len(rows))
+	for _, row := range rows {
+		result := tx.Model(&models.TaskRun{}).
+			Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
+			Updates(map[string]any{
+				"status": string(TaskStatusFailed), "result": "failure", "error": errMsg,
+				"completed_at": now, "terminal_sequence": seq,
+				"claimed_by": "", "claim_expires_at": nil, "partition_retry_pending": false,
+			})
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			continue
+		}
+		counts.addTaskRunStatus(1)
+		if s.eventStore != nil {
+			evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskFailed, runID, &row, counts)
+			if err != nil {
+				return nil, err
+			}
+			*events = append(*events, *evt)
+		}
+		transitioned = append(transitioned, row)
+		seq++
+	}
+	return transitioned, nil
 }
 
 func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
@@ -5786,13 +5853,6 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		SchemaValidation:        model.SchemaValidation,
 		LogScrubbed:             model.LogScrubbed,
 		LogGeneration:           model.LogGeneration,
-	}
-	if len(model.ExecutionDescriptor) > 0 {
-		var descriptor models.TaskExecutionDescriptor
-		if err := json.Unmarshal(model.ExecutionDescriptor, &descriptor); err == nil &&
-			descriptor.SchemaVersion == models.TaskExecutionDescriptorSchemaVersion {
-			task.TaskTimeout = descriptor.Timing.TaskTimeout
-		}
 	}
 
 	if len(model.Output) > 0 {
