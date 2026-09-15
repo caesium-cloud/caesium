@@ -134,10 +134,17 @@ steps:
 
 ```bash
 caesium test --path jobs/ --verbose
+caesium test --path jobs/ --check-images # strict local-Docker image gate
 caesium test --scenario ./harness
 caesium job preview --path jobs/nightly-etl.job.yaml
 caesium job lint --path jobs/
 ```
+
+`caesium test --check-images` is a strict local Docker daemon gate: each
+referenced image must already be present, and a daemon error also fails the
+command. It never pulls from a registry. Its result reports local Docker cache
+presence only; it does not establish registry pullability, Podman runtime
+availability, or whether a target Kubernetes cluster/node can run the image.
 
 ### 3. Run it locally
 
