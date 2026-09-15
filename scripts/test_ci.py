@@ -397,6 +397,11 @@ class WorkflowTests(unittest.TestCase):
         commands = scenario["run"]
         self.assertIn("set -euo pipefail", commands)
         self.assertEqual(commands.count("python3 test/kubernetes_cache_identity.py"), 2)
+        download = next(step for step in steps if step.get("with", {}).get("name") == "release-cli-amd64")
+        self.assertEqual(download["if"], "matrix.shard == 1")
+        self.assertEqual(download["with"]["path"], ".tmp/cache-identity-cli")
+        self.assertEqual(commands.count("--cli .tmp/cache-identity-cli/caesium-linux-amd64"), 2)
+        self.assertIn("chmod +x .tmp/cache-identity-cli/caesium-linux-amd64", commands)
         self.assertIn("--mode local", commands)
         self.assertIn("--mode distributed", commands)
         self.assertIn("CAESIUM_EXECUTION_MODE=distributed", commands)

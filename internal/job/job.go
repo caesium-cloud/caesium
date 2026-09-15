@@ -69,6 +69,8 @@ var runStartReadBackoffs = []time.Duration{
 
 const haltedDispatchWaitInterval = 50 * time.Millisecond
 
+var errUnresolvedIdentityTerminalWrite = errors.New("unresolved image identity failure could not be terminalized")
+
 type taskResult struct {
 	id              uuid.UUID
 	err             error
@@ -2738,6 +2740,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 	}
 
 	runTask := func(taskID uuid.UUID) ([]uuid.UUID, error) {
+		failIdentity := func(failure error) ([]uuid.UUID, error) {
+			if err := store.FailTask(runID, taskID, failure); err != nil {
+				return nil, errors.Join(failure, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist task identity failure: %w", err))
+			}
+			return nil, failure
+		}
 		runner := runners[taskID]
 		if runner == nil {
 			return nil, fmt.Errorf("missing runner for task %s", taskID)
@@ -2806,7 +2814,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			blob, blobErr := hashInput.CanonicalJSON(inputHash)
 			if blobErr != nil {
 				if hashArgs.UnresolvedImageIdentity != "" {
-					return nil, fmt.Errorf("serialize unresolved image identity: %w", blobErr)
+					return failIdentity(fmt.Errorf("serialize unresolved image identity: %w", blobErr))
 				}
 				log.Warn("failed to serialize hash-input blob", "task", taskName, "error", blobErr)
 				blob = nil
@@ -2814,13 +2822,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 			hashInputBlob = blob
 			if err := store.SetTaskHashWithBlob(runID, taskID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
 				if hashArgs.UnresolvedImageIdentity != "" {
-					return nil, fmt.Errorf("persist unresolved image identity: %w", err)
+					return failIdentity(fmt.Errorf("persist unresolved image identity: %w", err))
 				}
 				log.Warn("failed to persist task hash", "task", taskName, "error", err)
 			}
 			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskID, predOutputsByID, predHashByID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
 				if hashArgs.UnresolvedImageIdentity != "" {
-					return nil, fmt.Errorf("persist unresolved image execution descriptor: %w", err)
+					return failIdentity(fmt.Errorf("persist unresolved image execution descriptor: %w", err))
 				}
 				log.Warn("failed to persist task execution descriptor inputs", "task", taskName, "error", err)
 			}
@@ -3303,6 +3311,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 		terminalTasks++
 
 		if result.err != nil {
+			if errors.Is(result.err, errUnresolvedIdentityTerminalWrite) {
+				// A storage failure left the predecessor's identity uncertain.
+				// Drain admitted work but never dispatch downstream cache checks.
+				halt = true
+				queue = queue[:0]
+			}
 			taskOutcomes[result.id] = run.TaskStatusFailed
 			if runErr == nil {
 				runErr = result.err

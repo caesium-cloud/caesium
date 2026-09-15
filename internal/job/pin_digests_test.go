@@ -267,6 +267,105 @@ func TestPinDigestsUnavailableBypassesLegacyCacheAndTransitiveDescendants(t *tes
 	require.Equal(t, int64(4), count, "uncertain executions and descendants must not publish new entries")
 }
 
+func TestPinDigestsUnavailableThroughUnhashedTerminalPredecessor(t *testing.T) {
+	for _, tc := range []struct {
+		name                                  string
+		failed, verified, terminalWriteFailed bool
+	}{{name: "skipped"}, {name: "identity-write-failed", failed: true}, {name: "verified-skipped", verified: true}, {name: "failure-write-rejected", failed: true, terminalWriteFailed: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := jobdeftestutil.OpenTestDB(t)
+			t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+			store := run.NewStore(db)
+			engine := newFakeEngine()
+			jobID := uuid.New()
+			model := &models.Job{ID: jobID, Alias: "unknown-skipped-image", TriggerID: uuid.New()}
+			require.NoError(t, db.Create(model).Error)
+			tasks := &fakeTaskService{}
+			atoms := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{}}
+			edges := &fakeTaskEdgeService{}
+			for i, name := range []string{"source", "middle", "leaf", "values-middle", "values-leaf"} {
+				task := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: uuid.New(), Name: name, Position: i, CacheConfig: datatypes.JSON(`{"pinDigests":true,"digestTTL":0,"ttl":"1h"}`)}
+				a := fakeModelAtom(task.AtomID)
+				a.Image = "registry.example.com/verified:v1"
+				a.Engine = models.AtomEngineKubernetes
+				if i == 0 {
+					a.Image = "node-local:mutable"
+				}
+				if i == 1 || i == 3 {
+					if i == 3 || !tc.failed {
+						task.TriggerRule = jobdef.TriggerRuleAllFailed
+					}
+					task.CacheConfig = datatypes.JSON(`false`)
+				}
+				if i == 2 || i == 4 {
+					task.TriggerRule = jobdef.TriggerRuleAllDone
+				}
+				if i == 3 {
+					task.CacheConfig = datatypes.JSON(`{"chain":"values"}`)
+				}
+				tasks.tasks = append(tasks.tasks, task)
+				atoms.atoms[task.AtomID] = a
+				engine.logsByName[task.ID.String()] = "##caesium::output {\"token\":\"same\"}\n"
+			}
+			for _, pair := range [][2]int{{0, 1}, {1, 2}, {0, 3}, {3, 4}} {
+				edges.edges = append(edges.edges, &models.TaskEdge{ID: uuid.New(), JobID: jobID, FromTaskID: tasks.tasks[pair[0]].ID, ToTaskID: tasks.tasks[pair[1]].ID})
+			}
+			persistGraph(t, db, tasks.tasks, edges.edges)
+			if tc.failed {
+				require.NoError(t, db.Exec("CREATE TRIGGER fail_middle_identity BEFORE UPDATE OF hash ON task_runs WHEN NEW.task_id = '"+tasks.tasks[1].ID.String()+"' BEGIN SELECT RAISE(ABORT, 'identity write unavailable'); END").Error)
+			}
+			if tc.terminalWriteFailed {
+				require.NoError(t, db.Exec("CREATE TRIGGER fail_middle_terminal BEFORE UPDATE OF status ON task_runs WHEN NEW.task_id = '"+tasks.tasks[1].ID.String()+"' AND NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'terminal write unavailable'); END").Error)
+			}
+			opts := withTestDeps(store, env.Environment{MaxParallelTasks: 1, ExecutionMode: executionModeLocal, TaskFailurePolicy: taskFailurePolicyContinue}, tasks, atoms, edges, engine)
+			resolver := imagecheck.NewResolver(imagecheck.WithEngineDigestFunc(models.AtomEngineKubernetes, func(_ context.Context, image string) (string, error) {
+				if image == "node-local:mutable" && !tc.verified {
+					return "", imagecheck.ErrDigestUnavailable
+				}
+				return movedTagDigest, nil
+			}))
+			opts = append(opts, func(j *job) { j.imageResolver = resolver })
+			for i := 0; i < 2; i++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				started := time.Now()
+				err := New(model, opts...).Run(ctx)
+				cancel()
+				require.Less(t, time.Since(started), 3*time.Second, "identity failure must return without waiting for unresolved descendants")
+				if tc.terminalWriteFailed {
+					require.ErrorIs(t, err, errUnresolvedIdentityTerminalWrite)
+					require.Contains(t, err.Error(), "identity write unavailable")
+					require.Contains(t, err.Error(), "terminal write unavailable")
+				}
+				if tc.failed {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+			snapshot := latestRunSnapshot(t, store, jobID)
+			if tc.terminalWriteFailed {
+				require.Empty(t, engine.createRequestsForTask(tasks.tasks[1].ID))
+				require.Empty(t, engine.createRequestsForTask(tasks.tasks[2].ID), "cannot admit downstream work without durable predecessor identity")
+				require.Empty(t, engine.createRequestsForTask(tasks.tasks[4].ID))
+				return
+			}
+			expected := run.TaskStatusSkipped
+			if tc.failed {
+				expected = run.TaskStatusFailed
+			}
+			require.Equal(t, expected, taskRunByID(snapshot, tasks.tasks[1].ID).Status)
+			require.Empty(t, engine.createRequestsForTask(tasks.tasks[1].ID))
+			expectedLeafExecutions := 2
+			if tc.verified {
+				expectedLeafExecutions = 1
+			}
+			require.Len(t, engine.createRequestsForTask(tasks.tasks[2].ID), expectedLeafExecutions, "unhashed intermediary must preserve upstream identity qualification")
+			require.Len(t, engine.createRequestsForTask(tasks.tasks[4].ID), 1, "explicit values boundary preserves cache reuse")
+			require.Equal(t, run.TaskStatusCached, taskRunByID(snapshot, tasks.tasks[4].ID).Status)
+		})
+	}
+}
+
 func TestPinDigestsUnavailableFanoutPropagatesInstanceUncertainty(t *testing.T) {
 	f := newFanOutFixture(t, `["one","two"]`, &jobdef.FanOut{From: "list", MaxParallel: 2, MaxPartitions: 16}, 0)
 	f.enableProducerCache(t)

@@ -111,12 +111,20 @@ steps:
             assert task(first, "version")["output"]["version"] == "v1", first
             # Equal-output descendants test D2 as well as direct cache lookup.
             same = 'echo \'##caesium::output {"token":"same"}\''
-            graph = step("source", tag, same, "    next: [middle, values]\n")
+            graph = step("source", tag, same, "    next: [middle, values, skipped_middle, values_middle]\n")
             graph += step("middle", "alpine:3.23", same, "    dependsOn: [source]\n    cache: false\n    next: [leaf]\n")
             graph += step("leaf", "alpine:3.23", same, "    dependsOn: [middle]\n")
             graph += step("values", "alpine:3.23", same, "    dependsOn: [source]\n    cache: {pinDigests: true, digestTTL: 0s, chain: values}\n")
+            graph += step("skipped_middle", "alpine:3.23", same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: false\n    next: [skipped_leaf]\n")
+            graph += step("skipped_leaf", "alpine:3.23", same, "    dependsOn: [skipped_middle]\n    triggerRule: all_done\n")
+            graph += step("values_middle", "alpine:3.23", same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: {chain: values}\n    next: [values_leaf]\n")
+            graph += step("values_leaf", "alpine:3.23", same, "    dependsOn: [values_middle]\n    triggerRule: all_done\n")
             chain = apply("chain", graph)
             _, chain_first = run(chain)
+            for name in ("source", "middle", "leaf", "values", "skipped_leaf", "values_leaf"):
+                assert_executed(task(chain_first, name))
+            for name in ("skipped_middle", "values_middle"):
+                assert task(chain_first, name)["status"] == "skipped", chain_first
             command("docker", "build", "--build-arg", "QA_VERSION=v2", "-t", tag, directory)
             command("kind", "load", "docker-image", tag, "--name", args.cluster)
             image_v2 = command("docker", "image", "inspect", "--format", "{{.Id}}", tag)
@@ -129,8 +137,12 @@ steps:
             explanation = why(visible, second_id, "version")
             assert "image identity unavailable" in explanation["summary"], explanation
             chain_id, chain_second = run(chain)
-            for name in ("source", "middle", "leaf"):
+            for name in ("source", "middle", "leaf", "skipped_leaf"):
                 assert_executed(task(chain_second, name))
+            for name in ("skipped_middle", "values_middle"):
+                assert task(chain_second, name)["status"] == "skipped", chain_second
+            assert task(chain_second, "values_leaf")["status"] == "cached", chain_second
+            assert "image identity unavailable" in why(chain, chain_id, "skipped_leaf")["summary"]
             leaf_why = why(chain, chain_id, "leaf")
             assert "image identity unavailable" in leaf_why["summary"], leaf_why
             assert task(chain_second, "values")["status"] == "cached", chain_second
@@ -154,6 +166,11 @@ steps:
                 "disabled_middle": observation(chain_second, "middle"),
                 "transitive_leaf": observation(chain_second, "leaf"),
                 "values_cached": observation(chain_second, "values"),
+                "skipped_middle": observation(chain_second, "skipped_middle"),
+                "skipped_transitive_leaf_first": observation(chain_first, "skipped_leaf"),
+                "skipped_transitive_leaf": observation(chain_second, "skipped_leaf"),
+                "skipped_values_middle": observation(chain_second, "values_middle"),
+                "skipped_values_leaf_cached": observation(chain_second, "values_leaf"),
                 "uncached_v2": observation(control, "version"),
                 "stable_executed": observation(stable_first, "stable"),
                 "stable_cached": observation(stable_second, "stable"),

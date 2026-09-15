@@ -966,12 +966,19 @@ jobs:
             -w /bld/caesium \
             caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
             sh scripts/integration-test.sh
+      - name: Download static host CLI for cache identity regression
+        if: matrix.shard == 1
+        uses: actions/download-artifact@v8
+        with:
+          name: release-cli-amd64
+          path: .tmp/cache-identity-cli
       - name: Kubernetes mutable-tag cache identity (local and distributed)
         if: matrix.shard == 1
         run: |
           set -euo pipefail
           mkdir -p .tmp/kubernetes-cache-identity
-          python3 test/kubernetes_cache_identity.py --cli .tmp/caesium-cli/caesium --mode local 2>&1 | tee .tmp/kubernetes-cache-identity/local.log
+          chmod +x .tmp/cache-identity-cli/caesium-linux-amd64
+          python3 test/kubernetes_cache_identity.py --cli .tmp/cache-identity-cli/caesium-linux-amd64 --mode local 2>&1 | tee .tmp/kubernetes-cache-identity/local.log
           kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
           kubectl set env statefulset/caesium CAESIUM_EXECUTION_MODE=distributed
           kubectl rollout status statefulset/caesium --timeout=240s
@@ -983,7 +990,7 @@ jobs:
             sleep 1
           done
           if [ "$ready" != true ]; then cat /tmp/port-forward.log; exit 1; fi
-          python3 test/kubernetes_cache_identity.py --cli .tmp/caesium-cli/caesium --mode distributed 2>&1 | tee .tmp/kubernetes-cache-identity/distributed.log
+          python3 test/kubernetes_cache_identity.py --cli .tmp/cache-identity-cli/caesium-linux-amd64 --mode distributed 2>&1 | tee .tmp/kubernetes-cache-identity/distributed.log
       - name: Retain Kubernetes cache identity evidence
         if: always() && matrix.shard == 1
         uses: actions/upload-artifact@v7
