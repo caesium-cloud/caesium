@@ -632,15 +632,28 @@ jobs:
           runner_home="${HOME:?runner HOME is required}"
           runner_path="$PATH"
           runner_pwd="$PWD"
+          host_mount_ns="$(readlink /proc/self/ns/mnt)"
+          host_resolv_sha="$(sha256sum /etc/resolv.conf | awk '{print $1}')"
+          printf 'Host resolver nameservers:\n'
+          awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf
+          server_resolv_conf="$(docker inspect --format '{{.ResolvConfPath}}' caesium-server)"
+          case "$server_resolv_conf" in
+            /*) ;;
+            *) echo "Caesium resolver path is invalid: $server_resolv_conf" >&2; exit 1 ;;
+          esac
+          sudo test -f "$server_resolv_conf"
+          server_resolv_sha="$(sudo sha256sum "$server_resolv_conf" | awk '{print $1}')"
           node_bin="$(command -v node)"
           npm_bin="$(command -v npm)"
           nsenter_bin="$(command -v nsenter)"
+          unshare_bin="$(command -v unshare)"
           setpriv_bin="$(command -v setpriv)"
           test_cli="$GITHUB_WORKSPACE/ui/node_modules/@playwright/test/cli.js"
           browser_bin="$("$node_bin" -e 'const { chromium } = require("playwright"); process.stdout.write(chromium.executablePath())')"
           test -x "$node_bin"
           test -x "$npm_bin"
           test -x "$nsenter_bin"
+          test -x "$unshare_bin"
           test -x "$setpriv_bin"
           test -f "$test_cli"
           test -x "$browser_bin"
@@ -669,6 +682,30 @@ jobs:
           exec "$CAESIUM_E2E_NPM_BIN" run test:e2e -- --project=network-recovery
           BASH
           )"
+          mount_script="$(cat <<'BASH'
+          set -euo pipefail
+          test "$(readlink /proc/self/ns/mnt)" != "$CAESIUM_E2E_HOST_MOUNT_NS"
+          test -f "$CAESIUM_E2E_SERVER_RESOLV_CONF"
+          mount --make-rprivate /
+          mount --bind "$CAESIUM_E2E_SERVER_RESOLV_CONF" /etc/resolv.conf
+          test "$(sha256sum /etc/resolv.conf | awk '{print $1}')" = "$CAESIUM_E2E_SERVER_RESOLV_SHA"
+          printf 'Server resolver nameservers:\n'
+          awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf
+          exec "$CAESIUM_E2E_SETPRIV_BIN" --reuid="$CAESIUM_E2E_RUNNER_UID" --regid="$CAESIUM_E2E_RUNNER_GID" \
+            --groups="$CAESIUM_E2E_RUNNER_GROUPS" --inh-caps=-all --ambient-caps=-all \
+            --bounding-set=-all --no-new-privs /bin/bash -c "$CAESIUM_E2E_INNER_SCRIPT"
+          BASH
+          )"
+          check_host_resolver() {
+            status="$1"
+            current_resolv_sha="$(sha256sum /etc/resolv.conf | awk '{print $1}')"
+            if [ "$current_resolv_sha" != "$host_resolv_sha" ]; then
+              echo "host /etc/resolv.conf changed during isolated browser test" >&2
+              exit 1
+            fi
+            exit "$status"
+          }
+          trap 'check_host_resolver "$?"' EXIT
           sudo env \
             HOME="$runner_home" \
             PATH="$runner_path" \
@@ -681,13 +718,17 @@ jobs:
             CAESIUM_E2E_RUNNER_HOME="$runner_home" \
             CAESIUM_E2E_RUNNER_PATH="$runner_path" \
             CAESIUM_E2E_RUNNER_PWD="$runner_pwd" \
+            CAESIUM_E2E_RUNNER_GROUPS="$runner_groups" \
+            CAESIUM_E2E_HOST_MOUNT_NS="$host_mount_ns" \
+            CAESIUM_E2E_SERVER_RESOLV_CONF="$server_resolv_conf" \
+            CAESIUM_E2E_SERVER_RESOLV_SHA="$server_resolv_sha" \
             CAESIUM_E2E_NODE_BIN="$node_bin" \
             CAESIUM_E2E_NPM_BIN="$npm_bin" \
             CAESIUM_E2E_BROWSER_BIN="$browser_bin" \
+            CAESIUM_E2E_SETPRIV_BIN="$setpriv_bin" \
+            CAESIUM_E2E_INNER_SCRIPT="$inner_script" \
             "$nsenter_bin" --target "$server_pid" --net \
-              "$setpriv_bin" --reuid="$runner_uid" --regid="$runner_gid" \
-                --groups="$runner_groups" --inh-caps=-all --ambient-caps=-all \
-                --bounding-set=-all --no-new-privs /bin/bash -c "$inner_script"
+              "$unshare_bin" --mount --propagation private /bin/bash -c "$mount_script"
       - name: Collect browser diagnostics
         if: always()
         env:
