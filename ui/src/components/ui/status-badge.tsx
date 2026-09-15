@@ -1,6 +1,6 @@
 import { type CSSProperties } from "react";
 import { cn } from "@/lib/utils";
-import { statusKeyForDomain, statusMetaForDomain, type StatusDomain } from "@/lib/status";
+import { resolveStatusForDomain, type StatusDomain } from "@/lib/status";
 
 export type StatusBadgeVariant = "filled" | "soft" | "dot";
 export type StatusBadgeSize = "sm" | "md";
@@ -30,8 +30,7 @@ export function StatusBadge({
   label,
   className,
 }: StatusBadgeProps) {
-  const meta = statusMetaForDomain(status, domain);
-  const statusKey = statusKeyForDomain(status, domain);
+  const { key: statusKey, meta } = resolveStatusForDomain(status, domain);
   const text = label ?? meta.label;
 
   const sizing =
@@ -49,7 +48,7 @@ export function StatusBadge({
           className,
         )}
         style={{ color: meta.fg }}
-        data-status={statusKey}
+        data-status={statusKey ?? "unknown"}
       >
         <span
           aria-hidden="true"
@@ -74,7 +73,7 @@ export function StatusBadge({
         className,
       )}
       style={fill}
-      data-status={statusKey}
+      data-status={statusKey ?? "unknown"}
       data-variant={variant}
     >
       <span

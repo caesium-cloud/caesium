@@ -83,12 +83,12 @@ describe("statusMeta", () => {
 
   it("falls back for inherited property names in every explicit domain", () => {
     expect(statusMetaForDomain("constructor", "run").label).toBe("unknown");
-    expect(statusKeyForDomain("__proto__", "run")).toBe("unknown");
+    expect(statusKeyForDomain("__proto__", "run")).toBeNull();
     expect(statusMetaForDomain("constructor", "incident").label).toBe("unknown");
     expect(statusMetaForDomain("__proto__", "agent-action").label).toBe("unknown");
     expect(statusMetaForDomain("toString", "agent-session").label).toBe("unknown");
     expect(statusMetaForDomain("length", "constructor" as never).label).toBe("unknown");
-    expect(statusKeyForDomain("length", "constructor" as never)).toBe("unknown");
+    expect(statusKeyForDomain("length", "constructor" as never)).toBeNull();
     expect(statusMetaForDomain("open", "unknown-domain" as never).label).toBe("unknown");
   });
 

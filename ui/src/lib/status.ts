@@ -263,46 +263,63 @@ const ALIASES: Record<string, RunStatus> = {
   queued: "queued",
 };
 
+/** A domain-scoped status lookup with a nullable unrecognized key. */
+export interface StatusResolution {
+  /** Null only when the source value is not part of this lifecycle. */
+  key: string | null;
+  meta: StatusMeta;
+}
+
 /**
  * Resolve a status string (or unknown enum) to its visual treatment.
  * Falls back to a neutral grey for anything we don't recognize.
  */
 export function statusMeta(status: string | null | undefined): StatusMeta {
-  return statusMetaForDomain(status, "run");
+  return resolveStatusForDomain(status, "run").meta;
 }
 
 /**
- * Resolve a status in its source lifecycle. Domains intentionally prevent
+ * Resolve a status in its source lifecycle once. Domains intentionally prevent
  * identical strings from borrowing a different lifecycle's meaning.
  */
+export function resolveStatusForDomain(
+  status: string | null | undefined,
+  domain: StatusDomain = "run",
+): StatusResolution {
+  const key = statusKeyForDomain(status, domain);
+  if (key === null) return { key: null, meta: UNKNOWN };
+  if (domain === "run") return { key, meta: META[key as RunStatus] };
+
+  const domainMeta = hasOwn(DOMAIN_META, domain) ? DOMAIN_META[domain] : undefined;
+  return { key, meta: domainMeta && hasOwn(domainMeta, key) ? domainMeta[key] : UNKNOWN };
+}
+
+/** Resolve a lifecycle status to its visual treatment. */
 export function statusMetaForDomain(
   status: string | null | undefined,
   domain: StatusDomain = "run",
 ): StatusMeta {
-  const key = statusKeyForDomain(status, domain);
-  if (key === "unknown") return UNKNOWN;
-  if (domain === "run") {
-    return META[key as RunStatus];
-  }
-
-  const domainMeta = hasOwn(DOMAIN_META, domain) ? DOMAIN_META[domain] : undefined;
-  return domainMeta && hasOwn(domainMeta, key) ? domainMeta[key] : UNKNOWN;
+  return resolveStatusForDomain(status, domain).meta;
 }
 
-/** The canonical machine-readable key rendered in `data-status`. */
+/**
+ * The canonical machine-readable key for a recognized status. Unrecognized
+ * values return null so a real future enum named "unknown" cannot collide
+ * with the fallback sentinel.
+ */
 export function statusKeyForDomain(
   status: string | null | undefined,
   domain: StatusDomain = "run",
-): string {
-  if (!status) return "unknown";
+): string | null {
+  if (!status) return null;
   const key = String(status).trim().toLowerCase();
   if (domain === "run") {
     if (hasOwn(META, key)) return key;
-    return hasOwn(ALIASES, key) ? ALIASES[key] : "unknown";
+    return hasOwn(ALIASES, key) ? ALIASES[key] : null;
   }
 
   const domainMeta = hasOwn(DOMAIN_META, domain) ? DOMAIN_META[domain] : undefined;
-  return domainMeta && hasOwn(domainMeta, key) ? key : "unknown";
+  return domainMeta && hasOwn(domainMeta, key) ? key : null;
 }
 
 function hasOwn<T extends object>(record: T, key: string): key is keyof T & string {
