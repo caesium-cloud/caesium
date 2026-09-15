@@ -991,7 +991,7 @@ jobs:
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
           echo $! > /tmp/port-forward.pid
           ready=false
-          for attempt in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null; then
               ready=true
               break
