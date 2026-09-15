@@ -4,6 +4,7 @@ import {
   awaitRun,
   failOnUnexpectedPageErrors,
   findJobByAlias,
+  type E2ERun,
   type FixtureDefinition,
   triggerJob,
   uniqueSuffix,
@@ -61,10 +62,19 @@ test("Re-run starts a fresh trigger chain without inheriting scheduler depth", a
   const downstream = await findJobByAlias(request, String(downstreamDefinition.metadata?.alias));
 
   await triggerJob(request, upstream.id, params);
+  // Prior history can contain several chains; event delivery is at-least-once.
+  // Exercise that history explicitly instead of assuming exactly two C runs.
+  await triggerJob(request, upstream.id, params);
   const originalRun = await awaitRun(request, job.id, { status: "succeeded" });
   expect(originalRun.params).toEqual({ ...params, _trigger_depth: "1" });
   const originalDownstream = await awaitRun(request, downstream.id, { status: "succeeded" });
   expect(originalDownstream.params?._trigger_depth).toBe("2");
+  const priorResponse = await request.get(`/v1/jobs/${downstream.id}/runs`);
+  expect(priorResponse.ok()).toBe(true);
+  const priorRuns = await priorResponse.json() as E2ERun[];
+  const priorRunIds = new Set(priorRuns.map((run) => run.id));
+  expect(priorRunIds.has(originalDownstream.id)).toBe(true);
+  expect(priorRuns.every((run) => run.params?._trigger_depth === "2")).toBe(true);
 
   await page.goto(`/jobs/${job.id}/runs/${originalRun.id}`);
   await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
@@ -72,22 +82,42 @@ test("Re-run starts a fresh trigger chain without inheriting scheduler depth", a
   await page.getByRole("button", { name: "Re-run" }).click();
   await navigation;
 
-  const rerun = await awaitRun(request, job.id, { status: "succeeded" });
-  expect(rerun.id).toBe(new URL(page.url()).pathname.split("/").at(-1));
+  const rerunId = new URL(page.url()).pathname.split("/").at(-1);
+  const rerunPath = `/v1/jobs/${job.id}/runs/${rerunId}`;
+  await expect.poll(async () => {
+    const response = await request.get(rerunPath);
+    expect(response.ok()).toBe(true);
+    return (await response.json() as E2ERun).status;
+  }, { timeout: 60_000 }).toBe("succeeded");
+  const rerunResponse = await request.get(rerunPath);
+  expect(rerunResponse.ok()).toBe(true);
+  const rerun = await rerunResponse.json() as E2ERun;
+  expect(rerun.id).toBe(rerunId);
   expect(rerun.params).toEqual(params);
   expect(rerun.tasks).toEqual(
     expect.arrayContaining([expect.objectContaining({ output: expect.objectContaining({ mode: params.mode }) })]),
   );
 
+  let freshDownstreamId: string | undefined;
   await expect.poll(async () => {
     const response = await request.get(`/v1/jobs/${downstream.id}/runs`);
     expect(response.ok()).toBe(true);
-    const runs = await response.json() as Array<{ id: string }>;
-    return runs.length;
-  }, { timeout: 60_000 }).toBe(2);
-  const freshDownstream = await awaitRun(request, downstream.id, { status: "succeeded" });
+    const runs = await response.json() as E2ERun[];
+    freshDownstreamId = runs.find((run) =>
+      !priorRunIds.has(run.id) && run.status === "succeeded" && run.params?._trigger_depth === "1",
+    )?.id;
+    return freshDownstreamId;
+  }, { timeout: 60_000 }).toBeTruthy();
+  const freshResponse = await request.get(`/v1/jobs/${downstream.id}/runs/${freshDownstreamId}`);
+  expect(freshResponse.ok()).toBe(true);
+  const freshDownstream = await freshResponse.json() as E2ERun;
+  expect(freshDownstream.id).toBe(freshDownstreamId);
   expect(freshDownstream.id).not.toBe(originalDownstream.id);
-  expect(freshDownstream.params?._trigger_depth).toBe("1");
+  expect(freshDownstream.status).toBe("succeeded");
+  expect(freshDownstream.params).toEqual({ ...params, _trigger_depth: "1" });
+  expect(freshDownstream.tasks).toEqual(
+    expect.arrayContaining([expect.objectContaining({ output: expect.objectContaining({ mode: params.mode }) })]),
+  );
 });
 
 function buildParameterizedDefinition(upstreamAlias?: string): FixtureDefinition {
