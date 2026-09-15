@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
@@ -491,6 +492,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 						log.Info("worker cache completion canceled", "task_run_id", taskRun.ID, "run_id", taskRun.JobRunID, "error", err)
 						return
 					}
+					if errors.Is(err, dispatch.ErrCompletionApplicationRejected) {
+						e.reportTaskFailure(ctx, sink, taskRun, err, timeouts)
+						return
+					}
 					log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
 					// Fall through to normal execution on persistence failure.
 				} else {
@@ -544,7 +549,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		lastErr = execErr
-		if run.IsRunDeadlineError(execErr) {
+		if run.IsRunDeadlineError(execErr) || errors.Is(execErr, dispatch.ErrCompletionApplicationRejected) {
 			break
 		}
 
@@ -617,6 +622,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		return
 	}
 
+	e.reportTaskFailure(ctx, sink, taskRun, lastErr, timeouts)
+}
+
+// reportTaskFailure retains the same claim and absolute run window when a
+// finished result is rejected, including a cached result that ran no atom.
+func (e *runtimeExecutor) reportTaskFailure(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, lastErr error, timeouts executionTimeouts) {
 	failureCtx, failureCancel := runCompletionContext(ctx, timeouts)
 	persistErr := sink.Failed(failureCtx, taskRun, lastErr)
 	failureCancel()
