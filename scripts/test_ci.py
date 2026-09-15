@@ -402,6 +402,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(":/tmp/deadline-kubeconfig:ro", runner)
         self.assertIn('tee "$deadline_log"', runner)
 
+    def test_distributed_deadline_witness_selects_an_ipv4_gateway(self):
+        phase = next(step for step in JOBS["helm-integration-test"]["steps"]
+                     if step.get("name") == "Distributed Kubernetes deadline regression")
+        command = phase["run"]
+        selector = command[command.index("witness_host=$(python3"):command.index("deadline_log=")]
+        ipv4 = {"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"}
+        ipv6 = {"Subnet": "fc00:f853:ccd:e793::/64", "Gateway": "fc00:f853:ccd:e793::1"}
+        for configs, expected in (
+            ([ipv4], "172.18.0.1"),
+            ([ipv6, ipv4], "172.18.0.1"),
+            ([{"Subnet": "fc00:f853:ccd:e793::/64"}, ipv4], "172.18.0.1"),
+            ([{"Gateway": ""}, ipv6, ipv4], "172.18.0.1"),
+            ([ipv6], None),
+            ([], None),
+        ):
+            with self.subTest(configs=configs):
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", selector],
+                    env={**os.environ, "network_config": json.dumps(configs)},
+                    capture_output=True, text=True,
+                )
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("kind network has no IPv4 gateway", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"Kubernetes deadline witness gateway: {expected}", result.stdout)
+
     def test_distributed_kubernetes_deadline_gate_rejects_missing_or_skipped_coverage(self):
         phase = next(step for step in JOBS["helm-integration-test"]["steps"]
                      if step.get("name") == "Distributed Kubernetes deadline regression")

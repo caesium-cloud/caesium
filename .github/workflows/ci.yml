@@ -1006,8 +1006,22 @@ jobs:
           mkdir -p .tmp
           kind get kubeconfig > .tmp/deadline-kubeconfig
           chmod 600 .tmp/deadline-kubeconfig
-          witness_host=$(docker network inspect kind --format '{{(index .IPAM.Config 0).Gateway}}')
-          test -n "$witness_host"
+          # kind may list its IPv6 subnet first, or omit that subnet's gateway.
+          # The witness listens on IPv4, so select a matching gateway explicitly.
+          network_config=$(docker network inspect kind --format '{{json .IPAM.Config}}')
+          witness_host=$(python3 -c '
+          import ipaddress, json, sys
+          for config in json.load(sys.stdin):
+              gateway = config.get("Gateway")
+              if gateway and ipaddress.ip_address(gateway).version == 4:
+                  print(gateway)
+                  break
+          ' <<< "$network_config")
+          if [ -z "$witness_host" ]; then
+            echo "kind network has no IPv4 gateway for the deadline witness: $network_config" >&2
+            exit 1
+          fi
+          echo "Kubernetes deadline witness gateway: $witness_host"
           deadline_log=.tmp/distributed-kubernetes-deadlines.log
           docker run --rm \
             -v "$(pwd)":/bld/caesium \
