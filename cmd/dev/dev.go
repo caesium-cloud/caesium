@@ -135,8 +135,7 @@ func executeRun(ctx context.Context, w io.Writer, paths []string) error {
 		return err
 	}
 	if len(defs) == 0 {
-		_, _ = fmt.Fprintln(w, "No job definitions found.")
-		return nil
+		return fmt.Errorf("no job definitions selected")
 	}
 
 	runner := localrun.New(localrun.Config{

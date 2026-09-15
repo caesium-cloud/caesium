@@ -125,8 +125,8 @@ steps:
 // Cache Disabled: Step-level Override
 // --------------------------------------------------------------------------
 
-// TestCacheDisabledAtStepLevel verifies that a step with cache: false
-// always re-executes even when the job-level default is cache: true.
+// TestCacheDisabledAtStepLevel verifies that both scalar cache: false and the
+// mapping form cache.enabled: false re-execute under a cache-enabled job.
 func (s *IntegrationTestSuite) TestCacheDisabledAtStepLevel() {
 	alias := fmt.Sprintf("integration-cache-step-disabled-%d", time.Now().UnixNano())
 	manifest := fmt.Sprintf(`
@@ -147,6 +147,10 @@ steps:
     image: alpine:3.23
     cache: false
     command: ["sh", "-c", "echo always-run"]
+  - name: map-disabled-step
+    image: alpine:3.23
+    cache: {enabled: false}
+    command: ["sh", "-c", "echo always-run-mapping"]
 `, alias)
 
 	dir := s.writeJobManifest(manifest)
@@ -170,6 +174,7 @@ steps:
 	taskStatuses := s.taskStatusesByName(job.ID, run2)
 	s.Equal("cached", taskStatuses["cached-step"], "step with inherited cache should be cached")
 	s.Equal("succeeded", taskStatuses["uncached-step"], "step with cache: false should re-execute")
+	s.Equal("succeeded", taskStatuses["map-disabled-step"], "step with cache.enabled: false should re-execute")
 }
 
 // --------------------------------------------------------------------------
