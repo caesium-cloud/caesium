@@ -386,7 +386,7 @@ Enable server-side checks with `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `CAESIUM_C
 
 Operator surfaces:
 
-- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs. Findings are scoped to the linted job set — the linted jobs plus their direct producers and consumers on the server — so an unrelated breaking pair elsewhere on a shared server does not fail the lint, while a break the linted jobs participate in does.
+- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs. Use `--server https://caesium.example` or `--server=https://caesium.example` to select a target; bare `--server` uses `http://localhost:8080`. Findings are scoped to the linted job set — the linted jobs plus their direct producers and consumers on the server — so an unrelated breaking pair elsewhere on a shared server does not fail the lint, while a break the linted jobs participate in does.
 - `caesium contract check --path jobs/ [--json]` runs the contract-only server check.
 - `caesium contract graph [--dataset ns/name] [--json]` and `GET /v1/contracts/graph` expose the derived graph; the Console `/contracts` view renders the same graph.
 - `POST /v1/jobdefs/diff` includes per-job `contractFindings`; the Console JobDefs diff tab renders compatible/unknown/breaking badges with named consumers and teams.

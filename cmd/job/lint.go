@@ -38,9 +38,15 @@ var (
 	lintHTTPClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
 )
 
+const (
+	defaultLintServer    = "http://localhost:8080"
+	lintBareServerMarker = "__caesium_job_lint_bare_server__"
+)
+
 var lintCmd = &cobra.Command{
 	Use:   "lint",
 	Short: "Validate job definition manifests",
+	Args:  resolveLintServerArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defs, err := collectDefinitions(lintPaths)
 		if err != nil {
@@ -135,14 +141,51 @@ func init() {
 	lintCmd.Flags().StringVar(&lintVaultNamespace, "vault-namespace", os.Getenv("VAULT_NAMESPACE"), "Vault namespace for secret resolution")
 	lintCmd.Flags().StringVar(&lintVaultCACert, "vault-ca-cert", os.Getenv("VAULT_CACERT"), "Vault CA certificate path")
 	lintCmd.Flags().BoolVar(&lintVaultSkipVerify, "vault-skip-verify", envBool("VAULT_SKIP_VERIFY", false), "Disable TLS verification when connecting to Vault")
-	lintCmd.Flags().StringVar(&lintServer, "server", "http://localhost:8080", "POST definitions to the Caesium server for persisted-world linting (contract findings are scoped to the linted jobs and their direct producers/consumers); pass without a value to use http://localhost:8080")
+	lintCmd.Flags().StringVar(&lintServer, "server", defaultLintServer, "POST definitions to the Caesium server for persisted-world linting (contract findings are scoped to the linted jobs and their direct producers/consumers); pass without a value to use http://localhost:8080")
 	if flag := lintCmd.Flags().Lookup("server"); flag != nil {
-		flag.NoOptDefVal = "http://localhost:8080"
+		flag.NoOptDefVal = lintBareServerMarker
 	}
+	defaultUsage := lintCmd.UsageFunc()
+	lintCmd.SetUsageFunc(func(cmd *cobra.Command) error {
+		flag := cmd.Flags().Lookup("server")
+		if flag == nil {
+			return defaultUsage(cmd)
+		}
+		original := flag.NoOptDefVal
+		flag.NoOptDefVal = defaultLintServer
+		defer func() { flag.NoOptDefVal = original }()
+		return defaultUsage(cmd)
+	})
 	lintCmd.Flags().StringVar(&lintAPIKey, "api-key", "", "API key for authentication (prefer "+cliutil.APIKeyEnvVar+"; --api-key is visible in process listings)")
 	lintCmd.Flags().BoolVar(&lintJSON, "json", false, "Print server lint JSON (requires --server)")
 
 	Cmd.AddCommand(lintCmd)
+}
+
+// resolveLintServerArgs recovers the conventional spaced spelling that pflag
+// otherwise treats as a bare --server followed by an unused positional:
+// `--server https://caesium.example`. No command positional is valid, so every
+// other leftover argument is an error instead of an ignored target.
+func resolveLintServerArgs(cmd *cobra.Command, args []string) error {
+	if cmd.ArgsLenAtDash() >= 0 {
+		return fmt.Errorf("unexpected positional argument(s) after --; use --path for manifests and --server <URL> (or --server=<URL>) for server lint")
+	}
+	if lintServer == lintBareServerMarker && len(args) == 0 {
+		lintServer = defaultLintServer
+		return nil
+	}
+	if lintServer == lintBareServerMarker && len(args) == 1 && isHTTPServerURL(args[0]) {
+		lintServer = args[0]
+		return nil
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected positional argument(s): %s; use --path for manifests and --server <URL> (or --server=<URL>) for server lint", strings.Join(args, " "))
+}
+
+func isHTTPServerURL(value string) bool {
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
 }
 
 // LoadDefinitions exposes the same manifest loader used by `caesium job lint`
