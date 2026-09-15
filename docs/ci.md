@@ -398,13 +398,14 @@ normal runner. It gets the running Caesium container PID and uses `sudo nsenter
 --net` to run that host browser process in only the server's network namespace.
 It then creates a private mount namespace of its own and bind-mounts the
 container's inspected resolver file onto `/etc/resolv.conf` there. Recursive
-private propagation and a host resolver checksum gate keep that mount from
-changing the runner's resolver.
+private propagation keeps that mount from changing the runner's resolver. The
+mounted file's identity is checked without comparing mutable DNS contents.
 The command explicitly retains the runner UID, GID, HOME, Node executable, and
 working directory, verifies that the installed browser is executable, checks
-the server health endpoint, and resolves both Google font hosts from the entered
-namespace before the suite. It logs the host and container resolver nameservers,
-so the DNS boundary is observable. This preserves the production-like
+the server health endpoint, and probes both Google font hosts from the entered
+namespace before the suite. External DNS failures emit a warning naming the
+host and allow the browser assertions to run. It logs the host and container
+resolver nameservers, so the DNS boundary is observable. This preserves the production-like
 `http://127.0.0.1:8080` origin and relative `/v1` requests without placing the
 browser on the runner bridge while job task containers are created through the
 server's Docker socket. It does not enter the server mount, PID, user, root, or
@@ -416,9 +417,9 @@ The isolation addresses an observed runner `net::ERR_NETWORK_CHANGED` asset-load
 interruption that left the React root empty in three retained diagnostic attempts;
 host-bridge churn is a suspected trigger, rather than an established cause. It
 also observed that the first host-renderer namespace attempt could not resolve a
-font host. That proves DNS was unavailable in that setup, while the resolver
-source remains an inference until the logged nameservers are inspected. It
-does not retry navigation, relax browser assertions, disable flaky-test failures,
+font host. Hosted diagnostics confirmed the runner used a loopback DNS stub
+(`127.0.0.53`), while the server resolver (`168.63.129.16`) worked from the
+entered network. It does not retry navigation, relax browser assertions, disable flaky-test failures,
 or update screenshot baselines. Existing report/result paths remain available to
 the host-side sanitizer and artifact upload because the browser still runs as
 the runner user in the checkout.

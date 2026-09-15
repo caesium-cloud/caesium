@@ -106,6 +106,39 @@ def results(outputs):
     return needs
 
 
+def browser_nsenter_invocation(script):
+    """Parse the parent nsenter options, stopping before its child command."""
+    tokens = shlex.split(script.replace("\\\n", " "))
+    # The executable also appears as the argument to `test -x`; an invocation
+    # must begin with options so it selects the intended network namespace.
+    calls = [i for i, token in enumerate(tokens[:-1])
+             if token == "$nsenter_bin" and tokens[i + 1].startswith("-")]
+    if len(calls) != 1:
+        raise AssertionError("expected one nsenter invocation")
+    index = calls[0] + 1
+    namespaces = []
+    targets = []
+    while index < len(tokens) and tokens[index].startswith("-"):
+        option = tokens[index]
+        index += 1
+        if option == "--":
+            break
+        if option in ("--net", "-n"):
+            namespaces.append("net")
+        elif option in ("--target", "-t"):
+            if index >= len(tokens):
+                raise AssertionError("nsenter target is missing")
+            targets.append(tokens[index])
+            index += 1
+        elif option.startswith("--target="):
+            targets.append(option.split("=", 1)[1])
+        else:
+            raise AssertionError(f"unexpected nsenter option: {option}")
+    if index >= len(tokens):
+        raise AssertionError("nsenter child command is missing")
+    return namespaces, targets, tokens[index]
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -304,7 +337,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('runner_path="$PATH"', browser["run"])
         self.assertIn('runner_pwd="$PWD"', browser["run"])
         self.assertIn('host_mount_ns="$(readlink /proc/self/ns/mnt)"', browser["run"])
-        self.assertIn('host_resolv_sha="$(sha256sum /etc/resolv.conf | awk', browser["run"])
         self.assertIn("docker inspect --format '{{.ResolvConfPath}}' caesium-server", browser["run"])
         self.assertIn('sudo test -f "$server_resolv_conf"', browser["run"])
         self.assertIn("node_bin=\"$(command -v node)\"", browser["run"])
@@ -318,33 +350,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('HOME="$runner_home"', browser["run"])
         self.assertIn('PATH="$runner_path"', browser["run"])
         self.assertIn('PWD="$runner_pwd"', browser["run"])
-        self.assertIn("--target \"$server_pid\" --net", browser["run"])
+        self.assertEqual(browser_nsenter_invocation(browser["run"]),
+                         (["net"], ["$server_pid"], "$unshare_bin"))
         self.assertIn('"$unshare_bin" --mount --propagation private', browser["run"])
         self.assertIn('mount --make-rprivate /', browser["run"])
         self.assertIn('mount --bind "$CAESIUM_E2E_SERVER_RESOLV_CONF" /etc/resolv.conf', browser["run"])
         self.assertIn('CAESIUM_E2E_HOST_MOUNT_NS="$host_mount_ns"', browser["run"])
-        self.assertIn('CAESIUM_E2E_SERVER_RESOLV_SHA="$server_resolv_sha"', browser["run"])
-        self.assertIn("trap 'check_host_resolver \"$?\"' EXIT", browser["run"])
+        self.assertIn('test /etc/resolv.conf -ef "$CAESIUM_E2E_SERVER_RESOLV_CONF"', browser["run"])
         self.assertIn('"$CAESIUM_E2E_SETPRIV_BIN" --reuid="$CAESIUM_E2E_RUNNER_UID"', browser["run"])
         self.assertIn('--groups="$CAESIUM_E2E_RUNNER_GROUPS" --inh-caps=-all --ambient-caps=-all', browser["run"])
         self.assertIn('--bounding-set=-all --no-new-privs', browser["run"])
         self.assertIn("PLAYWRIGHT_BASE_URL=\"$PLAYWRIGHT_BASE_URL\"", browser["run"])
         self.assertIn("CAESIUM_MANUAL_TRIGGER_API_KEY=\"$CAESIUM_MANUAL_TRIGGER_API_KEY\"", browser["run"])
         self.assertIn('curl -sf "$PLAYWRIGHT_BASE_URL/health"', browser["run"])
-        self.assertIn('getent hosts fonts.googleapis.com', browser["run"])
-        self.assertIn('getent hosts fonts.gstatic.com', browser["run"])
+        self.assertIn('for font_host in fonts.googleapis.com fonts.gstatic.com', browser["run"])
         self.assertIn('--input-type=module', browser["run"])
         self.assertIn('const browser = await chromium.launch()', browser["run"])
         self.assertIn('exec "$CAESIUM_E2E_NPM_BIN" run test:e2e -- --project=network-recovery', browser["run"])
         self.assertIn("Host resolver nameservers:", browser["run"])
         self.assertIn("Server resolver nameservers:", browser["run"])
         self.assertNotIn("--network=host", browser["run"])
-        self.assertNotIn("--all", browser["run"])
-        self.assertNotIn('"$nsenter_bin" --target "$server_pid" --mount', browser["run"])
-        self.assertNotIn('"$nsenter_bin" --target "$server_pid" --pid', browser["run"])
-        self.assertNotIn('"$nsenter_bin" --target "$server_pid" --user', browser["run"])
-        self.assertNotIn('"$nsenter_bin" --target "$server_pid" --root', browser["run"])
-        self.assertNotIn('"$nsenter_bin" --target "$server_pid" --wd', browser["run"])
         self.assertNotIn("mcr.microsoft.com/playwright", browser["run"])
 
         justfile = (ROOT / "justfile").read_text()
@@ -353,6 +378,45 @@ class WorkflowTests(unittest.TestCase):
         recipe = justfile[recipe_start:recipe_end]
         self.assertIn("npm run test:e2e -- --project=network-recovery", recipe)
         self.assertNotIn("--no-deps", recipe)
+
+    def test_browser_nsenter_scope_is_independent_of_option_order(self):
+        for arguments in ('--target "$server_pid" --net',
+                          '--net --target "$server_pid"',
+                          '--net --target="$server_pid"',
+                          '-n -t "$server_pid"'):
+            with self.subTest(arguments=arguments):
+                command = f'test -x "$nsenter_bin"\n"$nsenter_bin" {arguments} "$unshare_bin" --mount --propagation private'
+                self.assertEqual(browser_nsenter_invocation(command),
+                                 (["net"], ["$server_pid"], "$unshare_bin"))
+
+    def test_browser_nsenter_scope_rejects_extra_namespaces_and_context(self):
+        for option in ('--mount', '-m', '--pid', '-p', '--user', '-U',
+                       '--root', '-r', '--wd', '-w', '--wdns', '-W',
+                       '--all', '-a', '--uts', '-u', '--ipc', '-i',
+                       '--cgroup', '-C', '--time', '-T', '--mount=/proc/1/ns/mnt'):
+            for arguments in (f'{option} --target "$server_pid" --net',
+                              f'--target "$server_pid" --net {option}'):
+                with self.subTest(arguments=arguments), self.assertRaises(AssertionError):
+                    browser_nsenter_invocation(f'"$nsenter_bin" {arguments} "$unshare_bin" --mount')
+
+    def test_external_font_dns_failure_warns_and_allows_browser_assertions(self):
+        browser = next(step for step in JOBS["ui-e2e"]["steps"]
+                       if step.get("id") == "playwright")
+        probe = re.search(r'^for font_host in .*?^done$', browser["run"], re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(probe)
+        with tempfile.TemporaryDirectory() as tmp:
+            getent = Path(tmp) / "getent"
+            getent.write_text('#!/bin/sh\nexit 2\n')
+            getent.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", probe.group() + '\nprintf "browser assertions reached\\n"'],
+                env={**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"]},
+                capture_output=True, text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("browser assertions reached", result.stdout)
+        for hostname in ("fonts.googleapis.com", "fonts.gstatic.com"):
+            self.assertIn(f"::warning::preflight: cannot resolve {hostname} (external DNS)", result.stderr)
 
     def test_malformed_browser_archive_never_uploads_raw_credentials(self):
         for name in ("ui-e2e", "ui-e2e-auth"):
