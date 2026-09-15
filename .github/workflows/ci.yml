@@ -565,22 +565,17 @@ jobs:
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - name: Resolve locked Playwright image
-        id: playwright-image
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies and browsers
+        id: dependencies
+        working-directory: ui
         run: |
-          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
-          import json
-
-          packages = json.load(open("ui/package-lock.json"))["packages"]
-          test_version = packages["node_modules/@playwright/test"]["version"]
-          playwright_version = packages["node_modules/playwright"]["version"]
-          if test_version != playwright_version:
-              raise SystemExit(
-                  "@playwright/test and playwright lockfile versions must match: "
-                  f"{test_version} != {playwright_version}"
-              )
-          print(f"image=mcr.microsoft.com/playwright:v{test_version}-noble")
-          PYTHON
+          npm ci
+          npx playwright install --with-deps chromium
       - name: Pre-pull job images
         id: job-images
         run: |
@@ -619,19 +614,80 @@ jobs:
           done
       - name: Run Playwright E2E
         id: playwright
+        working-directory: ui
         env:
-          PLAYWRIGHT_IMAGE: ${{ steps.playwright-image.outputs.image }}
+          CI: 'true'
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+          CAESIUM_MANUAL_TRIGGER_API_KEY: e2e-test-key
         run: |
-          docker pull "$PLAYWRIGHT_IMAGE"
-          docker run --rm --init --ipc=host \
-            --network=container:caesium-server \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work/ui \
-            -e CI=true \
-            -e PLAYWRIGHT_BASE_URL=http://127.0.0.1:8080 \
-            -e CAESIUM_MANUAL_TRIGGER_API_KEY \
-            "$PLAYWRIGHT_IMAGE" \
-            /bin/bash -lc 'npm ci && npm run test:e2e -- --project=network-recovery'
+          set -euo pipefail
+          server_pid="$(docker inspect --format '{{.State.Pid}}' caesium-server)"
+          case "$server_pid" in
+            ''|0|*[!0-9]*) echo "Caesium server PID is invalid: $server_pid" >&2; exit 1 ;;
+          esac
+          sudo test -e "/proc/$server_pid/ns/net"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          runner_groups="$(id -G | tr ' ' ',')"
+          runner_home="${HOME:?runner HOME is required}"
+          runner_path="$PATH"
+          runner_pwd="$PWD"
+          node_bin="$(command -v node)"
+          npm_bin="$(command -v npm)"
+          nsenter_bin="$(command -v nsenter)"
+          setpriv_bin="$(command -v setpriv)"
+          test_cli="$GITHUB_WORKSPACE/ui/node_modules/@playwright/test/cli.js"
+          browser_bin="$("$node_bin" -e 'const { chromium } = require("playwright"); process.stdout.write(chromium.executablePath())')"
+          test -x "$node_bin"
+          test -x "$npm_bin"
+          test -x "$nsenter_bin"
+          test -x "$setpriv_bin"
+          test -f "$test_cli"
+          test -x "$browser_bin"
+          inner_script="$(cat <<'BASH'
+          set -euo pipefail
+          test "$(id -u)" = "$CAESIUM_E2E_RUNNER_UID"
+          test "$(id -g)" = "$CAESIUM_E2E_RUNNER_GID"
+          test "$HOME" = "$CAESIUM_E2E_RUNNER_HOME"
+          test "$PATH" = "$CAESIUM_E2E_RUNNER_PATH"
+          cd "$CAESIUM_E2E_RUNNER_PWD"
+          test "$PWD" = "$CAESIUM_E2E_RUNNER_PWD"
+          test "$(command -v node)" = "$CAESIUM_E2E_NODE_BIN"
+          test -x "$CAESIUM_E2E_BROWSER_BIN"
+          "$CAESIUM_E2E_NODE_BIN" --version
+          curl -sf "$PLAYWRIGHT_BASE_URL/health" >/dev/null
+          getent hosts fonts.googleapis.com >/dev/null
+          getent hosts fonts.gstatic.com >/dev/null
+          "$CAESIUM_E2E_NODE_BIN" --input-type=module -e '
+            import { chromium } from "playwright";
+            if (chromium.executablePath() !== process.env.CAESIUM_E2E_BROWSER_BIN) {
+              throw new Error("Playwright browser executable changed inside the server namespace")
+            }
+            const browser = await chromium.launch();
+            await browser.close();
+          '
+          exec "$CAESIUM_E2E_NPM_BIN" run test:e2e -- --project=network-recovery
+          BASH
+          )"
+          sudo env \
+            HOME="$runner_home" \
+            PATH="$runner_path" \
+            PWD="$runner_pwd" \
+            CI="$CI" \
+            PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \
+            CAESIUM_MANUAL_TRIGGER_API_KEY="$CAESIUM_MANUAL_TRIGGER_API_KEY" \
+            CAESIUM_E2E_RUNNER_UID="$runner_uid" \
+            CAESIUM_E2E_RUNNER_GID="$runner_gid" \
+            CAESIUM_E2E_RUNNER_HOME="$runner_home" \
+            CAESIUM_E2E_RUNNER_PATH="$runner_path" \
+            CAESIUM_E2E_RUNNER_PWD="$runner_pwd" \
+            CAESIUM_E2E_NODE_BIN="$node_bin" \
+            CAESIUM_E2E_NPM_BIN="$npm_bin" \
+            CAESIUM_E2E_BROWSER_BIN="$browser_bin" \
+            "$nsenter_bin" --target "$server_pid" --net \
+              "$setpriv_bin" --reuid="$runner_uid" --regid="$runner_gid" \
+                --groups="$runner_groups" --inh-caps=-all --ambient-caps=-all \
+                --bounding-set=-all --no-new-privs /bin/bash -c "$inner_script"
       - name: Collect browser diagnostics
         if: always()
         env:

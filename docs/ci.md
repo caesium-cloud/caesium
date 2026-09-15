@@ -291,7 +291,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `integration` | ubuntu-24.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
 | `integration-extra` | ubuntu-24.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
 | `integration-arm64` | ubuntu-24.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
-| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | locked Playwright container joined to the server namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
+| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
@@ -391,19 +391,28 @@ cannot disrupt neighboring tests. Both projects appear in the same report.
 `just ui-e2e` uses the same project selection. A failure in either phase fails
 the job; a failed default dependency prevents the recovery phase from starting.
 
-The CI default lane derives `mcr.microsoft.com/playwright:v<locked-version>-noble`
-from the matching `@playwright/test` and `playwright` lockfile entries, then
-runs it with `--network=container:caesium-server`. The browser therefore keeps
-the production-like `http://127.0.0.1:8080` origin and relative `/v1` requests,
-but does not share the runner's bridge interface while job task containers are
-created through the server's Docker socket. This isolates the browser from an
-observed runner `net::ERR_NETWORK_CHANGED` asset-load interruption that left the
-React root empty in three retained diagnostic attempts; host-bridge churn is a
-suspected trigger validated by this lane, rather than an established cause. It
-does not retry navigation, relax browser assertions, or disable flaky-test
-failures. The whole checkout is mounted so fixtures and the existing
-report/result paths remain available to the host-side sanitizer and artifact
-upload.
+The CI default lane keeps the existing Node 22, `npm ci`, and
+`npx playwright install --with-deps chromium` setup so it uses the same host
+browser binary, font packages, cache, and Linux screenshot baseline as the
+normal runner. It gets the running Caesium container PID and uses `sudo nsenter
+--net` to run that host browser process in only the server's network namespace.
+The command explicitly retains the runner UID, GID, HOME, Node executable, and
+working directory, verifies that the installed browser is executable, checks
+the server health endpoint, and resolves both Google font hosts from the entered
+namespace before the suite. This preserves the production-like
+`http://127.0.0.1:8080` origin and relative `/v1` requests without placing the
+browser on the runner bridge while job task containers are created through the
+server's Docker socket. It does not enter the server mount, PID, user, root, or
+working-directory namespaces, so the browser retains the host checkout and
+renderer environment.
+
+The isolation addresses an observed runner `net::ERR_NETWORK_CHANGED` asset-load
+interruption that left the React root empty in three retained diagnostic attempts;
+host-bridge churn is a suspected trigger, rather than an established cause. It
+does not retry navigation, relax browser assertions, disable flaky-test failures,
+or update screenshot baselines. Existing report/result paths remain available to
+the host-side sanitizer and artifact upload because the browser still runs as
+the runner user in the checkout.
 
 CI retains two Playwright retries for diagnosis and sets `failOnFlakyTests`:
 a test that fails initially and passes on retry still fails the lane. Both
