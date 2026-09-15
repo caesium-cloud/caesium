@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
@@ -191,6 +192,74 @@ func TestRetryUsesTheAttemptBudgetFrozenOnTheRow(t *testing.T) {
 
 	require.Len(t, engine.createRequestsForTask(taskID), 4,
 		"the retry ran the applied retry budget instead of the 2 attempts the row froze")
+}
+
+// TestRetryUsesTaskTimeoutFrozenOnTheRow keeps the local executor aligned with
+// the distributed worker: a terminal run reopened after job apply must retain
+// the timeout recorded in its immutable execution descriptor.
+func TestRetryUsesTaskTimeoutFrozenOnTheRow(t *testing.T) {
+	store, engine, jobModel, taskModel, opts := buildFrozenFieldFixture(t, "frozen-task-timeout",
+		func(j *models.Job, _ *models.Task) {
+			j.TaskTimeout = 40 * time.Millisecond
+			j.RunTimeout = 2 * time.Second
+		})
+
+	jobID := taskModel.JobID
+	taskID := taskModel.ID
+	engine.resultByName[taskID.String()] = atom.Failure
+	require.Error(t, New(jobModel, opts...).Run(context.Background()))
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, 40*time.Millisecond, taskRunByID(snapshot, taskID).TaskTimeout)
+	_, err := store.RetryFromFailure(snapshot.ID)
+	require.NoError(t, err)
+
+	// Simulate a job apply that relaxes the catalog timeout. The reopened run's
+	// descriptor remains the authority and must still stop this long attempt.
+	jobModel.TaskTimeout = 5 * time.Second
+	require.NoError(t, store.DB().Model(jobModel).Update("task_timeout", jobModel.TaskTimeout).Error)
+	delete(engine.resultByName, taskID.String())
+	engine.runDurationByName[taskID.String()] = 10 * time.Second
+
+	started := time.Now()
+	err = New(jobModel, opts...).Run(run.WithContext(context.Background(), snapshot.ID))
+	require.ErrorContains(t, err, "timed out after 40ms")
+	require.Less(t, time.Since(started), time.Second)
+	require.True(t, engine.wasForceStopped(taskID.String()))
+
+	final := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.TaskStatusFailed, taskStatusByID(final)[taskID])
+}
+
+func TestRetryPreservesFrozenZeroTaskTimeout(t *testing.T) {
+	store, engine, jobModel, taskModel, opts := buildFrozenFieldFixture(t, "frozen-zero-task-timeout",
+		func(j *models.Job, _ *models.Task) {
+			j.RunTimeout = 2 * time.Second
+		})
+
+	jobID := taskModel.JobID
+	taskID := taskModel.ID
+	engine.resultByName[taskID.String()] = atom.Failure
+	require.Error(t, New(jobModel, opts...).Run(context.Background()))
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Zero(t, taskRunByID(snapshot, taskID).TaskTimeout)
+	_, err := store.RetryFromFailure(snapshot.ID)
+	require.NoError(t, err)
+
+	// A later job apply may introduce a metadata timeout, but zero on this run's
+	// descriptor means inherit the stable server default (zero in this fixture),
+	// not the mutable catalog value.
+	jobModel.TaskTimeout = 30 * time.Millisecond
+	require.NoError(t, store.DB().Model(jobModel).Update("task_timeout", jobModel.TaskTimeout).Error)
+	delete(engine.resultByName, taskID.String())
+	engine.runDurationByName[taskID.String()] = 80 * time.Millisecond
+
+	started := time.Now()
+	require.NoError(t, New(jobModel, opts...).Run(run.WithContext(context.Background(), snapshot.ID)))
+	require.GreaterOrEqual(t, time.Since(started), 60*time.Millisecond,
+		"the retry must outlive the mutable 30ms catalog timeout")
+	require.Equal(t, run.TaskStatusSucceeded, taskStatusByID(latestRunSnapshot(t, store, jobID))[taskID])
 }
 
 // buildFrozenFieldFixture wires a one-task job whose row therefore freezes the

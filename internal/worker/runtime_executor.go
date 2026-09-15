@@ -109,6 +109,35 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// tasks, local DB writes for ClaimNext'd tasks.
 	sink := e.sinkFor(ctx)
 
+	deadline, err := e.store.TaskExecutionDeadlineForRun(ctx, taskRun.JobRunID, taskRun.ID)
+	if err != nil {
+		err = fmt.Errorf("load frozen task deadlines: %w", err)
+		log.Error("failed to load worker task deadlines", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
+		if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+			log.Error("failed to persist task deadline load failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+		}
+		return
+	}
+	effectiveTaskTimeout := deadline.TaskTimeout
+	if effectiveTaskTimeout == 0 {
+		effectiveTaskTimeout = e.taskTimeout
+	}
+	timeouts := executionTimeouts{
+		taskTimeout: effectiveTaskTimeout,
+		runTimeout:  deadline.RunTimeout,
+		taskID:      taskRun.TaskID.String(),
+	}
+	if deadline.RunTimeout > 0 {
+		timeouts.runDeadline = deadline.RunStarted.Add(deadline.RunTimeout)
+		if timeouts.runDeadlineError(time.Now()) != nil {
+			// The run owner owns the atomic run-timeout transition. Sending this
+			// through the ordinary task-failure sink would lose the typed cause and
+			// could apply failure-policy cascades before the owner fails every
+			// unfinished task together.
+			return
+		}
+	}
+
 	jobAlias := ""
 	resolveJobAlias := func() string {
 		if jobAlias != "" {
@@ -424,6 +453,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			if getErr != nil {
 				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
 			} else if found {
+				// Cache resolution can outlive the run budget. Recheck the durable
+				// absolute deadline immediately before the cached terminal write;
+				// publishing the hit would otherwise release successors after the
+				// run timeout had already won.
+				if timeouts.runDeadlineError(time.Now()) != nil {
+					// See the initial deadline check above: only the run owner may
+					// publish the typed, all-task run-timeout transition.
+					return
+				}
 				log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
 				source := run.CacheHitSource{
 					RunID:     entry.RunID,
@@ -461,7 +499,18 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
+		// executeTask performs log parsing, schema checks, and data assertions
+		// after the atom exits. Any of those can return an ordinary error after
+		// the absolute run budget expired. Classify at this central seam before
+		// retry/reset or sink.Failed so the owner retains sole ownership of the
+		// atomic run-timeout transition. A claim mismatch remains authoritative:
+		// this worker no longer owns any result, including a timeout result.
+		if execErr != nil && !errors.Is(execErr, run.ErrTaskClaimMismatch) {
+			if deadlineErr := timeouts.runDeadlineError(time.Now()); deadlineErr != nil {
+				execErr = deadlineErr
+			}
+		}
 		if execErr == nil {
 			// Store successful result in cache, including any partition list this
 			// producer emitted: a later hit replays the result without running
@@ -486,6 +535,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		lastErr = execErr
+		if run.IsRunDeadlineError(execErr) {
+			break
+		}
 
 		// No more attempts — break to failure handling.
 		if attempt >= maxAttempts {
@@ -543,6 +595,16 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if ctx.Err() != nil {
 			return
 		}
+	}
+
+	// The run owner enforces the same durable absolute deadline and atomically
+	// fails the JobRun plus every unfinished TaskRun. Reporting this as an
+	// ordinary task failure first would run failure-policy cascades and turn
+	// pending work into dependency skips before the timeout transaction can
+	// truthfully resolve it. A resumed owner uses the same anchor, so this does
+	// not grant fresh time if the original owner disappears at the boundary.
+	if run.IsRunDeadlineError(lastErr) {
+		return
 	}
 
 	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
@@ -735,13 +797,12 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, finalAttempt bool) ([]pkgtask.Partition, error) {
-	taskCtx := ctx
-	cancel := func() {}
-	if e.taskTimeout > 0 {
-		taskCtx, cancel = context.WithTimeout(ctx, e.taskTimeout)
-	}
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
+	taskCtx, cancel := timeouts.attemptContext(ctx, time.Now())
 	defer cancel()
+	if err := context.Cause(taskCtx); err != nil {
+		return nil, err
+	}
 
 	engineFactory := e.engineFactory
 	if engineFactory == nil {
@@ -1015,6 +1076,14 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		if !finalAttempt {
 			return partitions, failure
 		}
+		// Log capture, teardown, and validation all happen after Wait. They may
+		// cross the durable run deadline even though the container itself
+		// finished first. Recheck immediately before the terminal write so a
+		// late failure result cannot win the race to publish under an expired
+		// execution window.
+		if deadlineErr := timeouts.runDeadlineError(time.Now()); deadlineErr != nil {
+			return nil, deadlineErr
+		}
 		// Final attempt: the container ran and reported its own result, so the
 		// COMPLETION route owns the full set of failure consequences (the
 		// group's failurePolicy, the in-group skip cascade, the successor
@@ -1040,6 +1109,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
+	// As above, completion is authorized by the absolute run window, not just
+	// by whether it was live when the atom started or Wait returned.
+	if deadlineErr := timeouts.runDeadlineError(time.Now()); deadlineErr != nil {
+		return nil, deadlineErr
+	}
 	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
 		return nil, err
 	}
@@ -1249,22 +1323,29 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 	stopAtom := func() error {
 		return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 	}
+	deadlineError := func(stopErr error) error {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		if stopErr != nil {
+			return fmt.Errorf("%w; failed to stop atom %s: %v", cause, a.ID(), stopErr)
+		}
+		return cause
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			stopErr := stopAtom()
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				if stopErr != nil {
-					return a, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskRun.TaskID, e.taskTimeout, a.ID(), stopErr)
-				}
-				return a, fmt.Errorf("task %s timed out after %s", taskRun.TaskID, e.taskTimeout)
-			}
-			if stopErr != nil {
+			if stopErr != nil && !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
 				log.Warn("failed to stop atom after task cancellation", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 			}
-			return a, ctx.Err()
+			return a, deadlineError(stopErr)
 		case result := <-waitResult:
+			if ctx.Err() != nil {
+				return a, deadlineError(stopAtom())
+			}
 			if result.err != nil {
 				if stopErr := stopAtom(); stopErr != nil {
 					log.Warn("failed to stop atom after engine wait error", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)

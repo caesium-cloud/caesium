@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -327,7 +328,9 @@ func (s *KubernetesTestSuite) TestStop() {
 		Return()
 
 	assert.Nil(s.T(), s.engine.Stop(req))
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	s.True(backend.lastDeleteHasDeadline, "the Kubernetes API call must be bounded even when callers request immediate container termination")
+	backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestStopError() {
@@ -355,6 +358,12 @@ func (s *KubernetesTestSuite) TestStopTimeout() {
 		Return()
 
 	assert.NotNil(s.T(), s.engine.Stop(req))
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Equal(int64(0), *backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
+	s.True(backend.lastDeleteHasDeadline, "cleanup must be bounded independently of the expired task context")
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 

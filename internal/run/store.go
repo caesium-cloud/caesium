@@ -211,23 +211,24 @@ type TaskRun struct {
 	CacheTTLNever   bool          `json:"-"`
 	// OutputSchema / SchemaValidation are what the worker validates a task's
 	// output against (runtimeExecutor.runSchemaValidation).
-	OutputSchema            []byte     `json:"-"`
-	SchemaValidation        string     `json:"-"`
-	LogScrubbed             bool       `json:"-"`
-	LogGeneration           string     `json:"-"`
-	CacheOriginRunID        *uuid.UUID `json:"cache_origin_run_id,omitempty"`
-	CacheCreatedAt          *time.Time `json:"cache_created_at,omitempty"`
-	CacheExpiresAt          *time.Time `json:"cache_expires_at,omitempty"`
-	RateLimitRetryAfter     *time.Time `json:"rate_limit_retry_after,omitempty"`
-	StartedAt               *time.Time `json:"started_at,omitempty"`
-	CompletedAt             *time.Time `json:"completed_at,omitempty"`
-	Error                   string     `json:"error,omitempty"`
-	OutstandingPredecessors int        `json:"outstanding_predecessors"`
-	PartitionValue          string     `json:"partition_value,omitempty"`
-	PartitionIndex          int        `json:"partition_index,omitempty"`
-	PartitionCount          int        `json:"partition_count,omitempty"`
-	PartitionFingerprint    string     `json:"partition_fingerprint,omitempty"`
-	PartitionDependsOn      []string   `json:"partition_depends_on,omitempty"`
+	OutputSchema            []byte        `json:"-"`
+	SchemaValidation        string        `json:"-"`
+	TaskTimeout             time.Duration `json:"-"`
+	LogScrubbed             bool          `json:"-"`
+	LogGeneration           string        `json:"-"`
+	CacheOriginRunID        *uuid.UUID    `json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt          *time.Time    `json:"cache_created_at,omitempty"`
+	CacheExpiresAt          *time.Time    `json:"cache_expires_at,omitempty"`
+	RateLimitRetryAfter     *time.Time    `json:"rate_limit_retry_after,omitempty"`
+	StartedAt               *time.Time    `json:"started_at,omitempty"`
+	CompletedAt             *time.Time    `json:"completed_at,omitempty"`
+	Error                   string        `json:"error,omitempty"`
+	OutstandingPredecessors int           `json:"outstanding_predecessors"`
+	PartitionValue          string        `json:"partition_value,omitempty"`
+	PartitionIndex          int           `json:"partition_index,omitempty"`
+	PartitionCount          int           `json:"partition_count,omitempty"`
+	PartitionFingerprint    string        `json:"partition_fingerprint,omitempty"`
+	PartitionDependsOn      []string      `json:"partition_depends_on,omitempty"`
 	// PartitionStatusCounts is the per-status histogram of a COLLAPSED fan-out
 	// group: {"succeeded":2,"failed":1,…}. Set only on the collapsed group entry
 	// that run-detail payloads return in place of N instance rows (see
@@ -1051,12 +1052,13 @@ func (s *Store) replayPredecessorRefsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([
 func newStartRunModel(req startRunRequest) (*models.JobRun, error) {
 	now := time.Now().UTC()
 	model := &models.JobRun{
-		ID:        uuid.New(),
-		JobID:     req.jobID,
-		Status:    string(StatusRunning),
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               uuid.New(),
+		JobID:            req.jobID,
+		Status:           string(StatusRunning),
+		StartedAt:        now,
+		TimeoutStartedAt: &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if req.triggerID != nil {
 		model.TriggerID = *req.triggerID
@@ -2710,6 +2712,12 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 		var attemptExpansion *FanOutExpansion
 
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			// Cache hits are terminal task writes too. Serialize them on the
+			// JobRun before reading or updating the TaskRun so run-timeout
+			// finalization and cache publication have one order on PostgreSQL.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			// taskRef is the caller's IMMUTABLE reference (a TaskRun primary key
@@ -2733,11 +2741,15 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return ErrTaskClaimMismatch
 			}
 			if IsTerminal(TaskStatus(taskRun.Status)) {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
 				return nil
 			}
 
 			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("id = ?", taskRun.ID)
+				Where("id = ? AND status NOT IN ?", taskRun.ID, terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
@@ -2771,8 +2783,11 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 			if resultUpdate.Error != nil {
 				return resultUpdate.Error
 			}
-			if enforceClaim && resultUpdate.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+			if resultUpdate.RowsAffected == 0 {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return nil
 			}
 			counts.addTaskRunStatus(1)
 
@@ -3762,6 +3777,13 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 		var attemptExpansion *FanOutExpansion
 
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			// Serialize every completion with run finalization before
+			// touching the TaskRun. PostgreSQL READ COMMITTED can otherwise let a
+			// completion observe run=running, wait on the task row, and commit a
+			// stale success after the timeout transaction has made the run failed.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			status := taskStatusFromResult(result)
@@ -3815,6 +3837,9 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 					// cascade: a terminal task has already been accounted for, and in the
 					// replace-cancel case that motivates this the run is cancelled, so no
 					// successor should advance.
+					if enforceClaim {
+						return ErrTaskClaimMismatch
+					}
 					return nil
 				}
 				var jobRun models.JobRun
@@ -3837,6 +3862,9 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			} else {
 				updateQuery = updateQuery.Where("job_run_id = ? AND task_id = ?", runID, catalogTaskID)
 			}
+			updateQuery = updateQuery.
+				Where("status NOT IN ?", terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
@@ -3886,8 +3914,11 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			if resultUpdate.Error != nil {
 				return resultUpdate.Error
 			}
-			if enforceClaim && resultUpdate.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+			if resultUpdate.RowsAffected == 0 {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return nil
 			}
 			counts.addTaskRunStatus(1)
 
@@ -4154,6 +4185,11 @@ func (s *Store) CompleteTaskOwner(
 		attemptEvents := make([]event.Event, 0, 8+len(skips))
 
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			// Match CompleteIfActive's JobRun-first lock order so a timeout and
+			// owner-memory completion have one serial outcome on PostgreSQL.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			// Metrics for the completed task (mirrors completeTask).
@@ -4173,7 +4209,14 @@ func (s *Store) CompleteTaskOwner(
 			}
 			taskRun := *row
 			catalogTaskID := taskRun.TaskID
-			tq := tx.Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy)
+			// Owner completion is deliberately idempotent for an identical
+			// redelivery after the first write landed without an acknowledgement.
+			// Keep accepting that same claimed row, while the JobRun lock and
+			// running predicate below still reject every completion after run
+			// timeout finalization.
+			tq := tx.
+				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if err := tq.First(&taskRun).Error; err == nil {
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
@@ -4224,6 +4267,7 @@ func (s *Store) CompleteTaskOwner(
 
 			res := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning)).
 				Updates(updates)
 			if res.Error != nil {
 				return res.Error
@@ -4591,6 +4635,9 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskRef)
 			if loadErr != nil {
 				if enforceClaim {
@@ -4599,12 +4646,16 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 				return loadErr
 			}
 			if IsTerminal(TaskStatus(row.Status)) {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
 				return nil
 			}
 			catalogTaskID := row.TaskID
 
 			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses())
+				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
@@ -4819,6 +4870,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""
+	runTimedOut := IsRunDeadlineError(result)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
@@ -4881,15 +4933,39 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// waits on a dependency the engine has not resolved is stranded by
 			// a terminal run just the same, and RetryPartition already refuses
 			// the retries no engine could ever release.
-			var pending int64
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
-					runID, string(TaskStatusPending), true).
-				Count(&pending).Error; err != nil {
-				return err
+			if !runTimedOut {
+				var pending int64
+				if err := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+						runID, string(TaskStatusPending), true).
+					Count(&pending).Error; err != nil {
+					return err
+				}
+				if pending > 0 {
+					return ErrRunHasPendingWork
+				}
 			}
-			if pending > 0 {
-				return ErrRunHasPendingWork
+
+			// A genuine metadata.runTimeout expiry resolves every unfinished task
+			// in the same transaction as the run. Clearing claims makes the
+			// worker's liveness sweep cancel old binaries, while new workers share
+			// this absolute deadline and stop the exact atom themselves. Terminal
+			// completion predicates below reject any result racing this write.
+			if runTimedOut {
+				taskResult := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+					Updates(map[string]any{
+						"status":                  string(TaskStatusFailed),
+						"result":                  "failure",
+						"error":                   errMsg,
+						"completed_at":            now,
+						"claimed_by":              "",
+						"claim_expires_at":        nil,
+						"partition_retry_pending": false,
+					})
+				if taskResult.Error != nil {
+					return taskResult.Error
+				}
 			}
 
 			// Read jobID + startedAt inside the same retried transaction so the
@@ -5665,6 +5741,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		LogScrubbed:             model.LogScrubbed,
 		LogGeneration:           model.LogGeneration,
 	}
+	if len(model.ExecutionDescriptor) > 0 {
+		var descriptor models.TaskExecutionDescriptor
+		if err := json.Unmarshal(model.ExecutionDescriptor, &descriptor); err == nil &&
+			descriptor.SchemaVersion == models.TaskExecutionDescriptorSchemaVersion {
+			task.TaskTimeout = descriptor.Timing.TaskTimeout
+		}
+	}
 
 	if len(model.Output) > 0 {
 		var out map[string]string
@@ -6380,11 +6463,13 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 // the declared concurrency nor replace-cancel a live run. On a full job it
 // returns ErrMaxConcurrentRunsReached and leaves the run terminal.
 func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
+	now := time.Now().UTC()
 	unconditional := func() error {
 		return tx.Model(jobRun).Updates(map[string]any{
-			"status":       string(StatusRunning),
-			"completed_at": nil,
-			"error":        "",
+			"status":             string(StatusRunning),
+			"timeout_started_at": now,
+			"completed_at":       nil,
+			"error":              "",
 		}).Error
 	}
 	if !admit || jobRun.Quarantine {
@@ -6404,7 +6489,7 @@ func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) e
 	// the same slot definition as new runs.
 	res := tx.Exec(`
 UPDATE job_runs
-SET status = ?, completed_at = NULL, error = ''
+SET status = ?, timeout_started_at = ?, completed_at = NULL, error = ''
 WHERE id = ?
 	AND status IN (?, ?)
 	AND (
@@ -6417,6 +6502,7 @@ WHERE id = ?
 			AND id <> ?
 	) < ?`,
 		string(StatusRunning),
+		now,
 		jobRun.ID,
 		string(StatusFailed), string(StatusSucceeded),
 		jobRun.JobID,

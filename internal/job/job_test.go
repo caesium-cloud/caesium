@@ -250,14 +250,17 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 		TaskTimeout:       40 * time.Millisecond,
 	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
 
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	err := New(&models.Job{ID: jobID, TaskTimeout: 40 * time.Millisecond, RunTimeout: time.Second}, opts...).Run(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "timed out")
+	require.NotContains(t, err.Error(), "run timed out", "a task deadline must not be relabeled as a run deadline")
 
 	snapshot := latestRunSnapshot(t, store, jobID)
+	require.NotContains(t, snapshot.Error, "run timed out")
 	status := taskStatusByID(snapshot)
 	require.Equal(t, run.TaskStatusFailed, status[taskID])
 	require.True(t, engine.wasForceStopped(taskID.String()))
+	require.Zero(t, engine.stopTimeout(taskID.String()), "force-stop must retain immediate Docker/Podman termination semantics")
 }
 
 func TestRunLocalRunTimeoutFailsRun(t *testing.T) {
@@ -269,14 +272,19 @@ func TestRunLocalRunTimeoutFailsRun(t *testing.T) {
 
 	jobID := uuid.New()
 	taskID := uuid.New()
+	pendingTaskID := uuid.New()
 	atomID := uuid.New()
+	pendingAtomID := uuid.New()
 
 	taskSvc := &fakeTaskService{tasks: models.Tasks{
 		{ID: taskID, JobID: jobID, AtomID: atomID},
+		{ID: pendingTaskID, JobID: jobID, AtomID: pendingAtomID},
 	}}
-	persistGraph(t, db, taskSvc.tasks, nil)
+	edges := models.TaskEdges{{ID: uuid.New(), JobID: jobID, FromTaskID: taskID, ToTaskID: pendingTaskID}}
+	persistGraph(t, db, taskSvc.tasks, edges)
 	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		atomID: fakeModelAtom(atomID),
+		atomID:        fakeModelAtom(atomID),
+		pendingAtomID: fakeModelAtom(pendingAtomID),
 	}}
 
 	engine.runDurationByName[taskID.String()] = 10 * time.Second
@@ -285,14 +293,65 @@ func TestRunLocalRunTimeoutFailsRun(t *testing.T) {
 		MaxParallelTasks:  1,
 		TaskFailurePolicy: taskFailurePolicyHalt,
 		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{edges: edges}, engine)
 
 	err := New(&models.Job{ID: jobID, RunTimeout: 80 * time.Millisecond}, opts...).Run(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "timed out")
+	require.Contains(t, err.Error(), "run timed out after 80ms")
 
 	snapshot := latestRunSnapshot(t, store, jobID)
 	require.Equal(t, run.StatusFailed, snapshot.Status)
+	require.Contains(t, snapshot.Error, "run timed out after 80ms")
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusFailed, status[taskID])
+	require.Equal(t, run.TaskStatusFailed, status[pendingTaskID], "run timeout must terminalize work that never dispatched")
+	require.True(t, engine.wasForceStopped(taskID.String()))
+	require.Empty(t, engine.createRequestsForTask(pendingTaskID))
+}
+
+func TestRunLocalRunTimeoutOverridesEarlierOrdinaryFailure(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+	jobID := uuid.New()
+	failedID := uuid.New()
+	runningID := uuid.New()
+	pendingID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: failedID, JobID: jobID, AtomID: uuid.New(), Position: 0},
+		{ID: runningID, JobID: jobID, AtomID: uuid.New(), Position: 1},
+		{ID: pendingID, JobID: jobID, AtomID: uuid.New(), Position: 2},
+	}}
+	edges := models.TaskEdges{{ID: uuid.New(), JobID: jobID, FromTaskID: runningID, ToTaskID: pendingID}}
+	persistGraph(t, db, taskSvc.tasks, edges)
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{}}
+	for _, taskModel := range taskSvc.tasks {
+		atomSvc.atoms[taskModel.AtomID] = fakeModelAtom(taskModel.AtomID)
+	}
+
+	engine.createErrByName[failedID.String()] = errors.New("ordinary first failure")
+	engine.runDurationByName[runningID.String()] = 10 * time.Second
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyContinue,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{edges: edges}, engine)
+
+	err := New(&models.Job{ID: jobID, RunTimeout: 80 * time.Millisecond}, opts...).Run(context.Background())
+	require.ErrorContains(t, err, "run timed out after 80ms")
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusFailed, snapshot.Status)
+	require.Contains(t, snapshot.Error, "run timed out after 80ms")
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusFailed, status[failedID])
+	require.Equal(t, run.TaskStatusFailed, status[runningID])
+	require.Equal(t, run.TaskStatusFailed, status[pendingID])
+	require.Contains(t, taskRunByID(snapshot, failedID).Error, "ordinary first failure",
+		"the timeout must not erase the earlier task's truthful error")
 }
 
 func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
@@ -641,9 +700,10 @@ type fakeEngine struct {
 
 	atoms map[string]*fakeEngineAtomState
 
-	inFlight      int
-	maxInFlight   int
-	stopForceByID map[string]bool
+	inFlight        int
+	maxInFlight     int
+	stopForceByID   map[string]bool
+	stopTimeoutByID map[string]time.Duration
 
 	// createRequests records every EngineCreateRequest in call order, so a test
 	// can assert on the recipe the executor actually handed the engine (image,
@@ -699,6 +759,7 @@ func newFakeEngine() *fakeEngine {
 		partitionActiveByAtomID: map[string]string{},
 		atoms:                   map[string]*fakeEngineAtomState{},
 		stopForceByID:           map[string]bool{},
+		stopTimeoutByID:         map[string]time.Duration{},
 	}
 }
 
@@ -830,6 +891,7 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 	if req.Force {
 		e.stopForceByID[atomLookupKey(req.ID)] = true
 	}
+	e.stopTimeoutByID[atomLookupKey(req.ID)] = req.Timeout
 
 	if state.stoppedAt.IsZero() {
 		state.stoppedAt = time.Now().UTC()
@@ -938,6 +1000,12 @@ func (e *fakeEngine) wasForceStopped(id string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.stopForceByID[id]
+}
+
+func (e *fakeEngine) stopTimeout(id string) time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stopTimeoutByID[id]
 }
 
 type fakeAtom struct {
