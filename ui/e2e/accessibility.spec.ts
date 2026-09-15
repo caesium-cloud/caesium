@@ -287,22 +287,22 @@ test("Trigger Job dialog is a labeled, focus-trapped dialog reachable and dismis
   // Radix's focus trap must cycle Tab within the dialog, wrapping at both
   // ends, rather than escaping to page chrome behind it. A single Tab from
   // the initially-focused field cannot prove this: this dialog has several
-  // focusable controls (the logical_date field, the params textarea, Cancel,
+  // focusable controls (the params textarea, Cancel,
   // Confirm Trigger, and the header's Close button), so ordinary untrapped
   // browser tab order would also stay inside for exactly one step even with
   // no trap at all. Instead, explicitly focus each boundary control and
   // confirm Tab/Shift+Tab wrap past it to the OTHER end of the dialog — the
   // only outcome an untrapped page cannot produce, since it would escape to
   // page chrome instead.
-  const logicalDateInput = dialog.getByLabel("logical_date");
+  const paramsInput = dialog.getByLabel("Run parameters");
   const closeButton = dialog.getByRole("button", { name: "Close" });
 
   await closeButton.focus();
   await page.keyboard.press("Tab");
-  await expect(logicalDateInput).toBeFocused();
+  await expect(paramsInput).toBeFocused();
   await expect(dialog.locator(":focus")).toBeVisible();
 
-  await logicalDateInput.focus();
+  await paramsInput.focus();
   await page.keyboard.press("Shift+Tab");
   await expect(closeButton).toBeFocused();
   await expect(dialog.locator(":focus")).toBeVisible();

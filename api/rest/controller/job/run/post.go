@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -34,6 +35,9 @@ func Post(c *echo.Context) error {
 	var req PostRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
+	if err := manualparams.Validate(req.Params); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
 	j, err := jsvc.Service(ctx).Get(id)

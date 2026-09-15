@@ -71,9 +71,19 @@ test("job detail trigger requires confirmation and lands on the run page", async
   await page.getByRole("button", { name: "Trigger job" }).click();
   await expect(page.getByRole("dialog", { name: "Trigger Job" })).toBeVisible();
 
-  await page.getByLabel("logical_date").fill("2026-07-07T12:00:00Z");
+  await expect(page.getByLabel("logical_date")).toHaveCount(0);
+  await page.getByLabel("Run parameters").fill("logical_date=2026-07-07T12:00:00Z");
+  await page.getByRole("button", { name: "Confirm Trigger" }).click();
+  await expect(page.getByText('Parameter "logical_date" is reserved for the scheduler.')).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Trigger Job" })).toBeVisible();
+
+  await page.getByLabel("Run parameters").fill("customer_date=2026-07-07\nmode=preview");
   await page.getByRole("button", { name: "Confirm Trigger" }).click();
 
   await page.waitForURL(new RegExp(`/jobs/${job.id}/runs/[^/]+$`));
   await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  const runId = new URL(page.url()).pathname.split("/").at(-1);
+  const response = await request.get(`/v1/jobs/${job.id}/runs/${runId}`);
+  expect(response.ok()).toBe(true);
+  expect((await response.json()).params).toEqual({ customer_date: "2026-07-07", mode: "preview" });
 });
