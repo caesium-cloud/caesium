@@ -734,7 +734,11 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 			if hashErr != nil {
 				return nil, fmt.Errorf("replay: interpolate env for step %q: %w", firstNonEmpty(task.taskName, group.taskName), hashErr)
 			}
-			unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
+			// An unresolved pinned baseline is not proof of immutable code identity.
+			// Re-execute it (and pending dependents) rather than accepting a legacy
+			// literal-tag entry. A frozen known digest remains reproducible.
+			identityUnavailable := task.descriptor.Cache.Enabled && task.descriptor.Cache.PinDigests && task.descriptor.Runtime.ResolvedImageDigest == ""
+			unchanged := !forceReexecute && !identityUnavailable && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
 			plan := plannedTask{
 				base:          task,
 				replayHash:    replayHash,

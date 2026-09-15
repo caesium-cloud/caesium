@@ -10,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/stretchr/testify/require"
 )
 
 // blobFor canonicalizes a HashInput the same way the write-path does (A2), so the
@@ -324,4 +325,15 @@ func TestDiff_InvalidJSONErrors(t *testing.T) {
 // reliably push the canonical blob past the 64 KB oversized bound.
 func padKey(i int) string {
 	return "padding-key-to-inflate-blob-size-" + strconv.Itoa(i)
+}
+
+func TestUnresolvedImageIdentityNoteSurvivesMissingBaseline(t *testing.T) {
+	raw := []byte(`{"blobVersion":1,"hash":"abc","unresolvedImageIdentity":"execution-one"}`)
+	diff, err := DiffHashInputBlobs(raw, nil)
+	require.NoError(t, err)
+	require.Contains(t, diff.Notes, unresolvedImageIdentityNote)
+	diff, err = DiffHashInputBlobs(raw, []byte(`{"blobVersion":1,"hash":"old"}`))
+	require.NoError(t, err)
+	require.Contains(t, diff.Notes, unresolvedImageIdentityNote)
+	require.Contains(t, diff.Changes, FieldChange{Field: "unresolvedImageIdentity", Kind: fieldScalar, After: "execution-one"})
 }

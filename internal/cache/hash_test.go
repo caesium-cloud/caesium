@@ -1372,3 +1372,20 @@ func TestCompute_ValuesChainBareStringPartitionOmitsEmptyFingerprint(t *testing.
 	assert.Equal(t, goldenStringFormHash, withEmpty.Compute(),
 		"empty partition fields must not change the transitive golden; no CacheVersion bump")
 }
+
+func TestUnresolvedImageIdentityIsExecutionSpecificAndPersisted(t *testing.T) {
+	first := HashInput{JobAlias: "unknown", Image: "node-local:mutable", UnresolvedImageIdentity: "execution-one"}
+	second := first
+	second.UnresolvedImageIdentity = "execution-two"
+	require.NotEqual(t, first.Compute(), second.Compute())
+	for _, oversized := range []bool{false, true} {
+		in := first
+		if oversized {
+			in.PredecessorOutputs = map[string]map[string]string{"source": {"large": strings.Repeat("x", maxHashInputBlobBytes)}}
+		}
+		raw, err := in.CanonicalJSON(in.Compute())
+		require.NoError(t, err)
+		blob := unmarshalBlob(t, raw)
+		require.Equal(t, in.UnresolvedImageIdentity, blob.UnresolvedImageIdentity)
+	}
+}

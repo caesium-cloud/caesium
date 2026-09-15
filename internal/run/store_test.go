@@ -2209,3 +2209,26 @@ func TestSetTaskHashWithDigestLeavesBlobNull(t *testing.T) {
 	require.Equal(t, "sha256:cafe", got.ResolvedImageDigest)
 	require.Empty(t, got.HashInputBlob)
 }
+
+func TestUnresolvedIdentityOverwriteClearsPriorDigestAndEffectiveHash(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskID := registerSingleTaskRun(t, store, db)
+	known := []byte(`{"blobVersion":1,"hash":"known","resolvedImageDigest":"sha256:old"}`)
+	require.NoError(t, store.SetTaskHashWithBlob(runID, taskID, "known", "sha256:old", known))
+	require.NoError(t, store.UpdateTaskExecutionDescriptorInputs(runID, taskID, nil, nil, "known", "sha256:old", known))
+	require.NoError(t, store.SetTaskEffectiveHash(runID, taskID, "old-equivalent"))
+	unknown := []byte(`{"blobVersion":1,"hash":"unknown","unresolvedImageIdentity":"new-execution"}`)
+	require.NoError(t, store.SetTaskHashWithBlob(runID, taskID, "unknown", "", unknown))
+	require.NoError(t, store.UpdateTaskExecutionDescriptorInputs(runID, taskID, nil, nil, "unknown", "", unknown))
+	var row models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&row).Error)
+	require.Empty(t, row.ResolvedImageDigest)
+	require.Empty(t, row.EffectiveHash)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	require.Empty(t, desc.Runtime.ResolvedImageDigest)
+	require.Empty(t, desc.Cache.EffectiveHash)
+	require.Equal(t, "unknown", desc.Cache.ComputedHash)
+}

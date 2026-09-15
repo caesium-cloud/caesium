@@ -137,8 +137,8 @@ type TaskRun struct {
 	CacheTTLNever bool `gorm:"not null;default:false" json:"-"`
 	// ResolvedImageDigest records the content digest (sha256:...) the image tag
 	// resolved to when pinning is on. Nullable: empty/unset when pinning is off
-	// or the digest could not be resolved (in which case the cache key falls
-	// back to the literal tag).
+	// or the digest could not be resolved (in which case requested pinning
+	// bypasses cache with an execution-specific unresolved identity).
 	ResolvedImageDigest string `gorm:"type:text" json:"resolved_image_digest,omitempty"`
 	// HashInputBlob is the canonical, secret-redacted, field-by-field JSON
 	// decomposition of the HashInput that produced Hash. Nullable: written only

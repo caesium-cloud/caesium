@@ -3,6 +3,7 @@ package imagecheck
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,14 +32,14 @@ func TestResolver_CachesWithinTTL(t *testing.T) {
 	var calls atomic.Int32
 	fn := func(_ context.Context, _ string) (string, error) {
 		calls.Add(1)
-		return "sha256:abc", nil
+		return "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", nil
 	}
 	r := NewResolver(WithEngineDigestFunc(models.AtomEngineDocker, fn))
 
 	for range 3 {
 		got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 		require.NoError(t, err)
-		assert.Equal(t, "sha256:abc", got)
+		assert.Equal(t, "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", got)
 	}
 	assert.Equal(t, int32(1), calls.Load(), "resolution should be cached within the TTL")
 }
@@ -48,7 +49,7 @@ func TestResolver_ZeroTTLAlwaysReresolves(t *testing.T) {
 	// the positive cache so each check re-resolves and a moved tag is detected
 	// immediately.
 	var calls atomic.Int32
-	digests := []string{"sha256:first", "sha256:second", "sha256:third"}
+	digests := []string{"sha256:a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e", "sha256:16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4", "sha256:b1e99324505bd32da0e1f85dcf5e19a09db0481e8a15f62c41eb320304a8e927"}
 	fn := func(_ context.Context, _ string) (string, error) {
 		n := calls.Add(1)
 		return digests[n-1], nil
@@ -65,7 +66,7 @@ func TestResolver_ZeroTTLAlwaysReresolves(t *testing.T) {
 
 func TestResolver_ReresolvesAfterTTL(t *testing.T) {
 	var calls atomic.Int32
-	digests := []string{"sha256:first", "sha256:second"}
+	digests := []string{"sha256:a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e", "sha256:16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4"}
 	fn := func(_ context.Context, _ string) (string, error) {
 		n := calls.Add(1)
 		return digests[n-1], nil
@@ -79,14 +80,14 @@ func TestResolver_ReresolvesAfterTTL(t *testing.T) {
 
 	got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:first", got)
+	assert.Equal(t, "sha256:a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e", got)
 
 	// Advance the clock past the TTL: a fresh resolution must happen, and a
 	// moved tag must surface its new digest (the correctness invariant).
 	now = now.Add(2 * time.Minute)
 	got, err = r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", time.Minute)
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:second", got)
+	assert.Equal(t, "sha256:16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4", got)
 	assert.Equal(t, int32(2), calls.Load())
 }
 
@@ -137,7 +138,7 @@ func TestResolver_NegativeCacheExpires(t *testing.T) {
 		err    error
 	}{
 		{"", errors.New("registry blip")},
-		{"sha256:recovered", nil},
+		{"sha256:f6e09cc89f85dcd21d987a4c4af142fe5bbb741de93d375af548f1d4f1d2063b", nil},
 	}
 	fn := func(_ context.Context, _ string) (string, error) {
 		n := calls.Add(1)
@@ -166,7 +167,7 @@ func TestResolver_NegativeCacheExpires(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	got, err := r.Resolve(context.Background(), models.AtomEngineDocker, "alpine:3.23", posTTL)
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:recovered", got)
+	assert.Equal(t, "sha256:f6e09cc89f85dcd21d987a4c4af142fe5bbb741de93d375af548f1d4f1d2063b", got)
 	assert.Equal(t, int32(2), calls.Load())
 }
 
@@ -219,15 +220,15 @@ func TestResolver_EmptyImageUnavailable(t *testing.T) {
 
 func TestRepoDigest_PrefersMatchingRepository(t *testing.T) {
 	repoDigests := []string{
-		"other/img@sha256:aaaa",
-		"library/app@sha256:bbbb",
+		"other/img@sha256:61be55a8e2f6b4e172338bddf184d6dbee29c98853e0a0485ecee7f27b9af0b4",
+		"library/app@sha256:81cc5b17018674b401b42f35ba07bb79e211239c23bffe658da1577e3e646877",
 	}
-	assert.Equal(t, "sha256:bbbb", repoDigest("library/app:1.0", repoDigests))
+	assert.Equal(t, "sha256:81cc5b17018674b401b42f35ba07bb79e211239c23bffe658da1577e3e646877", repoDigest("library/app:1.0", repoDigests))
 }
 
 func TestRepoDigest_FallsBackToFirst(t *testing.T) {
-	repoDigests := []string{"some/other@sha256:cccc"}
-	assert.Equal(t, "sha256:cccc", repoDigest("library/app:1.0", repoDigests))
+	repoDigests := []string{"some/other@sha256:b6fbd675f98e2abd22d4ed29fdc83150fedc48597e92dd1a7a24381d44a27451"}
+	assert.Equal(t, "sha256:b6fbd675f98e2abd22d4ed29fdc83150fedc48597e92dd1a7a24381d44a27451", repoDigest("library/app:1.0", repoDigests))
 }
 
 func TestRepoDigest_EmptyWhenNone(t *testing.T) {
@@ -249,9 +250,9 @@ func TestRepositoryOf(t *testing.T) {
 }
 
 func TestDigestFromReference(t *testing.T) {
-	d, ok := digestFromReference("repo@sha256:dead")
+	d, ok := digestFromReference("repo@sha256:28a3a5e81d1e89f0efc70b63bf717b921373fc7fac70bc1b7e4d466799c0c6b0")
 	assert.True(t, ok)
-	assert.Equal(t, "sha256:dead", d)
+	assert.Equal(t, "sha256:28a3a5e81d1e89f0efc70b63bf717b921373fc7fac70bc1b7e4d466799c0c6b0", d)
 
 	_, ok = digestFromReference("repo:tag")
 	assert.False(t, ok)
@@ -262,12 +263,12 @@ func TestDigestFromReference(t *testing.T) {
 
 func TestDockerInspectDigest_PrefersRepoDigest(t *testing.T) {
 	cli := fakeImageAPIClient{inspect: image.InspectResponse{
-		ID:          "sha256:configdigest",
-		RepoDigests: []string{"library/app@sha256:manifestdigest"},
+		ID:          "sha256:e0d6810644e01c3aef72e8c6d63392c4f35ea9605a00a441b5271455d24e43eb",
+		RepoDigests: []string{"library/app@sha256:3ee3e96d3d9b72b92f396bf32b8221eb3f7a771a882f85ceccf70aaebdb8df2e"},
 	}}
 	got, err := dockerInspectDigest(context.Background(), cli, "library/app:1.0")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:manifestdigest", got, "a RepoDigest should win over the config ID")
+	assert.Equal(t, "sha256:3ee3e96d3d9b72b92f396bf32b8221eb3f7a771a882f85ceccf70aaebdb8df2e", got, "a RepoDigest should win over the config ID")
 }
 
 func TestDockerInspectDigest_FallsBackToImageID(t *testing.T) {
@@ -297,4 +298,12 @@ func TestDockerInspectDigest_PropagatesInspectError(t *testing.T) {
 	cli := fakeImageAPIClient{err: errors.New("no such image")}
 	_, err := dockerInspectDigest(context.Background(), cli, "missing:tag")
 	assert.Error(t, err)
+}
+
+func TestResolverRejectsMalformedDigestBeforePinning(t *testing.T) {
+	for _, value := range []string{"sha256:abc", "id:sha256:abc", "sha256:", "sha256:" + strings.Repeat("g", 64)} {
+		r := NewResolver(WithEngineDigestFunc(models.AtomEngineKubernetes, func(context.Context, string) (string, error) { return value, nil }))
+		_, err := r.Resolve(context.Background(), models.AtomEngineKubernetes, "app:mutable", 0)
+		require.ErrorIs(t, err, ErrDigestUnavailable, value)
+	}
 }

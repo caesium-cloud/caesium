@@ -95,18 +95,18 @@ func TestNewResolver_DefaultRegistryClientUsesResolverCredentials(t *testing.T) 
 
 func TestDockerResolve_PrefersLocalDaemon(t *testing.T) {
 	cli := &pullingFakeClient{inspectBefore: image.InspectResponse{
-		ID:          "sha256:config",
-		RepoDigests: []string{"registry.example.com/app@sha256:local"},
+		ID:          "sha256:b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910",
+		RepoDigests: []string{"registry.example.com/app@sha256:25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6"},
 	}}
 	registryCalled := false
 	registryResolve := func(_ context.Context, _ string) (string, error) {
 		registryCalled = true
-		return "sha256:fromregistry", nil
+		return "sha256:7f1e5d050b1c1a32025ef438e239d8725a56c8889cfc3ca557249e1b2a4d8393", nil
 	}
 
 	got, err := dockerResolve(context.Background(), cli, registryResolve, noCredentials, "registry.example.com/app:1.0")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:local", got, "an image present in the daemon resolves locally")
+	assert.Equal(t, "sha256:25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6", got, "an image present in the daemon resolves locally")
 	assert.False(t, registryCalled, "no registry round-trip when the daemon has the image")
 	assert.Equal(t, 0, cli.pullCalls, "no pull when the daemon has the image")
 }
@@ -115,12 +115,12 @@ func TestDockerResolve_FallsBackToRegistryWithoutPulling(t *testing.T) {
 	cli := &pullingFakeClient{inspectErr: errors.New("No such image: registry.example.com/app:1.0")}
 	registryResolve := func(_ context.Context, ref string) (string, error) {
 		assert.Equal(t, "registry.example.com/app:1.0", ref)
-		return "sha256:fromregistry", nil
+		return "sha256:7f1e5d050b1c1a32025ef438e239d8725a56c8889cfc3ca557249e1b2a4d8393", nil
 	}
 
 	got, err := dockerResolve(context.Background(), cli, registryResolve, noCredentials, "registry.example.com/app:1.0")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:fromregistry", got, "an absent image resolves via the registry manifest")
+	assert.Equal(t, "sha256:7f1e5d050b1c1a32025ef438e239d8725a56c8889cfc3ca557249e1b2a4d8393", got, "an absent image resolves via the registry manifest")
 	assert.Equal(t, 0, cli.pullCalls, "a registry HEAD must not pull the image")
 }
 
@@ -128,8 +128,8 @@ func TestDockerResolve_FallsBackToAuthenticatedPull(t *testing.T) {
 	cli := &pullingFakeClient{
 		inspectErr: errors.New("No such image"),
 		afterPull: image.InspectResponse{
-			ID:          "sha256:config",
-			RepoDigests: []string{"registry.example.com/app@sha256:pulled"},
+			ID:          "sha256:b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910",
+			RepoDigests: []string{"registry.example.com/app@sha256:5ca8a34eac37884841c6925cc3ce17323a6ed90543d759706c97f2582af8fb03"},
 		},
 	}
 	registryResolve := func(_ context.Context, _ string) (string, error) {
@@ -139,7 +139,7 @@ func TestDockerResolve_FallsBackToAuthenticatedPull(t *testing.T) {
 
 	got, err := dockerResolve(context.Background(), cli, registryResolve, creds, "registry.example.com/app:1.0")
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:pulled", got)
+	assert.Equal(t, "sha256:5ca8a34eac37884841c6925cc3ce17323a6ed90543d759706c97f2582af8fb03", got)
 	assert.Equal(t, 1, cli.pullCalls, "the pull is the last resort, tried exactly once")
 
 	// The pull carried the operator's credentials as Docker RegistryAuth.
@@ -182,7 +182,7 @@ func TestDockerResolve_LocalImageWithoutRepoDigestsMarksImageID(t *testing.T) {
 	registryCalled := false
 	registryResolve := func(_ context.Context, _ string) (string, error) {
 		registryCalled = true
-		return "sha256:fromregistry", nil
+		return "sha256:7f1e5d050b1c1a32025ef438e239d8725a56c8889cfc3ca557249e1b2a4d8393", nil
 	}
 
 	got, err := dockerResolve(context.Background(), cli, registryResolve, noCredentials, "locally-built:dev")
