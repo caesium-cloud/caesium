@@ -359,6 +359,7 @@ type atomRunner struct {
 	image       string
 	command     []string
 	maxAttempts int
+	taskTimeout time.Duration
 	// cacheCfg is the cache configuration the SCHEDULER resolved at
 	// RegisterTasks, rebuilt from the row's seven cache columns the way
 	// runtimeExecutor.Execute rebuilds it. It must not be re-resolved from the
@@ -716,6 +717,7 @@ func buildLocalRunners(
 	j *job,
 	svc asvc.Atom,
 	currentRun *run.JobRun,
+	defaultTaskTimeout time.Duration,
 	atomsByTask map[uuid.UUID]*models.Atom,
 	runners map[uuid.UUID]*atomRunner,
 ) error {
@@ -758,6 +760,7 @@ func buildLocalRunners(
 			image:       taskState.Image,
 			command:     slices.Clone(taskState.Command),
 			maxAttempts: taskState.MaxAttempts,
+			taskTimeout: defaultTaskTimeout,
 			// Rebuilt field-for-field from the row, identical to the worker's
 			// construction in runtimeExecutor.Execute. An empty CacheChain —
 			// every row written before that column existed — means transitive,
@@ -968,19 +971,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
 	continueOnFailure := failurePolicy == taskFailurePolicyContinue
 
-	// Use job overrides if specified, otherwise fall back to environment variables
-	taskTimeout := j.taskTimeout
-	if taskTimeout == 0 {
-		taskTimeout = vars.TaskTimeout
-	}
-
-	// Apply run-level timeout if configured.
+	// The run-level timeout is applied after resolving the durable run row. A
+	// resumed execution must inherit its frozen timeout and current retry-window
+	// anchor rather than receive a fresh budget from mutable job metadata.
 	runTimeout := j.runTimeout
-	if runTimeout > 0 {
-		var runCancel context.CancelFunc
-		ctx, runCancel = context.WithTimeout(ctx, runTimeout)
-		defer runCancel()
-	}
 
 	maxParallel := j.maxParallelTasks
 	if maxParallel <= 0 {
@@ -1072,6 +1066,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 	var runErr error
 	completionArmed = true
 	defer func() {
+		// The run context is the authority for the whole-run deadline. It must
+		// win over an earlier ordinary task failure: with continue-on-failure a
+		// later task may consume the remaining run budget, and finalizing with
+		// the earlier error would leave that task and its pending siblings
+		// non-terminal. Per-task deadlines use child contexts and cannot enter
+		// this branch.
+		if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
+			runErr = cause
+			err = cause
+		}
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
 		}
@@ -1131,6 +1135,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
 		}
 	}()
+	runTimeout, runTimeoutStartedAt, deadlineErr := store.RunExecutionDeadline(ctx, runID, runTimeout)
+	if deadlineErr != nil {
+		runErr = fmt.Errorf("resolve run deadline: %w", deadlineErr)
+		return runErr
+	}
+	if runTimeout > 0 {
+		var runCancel context.CancelFunc
+		ctx, runCancel = context.WithDeadlineCause(ctx, runTimeoutStartedAt.Add(runTimeout), run.NewRunDeadlineError(runTimeout))
+		defer runCancel()
+	}
 	if runQuarantined && executionMode != executionModeDistributed {
 		runErr = ErrLocalQuarantinedReplayUnsupported
 		return runErr
@@ -1276,7 +1290,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// (internal/worker/runtime_executor.go, which reads taskRun.Engine,
 	// taskRun.Image and parseTaskCommand(taskRun.Command)) replayed the OLD one.
 	// To pick up a definition change, trigger a new run.
-	if err := buildLocalRunners(ctx, j, svc, currentRun, atomsByTask, runners); err != nil {
+	if err := buildLocalRunners(ctx, j, svc, currentRun, vars.TaskTimeout, atomsByTask, runners); err != nil {
 		runErr = err
 		return err
 	}
@@ -1442,7 +1456,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// and the instance's TaskRun primary key for a fan-out partition, where N
 	// sibling rows share (runID, taskID) and every store write and container name
 	// must therefore be keyed on the instance, not the catalog task.
-	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
+	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, attemptTimeout time.Duration, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 		// taskRef is what the run store resolves this execution to; see
 		// loadTaskRunByIDOrUnique for the primary-key-or-task-ID contract.
 		taskRef := taskID
@@ -1582,21 +1596,23 @@ func (j *job) Run(ctx context.Context) (err error) {
 				ID:    a.ID(),
 				Force: true,
 			})
+			cause := context.Cause(taskCtx)
 			switch {
-			case errors.Is(taskCtx.Err(), context.DeadlineExceeded):
+			case run.IsRunDeadlineError(cause):
 				if stopErr != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w; failed to stop atom %s: %v", cause, a.ID(), stopErr)
 				}
-				// Distinguish run-level timeout from task-level timeout.
-				if ctx.Err() != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, cause
+			case errors.Is(cause, context.DeadlineExceeded):
+				if stopErr != nil {
+					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, attemptTimeout, a.ID(), stopErr)
 				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
-			case errors.Is(taskCtx.Err(), context.Canceled):
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s", taskID, attemptTimeout)
+			case errors.Is(cause, context.Canceled):
 				if stopErr != nil {
 					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
 				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, taskCtx.Err())
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, cause)
 			}
 			// taskCtx is still live, so this is a genuine wait failure rather
 			// than a cancellation arriving by the other door. The stop is
@@ -2116,6 +2132,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
 				return
 			}
+			taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskRunID)
+			if timingErr != nil {
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: timingErr}
+				return
+			}
+			if taskTimeout == 0 {
+				taskTimeout = runner.taskTimeout
+			}
 
 			partEnv := map[string]string{
 				envName: m.partition.Key,
@@ -2177,6 +2201,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 					if entry, found, err := getCacheStore().Get(inputHash); err != nil {
 						log.Warn("cache lookup failed", "task", taskName, "partition", m.partition.Key, "error", err)
 					} else if found {
+						if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+							results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause}
+							return
+						}
 						if !taskQuarantined {
 							metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
 						}
@@ -2211,8 +2239,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if taskTimeout > 0 {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, runner, extra)
+			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, runner, extra)
 			cancel()
+			if execErr == nil {
+				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+					execErr = cause
+				}
+			}
 
 			if execErr == nil {
 				// Record violations on THIS INSTANCE's row. SaveSchemaViolations
@@ -2244,6 +2277,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 			if execErr != nil {
 				_ = store.SaveCapturedTaskLogSnapshot(runID, taskRunID, logSnapshot)
+				if run.IsRunDeadlineError(execErr) {
+					// The run completion defer fails every unfinished row in one
+					// transaction. Retrying or failing this instance here would apply
+					// ordinary task policy first and turn siblings into skips.
+					results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: execErr}
+					return
+				}
 				// Retries cover execution errors only, matching the unfanned
 				// local path: a container that ran and exited non-zero is a
 				// terminal result, not a transient fault.
@@ -2353,8 +2393,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// promptly — and fall through to the sweep, which runs detached
 				// and is the only thing that will resolve what was never
 				// dispatched.
-				if firstErr == nil {
-					firstErr = ctx.Err()
+				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) || firstErr == nil {
+					firstErr = cause
 				}
 				sawFailure = true
 				for inFlight > 0 {
@@ -2460,8 +2500,8 @@ func (j *job) Run(ctx context.Context) (err error) {
 					select {
 					case <-ctx.Done():
 						timer.Stop()
-						if firstErr == nil {
-							firstErr = ctx.Err()
+						if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) || firstErr == nil {
+							firstErr = cause
 						}
 					case <-timer.C:
 						timer.Stop()
@@ -2484,7 +2524,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			if res.err != nil {
 				sawFailure = true
-				if firstErr == nil {
+				if run.IsRunDeadlineError(res.err) || firstErr == nil {
 					firstErr = res.err
 				}
 				continue
@@ -2492,6 +2532,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if len(res.output) > 0 {
 				byPartition[res.partition] = res.output
 			}
+		}
+
+		// Run-timeout finalization owns every unfinished row in one transaction.
+		// The generic straggler sweep below records skips and unrecorded outcomes;
+		// doing that after the absolute deadline would hide which work the timeout
+		// actually interrupted and leave those rows outside the atomic failure.
+		if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+			return skippedTaskIDs, cause
+		}
+		if run.IsRunDeadlineError(firstErr) {
+			return skippedTaskIDs, firstErr
 		}
 
 		// The group node is about to be reported terminal to the run loop, so no
@@ -2703,7 +2754,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 		if runner == nil {
 			return nil, fmt.Errorf("missing runner for task %s", taskID)
 		}
-
 		// Build predecessor output env vars for this task.
 		predOutputs := make(map[string]map[string]string)
 		predOutputsByID := make(map[uuid.UUID]map[string]string)
@@ -2730,6 +2780,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		if group, ok := lookupFanOutGroup(taskID); ok && len(group.Instances) > 0 {
 			return runFannedGroup(taskID, runner, taskModel, group, outputEnv, predOutputs, predOutputsByID)
+		}
+		taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskID)
+		if timingErr != nil {
+			return nil, timingErr
+		}
+		if taskTimeout == 0 {
+			taskTimeout = runner.taskTimeout
 		}
 
 		// Cache check — attempt to bypass container execution.
@@ -2824,6 +2881,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 			case err != nil:
 				log.Warn("cache lookup failed", "task", taskName, "error", err)
 			case found:
+				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+					return nil, cause
+				}
 				if !taskQuarantined {
 					metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
 				}
@@ -2887,8 +2947,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, runner, outputEnv)
+			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, taskTimeout, runner, outputEnv)
 			cancel()
+			if execErr == nil {
+				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+					execErr = cause
+				}
+			}
 
 			if execErr == nil {
 				// Frozen row, not the live catalog - see the fanned twin above.
@@ -3005,6 +3070,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return skipped, fmt.Errorf("task %s failed with result %q", taskID, result)
 				}
 				return skipped, nil
+			}
+			if run.IsRunDeadlineError(execErr) {
+				// Preserve the typed cause for the run loop. CompleteIfActive in
+				// the run completion defer owns the atomic all-task transition.
+				return nil, execErr
 			}
 			lastErr = execErr
 
@@ -3201,7 +3271,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					runErr = ctx.Err()
+					runErr = context.Cause(ctx)
 					halt = true
 					continue
 				case <-timer.C:
@@ -3220,7 +3290,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				gotResult = true
 			case <-ctx.Done():
 				timer.Stop()
-				runErr = ctx.Err()
+				runErr = context.Cause(ctx)
 				halt = true
 				continue
 			case <-timer.C:
@@ -3245,6 +3315,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		if result.err != nil {
 			taskOutcomes[result.id] = run.TaskStatusFailed
+			if run.IsRunDeadlineError(result.err) {
+				// A genuine run deadline is the final run classification even
+				// when another independent task failed earlier under continue.
+				runErr = result.err
+				// CompleteIfActive below owns the atomic run-timeout transition.
+				// Do not apply ordinary task-failure policy here: it would turn
+				// unfinished siblings into skips just before that transition.
+				halt = true
+				queue = queue[:0]
+				continue
+			}
 			if runErr == nil {
 				runErr = result.err
 			}
@@ -3432,11 +3513,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 				}
 			}
 		}
-	}
-
-	// Wrap deadline-exceeded errors with a human-readable message.
-	if runTimeout > 0 && runErr != nil && errors.Is(runErr, context.DeadlineExceeded) {
-		runErr = fmt.Errorf("run timed out after %s", runTimeout)
 	}
 
 	if terminalTasks != liveTaskCount {

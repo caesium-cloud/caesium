@@ -30,6 +30,9 @@ type runResponse struct {
 type runTaskResponse struct {
 	ID               string                    `json:"id"`
 	Status           string                    `json:"status"`
+	RuntimeID        string                    `json:"runtime_id,omitempty"`
+	ClaimedBy        string                    `json:"claimed_by,omitempty"`
+	ClaimAttempt     int                       `json:"claim_attempt"`
 	Priority         int                       `json:"priority"`
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`

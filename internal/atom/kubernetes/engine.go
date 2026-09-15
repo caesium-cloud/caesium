@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -23,6 +24,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+const kubernetesStopAPITimeout = 30 * time.Second
 
 // kueueQueueLabel is the label Kueue reads to assign a workload to a LocalQueue.
 // Stamping it on the pod delegates admission to Kueue: its webhook gates the pod
@@ -218,21 +221,27 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 // (e.g. by a run-level timeout).
 func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 	var (
-		cancel context.CancelFunc
-		ctx    = context.Background()
-		bg     = metav1.DeletePropagationBackground
-		fg     = metav1.DeletePropagationForeground
-		opts   = metav1.DeleteOptions{PropagationPolicy: &fg}
+		bg   = metav1.DeletePropagationBackground
+		fg   = metav1.DeletePropagationForeground
+		opts = metav1.DeleteOptions{PropagationPolicy: &fg}
 	)
 
 	if req.Force {
 		opts.PropagationPolicy = &bg
+		// Use a short graceful deletion for deadline stops and ordinary teardown.
+		// Kubelet kills a TERM-ignoring container after this grace period before
+		// removing the pod. Zero would instead remove the API object without
+		// waiting for kubelet, losing the record of a possibly still-running pod.
+		grace := int64(1)
+		opts.GracePeriodSeconds = &grace
 	}
 
-	if req.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
-		defer cancel()
+	apiTimeout := req.Timeout
+	if apiTimeout <= 0 {
+		apiTimeout = kubernetesStopAPITimeout
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
 
 	return e.backend.Delete(ctx, req.ID, opts)
 }

@@ -36,6 +36,17 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
 | `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
 
+Job metadata can override the server task timeout with `taskTimeout` and set a
+whole-run deadline with `runTimeout`. These values are frozen when task rows are
+registered. A worker or run-owner takeover therefore uses the original absolute
+deadline rather than granting fresh time, while explicitly reopening a terminal
+run starts a new execution window under the same recorded limits. A run timeout
+atomically fails every unfinished task before late worker, owner, or cache-hit
+completion can publish successors.
+Kubernetes cleanup requests a one-second termination grace period. The pod
+remains visible while kubelet terminates it; Caesium does not use zero-grace API
+deletion as evidence that a container has stopped.
+
 ## Cancelling a Run Reaches the Container
 
 Cancelling a run — `POST /v1/jobs/:id/run` under a `replace` concurrency policy, or any other path through `CancelRun` — writes every non-terminal task row `cancelled` and publishes a `run_cancelled` event. Each execution mode turns that into a stopped container differently:

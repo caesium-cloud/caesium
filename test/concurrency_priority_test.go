@@ -316,7 +316,9 @@ metadata:
 trigger:
   type: cron
   configuration:
-    cron: "* * * * *"
+    # Every run in this scenario is started explicitly. Keep the persisted cron
+    # dormant so this fixture cannot write into later integration-test windows.
+    cron: "0 0 1 1 *"
 steps:
   - name: priority-step
     image: alpine:3.23

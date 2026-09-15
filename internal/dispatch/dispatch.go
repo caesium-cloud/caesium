@@ -41,17 +41,22 @@ import (
 
 // Rejection reason labels for caesium_complete_rejected_total.
 const (
-	ReasonStaleGeneration = "stale_generation"
-	ReasonWrongWorker     = "wrong_worker"
-	ReasonInvalidStatus   = "invalid_status"
-	ReasonTaskNotRunning  = "task_not_running"
-	ReasonNotOwner        = "not_owner"
-	ReasonMissingRun      = "missing_run"
-	ReasonMalformed       = "malformed"
+	ReasonStaleGeneration               = "stale_generation"
+	ReasonWrongWorker                   = "wrong_worker"
+	ReasonInvalidStatus                 = "invalid_status"
+	ReasonCompletionApplicationRejected = "completion_application_rejected"
+	ReasonCompletionApplyFailed         = "completion_apply_failed"
+	ReasonTaskNotRunning                = "task_not_running"
+	ReasonNotOwner                      = "not_owner"
+	ReasonMissingRun                    = "missing_run"
+	ReasonMalformed                     = "malformed"
 	// ReasonContention labels caesium_complete_retryable_total when the owner
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
 	ReasonContention = "contention"
+	// ReasonOwnerNotReady asks a push worker to retry while the memory owner is
+	// rebuilding its state. Falling back to SQL here would create two DAG writers.
+	ReasonOwnerNotReady = "owner_not_ready"
 	// ReasonAmbiguousTask rejects a dispatch that names only a catalog task id
 	// for a fan-out group that is already expanded into N instance rows.  There
 	// is no answer to "run this task" in that case, and every downstream write
@@ -133,6 +138,17 @@ type CapabilityAdvertiser interface {
 // distinct from a fence rejection (409), which is terminal — callers should
 // retry on ErrOwnerBusy and give up on any other error.
 var ErrOwnerBusy = errors.New("owner busy: retryable")
+
+// ErrOwnerNotReady means recovery has not published the run yet. Workers retain
+// the completion while their execution context and claim remain valid.
+var ErrOwnerNotReady = errors.New("owner recovery pending: retryable")
+
+// ErrOwnerRejected is an authoritative ownership/attempt fence, not a runtime failure.
+var ErrOwnerRejected = errors.New("owner completion fenced")
+
+// ErrCompletionApplicationRejected means the finished result failed validation,
+// while its worker claim remains eligible to report an ordinary task failure.
+var ErrCompletionApplicationRejected = errors.New("completion application rejected")
 
 // ErrPeerUnreachable wraps a TRANSPORT failure talking to a peer probed via
 // GetCapabilities, as distinct from a peer that answered with an unwelcome
@@ -650,8 +666,8 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	// Run-owner in-memory path: when enabled and this node holds the run's
 	// in-memory state, advance the DAG in memory and persist terminal-only rows
-	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
-	// falls through to the SQL path below as a safety net.
+	// (no per-transition SQL advancement). A run not yet tracked must retry:
+	// SQL fallback could otherwise commit across recovery's terminal-tail read.
 	if h.ownerManager != nil {
 		res, omErr := h.ownerManager.CompleteInstance(
 			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
@@ -672,17 +688,21 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Error("complete: owner-manager apply failed",
 				"run_id", req.RunID, "task_id", req.TaskID, "status", req.Status, "error", omErr)
-			writeJSON(w, http.StatusConflict, ErrorResponse{
-				Code:    ReasonTaskNotRunning,
-				Message: "failed to apply task completion",
-			})
+			writeCompletionApplyError(w, omErr)
 			return
 		}
 		if res.Owned {
 			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 			return
 		}
-		// Not tracked in memory here — fall through to the SQL path.
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "owner is rebuilding run state; retry completion",
+		})
+		return
 	}
 
 	// Rules 3 & 4 are enforced by the ClaimNext-path functions via
@@ -724,10 +744,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 				"status", req.Status,
 				"error", applyErr,
 			)
-			writeJSON(w, http.StatusConflict, ErrorResponse{
-				Code:    ReasonTaskNotRunning,
-				Message: "failed to apply task completion",
-			})
+			writeCompletionApplyError(w, applyErr)
 			return
 		}
 
@@ -765,10 +782,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 				"task_id", req.TaskID,
 				"error", applyErr,
 			)
-			writeJSON(w, http.StatusConflict, ErrorResponse{
-				Code:    ReasonTaskNotRunning,
-				Message: "failed to apply cache-hit completion",
-			})
+			writeCompletionApplyError(w, applyErr)
 			return
 		}
 	}
@@ -913,6 +927,16 @@ func GetCapabilities(ctx context.Context, targetURL, token string) (*Capabilitie
 	return &out, nil
 }
 
+// writeCompletionApplyError distinguishes deterministic partition validation from
+// unexpected storage/application faults; neither is an ownership fence.
+func writeCompletionApplyError(w http.ResponseWriter, err error) {
+	if _, ok := errors.AsType[*pkgtask.PartitionError](err); ok {
+		writeJSON(w, http.StatusUnprocessableEntity, ErrorResponse{Code: ReasonCompletionApplicationRejected, Message: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, ErrorResponse{Code: ReasonCompletionApplyFailed, Message: err.Error()})
+}
+
 // PostComplete sends a CompleteRequest from a worker to the owner node.
 func PostComplete(ctx context.Context, ownerURL, token string, req CompleteRequest) (*CompleteResponse, error) {
 	body, err := json.Marshal(req)
@@ -939,13 +963,28 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 		_ = json.Unmarshal(respBody, &result)
 		return &result, nil
 	}
-	// 503: the owner hit transient contention applying the completion and wants
-	// the worker to retry the same request.  Wrap ErrOwnerBusy so the caller can
-	// distinguish it from a terminal fence rejection (409) via errors.Is.
+	// Recovery is distinct from short write contention so the worker can retain
+	// the result for the lifetime of its claim instead of exhausting that budget.
+	// Unknown 503 bodies retain the existing contention classification.
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		var failure ErrorResponse
+		if json.Unmarshal(respBody, &failure) == nil && failure.Code == ReasonOwnerNotReady {
+			return nil, fmt.Errorf("complete: owner recovery pending: %w", ErrOwnerNotReady)
+		}
 		return nil, fmt.Errorf("complete: owner returned status %d: %w", resp.StatusCode, ErrOwnerBusy)
 	}
-	return nil, fmt.Errorf("complete: owner returned status %d", resp.StatusCode)
+	var failure ErrorResponse
+	decodedFailure := json.Unmarshal(respBody, &failure) == nil
+	// Prior owners used task_not_running only for completion application faults;
+	// actual claim/status fences use wrong_worker. Preserve that mixed-version path.
+	if decodedFailure && ((resp.StatusCode == http.StatusUnprocessableEntity && failure.Code == ReasonCompletionApplicationRejected) ||
+		(resp.StatusCode == http.StatusConflict && failure.Code == ReasonTaskNotRunning)) {
+		return nil, fmt.Errorf("complete: %w: %s", ErrCompletionApplicationRejected, failure.Message)
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("complete: owner returned status %d: %w: %s", resp.StatusCode, ErrOwnerRejected, failure.Message)
+	}
+	return nil, fmt.Errorf("complete: owner returned status %d: %s", resp.StatusCode, failure.Message)
 }
 
 // WarnIfNoToken emits a startup warning when owner mode is on but the
