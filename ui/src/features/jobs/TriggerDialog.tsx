@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent, type ReactElement } from "react";
 import { Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isSchedulerOwnedParam } from "./rerun-params";
@@ -9,12 +9,14 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 
 interface TriggerDialogProps {
   open: boolean;
   disabled?: boolean;
   isPending?: boolean;
+  trigger?: ReactElement;
   onConfirm: (params: Record<string, string>) => void;
   onOpenChange: (open: boolean) => void;
 }
@@ -23,6 +25,7 @@ export function TriggerDialog({
   open,
   disabled,
   isPending,
+  trigger,
   onConfirm,
   onOpenChange,
 }: TriggerDialogProps) {
@@ -60,7 +63,8 @@ export function TriggerDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg">
+      {trigger ? <DialogTrigger asChild>{trigger}</DialogTrigger> : null}
+      <DialogContent className="max-w-lg p-4 sm:rounded-lg sm:p-6">
         <DialogHeader>
           <DialogTitle>Trigger Job</DialogTitle>
           <DialogDescription>

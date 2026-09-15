@@ -72,7 +72,12 @@ function CountBadge({ value }: { value: number | null }) {
   );
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  className?: string;
+  onNavigate?: () => void;
+}
+
+export function Sidebar({ className, onNavigate }: SidebarProps) {
   const queryClient = useQueryClient();
   const counts = useNavCounts();
   const health = useClusterHealth();
@@ -136,7 +141,7 @@ export function Sidebar() {
   ];
 
   return (
-    <aside className="relative flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl shadow-sidebar/30">
+    <aside className={cn("relative flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl shadow-sidebar/30", className)}>
       {/* Gold accent rail on the left edge */}
       <span
         aria-hidden="true"
@@ -157,7 +162,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      <nav className="flex-1 space-y-1.5 p-3">
+      <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3">
         {navItems.map((item) => (
           <Link
             key={item.to}
@@ -169,6 +174,7 @@ export function Sidebar() {
             inactiveProps={{
               className: "text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
             }}
+            onClick={onNavigate}
             className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
           >
             <item.icon className="h-4 w-4 text-gold" />

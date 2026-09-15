@@ -336,7 +336,7 @@ export function RunDetailPage() {
         </div>
 
         {/* Action cluster */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button

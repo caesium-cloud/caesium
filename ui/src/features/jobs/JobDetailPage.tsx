@@ -450,15 +450,23 @@ export function JobDetailPage() {
             {featuredRun ? <div className="mt-2"><RunCacheSummary run={featuredRun} /></div> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button
-              size="sm"
-              aria-label="Trigger job"
-              onClick={() => setTriggerDialogOpen(true)}
-              disabled={triggerMutation.isPending || job.paused}
-            >
-              <Play className="mr-1.5 h-3.5 w-3.5" />
-              Trigger
-            </Button>
+            <TriggerDialog
+              open={triggerDialogOpen}
+              onOpenChange={setTriggerDialogOpen}
+              disabled={job.paused}
+              isPending={triggerMutation.isPending}
+              onConfirm={(params) => triggerMutation.mutate({ jobId: job.id, params })}
+              trigger={(
+                <Button
+                  size="sm"
+                  aria-label="Trigger job"
+                  disabled={triggerMutation.isPending || job.paused}
+                >
+                  <Play className="mr-1.5 h-3.5 w-3.5" />
+                  Trigger
+                </Button>
+              )}
+            />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -611,7 +619,7 @@ export function JobDetailPage() {
         }}
       >
         {secondaryView ? (
-          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-lg`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
             </DialogHeader>
@@ -642,14 +650,6 @@ export function JobDetailPage() {
           </DialogContent>
         ) : null}
       </Dialog>
-
-      <TriggerDialog
-        open={triggerDialogOpen}
-        onOpenChange={setTriggerDialogOpen}
-        disabled={job.paused}
-        isPending={triggerMutation.isPending}
-        onConfirm={(params) => triggerMutation.mutate({ jobId: job.id, params })}
-      />
 
       <BackfillDialog
         jobId={job.id}
