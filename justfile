@@ -1010,7 +1010,7 @@ ui-e2e: build-release
         cd ui; \
         npm ci; \
         npx playwright install chromium; \
-        npm run test:e2e -- --project=default'
+        npm run test:e2e -- --project=network-recovery'
 
 ui-e2e-auth: build-release
     #!/usr/bin/env bash

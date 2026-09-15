@@ -615,7 +615,7 @@ jobs:
       - name: Run Playwright E2E
         id: playwright
         working-directory: ui
-        run: npm run test:e2e -- --project=default
+        run: npm run test:e2e -- --project=network-recovery
       - name: Collect browser diagnostics
         if: always()
         env:

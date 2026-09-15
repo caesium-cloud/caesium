@@ -171,11 +171,12 @@ function isKnownViolationNode(label: string, ruleId: string, node: NodeResult): 
   });
 }
 
-async function assertNoNewViolations(page: Page, testInfo: TestInfo, label: string): Promise<void> {
-  const results: AxeResults = await new AxeBuilder({ page })
+async function assertNoNewViolations(page: Page, testInfo: TestInfo, label: string, include?: string): Promise<void> {
+  const scan = new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-    .exclude(CANVAS_EXCLUSIONS)
-    .analyze();
+    .exclude(CANVAS_EXCLUSIONS);
+  if (include) scan.include(include);
+  const results: AxeResults = await scan.analyze();
 
   await testInfo.attach(`axe-${label}`, {
     body: JSON.stringify(results.violations, null, 2),
@@ -279,7 +280,9 @@ test("Trigger Job dialog is a labeled, focus-trapped dialog reachable and dismis
   const dialog = page.getByRole("dialog", { name: "Trigger Job" });
   await expect(dialog).toBeVisible();
 
-  await assertNoNewViolations(page, testInfo, "trigger-job-dialog");
+  // Scan the dialog's controls, not page text intentionally dimmed behind its
+  // overlay. Page accessibility is checked by the separate page scenarios.
+  await assertNoNewViolations(page, testInfo, "trigger-job-dialog", '[role="dialog"]');
 
   // Radix's focus trap must cycle Tab within the dialog, wrapping at both
   // ends, rather than escaping to page chrome behind it. A single Tab from
