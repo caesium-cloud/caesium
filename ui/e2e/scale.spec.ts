@@ -102,15 +102,21 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
       reactFlow.boundingBox(),
       leafNode.boundingBox(),
     ]);
-    if (!viewportBox || !flowBox || !leafBox) return false;
+    if (!viewportBox || !flowBox || !leafBox) {
+      return { fits: false, canvas: viewportBox, flow: flowBox, leaf: leafBox };
+    }
 
-    return (
-      flowBox.y >= viewportBox.y &&
-      flowBox.y + flowBox.height <= viewportBox.y + viewportBox.height &&
-      leafBox.y >= flowBox.y &&
-      leafBox.y + leafBox.height <= flowBox.y + flowBox.height
-    );
-  }).toBe(true);
+    return {
+      fits:
+        flowBox.y >= viewportBox.y &&
+        flowBox.y + flowBox.height <= viewportBox.y + viewportBox.height &&
+        leafBox.y >= flowBox.y &&
+        leafBox.y + leafBox.height <= flowBox.y + flowBox.height,
+      canvas: viewportBox,
+      flow: flowBox,
+      leaf: leafBox,
+    };
+  }).toMatchObject({ fits: true });
   await expect(leafNode).toBeInViewport();
 });
 
