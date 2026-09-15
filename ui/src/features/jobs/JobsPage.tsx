@@ -97,7 +97,8 @@ function JobsPageInner() {
       />
 
       {/* Job grid */}
-      <div className="rounded-md border border-border/50 bg-card overflow-hidden">
+      <div data-testid="jobs-table-scroll" className="overflow-x-auto rounded-md border border-border/50 bg-card">
+        <div className="min-w-[720px] overflow-hidden">
         {/* Column headers */}
         <div
           className="grid items-center px-4 py-2 border-b border-border/50 bg-obsidian/30"
@@ -189,7 +190,7 @@ function JobsPageInner() {
               </div>
 
               {/* Actions column */}
-              <div className="py-2 flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center justify-end gap-0.5 py-2 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 group-focus-within:opacity-100">
                 <Button
                   variant="ghost"
                   size="icon"
@@ -197,6 +198,7 @@ function JobsPageInner() {
                   onClick={() => triggerMutation.mutate({ jobId: job.id })}
                   disabled={triggerMutation.isPending || isPaused}
                   title={isPaused ? "Unpause before triggering" : "Trigger run"}
+                  aria-label="Trigger run"
                 >
                   <Play className="h-3.5 w-3.5" />
                 </Button>
@@ -209,6 +211,7 @@ function JobsPageInner() {
                   }
                   disabled={pauseMutation.isPending}
                   title={isPaused ? "Unpause" : "Pause future runs"}
+                  aria-label={isPaused ? "Unpause job" : "Pause future runs"}
                 >
                   <Pause className="h-3.5 w-3.5" />
                 </Button>
@@ -216,6 +219,7 @@ function JobsPageInner() {
             </div>
           );
         })}
+        </div>
       </div>
 
       {/* Activity feed */}
@@ -259,7 +263,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
   return (
     <div className="flex flex-wrap items-center gap-3">
       {/* Status chips */}
-      <div className="flex items-center gap-1 rounded-md border border-border/50 bg-card p-1">
+      <div className="flex max-w-full overflow-x-auto rounded-md border border-border/50 bg-card p-1">
         {FILTER_CHIPS.map(({ key, label }) => {
           const count = counts[key];
           const isActive = statusFilter === key;
@@ -269,7 +273,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
               type="button"
               onClick={() => onStatusFilter(key)}
               className={cn(
-                "flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
+                "shrink-0 flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
                 isActive
                   ? "bg-obsidian text-text-1 shadow-sm"
                   : "text-text-3 hover:text-text-2 hover:bg-obsidian/50",
@@ -310,7 +314,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
       </div>
 
       {/* Sort */}
-      <div className="ml-auto flex items-center gap-1.5 text-[11px] text-text-3">
+      <div className="flex items-center gap-1.5 text-[11px] text-text-3 sm:ml-auto">
         <span>Sort</span>
         <select
           value={sort}

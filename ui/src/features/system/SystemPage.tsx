@@ -72,7 +72,7 @@ export function SystemPage() {
 
   return (
     <div className="space-y-6 pb-12">
-      <div className="flex items-end justify-between gap-4">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
         <div>
           <div className="text-[10px] font-bold uppercase tracking-widest text-gold/85 mb-1">Cluster · Health</div>
           <h1 className="text-2xl font-bold tracking-tight m-0 leading-tight">System</h1>
@@ -131,7 +131,7 @@ export function SystemPage() {
       </div>
 
       {/* KPI strips */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div data-testid="system-kpis" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <SysKpi icon={Database} label="Database" value={<span className="capitalize text-success">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} dot={db?.status === "healthy"} />
         <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{activeRuns?.count ?? 0}</span>} sub="Currently executing" />
         <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{triggers?.count ?? 0}</span>} sub="Registered" />
@@ -189,7 +189,7 @@ export function SystemPage() {
         <div className="absolute -top-10 -right-10 w-[200px] h-[200px] opacity-5 pointer-events-none">
           <AtomLogo size={200} animated={false} />
         </div>
-        <div className="flex justify-between items-start mb-4 relative z-10">
+        <div className="relative z-10 mb-4 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <div className="flex items-center gap-2">
               <TerminalSquare className="h-4 w-4 text-cyan-glow" />
@@ -301,7 +301,7 @@ export function SystemPage() {
 
 function SysKpi({ icon: Icon, label, value, sub, dot }: { icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode; sub: string; dot?: boolean }) {
   return (
-    <Card className="bg-midnight/30 border-graphite/50 p-3.5 hover:bg-midnight/50 transition-colors">
+    <Card data-testid="system-kpi" className="bg-midnight/30 border-graphite/50 p-3.5 hover:bg-midnight/50 transition-colors">
       <div className="flex justify-between items-center mb-2">
         <span className="text-[10px] font-bold tracking-widest uppercase text-text-3">{label}</span>
         <Icon className="h-3.5 w-3.5 text-text-4" />

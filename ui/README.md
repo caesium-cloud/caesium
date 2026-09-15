@@ -94,6 +94,17 @@ just ui-e2e
 
 `just ui-e2e` starts a real Caesium server with the embedded UI, installs Chromium if needed, and runs Playwright against the operator flow.
 
+### Responsive operator console
+
+Below the `lg` breakpoint, the fixed sidebar becomes a Radix focus-trapped navigation drawer. It closes on navigation, Escape, browser history, and a resize back to desktop; the menu trigger receives focus after a phone-sized close and desktop navigation receives focus after a resize. The command palette becomes an icon button at small widths so every header control remains reachable.
+
+Jobs keeps its operational columns in a deliberately horizontal scroll region on narrow displays, while page content and System cards stack without widening the main viewport. The live mobile coverage drives Jobs, a run detail and task log panel, System, navigation, and Trigger Job at phone, tablet, and desktop widths:
+
+```bash
+cd ui
+npm run test:e2e -- --project=default mobile-console.spec.ts
+```
+
 ## Notes
 
 - The UI depends on real REST and SSE endpoints; it is not a standalone mock frontend.
