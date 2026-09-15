@@ -115,7 +115,7 @@ export function ReplayDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-h-[90vh] max-w-5xl overflow-y-auto"
+        className="max-h-[90vh] max-w-5xl overflow-y-auto p-4 sm:rounded-lg sm:p-6"
         data-testid="replay-dialog"
       >
         <DialogHeader>

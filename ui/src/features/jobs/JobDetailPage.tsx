@@ -619,7 +619,7 @@ export function JobDetailPage() {
         }}
       >
         {secondaryView ? (
-          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-lg`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
             </DialogHeader>

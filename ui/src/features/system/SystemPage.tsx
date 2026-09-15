@@ -278,7 +278,7 @@ export function SystemPage() {
       </div>
 
       <Dialog open={pruneDialogOpen} onOpenChange={setPruneDialogOpen}>
-        <DialogContent className="sm:max-w-[425px] bg-midnight border-graphite/50 text-text-1">
+        <DialogContent className="bg-midnight border-graphite/50 p-4 text-text-1 sm:max-w-[425px] sm:rounded-lg sm:p-6">
           <DialogHeader>
             <DialogTitle className="text-lg">Prune expired cache entries</DialogTitle>
             <DialogDescription className="text-text-3 mt-1.5">

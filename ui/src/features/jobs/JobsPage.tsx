@@ -98,20 +98,6 @@ function JobsPageInner() {
 
       {/* Job grid */}
       <div data-testid="jobs-table-scroll" className="overflow-x-auto rounded-md border border-border/50 bg-card">
-        <div className="min-w-[720px] overflow-hidden">
-        {/* Column headers */}
-        <div
-          className="grid items-center px-4 py-2 border-b border-border/50 bg-obsidian/30"
-          style={{ gridTemplateColumns: "1fr 130px 120px 90px 96px 72px" }}
-        >
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Pipeline</span>
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Status</span>
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Last run</span>
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Duration</span>
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">History</span>
-          <span className="sr-only">Actions</span>
-        </div>
-
         {rows.length === 0 ? (
           <EmptyState
             title={search || statusFilter !== "all" ? "No pipelines match" : "No pipelines yet"}
@@ -122,104 +108,118 @@ function JobsPageInner() {
             }
             className="py-20"
           />
-        ) : null}
-
-        {rows.map((job) => {
-          const lr = job.latest_run;
-          const isRunning = lr?.status === "running";
-          const isPaused = job.paused;
-
-          return (
+        ) : (
+          <div className="min-w-[720px] overflow-hidden">
+            {/* Column headers */}
             <div
-              key={job.id}
-              data-testid="job-row"
-              className={cn(
-                "group grid items-center px-4 py-0 border-b border-border/40 last:border-0 transition-colors",
-                "hover:bg-obsidian/60",
-                isRunning && [
-                  "border-l-2 border-l-cyan-glow/60",
-                  "bg-running/5",
-                ],
-                isPaused && !isRunning && "bg-warning/5",
-              )}
-              style={{ gridTemplateColumns: "1fr 130px 120px 90px 96px 72px", minHeight: "52px" }}
+              className="grid items-center px-4 py-2 border-b border-border/50 bg-obsidian/30"
+              style={{ gridTemplateColumns: "1fr 130px 120px 90px 96px 72px" }}
             >
-              {/* Alias column */}
-              <div className="min-w-0 py-3 pr-3">
-                <div className="flex items-center gap-2">
-                  <Link
-                    to="/jobs/$jobId"
-                    params={{ jobId: job.id }}
-                    className="font-medium text-text-1 hover:text-cyan-glow truncate transition-colors"
-                  >
-                    {job.alias}
-                  </Link>
-                  {isPaused && (
-                    <StatusBadge status="paused" variant="soft" size="sm" />
-                  )}
-                </div>
-                <div className="text-[10px] font-mono text-text-4 mt-0.5">{shortId(job.id)}</div>
-              </div>
-
-              {/* Status column */}
-              <div className="py-3">
-                {lr ? (
-                  <StatusBadge status={lr.status} size="sm" />
-                ) : (
-                  <span className="text-[11px] text-text-4">—</span>
-                )}
-              </div>
-
-              {/* Last run column */}
-              <div className="py-3 text-sm text-text-2 tabular-nums">
-                {lr ? <RelativeTime date={lr.started_at} /> : <span className="text-text-4">—</span>}
-              </div>
-
-              {/* Duration column */}
-              <div className="py-3 text-sm font-mono text-text-2 tabular-nums">
-                {lr ? (
-                  <Duration start={lr.started_at} end={lr.completed_at} />
-                ) : (
-                  <span className="text-text-4">—</span>
-                )}
-              </div>
-
-              {/* Sparkline column */}
-              <div className="py-3">
-                <Sparkline runs={job.lastRuns} width={84} height={20} />
-              </div>
-
-              {/* Actions column */}
-              <div className="flex items-center justify-end gap-0.5 py-2 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 group-focus-within:opacity-100">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() => triggerMutation.mutate({ jobId: job.id })}
-                  disabled={triggerMutation.isPending || isPaused}
-                  title={isPaused ? "Unpause before triggering" : "Trigger run"}
-                  aria-label="Trigger run"
-                >
-                  <Play className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() =>
-                    pauseMutation.mutate({ jobId: job.id, paused: !isPaused, hasActiveRun: isRunning })
-                  }
-                  disabled={pauseMutation.isPending}
-                  title={isPaused ? "Unpause" : "Pause future runs"}
-                  aria-label={isPaused ? "Unpause job" : "Pause future runs"}
-                >
-                  <Pause className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Pipeline</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Status</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Last run</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Duration</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">History</span>
+              <span className="sr-only">Actions</span>
             </div>
-          );
-        })}
-        </div>
+
+            {rows.map((job) => {
+              const lr = job.latest_run;
+              const isRunning = lr?.status === "running";
+              const isPaused = job.paused;
+
+              return (
+                <div
+                  key={job.id}
+                  data-testid="job-row"
+                  className={cn(
+                    "group grid items-center px-4 py-0 border-b border-border/40 last:border-0 transition-colors",
+                    "hover:bg-obsidian/60",
+                    isRunning && [
+                      "border-l-2 border-l-cyan-glow/60",
+                      "bg-running/5",
+                    ],
+                    isPaused && !isRunning && "bg-warning/5",
+                  )}
+                  style={{ gridTemplateColumns: "1fr 130px 120px 90px 96px 72px", minHeight: "52px" }}
+                >
+                  {/* Alias column */}
+                  <div className="min-w-0 py-3 pr-3">
+                    <div className="flex items-center gap-2">
+                      <Link
+                        to="/jobs/$jobId"
+                        params={{ jobId: job.id }}
+                        className="font-medium text-text-1 hover:text-cyan-glow truncate transition-colors"
+                      >
+                        {job.alias}
+                      </Link>
+                      {isPaused && (
+                        <StatusBadge status="paused" variant="soft" size="sm" />
+                      )}
+                    </div>
+                    <div className="text-[10px] font-mono text-text-4 mt-0.5">{shortId(job.id)}</div>
+                  </div>
+
+                  {/* Status column */}
+                  <div className="py-3">
+                    {lr ? (
+                      <StatusBadge status={lr.status} size="sm" />
+                    ) : (
+                      <span className="text-[11px] text-text-4">—</span>
+                    )}
+                  </div>
+
+                  {/* Last run column */}
+                  <div className="py-3 text-sm text-text-2 tabular-nums">
+                    {lr ? <RelativeTime date={lr.started_at} /> : <span className="text-text-4">—</span>}
+                  </div>
+
+                  {/* Duration column */}
+                  <div className="py-3 text-sm font-mono text-text-2 tabular-nums">
+                    {lr ? (
+                      <Duration start={lr.started_at} end={lr.completed_at} />
+                    ) : (
+                      <span className="text-text-4">—</span>
+                    )}
+                  </div>
+
+                  {/* Sparkline column */}
+                  <div className="py-3">
+                    <Sparkline runs={job.lastRuns} width={84} height={20} />
+                  </div>
+
+                  {/* Actions column */}
+                  <div className="flex items-center justify-end gap-0.5 py-2 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 group-focus-within:opacity-100">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => triggerMutation.mutate({ jobId: job.id })}
+                      disabled={triggerMutation.isPending || isPaused}
+                      title={isPaused ? "Unpause before triggering" : "Trigger run"}
+                      aria-label={isPaused ? "Unpause before triggering" : "Trigger run"}
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() =>
+                        pauseMutation.mutate({ jobId: job.id, paused: !isPaused, hasActiveRun: isRunning })
+                      }
+                      disabled={pauseMutation.isPending}
+                      title={isPaused ? "Unpause" : "Pause future runs"}
+                      aria-label={isPaused ? "Unpause job" : "Pause future runs"}
+                    >
+                      <Pause className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Activity feed */}
@@ -263,7 +263,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
   return (
     <div className="flex flex-wrap items-center gap-3">
       {/* Status chips */}
-      <div className="flex max-w-full overflow-x-auto rounded-md border border-border/50 bg-card p-1">
+      <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border border-border/50 bg-card p-1">
         {FILTER_CHIPS.map(({ key, label }) => {
           const count = counts[key];
           const isActive = statusFilter === key;

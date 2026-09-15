@@ -78,7 +78,7 @@ export function AppShell() {
                 navigationButtonRef.current?.focus();
               }
             }}
-            className="left-0 top-0 h-dvh w-[min(20rem,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-y-0 border-l-0 p-0 data-[state=closed]:slide-out-to-left data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-left data-[state=open]:slide-in-from-top-0 lg:hidden"
+            className="left-0 top-0 h-dvh max-h-none w-[min(20rem,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-y-0 border-l-0 p-0 data-[state=closed]:slide-out-to-left data-[state=closed]:slide-out-to-top-0 data-[state=open]:slide-in-from-left data-[state=open]:slide-in-from-top-0 lg:hidden"
           >
             <DialogTitle className="sr-only">Navigation</DialogTitle>
             <Sidebar className="h-full w-full border-0" onNavigate={() => setNavigationOpen(false)} />

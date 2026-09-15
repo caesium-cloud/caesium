@@ -10,6 +10,16 @@ async function expectWithinViewport(page: Page, locator: Locator, viewportWidth:
   }).toBe(true);
 }
 
+async function expectDialogContentFitsViewport(page: Page, dialog: Locator) {
+  await expect.poll(async () => {
+    const box = await dialog.boundingBox();
+    const viewport = page.viewportSize();
+    return box && viewport
+      ? box.x >= 0 && box.y >= 0 && box.x + box.width <= viewport.width + 1 && box.y + box.height <= viewport.height + 1
+      : false;
+  }).toBe(true);
+}
+
 async function expectNoPageHorizontalOverflow(page: Page) {
   await expect.poll(() => page.evaluate(() =>
     document.documentElement.scrollWidth <= window.innerWidth &&
@@ -59,7 +69,14 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await expectNoPageHorizontalOverflow(page);
   await expectHeaderActionsDoNotOverlap(page);
   await page.getByRole("button", { name: "Open search" }).click();
-  await expect(page.getByPlaceholder("Type a command or search...")).toBeVisible();
+  const commandInput = page.getByPlaceholder("Type a command or search...");
+  await expect(commandInput).toBeVisible();
+  const commandDialog = page.getByRole("dialog").filter({ has: commandInput });
+  await expectDialogContentFitsViewport(page, commandDialog);
+  await expect.poll(async () => {
+    const [dialogBox, inputBox] = await Promise.all([commandDialog.boundingBox(), commandInput.locator("..").boundingBox()]);
+    return Boolean(dialogBox && inputBox && Math.abs(dialogBox.x - inputBox.x) <= 1);
+  }).toBe(true);
   await page.keyboard.press("Escape");
 
   // The job table retains its operational columns, but its own scroll viewport
@@ -71,6 +88,14 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
     scrollWidth: table.scrollWidth,
   }))).toEqual(expect.objectContaining({ overflowX: "auto" }));
   await expect.poll(() => jobsTable.evaluate((table) => table.scrollWidth > table.clientWidth)).toBe(true);
+  const searchInput = page.getByPlaceholder("Filter pipelines…");
+  await searchInput.fill("no-mobile-match");
+  const emptyState = page.getByRole("status");
+  await expect(emptyState).toContainText("No pipelines match");
+  await expectWithinViewport(page, emptyState, 390);
+  await expect.poll(() => jobsTable.evaluate((table) => table.scrollWidth === table.clientWidth)).toBe(true);
+  await searchInput.fill("");
+  await expect(emptyState).toBeHidden();
   await jobsTable.evaluate((table) => { table.scrollLeft = table.scrollWidth; });
   const rowTrigger = page.getByTestId("job-row").filter({ hasText: job.alias }).getByRole("button", { name: "Trigger run" });
   await expect(rowTrigger).toBeVisible();
@@ -131,10 +156,7 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await trigger.click();
   const triggerDialog = page.getByRole("dialog", { name: "Trigger Job" });
   await expect(triggerDialog).toBeVisible();
-  await expect.poll(async () => {
-    const box = await triggerDialog.boundingBox();
-    return box ? box.width <= 390 - 31 && box.height <= 844 - 31 : false;
-  }).toBe(true);
+  await expectDialogContentFitsViewport(page, triggerDialog);
   const runParameters = triggerDialog.getByLabel("Run parameters");
   const closeDialog = triggerDialog.getByRole("button", { name: "Close" });
   await runParameters.focus();
@@ -152,6 +174,11 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await expectWithinViewport(page, page.locator("main"), 768);
   await menu.click();
   await expect(drawer).toBeVisible();
+  await expect.poll(async () => {
+    const box = await drawer.boundingBox();
+    return box ? box.x === 0 && box.y === 0 && box.width <= 320 && Math.abs(box.height - 1024) <= 1 : false;
+  }).toBe(true);
+  await expect(drawer).toHaveCSS("border-top-left-radius", "0px");
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
   await expect(menu).toBeFocused();
@@ -166,6 +193,27 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await page.goBack();
   await expect(page).toHaveURL(/\/jobs$/);
   await expect(drawer).toBeHidden();
+  await page.getByRole("button", { name: "Open search" }).click();
+  await expect(commandInput).toBeVisible();
+  await expectDialogContentFitsViewport(page, commandDialog);
+  await expect.poll(async () => {
+    const [dialogBox, inputBox] = await Promise.all([commandDialog.boundingBox(), commandInput.locator("..").boundingBox()]);
+    return Boolean(dialogBox && inputBox && Math.abs(dialogBox.x - inputBox.x) <= 1);
+  }).toBe(true);
+  await page.keyboard.press("Escape");
+  await page.goto(`/jobs/${job.id}`);
+  await page.getByRole("link", { name: "Runs" }).click();
+  const secondaryDialog = page.getByRole("dialog", { name: "Run History" });
+  await expectDialogContentFitsViewport(page, secondaryDialog);
+  await expect.poll(async () => {
+    const [dialogBox, titleBox] = await Promise.all([secondaryDialog.boundingBox(), secondaryDialog.getByText("Run History", { exact: true }).boundingBox()]);
+    return Boolean(dialogBox && titleBox && Math.abs(titleBox.x - dialogBox.x - 24) <= 1);
+  }).toBe(true);
+  await page.keyboard.press("Escape");
+  await page.goto("/jobs");
+  await expect(page.getByRole("heading", { name: "Jobs", exact: true })).toBeVisible();
+  await expect(jobsTable).toBeVisible();
+  await finishMainEntranceAnimation(page);
   await page.screenshot({ path: testInfo.outputPath("tablet-jobs.png") });
 
   await page.setViewportSize({ width: 390, height: 390 });

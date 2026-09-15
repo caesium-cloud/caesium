@@ -532,7 +532,7 @@ export function TriggersPage() {
       </div>
 
       <Dialog open={editorOpen} onOpenChange={(open) => !editorPending && setEditorOpen(open)}>
-        <DialogContent className="max-w-2xl bg-midnight border-graphite/50 text-text-1">
+        <DialogContent className="max-w-2xl bg-midnight border-graphite/50 p-4 text-text-1 sm:rounded-lg sm:p-6">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold">{editorMode === "create" ? "New HTTP Trigger" : "Edit HTTP Trigger"}</DialogTitle>
             <DialogDescription className="text-text-3">

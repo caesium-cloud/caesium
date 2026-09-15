@@ -64,7 +64,7 @@ export function TriggerDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       {trigger ? <DialogTrigger asChild>{trigger}</DialogTrigger> : null}
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg p-4 sm:rounded-lg sm:p-6">
         <DialogHeader>
           <DialogTitle>Trigger Job</DialogTitle>
           <DialogDescription>
