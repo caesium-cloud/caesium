@@ -511,7 +511,8 @@ export interface Node {
   leader?: boolean;
   reachability?: Reachability;
   latency_ms?: number;
-  workers_busy: number;
+  /** Null when the server could not read the count within its budget. */
+  workers_busy: number | null;
   workers_total: number;
 }
 

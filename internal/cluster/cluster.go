@@ -171,12 +171,17 @@ const (
 	// refresh is scheduled. The console polls every 15s, so a failure surfaces
 	// within roughly one poll cycle.
 	refreshInterval = 10 * time.Second
-	// probeTimeout bounds a single member's dqlite RPC. Probes run in parallel,
-	// so this also bounds the whole refresh.
+	// probeTimeout bounds a single member's dqlite RPC.
 	probeTimeout = 2 * time.Second
-	// maxProbes caps the fan-out so a long-lived cluster with a large membership
-	// list can never turn a refresh into a stampede.
-	maxProbes = 32
+	// maxConcurrentProbes caps how many probes are IN FLIGHT at once, so a
+	// large membership cannot turn a refresh into a stampede. It bounds
+	// parallelism only — every member is still probed, in waves.
+	maxConcurrentProbes = 32
+	// refreshBudget bounds one whole background refresh: membership plus every
+	// wave of probes. It is generous because nothing waits on it — Snapshot
+	// returns the previous observation immediately — and because a membership
+	// larger than maxConcurrentProbes needs more than one wave.
+	refreshBudget = 60 * time.Second
 )
 
 // membershipFunc reports raft membership and the current leader address.
@@ -218,10 +223,10 @@ func Snapshot() View {
 	view.Members = append([]Member(nil), view.Members...)
 	if start {
 		go func() {
-			// Membership and the probe fan-out each get probeTimeout; the
-			// headroom here keeps a slow membership call from cutting the
-			// probes short and reporting a live member as unreachable.
-			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout*3)
+			// The budget covers membership plus every wave of probes, with
+			// headroom so a slow membership call cannot cut probes short and
+			// report a live member as unreachable.
+			ctx, cancel := context.WithTimeout(context.Background(), refreshBudget)
 			defer cancel()
 			// The flag is cleared even if observe panics, so one bad refresh
 			// cannot wedge the cache as permanently stale.
@@ -333,15 +338,33 @@ func observe(ctx context.Context) View {
 	}
 }
 
+// probeMembers probes EVERY member, with at most maxConcurrentProbes RPCs in
+// flight at once.
+//
+// Concurrency is capped with a semaphore rather than by truncating the member
+// list: an earlier version stopped the loop at the cap, so on a membership
+// larger than the cap the members past it were never probed at all and stayed
+// Unknown forever — which, since unknown liveness is never healthy, meant such
+// a deployment could never report healthy. A cap on parallelism must not become
+// a cap on coverage.
 func probeMembers(ctx context.Context, members []Member) {
+	sem := make(chan struct{}, maxConcurrentProbes)
 	var wg sync.WaitGroup
+
 	for i := range members {
-		if i >= maxProbes {
-			break
-		}
 		wg.Add(1)
 		go func(m *Member) {
 			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				// The refresh budget ran out before this member's turn. It
+				// stays Unknown, which is honest: it was never probed.
+				return
+			}
+
 			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 

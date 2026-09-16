@@ -217,7 +217,7 @@ export function SystemPage() {
                   </div>
                   <span className="text-[11px] text-text-2 truncate">{reachabilityLabel(n.reachability)}</span>
                   <span className="font-mono text-[11px] text-text-2 truncate">{n.role ?? "unknown"}</span>
-                  <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy}/{n.workers_total}</span>
+                  <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy ?? "?"}/{n.workers_total}</span>
                 </div>
               ))
             )}

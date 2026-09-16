@@ -63,7 +63,7 @@ type systemNode struct {
 	Leader       bool   `json:"leader"`
 	Reachability string `json:"reachability"`
 	LatencyMs    *int64 `json:"latency_ms"`
-	WorkersBusy  int    `json:"workers_busy"`
+	WorkersBusy  *int   `json:"workers_busy"`
 	WorkersTotal int    `json:"workers_total"`
 }
 
@@ -193,6 +193,9 @@ func (s *IntegrationTestSuite) TestSystemNodesReportObservedReachability() {
 		if n.Reachability == "reachable" {
 			reachable++
 			require.NotNil(s.T(), n.LatencyMs, "node %s reported reachable without a measured probe", n.Address)
+			// The database enrichment is bounded and degrades to null on
+			// timeout; on a healthy lane it must actually have completed.
+			require.NotNil(s.T(), n.WorkersBusy, "node %s reported no worker count on a healthy lane", n.Address)
 		}
 	}
 	assert.Equal(s.T(), 1, leaders, "exactly one node must be flagged as leader")

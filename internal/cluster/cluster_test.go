@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -313,6 +315,75 @@ func TestObserveProbesEveryMemberAndMarksTheLeader(t *testing.T) {
 	require.False(t, dead.Leader)
 	require.Equal(t, Unreachable, dead.Reachability)
 	require.Nil(t, dead.LatencyMs)
+}
+
+// TestObserveProbesEveryMemberBeyondTheConcurrencyCap: the cap must bound
+// PARALLELISM, not coverage. An earlier version truncated the member list at
+// the cap, so on a larger membership the members past it were never probed and
+// stayed Unknown forever — and unknown liveness is never healthy, so such a
+// deployment could never report healthy.
+func TestObserveProbesEveryMemberBeyondTheConcurrencyCap(t *testing.T) {
+	const total = maxConcurrentProbes + 8
+
+	infos := make([]client.NodeInfo, 0, total)
+	for i := range total {
+		infos = append(infos, client.NodeInfo{
+			ID: uint64(i + 1),
+			// Zero-padded so lexical sorting cannot coincidentally place the
+			// members this test cares about inside the first wave.
+			Address: fmt.Sprintf("10.0.0.%03d:9001", i+1),
+			Role:    client.Voter,
+		})
+	}
+
+	var (
+		mu       sync.Mutex
+		probed   = map[string]int{}
+		inFlight int
+		peak     int
+	)
+	restore := stub(t,
+		func(context.Context) ([]client.NodeInfo, string, error) {
+			return infos, infos[0].Address, nil
+		},
+		func(_ context.Context, addr string) error {
+			mu.Lock()
+			probed[addr]++
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+			mu.Unlock()
+
+			time.Sleep(2 * time.Millisecond)
+
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return nil
+		},
+	)
+	defer restore()
+
+	view := observe(context.Background())
+
+	require.Len(t, view.Members, total)
+	for _, info := range infos {
+		require.Equal(t, 1, probed[info.Address], "member %s was not probed exactly once", info.Address)
+	}
+	for _, m := range view.Members {
+		require.Equal(t, Reachable, m.Reachability, "member %s was left unprobed", m.Address)
+	}
+
+	require.Equal(t, total, view.Quorum.TotalVoters)
+	require.Equal(t, total, view.Quorum.ReachableVoters)
+	require.Equal(t, StatusAvailable, view.Quorum.Status, "a large membership must be able to report healthy")
+	require.Equal(t, StatusAvailable, view.Nodes.Status)
+	require.Zero(t, view.Nodes.Unknown)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.LessOrEqual(t, peak, maxConcurrentProbes, "probe concurrency exceeded the cap")
 }
 
 func TestObserveWithUnavailableMembershipReportsUnknownNotHealthy(t *testing.T) {
