@@ -47,6 +47,10 @@ type Signal struct {
 	EventType string
 	// Result is the atom.Result string persisted on TaskRun.Result.
 	Result string
+	// OOMKnown distinguishes an observed false verdict from unavailable runtime
+	// inspect evidence. OOMKilled is never inferred from exit 137.
+	OOMKnown  bool
+	OOMKilled bool
 	// HasSchemaViolations reports whether the task run recorded schema violations.
 	HasSchemaViolations bool
 	// ExitCode is the raw process exit code, or nil when none was captured.
@@ -137,10 +141,11 @@ func (c *Classifier) WithLogRule(pattern string, class FailureClass) (*Classifie
 //
 //  1. run_timed_out / sla_missed          → sla_risk
 //  2. schema_violation event / violations → schema_violation
-//  3. StartupFailure / ResourceFailure    → transient_infra
-//  4. log-tail regex table                → data_unavailable|auth_failure|oom|quota
-//  5. exit-code table                     → (default 137 → oom)
-//  6. fallback                            → unknown
+//  3. Runtime OOMKilled evidence          → oom; known false suppresses 137 fallback
+//  4. StartupFailure / ResourceFailure    → transient_infra
+//  5. log-tail regex table                → data_unavailable|auth_failure|oom|quota
+//  6. exit-code table                     → (default 137 → oom)
+//  7. fallback                            → unknown
 func (c *Classifier) Classify(sig Signal) FailureClass {
 	switch event.Type(sig.EventType) {
 	case event.TypeRunTimedOut, event.TypeSLAMissed:
@@ -151,6 +156,10 @@ func (c *Classifier) Classify(sig Signal) FailureClass {
 
 	if sig.HasSchemaViolations {
 		return ClassSchemaViolation
+	}
+
+	if sig.OOMKilled {
+		return ClassOOM
 	}
 
 	switch atom.Result(sig.Result) {
@@ -173,6 +182,9 @@ func (c *Classifier) Classify(sig Signal) FailureClass {
 	// Exit-code table.
 	if sig.ExitCode != nil {
 		if class, ok := c.exitCodeRules[*sig.ExitCode]; ok {
+			if sig.OOMKnown && *sig.ExitCode == 137 && class == ClassOOM {
+				return ClassUnknown
+			}
 			return class
 		}
 	}

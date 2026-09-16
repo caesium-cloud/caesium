@@ -317,6 +317,8 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		sig.LogTail = fc.taskRun.LogText
 		sig.Error = fc.taskRun.Error
 		sig.ExitCode = fc.taskRun.ExitCode
+		sig.OOMKnown = fc.taskRun.OOMKnown
+		sig.OOMKilled = fc.taskRun.OOMKilled
 		exitCode = fc.taskRun.ExitCode
 	}
 

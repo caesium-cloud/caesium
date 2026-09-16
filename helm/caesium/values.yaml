@@ -96,7 +96,7 @@ affinity: {}
 # -- Kubernetes engine configuration (for running job steps as Kubernetes pods)
 kubernetes:
   engine:
-    # -- Enable the Kubernetes engine; creates a Role and RoleBinding for pod management
+    # -- Enable the Kubernetes engine; creates a Role and RoleBinding for pod management and metrics.k8s.io pod get
     enabled: false
     # -- Namespace in which job pods are created (defaults to the release namespace)
     namespace: ""

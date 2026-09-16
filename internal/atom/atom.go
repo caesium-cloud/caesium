@@ -38,6 +38,7 @@ type Engine interface {
 	Wait(*EngineWaitRequest) (Atom, error)
 	Stop(*EngineStopRequest) error
 	Logs(*EngineLogsRequest) (io.ReadCloser, error)
+	Stats(*EngineStatsRequest) (ResourceStats, error)
 }
 
 // EngineGetRequest defines the input parameters to

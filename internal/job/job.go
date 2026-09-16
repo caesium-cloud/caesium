@@ -1523,6 +1523,25 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 		}
 
+		var resourceSampler *atom.ResourceSampler
+		if vars.ResourceStatsEnabled {
+			resourceSampler = atom.StartResourceSampler(taskCtx, runner.engine, a.ID(), vars.ResourceStatsSampleInterval)
+			defer resourceSampler.Stop(nil)
+		}
+
+		persistResourceOutcome := func(final atom.Atom) {
+			if resourceSampler == nil {
+				return
+			}
+			outcome := run.TaskResourceOutcome{ResourceSummary: resourceSampler.Stop(final), RuntimeID: a.ID(), Attempt: attempt}
+			if final != nil {
+				outcome.ExitCode = final.ExitCode()
+			}
+			if resourceErr := store.SetTaskResourceOutcome(runID, taskRef, outcome); resourceErr != nil {
+				log.Warn("failed to persist task resource outcome", "task_id", taskID, "error", resourceErr)
+			}
+		}
+
 		var (
 			secretLogStream    io.ReadCloser
 			secretLogCollector *run.SecretLogCollector
@@ -1580,6 +1599,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// "cancelled but the container is still out there" are different
 		// operational facts.
 		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
+			// Join sampling before Stop removes the runtime. A failed Wait has
+			// no terminal inspect evidence, but completed samples remain valid.
+			persistResourceOutcome(nil)
 			if secretLogCollector != nil {
 				secretLogCollector.Abort()
 			}
@@ -1628,10 +1650,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
 
+			persistResourceOutcome(a)
+
 			// Capture the raw exit code before Result() folds it into a coarse
 			// status and the incident classifier loses it. Best-effort.
-			if exitErr := store.SetTaskExitCode(runID, taskRef, a.ExitCode()); exitErr != nil {
-				log.Warn("failed to persist task exit code", "task_id", taskID, "error", exitErr)
+			if resourceSampler == nil {
+				if exitErr := store.SetTaskExitCode(runID, taskRef, a.ExitCode()); exitErr != nil {
+					log.Warn("failed to persist task exit code", "task_id", taskID, "error", exitErr)
+				}
 			}
 
 			// Parse both structured outputs and branch markers in a single

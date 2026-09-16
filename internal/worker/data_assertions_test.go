@@ -125,3 +125,7 @@ func TestRuntimeExecutorRecordsNoMetricsForAFailedAttempt(t *testing.T) {
 	assert.Zero(t, countDatasetMetrics(t, db),
 		"a failed attempt must not move a baseline")
 }
+
+func (e *metricsEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

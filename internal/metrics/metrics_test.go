@@ -338,3 +338,22 @@ func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) fl
 	s.Require().NoError(gauge.(prometheus.Metric).Write(&m))
 	return m.GetGauge().GetValue()
 }
+
+func (s *MetricsSuite) TestResourceFamiliesRegisteredAndObserved() {
+	Register()
+	TaskOOMKillsTotal.WithLabelValues("stats-job", "stats-task", "docker").Inc()
+	TaskCPUSecondsTotal.WithLabelValues("stats-job", "stats-task", "docker").Add(1.25)
+	TaskMemoryPeakBytes.WithLabelValues("stats-job", "stats-task", "docker").Observe(4096)
+	s.Equal(1.0, metrictestutil.CounterValue(s.T(), TaskOOMKillsTotal, "stats-job", "stats-task", "docker"))
+	s.Equal(1.25, metrictestutil.CounterValue(s.T(), TaskCPUSecondsTotal, "stats-job", "stats-task", "docker"))
+	s.Equal(uint64(1), metrictestutil.HistogramSampleCount(s.T(), TaskMemoryPeakBytes, "stats-job", "stats-task", "docker"))
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	found := map[string]bool{}
+	for _, family := range families {
+		found[family.GetName()] = true
+	}
+	for _, name := range []string{"caesium_task_oom_kills_total", "caesium_task_cpu_seconds_total", "caesium_task_memory_peak_bytes"} {
+		s.True(found[name], "missing registered family %s", name)
+	}
+}

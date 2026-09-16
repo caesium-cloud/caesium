@@ -490,15 +490,17 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				return err
 			}
 
+			updates := run.TaskResourceResetColumns()
+			maps.Copy(updates, map[string]any{
+				"status":           string(run.TaskStatusPending),
+				"claimed_by":       "",
+				"claim_expires_at": nil,
+				"runtime_id":       "",
+				"started_at":       nil,
+			})
 			result := tx.Model(&models.TaskRun{}).
 				Where(expiredWhere, expiredArgs...).
-				Updates(run.WithInvalidatedSecretLogSnapshot(map[string]any{
-					"status":           string(run.TaskStatusPending),
-					"claimed_by":       "",
-					"claim_expires_at": nil,
-					"runtime_id":       "",
-					"started_at":       nil,
-				}))
+				Updates(run.WithInvalidatedSecretLogSnapshot(updates))
 			if result.Error != nil {
 				return result.Error
 			}

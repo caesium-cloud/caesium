@@ -167,3 +167,7 @@ func (e *cancelOnCreateEngine) Stop(*atom.EngineStopRequest) error {
 func (e *cancelOnCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
+
+func (e *cancelOnCreateEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

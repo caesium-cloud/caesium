@@ -11,4 +11,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # Stats() GETs /apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods/{name}
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get"]
 {{- end }}
