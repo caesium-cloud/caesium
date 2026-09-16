@@ -43,46 +43,62 @@ type kubernetesEngine struct {
 	backend kubernetesBackend
 }
 
-var getKubernetesCore = func(k8sCfg string) corev1.CoreV1Interface {
-	if k8sCfg == "" {
+// getKubernetesCore resolves the CoreV1 client from the local kubeconfig,
+// falling back to in-cluster config. It returns an error instead of panicking
+// so every caller of NewEngine gets a clean, actionable failure (an
+// unreachable/missing kubeconfig is an expected runtime condition — e.g.
+// `caesium dev` running outside a cluster with no local kubeconfig — not a
+// programmer error).
+var getKubernetesCore = func(k8sCfg string) (corev1.CoreV1Interface, error) {
+	configPath := k8sCfg
+	if configPath == "" {
 		u, _ := user.Current()
-		k8sCfg = filepath.Join(u.HomeDir, kubeConfig)
+		configPath = filepath.Join(u.HomeDir, kubeConfig)
 	} else {
-		k8sCfg = filepath.Join(k8sCfg, kubeConfig)
+		configPath = filepath.Join(configPath, kubeConfig)
 	}
 
-	config, err := clientcmd.BuildConfigFromFlags("", k8sCfg)
+	config, err := clientcmd.BuildConfigFromFlags("", configPath)
 	if err != nil {
 		// Fall back to in-cluster config when running inside a Kubernetes pod.
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf(
+				"load kubeconfig %s and in-cluster config both failed (last error: %w)",
+				configPath, err)
 		}
 	}
 
 	cli, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("build kubernetes client: %w", err)
 	}
 
-	return cli.CoreV1()
+	return cli.CoreV1(), nil
 }
 
-// NewEngine creates a new instance of kubernetes.Engine
-// for interacting with kubernetes.Atoms.
-func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) Engine {
+// NewEngine creates a new instance of kubernetes.Engine for interacting with
+// kubernetes.Atoms. It returns an error (rather than panicking) when the
+// kubeconfig cannot be loaded and no in-cluster config is available, so every
+// caller can surface a clean, actionable message instead of an unrecovered
+// panic.
+func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) (Engine, error) {
 	var backend corev1.CoreV1Interface
 
 	if len(core) > 0 {
 		backend = core[0]
 	} else {
-		backend = getKubernetesCore(env.Variables().KubernetesConfig)
+		var err error
+		backend, err = getKubernetesCore(env.Variables().KubernetesConfig)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes engine unavailable: %w; check KUBECONFIG or run inside a cluster with a valid service account", err)
+		}
 	}
 
 	return &kubernetesEngine{
 		ctx:     ctx,
 		backend: backend.Pods(env.Variables().KubernetesNamespace),
-	}
+	}, nil
 }
 
 // Get a Caesium Kubernetes pod and its corresponding metadata.

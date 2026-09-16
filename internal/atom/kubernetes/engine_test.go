@@ -13,14 +13,35 @@ import (
 	"github.com/stretchr/testify/mock"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 func (s *KubernetesTestSuite) TestNewEngine() {
-	engine := NewEngine(
+	engine, err := NewEngine(
 		context.Background(),
 		fake.NewClientset().CoreV1(),
 	)
+	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), engine)
+}
+
+// TestNewEngineNoConfigReturnsError proves the config-load failure path
+// (no kubeconfig, no in-cluster config) returns a clean, actionable error
+// instead of panicking — the root cause of #479 (caesium dev --once panicked
+// with an unrecovered Go panic on an unreachable kubernetes engine).
+func (s *KubernetesTestSuite) TestNewEngineNoConfigReturnsError() {
+	orig := getKubernetesCore
+	defer func() { getKubernetesCore = orig }()
+	getKubernetesCore = func(string) (corev1.CoreV1Interface, error) {
+		return nil, fmt.Errorf("no configuration has been provided")
+	}
+
+	engine, err := NewEngine(context.Background())
+	assert.Nil(s.T(), engine)
+	if assert.Error(s.T(), err) {
+		assert.Contains(s.T(), err.Error(), "kubernetes engine unavailable")
+		assert.Contains(s.T(), err.Error(), "check KUBECONFIG")
+	}
 }
 
 func (s *KubernetesTestSuite) TestGet() {

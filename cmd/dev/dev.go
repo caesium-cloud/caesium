@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -49,8 +50,19 @@ func runDev(cmd *cobra.Command, _ []string) error {
 
 	w := cmd.OutOrStdout()
 
+	// Cancel any in-flight run — and stop/remove the container(s) it owns —
+	// on SIGINT/SIGTERM. This is established BEFORE the very first run (not
+	// just before the watch loop) so `--once`, which has no watch loop and
+	// therefore no other chance to observe an interrupt, gets the same
+	// graceful-cancellation behaviour watch mode's re-run loop already had.
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Initial run.
-	if err := executeRun(cmd.Context(), w, paths); err != nil {
+	if err := executeRun(ctx, w, paths); err != nil {
+		if ctx.Err() != nil {
+			_, _ = fmt.Fprintln(w, "\nInterrupted, stopping...")
+		}
 		_, _ = fmt.Fprintf(w, "Run failed: %v\n", err)
 		if runOnce {
 			return err
@@ -76,23 +88,27 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = watcher.Close() }()
 
-	// Watch directories containing YAML files (to catch new files too).
+	// Recursively watch every directory under the requested paths — not just
+	// ones that happen to contain YAML at startup — so a subdirectory
+	// created later (and files saved into it) is seen. A path naming a
+	// single file gets its containing directory watched, matching the
+	// single-file behaviour this replaces.
 	watchedDirs := make(map[string]struct{})
-	for _, f := range yamlFiles {
-		dir := filepath.Dir(f)
-		if _, ok := watchedDirs[dir]; ok {
-			continue
+	for _, p := range paths {
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			return fmt.Errorf("stat %s: %w", p, statErr)
 		}
-		watchedDirs[dir] = struct{}{}
-		if err := watcher.Add(dir); err != nil {
-			return fmt.Errorf("watch %s: %w", dir, err)
+		root := p
+		if !info.IsDir() {
+			root = filepath.Dir(p)
+		}
+		if _, err := addRecursiveWatch(watcher, root, watchedDirs); err != nil {
+			return fmt.Errorf("watch %s: %w", root, err)
 		}
 	}
 
 	_, _ = fmt.Fprintf(w, "\nWatching %d file(s) for changes... (Ctrl-C to stop)\n", len(yamlFiles))
-
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	debounce := time.NewTimer(0)
 	if !debounce.Stop() {
@@ -107,6 +123,29 @@ func runDev(cmd *cobra.Command, _ []string) error {
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
+			}
+
+			if event.Op&fsnotify.Create != 0 {
+				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
+					// A new (or recreated) subdirectory: watch it — and any
+					// subdirectories already nested inside it — then rescan
+					// the tree for YAML written before the watch was
+					// established (the create-dir-then-write-file race).
+					foundYAML, err := addRecursiveWatch(watcher, event.Name, watchedDirs)
+					if err != nil {
+						_, _ = fmt.Fprintf(w, "Watch error: %v\n", err)
+					}
+					if foundYAML {
+						debounce.Reset(200 * time.Millisecond)
+					}
+					continue
+				}
+			}
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				// Drop it from the tracked set; if the same path is
+				// recreated later, the Create branch above re-adds it (the
+				// parent directory's watch reports that Create regardless).
+				delete(watchedDirs, event.Name)
 			}
 			if !jobdef.IsYAML(event.Name) {
 				continue
@@ -127,6 +166,37 @@ func runDev(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
+}
+
+// addRecursiveWatch adds an fsnotify watch for dir and every subdirectory
+// nested beneath it, recording each newly watched directory in watchedDirs
+// (already-watched directories are skipped). It reports whether any YAML
+// file was found during the walk, which callers use to detect a file that
+// landed in a brand new directory before its watch was established.
+func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[string]struct{}) (foundYAML bool, err error) {
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// The path may have been removed mid-walk (e.g. a transient
+			// temp directory or a racing delete) — skip it rather than
+			// failing the whole scan.
+			return nil
+		}
+		if d.IsDir() {
+			if _, ok := watchedDirs[path]; ok {
+				return nil
+			}
+			if err := watcher.Add(path); err != nil {
+				return err
+			}
+			watchedDirs[path] = struct{}{}
+			return nil
+		}
+		if jobdef.IsYAML(path) {
+			foundYAML = true
+		}
+		return nil
+	})
+	return foundYAML, err
 }
 
 func executeRun(ctx context.Context, w io.Writer, paths []string) error {
