@@ -590,6 +590,32 @@ steps:
 	}, 60*time.Second, 200*time.Millisecond,
 		"dev never re-ran after editing the newly discovered nested DAG:\n%s", out.String())
 
+	// Remove the dynamically watched subtree entirely, then recreate it. A
+	// remove event must discard watches for the old inode; the parent tree must
+	// notice the recreation, rescan the manifest written before the new watch
+	// exists, and install a fresh watch that receives a later edit.
+	s.Require().NoError(os.RemoveAll(nestedDir))
+	s.Require().NoError(os.MkdirAll(nestedDir, 0o755))
+	s.Require().NoError(os.WriteFile(
+		filepath.Join(nestedDir, "new.job.yaml"),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v3")))),
+		0o644,
+	))
+	s.Require().Eventually(func() bool {
+		return okCount(nestedAlias) >= 3
+	}, 60*time.Second, 200*time.Millisecond,
+		"dev never discovered the recreated nested DAG:\n%s", out.String())
+
+	s.Require().NoError(os.WriteFile(
+		filepath.Join(nestedDir, "new.job.yaml"),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v4")))),
+		0o644,
+	))
+	s.Require().Eventually(func() bool {
+		return okCount(nestedAlias) >= 4
+	}, 60*time.Second, 200*time.Millisecond,
+		"dev never re-ran after editing the recreated nested DAG:\n%s", out.String())
+
 	s.Require().NoError(cmd.Process.Signal(syscall.SIGINT))
 
 	done := make(chan error, 1)

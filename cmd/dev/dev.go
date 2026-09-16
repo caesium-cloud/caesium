@@ -149,10 +149,15 @@ func runDev(cmd *cobra.Command, _ []string) error {
 			if !ok {
 				return nil
 			}
+			eventName, pathErr := absoluteWatchPath(event.Name)
+			if pathErr != nil {
+				_, _ = fmt.Fprintf(w, "Watch error: %v\n", pathErr)
+				continue
+			}
 
 			if event.Op&fsnotify.Create != 0 {
-				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
-					cleanName := filepath.Clean(event.Name)
+				if info, statErr := os.Stat(eventName); statErr == nil && info.IsDir() {
+					cleanName := eventName
 					if _, isRoot := roots.paths[cleanName]; isRoot {
 						// A selected directory root reappeared under its
 						// OWN path (moved away — removeWatchedSubtree
@@ -179,7 +184,7 @@ func runDev(cmd *cobra.Command, _ []string) error {
 					// appearing under a lone file's (or a root's own)
 					// non-recursive parent watch is intentionally left
 					// unwatched.
-					foundYAML, err := handleDirectoryCreated(watcher, event.Name, watchedDirs, roots.sentinelParents)
+					foundYAML, err := handleDirectoryCreated(watcher, eventName, watchedDirs, roots.sentinelParents)
 					if err != nil {
 						_, _ = fmt.Fprintf(w, "Watch error: %v\n", err)
 					}
@@ -202,15 +207,15 @@ func runDev(cmd *cobra.Command, _ []string) error {
 				// itself, we still want to recognize its return — see the
 				// roots.paths check in the Create branch above, and the
 				// parent watch setupWatches installs for exactly this case.
-				removeWatchedSubtree(watcher, event.Name, watchedDirs)
+				removeWatchedSubtree(watcher, eventName, watchedDirs)
 			}
-			if !jobdef.IsYAML(event.Name) {
+			if !jobdef.IsYAML(eventName) {
 				continue
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
 				continue
 			}
-			if _, sentinelOnly := roots.sentinelParents[filepath.Dir(filepath.Clean(event.Name))]; sentinelOnly {
+			if _, sentinelOnly := roots.sentinelParents[filepath.Dir(eventName)]; sentinelOnly {
 				// This directory is watched ONLY to observe a selected
 				// directory root reappearing under it (see setupWatches) —
 				// nothing else in it was ever explicitly selected. A
@@ -256,7 +261,10 @@ func resolveSymlinks(paths []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", p, err)
 		}
-		resolved[i] = filepath.Clean(r)
+		resolved[i], err = canonicalWatchDir(r)
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize %s: %w", p, err)
+		}
 	}
 	return resolved, nil
 }
@@ -293,7 +301,7 @@ type dirRoots struct {
 // the recursive tag always wins.
 //
 // setupWatches also installs a non-recursive watch on each directory root's
-// PARENT (unless the root has no meaningful parent, e.g. "." or "/"), so
+// PARENT (unless the root has no meaningful parent, e.g. "/"), so
 // that moving the root away and recreating it is observable:
 // removeWatchedSubtree drops the root and everything beneath it on the
 // Remove/Rename event, and nothing would otherwise be left watching for its
@@ -322,11 +330,13 @@ func setupWatches(watcher *fsnotify.Watcher, paths []string) (watchedDirs map[st
 		if !info.IsDir() {
 			continue
 		}
-		if _, err := addRecursiveWatch(watcher, p, watchedDirs, roots.sentinelParents); err != nil {
+		root, err := canonicalWatchDir(p)
+		if err != nil {
+			return nil, dirRoots{}, fmt.Errorf("canonicalize %s: %w", p, err)
+		}
+		if _, err := addRecursiveWatch(watcher, root, watchedDirs, roots.sentinelParents); err != nil {
 			return nil, dirRoots{}, fmt.Errorf("watch %s: %w", p, err)
 		}
-
-		root := filepath.Clean(p)
 		roots.paths[root] = struct{}{}
 		if parentDir := filepath.Dir(root); parentDir != root {
 			if _, ok := watchedDirs[parentDir]; !ok {
@@ -347,7 +357,10 @@ func setupWatches(watcher *fsnotify.Watcher, paths []string) (watchedDirs map[st
 		if info.IsDir() {
 			continue
 		}
-		parentDir := filepath.Dir(p)
+		parentDir, err := canonicalWatchDir(filepath.Dir(p))
+		if err != nil {
+			return nil, dirRoots{}, fmt.Errorf("canonicalize parent of %s: %w", p, err)
+		}
 		// A directory serving as an explicit file's parent has a genuine
 		// reason to react to arbitrary YAML writes in it (the pre-#515
 		// behaviour) — if it was only tracked as a root-recreation
@@ -375,15 +388,15 @@ func setupWatches(watcher *fsnotify.Watcher, paths []string) (watchedDirs map[st
 // run that produced it, forever. sentinelParents is forwarded to
 // addRecursiveWatch — see its doc for why.
 //
-// newDir is normalized with filepath.Clean before the lookup: on Linux,
-// fsnotify's inotify backend builds an event's Name by concatenating the
-// watch's OWN (filepath.Clean'd at Add-time) path with the raw entry name —
-// not filepath.Join — so a watch on "." (the default root) reports a newly
-// created entry as "./new", while THIS package's own watchedDirs entries are
-// always recorded under their clean form ("new"). Without normalizing here,
-// the lookup for "./new"'s parent misses the "." entry recorded at startup.
+// newDir is normalized to an absolute path before the lookup. fsnotify event
+// names reflect the registered watch spelling, while setupWatches registers
+// only absolute canonical directories; this keeps new-directory events and
+// watchedDirs keys in the same namespace.
 func handleDirectoryCreated(watcher *fsnotify.Watcher, newDir string, watchedDirs map[string]bool, sentinelParents map[string]struct{}) (foundYAML bool, err error) {
-	newDir = filepath.Clean(newDir)
+	newDir, err = absoluteWatchPath(newDir)
+	if err != nil {
+		return false, err
+	}
 	if !watchedDirs[filepath.Dir(newDir)] {
 		return false, nil
 	}
@@ -411,16 +424,14 @@ func handleDirectoryCreated(watcher *fsnotify.Watcher, newDir string, watchedDir
 // subdirectory created directly inside it — #515 reproduced for this
 // multi-path invocation.
 //
-// dir is normalized with filepath.Clean before the walk: filepath.WalkDir
-// reports the walk ROOT under exactly the string it was given (descendants
-// go through filepath.Join, which always cleans), and fsnotify.Add cleans
-// whatever path it is given before storing it internally — so an uncleaned
-// root here (e.g. "./new") would be tracked and watched under a different
-// spelling than what fsnotify (and this function, called again for a
-// descendant) will use later, breaking the watchedDirs lookups that gate
-// dynamic directory discovery.
+// dir is made absolute before the walk. filepath.WalkDir reports its root
+// using the spelling it received, so a relative root would otherwise produce
+// watchedDirs keys that disagree with fsnotify events from canonical watches.
 func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[string]bool, sentinelParents map[string]struct{}) (foundYAML bool, err error) {
-	dir = filepath.Clean(dir)
+	dir, err = absoluteWatchPath(dir)
+	if err != nil {
+		return false, err
+	}
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// The path may have been removed mid-walk (e.g. a transient
@@ -456,12 +467,13 @@ func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[st
 // names the directory that moved or was removed — not any descendants
 // tracked under their own paths from an earlier recursive walk — so without
 // this a descendant's stale entry survives and a later recreation at that
-// same path is wrongly treated as already watched. root is normalized with
-// filepath.Clean for the same reason addRecursiveWatch and
-// handleDirectoryCreated normalize their path arguments — see their
-// comments.
+// same path is wrongly treated as already watched. A removed path cannot be
+// symlink-resolved, so root is normalized to its absolute spelling only.
 func removeWatchedSubtree(watcher *fsnotify.Watcher, root string, watchedDirs map[string]bool) {
-	root = filepath.Clean(root)
+	root, err := absoluteWatchPath(root)
+	if err != nil {
+		return
+	}
 	prefix := root + string(filepath.Separator)
 	for dir := range watchedDirs {
 		if dir == root || strings.HasPrefix(dir, prefix) {
@@ -469,6 +481,33 @@ func removeWatchedSubtree(watcher *fsnotify.Watcher, root string, watchedDirs ma
 			delete(watchedDirs, dir)
 		}
 	}
+}
+
+// canonicalWatchDir gives every watched directory one identity, regardless of
+// whether the user supplied it relative to the current working directory,
+// absolutely, or through a directory symlink. Explicit FILE arguments remain
+// untouched for discovery/execution (see resolveSymlinks), but their parent
+// watch uses this identity so fsnotify events and watchedDirs keys agree.
+func canonicalWatchDir(path string) (string, error) {
+	abs, err := absoluteWatchPath(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// absoluteWatchPath is used for remove/rename event names, whose target may
+// already be gone and therefore cannot be resolved through EvalSymlinks.
+func absoluteWatchPath(path string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 func executeRun(ctx context.Context, w io.Writer, paths []string) error {

@@ -383,6 +383,22 @@ func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
 	backend.AssertExpectations(s.T())
 }
 
+func (s *KubernetesTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: context.Background()}
+	req := &atom.EngineCreateRequest{Name: testAtomID, Image: testImage, Command: []string{"test"}}
+
+	backend.On("Create", mock.AnythingOfType("*v1.Pod")).Run(func(args mock.Arguments) {
+		pod := args.Get(0).(*v1.Pod)
+		backend.On("Delete", pod.Name).Return(nil)
+	}).Return(context.DeadlineExceeded)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
+}
+
 func (s *KubernetesTestSuite) TestStop() {
 	req := &atom.EngineStopRequest{
 		ID: testAtomID,

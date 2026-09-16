@@ -893,6 +893,28 @@ func (s *DockerTestSuite) TestCreateCancelledDuringCreateRequest() {
 	backend.AssertExpectations(s.T())
 }
 
+// TestCreateDeadlineDuringCreateRequest covers the other ambiguous outcome:
+// Docker may persist a deterministically named container, then let the
+// detached create request expire before its response reaches Caesium. The
+// parent context is still active, so this must clean by name while returning
+// the original deadline error.
+func (s *DockerTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	req := &atom.EngineCreateRequest{Name: "deadline", Image: testImage, Command: []string{"test"}}
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{backend: backend, ctx: context.Background(), subpathHelperImage: subPathHelperImage}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).Return(context.DeadlineExceeded)
+	backend.On("ContainerStop", req.Name).Return(nil)
+	backend.On("ContainerRemove", req.Name).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
+}
+
 // TestCreateCancelledDuringSubPathHelperCreation covers a round-5
 // adversarial-review finding: the subPath helper container's OWN
 // ContainerCreate call ran on the cancellable context, registering its
@@ -949,6 +971,32 @@ func (s *DockerTestSuite) TestCreateCancelledDuringSubPathHelperCreation() {
 	assert.Nil(s.T(), c)
 	assert.ErrorIs(s.T(), err, context.Canceled,
 		"Create must report the cancellation and never reach the main container's own allocation")
+	backend.AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateDeadlineDuringSubPathHelperCreation() {
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{backend: backend, ctx: context.Background(), subpathHelperImage: subPathHelperImage}
+	req := &atom.EngineCreateRequest{
+		Name: testContainerName, Image: testImage, Command: []string{"run"},
+		Spec: container.Spec{ResolvedVolumeMounts: []container.VolumeMount{{
+			Name: "tfstate", Type: container.VolumeMountTypeVolume, Source: "tfstate-vol", Target: "/state", SubPath: "stack-a",
+		}}},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ClientVersion").Return("1.47")
+	backend.On("ImageInspect", subPathHelperImage).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", subPathHelperImage).Return()
+	helperNameMatcher := mock.MatchedBy(func(name string) bool { return strings.HasPrefix(name, "caesium-subpath-init-") })
+	backend.On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, helperNameMatcher).Return(context.DeadlineExceeded)
+	backend.On("ContainerStop", helperNameMatcher).Return(nil)
+	backend.On("ContainerRemove", helperNameMatcher).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
 	backend.AssertExpectations(s.T())
 }
 

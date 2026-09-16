@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -205,15 +206,14 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 
 	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, req.Name)
 	if err != nil {
-		if e.ctx.Err() != nil {
-			// The call failed for its own reason (possibly unrelated to
-			// e.ctx, since createCtx is independent), but the caller has
-			// ALSO given up in the meantime. Best-effort clean up by the
-			// deterministic name in case the daemon persisted the
-			// container anyway (e.g. the failure was a response-read error
-			// after the daemon had already committed it).
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: the daemon may have persisted the
+			// deterministically named container before its response reached us.
 			e.cleanupFailedCreate(req.Name, err)
-			return nil, e.ctx.Err()
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
 		}
 		return nil, err
 	}
@@ -724,9 +724,13 @@ func (e *dockerEngine) ensureVolumeSubPath(volumeName, cleanedSubPath string) er
 
 	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, name)
 	if err != nil {
-		if e.ctx.Err() != nil {
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// As above, a timeout can arrive after Docker persisted this
+			// deterministic helper container.
 			e.cleanupFailedCreate(name, err)
-			return e.ctx.Err()
+			if e.ctx.Err() != nil {
+				return e.ctx.Err()
+			}
 		}
 		return fmt.Errorf("create subPath helper container for volume %q: %w", volumeName, err)
 	}

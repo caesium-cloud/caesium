@@ -538,6 +538,23 @@ func (s *PodmanTestSuite) TestCreateCancelledDuringCreateRequest() {
 	backend.AssertExpectations(s.T())
 }
 
+func (s *PodmanTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	req := &atom.EngineCreateRequest{Name: "deadline", Image: testImage, Command: []string{"test"}}
+	backend := &mockPodmanBackend{}
+	engine := &podmanEngine{backend: backend, ctx: context.Background()}
+
+	backend.On("ImageExists", req.Image).Return(false, nil)
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).Return(context.DeadlineExceeded)
+	backend.On("ContainerStop", req.Name).Return(nil)
+	backend.On("ContainerRemove", req.Name).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestWait() {
 	req := &atom.EngineWaitRequest{
 		ID:      testAtomID,

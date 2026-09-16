@@ -116,13 +116,14 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	// reaches a definitive outcome; check e.ctx separately here.
 	created, err := e.backend.ContainerCreate(spec)
 	if err != nil {
-		if e.ctx.Err() != nil {
-			// The call failed for its own reason (possibly unrelated to
-			// e.ctx, since it ran detached), but the caller has ALSO given
-			// up in the meantime. Best-effort clean up by the deterministic
-			// name in case the server persisted the container anyway.
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: Podman may have persisted the
+			// deterministic container name before its response reached us.
 			e.cleanupFailedCreate(spec.Name, err)
-			return nil, e.ctx.Err()
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
 		}
 		return nil, err
 	}

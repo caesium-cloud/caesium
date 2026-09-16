@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/user"
@@ -204,15 +205,14 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 
 	pod, err := e.backend.Create(createCtx, spec, metav1.CreateOptions{})
 	if err != nil {
-		if e.ctx.Err() != nil {
-			// The call failed for its own reason (possibly unrelated to
-			// e.ctx, since createCtx is independent), but the caller has
-			// ALSO given up in the meantime. Best-effort clean up by the
-			// deterministic name in case the API server persisted the pod
-			// anyway (e.g. the failure was a response-read error after the
-			// server had already committed it).
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: the API server may have persisted
+			// this uniquely named Caesium pod before its response reached us.
 			e.cleanupFailedCreate(spec.Name, err)
-			return nil, e.ctx.Err()
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
 		}
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/fsnotify/fsnotify"
@@ -560,27 +561,18 @@ func TestHandleDirectoryCreated(t *testing.T) {
 	})
 }
 
-// TestPathNormalizationDefaultRoot fixes a round-3 P1 finding: on Linux,
-// fsnotify's inotify backend builds an event's Name by string-concatenating
-// the watch's OWN path (cleaned via filepath.Clean when it was Add()ed) with
-// the raw entry name — NOT filepath.Join. A watch on "." (the default root
-// with no --path given) therefore reports a newly created entry as "./new",
-// while addRecursiveWatch's own watchedDirs entries are always recorded
-// under filepath.WalkDir's root spelling. Before this fix, the root itself
-// was tracked as "." (clean) but a later Create event named "./new" (dirty)
-// was looked up as-is, and once "./new" was itself recursively watched, ITS
-// underlying fsnotify watch got cleaned to "new" — so watchedDirs held
-// "./new" while later events for its OWN children arrived as "new/deeper",
-// a lookup miss. Every path this package treats as a watchedDirs key is now
-// normalized with filepath.Clean, so the two spellings can no longer diverge.
+// TestPathNormalizationDefaultRoot proves relative default-root event names
+// map into the same absolute key space setupWatches uses for every directory.
 func TestPathNormalizationDefaultRoot(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
+	root, err := filepath.Abs(root)
+	require.NoError(t, err)
 
 	watcher := newTestWatcher(t)
 	watchedDirs, _, err := setupWatches(watcher, []string{"."})
 	require.NoError(t, err)
-	assert.True(t, watchedDirs["."], "the default root must be tracked under its clean form")
+	assert.True(t, watchedDirs[root], "the default root must be tracked under its absolute canonical form")
 
 	// Simulate inotify's ACTUAL (unclean) event spelling for a directory
 	// created directly under "." — "./new", not "new".
@@ -588,22 +580,63 @@ func TestPathNormalizationDefaultRoot(t *testing.T) {
 	foundYAML, err := handleDirectoryCreated(watcher, "./new", watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.False(t, foundYAML, "nothing has been written into it yet")
-	assert.True(t, watchedDirs["new"], "must be tracked under its CLEANED form")
-	assert.NotContains(t, watchedDirs, "./new", "must not also carry an uncleaned duplicate key")
-	assert.Contains(t, watcher.WatchList(), "new")
+	newDir := filepath.Join(root, "new")
+	assert.True(t, watchedDirs[newDir], "must be tracked under its absolute canonical form")
+	assert.NotContains(t, watchedDirs, "./new", "must not also carry a relative duplicate key")
+	assert.Contains(t, watcher.WatchList(), newDir)
 
 	// A directory created inside "new" is reported by fsnotify using ITS
-	// OWN watch path — "new" was Add()ed directly (via addRecursiveWatch
-	// above), so fsnotify already stores it clean, and the event for a
-	// grandchild arrives as "new/deeper" (no "./" prefix this time). The
-	// lookup on filepath.Dir("new/deeper") == "new" must hit the entry
-	// handleDirectoryCreated just recorded above.
+	// OWN watch path. A later relative spelling still resolves to the same
+	// absolute parent key recorded above.
 	require.NoError(t, os.MkdirAll(filepath.Join("new", "deeper"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join("new", "deeper", "job.job.yaml"), []byte("x"), 0o644))
 	foundYAML, err = handleDirectoryCreated(watcher, "new/deeper", watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.True(t, foundYAML, "the nested DAG under the \"./new\"-spelled directory must still be discovered")
-	assert.True(t, watchedDirs["new/deeper"])
+	assert.True(t, watchedDirs[filepath.Join(newDir, "deeper")])
+}
+
+// TestSetupWatchesCanonicalizesMixedPathSpellings drives a real fsnotify
+// Create event after the same directory tree is supplied through both a
+// relative and an absolute path. Inotify reports events using the spelling it
+// was registered with; canonical watch registration makes that event match the
+// recursive root regardless of argument order, so a new nested DAG is found.
+func TestSetupWatchesCanonicalizesMixedPathSpellings(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	jobs := filepath.Join(root, "jobs")
+	existing := filepath.Join(jobs, "existing")
+	require.NoError(t, os.MkdirAll(existing, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(existing, "existing.job.yaml"), []byte(testManifest("existing")), 0o644))
+
+	watcher := newTestWatcher(t)
+	watchedDirs, roots, err := setupWatches(watcher, []string{filepath.Join("jobs", "existing"), jobs})
+	require.NoError(t, err)
+	require.True(t, watchedDirs[jobs], "the absolute root must be recursive after mixed path inputs")
+	require.NotContains(t, watchedDirs, "jobs", "relative and absolute inputs must not create separate identities")
+
+	newDir := filepath.Join(jobs, "new")
+	require.NoError(t, os.MkdirAll(newDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "new.job.yaml"), []byte(testManifest("new")), 0o644))
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case event := <-watcher.Events:
+			if event.Op&fsnotify.Create == 0 || filepath.Clean(event.Name) != newDir {
+				continue
+			}
+			foundYAML, err := handleDirectoryCreated(watcher, event.Name, watchedDirs, roots.sentinelParents)
+			require.NoError(t, err)
+			assert.True(t, foundYAML, "the YAML written before the new directory watch was installed must be discovered")
+			assert.True(t, watchedDirs[newDir])
+			assert.Contains(t, watcher.WatchList(), newDir)
+			return
+		case <-deadline.C:
+			t.Fatal("timed out waiting for the real fsnotify Create event for the new directory")
+		}
+	}
 }
 
 // TestResolveSymlinksPreservesExplicitFileIdentity fixes a round-3 P2
