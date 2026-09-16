@@ -34,7 +34,7 @@ describe("CacheView", () => {
 
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <CacheView jobId="job-1" job={{ id: "job-1", alias: "cache-demo" } as Job} />
+        <CacheView jobId="job-1" job={{ id: "job-1", alias: "cache-demo" } as Job} taskPoliciesAvailable={false} />
       </QueryClientProvider>,
     );
 

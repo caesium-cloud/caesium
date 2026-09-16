@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, type CacheEntry, type Job, type JobRun, type JobTask } from "@/lib/api";
 import { shortId } from "@/lib/utils";
-import { describeCachePolicy } from "./cache-utils";
+import { describeCachePolicy, describeEffectiveCachePolicy, normalizeCacheConfig } from "./cache-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 
 interface CacheViewProps {
@@ -18,9 +18,10 @@ interface CacheViewProps {
   job: Job;
   featuredRun?: JobRun | null;
   tasks?: JobTask[];
+  taskPoliciesAvailable: boolean;
 }
 
-export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
+export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailable }: CacheViewProps) {
   const queryClient = useQueryClient();
   const [pendingTaskName, setPendingTaskName] = useState<string | null>(null);
 
@@ -39,6 +40,9 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
     () => [...(data?.entries ?? [])].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
     [data?.entries],
   );
+  const hasJobPolicy = job.cache_config !== undefined && job.cache_config !== null;
+  const jobPolicy = describeCachePolicy(job.cache_config);
+  const jobPolicyEnabled = hasJobPolicy && normalizeCacheConfig(job.cache_config).enabled;
 
   const invalidateAllMutation = useMutation({
     mutationFn: () => api.deleteJobCache(jobId),
@@ -70,8 +74,10 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
             <CardTitle className="text-sm">Job Cache Policy</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            <Badge variant={job.cache_config ? "cached" : "outline"}>{job.cache_config ? "Enabled" : "Disabled"}</Badge>
-            <p className="text-sm text-muted-foreground">{describeCachePolicy(job.cache_config)}</p>
+            <Badge variant={jobPolicyEnabled ? "cached" : "outline"}>
+              {!hasJobPolicy ? "Server default" : jobPolicyEnabled ? "Enabled" : "Disabled"}
+            </Badge>
+            <p className="text-sm text-muted-foreground">{jobPolicy}</p>
           </CardContent>
         </Card>
         <Card>
@@ -148,6 +154,8 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
                     key={`${entry.task_name}:${entry.hash}`}
                     entry={entry}
                     task={task}
+                    taskPolicyAvailable={taskPoliciesAvailable && task !== undefined}
+                    jobCacheConfig={job.cache_config}
                     jobId={jobId}
                     pending={pendingTaskName === entry.task_name && invalidateTaskMutation.isPending}
                     onInvalidate={(taskName) => {
@@ -168,12 +176,16 @@ export function CacheView({ jobId, job, featuredRun, tasks }: CacheViewProps) {
 function CacheEntryRow({
   entry,
   task,
+  taskPolicyAvailable,
+  jobCacheConfig,
   jobId,
   pending,
   onInvalidate,
 }: {
   entry: CacheEntry;
   task?: JobTask;
+  taskPolicyAvailable: boolean;
+  jobCacheConfig?: Job["cache_config"];
   jobId: string;
   pending: boolean;
   onInvalidate: (taskName: string) => void;
@@ -184,7 +196,9 @@ function CacheEntryRow({
         <div className="font-medium">{entry.task_name}</div>
         {task?.id ? <div className="text-[10px] font-mono text-muted-foreground">{shortId(task.id)}</div> : null}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">{describeCachePolicy(task?.cache_config)}</TableCell>
+      <TableCell className="text-sm text-muted-foreground" data-testid="cache-entry-policy">
+        {taskPolicyAvailable ? describeEffectiveCachePolicy(task?.cache_config, jobCacheConfig) : "Policy unavailable"}
+      </TableCell>
       <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
         <RelativeTime date={entry.created_at} />
       </TableCell>
