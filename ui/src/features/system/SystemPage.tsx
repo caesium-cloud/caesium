@@ -11,17 +11,31 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useClusterHealth } from "./useClusterHealth";
 import { AtomLogo } from "@/components/brand/atom-logo";
 import { PROMETHEUS_METRICS } from "./metrics";
+import {
+  checkTone,
+  deriveQuorumView,
+  deriveSystemBanner,
+  reachabilityLabel,
+  reachabilityTone,
+  reachableNodeCount,
+  type Tone,
+} from "./quorum";
 import type { Node } from "@/lib/api";
 import React from "react";
 
-function StatusDot({ ok }: { ok: boolean }) {
+const TONE_DOT: Record<Tone, string> = {
+  ok: "bg-success shadow-success/60",
+  warn: "bg-warning shadow-warning/60 animate-pulse",
+  danger: "bg-danger shadow-danger/60 animate-pulse",
+  muted: "bg-text-4 shadow-text-4/40",
+};
+
+function StatusDot({ tone, title }: { tone: Tone; title?: string }) {
   return (
-    <span 
-      className={`inline-block h-2 w-2 rounded-full shadow-[0_0_6px] flex-shrink-0 ${
-        ok 
-          ? "bg-success shadow-success/60" 
-          : "bg-danger shadow-danger/60 animate-pulse"
-      }`} 
+    <span
+      title={title}
+      data-tone={tone}
+      className={`inline-block h-2 w-2 rounded-full shadow-[0_0_6px] flex-shrink-0 ${TONE_DOT[tone]}`}
     />
   );
 }
@@ -69,6 +83,12 @@ export function SystemPage() {
   const activeRuns = rawHealth?.checks?.active_runs;
   const triggers = rawHealth?.checks?.triggers;
   const nodesCheck = rawHealth?.checks?.nodes;
+  const clusterCheck = rawHealth?.checks?.cluster;
+  // Membership and liveness are read from separate fields on purpose: the
+  // quorum numerator is what answered a probe, never the length of this list.
+  const quorum = deriveQuorumView(clusterCheck);
+  const banner = deriveSystemBanner(health.state, rawHealth);
+  const reachableNodes = reachableNodeCount(nodes);
 
   return (
     <div className="space-y-6 pb-12">
@@ -87,55 +107,67 @@ export function SystemPage() {
       </div>
 
       {/* Health banner */}
-      <div className={`rounded-lg border px-4 py-3 flex items-center gap-3 ${
-        health.state === "incident" || health.state === "unknown"
-          ? "border-danger/35 bg-gradient-to-r from-danger/10 to-danger/0"
-          : health.state === "operational"
-            ? "border-success/35 bg-gradient-to-r from-success/10 to-success/0"
-            : "border-gold/35 bg-gradient-to-r from-gold/10 to-gold/0"
-      }`}>
+      <div
+        data-testid="system-health-banner"
+        data-tone={banner.tone}
+        className={`rounded-lg border px-4 py-3 flex items-center gap-3 ${
+          banner.tone === "danger"
+            ? "border-danger/35 bg-gradient-to-r from-danger/10 to-danger/0"
+            : banner.tone === "ok"
+              ? "border-success/35 bg-gradient-to-r from-success/10 to-success/0"
+              : "border-gold/35 bg-gradient-to-r from-gold/10 to-gold/0"
+        }`}
+      >
         <div className="relative w-8 h-8 flex items-center justify-center flex-shrink-0">
           <span className={`absolute inset-0 rounded-full animate-pulse opacity-20 ${
-            health.state === "incident" || health.state === "unknown" ? "bg-danger" : health.state === "operational" ? "bg-success" : "bg-gold"
+            banner.tone === "danger" ? "bg-danger" : banner.tone === "ok" ? "bg-success" : "bg-gold"
           }`} />
-          {health.state === "incident" || health.state === "unknown"
+          {banner.tone === "danger"
             ? <XCircle className="h-4 w-4 text-danger relative" />
-            : health.state === "operational"
+            : banner.tone === "ok"
               ? <CheckCircle2 className="h-4 w-4 text-success relative" />
               : <Activity className="h-4 w-4 text-gold relative" />
           }
         </div>
         <div className="flex-1 min-w-0">
-          <p className="font-medium text-sm text-text-1 truncate">
-            {health.state === "incident" || health.state === "unknown"
-              ? "Health check failed — API unreachable"
-              : health.state === "operational"
-                ? "All systems operational"
-                : "System degraded"}
-          </p>
+          <p className="font-medium text-sm text-text-1 truncate">{banner.headline}</p>
           {health.uptimeSeconds != null && (
             <p className="text-[11px] font-mono text-text-3 mt-0.5 truncate">
               Uptime <span className="text-text-2">{formatUptime(health.uptimeSeconds)}</span>
             </p>
           )}
         </div>
-        <span className={`inline-flex items-center px-2.5 py-1 rounded text-[11px] font-bold tracking-widest uppercase flex-shrink-0 ${
-          health.state === "incident" || health.state === "unknown"
-            ? "bg-danger/15 text-danger"
-            : health.state === "operational"
-              ? "bg-success/15 text-success"
-              : "bg-gold/15 text-gold"
-        }`}>
-          {health.state}
+        <span
+          data-testid="system-health-badge"
+          className={`inline-flex items-center px-2.5 py-1 rounded text-[11px] font-bold tracking-widest uppercase flex-shrink-0 ${
+            banner.tone === "danger"
+              ? "bg-danger/15 text-danger"
+              : banner.tone === "ok"
+                ? "bg-success/15 text-success"
+                : "bg-gold/15 text-gold"
+          }`}
+        >
+          {banner.badge}
         </span>
       </div>
 
       {/* KPI strips */}
       <div data-testid="system-kpis" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <SysKpi icon={Database} label="Database" value={<span className="capitalize text-success">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} dot={db?.status === "healthy"} />
+        <SysKpi icon={Database} label="Database" value={<span className="capitalize">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} tone={checkTone(db?.status)} />
         <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{activeRuns?.count ?? 0}</span>} sub="Currently executing" />
         <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{triggers?.count ?? 0}</span>} sub="Registered" />
-        <SysKpi icon={Server} label="Nodes" value={<span className="font-mono">{nodesCheck?.count ?? nodes.length}</span>} sub="Tracked nodes" dot={nodes.length > 0} />
+        <SysKpi
+          icon={Server}
+          label="Nodes"
+          value={
+            <span className="font-mono" data-testid="system-nodes-kpi">
+              {reachableNodes ?? "?"}
+              <span className="text-text-4">/{nodes.length}</span>
+            </span>
+          }
+          sub="Reachable / tracked"
+          tone={nodesCheck?.status ? checkTone(nodesCheck.status) : reachableNodes === null ? "warn" : "ok"}
+        />
       </div>
 
       <div className="grid lg:grid-cols-[2fr_1fr] gap-4 items-start">
@@ -144,12 +176,14 @@ export function SystemPage() {
           <div className="px-4 py-3 border-b border-graphite/50 flex justify-between items-center bg-obsidian/30">
             <div>
               <div className="text-[13px] font-medium text-text-1">Cluster nodes</div>
-              <div className="text-[11px] text-text-3 mt-0.5">dqlite quorum · dynamic allocation</div>
+              <div className="text-[11px] text-text-3 mt-0.5">dqlite membership · probed liveness</div>
             </div>
-            <span className="font-mono text-[11px] text-text-3">{nodes.length} total</span>
+            <span className="font-mono text-[11px] text-text-3" data-testid="cluster-nodes-total">
+              {reachableNodes ?? "?"}/{nodes.length} reachable
+            </span>
           </div>
-          <div className="grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
-            <span>Address</span><span>Arch</span><span>Workers</span>
+          <div className="grid grid-cols-[minmax(0,1.4fr)_90px_70px_70px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
+            <span>Address</span><span>Liveness</span><span>Role</span><span>Workers</span>
           </div>
           <div>
             {isLoadingNodes ? (
@@ -161,14 +195,25 @@ export function SystemPage() {
               <div className="p-8 text-center text-sm text-text-4">No nodes detected</div>
             ) : (
               nodes.map((n, i) => (
-                <div key={n.address} className={`grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}>
+                <div
+                  key={n.address}
+                  data-testid="cluster-node-row"
+                  data-address={n.address}
+                  data-reachability={n.reachability ?? "unknown"}
+                  className={`grid grid-cols-[minmax(0,1.4fr)_90px_70px_70px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}
+                >
                   <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                    <StatusDot ok={true} />
+                    <StatusDot tone={reachabilityTone(n.reachability)} title={reachabilityLabel(n.reachability)} />
                     <div className="min-w-0">
-                      <div className="font-mono text-xs text-text-1 truncate">{n.address}</div>
+                      <div className="font-mono text-xs text-text-1 truncate">
+                        {n.address}
+                        {n.leader && <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wider text-gold">leader</span>}
+                      </div>
+                      <div className="font-mono text-[10px] text-text-4 truncate">{n.arch}</div>
                     </div>
                   </div>
-                  <span className="font-mono text-[11px] text-text-2 truncate">{n.arch}</span>
+                  <span className="text-[11px] text-text-2 truncate">{reachabilityLabel(n.reachability)}</span>
+                  <span className="font-mono text-[11px] text-text-2 truncate">{n.role ?? "unknown"}</span>
                   <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy}/{n.workers_total}</span>
                 </div>
               ))
@@ -179,8 +224,9 @@ export function SystemPage() {
         {/* Cluster Topology */}
         <Card className="bg-midnight/30 border-graphite/50 p-4">
           <div className="text-[13px] font-medium text-text-1 mb-1">Topology</div>
-          <div className="text-[11px] text-text-3 mb-4">Quorum view</div>
-          <ClusterTopology nodes={nodes} />
+          <div className="text-[11px] text-text-3 mb-4">Reachable voters / configured voters</div>
+          <ClusterTopology nodes={nodes} quorumLabel={quorum.label} quorumTone={quorum.tone} />
+          <div className="mt-2 text-[11px] text-text-3" data-testid="quorum-detail">{quorum.detail}</div>
         </Card>
       </div>
 
@@ -231,18 +277,33 @@ export function SystemPage() {
         <Card className="bg-midnight/30 border-graphite/50 overflow-hidden">
           <div className="px-4 py-3 border-b border-graphite/50">
             <div className="text-[13px] font-medium text-text-1">Health checks</div>
-            <div className="text-[11px] text-text-3 mt-0.5">Polled every 15s · {health.state === "operational" ? "all green" : "review degraded items"}</div>
+            <div className="text-[11px] text-text-3 mt-0.5">Polled every 15s · {banner.tone === "ok" ? "all green" : "review degraded items"}</div>
           </div>
           <div className="flex flex-col">
             {[
-              { key: "Database", result: db, detail: db?.latency_ms != null ? `${db.latency_ms} ms latency` : undefined },
-              { key: "Active Runs", result: activeRuns, detail: activeRuns?.count != null ? `${activeRuns.count} running` : undefined, alwaysOk: true },
-              { key: "Triggers", result: triggers, detail: triggers?.count != null ? `${triggers.count} registered` : undefined, alwaysOk: true },
-              { key: "Nodes", result: nodesCheck, detail: nodesCheck?.count != null ? `${nodesCheck.count} tracking` : undefined, alwaysOk: true },
+              { key: "Database", status: db?.status, detail: db?.latency_ms != null ? `${db.latency_ms} ms latency` : undefined },
+              { key: "Active Runs", status: activeRuns?.status, detail: activeRuns?.count != null ? `${activeRuns.count} running` : undefined },
+              { key: "Triggers", status: triggers?.status, detail: triggers?.count != null ? `${triggers.count} registered` : undefined },
+              {
+                key: "Nodes",
+                status: nodesCheck?.status,
+                detail: quorum.status === "unreported"
+                  ? (nodesCheck?.count != null ? `${nodesCheck.count} tracking` : undefined)
+                  : `${quorum.label} voters reachable`,
+              },
+              ...(clusterCheck
+                ? [{ key: "Quorum", status: clusterCheck.status, detail: quorum.detail }]
+                : []),
             ].map((c, i, arr) => (
-              <div key={c.key} className={`flex justify-between items-center px-4 py-3 ${i !== arr.length - 1 ? "border-b border-graphite/30" : ""}`}>
+              <div
+                key={c.key}
+                data-testid="health-check-row"
+                data-check={c.key}
+                data-tone={checkTone(c.status)}
+                className={`flex justify-between items-center px-4 py-3 ${i !== arr.length - 1 ? "border-b border-graphite/30" : ""}`}
+              >
                 <div className="flex items-center gap-2.5">
-                  <StatusDot ok={c.alwaysOk ? true : c.result?.status === "healthy"} />
+                  <StatusDot tone={checkTone(c.status)} title={c.status ?? "unknown"} />
                   <span className="text-[13px] text-text-1">{c.key}</span>
                 </div>
                 <span className="font-mono text-[11px] text-text-3">{c.detail || "--"}</span>
@@ -299,7 +360,7 @@ export function SystemPage() {
   );
 }
 
-function SysKpi({ icon: Icon, label, value, sub, dot }: { icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode; sub: string; dot?: boolean }) {
+function SysKpi({ icon: Icon, label, value, sub, tone }: { icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode; sub: string; tone?: Tone }) {
   return (
     <Card data-testid="system-kpi" className="bg-midnight/30 border-graphite/50 p-3.5 hover:bg-midnight/50 transition-colors">
       <div className="flex justify-between items-center mb-2">
@@ -307,7 +368,7 @@ function SysKpi({ icon: Icon, label, value, sub, dot }: { icon: React.ComponentT
         <Icon className="h-3.5 w-3.5 text-text-4" />
       </div>
       <div className="flex items-center gap-2">
-        {dot && <StatusDot ok={true} />}
+        {tone && <StatusDot tone={tone} />}
         <div className="text-[22px] font-medium text-text-1 tracking-tight leading-none">{value}</div>
       </div>
       <div className="font-mono text-[10px] text-text-4 mt-2 truncate">{sub}</div>
@@ -315,7 +376,14 @@ function SysKpi({ icon: Icon, label, value, sub, dot }: { icon: React.ComponentT
   );
 }
 
-function ClusterTopology({ nodes }: { nodes: Node[] }) {
+const TOPOLOGY_TEXT: Record<Tone, string> = {
+  ok: "hsl(var(--text-1))",
+  warn: "hsl(var(--gold))",
+  danger: "hsl(var(--danger))",
+  muted: "hsl(var(--text-3))",
+};
+
+function ClusterTopology({ nodes, quorumLabel, quorumTone }: { nodes: Node[]; quorumLabel: string; quorumTone: Tone }) {
   const cx = 110, cy = 110, R = 70;
   return (
     <svg viewBox="0 0 220 220" className="w-full h-[220px]">
@@ -340,18 +408,42 @@ function ClusterTopology({ nodes }: { nodes: Node[] }) {
       {/* center label */}
       <circle cx={cx} cy={cy} r="40" fill="url(#topo-glow)" />
       <text x={cx} y={cy - 2} textAnchor="middle" fontSize="9" fill="hsl(var(--text-3))" style={{ letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>quorum</text>
-      <text x={cx} y={cy + 12} textAnchor="middle" fontSize="14" fill="hsl(var(--text-1))" fontWeight="500" className="font-mono">{nodes.length}/{nodes.length}</text>
+      <text
+        x={cx}
+        y={cy + 12}
+        textAnchor="middle"
+        fontSize="14"
+        fill={TOPOLOGY_TEXT[quorumTone]}
+        fontWeight="500"
+        className="font-mono"
+        data-testid="quorum-count"
+      >
+        {quorumLabel}
+      </text>
       {/* nodes */}
       {nodes.map((n, i) => {
         const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
         const x = cx + Math.cos(angle) * R;
         const y = cy + Math.sin(angle) * R;
-        // In reality we don't know the leader right now, so we just treat them all equal
-        const isLeader = i === 0;
+        // Liveness and leadership are reported by the server; nothing here is
+        // inferred from a node's position in the list (issue #494).
+        const fill = n.reachability === "unreachable"
+          ? "hsl(var(--danger))"
+          : n.reachability === "reachable"
+            ? (n.leader ? "hsl(var(--gold))" : "hsl(var(--cyan))")
+            : "hsl(var(--text-4))";
         return (
           <g key={n.address}>
-            <circle cx={x} cy={y} r="14" fill={isLeader ? "hsl(var(--gold))" : "hsl(var(--cyan))"} opacity="0.18" />
-            <circle cx={x} cy={y} r="8" fill={isLeader ? "hsl(var(--gold))" : "hsl(var(--cyan))"} stroke="hsl(var(--midnight))" strokeWidth="2" />
+            <circle cx={x} cy={y} r="14" fill={fill} opacity="0.18" />
+            <circle
+              cx={x}
+              cy={y}
+              r="8"
+              fill={fill}
+              stroke="hsl(var(--midnight))"
+              strokeWidth="2"
+              strokeDasharray={n.reachability === "unreachable" ? "3 2" : undefined}
+            />
             <text x={x} y={y + Math.sin(angle) * 24 + (Math.sin(angle) > 0 ? 8 : -2)} textAnchor="middle" fontSize="9" fill="hsl(var(--text-2))" className="font-mono">{n.address.split(":")[0]}</text>
           </g>
         );

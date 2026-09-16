@@ -3,7 +3,12 @@ import { api, type HealthResponse } from "@/lib/api";
 
 const REFETCH_MS = 15_000;
 
-export type ClusterHealthState = "operational" | "degraded" | "incident" | "unknown";
+export type ClusterHealthState =
+  | "operational"
+  | "degraded"
+  | "unavailable"
+  | "incident"
+  | "unknown";
 
 export interface ClusterHealth {
   state: ClusterHealthState;
@@ -13,12 +18,17 @@ export interface ClusterHealth {
 
 const KNOWN_HEALTHY = new Set(["ok", "healthy", "operational", "ready", "up"]);
 const KNOWN_DEGRADED = new Set(["degraded", "warning", "warn"]);
+// The server reports `unavailable` when the dqlite cluster has lost quorum: it
+// is still answering HTTP (so the pod stays live and ready) but cannot serve
+// writes. That is an outage, not a degradation.
+const KNOWN_UNAVAILABLE = new Set(["unavailable", "no_quorum"]);
 
-function classify(status: string | undefined): ClusterHealthState {
+export function classify(status: string | undefined): ClusterHealthState {
   if (!status) return "unknown";
   const key = status.toLowerCase();
   if (KNOWN_HEALTHY.has(key)) return "operational";
   if (KNOWN_DEGRADED.has(key)) return "degraded";
+  if (KNOWN_UNAVAILABLE.has(key)) return "unavailable";
   if (key === "down" || key === "incident" || key === "error" || key === "failed") {
     return "incident";
   }

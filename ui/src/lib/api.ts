@@ -435,6 +435,49 @@ export interface HealthCheckResult {
   count?: number;
 }
 
+/** Observed liveness of a cluster member. `unknown` is never healthy. */
+export type Reachability = "reachable" | "unreachable" | "unknown";
+
+/** Quorum availability, derived from probed voters — never from membership size. */
+export type QuorumStatus = "available" | "degraded" | "unavailable" | "unknown";
+
+export interface ClusterMember {
+  address: string;
+  id?: number;
+  role: string;
+  leader: boolean;
+  reachability: Reachability;
+  latency_ms?: number;
+}
+
+/**
+ * Quorum separates configured membership (`total_voters`) from what actually
+ * answered a probe (`reachable_voters`). Rendering the former as the latter is
+ * what let a crashed replica display as "quorum 3/3" (issue #494).
+ */
+export interface Quorum {
+  status: QuorumStatus;
+  total_voters: number;
+  reachable_voters: number;
+  unreachable_voters: number;
+  unknown_voters: number;
+  required_voters: number;
+  available: boolean;
+  degraded: boolean;
+  leader_address?: string;
+}
+
+export interface ClusterCheck {
+  status: string;
+  clustered: boolean;
+  quorum: Quorum;
+  members: ClusterMember[];
+  /** False until the first liveness probe completes; liveness is unknown until then. */
+  observed: boolean;
+  observed_at?: string;
+  stale?: boolean;
+}
+
 export interface HealthResponse {
   status: string;
   uptime: number;
@@ -443,12 +486,17 @@ export interface HealthResponse {
     active_runs?: HealthCheckResult;
     triggers?: HealthCheckResult;
     nodes?: HealthCheckResult;
+    cluster?: ClusterCheck;
   };
 }
 
 export interface Node {
   address: string;
   arch: string;
+  role?: string;
+  leader?: boolean;
+  reachability?: Reachability;
+  latency_ms?: number;
   workers_busy: number;
   workers_total: number;
 }
