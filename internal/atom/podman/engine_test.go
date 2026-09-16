@@ -425,6 +425,10 @@ func (s *PodmanTestSuite) TestCreatePullErrorWhenImageMissing() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+// TestCreateStartError also proves the #480/round-3 orphan-cleanup fix: once
+// ContainerCreate has allocated a container, a subsequent failure (here,
+// ContainerStart) must stop+remove it rather than just returning the error
+// with no handle to clean up later.
 func (s *PodmanTestSuite) TestCreateStartError() {
 	req := &atom.EngineCreateRequest{
 		Image:   testImage,
@@ -443,6 +447,52 @@ func (s *PodmanTestSuite) TestCreateStartError() {
 	s.engine.backend.(*mockPodmanBackend).
 		On("ContainerStart", req.Name).
 		Return(fmt.Errorf("invalid container id"))
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStop", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerRemove", req.Name).
+		Return(nil)
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
+// TestCreateGetError covers the exact scenario a round-3 adversarial review
+// caught: ContainerStart succeeds but the immediately following Get
+// (ContainerInspect) fails — the shape of a SIGINT landing in that window
+// during `caesium dev --once`. Before the fix, Create returned the error
+// with no atom.Atom handle, so nothing else in the system ever learned the
+// already-started container's ID to stop it — an orphan despite #480.
+func (s *PodmanTestSuite) TestCreateGetError() {
+	req := &atom.EngineCreateRequest{
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImagePull", req.Image).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", req.Name).
+		Return(fmt.Errorf("context canceled"))
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStop", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerRemove", req.Name).
+		Return(nil)
 
 	c, err := s.engine.Create(req)
 	assert.NotNil(s.T(), err)

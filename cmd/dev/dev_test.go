@@ -1,6 +1,7 @@
 package dev
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testManifest returns a minimal valid job manifest with the given alias,
+// shared by every test in this file that needs a real, parseable definition.
+func testManifest(alias string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+steps:
+  - name: greet
+    image: alpine:3.23
+    command: ["echo", "hi"]
+`, alias)
+}
 
 // newTestWatcher returns a real fsnotify.Watcher closed on test cleanup,
 // shared by every test in this file that needs one.
@@ -357,4 +376,131 @@ func TestHandleDirectoryCreated(t *testing.T) {
 		assert.True(t, watchedDirs[newDir])
 		assert.Contains(t, watcher.WatchList(), newDir)
 	})
+}
+
+// TestPathNormalizationDefaultRoot fixes a round-3 P1 finding: on Linux,
+// fsnotify's inotify backend builds an event's Name by string-concatenating
+// the watch's OWN path (cleaned via filepath.Clean when it was Add()ed) with
+// the raw entry name — NOT filepath.Join. A watch on "." (the default root
+// with no --path given) therefore reports a newly created entry as "./new",
+// while addRecursiveWatch's own watchedDirs entries are always recorded
+// under filepath.WalkDir's root spelling. Before this fix, the root itself
+// was tracked as "." (clean) but a later Create event named "./new" (dirty)
+// was looked up as-is, and once "./new" was itself recursively watched, ITS
+// underlying fsnotify watch got cleaned to "new" — so watchedDirs held
+// "./new" while later events for its OWN children arrived as "new/deeper",
+// a lookup miss. Every path this package treats as a watchedDirs key is now
+// normalized with filepath.Clean, so the two spellings can no longer diverge.
+func TestPathNormalizationDefaultRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+
+	watcher := newTestWatcher(t)
+	watchedDirs, err := setupWatches(watcher, []string{"."})
+	require.NoError(t, err)
+	assert.True(t, watchedDirs["."], "the default root must be tracked under its clean form")
+
+	// Simulate inotify's ACTUAL (unclean) event spelling for a directory
+	// created directly under "." — "./new", not "new".
+	require.NoError(t, os.MkdirAll("new", 0o755))
+	foundYAML, err := handleDirectoryCreated(watcher, "./new", watchedDirs)
+	require.NoError(t, err)
+	assert.False(t, foundYAML, "nothing has been written into it yet")
+	assert.True(t, watchedDirs["new"], "must be tracked under its CLEANED form")
+	assert.NotContains(t, watchedDirs, "./new", "must not also carry an uncleaned duplicate key")
+	assert.Contains(t, watcher.WatchList(), "new")
+
+	// A directory created inside "new" is reported by fsnotify using ITS
+	// OWN watch path — "new" was Add()ed directly (via addRecursiveWatch
+	// above), so fsnotify already stores it clean, and the event for a
+	// grandchild arrives as "new/deeper" (no "./" prefix this time). The
+	// lookup on filepath.Dir("new/deeper") == "new" must hit the entry
+	// handleDirectoryCreated just recorded above.
+	require.NoError(t, os.MkdirAll(filepath.Join("new", "deeper"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join("new", "deeper", "job.job.yaml"), []byte("x"), 0o644))
+	foundYAML, err = handleDirectoryCreated(watcher, "new/deeper", watchedDirs)
+	require.NoError(t, err)
+	assert.True(t, foundYAML, "the nested DAG under the \"./new\"-spelled directory must still be discovered")
+	assert.True(t, watchedDirs["new/deeper"])
+}
+
+// TestResolveSymlinksPreservesExplicitFileIdentity fixes a round-3 P2
+// finding: resolveSymlinks previously resolved EVERY path, including an
+// explicit FILE argument reached through a symlink — permanently pinning
+// whatever it pointed to at startup into the paths slice executeRun reads
+// on every run. Repointing the symlink afterward (an atomic manifest swap,
+// e.g. `ln -sfn v2.yaml current.yaml`) then produced no observable change,
+// ever: discovery kept reading the OLD target. resolveSymlinks now only
+// resolves DIRECTORY paths; a file argument is returned exactly as given,
+// so each rerun's os.ReadFile (via jobdef.CollectDefinitions) naturally
+// picks up whatever the symlink currently points to.
+func TestResolveSymlinksPreservesExplicitFileIdentity(t *testing.T) {
+	base := t.TempDir()
+	templatesDir := filepath.Join(base, "templates")
+	require.NoError(t, os.MkdirAll(templatesDir, 0o755))
+
+	v1 := filepath.Join(templatesDir, "v1.yaml")
+	require.NoError(t, os.WriteFile(v1, []byte(testManifest("template-v1")), 0o644))
+	v2 := filepath.Join(templatesDir, "v2.yaml")
+	require.NoError(t, os.WriteFile(v2, []byte(testManifest("template-v2")), 0o644))
+
+	jobsDir := filepath.Join(base, "jobs")
+	require.NoError(t, os.MkdirAll(jobsDir, 0o755))
+	current := filepath.Join(jobsDir, "current.yaml")
+	if err := os.Symlink(v1, current); err != nil {
+		t.Skipf("symlinks not supported in this environment: %v", err)
+	}
+
+	resolved, err := resolveSymlinks([]string{current})
+	require.NoError(t, err)
+	require.Equal(t, []string{current}, resolved,
+		"an explicit file argument must be left exactly as given, not pinned to its symlink target")
+
+	defs, err := jobdef.CollectDefinitions(resolved, true)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, "template-v1", defs[0].Metadata.Alias)
+
+	// Repoint the symlink (an atomic manifest swap). Reading through the
+	// SAME unresolved path must pick up the new target immediately — proving
+	// nothing pinned the old one.
+	require.NoError(t, os.Remove(current))
+	require.NoError(t, os.Symlink(v2, current))
+
+	resolvedAgain, err := resolveSymlinks([]string{current})
+	require.NoError(t, err)
+	require.Equal(t, []string{current}, resolvedAgain)
+
+	defs, err = jobdef.CollectDefinitions(resolvedAgain, true)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	assert.Equal(t, "template-v2", defs[0].Metadata.Alias,
+		"repointing the symlink must be visible on the very next read")
+}
+
+// TestResolveSymlinksAcceptsFileWhoseTargetLacksYAMLExtension covers the
+// other half of the round-3 finding: fully resolving an explicit file
+// argument previously rejected a perfectly valid selection whenever its
+// target's name didn't itself end in .yaml/.yml (jobdef.IsYAML checks the
+// RESOLVED path's extension). A file argument left unresolved is judged by
+// its OWN extension, which is what the user actually selected.
+func TestResolveSymlinksAcceptsFileWhoseTargetLacksYAMLExtension(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "template-no-ext")
+	require.NoError(t, os.WriteFile(target, []byte(testManifest("no-ext-target")), 0o644))
+
+	link := filepath.Join(base, "current.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks not supported in this environment: %v", err)
+	}
+
+	resolved, err := resolveSymlinks([]string{link})
+	require.NoError(t, err)
+	require.Equal(t, []string{link}, resolved)
+
+	defs, err := jobdef.CollectDefinitions(resolved, true)
+	require.NoError(t, err,
+		"a selected .yaml symlink must not be rejected just because its target lacks a YAML extension")
+	require.Len(t, defs, 1)
+	assert.Equal(t, "no-ext-target", defs[0].Metadata.Alias)
 }

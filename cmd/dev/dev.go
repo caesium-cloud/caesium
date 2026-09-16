@@ -48,8 +48,8 @@ func runDev(cmd *cobra.Command, _ []string) error {
 		paths = []string{"."}
 	}
 
-	// Resolve every path to its real, symlink-free form ONCE, up front,
-	// before discovery or watching ever sees it. jobdef.CollectDefinitions
+	// Resolve every DIRECTORY path to its real, symlink-free form ONCE, up
+	// front, before discovery or watching ever sees it. jobdef.CollectDefinitions
 	// and jobdef.ResolveYAMLFiles both os.Stat then filepath.WalkDir a
 	// directory path, and WalkDir Lstats its root without following a
 	// symlink there — so a symlinked directory (e.g. `--path jobs` with
@@ -58,6 +58,16 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	// ran. Resolving here, into the SAME paths slice executeRun (every run,
 	// not just the first) and watch setup both read, fixes discovery and
 	// watching identically and keeps them from ever disagreeing.
+	//
+	// An explicit FILE argument is deliberately left unresolved: os.ReadFile
+	// (what CollectDefinitions and watcher.Add both rely on) already follows
+	// symlinks in every path component transparently, so nothing was ever
+	// broken there. Resolving it anyway would permanently pin whatever it
+	// happened to point to at startup — an atomic repoint or replacement of
+	// that exact file (e.g. `current.yaml -> templates/v1.yaml`, later
+	// repointed to v2) would then produce no rerun, ever, and a selected
+	// .yaml symlink whose target lacks a YAML extension would be rejected
+	// outright even though the SELECTED path is perfectly valid.
 	resolvedPaths, err := resolveSymlinks(paths)
 	if err != nil {
 		return err
@@ -188,17 +198,27 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// resolveSymlinks resolves every path to its real, symlink-free form. Used
-// once, up front in runDev, before either definition discovery or watch
-// setup sees any path — see the comment at its call site for why.
+// resolveSymlinks resolves every DIRECTORY path to its real, symlink-free
+// form; an explicit FILE path is left exactly as given. Used once, up front
+// in runDev, before either definition discovery or watch setup sees any
+// path — see the comment at its call site for why directories are resolved
+// but files are not.
 func resolveSymlinks(paths []string) ([]string, error) {
 	resolved := make([]string, len(paths))
 	for i, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", p, err)
+		}
+		if !info.IsDir() {
+			resolved[i] = p
+			continue
+		}
 		r, err := filepath.EvalSymlinks(p)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", p, err)
 		}
-		resolved[i] = r
+		resolved[i] = filepath.Clean(r)
 	}
 	return resolved, nil
 }
@@ -258,7 +278,16 @@ func setupWatches(watcher *fsnotify.Watcher, paths []string) (map[string]bool, e
 // setupWatches) is left untouched on purpose — expanding it would let a
 // step's own output write into a newly created subdirectory retrigger the
 // run that produced it, forever.
+//
+// newDir is normalized with filepath.Clean before the lookup: on Linux,
+// fsnotify's inotify backend builds an event's Name by concatenating the
+// watch's OWN (filepath.Clean'd at Add-time) path with the raw entry name —
+// not filepath.Join — so a watch on "." (the default root) reports a newly
+// created entry as "./new", while THIS package's own watchedDirs entries are
+// always recorded under their clean form ("new"). Without normalizing here,
+// the lookup for "./new"'s parent misses the "." entry recorded at startup.
 func handleDirectoryCreated(watcher *fsnotify.Watcher, newDir string, watchedDirs map[string]bool) (foundYAML bool, err error) {
+	newDir = filepath.Clean(newDir)
 	if !watchedDirs[filepath.Dir(newDir)] {
 		return false, nil
 	}
@@ -271,7 +300,17 @@ func handleDirectoryCreated(watcher *fsnotify.Watcher, newDir string, watchedDir
 // skipped). It reports whether any YAML file was found during the walk,
 // which callers use to detect a file that landed in a brand new directory
 // before its watch was established.
+//
+// dir is normalized with filepath.Clean before the walk: filepath.WalkDir
+// reports the walk ROOT under exactly the string it was given (descendants
+// go through filepath.Join, which always cleans), and fsnotify.Add cleans
+// whatever path it is given before storing it internally — so an uncleaned
+// root here (e.g. "./new") would be tracked and watched under a different
+// spelling than what fsnotify (and this function, called again for a
+// descendant) will use later, breaking the watchedDirs lookups that gate
+// dynamic directory discovery.
 func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[string]bool) (foundYAML bool, err error) {
+	dir = filepath.Clean(dir)
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// The path may have been removed mid-walk (e.g. a transient
@@ -303,8 +342,12 @@ func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[st
 // names the directory that moved or was removed — not any descendants
 // tracked under their own paths from an earlier recursive walk — so without
 // this a descendant's stale entry survives and a later recreation at that
-// same path is wrongly treated as already watched.
+// same path is wrongly treated as already watched. root is normalized with
+// filepath.Clean for the same reason addRecursiveWatch and
+// handleDirectoryCreated normalize their path arguments — see their
+// comments.
 func removeWatchedSubtree(watcher *fsnotify.Watcher, root string, watchedDirs map[string]bool) {
+	root = filepath.Clean(root)
 	prefix := root + string(filepath.Separator)
 	for dir := range watchedDirs {
 		if dir == root || strings.HasPrefix(dir, prefix) {

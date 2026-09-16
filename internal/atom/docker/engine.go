@@ -199,10 +199,34 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	)
 
 	if err = e.backend.ContainerStart(e.ctx, created.ID, opts); err != nil {
+		e.cleanupFailedCreate(created.ID, err)
 		return nil, err
 	}
 
-	return e.Get(&atom.EngineGetRequest{ID: created.ID})
+	a, getErr := e.Get(&atom.EngineGetRequest{ID: created.ID})
+	if getErr != nil {
+		// A container ID has been allocated (and just started) but Create
+		// is about to fail — most commonly because the caller's context
+		// (e.g. a SIGINT-cancelled `caesium dev`) was cancelled in the
+		// window between ContainerStart succeeding and this inspect. Create
+		// returning an error with no atom.Atom handle means nothing else in
+		// the system ever learns this container's ID to stop it, so it
+		// would otherwise run forever. See #480.
+		e.cleanupFailedCreate(created.ID, getErr)
+		return nil, getErr
+	}
+	return a, nil
+}
+
+// cleanupFailedCreate best-effort stops and removes a container that was
+// successfully created — and possibly started — but whose Create call is
+// failing for an unrelated reason. Stop already runs its Docker API calls
+// against a detached context (see its own comment), so this is safe to call
+// regardless of why Create is failing, including a cancelled caller context.
+func (e *dockerEngine) cleanupFailedCreate(id string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: id, Force: true}); err != nil {
+		log.Warn("failed to clean up container after Create failed", "id", id, "cause", cause, "error", err)
+	}
 }
 
 func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
