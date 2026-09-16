@@ -345,7 +345,6 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 
 	addScalar("image", before.Image, after.Image)
 	addScalar("resolvedImageDigest", before.ResolvedImageDigest, after.ResolvedImageDigest)
-	addScalar("unresolvedImageIdentity", before.UnresolvedImageIdentity, after.UnresolvedImageIdentity)
 	addScalar("command", joinCommand(before.Command), joinCommand(after.Command))
 	addScalar("workDir", before.WorkDir, after.WorkDir)
 	if before.CacheVersion != after.CacheVersion {

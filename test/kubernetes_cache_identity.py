@@ -136,6 +136,7 @@ steps:
             assert not row.get("resolved_image_digest"), row
             explanation = why(visible, second_id, "version")
             assert "image identity unavailable" in explanation["summary"], explanation
+            assert not any(change["field"] == "unresolvedImageIdentity" for change in explanation["diff"].get("changes", [])), explanation
             chain_id, chain_second = run(chain)
             for name in ("source", "middle", "leaf", "skipped_leaf"):
                 assert_executed(task(chain_second, name))

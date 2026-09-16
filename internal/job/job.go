@@ -1294,6 +1294,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 	taskQuarantine := make(map[uuid.UUID]bool, len(tasks))
 	taskAttempts := make(map[uuid.UUID]int, len(tasks))
 	terminalTasks := 0
+	imageIdentityChecksRequired := false
+	for _, taskState := range currentRun.Tasks {
+		imageIdentityChecksRequired = imageIdentityChecksRequired || taskState.CacheEnabled && taskState.CachePinDigests || taskState.HasUnresolvedImageIdentity
+	}
 
 	for _, taskState := range currentRun.Tasks {
 		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
@@ -1910,10 +1914,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 				log.Warn("cache bypassed: requested image digest could not be resolved", "task", taskName, "image", runner.image, "error", derr)
 			}
 		}
-		if cacheCfg.Chain != cache.ChainValues && unresolvedImageIdentity == "" {
+		if imageIdentityChecksRequired && cacheCfg.Chain != cache.ChainValues && unresolvedImageIdentity == "" {
 			if unknown, err := store.HasUnresolvedPredecessorImage(runID, taskID); unknown || err != nil {
 				unresolvedImageIdentity = uuid.NewString()
-				log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task", taskName, "error", err)
+				if err != nil {
+					log.Warn("cache bypassed: predecessor image identity query failed", "task", taskName, "reason", "identity_query_failed", "error", err)
+				} else {
+					log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task", taskName, "reason", "unresolved_predecessor")
+				}
 			}
 		}
 		runner.resolvedImageDigest = resolvedImageDigest
@@ -2135,7 +2143,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			failIdentity := func(cause error) {
 				persistErr := store.FailTaskInstance(runID, taskRunID, cause)
 				if persistErr != nil {
-					cause = fmt.Errorf("%w; persist partition failure: %v", cause, persistErr)
+					cause = errors.Join(cause, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist partition failure: %w", persistErr))
 				}
 				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause, abort: persistErr != nil}
 			}
@@ -2360,6 +2368,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// group still collects the identities and outputs of instances that DID
 		// finish — the fan-in aggregate is rebuilt from them.
 		absorb := func(res instanceResult) {
+			if res.abort {
+				firstErr = errors.Join(firstErr, res.err)
+			}
 			inFlight--
 			delete(running, res.taskRunID)
 			for _, id := range res.skippedTasks {
@@ -2571,7 +2582,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 
 		rows, err := store.TaskRunInstances(sweepCtx, runID, taskID)
 		if err != nil {
-			return skippedTaskIDs, err
+			return skippedTaskIDs, errors.Join(firstErr, err)
 		}
 		var stranded []string
 		var unrecorded []string
@@ -2625,7 +2636,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// added to skippedTaskIDs, which the run loop reads as catalog task
 			// ids and counts against the DAG's node total.
 			if skipErr := store.SkipTaskInstance(runID, row.ID, reason); skipErr != nil {
-				return skippedTaskIDs, skipErr
+				return skippedTaskIDs, errors.Join(firstErr, skipErr)
 			}
 			switch {
 			case wasRunning:
@@ -2682,7 +2693,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// because the run's context died between the last instance and here.
 		identities, err := store.FanOutInstanceIdentities(sweepCtx, runID, taskID)
 		if err != nil {
-			return skippedTaskIDs, err
+			return skippedTaskIDs, errors.Join(firstErr, err)
 		}
 		succeeded, failed := 0, 0
 		// groupHashes are the terminal-success instances' identities in
@@ -2919,7 +2930,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					return skipped, nil
 				}
 			default:
-				if !taskQuarantined {
+				if cacheCfg.Enabled && !taskQuarantined {
 					metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
 				}
 			}

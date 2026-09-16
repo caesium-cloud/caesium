@@ -9,11 +9,13 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
@@ -237,7 +239,15 @@ func TestPinDigestsUnavailableBypassesLegacyCacheAndTransitiveDescendants(t *tes
 			tasks.tasks[1].CacheConfig = datatypes.JSON(`false`)
 			require.NoError(t, db.Model(&models.Task{}).Where("id = ?", tasks.tasks[1].ID).Update("cache_config", datatypes.JSON(`false`)).Error)
 		}
+		var midMisses dto.Metric
+		midCounter := metrics.TaskCacheMissesTotal.WithLabelValues(model.Alias, "mid")
+		require.NoError(t, midCounter.Write(&midMisses))
 		require.NoError(t, New(model, opts...).Run(context.Background()))
+		if iteration == 1 {
+			var after dto.Metric
+			require.NoError(t, midCounter.Write(&after))
+			require.Equal(t, midMisses.GetCounter().GetValue(), after.GetCounter().GetValue(), "disabled intermediary is not a cache miss")
+		}
 		snapshot := latestRunSnapshot(t, store, jobID)
 		for i, task := range tasks.tasks {
 			var row models.TaskRun
@@ -422,6 +432,41 @@ BEGIN SELECT RAISE(ABORT, 'simulated identity write failure'); END;`).Error)
 			require.Equal(t, string(run.TaskStatusSucceeded), row.Status)
 		}
 	}
+}
+
+func TestPinDigestsUnavailableFanoutDoubleWriteFailureAbortsDownstream(t *testing.T) {
+	f := newFanOutFixture(t, `["one"]`, &jobdef.FanOut{From: "list", MaxParallel: 1, MaxPartitions: 16, FailurePolicy: jobdef.FanOutFailureContinue}, 0)
+	f.addDownstream(t)
+	f.setFannedCacheConfig(t, datatypes.JSON(`{"pinDigests":true,"digestTTL":0,"ttl":"1h"}`))
+	f.taskSvc.tasks[2].TriggerRule = jobdef.TriggerRuleAllDone
+	f.taskSvc.tasks[2].CacheConfig = datatypes.JSON(`{"pinDigests":true,"digestTTL":0,"ttl":"1h"}`)
+	require.NoError(t, f.db.Model(&models.Task{}).Where("id = ?", f.downstream).Updates(map[string]any{"trigger_rule": jobdef.TriggerRuleAllDone, "cache_config": f.taskSvc.tasks[2].CacheConfig}).Error)
+	f.atomSvc.atoms[f.taskSvc.tasks[1].AtomID].Image = "node-local:mutable"
+	f.atomSvc.atoms[f.taskSvc.tasks[1].AtomID].Engine = models.AtomEngineKubernetes
+	f.atomSvc.atoms[f.taskSvc.tasks[2].AtomID].Engine = models.AtomEngineKubernetes
+	require.NoError(t, f.db.Exec("CREATE TRIGGER fail_unknown_hash BEFORE UPDATE OF hash ON task_runs WHEN NEW.task_id = '"+f.fanned.String()+"' BEGIN SELECT RAISE(ABORT, 'identity write unavailable'); END").Error)
+	require.NoError(t, f.db.Exec("CREATE TRIGGER fail_unknown_terminal BEFORE UPDATE OF status ON task_runs WHEN NEW.task_id = '"+f.fanned.String()+"' AND NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'terminal write unavailable'); END").Error)
+	resolver := imagecheck.NewResolver(imagecheck.WithEngineDigestFunc(models.AtomEngineKubernetes, func(_ context.Context, image string) (string, error) {
+		if image == "node-local:mutable" {
+			return "", imagecheck.ErrDigestUnavailable
+		}
+		return movedTagDigest, nil
+	}))
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, func(j *job) { j.imageResolver = resolver })
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := New(&models.Job{ID: f.jobID}, opts...).Run(ctx)
+		require.NoError(t, ctx.Err(), "double-write failure must return without timing out")
+		cancel()
+		require.ErrorIs(t, err, errUnresolvedIdentityTerminalWrite)
+		require.ErrorContains(t, err, "identity write unavailable")
+		require.ErrorContains(t, err, "terminal write unavailable")
+	}
+	snapshot := latestRunSnapshot(t, f.store, f.jobID)
+	require.Zero(t, f.engine.createCount("one"))
+	require.Empty(t, f.engine.createRequestsForTask(f.downstream), "unknown partition identity must never release an all_done cache consumer")
+	require.False(t, taskRunByID(snapshot, f.downstream).CacheHit)
 }
 
 func TestPinDigestsUnavailableFanoutRetryRenewsIdentityInSameRun(t *testing.T) {

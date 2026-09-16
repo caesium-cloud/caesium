@@ -328,6 +328,8 @@ func TestRegisterTaskPersistsInitialExecutionDescriptorEnvelope(t *testing.T) {
 	require.True(t, descriptor.Baseline.ReplaySafe)
 	require.False(t, descriptor.Baseline.Quarantine)
 	require.Equal(t, map[string]string{"logical_date": "2026-06-25"}, descriptor.Run.Params)
+	require.NotNil(t, descriptor.Run.ImageIdentityChecksRequired)
+	require.True(t, *descriptor.Run.ImageIdentityChecksRequired)
 
 	require.Equal(t, models.AtomEngineKubernetes, descriptor.Runtime.Engine)
 	require.Equal(t, atom.Image, descriptor.Runtime.Image)
@@ -959,6 +961,12 @@ func TestRegisterTaskPersistsReplaySafeSnapshot(t *testing.T) {
 	require.NoError(t, db.First(&safeRun, "job_run_id = ? AND task_id = ?", runRecord.ID, safeTask.ID).Error)
 	require.False(t, unsafeRun.ReplaySafe)
 	require.True(t, safeRun.ReplaySafe)
+	for _, row := range []models.TaskRun{unsafeRun, safeRun} {
+		var descriptor models.TaskExecutionDescriptor
+		require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &descriptor))
+		require.NotNil(t, descriptor.Run.ImageIdentityChecksRequired)
+		require.False(t, *descriptor.Run.ImageIdentityChecksRequired)
+	}
 
 	require.NoError(t, db.Model(job).Update("replay_safe", true).Error)
 	secondRun, err := store.Start(job.ID, &trigger.ID)

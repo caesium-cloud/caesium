@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1197,6 +1198,23 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 	priority := baseline.Priority
 	if priority <= 0 {
 		priority = run.PriorityNormalValue
+	}
+	// Refresh the gate from this replay's frozen plan, never the live catalog.
+	// Legacy flags or persisted uncertainty cannot prove checks unnecessary.
+	descriptors := make([]models.TaskExecutionDescriptor, len(plans))
+	legacyOrUnknown := false
+	for i := range plans {
+		descriptors[i] = plans[i].descriptor
+		flag := descriptors[i].Run.ImageIdentityChecksRequired
+		legacyOrUnknown = legacyOrUnknown || flag == nil || *flag || bytes.Contains(plans[i].base.row.HashInputBlob, []byte(`"unresolvedImageIdentity"`))
+	}
+	identityChecks := models.FrozenImageIdentityChecks(descriptors)
+	if legacyOrUnknown {
+		required := true
+		identityChecks = &required
+	}
+	for i := range plans {
+		plans[i].descriptor.Run.ImageIdentityChecksRequired = identityChecks
 	}
 	for _, plan := range plans {
 		record, err := taskRunRecord(replayID, plan, now, priority)

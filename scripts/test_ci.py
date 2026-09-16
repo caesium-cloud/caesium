@@ -406,7 +406,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("--mode distributed", commands)
         self.assertIn("CAESIUM_EXECUTION_MODE=distributed", commands)
         self.assertIn("kubectl rollout status", commands)
+        not_run = next(step for step in steps if '"result":"not_run"' in step.get("run", ""))
+        self.assertEqual(not_run["if"], "always() && matrix.shard == 1")
+        self.assertIn("for mode in local distributed", not_run["run"])
+        self.assertIn('[ ! -f "$evidence" ]', not_run["run"])
         evidence = next(step for step in steps if step.get("with", {}).get("name") == "kubernetes-cache-identity")
+        self.assertLess(steps.index(not_run), steps.index(evidence))
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            root = Path(directory) / ".tmp/kubernetes-cache-identity"
+            for mode in ("local", "distributed"):
+                record = json.loads((root / f"{mode}.log").read_text())
+                self.assertEqual(record["result"], "not_run")
+                self.assertEqual(record["mode"], mode)
+            (root / "local.log").write_text("retained scenario failure\n")
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            self.assertEqual((root / "local.log").read_text(), "retained scenario failure\n")
+
         self.assertEqual(evidence["if"], "always() && matrix.shard == 1")
         self.assertEqual(evidence["with"]["if-no-files-found"], "error")
         for mode in ("local", "distributed"):

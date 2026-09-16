@@ -209,6 +209,10 @@ type TaskRun struct {
 	CacheDigestTTL  time.Duration `json:"-"`
 	CacheChain      string        `json:"-"`
 	CacheTTLNever   bool          `json:"-"`
+
+	// Retain legacy uncertainty when an executor resumes an unpinned run.
+	HasUnresolvedImageIdentity bool `json:"-"`
+
 	// OutputSchema / SchemaValidation are what the worker validates a task's
 	// output against (runtimeExecutor.runSchemaValidation).
 	OutputSchema            []byte     `json:"-"`
@@ -1862,6 +1866,21 @@ func (s *Store) registerTasksTx(
 
 		if len(records) == 0 {
 			return nil
+		}
+		descriptors := make([]models.TaskExecutionDescriptor, len(records))
+		for i := range records {
+			if err := json.Unmarshal(records[i].ExecutionDescriptor, &descriptors[i]); err != nil {
+				return err
+			}
+		}
+		identityChecks := models.FrozenImageIdentityChecks(descriptors)
+		for i := range records {
+			descriptors[i].Run.ImageIdentityChecksRequired = identityChecks
+			encoded, err := json.Marshal(descriptors[i])
+			if err != nil {
+				return err
+			}
+			records[i].ExecutionDescriptor = encoded
 		}
 		if err := tx.Create(&records).Error; err != nil {
 			return err
@@ -5670,6 +5689,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		LogScrubbed:             model.LogScrubbed,
 		LogGeneration:           model.LogGeneration,
 	}
+	task.HasUnresolvedImageIdentity = bytes.Contains(model.HashInputBlob, []byte(`"unresolvedImageIdentity"`))
 
 	if len(model.Output) > 0 {
 		var out map[string]string
@@ -5763,6 +5783,9 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 			head.PartitionCount = 0
 		}
 		head.ID = taskID
+		for _, inst := range insts {
+			head.HasUnresolvedImageIdentity = head.HasUnresolvedImageIdentity || inst.HasUnresolvedImageIdentity
+		}
 		if n > 1 {
 			modelsRows := make([]models.TaskRun, 0, n)
 			var firstStart *time.Time

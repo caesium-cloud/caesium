@@ -360,6 +360,8 @@ type TaskExecutionEdgeRef struct {
 
 type TaskExecutionRun struct {
 	Params map[string]string `json:"params,omitempty"`
+	// Nil denotes a legacy or incomplete freeze and requires conservative checks.
+	ImageIdentityChecksRequired *bool `json:"imageIdentityChecksRequired,omitempty"`
 }
 
 type TaskExecutionRuntime struct {

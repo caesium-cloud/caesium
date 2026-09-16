@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -263,11 +264,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// Caching still gates what caching owns: the lookup below and the publish
 	// after a successful run.
 	needsIdentityHash := cacheCfg.Enabled || run.IsFanOutInstance(taskRun)
-	if cacheCfg.Chain != cache.ChainValues {
+	if cacheCfg.Chain != cache.ChainValues && workerImageIdentityChecksRequired(taskRun, descriptor) {
 		if unknown, err := e.store.HasUnresolvedPredecessorImage(taskRun.JobRunID, taskRun.TaskID); unknown || err != nil {
 			unresolvedImageIdentity = uuid.NewString()
 			needsIdentityHash = true
-			log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task_id", taskRun.TaskID, "error", err)
+			if err != nil {
+				log.Warn("cache bypassed: predecessor image identity query failed", "task_id", taskRun.TaskID, "reason", "identity_query_failed", "error", err)
+			} else {
+				log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task_id", taskRun.TaskID, "reason", "unresolved_predecessor")
+			}
 		}
 	}
 	if needsIdentityHash {
@@ -1414,4 +1419,20 @@ func triggerRulesByTaskID(db *gorm.DB, ids []uuid.UUID) (map[uuid.UUID]string, e
 		out[rows[i].ID] = rows[i].TriggerRule
 	}
 	return out, nil
+}
+
+// Read only the gate from the already-loaded row; ordinary execution continues
+// using its existing runtime inputs. Legacy and malformed freezes stay conservative.
+func workerImageIdentityChecksRequired(taskRun *models.TaskRun, descriptor *models.TaskExecutionDescriptor) bool {
+	if taskRun.CacheEnabled && taskRun.CachePinDigests || bytes.Contains(taskRun.HashInputBlob, []byte(`"unresolvedImageIdentity"`)) {
+		return true
+	}
+	if descriptor == nil {
+		var frozen models.TaskExecutionDescriptor
+		if json.Unmarshal(taskRun.ExecutionDescriptor, &frozen) != nil {
+			return true
+		}
+		descriptor = &frozen
+	}
+	return descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion || descriptor.Run.ImageIdentityChecksRequired == nil || *descriptor.Run.ImageIdentityChecksRequired
 }

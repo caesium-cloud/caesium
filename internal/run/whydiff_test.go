@@ -335,5 +335,9 @@ func TestUnresolvedImageIdentityNoteSurvivesMissingBaseline(t *testing.T) {
 	diff, err = DiffHashInputBlobs(raw, []byte(`{"blobVersion":1,"hash":"old"}`))
 	require.NoError(t, err)
 	require.Contains(t, diff.Notes, unresolvedImageIdentityNote)
-	require.Contains(t, diff.Changes, FieldChange{Field: "unresolvedImageIdentity", Kind: fieldScalar, After: "execution-one"})
+	require.Empty(t, diff.Changes)
+	diff, err = DiffHashInputBlobs(raw, []byte(`{"blobVersion":1,"hash":"old","unresolvedImageIdentity":"execution-two"}`))
+	require.NoError(t, err)
+	require.Contains(t, diff.Notes, unresolvedImageIdentityNote)
+	require.Empty(t, diff.Changes, "random execution identity is proof of uncertainty, not a changed recipe input")
 }

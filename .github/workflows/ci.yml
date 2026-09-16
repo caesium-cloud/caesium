@@ -991,6 +991,16 @@ jobs:
           done
           if [ "$ready" != true ]; then cat /tmp/port-forward.log; exit 1; fi
           python3 test/kubernetes_cache_identity.py --cli .tmp/cache-identity-cli/caesium-linux-amd64 --mode distributed 2>&1 | tee .tmp/kubernetes-cache-identity/distributed.log
+      - name: Record Kubernetes cache identity scenarios that could not run
+        if: always() && matrix.shard == 1
+        run: |
+          mkdir -p .tmp/kubernetes-cache-identity
+          for mode in local distributed; do
+            evidence=".tmp/kubernetes-cache-identity/$mode.log"
+            if [ ! -f "$evidence" ]; then
+              printf '{"result":"not_run","mode":"%s","reason":"scenario did not run; inspect prerequisite or earlier mode failure"}\n' "$mode" > "$evidence"
+            fi
+          done
       - name: Retain Kubernetes cache identity evidence
         if: always() && matrix.shard == 1
         uses: actions/upload-artifact@v7
