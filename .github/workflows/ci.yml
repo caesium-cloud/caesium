@@ -572,8 +572,8 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
         id: dependencies
+        working-directory: ui
         run: |
-          cd ui
           npm ci
           npx playwright install --with-deps chromium
       - name: Pre-pull job images
@@ -615,7 +615,108 @@ jobs:
       - name: Run Playwright E2E
         id: playwright
         working-directory: ui
-        run: npm run test:e2e -- --project=network-recovery
+        env:
+          CI: 'true'
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+          CAESIUM_MANUAL_TRIGGER_API_KEY: e2e-test-key
+        run: |
+          set -euo pipefail
+          server_pid="$(docker inspect --format '{{.State.Pid}}' caesium-server)"
+          case "$server_pid" in
+            ''|0|*[!0-9]*) echo "Caesium server PID is invalid: $server_pid" >&2; exit 1 ;;
+          esac
+          sudo test -e "/proc/$server_pid/ns/net"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          runner_groups="$(id -G | tr ' ' ',')"
+          runner_home="${HOME:?runner HOME is required}"
+          runner_path="$PATH"
+          runner_pwd="$PWD"
+          host_mount_ns="$(readlink /proc/self/ns/mnt)"
+          printf 'Host resolver nameservers:\n'
+          awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf
+          server_resolv_conf="$(docker inspect --format '{{.ResolvConfPath}}' caesium-server)"
+          case "$server_resolv_conf" in
+            /*) ;;
+            *) echo "Caesium resolver path is invalid: $server_resolv_conf" >&2; exit 1 ;;
+          esac
+          sudo test -f "$server_resolv_conf"
+          node_bin="$(command -v node)"
+          npm_bin="$(command -v npm)"
+          nsenter_bin="$(command -v nsenter)"
+          unshare_bin="$(command -v unshare)"
+          setpriv_bin="$(command -v setpriv)"
+          browser_bin="$("$node_bin" -e 'const { chromium } = require("playwright"); process.stdout.write(chromium.executablePath())')"
+          test -x "$node_bin"
+          test -x "$npm_bin"
+          test -x "$nsenter_bin"
+          test -x "$unshare_bin"
+          test -x "$setpriv_bin"
+          test -x "$browser_bin"
+          inner_script="$(cat <<'BASH'
+          set -euo pipefail
+          test "$(id -u)" = "$CAESIUM_E2E_RUNNER_UID"
+          test "$(id -g)" = "$CAESIUM_E2E_RUNNER_GID"
+          test "$HOME" = "$CAESIUM_E2E_RUNNER_HOME"
+          test "$PATH" = "$CAESIUM_E2E_RUNNER_PATH"
+          cd "$CAESIUM_E2E_RUNNER_PWD"
+          test "$PWD" = "$CAESIUM_E2E_RUNNER_PWD"
+          test "$(command -v node)" = "$CAESIUM_E2E_NODE_BIN"
+          test -x "$CAESIUM_E2E_BROWSER_BIN"
+          "$CAESIUM_E2E_NODE_BIN" --version
+          curl -sf "$PLAYWRIGHT_BASE_URL/health" >/dev/null
+          for font_host in fonts.googleapis.com fonts.gstatic.com; do
+            if ! getent hosts "$font_host" >/dev/null; then
+              echo "::warning::preflight: cannot resolve $font_host (external DNS); continuing to browser assertions" >&2
+            fi
+          done
+          "$CAESIUM_E2E_NODE_BIN" --input-type=module -e '
+            import { chromium } from "playwright";
+            if (chromium.executablePath() !== process.env.CAESIUM_E2E_BROWSER_BIN) {
+              throw new Error("Playwright browser executable changed inside the server namespace")
+            }
+            const browser = await chromium.launch();
+            await browser.close();
+          '
+          exec "$CAESIUM_E2E_NPM_BIN" run test:e2e -- --project=network-recovery
+          BASH
+          )"
+          mount_script="$(cat <<'BASH'
+          set -euo pipefail
+          test "$(readlink /proc/self/ns/mnt)" != "$CAESIUM_E2E_HOST_MOUNT_NS"
+          test -f "$CAESIUM_E2E_SERVER_RESOLV_CONF"
+          mount --make-rprivate /
+          mount --bind "$CAESIUM_E2E_SERVER_RESOLV_CONF" /etc/resolv.conf
+          test /etc/resolv.conf -ef "$CAESIUM_E2E_SERVER_RESOLV_CONF"
+          printf 'Server resolver nameservers:\n'
+          awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf
+          exec "$CAESIUM_E2E_SETPRIV_BIN" --reuid="$CAESIUM_E2E_RUNNER_UID" --regid="$CAESIUM_E2E_RUNNER_GID" \
+            --groups="$CAESIUM_E2E_RUNNER_GROUPS" --inh-caps=-all --ambient-caps=-all \
+            --bounding-set=-all --no-new-privs /bin/bash -c "$CAESIUM_E2E_INNER_SCRIPT"
+          BASH
+          )"
+          sudo env \
+            HOME="$runner_home" \
+            PATH="$runner_path" \
+            PWD="$runner_pwd" \
+            CI="$CI" \
+            PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \
+            CAESIUM_MANUAL_TRIGGER_API_KEY="$CAESIUM_MANUAL_TRIGGER_API_KEY" \
+            CAESIUM_E2E_RUNNER_UID="$runner_uid" \
+            CAESIUM_E2E_RUNNER_GID="$runner_gid" \
+            CAESIUM_E2E_RUNNER_HOME="$runner_home" \
+            CAESIUM_E2E_RUNNER_PATH="$runner_path" \
+            CAESIUM_E2E_RUNNER_PWD="$runner_pwd" \
+            CAESIUM_E2E_RUNNER_GROUPS="$runner_groups" \
+            CAESIUM_E2E_HOST_MOUNT_NS="$host_mount_ns" \
+            CAESIUM_E2E_SERVER_RESOLV_CONF="$server_resolv_conf" \
+            CAESIUM_E2E_NODE_BIN="$node_bin" \
+            CAESIUM_E2E_NPM_BIN="$npm_bin" \
+            CAESIUM_E2E_BROWSER_BIN="$browser_bin" \
+            CAESIUM_E2E_SETPRIV_BIN="$setpriv_bin" \
+            CAESIUM_E2E_INNER_SCRIPT="$inner_script" \
+            "$nsenter_bin" --target "$server_pid" --net \
+              "$unshare_bin" --mount --propagation private /bin/bash -c "$mount_script"
       - name: Collect browser diagnostics
         if: always()
         env:
