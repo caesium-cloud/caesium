@@ -555,6 +555,38 @@ var (
 	// retry is refused because the job is paused. A human pause outranks an agent
 	// retry (design-agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
+)
+
+// RunCommittedError reports a start that FAILED after its run was already
+// committed and live: the row exists, run_started has been published and the
+// lease is taken, but the record could not be read back.
+//
+// It carries the exact run id so a caller can drive or finalize the run it
+// actually created. That identity matters: searching for "a matching running
+// run" instead would, during a leader change, let one node adopt and execute a
+// run another node created and is already executing.
+type RunCommittedError struct {
+	RunID uuid.UUID
+	JobID uuid.UUID
+	Err   error
+}
+
+func (e *RunCommittedError) Error() string {
+	return fmt.Sprintf("run: %s was committed but could not be read back: %v", e.RunID, e.Err)
+}
+
+func (e *RunCommittedError) Unwrap() error { return e.Err }
+
+// CommittedRunID reports the run a failed start already committed, if any.
+func CommittedRunID(err error) (uuid.UUID, bool) {
+	var committed *RunCommittedError
+	if errors.As(err, &committed) && committed.RunID != uuid.Nil {
+		return committed.RunID, true
+	}
+	return uuid.Nil, false
+}
+
+var (
 	// ErrPartitionNotRetryable is returned by RetryPartition when the addressed
 	// instance is terminal but not FAILED. The retryable set is documented at
 	// the guard in RetryPartition; controllers surface this as 409 with the
@@ -1518,7 +1550,22 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		s.startedMu.Unlock()
 	}
 
-	return s.loadRunWithDB(conn, model.ID)
+	// The run is COMMITTED by this point: the row exists, run_started has been
+	// published, the lease is taken and callers drive the run from the record
+	// returned here. Reading it back on the CALLER's context would let a
+	// cancellation landing in this window turn a live run into
+	// (nil, context.Canceled) — the caller then neither executes nor finalizes
+	// it, and the row is stranded `running` with no tasks and no engine. Only
+	// the transaction above honours cancellation; this read is detached.
+	loaded, err := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), model.ID)
+	if err != nil {
+		// Still committed, still live. Report the failure with the run's exact
+		// identity so the caller can drive or finalize THAT run — never a
+		// look-alike found by searching, which on another node would mean
+		// executing someone else's run twice.
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Err: err}
+	}
+	return loaded, nil
 }
 
 // taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
@@ -5665,7 +5712,60 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(runID)
 }
 
-func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
+// listCountToPageHook is a test seam invoked between List's total COUNT and
+// its page SELECT. Nil in production. It exists so a test can deterministically
+// reproduce a run committed in that window — the exact race a review caught:
+// two separate reads with no shared snapshot mean a run inserted after Count
+// but before Scan shifts the newest-first page, and comparing the page length
+// against the (now-stale) total can silently suppress next_offset even though
+// real older history still exists. See the limit+1 probe below, which is the
+// actual fix — this hook only lets a test PROVE the fix by forcing the race.
+var listCountToPageHook func()
+
+// List returns a page of a job's runs, newest first (created_at DESC, id DESC
+// as a deterministic tiebreak for runs created in the same instant), the
+// total row count, and whether more rows exist past this page.
+//
+// limit and offset are applied as given: bounds validation, defaulting, and
+// the documented page-size ceiling belong to the REST layer (see
+// runListPageBounds in api/rest/controller/job/run/list.go), which is what
+// actually rejects an out-of-range request with 400 instead of silently
+// clamping it. A limit <= 0 here means "no LIMIT clause", and hasMore is
+// always false in that case (an unbounded fetch has no continuation).
+//
+// hasMore is derived from the PAGE QUERY ITSELF — it fetches one row past
+// limit and reports hasMore when that extra row exists, trimming it back off
+// before converting results — rather than by comparing the page length
+// against total. total comes from a separate, earlier COUNT with no shared
+// read snapshot, so a run committed between the two statements can shift the
+// newest-first page enough that total's comparison alone would report no
+// more pages when older history in fact remains. The limit+1 probe answers
+// "is there another row after this page, right now, in this same read" and
+// is correct regardless of what total said a moment earlier; total itself is
+// still returned, but purely as the display count a client shows, never as
+// the truncation signal.
+//
+// cache_hits / executed_tasks / total_tasks are populated from the REAL
+// TaskRun rows belonging to the runs on THIS PAGE, not from
+// Preload("Tasks") — which is a silent no-op under Scan() (GORM does not
+// hydrate preloaded associations for Scan targets) and used to leave every
+// list entry reporting a measured zero while GET .../runs/:run_id, which
+// loads real rows via First(), reported the true count (issue #489).
+// Loading just the page's own task rows (bounded to however many runs the
+// page holds, never the job's whole history) and running them through the
+// same collapseFanOutGroups/summarizeTasks pipeline convertRunModel uses for
+// the detail endpoint guarantees the two agree, fan-out groups included.
+func (s *Store) List(jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
+	if err := s.db.Model(&models.JobRun{}).
+		Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
+		Count(&total).Error; err != nil {
+		return nil, 0, false, err
+	}
+
+	if listCountToPageHook != nil {
+		listCountToPageHook()
+	}
+
 	var results []struct {
 		models.JobRun
 		JobAlias     string
@@ -5673,32 +5773,94 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 		TriggerAlias string
 	}
 
-	err := s.db.Table("job_runs").
+	q := s.db.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
-		Order("job_runs.started_at ASC").
-		Preload("Tasks").
-		Scan(&results).Error
-
-	if err != nil {
-		return nil, err
+		Order("job_runs.created_at DESC, job_runs.id DESC")
+	if limit > 0 {
+		// Fetch one extra row so "is there more" is answered by this same
+		// query, not by a comparison against the (possibly now-stale) total
+		// counted above.
+		q = q.Limit(limit + 1)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	if err := q.Scan(&results).Error; err != nil {
+		return nil, 0, false, err
 	}
 
-	runs := make([]*JobRun, 0, len(results))
+	if limit > 0 && len(results) > limit {
+		hasMore = true
+		results = results[:limit]
+	}
+
+	runIDs := make([]uuid.UUID, 0, len(results))
 	for i := range results {
+		runIDs = append(runIDs, results[i].ID)
+	}
+	tasksByRun, err := s.pageTaskRunsByJobRunID(runIDs)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	runs = make([]*JobRun, 0, len(results))
+	for i := range results {
+		results[i].Tasks = tasksByRun[results[i].ID]
 		runValue, err := s.convertRunModel(&results[i].JobRun)
 		if err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 		runValue.JobAlias = results[i].JobAlias
 		runValue.TriggerType = results[i].TriggerType
 		runValue.TriggerAlias = results[i].TriggerAlias
+		// The list response stays a summary: full task rows are the detail
+		// endpoint's surface (GET .../runs/:run_id). Only the derived
+		// counters computed above — from the same real rows — are list
+		// surface, matching the shape clients already parse.
+		runValue.Tasks = []*TaskRun{}
 		runs = append(runs, runValue)
 	}
 
-	return runs, nil
+	return runs, total, hasMore, nil
+}
+
+// pageTaskRunsByJobRunID loads the TaskRun rows belonging to the given job
+// runs, keyed by job_run_id. Scoped to one List() page's run IDs rather than
+// the job's whole history, so a paged call costs one bounded indexed query
+// instead of an unbounded task_runs scan.
+// pageTaskRunsCounterColumns is every column convertRunTaskModel /
+// collapseFanOutGroups / summarizeTasks actually read to derive
+// cache_hits/executed_tasks/total_tasks: the group key (task_id), the status
+// vote (status, cache_hit), and id/job_run_id to address and bucket the row.
+// Deliberately NOT `SELECT *`: a TaskRun row also carries LogText (persisted
+// log snapshots up to 1 MiB each), execution descriptors, outputs, and
+// hash-input blobs — none of which summarizeTasks looks at, and all of which
+// convertRunModel's List() caller discards immediately after computing the
+// three counters (runValue.Tasks is reset to empty for list responses). A
+// full-column load here turned a 100-run page with a handful of tasks each
+// into materializing on the order of the executor's whole per-task log
+// ceiling, for every request.
+var pageTaskRunsCounterColumns = []string{"id", "job_run_id", "task_id", "status", "cache_hit"}
+
+func (s *Store) pageTaskRunsByJobRunID(runIDs []uuid.UUID) (map[uuid.UUID][]*models.TaskRun, error) {
+	out := make(map[uuid.UUID][]*models.TaskRun, len(runIDs))
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	var rows []*models.TaskRun
+	if err := s.db.
+		Select(pageTaskRunsCounterColumns).
+		Where("job_run_id IN ?", runIDs).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.JobRunID] = append(out[row.JobRunID], row)
+	}
+	return out, nil
 }
 
 func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
