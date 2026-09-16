@@ -59,6 +59,9 @@ func (m *mockDockerBackend) ContainerList(ctx context.Context, options dockercon
 
 func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (dockercontainer.CreateResponse, error) {
 	args := m.Called(config, hostConfig, containerName)
+	if len(args) > 0 && args.Error(0) != nil {
+		return dockercontainer.CreateResponse{}, args.Error(0)
+	}
 
 	switch containerName {
 	case "fail":

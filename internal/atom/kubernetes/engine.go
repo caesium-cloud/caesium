@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/user"
@@ -14,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -46,46 +48,67 @@ type kubernetesEngine struct {
 	backend kubernetesBackend
 }
 
-var getKubernetesCore = func(k8sCfg string) corev1.CoreV1Interface {
-	if k8sCfg == "" {
+// getKubernetesCore resolves the CoreV1 client from the local kubeconfig,
+// falling back to in-cluster config. It returns an error instead of panicking
+// so every caller of NewEngine gets a clean, actionable failure (an
+// unreachable/missing kubeconfig is an expected runtime condition — e.g.
+// `caesium dev` running outside a cluster with no local kubeconfig — not a
+// programmer error).
+//
+// The path resolved here is env.Variables().KubernetesConfig
+// (CAESIUM_KUBERNETES_CONFIG) joined with kubeConfig, or $HOME/.kube/config
+// when that env var is unset — NOT the standard KUBECONFIG env var, which
+// clientcmd.BuildConfigFromFlags never consults once given an explicit path.
+var getKubernetesCore = func(k8sCfg string) (corev1.CoreV1Interface, error) {
+	configPath := k8sCfg
+	if configPath == "" {
 		u, _ := user.Current()
-		k8sCfg = filepath.Join(u.HomeDir, kubeConfig)
+		configPath = filepath.Join(u.HomeDir, kubeConfig)
 	} else {
-		k8sCfg = filepath.Join(k8sCfg, kubeConfig)
+		configPath = filepath.Join(configPath, kubeConfig)
 	}
 
-	config, err := clientcmd.BuildConfigFromFlags("", k8sCfg)
+	config, err := clientcmd.BuildConfigFromFlags("", configPath)
 	if err != nil {
 		// Fall back to in-cluster config when running inside a Kubernetes pod.
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf(
+				"load kubeconfig %s and in-cluster config both failed (last error: %w)",
+				configPath, err)
 		}
 	}
 
 	cli, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("build kubernetes client: %w", err)
 	}
 
-	return cli.CoreV1()
+	return cli.CoreV1(), nil
 }
 
-// NewEngine creates a new instance of kubernetes.Engine
-// for interacting with kubernetes.Atoms.
-func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) Engine {
+// NewEngine creates a new instance of kubernetes.Engine for interacting with
+// kubernetes.Atoms. It returns an error (rather than panicking) when the
+// kubeconfig cannot be loaded and no in-cluster config is available, so every
+// caller can surface a clean, actionable message instead of an unrecovered
+// panic.
+func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) (Engine, error) {
 	var backend corev1.CoreV1Interface
 
 	if len(core) > 0 {
 		backend = core[0]
 	} else {
-		backend = getKubernetesCore(env.Variables().KubernetesConfig)
+		var err error
+		backend, err = getKubernetesCore(env.Variables().KubernetesConfig)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes engine unavailable: %w; set CAESIUM_KUBERNETES_CONFIG to a directory containing .kube/config (defaults to $HOME/.kube/config), or run inside a cluster with a valid service account", err)
+		}
 	}
 
 	return &kubernetesEngine{
 		ctx:     ctx,
 		backend: backend.Pods(env.Variables().KubernetesNamespace),
-	}
+	}, nil
 }
 
 // Get a Caesium Kubernetes pod and its corresponding metadata.
@@ -168,12 +191,57 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		}
 	}
 
-	pod, err := e.backend.Create(e.ctx, spec, metav1.CreateOptions{})
+	// Issue the allocation call itself against a bounded, DETACHED context
+	// rather than e.ctx: e.ctx is cancellable (e.g. SIGINT from `caesium
+	// dev`), and if it is cancelled WHILE this request is in flight, the
+	// API server may already have persisted the pod by the time the client
+	// sees a context-cancelled error — leaving nothing to clean up, since
+	// we would never learn the pod exists. spec.Name is generated
+	// client-side above, before this call, so it stays findable regardless
+	// of which context the call itself used. Running it to a definitive
+	// completion first, then checking e.ctx separately below, means Create
+	// always knows whether a pod exists and can remove it if the caller
+	// has since given up.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	pod, err := e.backend.Create(createCtx, spec, metav1.CreateOptions{})
 	if err != nil {
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: the API server may have persisted
+			// this uniquely named Caesium pod before its response reached us.
+			e.cleanupFailedCreate(spec.Name, err)
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// Create succeeded — the pod exists — but the caller is no longer
+		// waiting for it. Remove it and report the cancellation, not a
+		// spurious success. See #480.
+		e.cleanupFailedCreate(spec.Name, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	return &Atom{metadata: pod}, nil
+}
+
+// createRequestTimeout bounds the Create API call above, independent of the
+// caller's (possibly SIGINT-cancelled) context.
+const createRequestTimeout = 30 * time.Second
+
+// cleanupFailedCreate best-effort deletes a pod that was successfully
+// created but whose Create call is failing for an unrelated reason (most
+// commonly: the caller's context was cancelled around the create request).
+// Stop already deletes against a detached context.Background() (see its own
+// comment), so this is safe to call regardless of why Create is failing.
+func (e *kubernetesEngine) cleanupFailedCreate(name string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: name, Force: true}); err != nil {
+		log.Warn("failed to clean up pod after Create failed", "name", name, "cause", cause, "error", err)
+	}
 }
 
 func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {

@@ -32,6 +32,9 @@ type mockKubernetesBackend struct {
 
 func (m *mockKubernetesBackend) Create(ctx context.Context, pod *v1.Pod, opts metav1.CreateOptions) (*v1.Pod, error) {
 	args := m.Called(pod)
+	if len(args) > 0 && args.Error(0) != nil {
+		return nil, args.Error(0)
+	}
 	if strings.HasPrefix(pod.Name, "-") {
 		return nil, args.Error(0)
 	}

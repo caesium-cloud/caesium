@@ -1454,7 +1454,7 @@ func defaultNewEngine(ctx context.Context, engineType models.AtomEngine) (atom.E
 	case models.AtomEngineDocker:
 		return docker.NewEngine(ctx), nil
 	case models.AtomEngineKubernetes:
-		return kubernetes.NewEngine(ctx), nil
+		return kubernetes.NewEngine(ctx)
 	case models.AtomEnginePodman:
 		return podman.NewEngine(ctx), nil
 	default:

@@ -14,14 +14,40 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 func (s *KubernetesTestSuite) TestNewEngine() {
-	engine := NewEngine(
+	engine, err := NewEngine(
 		context.Background(),
 		fake.NewClientset().CoreV1(),
 	)
+	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), engine)
+}
+
+// TestNewEngineNoConfigReturnsError proves the config-load failure path
+// (no kubeconfig, no in-cluster config) returns a clean, actionable error
+// instead of panicking — the root cause of #479 (caesium dev --once panicked
+// with an unrecovered Go panic on an unreachable kubernetes engine).
+func (s *KubernetesTestSuite) TestNewEngineNoConfigReturnsError() {
+	orig := getKubernetesCore
+	defer func() { getKubernetesCore = orig }()
+	getKubernetesCore = func(string) (corev1.CoreV1Interface, error) {
+		return nil, fmt.Errorf("no configuration has been provided")
+	}
+
+	engine, err := NewEngine(context.Background())
+	assert.Nil(s.T(), engine)
+	if assert.Error(s.T(), err) {
+		assert.Contains(s.T(), err.Error(), "kubernetes engine unavailable")
+		// Must name the setting this constructor actually reads
+		// (CAESIUM_KUBERNETES_CONFIG) rather than the standard KUBECONFIG
+		// env var, which clientcmd.BuildConfigFromFlags never consults here.
+		assert.Contains(s.T(), err.Error(), "CAESIUM_KUBERNETES_CONFIG")
+		assert.NotContains(s.T(), err.Error(), "KUBECONFIG",
+			"KUBECONFIG has no effect on this code path and must not be recommended")
+	}
 }
 
 func (s *KubernetesTestSuite) TestGet() {
@@ -316,6 +342,62 @@ func (s *KubernetesTestSuite) TestCreateError() {
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), c)
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+}
+
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after the docker/podman orphan-cleanup fix, a SIGINT
+// landing WHILE the pod-create API request itself is in flight could still
+// orphan a pod — the API server may persist it before the client sees a
+// cancellation error, and Create would return with no handle at all to
+// clean up. The fake backend cancels the engine's context from inside its
+// Create handler (simulating the server completing the request at the
+// exact moment SIGINT arrives) and then reports success, proving Create
+// still definitively completes the allocation call, notices the
+// cancellation afterward, and deletes the pod it just learned the name of
+// rather than leaking it. The pod's name isn't known ahead of time (a
+// client-generated UUID suffix), so the Delete expectation is registered
+// from inside the Create callback once the actual name is known.
+func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test", "cmd"},
+	}
+
+	backend.
+		On("Create", mock.AnythingOfType("*v1.Pod")).
+		Run(func(args mock.Arguments) {
+			pod := args.Get(0).(*v1.Pod)
+			backend.On("Delete", pod.Name).Return()
+			cancel()
+		}).
+		Return()
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: context.Background()}
+	req := &atom.EngineCreateRequest{Name: testAtomID, Image: testImage, Command: []string{"test"}}
+
+	backend.On("Create", mock.AnythingOfType("*v1.Pod")).Run(func(args mock.Arguments) {
+		pod := args.Get(0).(*v1.Pod)
+		backend.On("Delete", pod.Name).Return(nil)
+	}).Return(context.DeadlineExceeded)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestStop() {

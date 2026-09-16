@@ -173,10 +173,13 @@ type job struct {
 	taskEdgeServiceFactory func(context.Context) taskedge.TaskEdge
 	dispatchRunCallbacks   func(context.Context, uuid.UUID, uuid.UUID, error) error
 	newDockerEngine        func(context.Context) atom.Engine
-	newKubernetesEngine    func(context.Context) atom.Engine
-	newPodmanEngine        func(context.Context) atom.Engine
-	atomPollInterval       time.Duration
-	secretResolver         secret.Resolver
+	// newKubernetesEngine returns an error (instead of panicking) when the
+	// kubernetes engine cannot be constructed — e.g. no reachable kubeconfig —
+	// so buildLocalRunners can surface a clean, actionable failure. See #479.
+	newKubernetesEngine func(context.Context) (atom.Engine, error)
+	newPodmanEngine     func(context.Context) atom.Engine
+	atomPollInterval    time.Duration
+	secretResolver      secret.Resolver
 	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
 	// imagecheck.Default(); tests inject a stub so Create can be asserted
 	// against a known digest without a registry.
@@ -336,7 +339,7 @@ func New(m *models.Job, opts ...JobOption) Job {
 			return callback.Default().Dispatch(ctx, jobID, runID, runErr)
 		},
 		newDockerEngine:     func(ctx context.Context) atom.Engine { return docker.NewEngine(ctx) },
-		newKubernetesEngine: func(ctx context.Context) atom.Engine { return kubernetes.NewEngine(ctx) },
+		newKubernetesEngine: func(ctx context.Context) (atom.Engine, error) { return kubernetes.NewEngine(ctx) },
 		newPodmanEngine:     func(ctx context.Context) atom.Engine { return podman.NewEngine(ctx) },
 		atomPollInterval:    env.Variables().AtomPollInterval,
 	}
@@ -468,7 +471,10 @@ func WithDockerEngineFactory(factory func(context.Context) atom.Engine) JobOptio
 }
 
 // WithKubernetesEngineFactory overrides the Kubernetes engine constructor.
-func WithKubernetesEngineFactory(factory func(context.Context) atom.Engine) JobOption {
+// Unlike the Docker/Podman factories, this one can fail (no reachable
+// kubeconfig) and returns an error rather than panicking; buildLocalRunners
+// surfaces that error as a clean run failure instead of an unrecovered panic.
+func WithKubernetesEngineFactory(factory func(context.Context) (atom.Engine, error)) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.newKubernetesEngine = factory
@@ -790,7 +796,11 @@ func buildLocalRunners(
 		case models.AtomEngineDocker:
 			runner.engine = j.newDockerEngine(ctx)
 		case models.AtomEngineKubernetes:
-			runner.engine = j.newKubernetesEngine(ctx)
+			engine, err := j.newKubernetesEngine(ctx)
+			if err != nil {
+				return fmt.Errorf("task %s: %w", taskID, err)
+			}
+			runner.engine = engine
 		case models.AtomEnginePodman:
 			runner.engine = j.newPodmanEngine(ctx)
 		default:

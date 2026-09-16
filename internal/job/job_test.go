@@ -502,7 +502,7 @@ func withTestDeps(
 		WithTaskEdgeServiceFactory(func(context.Context) taskedge.TaskEdge { return edgeSvc }),
 		WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
 		WithDockerEngineFactory(func(context.Context) atom.Engine { return engine }),
-		WithKubernetesEngineFactory(func(context.Context) atom.Engine { return engine }),
+		WithKubernetesEngineFactory(func(context.Context) (atom.Engine, error) { return engine, nil }),
 		WithPodmanEngineFactory(func(context.Context) atom.Engine { return engine }),
 		WithAtomPollInterval(5 * time.Millisecond),
 	}
