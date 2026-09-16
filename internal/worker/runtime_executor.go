@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -233,7 +234,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	var cacheHash string
 	// resolvedImageDigest is the content digest folded into cacheHash when
 	// pinning is on; empty otherwise. Reused when caching the result.
-	var resolvedImageDigest string
+	var resolvedImageDigest, unresolvedImageIdentity string
 	// hashInputBlob is the canonical secret-redacted decomposition of the
 	// HashInput; reused when caching the result so a cache hit can be explained.
 	var hashInputBlob []byte
@@ -263,8 +264,19 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// Caching still gates what caching owns: the lookup below and the publish
 	// after a successful run.
 	needsIdentityHash := cacheCfg.Enabled || run.IsFanOutInstance(taskRun)
+	if cacheCfg.Chain != cache.ChainValues && workerImageIdentityChecksRequired(taskRun, descriptor) {
+		if unknown, err := e.store.HasUnresolvedPredecessorImage(taskRun.JobRunID, taskRun.TaskID); unknown || err != nil {
+			unresolvedImageIdentity = uuid.NewString()
+			needsIdentityHash = true
+			if err != nil {
+				log.Warn("cache bypassed: predecessor image identity query failed", "task_id", taskRun.TaskID, "reason", "identity_query_failed", "error", err)
+			} else {
+				log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task_id", taskRun.TaskID, "reason", "unresolved_predecessor")
+			}
+		}
+	}
 	if needsIdentityHash {
-		if cacheCfg.Enabled {
+		if cacheCfg.Enabled && unresolvedImageIdentity == "" {
 			cacheStore = cache.NewStore(e.store.DB())
 		}
 
@@ -302,8 +314,8 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		// When digest pinning is on, resolve the image tag to its content
-		// digest and fold the digest into the cache key. A resolution failure
-		// falls back to the literal tag — a cache miss is always safe.
+		// digest and fold the digest into the cache key. Unresolved identity
+		// bypasses cache reuse/publication and changes transitive downstream keys.
 		//
 		// Gated on cacheCfg.Enabled, matching the local lane's
 		// resolveTaskCacheIdentity (`if cacheCfg.Enabled && cacheCfg.PinDigests`):
@@ -318,26 +330,31 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			} else if cacheCfg.PinDigests {
 				if digest, derr := e.digestResolver().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
 					resolvedImageDigest = digest
+				} else {
+					unresolvedImageIdentity = uuid.NewString()
+					cacheStore = nil
+					log.Warn("cache bypassed: requested image digest could not be resolved", "task_id", taskRun.TaskID, "image", taskRun.Image, "error", derr)
 				}
 			}
 		}
 
 		hashInput := cache.HashInput{
-			JobAlias:             cacheJobAlias,
-			TaskName:             taskName,
-			Image:                taskRun.Image,
-			ResolvedImageDigest:  resolvedImageDigest,
-			Command:              parseTaskCommand(taskRun.Command),
-			Env:                  mergedEnv,
-			WorkDir:              atomSpec.WorkDir,
-			Mounts:               atomSpec.Mounts,
-			ResolvedVolumeMounts: atomSpec.ResolvedVolumeMounts,
-			Kubernetes:           atomSpec.Kubernetes,
-			PredecessorHashes:    predHashes,
-			PredecessorOutputs:   predOutputs,
-			RunParams:            runParams,
-			Partition:            taskRun.PartitionValue,
-			PartitionFingerprint: taskRun.PartitionFingerprint,
+			JobAlias:                cacheJobAlias,
+			TaskName:                taskName,
+			Image:                   taskRun.Image,
+			ResolvedImageDigest:     resolvedImageDigest,
+			UnresolvedImageIdentity: unresolvedImageIdentity,
+			Command:                 parseTaskCommand(taskRun.Command),
+			Env:                     mergedEnv,
+			WorkDir:                 atomSpec.WorkDir,
+			Mounts:                  atomSpec.Mounts,
+			ResolvedVolumeMounts:    atomSpec.ResolvedVolumeMounts,
+			Kubernetes:              atomSpec.Kubernetes,
+			PredecessorHashes:       predHashes,
+			PredecessorOutputs:      predOutputs,
+			RunParams:               runParams,
+			Partition:               taskRun.PartitionValue,
+			PartitionFingerprint:    taskRun.PartitionFingerprint,
 			// All three partition fields, exactly as the local lane sets them
 			// (internal/job/job.go). Dropping the attributes here would let the
 			// two lanes disagree about one instance's cache identity, so the same
@@ -359,6 +376,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// failure is non-fatal — the hash is still written without the blob.
 		blob, blobErr := hashInput.CanonicalJSON(cacheHash)
 		if blobErr != nil {
+			if unresolvedImageIdentity != "" {
+				if persistErr := sink.Failed(ctx, taskRun, fmt.Errorf("serialize unresolved image identity: %w", blobErr)); persistErr != nil {
+					log.Error("failed to persist identity serialization failure", "error", persistErr)
+				}
+				return
+			}
 			log.Warn("cache: failed to serialize hash-input blob", "task_id", taskRun.TaskID, "error", blobErr)
 			blob = nil
 		}
@@ -370,9 +393,21 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// --partition`, `receipt get` and `run retry --partition` with no identity
 		// to match. The descriptor write below already passes taskRun.ID.
 		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.ID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+			if unresolvedImageIdentity != "" {
+				if persistErr := sink.Failed(ctx, taskRun, fmt.Errorf("persist unresolved image identity: %w", err)); persistErr != nil {
+					log.Error("failed to persist identity failure", "error", persistErr)
+				}
+				return
+			}
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
 		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.ID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+			if unresolvedImageIdentity != "" {
+				if persistErr := sink.Failed(ctx, taskRun, fmt.Errorf("persist unresolved image execution descriptor: %w", err)); persistErr != nil {
+					log.Error("failed to persist descriptor identity failure", "error", persistErr)
+				}
+				return
+			}
 			log.Warn("cache: failed to persist task execution descriptor inputs", "task_id", taskRun.TaskID, "error", err)
 		}
 
@@ -1411,4 +1446,20 @@ func triggerRulesByTaskID(db *gorm.DB, ids []uuid.UUID) (map[uuid.UUID]string, e
 		out[rows[i].ID] = rows[i].TriggerRule
 	}
 	return out, nil
+}
+
+// Read only the gate from the already-loaded row; ordinary execution continues
+// using its existing runtime inputs. Legacy and malformed freezes stay conservative.
+func workerImageIdentityChecksRequired(taskRun *models.TaskRun, descriptor *models.TaskExecutionDescriptor) bool {
+	if taskRun.CacheEnabled && taskRun.CachePinDigests || bytes.Contains(taskRun.HashInputBlob, []byte(`"unresolvedImageIdentity"`)) {
+		return true
+	}
+	if descriptor == nil {
+		var frozen models.TaskExecutionDescriptor
+		if json.Unmarshal(taskRun.ExecutionDescriptor, &frozen) != nil {
+			return true
+		}
+		descriptor = &frozen
+	}
+	return descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion || descriptor.Run.ImageIdentityChecksRequired == nil || *descriptor.Run.ImageIdentityChecksRequired
 }

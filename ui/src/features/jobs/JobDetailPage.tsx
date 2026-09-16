@@ -112,7 +112,7 @@ export function JobDetailPage() {
     queryFn: () => api.getJobDAG(jobId),
   });
 
-  const { data: tasks, isLoading: isLoadingTasks } = useQuery({
+  const { data: tasks, isLoading: isLoadingTasks, isError: isTasksError } = useQuery({
     queryKey: ["job", jobId, "tasks"],
     queryFn: () => api.getJobTasks(jobId),
   });
@@ -644,7 +644,13 @@ export function JobDetailPage() {
                 <BackfillsView jobId={job.id} />
               )}
               {secondaryView === "cache" && (
-                <CacheView jobId={job.id} job={job} featuredRun={featuredRun} tasks={tasks} />
+                <CacheView
+                  jobId={job.id}
+                  job={job}
+                  featuredRun={featuredRun}
+                  tasks={tasks}
+                  taskPoliciesAvailable={!isLoadingTasks && !isTasksError}
+                />
               )}
             </div>
           </DialogContent>
@@ -946,7 +952,7 @@ function JobManifestView({
 
 function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
   return (
-    <div className="rounded-md border bg-card divide-y">
+    <div className="rounded-md border bg-card divide-y" data-testid="job-runs-list">
       {runs.length === 0 ? (
         <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
       ) : null}

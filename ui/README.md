@@ -20,6 +20,7 @@ The UI is served from `/` by the Go API and currently includes:
 
 - `/jobs`
 - `/jobs/:jobId`
+- `/jobs/:jobId/runs` (the deterministic destination for a run detail's **All runs** link)
 - `/jobs/:jobId/runs/:runId`
 - `/stats`
 - `/triggers`
@@ -85,6 +86,8 @@ Current frontend coverage includes:
 - Task detail panel resize behavior
 - Task node rendering states
 - Job DAG layout/status/edge mapping
+- Future cron countdowns, exact UTC next-fire timestamps, and cache-expiry labels
+- Effective cache-policy labels for inherited and task-level settings
 
 Browser E2E:
 

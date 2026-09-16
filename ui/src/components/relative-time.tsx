@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { formatRelativeTime } from "./relative-time-format";
 
 interface RelativeTimeProps {
   date: string;
+  /** A scheduled or expiry instant that should count down instead of absorbing clock skew. */
+  future?: boolean;
 }
 
-export function RelativeTime({ date }: RelativeTimeProps) {
+export function RelativeTime({ date, future = false }: RelativeTimeProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -15,24 +18,5 @@ export function RelativeTime({ date }: RelativeTimeProps) {
     return () => clearInterval(timer);
   }, []);
 
-  const calculate = () => {
-    const time = new Date(date).getTime();
-    const diff = now - time;
-
-    if (diff < 0) return "just now";
-
-    const seconds = Math.floor(diff / 1000);
-    if (seconds < 60) return `${seconds}s ago`;
-
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
-  };
-
-  return <span>{calculate()}</span>;
+  return <span>{formatRelativeTime(date, now, future)}</span>;
 }

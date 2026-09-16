@@ -198,7 +198,7 @@ type TaskRun struct {
 	// ResolvedImageDigest is the content digest (sha256:...) the image tag
 	// resolved to when cache.pinDigests is on — the value folded into the
 	// cache key in place of the mutable tag. Empty when pinning is off or the
-	// digest could not be resolved (the key fell back to the tag). Read
+	// digest could not be resolved (requested pinning bypasses cache reuse). Read
 	// surface: it is how an operator sees whether a step was actually pinned.
 	ResolvedImageDigest string `json:"resolved_image_digest,omitempty"`
 	// The remaining frozen execution inputs. They are `json:"-"` because they
@@ -217,6 +217,10 @@ type TaskRun struct {
 	CacheDigestTTL  time.Duration `json:"-"`
 	CacheChain      string        `json:"-"`
 	CacheTTLNever   bool          `json:"-"`
+
+	// Retain legacy uncertainty when an executor resumes an unpinned run.
+	HasUnresolvedImageIdentity bool `json:"-"`
+
 	// OutputSchema / SchemaValidation are what the worker validates a task's
 	// output against (runtimeExecutor.runSchemaValidation).
 	OutputSchema            []byte     `json:"-"`
@@ -878,9 +882,11 @@ func (s *Store) SetTaskHashWithDigest(runID, taskRef uuid.UUID, hash, resolvedIm
 // SetTaskHashWithBlob persists the task identity hash, the resolved image
 // digest folded into it, and the canonical secret-redacted decomposition of the
 // HashInput (the blob) on the same write — the existing hash write-path. The
-// digest and blob are optional: an empty digest or a nil/empty blob leaves the
-// corresponding column untouched (so a literal-tag, blob-less run stays
-// consistent). The blob lets `caesium why` later diff two runs field-by-field
+// blob is optional. A supplied canonical blob makes the digest authoritative
+// (including empty), and clears the previous effective hash before execution
+// can establish a new equality proof. A nil blob retains the compatibility
+// behavior of writing only nonempty digests. The blob lets `caesium why` later
+// diff two runs field-by-field
 // rather than only observing that the opaque hashes differ.
 // taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract. This
 // matters more here than almost anywhere else: with loadUniqueTaskRun, a fanned
@@ -890,11 +896,12 @@ func (s *Store) SetTaskHashWithDigest(runID, taskRef uuid.UUID, hash, resolvedIm
 // no per-partition cache entry.
 func (s *Store) SetTaskHashWithBlob(runID, taskRef uuid.UUID, hash, resolvedImageDigest string, hashInputBlob []byte) error {
 	updates := map[string]any{"hash": hash}
-	if resolvedImageDigest != "" {
+	if resolvedImageDigest != "" || len(hashInputBlob) > 0 {
 		updates["resolved_image_digest"] = resolvedImageDigest
 	}
 	if len(hashInputBlob) > 0 {
 		updates["hash_input_blob"] = datatypes.JSON(hashInputBlob)
+		updates["effective_hash"] = ""
 	}
 	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
 	if err != nil {
@@ -917,10 +924,12 @@ func (s *Store) UpdateTaskExecutionDescriptorInputs(runID, taskID uuid.UUID, pre
 			desc.Baseline.ComputedHash = computedHash
 			desc.Cache.ComputedHash = computedHash
 		}
-		if resolvedImageDigest != "" {
+		if resolvedImageDigest != "" || len(hashInputBlob) > 0 {
 			desc.Runtime.ResolvedImageDigest = resolvedImageDigest
 		}
 		if len(hashInputBlob) > 0 {
+			desc.Baseline.EffectiveHash = ""
+			desc.Cache.EffectiveHash = ""
 			desc.Baseline.HashInputBlobStored = true
 			desc.Cache.HashInputBlobStored = true
 		}
@@ -1865,6 +1874,21 @@ func (s *Store) registerTasksTx(
 
 		if len(records) == 0 {
 			return nil
+		}
+		descriptors := make([]models.TaskExecutionDescriptor, len(records))
+		for i := range records {
+			if err := json.Unmarshal(records[i].ExecutionDescriptor, &descriptors[i]); err != nil {
+				return err
+			}
+		}
+		identityChecks := models.FrozenImageIdentityChecks(descriptors)
+		for i := range records {
+			descriptors[i].Run.ImageIdentityChecksRequired = identityChecks
+			encoded, err := json.Marshal(descriptors[i])
+			if err != nil {
+				return err
+			}
+			records[i].ExecutionDescriptor = encoded
 		}
 		if err := tx.Create(&records).Error; err != nil {
 			return err
@@ -5688,6 +5712,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		LogScrubbed:             model.LogScrubbed,
 		LogGeneration:           model.LogGeneration,
 	}
+	task.HasUnresolvedImageIdentity = bytes.Contains(model.HashInputBlob, []byte(`"unresolvedImageIdentity"`))
 
 	if len(model.Output) > 0 {
 		var out map[string]string
@@ -5781,6 +5806,9 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 			head.PartitionCount = 0
 		}
 		head.ID = taskID
+		for _, inst := range insts {
+			head.HasUnresolvedImageIdentity = head.HasUnresolvedImageIdentity || inst.HasUnresolvedImageIdentity
+		}
 		if n > 1 {
 			// Resource measurements describe an instance, never the arbitrary
 			// first sibling selected for this collapsed group. Read partitions

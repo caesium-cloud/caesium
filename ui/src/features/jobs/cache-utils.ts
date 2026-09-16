@@ -119,15 +119,53 @@ export function normalizeCacheConfig(raw?: CacheConfigValue): CachePolicySummary
     return { enabled: false };
   }
 
+  // Match pkg/jobdef.applyCache: any map form enables caching. The server does
+  // not currently honor an `enabled` key within that map.
   return {
-    enabled: raw.enabled ?? true,
+    enabled: true,
     ttl: raw.ttl,
     version: raw.version,
   };
 }
 
 export function describeCachePolicy(raw?: CacheConfigValue): string {
-  const normalized = normalizeCacheConfig(raw);
+  if (raw === undefined || raw === null) {
+    return "Server default";
+  }
+  return describeNormalizedCachePolicy(normalizeCacheConfig(raw));
+}
+
+/** Applies job defaults before a task's explicit boolean or partial-map override. */
+export function resolveCachePolicy(task?: CacheConfigValue, job?: CacheConfigValue): CachePolicySummary {
+  const inherited = normalizeCacheConfig(job);
+  if (task === undefined || task === null) {
+    return inherited;
+  }
+  if (typeof task === "boolean") {
+    return { ...inherited, enabled: task };
+  }
+
+  return {
+    // Keep the inventory truthful to the server's current map semantics.
+    enabled: true,
+    ttl: task.ttl ?? inherited.ttl,
+    version: task.version ?? inherited.version,
+  };
+}
+
+/** Includes whether the row inherits its job policy or overrides it itself. */
+export function describeEffectiveCachePolicy(task?: CacheConfigValue, job?: CacheConfigValue): string {
+  const policy = describeNormalizedCachePolicy(resolveCachePolicy(task, job));
+  if (task !== undefined && task !== null) {
+    return `Override: ${policy}`;
+  }
+  if (job !== undefined && job !== null) {
+    return `Inherited: ${policy}`;
+  }
+  return "Server default";
+}
+
+function describeNormalizedCachePolicy(normalized: CachePolicySummary): string {
   if (!normalized.enabled) {
     return "Disabled";
   }
