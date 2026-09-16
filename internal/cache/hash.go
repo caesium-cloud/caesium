@@ -92,19 +92,20 @@ type HashInputBlob struct {
 	// trusting the decomposition.
 	Hash string `json:"hash"`
 
-	JobAlias             string                       `json:"jobAlias,omitempty"`
-	TaskName             string                       `json:"taskName,omitempty"`
-	Image                string                       `json:"image,omitempty"`
-	ResolvedImageDigest  string                       `json:"resolvedImageDigest,omitempty"`
-	Command              []string                     `json:"command,omitempty"`
-	Env                  map[string]envBlobValue      `json:"env,omitempty"`
-	WorkDir              string                       `json:"workDir,omitempty"`
-	Mounts               []container.Mount            `json:"mounts,omitempty"`
-	ResolvedVolumeMounts []container.VolumeMount      `json:"resolvedVolumeMounts,omitempty"`
-	Kubernetes           *container.KubernetesSpec    `json:"kubernetes,omitempty"`
-	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
-	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
-	RunParams            map[string]string            `json:"runParams,omitempty"`
+	JobAlias                string                       `json:"jobAlias,omitempty"`
+	TaskName                string                       `json:"taskName,omitempty"`
+	Image                   string                       `json:"image,omitempty"`
+	ResolvedImageDigest     string                       `json:"resolvedImageDigest,omitempty"`
+	UnresolvedImageIdentity string                       `json:"unresolvedImageIdentity,omitempty"`
+	Command                 []string                     `json:"command,omitempty"`
+	Env                     map[string]envBlobValue      `json:"env,omitempty"`
+	WorkDir                 string                       `json:"workDir,omitempty"`
+	Mounts                  []container.Mount            `json:"mounts,omitempty"`
+	ResolvedVolumeMounts    []container.VolumeMount      `json:"resolvedVolumeMounts,omitempty"`
+	Kubernetes              *container.KubernetesSpec    `json:"kubernetes,omitempty"`
+	PredecessorHashes       []string                     `json:"predecessorHashes,omitempty"`
+	PredecessorOutputs      map[string]map[string]string `json:"predecessorOutputs,omitempty"`
+	RunParams               map[string]string            `json:"runParams,omitempty"`
 
 	// Chain records the cache chain mode ONLY when it is ChainValues; the
 	// default transitive mode writes nothing, so every blob produced before this
@@ -202,26 +203,27 @@ func redactEnv(env map[string]string) map[string]envBlobValue {
 // value never lands in the blob.
 func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 	blob := HashInputBlob{
-		BlobVersion:          HashInputBlobVersion,
-		Hash:                 precomputed,
-		JobAlias:             h.JobAlias,
-		TaskName:             h.TaskName,
-		Image:                h.Image,
-		ResolvedImageDigest:  h.ResolvedImageDigest,
-		Command:              h.Command,
-		Env:                  redactEnv(h.Env),
-		WorkDir:              h.WorkDir,
-		Mounts:               sortedMounts(h.Mounts),
-		ResolvedVolumeMounts: sortedVolumeMounts(h.ResolvedVolumeMounts),
-		Kubernetes:           hashableKubernetes(h.Kubernetes),
-		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
-		PredecessorOutputs:   h.PredecessorOutputs,
-		RunParams:            h.RunParams,
-		Partition:            h.Partition,
-		PartitionFingerprint: h.PartitionFingerprint,
-		PartitionAttributes:  h.PartitionAttributes,
-		Chain:                h.blobChain(),
-		CacheVersion:         h.CacheVersion,
+		BlobVersion:             HashInputBlobVersion,
+		Hash:                    precomputed,
+		JobAlias:                h.JobAlias,
+		TaskName:                h.TaskName,
+		Image:                   h.Image,
+		ResolvedImageDigest:     h.ResolvedImageDigest,
+		UnresolvedImageIdentity: h.UnresolvedImageIdentity,
+		Command:                 h.Command,
+		Env:                     redactEnv(h.Env),
+		WorkDir:                 h.WorkDir,
+		Mounts:                  sortedMounts(h.Mounts),
+		ResolvedVolumeMounts:    sortedVolumeMounts(h.ResolvedVolumeMounts),
+		Kubernetes:              hashableKubernetes(h.Kubernetes),
+		PredecessorHashes:       sortedCopy(h.PredecessorHashes),
+		PredecessorOutputs:      h.PredecessorOutputs,
+		RunParams:               h.RunParams,
+		Partition:               h.Partition,
+		PartitionFingerprint:    h.PartitionFingerprint,
+		PartitionAttributes:     h.PartitionAttributes,
+		Chain:                   h.blobChain(),
+		CacheVersion:            h.CacheVersion,
 	}
 
 	data, err := json.Marshal(blob)
@@ -234,14 +236,15 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 
 	// Degrade gracefully: keep identity + a digest, drop the verbatim fields.
 	oversized := HashInputBlob{
-		BlobVersion:         HashInputBlobVersion,
-		Hash:                blob.Hash,
-		JobAlias:            h.JobAlias,
-		TaskName:            h.TaskName,
-		Image:               h.Image,
-		ResolvedImageDigest: h.ResolvedImageDigest,
-		Chain:               h.blobChain(),
-		CacheVersion:        h.CacheVersion,
+		BlobVersion:             HashInputBlobVersion,
+		Hash:                    blob.Hash,
+		JobAlias:                h.JobAlias,
+		TaskName:                h.TaskName,
+		Image:                   h.Image,
+		ResolvedImageDigest:     h.ResolvedImageDigest,
+		UnresolvedImageIdentity: h.UnresolvedImageIdentity,
+		Chain:                   h.blobChain(),
+		CacheVersion:            h.CacheVersion,
 		Oversized: &oversizedBlob{
 			EnvCount:                  len(h.Env),
 			PredecessorCount:          len(h.PredecessorHashes),
@@ -321,11 +324,17 @@ type HashInput struct {
 	// ResolvedImageDigest is the content digest (sha256:...) the Image tag
 	// resolved to when digest pinning is enabled. It is empty when pinning is
 	// off, in which case the hash is byte-identical to the pre-pinning era and
-	// only the mutable tag contributes. When set, the digest is folded into the
-	// key in addition to the tag, so a tag that moves to a new digest yields a
+	// the mutable tag contributes unless uncertainty is recorded below. When set,
+	// the digest is folded into the key in addition to the tag, so a moved tag yields a
 	// different hash — a cache miss, never a stale hit.
 	ResolvedImageDigest string
-	Command             []string
+	// UnresolvedImageIdentity is a fresh execution nonce when requested pinning
+	// or a transitive predecessor could not establish immutable identity. It
+	// prevents reuse and carries uncertainty through transitive predecessor
+	// hashes, including equal-output executions.
+	// It is empty when neither this task nor its transitive inputs are uncertain.
+	UnresolvedImageIdentity string
+	Command                 []string
 	// Env is the step-declared environment after ${CAESIUM_PARAM_*}
 	// interpolation and predecessor-output injection, and before secret://
 	// resolution. The substituted values (not the tokens) are what Compute
@@ -386,6 +395,9 @@ func (h HashInput) Compute() string {
 	// changes the key, forcing a cache miss instead of a stale hit.
 	if h.ResolvedImageDigest != "" {
 		w(digest, "image_digest:%s\n", h.ResolvedImageDigest)
+	}
+	if h.UnresolvedImageIdentity != "" {
+		w(digest, "unresolved_image_identity:%s\n", h.UnresolvedImageIdentity)
 	}
 	w(digest, "command:%s\n", strings.Join(h.Command, "\x00"))
 

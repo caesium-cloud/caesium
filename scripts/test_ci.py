@@ -505,6 +505,7 @@ class WorkflowTests(unittest.TestCase):
         # recognizes the concrete (non-root) fixture paths below.
         for path, group in (
             ("test/definitions/job_one.yaml", "go"),
+            ("test/kubernetes_cache_identity.py", "go"),
             ("pkg/jobdef/testdata/schema.json", "go"),
             ("docs/examples/minimal.job.yaml", "go"),
             ("docs/examples-k8s/minimal.job.yaml", "go"),
@@ -515,6 +516,44 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(any(fnmatch.fnmatchcase(path, rule) for rule in filters[group]), path)
         for path in ("docs/ci.md", "README.md"):
             self.assertFalse(any(fnmatch.fnmatchcase(path, rule) for rules in filters.values() for rule in rules))
+
+    def test_kubernetes_cache_identity_runs_both_modes_and_retains_evidence(self):
+        steps = JOBS["helm-integration-test"]["steps"]
+        scenario = next(step for step in steps if "test/kubernetes_cache_identity.py" in step.get("run", ""))
+        self.assertEqual(scenario["if"], "matrix.shard == 1")
+        commands = scenario["run"]
+        self.assertIn("set -euo pipefail", commands)
+        self.assertEqual(commands.count("python3 test/kubernetes_cache_identity.py"), 2)
+        download = next(step for step in steps if step.get("with", {}).get("name") == "release-cli-amd64")
+        self.assertEqual(download["if"], "matrix.shard == 1")
+        self.assertEqual(download["with"]["path"], ".tmp/cache-identity-cli")
+        self.assertEqual(commands.count("--cli .tmp/cache-identity-cli/caesium-linux-amd64"), 2)
+        self.assertIn("chmod +x .tmp/cache-identity-cli/caesium-linux-amd64", commands)
+        self.assertIn("--mode local", commands)
+        self.assertIn("--mode distributed", commands)
+        self.assertIn("CAESIUM_EXECUTION_MODE=distributed", commands)
+        self.assertIn("kubectl rollout status", commands)
+        not_run = next(step for step in steps if '"result":"not_run"' in step.get("run", ""))
+        self.assertEqual(not_run["if"], "always() && matrix.shard == 1")
+        self.assertIn("for mode in local distributed", not_run["run"])
+        self.assertIn('[ ! -f "$evidence" ]', not_run["run"])
+        evidence = next(step for step in steps if step.get("with", {}).get("name") == "kubernetes-cache-identity")
+        self.assertLess(steps.index(not_run), steps.index(evidence))
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            root = Path(directory) / ".tmp/kubernetes-cache-identity"
+            for mode in ("local", "distributed"):
+                record = json.loads((root / f"{mode}.log").read_text())
+                self.assertEqual(record["result"], "not_run")
+                self.assertEqual(record["mode"], mode)
+            (root / "local.log").write_text("retained scenario failure\n")
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            self.assertEqual((root / "local.log").read_text(), "retained scenario failure\n")
+
+        self.assertEqual(evidence["if"], "always() && matrix.shard == 1")
+        self.assertEqual(evidence["with"]["if-no-files-found"], "error")
+        for mode in ("local", "distributed"):
+            self.assertIn(f'tee {evidence["with"]["path"]}{mode}.log', commands)
 
     def test_downloaded_artifacts_have_producers(self):
         saved = set()

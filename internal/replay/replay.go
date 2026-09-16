@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -734,7 +735,11 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 			if hashErr != nil {
 				return nil, fmt.Errorf("replay: interpolate env for step %q: %w", firstNonEmpty(task.taskName, group.taskName), hashErr)
 			}
-			unchanged := !forceReexecute && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
+			// An unresolved pinned baseline is not proof of immutable code identity.
+			// Re-execute it (and pending dependents) rather than accepting a legacy
+			// literal-tag entry. A frozen known digest remains reproducible.
+			identityUnavailable := task.descriptor.Cache.Enabled && task.descriptor.Cache.PinDigests && task.descriptor.Runtime.ResolvedImageDigest == ""
+			unchanged := !forceReexecute && !identityUnavailable && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
 			plan := plannedTask{
 				base:          task,
 				replayHash:    replayHash,
@@ -1193,6 +1198,23 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 	priority := baseline.Priority
 	if priority <= 0 {
 		priority = run.PriorityNormalValue
+	}
+	// Refresh the gate from this replay's frozen plan, never the live catalog.
+	// Legacy flags or persisted uncertainty cannot prove checks unnecessary.
+	descriptors := make([]models.TaskExecutionDescriptor, len(plans))
+	legacyOrUnknown := false
+	for i := range plans {
+		descriptors[i] = plans[i].descriptor
+		flag := descriptors[i].Run.ImageIdentityChecksRequired
+		legacyOrUnknown = legacyOrUnknown || flag == nil || *flag || bytes.Contains(plans[i].base.row.HashInputBlob, []byte(`"unresolvedImageIdentity"`))
+	}
+	identityChecks := models.FrozenImageIdentityChecks(descriptors)
+	if legacyOrUnknown {
+		required := true
+		identityChecks = &required
+	}
+	for i := range plans {
+		plans[i].descriptor.Run.ImageIdentityChecksRequired = identityChecks
 	}
 	for _, plan := range plans {
 		record, err := taskRunRecord(replayID, plan, now, priority)
