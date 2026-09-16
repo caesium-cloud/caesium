@@ -233,7 +233,11 @@ steps:
 	s.NotContains(combined, "panic:", "must not surface a Go panic trace")
 	s.NotContains(combined, "goroutine ", "must not surface a Go panic stack trace")
 	s.Contains(combined, "kubernetes engine unavailable", "must name the failing engine and cause")
-	s.Contains(combined, "KUBECONFIG", "must point the developer at how to fix it")
+	// Must point at the setting this constructor actually reads
+	// (CAESIUM_KUBERNETES_CONFIG), not the standard KUBECONFIG env var, which
+	// has no effect here since clientcmd.BuildConfigFromFlags is given an
+	// explicit path.
+	s.Contains(combined, "CAESIUM_KUBERNETES_CONFIG", "must point the developer at the setting that actually works")
 }
 
 // ---------------------------------------------------------------------------

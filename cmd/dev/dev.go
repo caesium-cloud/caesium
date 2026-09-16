@@ -103,8 +103,16 @@ func runDev(cmd *cobra.Command, _ []string) error {
 		if !info.IsDir() {
 			root = filepath.Dir(p)
 		}
-		if _, err := addRecursiveWatch(watcher, root, watchedDirs); err != nil {
-			return fmt.Errorf("watch %s: %w", root, err)
+		// filepath.WalkDir Lstats its root and does not follow a symlink
+		// there (only os.Stat, used above, follows it) — so a symlinked
+		// directory, or an explicit file's symlinked parent, would silently
+		// get zero watches. Resolve to the real path first.
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", root, err)
+		}
+		if _, err := addRecursiveWatch(watcher, resolvedRoot, watchedDirs); err != nil {
+			return fmt.Errorf("watch %s: %w", resolvedRoot, err)
 		}
 	}
 
@@ -142,10 +150,18 @@ func runDev(cmd *cobra.Command, _ []string) error {
 				}
 			}
 			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-				// Drop it from the tracked set; if the same path is
-				// recreated later, the Create branch above re-adds it (the
-				// parent directory's watch reports that Create regardless).
-				delete(watchedDirs, event.Name)
+				// Drop the whole former subtree, not just event.Name: moving
+				// or removing a directory generates exactly one event, for
+				// that directory itself — a descendant watched under its own
+				// path (from the initial recursive walk) gets no event of
+				// its own when an ancestor moves. Leaving a descendant's old
+				// path in watchedDirs would make a later recreation at that
+				// same path look "already watched" and skip re-adding a real
+				// watch for its new inode. If the same tree is recreated
+				// later, the Create branch above re-adds it from scratch
+				// (the parent directory's watch reports that Create
+				// regardless).
+				removeWatchedSubtree(watcher, event.Name, watchedDirs)
 			}
 			if !jobdef.IsYAML(event.Name) {
 				continue
@@ -197,6 +213,23 @@ func addRecursiveWatch(watcher *fsnotify.Watcher, dir string, watchedDirs map[st
 		return nil
 	})
 	return foundYAML, err
+}
+
+// removeWatchedSubtree drops root and every directory tracked in watchedDirs
+// underneath it (its whole former subtree), best-effort removing the
+// underlying fsnotify watch for each. A single Remove/Rename event only
+// names the directory that moved or was removed — not any descendants
+// tracked under their own paths from an earlier recursive walk — so without
+// this a descendant's stale entry survives and a later recreation at that
+// same path is wrongly treated as already watched.
+func removeWatchedSubtree(watcher *fsnotify.Watcher, root string, watchedDirs map[string]struct{}) {
+	prefix := root + string(filepath.Separator)
+	for dir := range watchedDirs {
+		if dir == root || strings.HasPrefix(dir, prefix) {
+			_ = watcher.Remove(dir)
+			delete(watchedDirs, dir)
+		}
+	}
 }
 
 func executeRun(ctx context.Context, w io.Writer, paths []string) error {

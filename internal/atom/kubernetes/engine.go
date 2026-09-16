@@ -49,6 +49,11 @@ type kubernetesEngine struct {
 // unreachable/missing kubeconfig is an expected runtime condition — e.g.
 // `caesium dev` running outside a cluster with no local kubeconfig — not a
 // programmer error).
+//
+// The path resolved here is env.Variables().KubernetesConfig
+// (CAESIUM_KUBERNETES_CONFIG) joined with kubeConfig, or $HOME/.kube/config
+// when that env var is unset — NOT the standard KUBECONFIG env var, which
+// clientcmd.BuildConfigFromFlags never consults once given an explicit path.
 var getKubernetesCore = func(k8sCfg string) (corev1.CoreV1Interface, error) {
 	configPath := k8sCfg
 	if configPath == "" {
@@ -91,7 +96,7 @@ func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) (Engine, err
 		var err error
 		backend, err = getKubernetesCore(env.Variables().KubernetesConfig)
 		if err != nil {
-			return nil, fmt.Errorf("kubernetes engine unavailable: %w; check KUBECONFIG or run inside a cluster with a valid service account", err)
+			return nil, fmt.Errorf("kubernetes engine unavailable: %w; set CAESIUM_KUBERNETES_CONFIG to a directory containing .kube/config (defaults to $HOME/.kube/config), or run inside a cluster with a valid service account", err)
 		}
 	}
 

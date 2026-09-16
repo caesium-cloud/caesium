@@ -40,7 +40,12 @@ func (s *KubernetesTestSuite) TestNewEngineNoConfigReturnsError() {
 	assert.Nil(s.T(), engine)
 	if assert.Error(s.T(), err) {
 		assert.Contains(s.T(), err.Error(), "kubernetes engine unavailable")
-		assert.Contains(s.T(), err.Error(), "check KUBECONFIG")
+		// Must name the setting this constructor actually reads
+		// (CAESIUM_KUBERNETES_CONFIG) rather than the standard KUBECONFIG
+		// env var, which clientcmd.BuildConfigFromFlags never consults here.
+		assert.Contains(s.T(), err.Error(), "CAESIUM_KUBERNETES_CONFIG")
+		assert.NotContains(s.T(), err.Error(), "KUBECONFIG",
+			"KUBECONFIG has no effect on this code path and must not be recommended")
 	}
 }
 
