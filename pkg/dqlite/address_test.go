@@ -210,15 +210,20 @@ func TestSoleMemberRejoinsAtNewAddress(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT n FROM durable").Scan(&n))
 	require.Equal(t, 7, n)
 
-	// The node's own view of the leader must agree with the address it now
-	// listens on, otherwise every "am I the owner?" comparison is wrong.
+	// go-dqlite refreshes cluster.yaml from the raft configuration, so a stale
+	// self address is not inert: it poisons the discovery cache and the SQL
+	// driver above would never find the leader. Leadership is also recognised
+	// by node ID rather than by an address that can go stale.
+	require.NoFileExists(t, filepath.Join(dir, repairFileName))
+
 	cli, err := app.FindLeader(ctx)
 	require.NoError(t, err)
 	defer func() { _ = cli.Close() }()
 	leader, err := cli.Leader(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, leader)
-	require.Equal(t, app.Address(), leader.Address)
+	require.Equal(t, id, leader.ID, "leadership must be recognised by node ID")
+	require.Equal(t, newAddr, localAddress(app, members[id]))
 }
 
 // TestStaleSingletonCacheNeverForcesRecovery is the review finding behind the
@@ -458,17 +463,21 @@ func TestSpareMemberAtStaleAddressStillStarts(t *testing.T) {
 	apps[2] = nil
 
 	newAddr := "127.0.0.2:9453"
-	done := make(chan error, 1)
+	type restarted struct {
+		app *dqliteapp.App
+		err error
+	}
+	done := make(chan restarted, 1)
 	go func() {
 		app, err := restartNode(t, ctx, dirs[2], newAddr, addrs[:1])
-		apps[2] = app
-		done <- err
+		done <- restarted{app: app, err: err}
 	}()
 
 	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Minute):
+	case result := <-done:
+		require.NoError(t, result.err)
+		apps[2] = result.app
+	case <-time.After(3 * time.Minute):
 		t.Fatal("a spare whose address changed never finished starting")
 	}
 

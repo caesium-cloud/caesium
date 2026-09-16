@@ -38,8 +38,8 @@ const (
 	localConfigurationTimeout = 30 * time.Second
 	localConfigurationRetry   = time.Second
 
-	// How long to wait when checking whether some other address is a live
-	// dqlite node. Only used to refuse a local raft reconfiguration.
+	// How long to wait when checking whether some other address answers as a
+	// live dqlite node. Only used to refuse a local raft reconfiguration.
 	peerProbeTimeout = 3 * time.Second
 )
 
@@ -334,8 +334,9 @@ func peerAddresses(members []client.NodeInfo, id uint64, self string, extra ...[
 }
 
 // anyNodeReachable reports whether any of the given addresses answers as a live
-// dqlite node. It exists to refuse a forced local reconfiguration whenever
-// something else is still out there, however this node's own view got there.
+// dqlite node. It exists to refuse a local raft reconfiguration whenever
+// something else is still out there, however this node's view of membership got
+// to look like a singleton.
 func anyNodeReachable(ctx context.Context, addresses []string) (string, bool) {
 	for _, address := range addresses {
 		probeCtx, cancel := context.WithTimeout(ctx, peerProbeTimeout)
@@ -353,25 +354,43 @@ func anyNodeReachable(ctx context.Context, addresses []string) (string, bool) {
 // recoverSoleMemberAddress rewrites the raft configuration of a cluster whose
 // only member is this node.
 //
-// A single-member cluster has no leader to route a membership change through
-// and no peer that could hold a more recent log, so forcing the configuration
-// is the documented recovery path rather than a divergence risk. Without it the
-// node keeps reporting its old address as the leader's, and every "am I the
-// leader?" comparison against the configured address is wrong.
+// It has to be done. go-dqlite refreshes cluster.yaml from the raft
+// configuration on a timer, so a stale self address does not stay inert: it
+// overwrites the discovery cache, and the SQL driver then dials an address
+// nothing listens on and never finds the leader. A single-member cluster has no
+// leader to route a membership change through, so forcing the configuration is
+// the documented recovery path — and with no peer to diverge from, it is safe.
 //
-// The caller must already have established, from the node's own committed raft
-// configuration, that there is exactly one member; candidates is every other
-// address this node knows of, and a live answer from any of them refuses the
-// recovery outright.
+// Safe only under both of these, which the caller must establish: membership
+// came from the node's own committed raft configuration and named exactly one
+// member — never from the cluster.yaml discovery cache, which lags by up to
+// go-dqlite's roles-adjustment interval and can still read as a singleton long
+// after peers joined — and no other address this node knows of answers as a
+// live node. The node must be stopped; raft_recover refuses to run against a
+// live one.
 func recoverSoleMemberAddress(ctx context.Context, dir string, id uint64, address string, candidates []string) error {
 	if reachable, ok := anyNodeReachable(ctx, candidates); ok {
 		return fmt.Errorf(
 			"dqlite: refusing to rewrite the raft configuration of node %d: %s answered as a live node",
 			id, reachable)
 	}
-	return godqlite.ReconfigureMembershipExt(dir, []client.NodeInfo{
-		{ID: id, Address: address, Role: client.Voter},
-	})
+	recovered := []client.NodeInfo{{ID: id, Address: address, Role: client.Voter}}
+	if err := godqlite.ReconfigureMembershipExt(dir, recovered); err != nil {
+		return err
+	}
+
+	// The node that just stopped refreshed cluster.yaml from the configuration
+	// it had, so the discovery cache is holding the address that was just
+	// recovered away. Left there, the next start dials an address nothing
+	// listens on and never finds its own leader.
+	store, err := client.NewYamlNodeStore(filepath.Join(dir, clusterFileName))
+	if err != nil {
+		return fmt.Errorf("open %s: %w", clusterFileName, err)
+	}
+	if err := store.Set(ctx, recovered); err != nil {
+		return fmt.Errorf("rewrite %s: %w", clusterFileName, err)
+	}
+	return nil
 }
 
 // findLeaderAmong connects to the cluster leader, starting from the given
@@ -610,17 +629,20 @@ func openNativeApp(ctx context.Context, dir, address string, seeds []string, opt
 	}
 
 	if len(members) == 1 && self != nil {
-		if err := recoverSoleMemberAddress(
-			ctx, dir, app.ID(), app.Address(), peerAddresses(members, app.ID(), app.Address(), cached, seedCandidates),
-		); err != nil {
-			_ = app.Close()
-			return nil, err
-		}
-		log.Warn("rewrote the raft configuration of a single-member dqlite cluster onto its new address",
-			"node_id", app.ID(), "previous_address", self.Address, "node_address", app.Address())
+		// Authoritative: this came from the node's own committed raft
+		// configuration, not from the cluster.yaml discovery cache.
+		id, listening, previous := app.ID(), app.Address(), self.Address
+		candidates := peerAddresses(members, id, listening, cached, seedCandidates)
+		// raft_recover refuses to run against a live node, so stop first and
+		// start again afterwards.
 		if err := app.Close(); err != nil {
 			return nil, err
 		}
+		if err := recoverSoleMemberAddress(ctx, dir, id, listening, candidates); err != nil {
+			return nil, err
+		}
+		log.Warn("rewrote the raft configuration of a single-member dqlite cluster onto its new address",
+			"node_id", id, "previous_address", previous, "node_address", listening)
 		if app, err = dqliteapp.New(dir, opts...); err != nil {
 			return nil, err
 		}
