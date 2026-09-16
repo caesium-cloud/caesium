@@ -108,6 +108,9 @@ func (s *IntegrationTestSuite) TestSystemHealthReportsProbedQuorum() {
 	require.Equal(s.T(), "healthy", envelope.Status)
 
 	check := envelope.Checks.Cluster
+	if raw, err := json.Marshal(check); err == nil {
+		s.T().Logf("GET /health checks.cluster: %s", raw)
+	}
 	require.NotNil(s.T(), check, "/health must report a cluster check on a dqlite deployment")
 	assert.True(s.T(), check.Clustered)
 	assert.Equal(s.T(), "healthy", check.Status)
@@ -172,6 +175,9 @@ func (s *IntegrationTestSuite) TestSystemNodesReportObservedReachability() {
 	}, 30*time.Second, time.Second, fmt.Sprintf("no node reported observed reachability: %+v", nodes))
 
 	require.NotEmpty(s.T(), nodes)
+	if raw, err := json.Marshal(nodes); err == nil {
+		s.T().Logf("GET /v1/system/nodes: %s", raw)
+	}
 
 	leaders := 0
 	reachable := 0

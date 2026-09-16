@@ -79,6 +79,52 @@ kubectl exec caesium-1 -- cat /etc/caesium/database-nodes
 kubectl exec caesium-2 -- cat /etc/caesium/database-nodes
 ```
 
+### Quorum health
+
+`/health` reports raft membership and liveness separately, under
+`checks.cluster`. Membership is what the cluster was configured with;
+liveness is what actually answered a bounded dqlite RPC:
+
+```bash
+kubectl port-forward service/caesium 8080:8080
+curl -s http://127.0.0.1:8080/health | jq '.status, .checks.cluster.quorum'
+```
+
+```json
+{
+  "status": "degraded",
+  "total_voters": 3,
+  "reachable_voters": 2,
+  "unreachable_voters": 1,
+  "required_voters": 2,
+  "available": true,
+  "degraded": true,
+  "leader_address": "10.244.0.8:9001"
+}
+```
+
+- `available` — a majority of voters answered, so the cluster can serve writes.
+- `degraded` — it is serving with less than full redundancy, or redundancy could
+  not be confirmed.
+- `status: "unavailable"` — fewer voters answered than a majority requires.
+- `status: "unknown"` — liveness could not be determined. This is never
+  reported as healthy.
+
+The console's `/system` page renders `reachable_voters / total_voters`, so a
+two-of-three cluster shows as `2/3` and DEGRADED rather than as fully
+operational.
+
+The **HTTP status code** answers a different question from the body: it is what
+the liveness and readiness probes read, so only this pod's own inability to
+serve (a failing database check) returns 503. A cluster-wide condition — a peer
+down, or a lost quorum — is reported in the body with HTTP 200, so that one sick
+member cannot restart or de-register the entire StatefulSet.
+
+Liveness is probed in the background and served from a short-lived cache, so
+`/health` never blocks on cluster RPCs. `checks.cluster.observed_at` carries the
+observation time and `checks.cluster.stale` marks a result older than the
+refresh interval.
+
 ## Configuration Reference
 
 All settings are in `helm/caesium/values.yaml`.
