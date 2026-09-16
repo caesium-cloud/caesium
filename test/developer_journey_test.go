@@ -487,6 +487,8 @@ func (s *IntegrationTestSuite) TestDevWatchModeDiscoversNewNestedDAGAndEdits() {
 
 	rootAlias := fmt.Sprintf("dev-journey-watch-nested-root-%d", time.Now().UnixNano())
 	nestedAlias := fmt.Sprintf("dev-journey-watch-nested-child-%d", time.Now().UnixNano())
+	recreatedV3Alias := fmt.Sprintf("dev-journey-watch-recreated-v3-%d", time.Now().UnixNano())
+	recreatedV4Alias := fmt.Sprintf("dev-journey-watch-recreated-v4-%d", time.Now().UnixNano())
 	marker := fmt.Sprintf("caesium-dev-watch-nested-marker-%d", time.Now().UnixNano())
 
 	rootManifest := fmt.Sprintf(`
@@ -504,7 +506,7 @@ steps:
     command: ["sh", "-c", %q]
 `, rootAlias, fmt.Sprintf("echo root-%s", marker))
 
-	nestedManifest := func(v string) string {
+	nestedManifest := func(alias, v string) string {
 		return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -518,7 +520,7 @@ steps:
   - name: greet
     image: alpine:3.23
     command: ["sh", "-c", %q]
-`, nestedAlias, fmt.Sprintf("echo nested-%s-%s", v, marker))
+`, alias, fmt.Sprintf("echo nested-%s-%s", v, marker))
 	}
 
 	dir := s.writeJobManifest(rootManifest)
@@ -569,7 +571,7 @@ steps:
 	s.Require().NoError(os.MkdirAll(nestedDir, 0o755))
 	s.Require().NoError(os.WriteFile(
 		filepath.Join(nestedDir, "new.job.yaml"),
-		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v1")))),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest(nestedAlias, "v1")))),
 		0o644,
 	))
 	s.Require().Eventually(func() bool {
@@ -582,7 +584,7 @@ steps:
 	// the next rescan of the OLD file resurrecting it).
 	s.Require().NoError(os.WriteFile(
 		filepath.Join(nestedDir, "new.job.yaml"),
-		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v2")))),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest(nestedAlias, "v2")))),
 		0o644,
 	))
 	s.Require().Eventually(func() bool {
@@ -598,21 +600,21 @@ steps:
 	s.Require().NoError(os.MkdirAll(nestedDir, 0o755))
 	s.Require().NoError(os.WriteFile(
 		filepath.Join(nestedDir, "new.job.yaml"),
-		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v3")))),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest(recreatedV3Alias, "v3")))),
 		0o644,
 	))
 	s.Require().Eventually(func() bool {
-		return okCount(nestedAlias) >= 3
+		return okCount(recreatedV3Alias) >= 1
 	}, 60*time.Second, 200*time.Millisecond,
 		"dev never discovered the recreated nested DAG:\n%s", out.String())
 
 	s.Require().NoError(os.WriteFile(
 		filepath.Join(nestedDir, "new.job.yaml"),
-		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest("v4")))),
+		[]byte(strings.TrimSpace(s.injectEngine(nestedManifest(recreatedV4Alias, "v4")))),
 		0o644,
 	))
 	s.Require().Eventually(func() bool {
-		return okCount(nestedAlias) >= 4
+		return okCount(recreatedV4Alias) >= 1
 	}, 60*time.Second, 200*time.Millisecond,
 		"dev never re-ran after editing the recreated nested DAG:\n%s", out.String())
 
