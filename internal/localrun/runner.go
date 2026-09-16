@@ -129,10 +129,13 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 		job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
 	}
 	if r.cfg.EngineFactory != nil {
+		factory := r.cfg.EngineFactory
 		opts = append(opts,
-			job.WithDockerEngineFactory(r.cfg.EngineFactory),
-			job.WithKubernetesEngineFactory(r.cfg.EngineFactory),
-			job.WithPodmanEngineFactory(r.cfg.EngineFactory),
+			job.WithDockerEngineFactory(factory),
+			job.WithKubernetesEngineFactory(func(ctx context.Context) (atom.Engine, error) {
+				return factory(ctx), nil
+			}),
+			job.WithPodmanEngineFactory(factory),
 		)
 	}
 

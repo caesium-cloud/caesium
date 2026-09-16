@@ -63,8 +63,26 @@ func (cli *podmanClient) ContainerList(filters map[string][]string, all bool) ([
 	return containers.List(cli.ctx, &containers.ListOptions{All: &all, Filters: filters})
 }
 
+// createRequestTimeout bounds the ContainerCreate API call, independent of
+// the caller's (possibly SIGINT-cancelled) context — see the comment below.
+const createRequestTimeout = 30 * time.Second
+
 func (cli *podmanClient) ContainerCreate(spec *specgen.SpecGenerator) (entities.ContainerCreateResponse, error) {
-	return containers.CreateWithSpec(cli.ctx, spec, nil)
+	// Bound the request and detach it from cancellation, matching
+	// ContainerStop/ContainerRemove below: if the caller's context (e.g. a
+	// SIGINT-cancelled `caesium dev`) is cancelled WHILE this request is in
+	// flight, the server may already have created the container by the
+	// time the client sees a cancellation error — leaving nothing to clean
+	// up, since podmanEngine.Create would never learn it exists. Running it
+	// to a definitive completion, decoupled from that cancellation, lets
+	// podmanEngine.Create check the caller's context separately afterward
+	// and clean up by the container's deterministic name if the caller has
+	// since given up. context.WithoutCancel preserves the embedded Podman
+	// client cli.ctx carries (see ContainerWait's comment below) while
+	// ignoring the parent's Done channel.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(cli.ctx), createRequestTimeout)
+	defer cancel()
+	return containers.CreateWithSpec(ctx, spec, nil)
 }
 
 func (cli *podmanClient) ContainerStart(id string) error {

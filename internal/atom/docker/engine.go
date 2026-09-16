@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,11 @@ import (
 // mount.VolumeOptions.Subpath (a named-volume mount scoped to a
 // sub-directory of the volume rather than its root).
 const subPathMinAPIVersion = "1.45"
+
+// createRequestTimeout bounds the ContainerCreate API call in Create,
+// independent of the caller's (possibly SIGINT-cancelled) context — see the
+// comment at its use site.
+const createRequestTimeout = 30 * time.Second
 
 // subPathHelperImage is the canonical default for the CAESIUM_DOCKER_SUBPATH_HELPER_IMAGE
 // override (env.Environment.DockerSubpathHelperImage): the minimal image used
@@ -184,9 +190,39 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 
 	log.Info("creating docker container", "image", imageRef)
 
-	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, req.Name)
+	// Issue the allocation call itself against a bounded, DETACHED context
+	// rather than e.ctx: e.ctx is cancellable (e.g. SIGINT from `caesium
+	// dev`), and if it is cancelled WHILE this request is in flight, the
+	// daemon may already have committed the container by the time the
+	// client sees a context-cancelled error — leaving nothing to clean up,
+	// since we would never learn the container exists. req.Name is a
+	// deterministic identity fixed by the caller before this call, so it
+	// stays findable regardless of which context the call itself used.
+	// Running it to a definitive completion first, then checking e.ctx
+	// separately below, means Create always knows whether a container
+	// exists and can remove it if the caller has since given up.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, req.Name)
 	if err != nil {
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: the daemon may have persisted the
+			// deterministically named container before its response reached us.
+			e.cleanupFailedCreate(req.Name, err)
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the container exists — but the
+		// caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	opts := dockercontainer.StartOptions{}
@@ -199,10 +235,34 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	)
 
 	if err = e.backend.ContainerStart(e.ctx, created.ID, opts); err != nil {
+		e.cleanupFailedCreate(created.ID, err)
 		return nil, err
 	}
 
-	return e.Get(&atom.EngineGetRequest{ID: created.ID})
+	a, getErr := e.Get(&atom.EngineGetRequest{ID: created.ID})
+	if getErr != nil {
+		// A container ID has been allocated (and just started) but Create
+		// is about to fail — most commonly because the caller's context
+		// (e.g. a SIGINT-cancelled `caesium dev`) was cancelled in the
+		// window between ContainerStart succeeding and this inspect. Create
+		// returning an error with no atom.Atom handle means nothing else in
+		// the system ever learns this container's ID to stop it, so it
+		// would otherwise run forever. See #480.
+		e.cleanupFailedCreate(created.ID, getErr)
+		return nil, getErr
+	}
+	return a, nil
+}
+
+// cleanupFailedCreate best-effort stops and removes a container that was
+// successfully created — and possibly started — but whose Create call is
+// failing for an unrelated reason. Stop already runs its Docker API calls
+// against a detached context (see its own comment), so this is safe to call
+// regardless of why Create is failing, including a cancelled caller context.
+func (e *dockerEngine) cleanupFailedCreate(id string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: id, Force: true}); err != nil {
+		log.Warn("failed to clean up container after Create failed", "id", id, "cause", cause, "error", err)
+	}
 }
 
 func (e *dockerEngine) ensureImagePresent(imageRef string) (string, error) {
@@ -649,9 +709,37 @@ func (e *dockerEngine) ensureVolumeSubPath(volumeName, cleanedSubPath string) er
 
 	log.Info("creating docker subPath helper container", "volume", volumeName, "subPath", cleanedSubPath)
 
-	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, name)
+	// Same allocation-cancellation protection Create's main container gets
+	// (see cleanupFailedCreate and its call site): run the helper's own
+	// ContainerCreate against a bounded, DETACHED context so it always
+	// reaches a definitive outcome, then check e.ctx separately and clean
+	// up by the helper's deterministic name if the caller has since given
+	// up. Without this, a SIGINT landing in this exact window orphaned a
+	// caesium-subpath-init-* container that the main container's
+	// protection never even reaches — this runs BEFORE it, and the defer
+	// below (which DOES already use a detached context) is only ever
+	// registered after ContainerCreate succeeds.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, name)
 	if err != nil {
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// As above, a timeout can arrive after Docker persisted this
+			// deterministic helper container.
+			e.cleanupFailedCreate(name, err)
+			if e.ctx.Err() != nil {
+				return e.ctx.Err()
+			}
+		}
 		return fmt.Errorf("create subPath helper container for volume %q: %w", volumeName, err)
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the helper container exists — but
+		// the caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return e.ctx.Err()
 	}
 
 	defer func() {
