@@ -286,6 +286,69 @@ func TestStaleSingletonCacheNeverForcesRecovery(t *testing.T) {
 	}
 }
 
+// A migrated voter can remain leader by initiating outbound heartbeats even
+// while peers still have its old address. Drive the real repair decision with
+// the current leader's ID and a changed address: it must hand leadership to a
+// live voter and defer membership mutation until a fresh leader connection.
+func TestAddressRepairTransfersLeadershipToAnotherVoter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9491", "127.0.0.1:9492", "127.0.0.1:9493"}
+	apps := make([]*dqliteapp.App, len(dirs))
+	for idx := range dirs {
+		var seeds []string
+		if idx > 0 {
+			seeds = addrs[:1]
+		}
+		apps[idx] = startNode(t, ctx, dirs[idx], addrs[idx], seeds)
+	}
+	defer func() {
+		for _, app := range apps {
+			_ = app.Close()
+		}
+	}()
+
+	cli, err := apps[0].FindLeader(ctx)
+	require.NoError(t, err)
+	leader, err := cli.Leader(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, leader)
+	members, err := cli.Cluster(ctx)
+	require.NoError(t, err)
+	require.Len(t, members, 3)
+	require.NoError(t, cli.Close())
+	leaderIdx := -1
+	for idx, app := range apps {
+		if app.ID() == leader.ID {
+			leaderIdx = idx
+			break
+		}
+	}
+	require.NotEqual(t, -1, leaderIdx)
+	repaired, err := repairClusterAddress(ctx, dirs[leaderIdx], leader.ID,
+		fmt.Sprintf("127.0.0.2:%d", 9491+leaderIdx), addrs)
+	require.ErrorIs(t, err, errLeadershipTransferred)
+	require.False(t, repaired, "membership must not change on the old leader connection")
+	require.NoFileExists(t, filepath.Join(dirs[leaderIdx], repairFileName))
+
+	require.Eventually(t, func() bool {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		cli, err := apps[0].FindLeader(probeCtx)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = cli.Close() }()
+		current, err := cli.Leader(probeCtx)
+		return err == nil && current != nil && current.ID != leader.ID
+	}, 15*time.Second, 100*time.Millisecond)
+	after := clusterMembers(t, ctx, apps[0])
+	require.Len(t, after, 3)
+	require.Equal(t, addrs[leaderIdx], after[leader.ID].Address,
+		"the next repair attempt, not the leadership transfer, changes membership")
+}
+
 // TestReplacedMemberRejoinsAtNewAddress is the three-replica pod-replacement
 // case from issue #493: one member's data directory survives, its address does
 // not, and it has to come back as a voting member the rest of the cluster can
@@ -539,8 +602,11 @@ func TestUnresolvedRepairFailsStartup(t *testing.T) {
 		apps[idx] = nil
 	}
 
+	started := time.Now()
 	app, err := restartNode(t, ctx, dirs[2], "127.0.0.2:9473", addrs[:1])
 	require.Error(t, err, "a node the cluster cannot reach must not report ready")
+	require.Less(t, time.Since(started), 12*time.Second,
+		"the five-second repair budget must cancel an in-flight leader search")
 	require.Nil(t, app)
 	require.ErrorContains(t, err, "could not reconcile this node's cluster membership")
 	require.NoFileExists(t, filepath.Join(dirs[2], repairFileName),
@@ -580,6 +646,13 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 	for idx := range dirs {
 		apps[idx] = start(idx)
 	}
+	restartSpare := func(address string) (*dqliteapp.App, error) {
+		openCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		return openNativeApp(openCtx, dirs[3], address, addrs[:1],
+			dqliteapp.WithAddress(address), dqliteapp.WithCluster(addrs[:1]),
+			dqliteapp.WithVoters(3), dqliteapp.WithStandBys(0))
+	}
 	defer func() {
 		for _, app := range apps {
 			if app != nil {
@@ -602,7 +675,7 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 
 	newAddr := "127.0.0.2:9484"
 	var err error
-	apps[3], err = restartNode(t, ctx, dirs[3], newAddr, addrs[:1])
+	apps[3], err = restartSpare(newAddr)
 	require.NoError(t, err)
 	require.Equal(t, spare, apps[3].ID())
 	require.NoFileExists(t, filepath.Join(dirs[3], repairFileName))
@@ -626,7 +699,7 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 	require.NoError(t, cli.Remove(ctx, spare))
 	require.NoError(t, cli.Close())
 	latestAddr := "127.0.0.3:9484"
-	apps[3], err = restartNode(t, ctx, dirs[3], latestAddr, addrs[:1])
+	apps[3], err = restartSpare(latestAddr)
 	require.NoError(t, err)
 	require.NoFileExists(t, filepath.Join(dirs[3], repairFileName))
 	members = clusterMembers(t, ctx, apps[0])
@@ -644,7 +717,7 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 		require.NoError(t, apps[idx].Close())
 		apps[idx] = nil
 	}
-	app, err := restartNode(t, ctx, dirs[3], "127.0.0.4:9484", addrs[:1])
+	app, err := restartSpare("127.0.0.4:9484")
 	require.Error(t, err)
 	require.Nil(t, app)
 	require.ErrorContains(t, err, "could not read cluster membership from the local node or the leader")

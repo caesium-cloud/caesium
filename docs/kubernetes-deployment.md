@@ -213,9 +213,12 @@ directory, so a replacement pod normally comes back with a data directory that
 disagrees with its own address.
 
 Caesium reconciles this on startup: it rewrites the persisted identity to the
-current address, keeping the node ID, and then corrects the cluster's raft
-configuration through the leader so the other members dial the address the pod
-actually has. The migration is logged as
+current address, keeping the node ID, and then corrects a multi-member cluster's
+raft configuration through the leader so the other members dial the address the
+pod actually has. A sole member instead recovers its local raft configuration
+after checking that no peer is reachable. If membership cannot be verified or
+repaired, startup fails and the rollout waits rather than accepting reduced
+quorum. The migration is logged as
 `dqlite node address changed since this data directory was created; migrating`,
 followed by
 `dqlite cluster membership updated to this node's current address`. No manual

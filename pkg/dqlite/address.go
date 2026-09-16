@@ -61,9 +61,11 @@ var (
 
 // ErrAddressRepairWhileLeading is returned when this node's address is stale in
 // the raft configuration but this node is currently the leader, so it cannot
-// remove and re-add itself. The caller retries; a node the rest of the cluster
-// cannot reach does not stay leader for long.
+// remove and re-add itself. If a reachable voter can take leadership, the
+// caller transfers to it and retries; otherwise startup eventually fails.
 var ErrAddressRepairWhileLeading = errors.New("dqlite: cannot rewrite own address while holding leadership")
+
+var errLeadershipTransferred = errors.New("dqlite: transferred leadership before address repair")
 
 // AddressMigration records a node whose persisted dqlite address no longer
 // matches the address it has been configured with.
@@ -549,7 +551,7 @@ func repairClusterAddress(ctx context.Context, dir string, id uint64, address st
 		return false, fmt.Errorf("read leader: %w", err)
 	}
 	if leader != nil && leader.ID == id {
-		return false, ErrAddressRepairWhileLeading
+		return false, transferLeadershipFromStaleNode(ctx, cli, members, id)
 	}
 
 	// Journal before the first of the two round trips, so a crash in between
@@ -564,6 +566,34 @@ func repairClusterAddress(ctx context.Context, dir string, id uint64, address st
 		return false, fmt.Errorf("re-add member %d at %s: %w", id, address, err)
 	}
 	return true, confirmMembership(ctx, cli, dir, id, address, role)
+}
+
+// A replaced voter can win an election through outbound connections even
+// though peers still dial its old address. Its heartbeats can maintain that
+// leadership indefinitely, so waiting for an election is not enough. Transfer
+// to a reachable voter, then reconnect on the next repair attempt; the old
+// leader connection must not be used for membership changes after transfer.
+func transferLeadershipFromStaleNode(ctx context.Context, cli *client.Client, members []client.NodeInfo, id uint64) error {
+	var transferErr error
+	for _, member := range members {
+		if member.ID == id || member.Role != client.Voter {
+			continue
+		}
+		if _, reachable := anyNodeReachable(ctx, []string{member.Address}); !reachable {
+			continue
+		}
+		transferCtx, cancel := context.WithTimeout(ctx, leaderConnectTimeout)
+		err := cli.Transfer(transferCtx, member.ID)
+		cancel()
+		if err == nil {
+			return fmt.Errorf("%w: voter %d at %s", errLeadershipTransferred, member.ID, member.Address)
+		}
+		transferErr = errors.Join(transferErr, fmt.Errorf("voter %d at %s: %w", member.ID, member.Address, err))
+	}
+	if transferErr != nil {
+		return fmt.Errorf("%w: %v", ErrAddressRepairWhileLeading, transferErr)
+	}
+	return fmt.Errorf("%w: no other voting member is reachable", ErrAddressRepairWhileLeading)
 }
 
 // confirmMembership re-reads the leader's view and only clears the journal once
@@ -600,10 +630,11 @@ func ensureClusterAddress(
 	candidates []string,
 	budget time.Duration,
 ) error {
-	deadline := time.Now().Add(budget)
+	repairCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		repaired, err := repairClusterAddress(ctx, dir, id, address, candidates)
+		repaired, err := repairClusterAddress(repairCtx, dir, id, address, candidates)
 		if err == nil {
 			if repaired {
 				log.Info("dqlite cluster membership updated to this node's current address",
@@ -615,7 +646,10 @@ func ensureClusterAddress(
 		log.Warn("could not reconcile this node's dqlite cluster address yet",
 			"node_id", id, "node_address", address, "attempt", attempt, "error", err)
 
-		if time.Now().After(deadline) {
+		if repairCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return lastErr
 		}
 		// The leader refuses overlapping configuration changes. When this node
@@ -624,12 +658,15 @@ func ensureClusterAddress(
 		// has landed — so come back quickly enough to slot between its attempts
 		// instead of waiting out the full interval.
 		delay := addressRepairInterval
-		if strings.Contains(err.Error(), errConfigurationChangeInFlight) {
+		if strings.Contains(err.Error(), errConfigurationChangeInFlight) || errors.Is(err, errLeadershipTransferred) {
 			delay = addressRepairContentionRetry
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-repairCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return lastErr
 		case <-time.After(delay):
 		}
 	}
