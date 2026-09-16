@@ -208,7 +208,11 @@ jobs:
       - uses: ./.github/actions/bake-images
         with:
           arch: amd64
-          targets: product
+          # `robustness` layers the compiled ./test/robustness binary onto the
+          # same release target, so it shares this bake's graph.
+          targets: |
+            product
+            robustness
           cache-group: product
       - name: Build triage-agent
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
@@ -240,6 +244,10 @@ jobs:
         with:
           name: integration-runner-amd64
           images: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: robustness-amd64
+          images: caesiumcloud/caesium-robustness:${{ env.IMAGE_TAG }}-amd64
       - uses: actions/upload-artifact@v7
         with:
           name: release-cli-amd64
@@ -618,7 +626,7 @@ jobs:
       - name: Run Playwright E2E
         id: playwright
         working-directory: ui
-        run: npm run test:e2e -- --project=default
+        run: npm run test:e2e -- --project=network-recovery
       - name: Collect browser diagnostics
         if: always()
         env:
@@ -984,6 +992,67 @@ jobs:
           kubectl get pods -A || true
           kubectl describe pods -l cloud.caesium -A || true
 
+  # First persistent three-node robustness lane: B1's owner-crash regression on
+  # kind + the Helm StatefulSet, plus E5's SQL-work budget on the existing
+  # Docker integration server. Both reduce to one scenario evidence report that
+  # scripts/check-test-evidence.py validates against test/contracts/scenarios.json,
+  # failing closed on a missing artifact or scenario, an unexpected skip, a
+  # disabled gate, wrong topology/mode/flags, a wrong candidate identity or
+  # absent fault-activation evidence.
+  #
+  # PROMOTED (distributed-testing G5): this lane is part of the fail-closed
+  # `ci-ok` aggregate, which also gates `publish`. `ci-ok` itself is NOT one of
+  # master's eight required status checks, so until a CODEOWNER adds it the
+  # promotion blocks tag publication, not PR merge. Every existing
+  # engine/architecture suite keeps running unchanged and unpromoted.
+  early-evidence:
+    needs: [changes, images, helm-lint]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # check-test-evidence.py requires a real commit SHA; the `-amd64` image
+      # tag (and a `v*` tag build's IMAGE_TAG) can never stand in for it.
+      CANDIDATE_SHA: ${{ github.sha }}
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      # Loads the precompiled runner, product and robustness images (no
+      # compiler image) and runs the focused SQL-work-budget scenario.
+      - name: SQL-work budget scenario (existing integration suite)
+        uses: ./.github/actions/run-integration
+        with:
+          arch: amd64
+          recipe: integration-test-sql-budget
+          load-robustness: "true"
+      - name: Three-node owner-crash lane
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 robustness-test
+      - name: Validate scenario evidence
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 check-evidence
+      - name: Upload scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: early-evidence
+          # The lane redacts its generated internal token and kubeconfigs
+          # before this step; see `just robustness-test`.
+          path: .tmp/evidence/
+          if-no-files-found: error
+          retention-days: 7
+
   podman-integration-test:
     needs: [changes, images]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
@@ -1059,6 +1128,8 @@ jobs:
             -e CAESIUM_CONTRACT_DEPRECATION_WINDOW=5s \
             -e CAESIUM_CACHE_PIN_DIGESTS=true \
             -e CAESIUM_CACHE_ENABLED=true \
+            -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+            -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
             -e CAESIUM_DATABASE_SHARDS=4 \
             -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
             --user 0:0 \
@@ -1120,6 +1191,17 @@ jobs:
   # Merge gate. Failure/cancelled of any listed job fails the gate; skipped
   # (path filter) is allowed. Include image producers so a failed `images`
   # job cannot hide behind skipped integration consumers.
+  #
+  # `early-evidence` is required here (distributed-testing G5) and a green job
+  # result alone does not satisfy it: the gate downloads the report that lane
+  # uploaded and re-validates it against the committed scenario manifest, bound
+  # to this run's candidate SHA. Absent, foreign or hollow evidence fails.
+  #
+  # NOTE: `ci-ok` is not itself one of master's required status checks (they are
+  # lint, unit-test, unit-test-arm64, ui-test, ui-e2e, ui-e2e-auth,
+  # build-and-integration-test and build-and-integration-test-agent-auth). This
+  # job gates `publish`; making it gate PR merge is a repository-settings change
+  # for the CODEOWNER, not a workflow change.
   ci-ok:
     if: always()
     needs:
@@ -1137,15 +1219,28 @@ jobs:
       - ui-e2e
       - ui-e2e-auth
       - integration
+      - helm-lint
+      - early-evidence
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      # Only downloadable when the lane actually ran. A lane that ran but left
+      # no report still fails the gate: ci-ok.py requires the file.
+      - name: Download early-evidence report
+        if: needs.early-evidence.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: early-evidence
+          path: .tmp/evidence
       - name: Evaluate merge gate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           python3 scripts/ci-ok.py \
+            --evidence-report .tmp/evidence/evidence.json \
+            --evidence-manifest test/contracts/scenarios.json \
+            --candidate-sha "${{ github.sha }}" \
             changes \
             ci-config \
             builder \
@@ -1159,7 +1254,9 @@ jobs:
             ui-test \
             ui-e2e \
             ui-e2e-auth \
-            integration
+            integration \
+            helm-lint \
+            early-evidence
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

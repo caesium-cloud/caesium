@@ -62,10 +62,14 @@ type Scrubber struct {
 // that fail the over-redaction guard (too short, a denylisted literal, or a
 // bare small number) are dropped from exact-match scrubbing.
 func NewScrubber(secretValues []string) *Scrubber {
+	return &Scrubber{secrets: normalizedSecretValues(secretValues, scrubbable)}
+}
+
+func normalizedSecretValues(secretValues []string, keep func(string) bool) []string {
 	seen := make(map[string]struct{}, len(secretValues))
 	kept := make([]string, 0, len(secretValues))
 	for _, v := range secretValues {
-		if !scrubbable(v) {
+		if v == "" || !keep(v) {
 			continue
 		}
 		if _, dup := seen[v]; dup {
@@ -77,7 +81,7 @@ func NewScrubber(secretValues []string) *Scrubber {
 	sort.SliceStable(kept, func(i, j int) bool {
 		return len(kept[i]) > len(kept[j])
 	})
-	return &Scrubber{secrets: kept}
+	return kept
 }
 
 // SecretValuesFromEnv extracts the resolved values of the env keys whose raw

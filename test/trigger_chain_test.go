@@ -69,13 +69,22 @@ func (s *IntegrationTestSuite) TestTriggerChainDepthLimitRejectsNextHop() {
 	defer os.RemoveAll(dir)
 
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
-	jobA := s.requireJobByAlias(a)
 	jobB := s.requireJobByAlias(b)
 
-	runA := s.triggerRunWithParams(jobA.ID, map[string]string{"_trigger_depth": "1000000"})
-	s.Require().Equal("succeeded", s.awaitRun(jobA.ID, runA, runTimeout).Status)
-
+	// Drive the router through event ingestion. Manual runs cannot submit
+	// scheduler-owned params; the lifecycle bridge itself is covered above.
+	rejected := s.postEvent(fmt.Sprintf(`{"type":"run_completed","source":"caesium","data":{"job_alias":%q,"params":{"_trigger_depth":"1000000"}}}`, a))
+	s.Equal(1, rejected.MatchedTriggers)
+	s.Zero(rejected.RunsStarted)
 	s.assertNoRuns(jobB.ID, 5*time.Second)
+
+	accepted := s.postEvent(fmt.Sprintf(`{"type":"run_completed","source":"caesium","data":{"job_alias":%q,"params":{"_trigger_depth":"0"}}}`, a))
+	s.Equal(1, accepted.MatchedTriggers)
+	s.Equal(1, accepted.RunsStarted, "the same configured trigger must fire below the depth limit")
+	runB := s.awaitNewRun(jobB.ID, 0, 60*time.Second)
+	finished := s.awaitRun(jobB.ID, runB.ID, runTimeout)
+	s.Equal("succeeded", finished.Status)
+	s.Equal("1", finished.Params["_trigger_depth"])
 }
 
 func (s *IntegrationTestSuite) writeTriggerChainManifests(files map[string]string) string {

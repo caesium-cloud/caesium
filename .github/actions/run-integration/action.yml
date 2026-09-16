@@ -14,6 +14,9 @@ inputs:
   load-reagents:
     description: Load the reagent role image artifact
     default: "false"
+  load-robustness:
+    description: Load the robustness runner image artifact (early-evidence lane)
+    default: "false"
   shard-index:
     description: One-based shard index (empty runs the unsharded suite)
     default: ""
@@ -39,6 +42,10 @@ runs:
       uses: ./.github/actions/load-docker-images
       with:
         name: reagents-${{ inputs.arch }}
+    - if: ${{ inputs.load-robustness == 'true' }}
+      uses: ./.github/actions/load-docker-images
+      with:
+        name: robustness-${{ inputs.arch }}
     - name: Run ${{ inputs.recipe }}
       shell: bash
       env:

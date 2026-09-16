@@ -71,13 +71,14 @@ export function CommandMenu() {
         type="button"
         aria-label="Open search"
         onClick={() => setOpen(true)}
-        className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground border rounded-md hover:bg-muted transition-colors w-64 justify-between"
+        className="flex h-9 w-9 items-center justify-center rounded-md border text-sm text-muted-foreground transition-colors hover:bg-muted sm:w-64 sm:justify-between sm:px-3"
       >
-        <div className="flex items-center gap-2">
+        <div className="hidden items-center gap-2 sm:flex">
           <Search className="h-4 w-4" />
           <span>Search...</span>
         </div>
-        <kbd className="pointer-events-none inline-flex h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100">
+        <Search className="h-4 w-4 sm:hidden" />
+        <kbd className="pointer-events-none hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100 sm:inline-flex">
           <span className="text-xs">⌘</span>K
         </kbd>
       </button>

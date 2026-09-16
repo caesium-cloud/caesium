@@ -68,7 +68,8 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 				"started_at":       nil,
 			})
 			res := tx.Model(&models.TaskRun{}).
-				Where(where, args...).Updates(updates)
+				Where(where, args...).
+				Updates(WithInvalidatedSecretLogSnapshot(updates))
 			if res.Error != nil {
 				return res.Error
 			}

@@ -27,7 +27,7 @@ import {
 import { BackfillDialog } from "./BackfillDialog";
 import { BackfillsView } from "./BackfillsView";
 import { CacheView } from "./CacheView";
-import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
+import { describeCachePolicy, getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { formatPriority, formatQueueParams, isStaleQueueRow, queuePendingReason } from "./queue-utils";
@@ -262,7 +262,8 @@ export function JobDetailPage() {
     queryKey: ["job", jobId, "runs", featuredRunId],
     queryFn: () => api.getJobRun(jobId, featuredRunId!),
     enabled: !!featuredRunId,
-    refetchInterval: streamHealthy ? false : featuredRunSummary?.status === "running" ? 5000 : 15000,
+    refetchInterval: (query) =>
+      !streamHealthy || isTerminalRunStatus(query.state.data?.status ?? featuredRunSummary?.status) ? 5000 : false,
   });
 
   useEffect(() => {
@@ -284,16 +285,22 @@ export function JobDetailPage() {
 
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const completedRun = e.payload as JobRun | undefined;
+          if (completedRun?.tasks) {
+            return mergeTerminalRunUpdate(old, completedRun);
+          }
           if (completedRun?.id === featuredRunId) {
-            return completedRun?.tasks ? completedRun : { ...old, ...completedRun, status: "succeeded" };
+            return { ...old, ...completedRun, status: "succeeded" };
           }
           return old;
         }
 
         if (e.type === "run_failed") {
           const failedRun = e.payload as JobRun | undefined;
+          if (failedRun?.tasks) {
+            return mergeTerminalRunUpdate(old, failedRun);
+          }
           if (failedRun?.id === featuredRunId) {
-            return failedRun?.tasks ? failedRun : { ...old, ...failedRun, status: "failed" };
+            return { ...old, ...failedRun, status: "failed" };
           }
           return old;
         }
@@ -443,15 +450,23 @@ export function JobDetailPage() {
             {featuredRun ? <div className="mt-2"><RunCacheSummary run={featuredRun} /></div> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button
-              size="sm"
-              aria-label="Trigger job"
-              onClick={() => setTriggerDialogOpen(true)}
-              disabled={triggerMutation.isPending || job.paused}
-            >
-              <Play className="mr-1.5 h-3.5 w-3.5" />
-              Trigger
-            </Button>
+            <TriggerDialog
+              open={triggerDialogOpen}
+              onOpenChange={setTriggerDialogOpen}
+              disabled={job.paused}
+              isPending={triggerMutation.isPending}
+              onConfirm={(params) => triggerMutation.mutate({ jobId: job.id, params })}
+              trigger={(
+                <Button
+                  size="sm"
+                  aria-label="Trigger job"
+                  disabled={triggerMutation.isPending || job.paused}
+                >
+                  <Play className="mr-1.5 h-3.5 w-3.5" />
+                  Trigger
+                </Button>
+              )}
+            />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -604,7 +619,7 @@ export function JobDetailPage() {
         }}
       >
         {secondaryView ? (
-          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-lg`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
             </DialogHeader>
@@ -635,14 +650,6 @@ export function JobDetailPage() {
           </DialogContent>
         ) : null}
       </Dialog>
-
-      <TriggerDialog
-        open={triggerDialogOpen}
-        onOpenChange={setTriggerDialogOpen}
-        disabled={job.paused}
-        isPending={triggerMutation.isPending}
-        onConfirm={(params) => triggerMutation.mutate({ jobId: job.id, params })}
-      />
 
       <BackfillDialog
         jobId={job.id}
@@ -849,7 +856,7 @@ function RemediationOverview({
                     className="grid gap-3 px-4 py-3 text-sm transition-colors hover:bg-graphite/10 md:grid-cols-[140px_120px_minmax(0,1fr)] md:items-center"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={incident.status} size="sm" />
+                      <StatusBadge status={incident.status} domain="incident" size="sm" />
                       <span className="font-mono text-[10px] text-text-4">{incidentAge(incident)}</span>
                     </div>
                     <Badge variant="outline" className="w-fit border-warning/30 bg-warning/10 text-[10px] text-warning">

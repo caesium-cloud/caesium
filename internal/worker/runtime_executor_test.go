@@ -702,7 +702,9 @@ type captureCreateEngine struct {
 	createReq *atom.EngineCreateRequest
 	// logs is what the container "printed"; empty (the default) is a silent
 	// container, which is what every pre-existing caller expects.
-	logs string
+	logs       string
+	logsReader io.ReadCloser
+	stopCalls  int
 }
 
 func (e *captureCreateEngine) Get(*atom.EngineGetRequest) (atom.Atom, error) {
@@ -724,10 +726,14 @@ func (e *captureCreateEngine) Wait(*atom.EngineWaitRequest) (atom.Atom, error) {
 }
 
 func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
+	e.stopCalls++
 	return nil
 }
 
 func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	if e.logsReader != nil {
+		return e.logsReader, nil
+	}
 	return io.NopCloser(strings.NewReader(e.logs)), nil
 }
 

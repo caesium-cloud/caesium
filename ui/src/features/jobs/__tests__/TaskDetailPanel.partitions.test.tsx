@@ -13,7 +13,7 @@ vi.mock("@/lib/auth", () => ({
 // jsdom has no matchMedia/canvas support for it, so stub it out the same way
 // the sibling TaskDetailPanel.test.tsx does — these tests only care about the
 // "Details" tab's partition table.
-vi.mock("xterm", () => ({
+vi.mock("@xterm/xterm", () => ({
   Terminal: vi.fn().mockImplementation(function () {
     return {
       loadAddon: vi.fn(),
@@ -25,7 +25,7 @@ vi.mock("xterm", () => ({
   }),
 }));
 
-vi.mock("xterm-addon-fit", () => ({
+vi.mock("@xterm/addon-fit", () => ({
   FitAddon: vi.fn().mockImplementation(function () {
     return { fit: vi.fn() };
   }),

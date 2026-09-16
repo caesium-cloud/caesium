@@ -1,6 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Bell, ChevronRight, LogOut } from "lucide-react";
-import { useState } from "react";
+import { Bell, ChevronRight, LogOut, Menu } from "lucide-react";
+import { type Ref, useState } from "react";
 import { ModeToggle } from "../mode-toggle";
 import { CommandMenu } from "../command-menu";
 import { Button } from "@/components/ui/button";
@@ -80,7 +80,12 @@ function Breadcrumb() {
   );
 }
 
-export function Header() {
+interface HeaderProps {
+  onOpenNavigation?: () => void;
+  navigationButtonRef?: Ref<HTMLButtonElement>;
+}
+
+export function Header({ onOpenNavigation, navigationButtonRef }: HeaderProps) {
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const handleSignOut = async () => {
@@ -97,8 +102,18 @@ export function Header() {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border/70 bg-background/70 px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-4">
+    <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border/70 bg-background/70 px-4 sm:px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Open navigation"
+          className="text-text-2 hover:text-text-1 lg:hidden"
+          onClick={onOpenNavigation}
+          ref={navigationButtonRef}
+        >
+          <Menu className="h-4 w-4" />
+        </Button>
         <div className="hidden items-center gap-2 lg:flex">
           <span className="h-2 w-2 rounded-full bg-gold animate-gold-pulse shadow-[0_0_18px_hsl(var(--gold)/0.45)]" />
           <span className="text-[0.62rem] font-medium uppercase tracking-[0.34em] text-text-3">

@@ -174,19 +174,27 @@ type TaskRun struct {
 	// Resource observations belong to this task instance's latest attempt.
 	// Nil measurements mean unavailable, never an observed zero. StatsSource is
 	// empty when collection was disabled, otherwise sampled, oom_inferred or none.
-	PeakMemoryBytes         *int64         `gorm:"type:bigint" json:"peak_memory_bytes,omitempty"`
-	CPUSeconds              *float64       `json:"cpu_seconds,omitempty"`
-	StatsSource             string         `gorm:"not null;default:''" json:"stats_source,omitempty"`
-	OOMKnown                bool           `gorm:"not null;default:false" json:"oom_known,omitempty"`
-	OOMKilled               bool           `gorm:"not null;default:false" json:"oom_killed,omitempty"`
-	AppliedResources        datatypes.JSON `gorm:"type:json" json:"applied_resources,omitempty"`
-	EscalationLevel         int            `gorm:"not null;default:0" json:"escalation_level,omitempty"`
-	ExecutionDescriptor     datatypes.JSON `gorm:"type:json" json:"-"`
-	LogText                 string         `gorm:"type:text" json:"-"`
-	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`
-	Error                   string         `json:"error,omitempty"`
-	RuntimeID               string         `json:"runtime_id,omitempty"`
-	OutstandingPredecessors int            `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
+	PeakMemoryBytes     *int64         `gorm:"type:bigint" json:"peak_memory_bytes,omitempty"`
+	CPUSeconds          *float64       `json:"cpu_seconds,omitempty"`
+	StatsSource         string         `gorm:"not null;default:''" json:"stats_source,omitempty"`
+	OOMKnown            bool           `gorm:"not null;default:false" json:"oom_known,omitempty"`
+	OOMKilled           bool           `gorm:"not null;default:false" json:"oom_killed,omitempty"`
+	AppliedResources    datatypes.JSON `gorm:"type:json" json:"applied_resources,omitempty"`
+	EscalationLevel     int            `gorm:"not null;default:0" json:"escalation_level,omitempty"`
+	ExecutionDescriptor datatypes.JSON `gorm:"type:json" json:"-"`
+	LogText             string         `gorm:"type:text" json:"-"`
+	LogTruncated        bool           `gorm:"not null;default:false" json:"-"`
+	// LogScrubbed marks output that must be served only from the executor's
+	// sanitized snapshot, never from the runtime's raw log stream. It is a
+	// property of the frozen task spec and therefore survives attempt retries.
+	LogScrubbed bool `gorm:"not null;default:false" json:"-"`
+	// LogGeneration is a per-runtime UUID. Sanitized snapshot writes carry it
+	// in their ownership predicate so a collector from an invalidated runtime
+	// cannot write into a replacement that happens to reuse the same attempt.
+	LogGeneration           string `gorm:"type:text;not null;default:''" json:"-"`
+	Error                   string `json:"error,omitempty"`
+	RuntimeID               string `json:"runtime_id,omitempty"`
+	OutstandingPredecessors int    `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
 	// OwnerGeneration is set to the RunLease.Generation of the owning node when
 	// run-owner mode is active.  Every coordination write by the owner
 	// includes AND (owner_generation = ? OR owner_generation = 0) in its WHERE

@@ -51,10 +51,7 @@ var lintCmd = &cobra.Command{
 			return fmt.Errorf("--json is only supported with --server")
 		}
 		if len(defs) == 0 {
-			if err := writeCmdOut(cmd, "No job definitions found.\n"); err != nil {
-				return err
-			}
-			return nil
+			return fmt.Errorf("no job definitions selected")
 		}
 
 		if serverMode {

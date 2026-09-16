@@ -36,4 +36,15 @@ describe("<StatusBadge />", () => {
     render(<StatusBadge status="succeeded" label="Done" />);
     expect(screen.getByText("Done")).toBeInTheDocument();
   });
+
+  it("renders an incident status in its own lifecycle", () => {
+    render(<StatusBadge status="open" domain="incident" />);
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("open")).toHaveAttribute("data-status", "open");
+  });
+
+  it("keeps the canonical key when an incident label contains spaces", () => {
+    render(<StatusBadge status="awaiting_approval" domain="incident" />);
+    expect(screen.getByText("awaiting approval")).toHaveAttribute("data-status", "awaiting_approval");
+  });
 });

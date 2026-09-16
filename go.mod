@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/Rican7/retry v0.3.1
+	github.com/anishathalye/porcupine v1.3.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/canonical/go-dqlite/v3 v3.0.4
 	github.com/containerd/errdefs v1.0.0
@@ -27,6 +28,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
+	github.com/prometheus/common v0.71.0
 	github.com/robfig/cron v1.2.0
 	github.com/russellhaering/goxmldsig v1.6.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
@@ -46,6 +48,7 @@ require (
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.37.0
+	pgregory.net/rapid v1.3.0
 )
 
 require (
@@ -177,7 +180,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkg/sftp v1.13.11 // indirect
 	github.com/proglottis/gpgme v0.1.6 // indirect
-	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.11.1 // indirect

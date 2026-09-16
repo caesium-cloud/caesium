@@ -595,7 +595,8 @@ type fakeEngine struct {
 
 	// logsByName is the marker stream a container "prints", keyed by
 	// atomLookupKey. Empty (the default) means a silent container.
-	logsByName map[string]string
+	logsByName       map[string]string
+	logReadersByName map[string]io.ReadCloser
 
 	// logsErrByName makes Logs fail for an atom, keyed by atomLookupKey — the
 	// engine losing the container's output entirely. It is how a scenario
@@ -685,6 +686,7 @@ func newFakeEngine() *fakeEngine {
 		runDurationByName:       map[string]time.Duration{},
 		resultByName:            map[string]atom.Result{},
 		logsByName:              map[string]string{},
+		logReadersByName:        map[string]io.ReadCloser{},
 		logsErrByName:           map[string]error{},
 		waitErrByName:           map[string]error{},
 		logsByPartition:         map[string]string{},
@@ -887,6 +889,9 @@ func (e *fakeEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
 	defer e.mu.Unlock()
 	body := ""
 	if req != nil {
+		if reader, ok := e.logReadersByName[atomLookupKey(req.ID)]; ok {
+			return reader, nil
+		}
 		if err, ok := e.logsErrByName[atomLookupKey(req.ID)]; ok {
 			return nil, err
 		}

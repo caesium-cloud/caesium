@@ -47,8 +47,7 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if len(defs) == 0 {
-		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No job definitions found.")
-		return err
+		return fmt.Errorf("no job definitions selected")
 	}
 
 	w := cmd.OutOrStdout()
@@ -111,8 +110,7 @@ func runScenarios(cmd *cobra.Command) error {
 		return err
 	}
 	if len(scenarios) == 0 {
-		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No harness scenarios found.")
-		return err
+		return fmt.Errorf("no harness scenarios selected")
 	}
 
 	w := cmd.OutOrStdout()

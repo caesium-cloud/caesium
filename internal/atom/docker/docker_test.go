@@ -119,6 +119,9 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID strin
 
 func (m *mockDockerBackend) ImageInspect(ctx context.Context, imageRef string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
 	args := m.Called(imageRef)
+	if v, ok := args.Get(0).(image.InspectResponse); ok {
+		return v, args.Error(1)
+	}
 	return image.InspectResponse{}, args.Error(0)
 }
 

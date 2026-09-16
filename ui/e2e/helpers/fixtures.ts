@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 import { parseAllDocuments } from "yaml";
 
 /**
@@ -144,6 +144,137 @@ export async function loadFixtureDefinitions(filename: string): Promise<FixtureD
 
     return def;
   });
+}
+
+/** Short random suffix for building collision-free aliases/paths outside loadFixtureDefinitions. */
+export function uniqueSuffix(): string {
+  return crypto.randomUUID().split("-")[0];
+}
+
+/**
+ * Chrome auto-logs a console error for every non-2xx HTTP response
+ * ("Failed to load resource: the server responded with a status of ...").
+ * That fires for every intentional SYNTHETIC 401/403/etc. response-mock test
+ * in this directory, and for ordinary in-product error paths (e.g. a fanned
+ * task's log viewer probing without a selected instance yet, which the
+ * backend answers 400 by design — see LogViewer.tsx/taskLogsURL). It is
+ * expected browser-generated noise mirroring the network tab, not a JS
+ * exception — the real regression signal is a genuine console.error CALL
+ * from application code or an uncaught pageerror, neither of which this
+ * pattern matches. This exception applies globally, in every spec: an
+ * HTTP-status resource failure is never a surprise regardless of which test
+ * produces it.
+ */
+const HTTP_STATUS_RESOURCE_LOAD_ERROR = /^Failed to load resource: the server responded with a status of \d+/;
+
+/**
+ * Chrome also auto-logs a network-level failure ("Failed to load resource:
+ * net::ERR_...", e.g. ERR_INTERNET_DISCONNECTED / ERR_NETWORK_CHANGED) for a
+ * request that never got an HTTP response at all — this fires while
+ * network-recovery.spec.ts's real `context.setOffline(true)` case is
+ * offline. UNLIKE the HTTP-status case above, this is deliberately NOT
+ * allowlisted globally: a genuine net::ERR_FAILED/net::ERR_CONNECTION_REFUSED
+ * for an application request while the browser is expected to be online is
+ * exactly the regression this guard exists to catch. Only spec files that
+ * opt in via `failOnUnexpectedPageErrors({ allowNetworkLevelErrors: true })`
+ * get a pass, and today that's only network-recovery.spec.ts — every other
+ * spec keeps the guard strict.
+ *
+ * The opt-in is FILE-wide, not scoped to the one test that calls
+ * `context.setOffline()`: CI (Linux/Chromium) was observed reporting
+ * net::ERR_NETWORK_CHANGED — not always net::ERR_INTERNET_DISCONNECTED —
+ * for the same induced cut, and NOT confined to that test's own
+ * `setOffline(true)`/`setOffline(false)` interval or even to that single
+ * test; it also surfaced against later, unrelated tests further down the
+ * same file (real OS/CI-level network-interface noise from the cut,
+ * observed bleeding across the shared browser process rather than staying
+ * scoped to the originating browser context). A per-test/per-window
+ * allowance could not reliably contain it, so the tolerance is file-scoped
+ * instead — still a large narrowing from "every spec" (the actual review
+ * finding) down to the one file that does real network manipulation.
+ */
+const NETWORK_LEVEL_RESOURCE_LOAD_ERROR = /^Failed to load resource: net::ERR_/;
+
+/**
+ * Registers a `beforeEach`/`afterEach` pair for the CALLING spec file that
+ * fails a test if the page logged a `console.error` or threw an uncaught
+ * `pageerror` during it. Call once at module scope (not inside a test body)
+ * near the top of a spec file — Playwright collects hooks by when they run
+ * during the file's synchronous load, not by which module the `test.*` call
+ * physically lives in.
+ *
+ * `allowNetworkLevelErrors` additionally tolerates a browser-level
+ * NETWORK_LEVEL_RESOURCE_LOAD_ERROR (see above) for every test in this
+ * file — opt in only for a spec that deliberately induces a real network
+ * failure (e.g. via `context.setOffline()`); HTTP-status resource failures
+ * and genuine console.error/pageerror signals are still caught regardless.
+ */
+export function failOnUnexpectedPageErrors(options?: { allowNetworkLevelErrors?: boolean }): void {
+  let errors: string[] = [];
+  const allowNetworkLevelErrors = options?.allowNetworkLevelErrors ?? false;
+
+  test.beforeEach(async ({ page }) => {
+    errors = [];
+    page.on("console", (msg) => {
+      if (msg.type() !== "error") return;
+      const text = msg.text();
+      if (HTTP_STATUS_RESOURCE_LOAD_ERROR.test(text)) return;
+      if (allowNetworkLevelErrors && NETWORK_LEVEL_RESOURCE_LOAD_ERROR.test(text)) return;
+      errors.push(`console.error: ${text}`);
+    });
+    page.on("pageerror", (err) => {
+      errors.push(`pageerror: ${err.stack ?? err.message}`);
+    });
+  });
+
+  test.afterEach(() => {
+    expect(errors, `unexpected browser console/page errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+}
+
+/**
+ * A real, live-executed DAG with one root step fanning out into `width`
+ * independent parallel leaf steps that all join into a single final step.
+ * Every step is a fast `alpine:3.23` no-op so the whole run completes quickly
+ * even at moderate width. Used by scale coverage to exercise a wide DAG against
+ * the real backend (not a synthetic/mocked one) before any synthetic
+ * partition-count coverage layers on top of it.
+ */
+export function buildFanDefinition(alias: string, width: number): FixtureDefinition {
+  const leaves = Array.from({ length: width }, (_, i) => `leaf-${i}`);
+  return {
+    apiVersion: "v1",
+    kind: "Job",
+    metadata: { alias },
+    trigger: {
+      type: "cron",
+      configuration: { cron: "0 0 1 1 *" },
+    },
+    steps: [
+      {
+        name: "root",
+        engine: "docker",
+        image: "alpine:3.23",
+        command: ["sh", "-c", "true"],
+        next: leaves,
+      },
+      ...leaves.map((name) => ({
+        name,
+        engine: "docker",
+        image: "alpine:3.23",
+        command: ["sh", "-c", "true"],
+        dependsOn: ["root"],
+        next: ["join"],
+      })),
+      {
+        name: "join",
+        engine: "docker",
+        image: "alpine:3.23",
+        command: ["sh", "-c", "true"],
+        dependsOn: leaves,
+      },
+    ],
+  } as unknown as FixtureDefinition;
 }
 
 export async function applyDefinitions(request: APIRequestContext, ...defs: FixtureDefinition[]): Promise<void> {

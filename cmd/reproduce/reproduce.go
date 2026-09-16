@@ -436,6 +436,7 @@ func (localRunner) Run(ctx context.Context, def *pkgjobdef.Definition, taskTimeo
 			Output:       task.Output,
 			LogText:      task.LogText,
 			LogTruncated: task.LogTruncated,
+			LogScrubbed:  task.LogScrubbed,
 			Error:        task.Error,
 		})
 	}

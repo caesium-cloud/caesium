@@ -119,6 +119,11 @@ By default, every recorded `secret://` env var is omitted and named in a warning
 
 `--resolve-secrets` builds a local secret resolver from the operator's local provider config. Values are never fetched from the Caesium server. If a local provider cannot resolve a ref, or resolves it from a different provider than the recorded ref, the env var remains omitted and a warning is emitted.
 
+During a local reproduction, structured task output is taken from the
+authoritative persisted output captured from the original marker stream. For a
+secret-bearing task, Caesium does not reparse the sanitized retained log and
+replace those output values with redaction placeholders.
+
 Drift checks are best-effort. Reproduce compares the recorded ref string and provider identity fields when the local provider matches, including Vault version and Kubernetes `resourceVersion`. The recorded HMAC identity is server-keyed and is not client-verifiable.
 
 When `--resolve-secrets` is used with `--dry-run`, `--json`, or run-mode JSON, resolved secret values appear in the JSON envelope by design because the envelope is the local execution input. Protect stdout accordingly.

@@ -61,7 +61,7 @@ test.beforeAll(async ({ request }) => {
   keys = await obtainAuthKeys(request);
 });
 
-test("incidents board filters a live failure and opens the detail timeline", async ({ page, request }) => {
+test("incidents board preserves a live incident status through its detail timeline", async ({ page, request }) => {
   test.slow();
 
   const alias = `incident-ui-${Date.now().toString(36)}`;
@@ -73,6 +73,7 @@ test("incidents board filters a live failure and opens the detail timeline", asy
   const run = await triggerRun(request, job.id, authHeaders(keys.runner));
   await waitForFailedRun(request, job.id, run.id, authHeaders(keys.viewer));
   const incident = await waitForIncident(request, job.id, run.id, authHeaders(keys.viewer));
+  expect(incident.status).toBe("open");
 
   // One failing run opens exactly one incident. A run publishes both task_failed
   // and run_failed; the classifier dedupes the run-level twin so operators never
@@ -103,10 +104,12 @@ test("incidents board filters a live failure and opens the detail timeline", asy
   // here; task attribution is verified below on the detail timeline (refetched
   // per-incident).
   await expect(row).toContainText(incident.class.replaceAll("_", " "));
+  await expect(row.locator('[data-status="open"]')).toHaveText("open");
   await row.click();
 
   await page.waitForURL(new RegExp(`/incidents/${incident.id}$`));
   await expect(page.getByTestId("incident-detail-page")).toBeVisible();
+  await expect(page.getByTestId("incident-detail-page").locator('[data-status="open"]')).toHaveText("open");
   await expect(page.getByTestId("incident-timeline")).toContainText("Failure captured");
   await expect(page.getByTestId("incident-timeline")).toContainText("Classified");
   await expect(page.getByTestId("task-why-container")).toBeVisible({ timeout: 30_000 });

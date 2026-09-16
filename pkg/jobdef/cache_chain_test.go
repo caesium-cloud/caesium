@@ -161,7 +161,8 @@ metadata:
     chain: transitive
 trigger:
   type: cron
-  cron: "* * * * *"
+  configuration:
+    cron: "* * * * *"
 steps:
   - name: only
     image: alpine:3.23

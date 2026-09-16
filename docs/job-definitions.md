@@ -221,6 +221,7 @@ See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example �
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
 - `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
+- Manual runs reject scheduler-owned parameter keys (`_`-prefixed keys and `logical_date`) with HTTP 400. Console Re-run preserves business inputs and removes these keys so trigger depth, freshness provenance, and scheduled-slot identity belong to the new execution. Use backfill to execute a scheduled logical slot.
 - HTTP triggers require `configuration.path`. Caesium serves the webhook at `POST /v1/hooks/<path>`. Existing manifests may spell the path as `/hooks/<path>` or `/v1/hooks/<path>`; Caesium normalizes those forms to the same route.
 - HTTP triggers may optionally define `secret`, `signatureScheme`, `signatureHeader`, and `paramMapping` to validate incoming webhook requests and extract JSON payload fields into run parameters.
 - Event triggers require `configuration.events`, a non-empty list of patterns with `type`, optional `source`, and optional string `filter` map. Event `type` accepts exact names or globs such as `webhook.*`; `filter` keys are dot paths into the event `data` payload.
@@ -489,13 +490,14 @@ Cache can be enabled at the job level or overridden per step. Step-level setting
 
 | Scope | Field | Example |
 |-------|-------|---------|
-| Job default | `metadata.cache` | `true`, `{ttl: "24h"}`, or `{chain: "values"}` |
-| Step override | `steps[].cache` | `true`, `false`, or `{ttl: "12h", version: 2, chain: "values"}` |
+| Job default | `metadata.cache` | `true`, `{enabled: false, ttl: "24h"}`, or `{chain: "values"}` |
+| Step override | `steps[].cache` | `true`, `false`, or `{enabled: false, ttl: "12h", version: 2, chain: "values"}` |
 | Global | env `CAESIUM_CACHE_ENABLED=true` | Enables caching for all jobs |
 
 ### Configuration Options
 
 - **`true` / `false`** -- enable or disable caching.
+- **`enabled`** -- explicit boolean enable/disable inside the mapping form. A mapping enables caching when this field is omitted.
 - **`ttl`** -- duration string controlling how long an entry remains valid (e.g. `"1h"`, `"24h"`, `"7d"`). Expired entries are ignored and the task re-executes. The literal `ttl: never` suppresses expiry entirely and overrides any inherited `CAESIUM_CACHE_TTL` default -- use it for a step keyed on a content fingerprint, which should not be re-executed just because a wall clock moved.
 - **`version`** -- integer that forms part of the cache key. Bump this value to force re-execution without modifying the rest of the manifest.
 - **`chain`** -- `transitive` (default) or `values`; selects whether predecessor *identity hashes* enter this step's key. See [Cache Chain](#cache-chain).
@@ -671,6 +673,10 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - Kubernetes Secrets: `secret://k8s/<secret>/<key>` uses the default namespace; include the namespace as the first segment to target another namespace (`secret://k8s/infra/git-creds/token`). Query parameters `namespace`, `name`, and `key` override each component when needed.
 - Vault KV paths: `secret://vault/<path>?field=<key>` resolves using the configured Vault client. If `field` is omitted, the final path segment is treated as the key (e.g. `secret://vault/secret/legacy/password`). Both KV v1 and v2 responses are supported.
 - Secret resolvers are pluggable; Git sync, CLI tooling, and runtime step environment resolution load values via the configured resolver chain so credentials never persist inside job manifests.
+- Task logs replace every non-empty resolved `secret://` environment value with `[REDACTED]` before retaining the bounded 1 MiB snapshot. If a resolved value itself occurs in that fixed placeholder, the matched value is removed instead so generated text cannot reproduce it. The live log endpoint and Console tail that sanitized snapshot, including across distributed nodes and client reconnects; they never open the task runtime's raw stream for a secret-bearing step. If a live stream reaches the cap after its response headers were sent, a collision-safe form of the `[caesium: log truncated]` line makes truncation visible when any marker words are themselves resolved values; retained reads also set `X-Caesium-Log-Truncated: true`. Text outside exact resolved-value matches remains unchanged—including a printed `secret://` URI unless the URI text itself contains such a match—and structured `##caesium::` markers are parsed from the original stream before only the display snapshot is scrubbed.
+- Log scrubbing is exact-value protection. It also catches a resolved value split across runtime chunks and replaces short, numeric, or common values because their secret provenance is known. It cannot recognize a value that the task transforms, encodes, or encrypts before printing.
+- The protection is prospective. Snapshots written before this behavior was deployed cannot be repaired because Caesium intentionally did not retain their historical plaintext secret values. The read endpoint does not re-resolve a reference: doing so could redact a rotated current value while leaving the old leaked value intact. Each new execution attempt uses only the values resolved for that attempt and discards its task-local scrubber afterward.
+- Upgrade every API and executor replica together before relying on this protection: drain or stop old executors, stop old API replicas, deploy the new version, and only then admit new executions. A rolling mixed-version cluster cannot provide the guarantee because an old executor can still retain raw output and an old API can still serve a runtime's raw stream. The guarantee begins with executions admitted after every replica has been upgraded; historical snapshots remain unchanged as described above.
 
 ## Linting Definitions
 
@@ -748,6 +754,33 @@ Two consequences of the frozen fields are worth calling out for operators:
 
 - Run `caesium job schema --doc` to print the generated schema reference (also stored in `docs/job-schema-reference.md`).
 - Append `--summary --path <dir>` to produce a conformance report that aggregates trigger types, engines, and callbacks used in the supplied manifests. Add `--markdown` to emit the report as Markdown for CI artifacts.
+
+## Image Digest Pinning and Private Registries
+
+`cache.pinDigests: true` (job- or step-level; global default `CAESIUM_CACHE_PIN_DIGESTS`) resolves each step's image tag to its content digest and folds the digest — not the mutable tag — into the cache key, so a tag that is re-pushed produces a cache **miss** instead of a stale hit. The resolved digest is recorded as `resolved_image_digest` on the task run and in the reproduce descriptor. The tag→digest mapping is a perf cache reused for `cache.digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, `5m`); `digestTTL: 0` re-resolves on every check.
+
+Resolution works on every engine:
+
+| Engine | How the digest is resolved |
+|---|---|
+| `docker` | The local daemon first (an image that is already present costs no network I/O); if absent, a registry manifest `HEAD`; if that fails too, a pull using the credentials below, then inspect. |
+| `podman`, `kubernetes` | Directly against the registry (Docker Registry HTTP API v2 manifest `HEAD` — no layers are pulled). Neither engine exposes a pre-run digest source, so the server asks the registry itself. |
+
+Resolution failures (registry unreachable, tag missing, credentials rejected) fall back to the literal tag and are logged; a cache miss is always safe, so an unresolved digest never serves a stale result — it only loses the tamper-evidence for that step.
+
+### Registry credentials
+
+Private registries are authenticated with `CAESIUM_REGISTRY_AUTH`, a comma-separated map of registry host to the `secret://` reference that holds the pull credentials. The credential itself never appears in the environment; it is resolved through the same secret providers as job `env` values (`env`, `k8s`, `vault`):
+
+```sh
+CAESIUM_REGISTRY_AUTH="ghcr.io=secret://env/GHCR_PULL,registry.example.com:5000=secret://vault/kv/data/registry#pull,docker.io=secret://k8s/regcred?key=.dockerconfigjson"
+```
+
+- Hosts match case-insensitively. Docker Hub may be written as `docker.io`, `index.docker.io`, or the `config.json` form `https://index.docker.io/v1/`. A host without a port matches that host on any port; a host with a port matches exactly and wins.
+- The referenced secret's value may be `username:password` (the password may contain colons), a JSON object `{"username": "...", "password": "..."}`, or a Docker `config.json` / Kubernetes `.dockerconfigjson` document — so an existing `imagePullSecret` can be reused verbatim. Token-based registries fit the same shape (`oauth2accesstoken:<token>` for GCR, `AWS:<token>` for ECR, `<user>:<PAT>` for GHCR).
+- Unmapped registries are probed anonymously (public images, including Docker Hub's anonymous token flow, still resolve). A registry that demands credentials none are configured for fails resolution with a message naming the host and this variable; credentials are never logged or echoed in errors.
+- The same credentials are sent as `RegistryAuth` when the Docker digest path has to pull an image. They do **not** configure the engines' own runtime pulls: the Docker/Podman daemons keep using their credential stores and Kubernetes its `imagePullSecrets`, exactly as before.
+- Loopback registries (`localhost`, `127.0.0.0/8`, `::1`) are addressed over plain HTTP, matching the Docker daemon's default insecure-registry rule; everything else is HTTPS.
 
 ## Git Sync Configuration
 

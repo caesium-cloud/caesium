@@ -12,6 +12,7 @@ import (
 
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jobdef/yamlstrict"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +26,23 @@ type File struct {
 	APIVersion string     `yaml:"apiVersion"`
 	Kind       string     `yaml:"kind"`
 	Scenarios  []Scenario `yaml:"scenarios"`
+}
+
+// UnmarshalYAML makes harness assertions fail closed on misspelled fields.
+func (f *File) UnmarshalYAML(value *yaml.Node) error {
+	if err := yamlstrict.RequireMapping(value, "Harness manifest"); err != nil {
+		return err
+	}
+	if err := yamlstrict.ValidateKnownFields(value, File{}); err != nil {
+		return err
+	}
+	type plainFile File
+	var decoded plainFile
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*f = File(decoded)
+	return nil
 }
 
 // Scenario defines one executable harness case.

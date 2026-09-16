@@ -71,8 +71,9 @@ func (s *IntegrationTestSuite) TestTestCommandNoDefinitionsFound() {
 	s.Require().NoError(err)
 	defer os.RemoveAll(dir)
 
-	out := s.runCLIOutput("test", "--path", dir)
-	s.Contains(out, "No job definitions found")
+	out, err := s.runCLIRaw("test", "--path", dir)
+	s.Error(err, "expected non-zero exit when no definitions are selected")
+	s.Contains(out, "no job definitions selected")
 }
 
 func (s *IntegrationTestSuite) TestTestCommandRunsHarnessScenario() {

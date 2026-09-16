@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import { JobDAG } from "../JobDAG";
 import type { Atom, JobDAGResponse, TaskRun } from "@/lib/api";
 
+const { flowDimensions, fitView } = vi.hoisted(() => ({
+  flowDimensions: { width: 960, height: 600 },
+  fitView: vi.fn(),
+}));
+
 vi.mock("reactflow", () => {
   const ReactFlow = ({
     nodes = [],
@@ -11,6 +16,7 @@ vi.mock("reactflow", () => {
     fitViewOptions,
     maxZoom,
     proOptions,
+    children,
   }: {
     nodes?: Array<Record<string, unknown>>;
     edges?: Array<Record<string, unknown>>;
@@ -18,6 +24,7 @@ vi.mock("reactflow", () => {
     fitViewOptions?: Record<string, unknown>;
     maxZoom?: number;
     proOptions?: { hideAttribution?: boolean };
+    children?: React.ReactNode;
   }) => (
     <div
       data-testid="reactflow-mock"
@@ -68,6 +75,7 @@ vi.mock("reactflow", () => {
       {proOptions?.hideAttribution ? null : (
         <div className="react-flow__attribution">React Flow</div>
       )}
+      {children}
     </div>
   );
 
@@ -76,6 +84,9 @@ vi.mock("reactflow", () => {
     default: ReactFlow,
     Background: () => null,
     Controls: () => null,
+    useNodesInitialized: () => true,
+    useReactFlow: () => ({ fitView }),
+    useStore: (selector: (state: typeof flowDimensions) => unknown) => selector(flowDimensions),
     MarkerType: { ArrowClosed: "arrow-closed" },
     Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
   };
@@ -127,6 +138,51 @@ const atoms: Record<string, Atom> = {
 };
 
 describe("JobDAG", () => {
+  it("refits after React Flow observes a settled canvas resize", () => {
+    let nextFrame = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      const frame = ++nextFrame;
+      frames.set(frame, callback);
+      return frame;
+    });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation((frame) => {
+      frames.delete(frame);
+    });
+    fitView.mockClear();
+    flowDimensions.width = 960;
+    flowDimensions.height = 600;
+
+    const dag: JobDAGResponse = {
+      job_id: "job-1",
+      nodes: [
+        { id: "task-1", atom_id: "atom-1" },
+        { id: "task-2", atom_id: "atom-2" },
+      ],
+      edges: [{ from: "task-1", to: "task-2" }],
+    };
+    const view = render(<JobDAG dag={dag} atoms={atoms} />);
+
+    try {
+      const staleFrame = nextFrame;
+      flowDimensions.height = 400;
+      view.rerender(<JobDAG dag={dag} atoms={atoms} />);
+
+      expect(cancelFrame).toHaveBeenCalledWith(staleFrame);
+      expect(frames.has(staleFrame)).toBe(false);
+      expect(fitView).not.toHaveBeenCalled();
+
+      const currentFrame = nextFrame;
+      frames.get(currentFrame)?.(0);
+      expect(fitView).toHaveBeenCalledTimes(1);
+      expect(fitView).toHaveBeenCalledWith(expect.objectContaining({ padding: 0.2, minZoom: 0.05 }));
+    } finally {
+      view.unmount();
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+
   it("maps branch nodes and normalizes completed task status", () => {
     const dag: JobDAGResponse = {
       job_id: "job-1",

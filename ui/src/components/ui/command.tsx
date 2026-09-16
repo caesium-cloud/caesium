@@ -30,7 +30,7 @@ type CommandDialogProps = DialogProps & {
 const CommandDialog = ({ children, commandProps, ...props }: CommandDialogProps) => {
   return (
     <Dialog {...props}>
-      <DialogContent className="overflow-hidden p-0">
+      <DialogContent className="overflow-hidden p-0 sm:rounded-lg">
         <Command
           {...commandProps}
           className={cn(

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -36,6 +38,11 @@ const (
 	taskFailurePolicyContinue = "continue"
 )
 
+var (
+	secretLogDrainTimeout = run.SecretLogDrainTimeout
+	secretLogAbortTimeout = run.SecretLogAbortTimeout
+)
+
 type runtimeExecutor struct {
 	store             *run.Store
 	taskTimeout       time.Duration
@@ -49,6 +56,17 @@ type runtimeExecutor struct {
 	// nil in production → defaults to dispatch.PostComplete; tests inject a fake.
 	completePost   completePoster
 	secretResolver secret.Resolver
+	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
+	// imagecheck.Default(); tests inject a stub so Create can be asserted
+	// against a known digest without a registry.
+	imageResolver *imagecheck.Resolver
+}
+
+func (e *runtimeExecutor) digestResolver() *imagecheck.Resolver {
+	if e != nil && e.imageResolver != nil {
+		return e.imageResolver
+	}
+	return imagecheck.Default()
 }
 
 func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string, resolvers ...secret.Resolver) TaskExecutor {
@@ -298,7 +316,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			if descriptor != nil && descriptor.Runtime.ResolvedImageDigest != "" {
 				resolvedImageDigest = descriptor.Runtime.ResolvedImageDigest
 			} else if cacheCfg.PinDigests {
-				if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
+				if digest, derr := e.digestResolver().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
 					resolvedImageDigest = digest
 				}
 			}
@@ -443,7 +461,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, attempt >= maxAttempts)
 		if execErr == nil {
 			// Store successful result in cache, including any partition list this
 			// producer emitted: a later hit replays the result without running
@@ -717,7 +735,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, finalAttempt bool) ([]pkgtask.Partition, error) {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -764,6 +782,18 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 			log.Warn("failed to persist worker task execution descriptor secret identity", "task_id", taskRun.TaskID, "error", err)
 		}
 	}
+	secretBearing := len(secretIdentities) > 0
+	secretValues := incident.SecretValuesFromEnv(atomSpec.Env, spec.Env)
+	secretLogFence := run.SecretLogFence{
+		Attempt:    max(taskRun.Attempt, 1),
+		Claim:      &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt},
+		Generation: uuid.NewString(),
+	}
+	if secretBearing {
+		if err := e.store.PrepareSecretTaskLog(taskRun.JobRunID, taskRun.ID, secretLogFence); err != nil {
+			return nil, fmt.Errorf("prepare scrubbed task log: %w", err)
+		}
+	}
 
 	predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
 	if predErr != nil {
@@ -798,7 +828,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
-		Image:   taskRun.Image,
+		Image:   imagecheck.PinReference(taskRun.Image, resolvedImageDigest),
 		Command: command,
 		Spec:    spec,
 	})
@@ -831,6 +861,24 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		defer resourceSampler.Stop(nil)
 	}
 
+	var (
+		secretLogStream    io.ReadCloser
+		secretLogCollector *run.SecretLogCollector
+		secretLogResult    <-chan run.SecretLogCaptureResult
+	)
+	if secretBearing {
+		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
+			log.Warn("failed to open scrubbed live task log; will retry after completion",
+				"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", streamErr)
+		} else {
+			secretLogStream = stream
+			collector := run.NewSecretLogCollector(e.store, taskRun.JobRunID, taskRun.ID, secretLogFence,
+				secretValues, pkgtask.MaxLogSnapshotBytes)
+			secretLogCollector = collector
+			secretLogResult = run.StartSecretTaskLogCapture(stream, collector, 0, vars.FanOutMaxPartitions)
+		}
+	}
+
 	finalAtom, monitorErr := e.monitorTask(taskCtx, taskRun, engine, a, resourceSampler)
 	if resourceSampler != nil {
 		// monitorTask joins the sampler before error cleanup removes the
@@ -849,6 +897,12 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		}
 	}
 	if monitorErr != nil {
+		if secretLogCollector != nil {
+			secretLogCollector.Abort()
+		}
+		if secretLogStream != nil {
+			_ = secretLogStream.Close()
+		}
 		return nil, monitorErr
 	}
 	// Use the post-Wait snapshot, since Create may still report Unknown.
@@ -876,19 +930,45 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// instead of failing the task for an infrastructure fault.
 	var metricsCapture run.MetricsCapture
 	var logSnapshot *run.TaskLogSnapshot
-	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+	var markers *pkgtask.Markers
+	var parseErr error
+	var logErr error
+	var secretLogDrainTimedOut bool
+	if secretLogResult != nil {
+		capture, timedOut := run.DrainSecretTaskLogCapture(secretLogResult, secretLogCollector, secretLogStream,
+			secretLogDrainTimeout, secretLogAbortTimeout)
+		markers, parseErr = capture.Markers, capture.Err
+		secretLogDrainTimedOut = timedOut
+		if capture.PersistErr != nil {
+			log.Warn("failed to persist scrubbed live task log", "task_id", taskRun.TaskID, "error", capture.PersistErr)
+		}
+	} else {
+		logs, openErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+		logErr = openErr
+		if openErr == nil {
+			if secretBearing {
+				collector := run.NewSecretLogCollector(e.store, taskRun.JobRunID, taskRun.ID, secretLogFence,
+					secretValues, pkgtask.MaxLogSnapshotBytes)
+				markers, parseErr = run.CaptureSecretTaskLogs(logs, collector, 0, env.Variables().FanOutMaxPartitions)
+				if persistErr := collector.Err(); persistErr != nil {
+					log.Warn("failed to persist scrubbed task log", "task_id", taskRun.TaskID, "error", persistErr)
+				}
+			} else {
+				markers, parseErr = pkgtask.CaptureMarkersWithLimits(logs, pkgtask.MaxLogSnapshotBytes, 0, env.Variables().FanOutMaxPartitions)
+				if closeErr := logs.Close(); closeErr != nil {
+					log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
+				}
+			}
+		}
+	}
 	if logErr != nil {
 		metricsCapture.Unreadable = true
 		log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
 			"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", logErr)
 	} else {
-		markers, parseErr := pkgtask.CaptureMarkersWithLimits(logs, pkgtask.MaxLogSnapshotBytes, 0, env.Variables().FanOutMaxPartitions)
-		if closeErr := logs.Close(); closeErr != nil {
-			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
-		}
 		switch {
 		case parseErr != nil:
-			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok {
+			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
 				return nil, parseErr
 			}
 			metricsCapture.Unreadable = true
@@ -919,6 +999,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
 		log.Warn("failed to stop atom after task completion", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 	}
+	if secretLogDrainTimedOut {
+		return nil, fmt.Errorf("timed out draining scrubbed task log")
+	}
 
 	// Persist the captured log BEFORE any path that can return early. The Stop
 	// above is stop-AND-remove on every engine, so this snapshot is now the only
@@ -926,7 +1009,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// outputSchema below is precisely the one whose log someone will open.
 	// Keyed on the TaskRun primary key so a fan-out instance records its own log
 	// instead of broadcasting across (job_run_id, task_id) siblings.
-	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
+	if err := e.store.SaveCapturedTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
 		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
 	}
 
@@ -1188,7 +1271,9 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 	}()
 
 	stopAtom := func() error {
-		resourceSampler.Stop(nil)
+		if resourceSampler != nil {
+			resourceSampler.Stop(nil)
+		}
 		return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 	}
 

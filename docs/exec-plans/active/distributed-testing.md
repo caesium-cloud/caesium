@@ -1,6 +1,6 @@
 # Distributed Testing and Performance Confidence
 
-Last updated: 2026-09-09
+Last updated: 2026-09-14
 
 Make a passing required CI result meaningful evidence that Caesium preserves
 its backend guarantees, developer workflows, and Console behavior under normal
@@ -357,9 +357,561 @@ but future dispatch still requires a refreshed open-PR/base check and exclusive
 reservation.** This snapshot is not a perpetual handoff or evidence that those
 open sibling PRs merged. No review messages were sent.
 
+### F1 decision record — W3-ε, 2026-09-14
+
+**Audit base: `f3f5ce3ab68d57709127a0b2807e670e7d39726a`.** This is a
+source, chart, artifact and registry audit plus two bounded local container
+experiments against the published `v0.1.0` image. It is a lifecycle design and
+policy record, not upgrade certification: no cluster upgrade, no rollback, no
+membership replacement and no restore was executed for F1. `D` means documented
+and traced in code, `I` means inferred from code and awaiting executed evidence,
+`U` means unresolved or stronger behavior these tests must not silently promise.
+Q4 is resolved below; Q1–Q3, Q5 and Q6 remain open. Where F1 records a missing
+capability, F2/F3/F4 must report it blocked with evidence; none of them may ship
+a runnable placeholder that passes by asserting nothing.
+
+#### Schema evolution mechanism and its limits
+
+There are **no hand-written SQL migration files and no schema-version table**.
+`pkg/db/Migrate()` (`pkg/db/db.go:236`) calls `conn.AutoMigrate(model)` once per
+entry of `internal/models.All` (`pkg/db/db.go:293`); the struct tags in
+`internal/models/` are the schema. A repository-wide grep for `schema_version`
+returns only unrelated JSON payload versions (`internal/models/run.go:239`,
+`internal/reproduce/reconstruct.go:172`), never a migration ledger. The schema a
+database ends up with is therefore a pure function of the binary that last
+booted against it, and nothing on disk records which binary that was.
+
+Consequences the lifecycle tests must respect:
+
+- **Exactly one explicit DDL step exists.**
+  `MigrateTaskRunUniquePartitionIndex` (`pkg/db/migrations.go`) idempotently
+  drops a pre-fan-out `idx_taskrun_jobrun_task` so AutoMigrate can recreate it
+  in its UNIQUE `(job_run_id, task_id, partition_index)` shape. It runs on the
+  catalog, every hot shard and the cold database before AutoMigrate
+  (`pkg/db/db.go:238-254`).
+- **AutoMigrate is additive and name-blind.** It adds tables, columns and
+  indexes and never drops a column, and it matches an index by NAME only, so a
+  re-shaped index that keeps its name survives forever unless an explicit repair
+  precedes it — the defect `pkg/db/migrations.go:17-47` exists to fix. Any future
+  re-shape needs its own repair step; F2/F4 may not assume the generic path
+  covers one.
+- **Every node migrates, unconditionally, on every boot.**
+  `cmd/start/start.go:163-165` calls `db.Migrate()` with no leader gate and
+  `log.Fatal`s on failure. In a three-member cluster all three members issue this
+  DDL through Raft during a rolling upgrade. **U**: concurrent AutoMigrate from a
+  mixed-version fleet is untested; F2 must capture each member's migration log
+  and any DDL error rather than assuming serialization.
+- **Shard count is part of the on-disk identity.** The logical databases are
+  `caesium`, `caesium_history` and `caesium_hot_%02d` (`pkg/db/db.go:25-27`) and
+  a run's rows live in `fnv32a(run_id) % len(hot)` (`pkg/db/router.go:148-156`).
+  `docs/database-sharding.md` records that increasing `CAESIUM_DATABASE_SHARDS`
+  does not rebalance existing hot rows. **DECISION:** the shard count is frozen
+  for the life of a data directory. F2/F4 must assert the value is byte-identical
+  on both sides of every transition and must treat a changed count as an
+  unsupported transition, not a configuration option.
+
+**Measured delta for the qualified pair.** `GET /v1/database/schema` against
+`caesiumcloud/caesium:v0.1.0` on a fresh volume returns dialect `dqlite`,
+`sqlite_version` 3.53.4 and 40 catalog tables. `internal/models/models.go` at
+this base adds two: `dataset_metrics` and `dataset_holds`. `git diff v0.1.0..HEAD
+-- internal/models/` adds only these columns to existing tables:
+`callback_runs.http_status/response_body/retry_count`,
+`dataset_declarations.assertions_json/on_violation/release`,
+`jobs.on_upstream_hold`, `job_runs.skip_reason` and
+`task_runs.data_violations`. **The last two live on different tables**:
+`SkipReason` is a field of `models.JobRun` (`internal/models/run.go:43`) and
+`DataViolations` is a field of `models.TaskRun` (`internal/models/run.go:165`);
+there is no `job_runs.data_violations` column and never will be. `versions.json`
+must carry the delta as explicit `table -> column` pairs, not a shared prefix, and
+the F4 schema assertion must look for each column on the table named here —
+asserting `data_violations` on `job_runs` would fail a correct upgrade while
+leaving the real `task_runs` column unverified. Every added column is
+either nullable or carries a non-null DEFAULT, so a v0.1.0 binary can still
+INSERT into a candidate-migrated table — a necessary but **not** sufficient
+condition for rollback. `TaskRun`'s composite index tag is byte-identical at
+v0.1.0 and at this base, so this pair does **not** exercise the index repair:
+the first qualified upgrade is a purely additive case and F4 must label it so
+rather than implying general migration coverage. `go.mod` is unchanged between
+v0.1.0 and this base, so both sides link go-dqlite v3.0.4 and share the on-disk
+raft/dqlite format.
+
+#### Release artifacts, version identity, and the qualified pair
+
+- **One release exists.** `gh release list` returns only `v0.1.0`, published
+  2026-09-08 at tag `16a4c8fcfd7580e4eec2c0c79a7a54e237c926c0`; this base is 46
+  commits ahead. There is no release-to-release pair, so the only old→new path
+  that can be tested today is `v0.1.0 → candidate SHA`.
+- **Release assets** (`gh release view v0.1.0`, and the published `SHA256SUMS`):
+  `caesium-linux-amd64` sha256 `b890ca8d1a76420ef04c81dbc20612da57cf415c9f465e6cb98b241475df552c`,
+  `caesium-linux-arm64` sha256 `8b9b924288c9ae77ec8f167cc33cb77ecb05238abee92a95474f9ff810cea586`.
+- **Published images** (Docker Hub tag API): multi-arch
+  `caesiumcloud/caesium:v0.1.0` = `sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917`,
+  amd64 `sha256:d93d21e776665039bbf5cc3dc41be7a0b402ae9f2e83d446f2fb05a16d52288b`,
+  arm64 `sha256:56569860e7bfc33ca84998648a0d0d72bb87c35194299cb02f54da52104d932d`.
+  The `publish` job (`.github/workflows/ci.yml`) pushes only the `release`
+  target plus the reagent images; the DinD `-test` image and the integration
+  runner are never published, so a previous release cannot supply a DinD server.
+- **Registry trap.** The `latest` tag in that repository was last pushed
+  2021-03-23 and is amd64-only. It is not a release and the publish chain never
+  updates it. No lifecycle fixture may reference `latest`; pin `v0.1.0` and
+  verify the resolved digest.
+- **There is no version surface.** `caesium --version` returns
+  `Error: unknown flag: --version`, there is no version subcommand
+  (`caesium --help`), and `api/rest/bind/bind.go` binds no version route —
+  `/v1/system/nodes` and `/v1/system/features` are the only system reads. Build
+  identity must therefore be established **externally**: the pinned image
+  digest, the container's running image ID, and in Kubernetes
+  `status.containerStatuses[].imageID`, exactly as B1 already does
+  (`test/robustness/cluster/imageid.go`). A useful secondary, behavioral
+  discriminator for this pair only: `GET /v1/system/features` gains the key
+  `data_assertions_enabled` at this base and lacks it on v0.1.0 (observed).
+- **Internal protocol.** `InternalProtocolVersion = 2`
+  (`internal/dispatch/dispatch.go:98`) and the same constant holds at v0.1.0, so
+  the qualified pair is protocol-compatible in both directions. The code records
+  that an OLD owner dispatching to a NEW peer fails closed with 409
+  `ReasonAmbiguousTask`, while a NEW owner dispatching to a **pre-v2** peer is
+  unguarded since the capability probe was removed for #358 (commit `bd0d5416`,
+  PR #372) — see the comment at `internal/dispatch/dispatch.go:78-93`.
+  `GET /internal/capabilities` reports a peer's `protocol_version`.
+
+**DECISION (supported version paths).** Supported old→new is the single adjacent
+pair `v0.1.0 → candidate`, on one node and on three nodes. Each future release
+adds exactly one more adjacent pair. Skip-version upgrades (N-2 → N) are
+**unsupported** until a test exercises them. Mixed-version operation is supported
+only between builds that both advertise internal protocol 2 and run the same
+`CAESIUM_DATABASE_SHARDS`; introducing a pre-v2 member is unsupported and must
+not be tested as if it were.
+
+#### Q4 decisions
+
+| Q4 sub-question | Decision | Evidence |
+| --- | --- | --- |
+| Shipped CLI platforms | `linux/amd64` and `linux/arm64` only, statically linked. No darwin or windows binary; macOS runs the CLI through the container image. D1 adds no native platform. | `build/Dockerfile` `cli-static` stage (CGO against musl, `GOOS=linux`); the publish job's release notes; open enhancement #418 "Build a darwin `caesium` CLI binary via a separate toolchain path". |
+| Supported browsers | Chromium only. `ui/playwright.config.ts` declares two projects (`default`, `auth`) and sets no `browserName`, so both run Playwright's Chromium default. D2 keeps Chromium required and adds **no** Firefox/WebKit project in this plan; adding one is a separate product-support decision with its own runner cost under Q1. | `ui/playwright.config.ts`. |
+| Previous release(s) | Exactly `v0.1.0`, pinned by digest. One adjacent pair only. | `gh release list`; Docker Hub tag API. |
+| Mixed-version operation | Permitted only within internal protocol 2 and an identical shard count; F2 may run a mixed window **during** a rolling upgrade but may not claim general N-1/N interoperability, and must not introduce a pre-v2 member. | `internal/dispatch/dispatch.go:78-99`. |
+| Rollback vs restore | **Restore-from-snapshot is the *intended* recovery; binary rollback is not.** Restore is not yet qualified: until F2's restore case carries pre-startup snapshot evidence and a passing negative control (below), a rejoin that reads matching rows is peer catch-up, not proof of restore, so this row states policy rather than a demonstrated guarantee. AutoMigrate never removes what it added and no down-migration exists, so a candidate-migrated data directory cannot be returned to its old schema. F4 still runs a rollback attempt as an explicitly labelled exploratory case and records the observed outcome; a passing attempt does not become a product guarantee without a recorded product decision. | `pkg/db/db.go:236-293`; the additive-only delta above. |
+| Backup/restore support | **Absent as a product capability** — an external prerequisite, not a test gap. There is no backup or restore command, route or scheduler; `docs/kubernetes-deployment.md:199-204` delegates to storage-platform tooling. `caesium job export` reconstructs a job manifest only (`cmd/job/export.go`), and `/v1/database/query` is read-only and capped at 1000 rows (`api/rest/service/database/database.go:22-32`), so neither is a state backup. "Restore" in F2 therefore means a **storage-level** snapshot/copy of a stopped member's volume taken by the harness. | as cited. |
+| Storage failure model | Four distinct cases, enumerated below. No process-kill test may be labelled power-loss or disk-loss qualification. | below. |
+
+#### Failure and durability model — four distinct cases
+
+These are separate faults with separate evidence; F2/F3 must name which one a
+scenario actually injects.
+
+1. **Process kill (SIGKILL) with the filesystem intact.** The only case B1
+   exercises today: the volume and every byte already written to it survive, so
+   recovery is ownership takeover, already contracted as DT-OWNER-01 and
+   DT-RECOVER-01. **D**. What a *page-cache-resident* write survives here is
+   case 3's question, not this one's.
+2. **OS or power loss.** The host disappears between fsync boundaries. Caesium
+   does not configure dqlite's snapshot parameters — `pkg/dqlite/dqlite.go:164-175`
+   passes only address, cluster, voters, standbys, log func and busy timeout — so
+   raft snapshot/trailing thresholds are the unconfigured dqlite C defaults and
+   are not readable from Go. The `PRAGMA synchronous=NORMAL` in
+   `pkg/dqlite/dqlite.go:196-208` applies only to the injected-connection
+   (non-native) path; go-dqlite rejects SQL PRAGMAs. **U**: no measured
+   power-loss durability bound exists, and F3 may not claim one from a
+   container kill.
+3. **Lost unflushed writes / torn tail.** `pkg/dqlite/dqlite.go` does **not**
+   pass `WithAutoRecovery`, so go-dqlite's default `AutoRecovery: true` applies
+   (`go-dqlite/v3@v3.0.4 app/options.go:279-291`), documented as: "raft snapshots and segment files
+   may be deleted at startup if they are determined to be corrupt … can lead to
+   data loss." A node that lost its unflushed tail therefore may silently
+   truncate at startup rather than failing loudly. On one node that can lose an
+   acknowledged write; with a healthy quorum the survivor log re-replicates it.
+   **U, safety-relevant.** F3 must record whether auto-recovery fired (it is
+   visible only in the dqlite log stream) and must never treat a silent start as
+   proof of retention.
+4. **Actual disk loss.** The volume is gone. Recovery is member replacement, for
+   which no product surface exists (below). Distinct from every case above and
+   from a PVC that merely detaches.
+
+Related shutdown facts: `cmd/start/shutdown.go:55` closes the GORM router's
+connection pools only. Nothing in the repository calls the dqlite app's `Close`
+or `Handover` (grep for `Handover`/`dqliteapp` outside `pkg/dqlite/dqlite.go`
+returns nothing), so **every** termination — including a planned rolling upgrade
+— is an ungraceful Raft departure with no leadership or voter handover. Role
+rebalancing is left to go-dqlite's 30-second `RolesAdjustmentFrequency` default.
+
+#### Blocking finding — node address identity survives the volume, not the pod
+
+The chart sets `CAESIUM_NODE_ADDRESS` to `$(POD_IP):9001`
+(`helm/caesium/templates/statefulset.yaml:103-105`), while go-dqlite records the
+node's address in `info.yaml` inside the data directory and **refuses to start**
+if a supplied address differs: `go-dqlite/v3@v3.0.4 app/app.go:117-121` returns
+`address %q in info.yaml does not match %q` whenever `info.yaml` exists and the
+supplied `WithAddress` disagrees with it.
+
+Verified locally on the published release, not inferred:
+
+```sh
+docker volume create f1auditvol
+docker run -d --name a -v f1auditvol:/var/lib/caesium/dqlite caesiumcloud/caesium:v0.1.0 start
+# /health healthy; info.yaml records Address: 127.0.0.1:9001
+docker rm -f a
+docker run -d --name b -e CAESIUM_NODE_ADDRESS=127.0.0.2:9001 \
+  -v f1auditvol:/var/lib/caesium/dqlite caesiumcloud/caesium:v0.1.0 start
+# exits 1: {"level":"fatal","caller":"db/db.go:56","msg":"failed to connect to
+#   database","error":"address \"127.0.0.1:9001\" in info.yaml does not match
+#   \"127.0.0.2:9001\""}
+```
+
+A StatefulSet pod keeps its PVC across recreation but **not** its IP: Kubernetes
+guarantees a stable network *identity* (the headless-service DNS name), never a
+stable pod IP. Any pod recreation — `helm upgrade`, node drain, eviction,
+rescheduling — therefore starts a coin flip on whether the CNI happens to hand
+back the same address; when it does not, `caesium start` exits 1 and the pod
+CrashLoopBackOffs with its data intact. B1's harness never meets this because it
+kills the *container* with `ctr` and leaves the pod sandbox (and its IP) in
+place, exactly as the A1 record describes; the CI Helm lane never meets it
+because it runs one replica with `persistence.enabled: false`
+(`helm/caesium/ci/test-values-k8s.yaml`), so every boot writes a fresh
+`info.yaml`. `helm upgrade` is not executed anywhere in CI at all — the only
+invocation in the repository is `just k8s-distributed`, which also sets
+`persistence.enabled=false` (`justfile:1074-1100`).
+
+**DECISION:** this is a product defect with an external prerequisite
+("stable dqlite node address", below), not a test defect. F2 must therefore be
+written to *expose and classify* it rather than to pass: record every member's
+`info.yaml` address before the transition and its pod IP after, and label an
+upgrade that succeeded only because the CNI reused the address as **not**
+evidence of a supported upgrade.
+
+#### External product prerequisites (not runnable placeholder tests)
+
+1. **Backup and restore.** No command, route or scheduled capability. Until one
+   exists, "restore" means a harness-taken storage snapshot of a stopped
+   member's volume. F2's restore case is *blocked* if the harness cannot take a
+   consistent copy; it is never skipped as passing.
+2. **Member removal / replacement.** Nothing in the repository calls go-dqlite's
+   `client.Remove`, and `api/rest/bind/bind.go` binds no membership-mutating
+   route; `GET /v1/system/nodes` is read-only. The new-ID/join path is
+   **ordinal-dependent, not universal**: `app.New` generates a new ID and writes
+   the join marker only when a cluster address list is supplied
+   (`go-dqlite/v3@v3.0.4 app/app.go:96-111` — `if len(o.Cluster) == 0 { info.ID =
+   dqlite.BootstrapID }`), and the chart's peer-discovery script always writes an
+   **empty** peer list for ordinal 0
+   (`helm/caesium/templates/configmap.yaml:14-17`). A replaced pod with a fresh
+   PVC therefore behaves differently by ordinal:
+   - **Ordinals ≥ 1** get a non-empty `--cluster` list, generate a new node ID
+     and join; the dead member's ID stays in the cluster and can only be demoted
+     by go-dqlite's role adjustment, never removed. F2 records the resulting
+     membership as evidence.
+   - **Ordinal 0** gets an empty list, so a fresh directory takes the fixed
+     `dqlite.BootstrapID` and initializes a **self-only** node store instead of
+     joining the surviving quorum. There is no product rejoin or re-bootstrap
+     procedure for this; a stable pod address does not help, because the defect
+     is the empty peer list, not the address.
+   No test may therefore promise that "a replaced member joins" without naming
+   the ordinal it replaced; recovering a lost ordinal 0 is prerequisite 5 below.
+3. **Build/version reporting.** No `--version`, no version subcommand, no
+   version route. Every lifecycle assertion of "which build is serving" depends
+   on external image identity.
+4. **Stable dqlite node address across pod recreation.** Per the finding above.
+   Resolving it is product work (a stable per-ordinal address, or reconciling
+   `info.yaml` on start); this plan does not authorize that change.
+5. **Ordinal-0 rejoin / re-bootstrap after disk loss.** Per item 2: the chart
+   hands ordinal 0 an empty peer list unconditionally
+   (`helm/caesium/templates/configmap.yaml:14-17`), so a `caesium-0` replaced
+   with a fresh PVC self-bootstraps under `dqlite.BootstrapID` instead of
+   rejoining the surviving quorum. There is no command, route or chart path that
+   recovers it. Resolving it is product work (seed ordinal 0's peer list from its
+   siblings when its data directory is empty, or supply an explicit rejoin
+   procedure); this plan does not authorize that change, and F2's ordinal-0 case
+   reports **blocked-by-prerequisite**.
+
+None of these may be replaced by a test that asserts nothing. A scenario that
+depends on an unresolved prerequisite is reported **blocked** with its evidence.
+
+#### F4 procedure — single-node previous-release upgrade qualification
+
+Owns `test/lifecycle/standalone_test.go`, `test/lifecycle/versions.json` and
+`scripts/lifecycle-tests.sh`. Integration-tagged (`//go:build integration`);
+compiled explicitly in the builder, since the precompiled `./test` runner does
+not discover subpackages. F4 does **not** need a cluster, B3, or new paid
+infrastructure. `test/lifecycle/versions.json` is the version matrix: for each
+pair, the previous image reference **and resolved digest**, the release asset
+checksums, the protocol version both sides advertise, the shard count, and the
+expected table delta expressed as explicit `{"table": ..., "column": ...}` pairs
+(so `job_runs.skip_reason` and `task_runs.data_violations` stay on their own
+tables). F4 must not edit `test/contracts/scenarios.json`; that
+file's writer order is A2 → G3 → B3 → D3 → G6, and G6 registers the lifecycle
+scenarios.
+
+```sh
+CANDIDATE_SHA=$(git rev-parse HEAD)
+LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+ARTIFACTS=$(mktemp -d)
+PREV_IMAGE="caesiumcloud/caesium:v0.1.0"
+PREV_DIGEST="sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917"
+CAESIUM_SKIP_IMAGE_BUILD=false just tag="$CANDIDATE_SHA" build-release
+docker image inspect "caesiumcloud/caesium:$CANDIDATE_SHA"
+docker pull "$PREV_IMAGE" && docker image inspect "$PREV_IMAGE" \
+  --format '{{index .RepoDigests 0}}'   # must resolve to $PREV_DIGEST
+docker volume create "$LIFECYCLE_ID-data"
+CAESIUM_LIFECYCLE_ID="$LIFECYCLE_ID" CAESIUM_LIFECYCLE_ARTIFACTS="$ARTIFACTS" \
+  CAESIUM_LIFECYCLE_PREV_IMAGE="$PREV_IMAGE" \
+  CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  bash scripts/lifecycle-tests.sh
+```
+
+Volume and identity rules, verified locally: a **fresh named volume** inherits
+`10001:10001` from the release image's `/var/lib/caesium/dqlite`
+(`build/Dockerfile`, `release` stage), so no `--user` override is needed and the
+production UID is preserved. A host **bind mount** does not inherit that
+ownership and is forbidden. If the lane must grant the Docker socket, prefer
+`--group-add "$(stat -c '%g' /var/run/docker.sock)"`; if `--user 0:0` is used
+instead it must be used identically on **both** sides, and the choice recorded.
+Each side's matching CLI is extracted from its own image with
+`docker cp "$ctr":/bin/caesium` — the pattern `just integration-test-podman` and
+the CI Helm lane already use — so the old release is driven by the old CLI.
+
+Both containers run with the same env block, of which
+`CAESIUM_DATABASE_CONSOLE_ENABLED=true` (schema assertions),
+`CAESIUM_MANUAL_TRIGGER_API_KEY`, `CAESIUM_RUN_QUEUE_ENABLED=true`,
+`CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true` and
+`CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms` are load-bearing. `git diff
+v0.1.0..HEAD -- pkg/env/env.go` adds variables but removes and renames none, so
+the same block is valid on both sides; the six candidate-only variables
+(including `CAESIUM_DATA_ASSERTIONS_ENABLED`) are inert on v0.1.0 and no fixture
+may depend on the old release honoring them.
+
+**Retained-state fixture, created through v0.1.0's own public surface** (job
+YAML per `docs/caesium-job-llm-reference.md`, steps on `alpine:3.23`):
+
+| Class | How it is created | Recorded identity |
+| --- | --- | --- |
+| Definitions | `caesium job apply` two jobs, one with `concurrency` queue behavior | job UUIDs, aliases, exported manifests |
+| Succeeded history | trigger one run to completion | run UUID, task-run UUIDs, terminal status and timestamps |
+| Failed history | trigger a run whose step exits non-zero | run UUID, recorded error, retry eligibility |
+| Queued work | trigger the queued job while its predecessor is running | `run_queue` row id, `claimed_by`/`claimed_at` |
+| Events | the runs above | for each selected store and run, the full pre-upgrade set of `(sequence, type, task_id, payload)` tuples read from `GET /v1/events?run_id=`, plus the explicit resume cursor chosen below the lowest retained sequence — **not** a high-water mark |
+| Schema | `GET /v1/database/schema` | the 40-table list |
+
+Stop with `docker stop -t 60` so the 30-second grace period
+(`cmd/start/shutdown.go:15`) can run, then start the candidate on the same
+volume and assert:
+
+1. The candidate reaches `/health` healthy, logs `migrating database`
+   (`cmd/start/start.go:163`), and exits non-zero nowhere.
+2. `GET /v1/database/schema` lists every table the v0.1.0 snapshot listed, plus
+   exactly `dataset_metrics` and `dataset_holds`, and each added column above is
+   present on its table.
+3. Every recorded job/run/task-run UUID is readable with unchanged terminal
+   status, error text and timestamps; the failed run is still failed.
+4. Replaying `GET /v1/events?run_id=` with `Last-Event-ID` set to the recorded
+   resume cursor returns, **as a set**, every pre-upgrade `(sequence, type,
+   task_id, payload)` tuple recorded for that run above the cursor. Duplicate
+   and additional deliveries are legal and must not fail the assertion.
+   **A gap-free range or high-water-mark check is invalid here** and must not be
+   written: `ExecutionEvent.Sequence` is a table-wide `autoIncrement` primary key
+   (`internal/models/execution_event.go:12`) while `Store.ListSince` applies
+   `sequence > ?` and *then* filters by `run_id`
+   (`internal/event/store.go:113-150`), so any single run's sequences are
+   legitimately sparse — two interleaved runs can hold `{1,3}` and `{2,4}` and
+   both be complete. Conversely, reaching the same maximum proves nothing about
+   an earlier event surviving. This is exactly DT-EVENT-01's restriction that a
+   sequence identifies an event *within the selected store lifetime* and is not a
+   gap-free counter; the assertion above is the only form that respects it.
+5. The queued row is dequeued and reaches a started run — asserting it merely
+   still exists is insufficient, because a stale claim would look identical.
+6. The candidate CLI's `job export` of each alias re-lints and produces no
+   changes under `job diff` against the candidate server.
+7. The serving build is the candidate: container image ID equals the built
+   candidate's, cross-checked by `data_assertions_enabled` appearing in
+   `GET /v1/system/features`.
+
+**Required unsupported-transition case** (deterministic, no cluster needed):
+restart the candidate on the same volume with `CAESIUM_NODE_ADDRESS` set to a
+value other than the one in `info.yaml` and assert exit status 1 and the
+`address … in info.yaml does not match` fatal from `pkg/db/db.go:56`. This is
+F1's documented unsupported transition and the single-node form of the blocking
+finding above.
+
+**Required recorded-outcome cases**, run and reported without a pre-judged
+expectation, because F1 does not promise them: (a) rollback — restart v0.1.0 on
+the candidate-migrated volume and record whether it starts and whether every
+pre-upgrade identity reads back; (b) shard-count change — restart the candidate
+with a different `CAESIUM_DATABASE_SHARDS` and record the observed behavior. A
+passing (a) does not create a supported rollback guarantee; a silently
+successful (b) that strands rows is a finding to file, not a pass.
+
+G6 later wires this standalone runner into the declared CI/release matrix; F4
+ships with a single containerized command and same-SHA evidence and does not
+wait for that.
+
+#### F2 procedure — persistent cluster upgrade, replacement, and recovery
+
+Owns `test/lifecycle/cluster_test.go` and
+`helm/caesium/ci/test-values-lifecycle.yaml`, and extends F4's
+`test/lifecycle/versions.json` and `scripts/lifecycle-tests.sh`. It **consumes**
+B1's completed harness — `scripts/robustness.sh`, `build/Dockerfile.robustness`,
+`test/robustness/cluster/` and the recorder — and owns separate scenario files;
+it does not edit B1's owned files or the scenario manifest.
+
+`helm/caesium/ci/test-values-lifecycle.yaml` is F2's own values file, derived
+from `helm/caesium/ci/test-values-robustness.yaml` minus the fault-tuning knobs:
+`replicaCount: 3`, `persistence.enabled: true`, `CAESIUM_DATABASE_SHARDS=1`,
+`CAESIUM_DATABASE_VOTERS=3`, `CAESIUM_DATABASE_STANDBYS=0`,
+`CAESIUM_DATABASE_CONSOLE_ENABLED=true`, the run-queue variables from F4, and
+the worker-hostname anti-affinity. Leave `updateStrategy`, `podManagementPolicy`
+and `persistentVolumeClaimRetentionPolicy` **unset** so the test measures the
+chart as shipped (`helm/caesium/templates/statefulset.yaml` declares none, so
+Kubernetes defaults `RollingUpdate` / `OrderedReady` / `Retain` apply). Do not
+inherit cache, lineage, freshness or assertion gates from a mutable sibling
+values file.
+
+Install the previous release, not the candidate, into an owned kind cluster and
+namespace, reusing B1's lifecycle:
+
+```sh
+docker pull caesiumcloud/caesium:v0.1.0
+kind load docker-image --name "$LIFECYCLE_ID" caesiumcloud/caesium:v0.1.0
+helm install caesium ./helm/caesium --kubeconfig "$ARTIFACTS/kubeconfig" \
+  --namespace "$LIFECYCLE_ID" --create-namespace \
+  --values helm/caesium/ci/test-values-lifecycle.yaml \
+  --set image.tag=v0.1.0 --wait --timeout 300s
+```
+
+Before the transition, prove the starting state and capture identity: three
+bound PVCs, three distinct pod UIDs/IPs on distinct worker nodes, three dqlite
+members with voter roles and an agreed leader through B1's direct `Leader`/
+`Cluster` RPCs against each `podIP:9001`, and — for each pod — the address
+recorded in `/var/lib/caesium/dqlite/info.yaml` alongside its current pod IP.
+Seed the same retained-state fixture classes F4 defines, plus in-flight work: a
+run executing at the moment the upgrade starts, and a queued run behind it.
+
+Then upgrade with the **same target and the same values**:
+
+```sh
+helm upgrade caesium ./helm/caesium --kubeconfig "$ARTIFACTS/kubeconfig" \
+  --namespace "$LIFECYCLE_ID" \
+  --values helm/caesium/ci/test-values-lifecycle.yaml \
+  --set image.tag="$CANDIDATE_SHA" --wait --timeout 600s
+```
+
+Every one of those flags is load-bearing and none may be dropped. `helm upgrade`
+does **not** carry the installed overrides forward unless it is given them again
+or `--reuse-values`; re-rendering this chart with only an image override falls
+back to the chart defaults, where `replicaCount: 1` (`helm/caesium/values.yaml:2`)
+and `config.extraEnv` is empty. That would silently scale the release to a single
+member and drop the distributed/run-owner configuration, the three-voter dqlite
+settings, the worker-hostname anti-affinity and the Kubernetes executor RBAC — so
+the run would not exercise the three-member rolling transition this case is
+about, while still reporting success. Omitting `--kubeconfig` and `--namespace`
+likewise risks addressing a different cluster or namespace than the install. F2
+must therefore diff `helm template`/`helm get manifest` before and after the
+upgrade and assert that the **only** change is the image reference: replica
+count, env block, affinity and RBAC must be byte-identical across the
+transition, and a topology change is a harness bug, not a result. If F2 instead
+chooses `--reuse-values`, that is a deliberate choice that must be recorded, and
+the same rendered-diff assertion still applies.
+
+A `--wait` timeout is a symptom, not a result: F2 must
+never assert on the helm exit status alone, and must inspect each pod's phase,
+container exit code and log regardless of how helm returned. Assert, per member
+and in this order:
+
+1. The pod was recreated; record its new IP and compare it with the `info.yaml`
+   address captured before the upgrade.
+2. If the address changed, the container must exit 1 with the
+   `info.yaml does not match` fatal; F2 records this as the expected
+   manifestation of the open prerequisite and the upgrade case reports
+   **blocked-by-prerequisite**, never flake and never pass.
+3. If the address was reused, the member must rejoin with its retained volume,
+   run AutoMigrate without error, and the cluster must return to three voters
+   with an agreed leader. This outcome is labelled *address-reuse dependent* and
+   is not evidence of a supported upgrade.
+4. Retained state: every pre-upgrade job/run/task-run identity readable with
+   unchanged terminal status; the recorded per-run event tuples replay as a set
+   from the explicit resume cursor, allowing duplicates, under exactly the F4
+   rule above (never a gap-free or high-water-mark check); the queued run reaches
+   a started run; the in-flight
+   run reaches a legal terminal outcome reconciled against the raw effect ledger
+   B1's recorder already provides, with duplicate task attempts retained rather
+   than automatically failed.
+5. Mixed-version window: while members straddle versions, record each member's
+   image ID and `GET /internal/capabilities` `protocol_version`, and assert
+   dispatch/completion traffic actually crossed a version boundary before any
+   interoperability claim is made. Both sides must report protocol 2.
+
+Additional F2 cases, each reported pass / fail / blocked with evidence:
+
+- **Membership replacement (a joining ordinal).** Delete **`caesium-1`** — a
+  non-zero ordinal, chosen precisely because the chart gives it a non-empty peer
+  list — *and* its PVC; assert the replacement generates a new node ID and joins,
+  and record the dead member's leftover entry and role, which no product surface
+  can remove. This case says nothing about ordinal 0 and may not be generalized
+  to it.
+- **Ordinal-0 disk loss (expected blocked).** Delete **`caesium-0`** and its PVC
+  separately. Per the prerequisite above, the empty peer list at
+  `helm/caesium/templates/configmap.yaml:14-17` makes `app.New` take
+  `dqlite.BootstrapID` on the fresh directory and initialize a self-only node
+  store rather than joining the surviving quorum. F2 records the replacement's
+  `info.yaml` ID, its node store, and the surviving members' view of membership,
+  and reports the case **blocked-by-prerequisite** (missing rejoin/bootstrap
+  recovery procedure). A run in which ordinal 0 appears healthy must be checked
+  against the survivors' membership before it is called a rejoin — a self-only
+  bootstrap also answers `/health`.
+- **Snapshot catch-up.** Stop one member long enough for the leader to truncate
+  past its index, restart it, and assert it catches up. dqlite's snapshot
+  thresholds are unconfigured C defaults (`pkg/dqlite/dqlite.go:164-175` passes
+  no `WithSnapshotParams`), so F2 must **measure** the threshold it actually
+  crossed rather than assume a number.
+- **Restore.** Stop one member, copy its volume, corrupt or delete the original,
+  restore the copy, restart. **Rejoining and reading matching rows does not
+  prove the copy was restored** and may not be asserted as such: `dqApp.Open`
+  hands SQL to go-dqlite's driver, which connects through
+  `protocol.NewLeaderConnector` (`go-dqlite/v3@v3.0.4 driver/driver.go:307`), so
+  an HTTP read served by the restarted member can be answered by a **surviving
+  leader**, and any log data missing locally is simply re-replicated from the
+  quorum. A restore that silently lost the copied bytes satisfies both
+  observations. F2 must instead produce:
+  1. **Pre-startup evidence** that the expected snapshot was restored — the
+     copy's manifest (per-file sizes and checksums, and `info.yaml` node ID and
+     address) compared against the restored directory **before** the container
+     starts, not inferred afterwards.
+  2. **An assertion that depends on the snapshot's contents and cannot be
+     supplied by healthy peers** — read the restored member's local state
+     directly rather than through the leader-connected SQL path (for example,
+     inspect the restored data directory, or exercise the member with the other
+     two stopped so no peer can serve or re-replicate the answer).
+  3. **A negative control**: repeat the case with the snapshot omitted or
+     damaged and show the assertion **fails**. An assertion that passes without
+     the snapshot is measuring peer catch-up, not restore.
+  If the harness cannot take a consistent copy, or cannot run the negative
+  control, report the case **blocked** — or scope it explicitly to *member
+  catch-up* and stop using it to qualify the supported snapshot-recovery policy.
+  There is no product restore to exercise.
+- **Rollback.** Only as the recorded-outcome case F1 defines; a `helm rollback`
+  that starts is not a supported path.
+
+Single-node migration qualification is F4's and does not wait for F2. F2 does
+not begin before B3's fault vocabulary is available for the in-flight-work case.
+
+#### F3 procedure constraints from F1
+
+F3 inherits this record's vocabulary and may not widen it. Its seeded fault
+sequences may combine the four failure cases above only when each is separately
+injected and separately evidenced; a container or process kill is never labelled
+power-loss or disk-loss qualification, and a detached volume is never labelled
+disk loss. The storage faults F3 is permitted to inject are exactly the
+volume-level operations the harness owns on a **stopped** member — detach and
+reattach, snapshot and restore, truncate or corrupt a copy, and fill the volume
+to exhaustion — plus whatever the provisioned topology supports under Q2; a
+fault applied to a running member's volume through the container runtime is a
+different, unmodelled case and must be recorded as such. Clock faults remain
+outside this plan's scope per A1's clock decision. Repeated failover and node replacement in F3 must reuse
+F2's replacement procedure and inherit its blocked-by-prerequisite status until
+the stable-node-address prerequisite is resolved. Every soak scenario keeps a
+short locally reproducible form, and retains its actual fault schedule as well
+as its seed.
+
 ### Open decisions and external prerequisites
 
-These questions were offered during brainstorming and remain unanswered. None
+These questions were offered during brainstorming. All remain unanswered except
+Q4, which the F1 decision record resolves above. None
 prevents drafting or the first-wave items. Implementations may proceed only
 within their resolved contract and available test infrastructure.
 
@@ -368,18 +920,24 @@ within their resolved contract and available test infrastructure.
 | Q1 | Required PR wall-clock and runner-cost budget | Measure current cold/warm CI, then agree the full matrix budget; 20–30 minutes is a proposal, not a measured commitment. The early G5 gate uses existing hosted runners and reports incremental cost. Keep complete existing suites. | G6 full-matrix promotion and G4 cadence/capacity. |
 | Q2 | Controlled performance and multi-host infrastructure | Three separate Caesium processes/containers on one CI host for PR robustness; isolated repeatable performance runners and separate hosts for broader qualification. Record provisioned runner identity, CPU/memory/storage, networking privileges, cleanup owner, and access proof. Provisioning paid infrastructure is not part of this plan PR. | E4 controlled calibration and F3/G4 multi-host operation. |
 | Q3 | Supported fault, execution, delivery, and recovery contracts | A1 produces the per-operation contract and selects the first conformance scenarios. Product-owner review resolves stronger or ambiguous guarantees with a recorded decision. A1 can finish with unresolved entries; dependent scenarios cannot claim those guarantees. | B2/B3, C1, D3, and F2 only for unresolved scenario contracts. |
-| Q4 | Supported OS/browser and release compatibility matrix | Confirm shipped CLI platforms, supported browsers, previous release(s), mixed-version operation, rollback versus backup restore, and storage failure model. Record exact release artifacts and documented policy. | D1/D2 expanded platforms and F4/F2 upgrade/restore scenarios. |
+| Q4 | Supported OS/browser and release compatibility matrix | **Resolved by the F1 decision record (W3-ε, 2026-09-14).** CLI platforms are `linux/amd64` and `linux/arm64` only; browsers are Chromium only; the one supported old-to-new path is `v0.1.0 → candidate`, adjacent pairs only; mixed-version operation is limited to internal protocol 2 with an identical shard count; restore-from-snapshot is the supported recovery and binary rollback is not; backup/restore, member removal, build/version reporting and a stable dqlite node address are recorded external product prerequisites. The storage failure model separates process kill, OS/power loss, lost unflushed writes and disk loss. | Unblocked: D1/D2 platform scope, F4 and F2. F2's upgrade case is blocked-by-prerequisite until the stable-node-address defect is fixed, which is product work outside this plan. |
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-10)
+## Progress (as of 2026-09-14, W3)
 
-**W1 implementation is merged; W1/N-1 is in [#469](https://github.com/caesium-cloud/caesium/pull/469).**
-A1, E1 and G1 have merged acceptance evidence and are checked. The other 24
-implementation items remain undispatched. This documentation checkpoint is
-based on merged master `646c9219`, which includes all three items and the index
-prerequisite. Merging #469 completes W1/N-1; until then, resume this checkpoint
-rather than dispatching W2. No repository settings have changed.
+**W1 and W2 are closed, W3 implementation is merged, and W3/N-1 is this PR.**
+A1, A2, B1, C1, D1, D2, E1, E5, F1, G1, G3 and G5 have merged acceptance
+evidence and are checked. The other 15 implementation items remain
+undispatched. This documentation checkpoint is based on merged master
+`894f645b`, which includes all six W3 items. W3 wires B1's owner-crash runner
+and E5's SQL-work budget into a real CI lane (`early-evidence`), promotes that
+lane into the fail-closed `ci-ok` aggregate with evidence-binding checks, adds
+an independent pure reference model with generated property tests, extends the
+binary-driven developer journey, expands browser accessibility/visual/scale/
+recovery coverage, and records the F1 lifecycle decision that resolves Q4.
+**No repository settings have changed** — see the milestone note after the W3
+table, and Q6.
 
 | W1 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
@@ -388,20 +946,44 @@ rather than dispatching W2. No repository settings have changed.
 | γ | G1 / [#464](https://github.com/caesium-cloud/caesium/pull/464), merged | Merge `80273d3fe29ecf3a9df84d868a085df944959d3c`; verified candidate `7fcc1fd75b235066b27d66328d4293a34ce424b9`. [CI run 34499470605](https://github.com/caesium-cloud/caesium/actions/runs/34499470605): all 35 executed checks pass; tag-only publish skipped. All 15 Python validators and actionlint pass. Native Chromium fail-once proof using unchanged G1 configuration exits 1 despite a passing retry. Fresh hosted browser lanes pass (28 default + 8 auth, no skips/flaky outcomes); both uploaded artifacts were recursively checked for API-key tokens. Tested merge `ffe74c5a` has parents `dd35ba42` and `7fcc1fd7`. Independent and external reviews have no actionable findings. |
 | Index prerequisite | [#467](https://github.com/caesium-cloud/caesium/pull/467), merged | Merge `2d28607feb50412b273abefc0aae94da64bf0099`. The one-line README convention repair is incorporated in both candidates. The formerly failing index guardrail now passes locally and on both CI architectures. No guardrail or test floor changed; this is not N-1 completion. |
 
-**W1/N-1 — [#469](https://github.com/caesium-cloud/caesium/pull/469): merge pending.**
-This PR synchronizes `docs/ci.md` with shipped load-harness exit/report behavior,
-browser diagnostics and Python validator discovery, and updates the README and
-roadmap status links. Its merge SHA is unavailable until merge; on resume,
-resolve #469's live merge commit and record it in the next Progress update.
-The presence of this checkpoint on the default branch, together with #469's
-verified merged state, closes W1 without another status-only PR. The overall
-27-item plan remains active; new multi-node fault guarantees and calibrated
-performance gates have not shipped in W1.
+**W1/N-1 — [#469](https://github.com/caesium-cloud/caesium/pull/469), merged.**
+Merge `79d8add59386881c763fc3185c7ad91e606b1470`. It synchronized `docs/ci.md`
+with shipped load-harness exit/report behavior, browser diagnostics and Python
+validator discovery, and updated the README and roadmap status links. W1 is
+closed; no further status-only PR is owed for it.
+
+| W2 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | B1 / [#472](https://github.com/caesium-cloud/caesium/pull/472), merged | Merge `f3f5ce3ab68d57709127a0b2807e670e7d39726a`; verified candidate `b716c6dbe0b65757f8e4c5984e2e7f98993b9ac4`. Live kind proof `B1_KIND_OK` on 2026-09-12: `TestOwnerCrash` PASS in 123.22s, `owner_is_leader` 63.21s (recovery 33.086s) and `owner_is_not_leader` 57.38s (recovery 35.090s), generation 1→2 in both, owner `10.244.1.3` → `10.244.3.3`. Three persistent replicas on distinct nodes/IPs/UIDs with bound PVCs; dqlite reported 3 voters and leader `10.244.1.3:9001`; connectivity probe observed before the fault; kill path was cordon → `systemctl stop kubelet` + `ctr tasks kill SIGKILL` with observed death; old kubelet restarted and uncordoned; two isolated cluster IDs coexisted before the extra was deleted; 2 duplicate block attempts retained and sink nonces correlated to public task-run UUIDs. `helm lint`/`helm template` against `test-values-robustness.yaml`, `bash -n scripts/robustness.sh` and `git diff --check` pass. **Limits:** the live proof is orchestrator-owned (image build plus a 4-node cluster) and the lane is **not** wired into CI — G3 owns that. Remaining product risk recorded by the PR: `POST /v1/database/query` issues `PRAGMA query_only`, which native dqlite may reject; a 500 there is a product-console gap, not permission to skip lease observation. |
+| β | E5 / [#471](https://github.com/caesium-cloud/caesium/pull/471), merged | Merge `4bc19ac98389ccd3fd61382e9f9ec40ad37949a6`; verified candidate `86917428a4eb5c29d4aec9a2608634a94e88b2c8`. Live `just integration-test` from the item worktree PASS in 610.355s: `TestStatementBudgetFixedWorkload` PASS (2.42s) with `lease_renewal` and `callback` skipped with logged reasons (both deltas 0), the recorded comparator profiles PASS including the leftover-plus-lost-batching fixture, and `TestStatementBudgetParseCounterRejectsPrefixOnlyName` PASS. **Limits:** the scenario gates the measured `caesium_db_statements_total` / `caesium_db_writes_total` categories only — not latency, not uninstrumented queries. `lease_renewal` and leftover `callback` traffic are reported as skipped with reasons instead of false exact bounds; `command`/`checkpoint` are asserted zero. `test/contracts/scenarios.json` was deliberately not edited, so G3 still has to register `TestStatementBudgetFixedWorkload`. |
+| γ | A2 / [#470](https://github.com/caesium-cloud/caesium/pull/470), merged | Merge `0c42e549f5983fb4c8bf78cbfdf9fae698b21f41`; verified candidate `56db7bf755035b57e905e389f060970b61c920e9`. `python3 -m unittest scripts/test_test_evidence.py -v` 29 tests OK; `python3 -m unittest discover -s scripts -p 'test_*.py' -v` 44 tests OK; `git diff --check` clean. **Limits:** every committed manifest row is `status: absent` with empty `gates`, so the catalog names planned B1/B2/B3/D3/E5/G3 scenarios and proves none of them; G3 registers selectors and the early gate after the tests exist. Verification was Python-only (no Docker), and this PR invented no passing CI evidence. |
+| W2/N-1 | [#473](https://github.com/caesium-cloud/caesium/pull/473), merged | Merge `b6b1c054da201c4dfd7b8395511f7d5fec386cae`. Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the three merged W2 items. W2 is closed; no further status-only PR is owed for it. |
+
+| W3 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | G3 / [#477](https://github.com/caesium-cloud/caesium/pull/477), merged | Merge `2ef933e13d96f3e26b8f188fa19481d90257692f`. Delivered the `early-evidence` CI job on the existing kind/Helm/`run-integration` infrastructure, the `robustness-runner` bake target and its `robustness-amd64` artifact (compiling `./test/robustness` explicitly with `-tags=integration`, since the precompiled `./test` binary cannot contain subpackage tests), the `robustness-runner`/`robustness-test`/`integration-test-sql-budget`/`check-evidence`/`early-evidence` just recipes, and the stdlib-only artifact consumer `scripts/collect-evidence.py` with its unit module. Registered `b1-owner-crash-leader`, `b1-owner-crash-nonleader` and `e5-sql-work-budget` as `proven` with `gates: ["early"]`; every other manifest row stays `absent` with no gate. Corrected three A2 manifest defects: E5's selector matched no test (now suite-qualified `TestIntegrationTestSuite/TestStatementBudgetFixedWorkload`), its topology claimed `database_shards: 1`/`voters: 1` where `integration-up` runs four shards on one standalone process with `mode.execution: local`, and the B1 rows' `feature_flags` used pseudo-keys no observed environment could match (now the real `CAESIUM_*` names). Live lane on candidate `f3f5ce3a`: `TestStatementBudgetFixedWorkload` PASS (2.44s) and `TestOwnerCrash` PASS (125.94s; `owner_is_leader` 63.21s, `owner_is_not_leader` 60.18s), evidence validated with three scenarios `pass`, cluster and containers cleaned up afterwards. Two live fail-closed proofs on the same real artifacts (deleted fragment, removed scenario) exit 1. 88 Python tests OK, actionlint clean, `just helm-lint`/`helm-template`, `just lint` 0 issues, `just unit-test` pass. **Limits:** the Docker lane runs the `-test` image variant, so `e5-sql-work-budget` sets `require_candidate_digest: false` and records `observed_server_image_id` rather than claiming the release digest. At this merge the lane was deliberately outside `ci-ok` and `scripts/ci-ok.py` was untouched — G5 owns promotion. The full `just integration-test` suite was not run. |
+| β | C1 / [#475](https://github.com/caesium-cloud/caesium/pull/475), merged | Merge `5ecd95d8374ebcf281c835a9f9cde21dd848b34c`. Delivered the untagged pure-Go `test/model/` reference model — readiness re-derived declaratively as a fixpoint over the outcome set, deliberately unlike the product's incremental predecessor counters — plus `internal/run/model_properties_test.go` and `internal/run/recovery_properties_test.go`, which drive the real `RunState` and the real `RecoverRunState`/`RecoverRunStateWithFanOut`/`Snapshot`/`Restore`/`ValidateCheckpointBlob` against it over generated bounded DAGs and every checkpoint index of a generated execution. Added `pgregory.net/rapid v1.3.0` and `github.com/anishathalye/porcupine v1.3.0` with toolchain-generated sums (`go mod tidy` also promoted the already-direct `prometheus/common` out of the indirect block). `independence_test.go` enforces the import allowlist and the no-build-tag rule mechanically, so the hermetic claim is a test rather than a convention. Porcupine checks only the run-status register; delivery, liveness and lease safety have separate models, each with a negative control proving the oracle rejects a planted defect. **Deliberate deviation, stated rather than silent:** minimized counterexamples are retained as deterministic source in `test/model/regression_test.go` rather than as Rapid `.fail` artifacts, with the `.fail` workflow (keep while a defect is open, transcribe on fix) documented in `doc.go`. **Limits:** the four counterexamples found were all in the new model — the product's `RunState` and recovery paths agreed with it under 4000+ generated cases per property, so **no product defect was found** — and a green run proves a decision function agrees with a specification on hermetic inputs, never that the wiring around it is correct. `just lint` 0 issues, `just unit-test` exit 0, integration-tagged compile green; `just integration-test` deliberately not run (test-only diff). |
+| γ | D1 / [#476](https://github.com/caesium-cloud/caesium/pull/476), merged | Merge `b26fb6137e3a455a4ec9a9ec4bd188ac66c87a81`. Delivered `test/developer_journey_test.go` (ten `IntegrationTestSuite` scenarios extending, not rewriting, `test/local_dev_test.go`) and `test/developer_testdata/pipeline.job.yaml`: unparseable YAML rejected by both collection paths (`internal/jobdef.CollectDefinitions` for `test`/`dev` versus `cmd/job.collectDefinitions` for `lint`/`preview`/`apply`), a schema-invalid `dev --once`, a workspace directory and job filename both containing a literal space, an unreachable `kubernetes` engine, `--run-timeout` proving the container is stopped *and* removed, watch-mode re-run on edit plus graceful SIGINT with no surviving container, and `job apply` followed by `job export` asserting the round-tripped DAG topology and labels. Streams captured separately throughout. Full `just integration-test` green with 0 failures (`ok ... 602.102s`); all ten scenarios PASS. **Product defects found and filed rather than fixed** (the owning packages are outside this item's file scope): [#479](https://github.com/caesium-cloud/caesium/issues/479) — `dev --once` panics in `internal/atom/kubernetes.NewEngine` (exit 2) on an unreachable engine because `internal/job.buildLocalRunners` calls the factory with no `recover()`; and [#480](https://github.com/caesium-cloud/caesium/issues/480) — `dev --once` ignores SIGINT and orphans its container. The affected assertions require only a bounded nonzero exit, so they stay valid once those are fixed. |
+| δ | D2 / [#482](https://github.com/caesium-cloud/caesium/pull/482), merged | Merge `894f645b85d4b17e5bb0abac6bd9d4903501fb12`. Delivered `ui/e2e/accessibility.spec.ts` (scoped axe over WCAG2/2.1 A+AA critical/serious findings plus keyboard/focus, with the react-flow DAG canvas and xterm terminal excluded as DOM-less by construction), `ui/e2e/visual.spec.ts` with committed `-linux.png` baselines, `ui/e2e/scale.spec.ts` (a real 18-node DAG, 24 individually reachable pipelines, a synthetic 240-row partition set, a real 2000-line log stream), `ui/e2e/network-recovery.spec.ts`, the shared `failOnUnexpectedPageErrors` guard plus `uniqueSuffix`/`buildFanDefinition` in `ui/e2e/helpers/fixtures.ts`, `toHaveScreenshot` defaults in `ui/playwright.config.ts`, and a pinned `@axe-core/playwright`. Adversarial-review findings were fixed in-PR (commits `ab450ddb`, `503517fa`, `527c737c`, `ac0582be`): the axe baseline is tracked per violating **node** rather than per rule id, matched by leaf class set and, for `color-contrast`, by `fgColor` within an RGB tolerance, because axe's selector minimization and these opacity-composited tokens both vary run to run against an unmodified UI; the Trigger Job dialog's single-Tab focus check became a real wrap-around boundary proof in both directions; the partition-table baseline was re-taken from CI's actual render; and the console-error guard's network-level `net::ERR_*` allowance ended up file-scoped to `network-recovery.spec.ts` alone, every other spec keeping the strict default. **Limits:** `KNOWN_VIOLATIONS`/`KNOWN_CONTRAST_TOKENS` is a tracked baseline of real pre-existing product defects, filed as [#483](https://github.com/caesium-cloud/caesium/issues/483) — not a pass; shrinking it is product-code work outside this stream. The visual tests self-skip off Linux, so the per-pixel comparison happens only in CI's `ui-e2e`. The large partition set and the credential/permission-denial cases are explicitly SYNTHETIC (this e2e server runs `CAESIUM_FANOUT_MAX_PARTITIONS=8` and no `CAESIUM_AUTH_MODE`); real scope denial stays covered live in `ui/e2e/auth/`. Local `just ui-lint`, `ui-test`, `ui-e2e` (41 passed, 3 darwin screenshot skips), `ui-e2e-auth` (8 passed), `just lint` and `just unit-test` all green. |
+| ε | F1 / [#474](https://github.com/caesium-cloud/caesium/pull/474) + [#478](https://github.com/caesium-cloud/caesium/pull/478), merged | Merges `937a9feac5e51b7358331356bb95d8247617bff7` and `da08e7ef81dc0f5a0818e6283eba78bec9f054b1`. Delivered the F1 lifecycle decision record under Strategic Decisions and closed **Q4** there. Audited against real code, chart, workflow and registry: there are no hand-written migrations and no schema-version table (`pkg/db/Migrate()` AutoMigrates `internal/models.All` from struct tags, with one explicit DDL repair), every node migrates unconditionally on boot, and the shard count is frozen for the life of a data directory. Exactly one release exists (`v0.1.0`); the record pins its multi-arch and per-arch image digests and release asset checksums, and flags Docker Hub's `latest` as a 2021 amd64-only image the publish chain never updates. Q4: CLI platforms `linux/amd64`+`linux/arm64` only, Chromium only, adjacent-pair upgrades only, mixed-version operation limited to internal protocol 2 with an identical shard count, restore-from-snapshot supported and binary rollback not. **Blocking finding, reproduced locally against `caesiumcloud/caesium:v0.1.0` on a retained volume:** go-dqlite refuses to start when the supplied address differs from `info.yaml` (`pkg/db/db.go`), and the chart sets `CAESIUM_NODE_ADDRESS=$(POD_IP):9001`, so a persistent StatefulSet upgrade depends on the CNI reusing the pod IP — and `helm upgrade` is never executed in CI at all. Five external product prerequisites are recorded (backup/restore, member removal, build/version reporting, stable dqlite node address, ordinal-0 rejoin/re-bootstrap). #478 accepted and fixed all five P2 findings from the adversarial review of #474: `data_violations` belongs to `task_runs` and not `job_runs`; the event fixture records identities as a set with an explicit resume cursor instead of a forbidden gap-free high-water mark; the Helm upgrade command must keep its kubeconfig/namespace/values and diff `helm get manifest` before and after; ordinal-0 loss is a separate blocked case, with `caesium-1` named for replacement; and restore must be distinguishable from peer catch-up, which downgrades the rollback-versus-restore row from "supported" to "intended, not yet qualified". **Limits:** this is lifecycle policy and procedure, not upgrade certification — no upgrade, rollback, replacement or restore was executed. F4 and F2 are dispatchable without further design, but F2's upgrade case is blocked-by-prerequisite on the stable node address and its disk-loss case on ordinal-0 bootstrap. Docs-only; `just lint` 0 issues and `just unit-test` green on both PRs. |
+| ζ | G5 / [#481](https://github.com/caesium-cloud/caesium/pull/481), merged | Merge `5d4bf73e0d194301090e147a17daf5c883f7e0bc`, merged by the CODEOWNER. `ci-ok` now requires `early-evidence` with `SELECTORS["early-evidence"] = ("go", "helm", "ci")` — exactly the lane's own `if:` condition, so a lane that vanishes cannot read as an allowed skip — and `helm-lint`, the lane's unconditional producer, is promoted with it so a chart failure reports as itself rather than as a skipped consumer. **A green job result is not accepted as evidence:** `ci-ok` downloads the report the lane uploaded and `scripts/ci-ok.py` requires it to exist and parse as an object, to bind to this run's `github.sha`, to have at least one registered `early` scenario (an ungated manifest cannot vacuously pass), to report every `early`-gated row `pass` with its required fault-activation kind and observations, and to pass `check-test-evidence.py --require early --strict`. Measured on hosted `ubuntu-24.04` runners across five green runs: 6m19s, 5m57s, 6m18s, 7m15s and 7m32s (mean ~6m40s), with no lane flake and no lane retry. The aggregate's verdict now lands ~2m07s later; total workflow wall clock grew 0s on one attempt (13m12s, `helm-integration-test` still the critical path) and +25s on the other, where `ci-ok` became the critical path, and the promotion costs no new runner minutes because the lane already ran on every `go`/`helm`/`ci` PR. It also fail-closed for real on [run 34868499191](https://github.com/caesium-cloud/caesium/actions/runs/34868499191) attempt 1, where a transient `images`/`bake-images` failure skipped the lane and the gate refused for both the missing dependency and the absent evidence report. **Q6 finding — `ci-ok` is NOT enforced at merge.** Master's protection lists eight required contexts (`lint`, `unit-test`, `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`, `build-and-integration-test`, `build-and-integration-test-agent-auth`), `strict: false`, `enforce_admins: false`, one CODEOWNER review, and there are no rulesets; `ci-ok` is absent, so this promotion blocks `v*` tag publication (through `publish.needs`) but not PR merge. Exactly one repository-settings change closes that — adding `ci-ok` to `required_status_checks` — which is outside execution authorization and was **not** made; it is surfaced to the CODEOWNER. Existing optional lanes (`helm-integration-test`, `podman-integration-test`, `integration-extra`, `integration-arm64`) keep their unpromoted status, asserted by a test. |
+| W3/N-1 | this PR | Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the six merged W3 items, authored from merged master `894f645b`. It also carries the one-line G5 note refresh (`ed62d4a0`) that was raised on the W3-ζ branch but never merged. Its merge SHA is unavailable until merge; resolve it on the next invocation and record it here. |
+
+The overall 27-item plan remains active. **The minimum credible gate milestone
+(G3 + G5) is delivered in CI but is not merge-enforced.** `early-evidence` runs
+on every `go`/`helm`/`ci` pull request, and `ci-ok` fails closed on the lane's
+report rather than on its job result — but `ci-ok` is not one of master's eight
+required status checks, so today the promotion blocks `v*` tag publication and
+not PR merge. Closing that gap is exactly one repository-settings change (add
+`ci-ok` to `required_status_checks`), recorded under Q6 as a CODEOWNER decision
+outside this plan's execution authorization; no settings were changed in W3.
+Calibrated performance budgets, partitions, upgrade qualification, real
+CLI/server coverage and Console fault journeys have not shipped.
 
 ### Resume and tracking rules
 
 The committed plan is the shared progress record; PR bodies hold detailed
-candidate evidence. The machine-local `.codex/runs/distributed-testing/w1/state.md`
+candidate evidence. The machine-local `.codex/runs/distributed-testing/w<n>/state.md`
 is a recovery aid, not a replacement for this dashboard. The orchestrator keeps
 Progress current when PRs are published, revised, verified or merged, including
 at a review-only endpoint. Interim Progress corrections do not wait for N-1;
@@ -409,24 +991,40 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile these
 rows against live PR state, head/merge SHAs, reviews and current-head checks.
-Resume #469 while W1/N-1 is unfinished. Checkboxes mean merged acceptance
+Resume the W3/N-1 PR while it is unfinished. Checkboxes mean merged acceptance
 evidence; rows distinguish implementation and verification from merge. Once
-N-1 is verified merged, record its merge SHA and select W2 in that invocation;
-choose dependency-ready items while preserving unresolved Q1–Q6 and
-shared-file ownership. Dependency readiness alone does not authorize dispatch
-before the current wave's checkpoint.
+W3/N-1 is verified merged, record its merge SHA and select **W4** in that
+invocation; choose dependency-ready items while preserving unresolved Q1–Q3, Q5
+and Q6 and shared-file ownership. Dependency readiness alone does not authorize
+dispatch before the current wave's checkpoint.
+
+Dependency-ready after W3: **E2** (A1, E1), **G2** (A2, G1), **F4** (F1),
+**C2** (C1) and **G7** (G5). Their Files lists are pairwise disjoint, and G7 is
+the only writer of the `.github/workflows/ci.yml` / `scripts/ci-ok.py` /
+`scripts/test_ci.py` chain in that set — G2's new Python validator module is
+discovered by G1's wildcard and must not be edited into the workflow.
+**B2** is dependency-ready on B1 and C1 but **must not be dispatched until the
+EX-HOOKS sibling check is done**: identify the merged SHA/PR of any intersecting
+closed-loop-arc work on `internal/event/bus_dispatch.go` and record exclusive
+ownership for the wave, or record that no sibling has an active claim. A checked
+box in a sibling plan is not that evidence.
+
+Still blocked after W3: **B3** (needs B2), **C3** (B3, C2), **D3** (B3, D2),
+**E3** (E2, D2, C2), **E4** (E3, plus Q2/Q5), **F2** (F4, B3, and
+blocked-by-prerequisite on the stable node address), **F3** (B3, C3, E4, F2,
+plus Q2), **G4** (F3, G6) and **G6** (B3, C3, D3, E4, F2, G2, G7).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | A1 and G1 merged; A2 undispatched until W1/N-1 |
-| B | Real multi-node robustness (3 items) | P0 | A1 prerequisite merged; B1 undispatched until W1/N-1 |
-| C | Reference models, generated tests, and checker validation (3 items) | P0 | A1 prerequisite merged; C1 undispatched until W1/N-1 |
-| D | Developer and Console journeys (3 items) | P0 | A1 prerequisite merged; D1 undispatched until W1/N-1; expanded support needs Q4 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466; E2/E5 dependency-ready after W1/N-1; E4 needs Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | Undispatched; F4 follows F1 without B3; F2 adds cluster qualification |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464; G3/G5 remain dependency-blocked |
+| A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three of thirteen manifest rows are now `proven` with `gates: ["early"]` (registered by G3 #477); the other ten stay `absent` and belong to B2/B3/D3, then G6 |
+| B | Real multi-node robustness (3 items) | P0 | B1 merged #472 and now executed by the `early-evidence` lane on every `go`/`helm`/`ci` PR (wired by G3 #477, gated by G5 #481); B2 dependency-ready on B1/C1 but held for the EX-HOOKS sibling check; B3 needs B2 |
+| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475 — `test/model` runs inside `just unit-test` and found no product defect; C2 dependency-ready for W4; C3 needs B3 + C2 |
+| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482, with product defects filed as #479/#480 and Console accessibility debt as #483; D3 needs B3 + D2; Q4 has settled the supported platform/browser scope |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466 and E5 merged #471, and E5's budget is now gated through `early-evidence`; E2 dependency-ready for W4; E3 needs E2/D2/C2; E4 needs Q2/Q5 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474 and corrected by #478; Q4 resolved. F4 dependency-ready for W4; F2 follows F4/B3 and is blocked-by-prerequisite on the stable node address; F3 needs B3/C3/E4/F2 |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464, G3 merged #477, G5 merged #481 — `early-evidence` is a fail-closed `ci-ok` dependency, but `ci-ok` is not itself a required status check (Q6, CODEOWNER decision). G2 and G7 dependency-ready for W4; G6 then G4 follow |
 
 ## Streams
 
@@ -446,17 +1044,19 @@ below is mandatory, including append-only edits.
   Depends on: none.
   Verify: Name each public operation, identity, acknowledgement point, safety/liveness oracle, fault/clock assumptions, and unresolved guarantee, including rejection while quorum is absent. First compare the existing Helm StatefulSet/headless membership plus CI kind setup with Testcontainers/Toxiproxy; the default B1 design reuses the chart, enables persistence, and kills a pod. Record exact image, node/owner discovery, test runner, and recorder reachability commands. A bounded spike must establish whether peer address advertisement permits proxies before adopting them. Compare a small injectable clock seam in lease/owner/worker renewal with existing Go timer test facilities, short test-only lease configuration, and external process pause; a clock seam does not replace real crash/commit faults. Enumerate any indispensable event-dispatch hook and sibling handoff, rather than assigning five product files speculatively. B1's supported owner-crash contract can be settled independently of the later partition/clock/storage envelope; retain unresolved Q1–Q6 entries.
 
-- [ ] A2. Introduce a scenario manifest and a validator for complete evidence.
+- [x] A2. Introduce a scenario manifest and a validator for complete evidence.
   Files: new `test/contracts/scenarios.json`, new `scripts/check-test-evidence.py`, new `scripts/test_test_evidence.py`.
   Depends on: A1, G1.
   Verify: each included contract maps to named real-surface scenarios and required topology/mode/feature flags, expected observations, and allowed skips with reasons. Validate schema and duplicate IDs, then reject synthetic reports with missing scenarios, unexpected skips, disabled gates, wrong artifact identity, absent fault-activation evidence, or checker timeouts. Distinguish pass, fail, and inconclusive. The manifest must not contain rows marked proven for scenarios that do not yet exist; G3 reconciles the early gate and G6 the full suite.
+  Merged: [#470](https://github.com/caesium-cloud/caesium/pull/470), merge `0c42e549f5983fb4c8bf78cbfdf9fae698b21f41` (W2-γ). Delivered the catalog covering all 11 A1 contract IDs with topology, mode, feature flags, expected observations, skip policy, identity fields and fault-activation requirements, plus the stdlib-only fail-closed checker (exit 0 pass / 1 fail / 2 inconclusive, or 1 with `--strict`) and its unit module, which G1's wildcard already discovers. Limits: every committed row is `status: absent` with empty `gates`, so no scenario is proven and the unbuilt B1/B2/B3/D3/E5/G3 rows are named as planned only; G3 registers selectors and the early gate. Verified with Python alone — no Docker, no live report.
 
 ### Stream B — Real multi-node robustness
 
-- [ ] B1. Reuse the Helm topology and ship the first real owner-crash regression
+- [x] B1. Reuse the Helm topology and ship the first real owner-crash regression
   Files: new `test/robustness/cluster/`, new `test/robustness/owner_crash_test.go`, new `test/robustness/recorder/`, new `scripts/robustness.sh`, new `build/Dockerfile.robustness`, new `helm/caesium/ci/test-values-robustness.yaml`.
   Depends on: A1.
   Verify: Use the existing chart and CI kind lifecycle with replicaCount=3 and persistence enabled, candidate images loaded into an owned cluster, and unique namespaces/volumes. Do not invoke the Docker Desktop registry recipe unchanged or alter a user's current cluster. Put Docker/Kubernetes-dependent Go drivers and their helpers behind `//go:build integration`; compile their runner in the container toolchain. Observe three real dqlite members and a quorum, apply/trigger a blocked multi-step job through HTTP/CLI, identify its actual owner, terminate that pod without graceful application shutdown, and observe a surviving owner finish the accepted run. Exercise owner=leader and owner!=leader, then restart/rejoin the old pod with its retained volume. Use a small HTTP effect sink hosted by the test runner outside the faulted pods; persist raw starts/completions and verify public final state. This is a complete named regression, not scaffolding waiting for C1/B2/B3. Reject accidental single-node startup, missing task/sink connectivity, absent kill evidence, and wrong candidate image digests. Demonstrate two isolated harness instances coexist and clean up only owned resources; no Testcontainers dependency is required for this first topology.
+  Merged: [#472](https://github.com/caesium-cloud/caesium/pull/472), merge `f3f5ce3ab68d57709127a0b2807e670e7d39726a` (W2-α). Delivered `scripts/robustness.sh` (owned kind cluster of 1 control-plane + 3 workers, candidate/runner/task image load, three persistent Helm replicas with required hostname anti-affinity), `build/Dockerfile.robustness`, `helm/caesium/ci/test-values-robustness.yaml`, and the integration-tagged `test/robustness/` runner with `TestOwnerCrash` covering `owner_is_leader` and `owner_is_not_leader`. The in-cluster runner sits on the control-plane node with namespace-scoped RBAC, records start/complete nonces through a sink on `:8090`, correlates them to public task-run identity after recovery, retains duplicate attempts, and reads membership through dqlite `Leader`/`Cluster` RPCs against `podIP:9001` plus a UUID-validated `POST /v1/database/query` lease read. The host controller cordons the owner worker before triggering and kills via `systemctl stop kubelet` + `ctr tasks kill`, requiring the container ID to appear in `ctr tasks list` and then stop or disappear. Limits: the passing run is an orchestrator-owned live kind proof of candidate `b716c6db` (2026-09-12), **not** a CI lane — G3 wires the runner, image and selectors. `PRAGMA query_only` inside `POST /v1/database/query` may be rejected by native dqlite; that is a recorded product risk, not permission to skip lease observation.
 
 - [ ] B2. Add targeted faults and correlate public event and effect histories
   Files: new `test/robustness/faults/`, new `test/robustness/history/`, new `test/robustness/faults_test.go`, `test/robustness/recorder/` (created by B1), new `internal/testfault/`, `internal/event/bus_dispatch.go` (only A1-approved dispatch hook; EX-HOOKS required), `build/Dockerfile.robustness` (created by B1).
@@ -470,10 +1070,12 @@ below is mandatory, including append-only edits.
 
 ### Stream C — Generated state transitions and checker strength
 
-- [ ] C1. Implement independent pure models and generated lifecycle tests
+- [x] C1. Implement independent pure models and generated lifecycle tests
   Files: new `test/model/`, new `internal/run/model_properties_test.go`, new `internal/run/recovery_properties_test.go`, `go.mod`, `go.sum`.
   Depends on: A1.
+  Merged: [#475](https://github.com/caesium-cloud/caesium/pull/475), merge `5ecd95d8374ebcf281c835a9f9cde21dd848b34c` (W3-β).
   Verify: Generate bounded DAGs and sequences of admission, completion, cancellation, retry, lease expiry, checkpoint, and recovery using Rapid; minimize and retain failures. The independent `test/model` package is deliberately untagged, pure Go, and has no cluster/client startup, Docker socket, real network, or product decision-function dependency, so it belongs in `just unit-test`. Any test that launches external infrastructure must instead be integration-tagged and run by the system runner. Use Porcupine only for valid sequential contracts, with separate liveness/event models. Check checkpoint/replay equivalence and partition accounting with hermetic fixtures; compare real execution modes in B3 rather than claiming the pure model proves wiring. C1 owns its used model dependencies; adding a future proxy/container library needs a separately assigned owner.
+  Note: shipped with `pgregory.net/rapid v1.3.0` and `github.com/anishathalye/porcupine v1.3.0` (toolchain-generated sums; `go mod tidy` also promoted the already-direct `prometheus/common` out of the indirect block). `test/model` is untagged pure Go and `independence_test.go` enforces its import allowlist mechanically, so the no-product-dependency and hermetic claims are a test rather than a convention. Porcupine checks only the run-status register; delivery, liveness and lease safety have separate models, each with a negative control proving the oracle rejects a planted defect. Retained minimized failures are committed as deterministic tests in `test/model/regression_test.go`, not as Rapid `.fail` artifacts: a fixed defect's bitstream replays as "no longer valid" and documents nothing, so the workflow in `doc.go` keeps `.fail` files only while a defect is open. The four counterexamples found were all in the new model; the product's `RunState`/recovery paths agreed with it under 4000+ generated cases per property. No cluster evidence is claimed — B1/B3 remain the only source for that.
 
 - [ ] C2. Expand native fuzzing and deterministic concurrency regressions.
   Files: `pkg/jobdef/schemacompat/fuzz_test.go`, `internal/jobdef/diff/fuzz_test.go`, `internal/trigger/cron/fuzz_test.go`, new `internal/run/descriptor_fuzz_test.go`, new `internal/run/recovery_fuzz_test.go`, new `internal/worker/renewal_synctest_test.go`, new `scripts/fuzz-tests.sh`.
@@ -487,15 +1089,40 @@ below is mandatory, including append-only edits.
 
 ### Stream D — Developer and Console journeys
 
-- [ ] D1. Extend binary-driven developer workflows and cleanup assertions.
+- [x] D1. Extend binary-driven developer workflows and cleanup assertions.
   Files: `test/local_dev_test.go`, new `test/developer_journey_test.go`, new `test/developer_testdata/`.
   Depends on: A1.
+  Merged: [#476](https://github.com/caesium-cloud/caesium/pull/476), merge `b26fb6137e3a455a4ec9a9ec4bd188ac66c87a81` (W3-γ). Product defects found by the new scenarios and filed rather than worked around: [#479](https://github.com/caesium-cloud/caesium/issues/479) (`dev --once` panics on an unreachable kubernetes engine) and [#480](https://github.com/caesium-cloud/caesium/issues/480) (`dev --once` ignores SIGINT and orphans its container).
   Verify: use the container-built release CLI in an empty temporary workspace for lint, preview, dev-once, watch/edit, interrupt, apply, and inspect. Check malformed input, paths with spaces, unavailable engines, cancellation/timeouts, and owned-resource cleanup. Parse JSON exclusively from stdout captured separately from stderr and assert exit status. Preserve existing helpers; testscript is an optional future harness substitution, not a reason to rewrite working tests. Run the currently shipped Linux architectures; add native platforms only after Q4 confirms support. Inspect the job-definition reference before writing any YAML fixtures.
 
-- [ ] D2. Expand functional, visual, accessibility, and scale browser coverage.
+- [x] D2. Expand functional, visual, accessibility, and scale browser coverage.
   Files: new `ui/e2e/accessibility.spec.ts`, new `ui/e2e/visual.spec.ts`, new `ui/e2e/scale.spec.ts`, new `ui/e2e/network-recovery.spec.ts`, new `ui/e2e/visual.spec.ts-snapshots/`, `ui/e2e/helpers/fixtures.ts`, `ui/package.json`, `ui/package-lock.json`, `ui/playwright.config.ts`.
   Depends on: A1, G1.
+  Merged: [#482](https://github.com/caesium-cloud/caesium/pull/482), merge `894f645b85d4b17e5bb0abac6bd9d4903501fb12` (W3-δ). Console accessibility debt found by the axe baseline is filed as [#483](https://github.com/caesium-cloud/caesium/issues/483); shrinking that baseline is product-code work outside this stream.
   Verify: against the live backend, check create/apply or existing authoring workflows, trigger, logs, failure diagnosis, retry/cancel, reload, permission denial, credential expiry, reconnect, and stale-request races. Require keyboard/focus behavior and scoped axe checks. Review deterministic screenshots with fixed fonts, viewport, timestamps, and dataset. Load large DAGs, many partitions, paginated history, and long logs; assert all expected data remains reachable through virtualization/pagination. Fail on unexpected console/page errors. Chromium remains required; Q4 selects additional supported browser projects. Synthetic response manipulation tests are explicitly labeled and do not replace live persistence tests.
+  Note (W3-δ): create/apply, trigger, logs, failure diagnosis, and retry/cancel
+  against the live backend were already real-surface-covered by existing
+  spec files (`operator-flow`, `job-queue`, `replay`, `why`, `blame`); the four
+  new files add accessibility/keyboard, deterministic-visual, scale, and
+  reload/reconnect/credential/race coverage without duplicating that ground.
+  `accessibility.spec.ts` scopes axe to WCAG2/2.1 A+AA critical/serious
+  findings and records a `KNOWN_VIOLATIONS` baseline of real, pre-existing
+  product defects it found (systemic icon-only buttons with no accessible
+  name; several muted-text/badge color tokens below 4.5:1 contrast) — `ui/src/**`
+  is out of this stream's scope, so the gate catches a NEW rule-id regression
+  per page rather than asserting away debt it cannot fix; shrinking that
+  baseline is a future product-code PR. `visual.spec.ts` commits only
+  `-linux.png` baselines (generated in a pinned `mcr.microsoft.com/playwright`
+  container matching the exact npm-resolved version) and each test
+  self-skips off Linux, since `just ui-e2e` runs the browser on whatever host
+  invoked `just`, not in a container — a local darwin/win32 run reports
+  "skipped", and the real per-pixel comparison is CI's `ui-e2e` check.
+  "Paginated history" is covered via the fanned-partition list's own
+  `next_offset` cursor walk (the job run-history list itself has no
+  pagination/virtualization to exercise). `network-recovery.spec.ts`'s
+  permission-denial/credential-expiry cases are SYNTHETIC (this project's
+  default e2e server runs without `CAESIUM_AUTH_MODE`); real scope-based
+  denial is already covered live in `ui/e2e/auth/*`.
 
 - [ ] D3. Exercise the operator journey across actual cluster failure.
   Files: new `ui/e2e/cluster-recovery.spec.ts`, new `ui/e2e/helpers/cluster.ts`, `ui/playwright.config.ts`, `test/contracts/scenarios.json` (created by A2).
@@ -524,17 +1151,21 @@ below is mandatory, including append-only edits.
   Depends on: E3.
   Verify: satisfy Q2/Q5 with repeated same-code control runs on the chosen runner, sufficient tail samples, and a reviewed workload-specific decision rule. Record absolute SLOs, bounded relative degradation, uncertainty/non-inferiority method, aggregation/multiple-comparison policy, and minimum sample sizes. Pass only when evidence establishes the allowed bound and correctness/SLOs pass; fail material regression; classify inadequate evidence as inconclusive, with a bounded rerun policy that blocks the strict gate if unresolved. Keep both a target-base comparison and a versioned fixed baseline to expose cumulative regression. Intentional budget changes require visible rationale and review; neutral performance is valid and optimization claims must identify tradeoffs. No promotion before calibration evidence exists.
 
-- [ ] E5. Add an early SQL-work budget inside the existing integration suite
+- [x] E5. Add an early SQL-work budget inside the existing integration suite
   Files: new `test/statement_budget_test.go`, new `test/statement_budget_testdata/`.
   Depends on: E1.
   Verify: Run fixed successful workloads through real HTTP/CLI and assert per-category deltas of the existing `caesium_db_statements_total` and `caesium_db_writes_total`. The tagged scenario is discovered by the current `IntegrationTestSuite` and sharding, so it gates with the existing required integration lane before E4. Isolate the server/workload and use bounded, workload-driven categories; timer-driven lease renewals, replay, and unrelated traffic are not assumed deterministic. Establish a repeatable count baseline and explicit justified tolerance on existing CI runners; where a category cannot be isolated, report that limitation rather than imposing a false exact bound. Demonstrate detection of an instrumented extra-statement/lost-batching mutation while completion counts still match. This guards the measured SQL-work classes and needs neither paid runners nor timing SLO decisions Q2/Q5; it does not prove latency or cover uninstrumented queries.
+  Merged: [#471](https://github.com/caesium-cloud/caesium/pull/471), merge `4bc19ac98389ccd3fd61382e9f9ec40ad37949a6` (W2-β). Delivered `test/statement_budget_test.go` and `test/statement_budget_testdata/`. `TestStatementBudgetFixedWorkload` is an `IntegrationTestSuite` method, so the existing required Docker integration lane and its sharding discover it without workflow edits: it applies a 2-step sequential `alpine:3.23` HTTP job through the CLI, starts it with `run start` (stdout captured separately from stderr), waits on HTTP until the run and both tasks succeed, and asserts per-category deltas of `caesium_db_statements_total` and `caesium_db_writes_total` against `statement_budget_testdata/baseline.json`. `TestStatementBudgetComparator` replays recorded profiles from `cases.json` so lost batching, extra statements with matching completions, leftover work hiding unbatched inserts, and missing evidence all fail; the labeled scrape rejects prefix-only metric names. Limits: `lease_renewal` and leftover `callback` categories are declared `skip` with reasons rather than exact bounds, `command`/`checkpoint` must stay zero, and the budget guards measured SQL-work classes only. `test/contracts/scenarios.json` was left to G3.
 
 ### Stream F — Compatibility, durability, and sustained operation
 
-- [ ] F1. Resolve the upgrade and storage qualification matrix.
+- [x] F1. Resolve the upgrade and storage qualification matrix.
   Files: `docs/exec-plans/active/distributed-testing.md` (F1 decision record only).
   Depends on: A1.
+  Merged: [#474](https://github.com/caesium-cloud/caesium/pull/474), merge `937a9feac5e51b7358331356bb95d8247617bff7`, corrected by [#478](https://github.com/caesium-cloud/caesium/pull/478), merge `da08e7ef81dc0f5a0818e6283eba78bec9f054b1` (W3-ε).
   Verify: add the lifecycle decision record to this plan rather than creating a separate design. Audit existing migrations, release artifacts, chart persistence, membership/replacement procedures, and backup/restore support. Record the exact supported old-to-new paths and allowed rollback/restore behavior, fixture-generation mechanism, retained-run/queue/event cases, and failure assumptions. Distinguish process kill, OS/power loss, lost unflushed writes, and actual disk loss. Deliver the Q4 decisions and exact F2/F3 test procedure; unsupported backup/rollback capabilities become explicit external product prerequisites, not runnable placeholder tests.
+  Note: resolved by the F1 decision record under Strategic Decisions; Q4 is closed there. F4 and F2 are dispatchable without further design. The record is a lifecycle policy and procedure, not upgrade certification — no upgrade, rollback, replacement or restore was executed for F1. Five external product prerequisites are recorded (backup/restore, member removal, build/version reporting, stable dqlite node address, ordinal-0 rejoin/re-bootstrap); the stable-address one makes F2's upgrade case blocked-by-prerequisite rather than expected-green, and the ordinal-0 one does the same for its disk-loss case; both are product work this plan does not authorize.
+  Corrected after review: PR #478.
 
 - [ ] F2. Qualify persistent cluster upgrades, replacement, and supported recovery paths
   Files: new `test/lifecycle/cluster_test.go`, `test/lifecycle/versions.json` (created by F4), `scripts/lifecycle-tests.sh` (created by F4), new `helm/caesium/ci/test-values-lifecycle.yaml`.
@@ -563,20 +1194,24 @@ below is mandatory, including append-only edits.
   Depends on: A2, G1.
   Verify: use Go coverage-instrumented binaries built in containers, explicit package selection and `GOCOVERDIR`, and merge compatible profiles from CLI, server, and live browser journeys. Collect on graceful shutdown and provide explicit flushing where required; killed-process or missing profiles are incomplete evidence, not zero coverage or success. Label profile provenance, separate unit/integration/browser contributions, and report uncovered changed paths and critical contract gaps. Set package/diff ratchets after measuring a baseline instead of requiring a vanity global percentage. Demonstrate coverage of a real request-to-write-to-read path. Keep coverage/fault instrumentation out of performance artifacts and audit the separate `reagents/go.mod` scope when relevant.
 
-- [ ] G3. Wire the first persistent three-node lane and its exact scenario selectors
-  Files: `.github/workflows/ci.yml`, `.github/actions/run-integration/action.yml`, `build/ci.docker-bake.hcl`, `justfile`, `scripts/test_ci.py`, `test/contracts/scenarios.json` (created by A2).
+- [x] G3. Wire the first persistent three-node lane and its exact scenario selectors
+  Files: `.github/workflows/ci.yml`, `.github/actions/run-integration/action.yml`, `build/ci.docker-bake.hcl`, `build/ci.docker-bake-cache.hcl`, `justfile`, `scripts/collect-evidence.py` (new), `scripts/test_collect_evidence.py` (new), `scripts/test_ci.py`, `scripts/test_test_evidence.py`, `test/contracts/scenarios.json` (created by A2).
   Depends on: A2, B1, E5, G1.
+  Merged: [#477](https://github.com/caesium-cloud/caesium/pull/477), merge `2ef933e13d96f3e26b8f188fa19481d90257692f` (W3-α).
   Verify: Add the B1 runner/image/recipe and artifact consumers using the existing kind and Helm infrastructure. Register the owner-crash scenario and E5's existing-suite budget with exact topology, candidate digest, and scenario identity. A new `test/robustness` binary must be explicitly built with integration tags; the existing `./test` precompiled binary cannot contain its subpackage tests. Verify selectors for code, fixtures, chart, dependency, image/build, and workflow changes, and a missing artifact/scenario failure. Preserve complete existing engine/architecture suites. Ship an executable lane and selector tests; promotion/settings/merge policy are separate G5/G7 work, so G3 does not wait for full B3, E4, F2, or G2.
+  Note (W3-alpha): `just early-evidence` runs E5's `TestIntegrationTestSuite/TestStatementBudgetFixedWorkload` against the existing `integration-up` server and B1's `TestOwnerCrash` on an owned kind cluster (1 control-plane + 3 workers, three persistent Helm StatefulSet replicas), then `scripts/collect-evidence.py` reduces the retained artifacts to one report that `scripts/check-test-evidence.py --require early --strict` validates. Every reported field is read back from a real artifact (pod environments, kind config, bound PVC claims, recorder records, `docker inspect`, a retained `/metrics` scrape); a missing record or an unreadable `ctr` listing is reported inconclusive, never pass. The new `early-evidence` job uses the existing kind/Helm/`run-integration` infrastructure and is deliberately **not** in `ci-ok` or any required check — promotion is G5. The three rows are `proven` with `gates: ["early"]`; every other row stays `absent` with no gate. The Docker lane runs the `-test` image variant, so `e5-sql-work-budget` records `observed_server_image_id` and sets `require_candidate_digest: false` rather than claiming the release digest.
 
 - [ ] G4. Schedule broader qualification and enforce release evidence
   Files: `.github/workflows/ci.yml`, new `.github/workflows/testing-qualification.yml`, `scripts/test_ci.py`.
   Depends on: F3, G6.
   Verify: Schedule longer seed/fuzz campaigns, browsers, multi-host faults, and soaks within Q1/Q2 limits, with cleanup, retained evidence, and triage ownership. Retain current native CLI checksum/smoke gates. Require supported release qualification in the actual publish chain or verified same-SHA evidence; demonstrate a failed qualification blocks publication. Run scheduled/manual campaigns and record one-command reproduction and explicit limits for N-1's runbook sync. Nightly results are broader evidence, not retroactive proof for every PR.
 
-- [ ] G5. Promote the minimum credible gate into the fail-closed aggregate
+- [x] G5. Promote the minimum credible gate into the fail-closed aggregate
   Files: `.github/workflows/ci.yml`, `scripts/ci-ok.py`, `scripts/test_ci.py`.
   Depends on: G3.
+  Merged: [#481](https://github.com/caesium-cloud/caesium/pull/481), merge `5d4bf73e0d194301090e147a17daf5c883f7e0bc` (W3-ζ).
   Verify: On the existing hosted runner, require B1's demonstrated three-member owner-crash lane alongside E5's SQL-work budget and G1's honest browser outcomes. Record measured added duration and repeated stability without waiting for controlled-runner timing calibration or the full exploratory suite. Audit current required checks/rulesets under Q6 and verify that ci-ok is actually enforced; change settings only within execution authorization. Test failed/cancelled/skipped/missing new dependencies and require exact scenario/fault evidence. Existing optional mode/engine lanes retain their honest status until explicitly promoted. This milestone provides narrow documented confidence, not full partition/upgrade/performance equivalence.
+  Note (W3-ζ): `ci-ok` now requires `early-evidence` (B1's three-member owner-crash lane plus E5's SQL-work budget) alongside G1's `ui-e2e`/`ui-e2e-auth`, and `helm-lint`, the lane's unconditional producer, is promoted with it so a chart failure reports as itself rather than as a skipped consumer. A green job result is not accepted as evidence: `ci-ok` downloads the report the lane uploaded and `scripts/ci-ok.py` requires it to exist, to bind to this run's `github.sha`, to report every `early`-gated manifest row `pass` with its required fault-activation observations, and to pass `check-test-evidence.py --require early --strict`; absent, foreign or hollow evidence fails closed, as do failed/cancelled/unexpectedly-skipped/missing dependencies. Measured on hosted runners: `early-evidence` took 6m19s, 5m57s, 6m18s, 7m15s and 7m32s across five green hosted runs ([34861385345](https://github.com/caesium-cloud/caesium/actions/runs/34861385345), [34863643792](https://github.com/caesium-cloud/caesium/actions/runs/34863643792), both attempts of [34865488758](https://github.com/caesium-cloud/caesium/actions/runs/34865488758) and [34868499191](https://github.com/caesium-cloud/caesium/actions/runs/34868499191) attempt 2), with no lane flake. It moved `ci-ok` behind the lane — on W3-ζ attempt 1 `ci-ok` finished 16:09:20 instead of ~16:07:13, about +2m — while total workflow wall clock grew 0s on attempt 1 (13m12s; `helm-integration-test` was still the critical path) and +25s on attempt 2, where `ci-ok` became the critical path. The promotion also fail-closed for real on 34868499191 attempt 1, where an unrelated transient `images`/`bake-images` failure skipped the lane: `ci-ok failed: images=failure, … early-evidence=skipped, early-evidence evidence: .tmp/evidence/evidence.json is absent; the lane produced no evidence`. **Q6 audit finding: `ci-ok` is not enforced at merge.** Master's protection lists eight required contexts (lint, unit-test, unit-test-arm64, ui-test, ui-e2e, ui-e2e-auth, build-and-integration-test, build-and-integration-test-agent-auth), `strict: false`, `enforce_admins: false`, one CODEOWNER review, and there are no rulesets; `ci-ok` is absent. It is enforced only as a dependency of `publish` (so this promotion does block `v*` tag publication), and `scripts/ci-ok.py` is reached at merge only through the two required wrapper contexts over `changes images integration`. Making this promotion merge-blocking needs exactly one repository-settings change — add `ci-ok` to `required_status_checks.contexts` on master — which is outside execution authorization and was NOT made; it is surfaced to the CODEOWNER. Existing optional lanes (helm-integration-test, podman-integration-test, integration-extra, integration-arm64) keep their unpromoted status, asserted by a test. This is narrow documented confidence: one owner-crash fault and one SQL-work budget, not partition, upgrade or performance equivalence.
 
 - [ ] G6. Wire and qualify the remaining complete system suites
   Files: `.github/workflows/ci.yml`, `.github/actions/run-integration/action.yml`, `build/ci.docker-bake.hcl`, `build/Dockerfile.integration`, `justfile`, `scripts/ci-ok.py`, `scripts/test_ci.py`, `scripts/integration-test.sh`, `test/shard_test.go`, `test/contracts/scenarios.json` (created by A2).
