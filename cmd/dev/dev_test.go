@@ -60,7 +60,7 @@ func TestAddRecursiveWatch(t *testing.T) {
 		watcher := newTestWatcher(t)
 		watchedDirs := make(map[string]bool)
 
-		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.True(t, foundYAML, "expected the walk to find job.job.yaml under root/a")
 
@@ -77,7 +77,7 @@ func TestAddRecursiveWatch(t *testing.T) {
 		watcher := newTestWatcher(t)
 		watchedDirs := make(map[string]bool)
 
-		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.False(t, foundYAML)
 		assert.True(t, watchedDirs[filepath.Join(root, "sub")], "a directory with no YAML must still be watched")
@@ -88,14 +88,14 @@ func TestAddRecursiveWatch(t *testing.T) {
 		watcher := newTestWatcher(t)
 		watchedDirs := make(map[string]bool)
 
-		_, err := addRecursiveWatch(watcher, root, watchedDirs)
+		_, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		require.Len(t, watchedDirs, 1)
 
 		// A second pass over the SAME tree must not error (fsnotify.Add is not
 		// re-invoked for directories already tracked) and must not change the
 		// tracked set.
-		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.False(t, foundYAML)
 		assert.Len(t, watchedDirs, 1)
@@ -114,7 +114,7 @@ func TestAddRecursiveWatch(t *testing.T) {
 		watcher := newTestWatcher(t)
 		watchedDirs := make(map[string]bool)
 
-		foundYAML, err := addRecursiveWatch(watcher, newDir, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, newDir, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.True(t, foundYAML)
 		assert.True(t, watchedDirs[newDir])
@@ -174,7 +174,7 @@ func TestRemoveWatchedSubtree(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(deepDir, "job.job.yaml"), []byte("x"), 0o644))
 
 		watchedDirs := make(map[string]bool)
-		_, err := addRecursiveWatch(watcher, root, watchedDirs)
+		_, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		require.Contains(t, watchedDirs, deepDir)
 		require.Contains(t, watcher.WatchList(), deepDir)
@@ -192,7 +192,7 @@ func TestRemoveWatchedSubtree(t *testing.T) {
 		// the Create branch in dev.go's event loop would.
 		require.NoError(t, os.MkdirAll(deepDir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(deepDir, "job.job.yaml"), []byte("x"), 0o644))
-		foundYAML, err := addRecursiveWatch(watcher, newDir, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, newDir, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.True(t, foundYAML)
 		assert.Contains(t, watchedDirs, deepDir)
@@ -244,7 +244,7 @@ steps:
 		watcher := newTestWatcher(t)
 		watchedDirs := make(map[string]bool)
 
-		foundYAML, err := addRecursiveWatch(watcher, link, watchedDirs)
+		foundYAML, err := addRecursiveWatch(watcher, link, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.False(t, foundYAML, "filepath.WalkDir must not follow the root symlink")
 		assert.Empty(t, watchedDirs, "no watch should be installed for an unresolved symlink root")
@@ -271,11 +271,11 @@ steps:
 		assert.Equal(t, "symlink-discovery-test", defs[0].Metadata.Alias)
 
 		watcher := newTestWatcher(t)
-		watchedDirs, rootPaths, err := setupWatches(watcher, resolved)
+		watchedDirs, roots, err := setupWatches(watcher, resolved)
 		require.NoError(t, err)
 		assert.True(t, watchedDirs[resolved[0]], "the resolved directory root must be watched recursively")
 		assert.Contains(t, watcher.WatchList(), resolved[0])
-		assert.Contains(t, rootPaths, resolved[0])
+		assert.Contains(t, roots.paths, resolved[0])
 	})
 }
 
@@ -315,13 +315,13 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 		require.NoError(t, os.MkdirAll(nested, 0o755))
 
 		watcher := newTestWatcher(t)
-		watchedDirs, rootPaths, err := setupWatches(watcher, []string{root})
+		watchedDirs, roots, err := setupWatches(watcher, []string{root})
 		require.NoError(t, err)
 
 		assert.True(t, watchedDirs[root])
 		assert.True(t, watchedDirs[filepath.Join(root, "a")])
 		assert.True(t, watchedDirs[nested])
-		assert.Contains(t, rootPaths, root)
+		assert.Contains(t, roots.paths, root)
 	})
 
 	t.Run("a directory argument's recursive tag wins over a file argument sharing its parent", func(t *testing.T) {
@@ -339,6 +339,115 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 	})
 }
 
+// TestSetupWatchesSentinelParentsFilterUnrelatedYAML fixes a round-5 P2
+// finding: the non-recursive parent watch setupWatches installs to observe
+// a directory root's own recreation (see TestRootRecreationAfterMove) was
+// ALSO reachable by the event loop's generic "any YAML Write/Create anywhere
+// watched reruns" fallthrough — so with `--path project/jobs`, writing
+// project/output.yaml (a sibling OUTSIDE the selected "project/jobs" tree)
+// would reset the debounce and rerun the selected DAG, even though
+// definition discovery never reads it. If a selected job writes that exact
+// output through a bind mount, every rerun would queue another, forever.
+// setupWatches now tracks directories watched SOLELY as a root-recreation
+// sentinel (dirRoots.sentinelParents) separately from genuine watch reasons,
+// and dev.go's event loop consults it — via the exact predicate exercised
+// here — before treating a YAML Write/Create as reason to rerun.
+func TestSetupWatchesSentinelParentsFilterUnrelatedYAML(t *testing.T) {
+	t.Run("a directory watched purely as a root sentinel filters unrelated YAML", func(t *testing.T) {
+		base := t.TempDir()
+		project := filepath.Join(base, "project")
+		jobsDir := filepath.Join(project, "jobs")
+		require.NoError(t, os.MkdirAll(jobsDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(jobsDir, "job.job.yaml"), []byte(testManifest("selected")), 0o644))
+		sibling := filepath.Join(project, "output.yaml")
+		require.NoError(t, os.WriteFile(sibling, []byte("not a job"), 0o644))
+
+		watcher := newTestWatcher(t)
+		_, roots, err := setupWatches(watcher, []string{jobsDir})
+		require.NoError(t, err)
+
+		assert.Contains(t, roots.sentinelParents, project,
+			"project is watched ONLY to observe jobsDir's own recreation")
+
+		// This is the exact predicate dev.go's event loop applies before a
+		// YAML Write/Create is allowed to reset the debounce timer.
+		_, filtered := roots.sentinelParents[filepath.Dir(filepath.Clean(sibling))]
+		assert.True(t, filtered, "a sibling YAML write outside the selected tree must be filtered")
+	})
+
+	t.Run("a directory with a genuine file-parent reason is not filtered", func(t *testing.T) {
+		base := t.TempDir()
+		project := filepath.Join(base, "project")
+		jobsDir := filepath.Join(project, "jobs")
+		require.NoError(t, os.MkdirAll(jobsDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(jobsDir, "job.job.yaml"), []byte(testManifest("selected")), 0o644))
+		standalone := filepath.Join(project, "standalone.yaml")
+		require.NoError(t, os.WriteFile(standalone, []byte(testManifest("standalone")), 0o644))
+
+		watcher := newTestWatcher(t)
+		// project is BOTH jobsDir's parent sentinel AND standalone.yaml's
+		// genuine parent — the latter demotes it out of sentinel-only status,
+		// preserving the pre-#515 coverage an explicitly selected file gets.
+		_, roots, err := setupWatches(watcher, []string{jobsDir, standalone})
+		require.NoError(t, err)
+
+		assert.NotContains(t, roots.sentinelParents, project,
+			"a directory with an explicitly selected file in it is not sentinel-only")
+	})
+}
+
+// TestAddRecursiveWatchPromotesExistingSentinelToRecursive fixes a round-5
+// P2 finding: for `--path jobs/existing --path jobs`, processing the first
+// argument installs watchedDirs["jobs"]=false as a parent sentinel (see
+// setupWatches) BEFORE "jobs" is ever walked in its own right. When the
+// second argument's walk revisited "jobs", the existing-entry branch used to
+// return without upgrading that flag — so "jobs" stayed permanently
+// non-recursive despite genuinely being a selected directory root, and
+// handleDirectoryCreated later refused to expand into a brand new
+// subdirectory created directly inside it (#515 reproduced for this
+// multi-path invocation). addRecursiveWatch now promotes an existing
+// non-recursive entry to recursive (and drops it from sentinelParents) when
+// revisited. Both argument orders are covered, per the review's ask.
+func TestAddRecursiveWatchPromotesExistingSentinelToRecursive(t *testing.T) {
+	for _, order := range []struct {
+		name  string
+		paths func(existing, jobs string) []string
+	}{
+		{"existing first, jobs second (the reported order)", func(existing, jobs string) []string {
+			return []string{existing, jobs}
+		}},
+		{"jobs first, existing second", func(existing, jobs string) []string {
+			return []string{jobs, existing}
+		}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			base := t.TempDir()
+			jobsDir := filepath.Join(base, "jobs")
+			existingDir := filepath.Join(jobsDir, "existing")
+			require.NoError(t, os.MkdirAll(existingDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(existingDir, "job.job.yaml"), []byte(testManifest("existing")), 0o644))
+
+			watcher := newTestWatcher(t)
+			watchedDirs, roots, err := setupWatches(watcher, order.paths(existingDir, jobsDir))
+			require.NoError(t, err)
+
+			require.True(t, watchedDirs[jobsDir], "jobs must end up tagged recursive regardless of argument order")
+			assert.NotContains(t, roots.sentinelParents, jobsDir,
+				"jobs must no longer be tracked as a mere sentinel once it is a genuine recursive root")
+
+			// The actual #515 reproduction: creating a brand new
+			// subdirectory directly inside "jobs" must still be expanded.
+			newDir := filepath.Join(jobsDir, "new")
+			require.NoError(t, os.MkdirAll(newDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(newDir, "new.job.yaml"), []byte(testManifest("new")), 0o644))
+			foundYAML, err := handleDirectoryCreated(watcher, newDir, watchedDirs, roots.sentinelParents)
+			require.NoError(t, err)
+			assert.True(t, foundYAML, "the new subdirectory under the promoted root must be discovered")
+			assert.True(t, watchedDirs[newDir])
+		})
+	}
+}
+
 // TestRootRecreationAfterMove fixes a round-4 P2 finding: moving a selected
 // DIRECTORY root away (removeWatchedSubtree correctly drops it and every
 // descendant from watchedDirs on the Remove/Rename event) and recreating it
@@ -346,9 +455,9 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 // ever watches itself and its descendants, never its parent, so the parent
 // directory's watch (which WOULD see the recreation) simply didn't exist.
 // setupWatches now also installs a non-recursive watch on each directory
-// root's OWN parent and records the root in rootPaths; this proves the
+// root's OWN parent and records the root in roots.paths; this proves the
 // full sequence a real watch-mode session goes through: initial setup,
-// the root moving away, its recreation being noticed via rootPaths (the
+// the root moving away, its recreation being noticed via roots.paths (the
 // event loop's job, exercised here directly since it is the exact check
 // dev.go's Create branch performs), and — critically — that a SUBSEQUENT
 // edit nested inside the recreated root is still picked up, proving full
@@ -361,9 +470,9 @@ func TestRootRecreationAfterMove(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "job.job.yaml"), []byte(testManifest("original")), 0o644))
 
 	watcher := newTestWatcher(t)
-	watchedDirs, rootPaths, err := setupWatches(watcher, []string{root})
+	watchedDirs, roots, err := setupWatches(watcher, []string{root})
 	require.NoError(t, err)
-	require.Contains(t, rootPaths, root)
+	require.Contains(t, roots.paths, root)
 	require.True(t, watchedDirs[root])
 	parent := filepath.Dir(root)
 	require.Contains(t, watcher.WatchList(), parent, "the root's own parent must be watched too")
@@ -376,8 +485,8 @@ func TestRootRecreationAfterMove(t *testing.T) {
 	removeWatchedSubtree(watcher, root, watchedDirs)
 	assert.NotContains(t, watchedDirs, root)
 	assert.NotContains(t, watcher.WatchList(), root)
-	// rootPaths must survive: we still want to recognize the root's return.
-	assert.Contains(t, rootPaths, root)
+	// roots.paths must survive: we still want to recognize the root's return.
+	assert.Contains(t, roots.paths, root)
 
 	// Recreate the root with a (different) valid DAG — the real-world
 	// equivalent of `mkdir jobs && write jobs/job.yaml`.
@@ -387,9 +496,9 @@ func TestRootRecreationAfterMove(t *testing.T) {
 	// This is the exact check dev.go's event loop's Create branch performs
 	// before falling back to handleDirectoryCreated: is the created name one
 	// of the tracked roots? If so, restore full recursive watching under it.
-	_, isRoot := rootPaths[filepath.Clean(root)]
+	_, isRoot := roots.paths[filepath.Clean(root)]
 	require.True(t, isRoot, "the recreated path must still be recognized as a tracked root")
-	foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs)
+	foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.True(t, foundYAML, "the recreated root's own manifest must be found on restoration")
 	assert.True(t, watchedDirs[root], "the root must be recursively tracked again")
@@ -400,7 +509,7 @@ func TestRootRecreationAfterMove(t *testing.T) {
 	// just a watch on the root entry itself.
 	nested := filepath.Join(root, "nested")
 	require.NoError(t, os.MkdirAll(nested, 0o755))
-	foundYAML, err = handleDirectoryCreated(watcher, nested, watchedDirs)
+	foundYAML, err = handleDirectoryCreated(watcher, nested, watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.False(t, foundYAML, "nothing written into it yet")
 	assert.True(t, watchedDirs[nested], "the newly created nested directory must be watched recursively")
@@ -426,7 +535,7 @@ func TestHandleDirectoryCreated(t *testing.T) {
 		require.NoError(t, os.MkdirAll(newDir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(newDir, "result.yaml"), []byte("x"), 0o644))
 
-		foundYAML, err := handleDirectoryCreated(watcher, newDir, watchedDirs)
+		foundYAML, err := handleDirectoryCreated(watcher, newDir, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.False(t, foundYAML, "a directory under a non-recursive parent must not be expanded")
 		assert.NotContains(t, watchedDirs, newDir)
@@ -443,7 +552,7 @@ func TestHandleDirectoryCreated(t *testing.T) {
 		require.NoError(t, os.MkdirAll(newDir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(newDir, "job.job.yaml"), []byte("x"), 0o644))
 
-		foundYAML, err := handleDirectoryCreated(watcher, newDir, watchedDirs)
+		foundYAML, err := handleDirectoryCreated(watcher, newDir, watchedDirs, make(map[string]struct{}))
 		require.NoError(t, err)
 		assert.True(t, foundYAML)
 		assert.True(t, watchedDirs[newDir])
@@ -476,7 +585,7 @@ func TestPathNormalizationDefaultRoot(t *testing.T) {
 	// Simulate inotify's ACTUAL (unclean) event spelling for a directory
 	// created directly under "." — "./new", not "new".
 	require.NoError(t, os.MkdirAll("new", 0o755))
-	foundYAML, err := handleDirectoryCreated(watcher, "./new", watchedDirs)
+	foundYAML, err := handleDirectoryCreated(watcher, "./new", watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.False(t, foundYAML, "nothing has been written into it yet")
 	assert.True(t, watchedDirs["new"], "must be tracked under its CLEANED form")
@@ -491,7 +600,7 @@ func TestPathNormalizationDefaultRoot(t *testing.T) {
 	// handleDirectoryCreated just recorded above.
 	require.NoError(t, os.MkdirAll(filepath.Join("new", "deeper"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join("new", "deeper", "job.job.yaml"), []byte("x"), 0o644))
-	foundYAML, err = handleDirectoryCreated(watcher, "new/deeper", watchedDirs)
+	foundYAML, err = handleDirectoryCreated(watcher, "new/deeper", watchedDirs, make(map[string]struct{}))
 	require.NoError(t, err)
 	assert.True(t, foundYAML, "the nested DAG under the \"./new\"-spelled directory must still be discovered")
 	assert.True(t, watchedDirs["new/deeper"])

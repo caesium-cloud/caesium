@@ -709,9 +709,33 @@ func (e *dockerEngine) ensureVolumeSubPath(volumeName, cleanedSubPath string) er
 
 	log.Info("creating docker subPath helper container", "volume", volumeName, "subPath", cleanedSubPath)
 
-	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, name)
+	// Same allocation-cancellation protection Create's main container gets
+	// (see cleanupFailedCreate and its call site): run the helper's own
+	// ContainerCreate against a bounded, DETACHED context so it always
+	// reaches a definitive outcome, then check e.ctx separately and clean
+	// up by the helper's deterministic name if the caller has since given
+	// up. Without this, a SIGINT landing in this exact window orphaned a
+	// caesium-subpath-init-* container that the main container's
+	// protection never even reaches — this runs BEFORE it, and the defer
+	// below (which DOES already use a detached context) is only ever
+	// registered after ContainerCreate succeeds.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, name)
 	if err != nil {
+		if e.ctx.Err() != nil {
+			e.cleanupFailedCreate(name, err)
+			return e.ctx.Err()
+		}
 		return fmt.Errorf("create subPath helper container for volume %q: %w", volumeName, err)
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the helper container exists — but
+		// the caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return e.ctx.Err()
 	}
 
 	defer func() {

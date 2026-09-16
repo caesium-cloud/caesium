@@ -893,6 +893,65 @@ func (s *DockerTestSuite) TestCreateCancelledDuringCreateRequest() {
 	backend.AssertExpectations(s.T())
 }
 
+// TestCreateCancelledDuringSubPathHelperCreation covers a round-5
+// adversarial-review finding: the subPath helper container's OWN
+// ContainerCreate call ran on the cancellable context, registering its
+// removal defer only after a successful response — completely unprotected
+// by the main-container cleanup TestCreateCancelledDuringCreateRequest
+// proves, since ensureVolumeSubPaths runs BEFORE that main container is
+// ever created. The fake backend cancels the engine's context from inside
+// the HELPER's ContainerCreate handler itself (simulating SIGINT landing
+// exactly there) and reports success, proving ensureVolumeSubPath still
+// definitively completes the helper's allocation call, notices the
+// cancellation afterward, and removes the helper it just learned about —
+// and Create never reaches the main container's own ContainerCreate at all.
+func (s *DockerTestSuite) TestCreateCancelledDuringSubPathHelperCreation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{
+		backend:            backend,
+		ctx:                ctx,
+		subpathHelperImage: subPathHelperImage,
+	}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Name:    "tfstate",
+				Type:    container.VolumeMountTypeVolume,
+				Source:  "tfstate-vol",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ClientVersion").Return("1.47")
+	backend.On("ImageInspect", subPathHelperImage).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", subPathHelperImage).Return()
+
+	helperNameMatcher := mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, "caesium-subpath-init-")
+	})
+	backend.
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, helperNameMatcher).
+		Run(func(mock.Arguments) { cancel() }).
+		Return()
+	backend.On("ContainerStop", testAtomID).Return(nil)
+	backend.On("ContainerRemove", testAtomID).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation and never reach the main container's own allocation")
+	backend.AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestStop() {
 	req := &atom.EngineStopRequest{
 		ID: testAtomID,
