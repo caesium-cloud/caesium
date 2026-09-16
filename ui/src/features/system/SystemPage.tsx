@@ -15,13 +15,14 @@ import {
   checkTone,
   deriveQuorumView,
   deriveSystemBanner,
+  mergeNodeRows,
   nodeLivenessLabel,
   reachabilityLabel,
   reachabilityTone,
   reachableNodeCount,
+  type NodeRow,
   type Tone,
 } from "./quorum";
-import type { Node } from "@/lib/api";
 import React from "react";
 
 const TONE_DOT: Record<Tone, string> = {
@@ -89,7 +90,12 @@ export function SystemPage() {
   // quorum numerator is what answered a probe, never the length of this list.
   const quorum = deriveQuorumView(clusterCheck);
   const banner = deriveSystemBanner(health.state, rawHealth);
-  const reachableNodes = reachableNodeCount(nodes);
+  // Liveness is merged from the CURRENT health observation; the node query is
+  // only supplementary. It is authenticated, and its auth key lookup is itself
+  // a leader-dependent read, so it is the request most likely to stall during
+  // the very outage this page has to describe.
+  const nodeRows = mergeNodeRows(clusterCheck, nodes);
+  const reachableNodes = reachableNodeCount(nodeRows);
   // Node liveness spans every member, voters and non-voters alike.
   const nodeLiveness = nodeLivenessLabel(clusterCheck);
 
@@ -165,7 +171,7 @@ export function SystemPage() {
           value={
             <span className="font-mono" data-testid="system-nodes-kpi">
               {reachableNodes ?? "?"}
-              <span className="text-text-4">/{nodes.length}</span>
+              <span className="text-text-4">/{nodeRows.length}</span>
             </span>
           }
           sub="Reachable / tracked"
@@ -182,28 +188,29 @@ export function SystemPage() {
               <div className="text-[11px] text-text-3 mt-0.5">dqlite membership · probed liveness</div>
             </div>
             <span className="font-mono text-[11px] text-text-3" data-testid="cluster-nodes-total">
-              {reachableNodes ?? "?"}/{nodes.length} reachable
+              {reachableNodes ?? "?"}/{nodeRows.length} reachable
             </span>
           </div>
           <div className="grid grid-cols-[minmax(0,1.4fr)_90px_70px_70px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
             <span>Address</span><span>Liveness</span><span>Role</span><span>Workers</span>
           </div>
           <div>
-            {isLoadingNodes ? (
+            {isLoadingNodes && nodeRows.length === 0 ? (
               <div className="p-4 space-y-3">
                 <Skeleton className="h-6 w-full bg-graphite/10" />
                 <Skeleton className="h-6 w-full bg-graphite/10" />
               </div>
-            ) : nodes.length === 0 ? (
+            ) : nodeRows.length === 0 ? (
               <div className="p-8 text-center text-sm text-text-4">No nodes detected</div>
             ) : (
-              nodes.map((n, i) => (
+              nodeRows.map((n, i) => (
                 <div
                   key={n.address}
                   data-testid="cluster-node-row"
                   data-address={n.address}
-                  data-reachability={n.reachability ?? "unknown"}
-                  className={`grid grid-cols-[minmax(0,1.4fr)_90px_70px_70px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}
+                  data-reachability={n.reachability}
+                  data-liveness-current={n.livenessCurrent}
+                  className={`grid grid-cols-[minmax(0,1.4fr)_90px_70px_70px] px-4 py-3 items-center ${i !== nodeRows.length - 1 ? "border-b border-graphite/30" : ""}`}
                 >
                   <div className="flex items-center gap-2.5 min-w-0 pr-2">
                     <StatusDot tone={reachabilityTone(n.reachability)} title={reachabilityLabel(n.reachability)} />
@@ -212,12 +219,16 @@ export function SystemPage() {
                         {n.address}
                         {n.leader && <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wider text-gold">leader</span>}
                       </div>
-                      <div className="font-mono text-[10px] text-text-4 truncate">{n.arch}</div>
+                      {n.latencyMs != null && (
+                        <div className="font-mono text-[10px] text-text-4 truncate">{n.latencyMs} ms</div>
+                      )}
                     </div>
                   </div>
                   <span className="text-[11px] text-text-2 truncate">{reachabilityLabel(n.reachability)}</span>
                   <span className="font-mono text-[11px] text-text-2 truncate">{n.role ?? "unknown"}</span>
-                  <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy ?? "?"}/{n.workers_total}</span>
+                  <span className="font-mono text-xs text-text-2 truncate">
+                    {n.workersBusy ?? "?"}/{n.workersTotal ?? "?"}
+                  </span>
                 </div>
               ))
             )}
@@ -228,7 +239,7 @@ export function SystemPage() {
         <Card className="bg-midnight/30 border-graphite/50 p-4">
           <div className="text-[13px] font-medium text-text-1 mb-1">Topology</div>
           <div className="text-[11px] text-text-3 mb-4">Reachable voters / configured voters</div>
-          <ClusterTopology nodes={nodes} quorumLabel={quorum.label} quorumTone={quorum.tone} />
+          <ClusterTopology nodes={nodeRows} quorumLabel={quorum.label} quorumTone={quorum.tone} />
           <div className="mt-2 text-[11px] text-text-3" data-testid="quorum-detail">{quorum.detail}</div>
         </Card>
       </div>
@@ -390,7 +401,7 @@ const TOPOLOGY_TEXT: Record<Tone, string> = {
   muted: "hsl(var(--text-3))",
 };
 
-function ClusterTopology({ nodes, quorumLabel, quorumTone }: { nodes: Node[]; quorumLabel: string; quorumTone: Tone }) {
+function ClusterTopology({ nodes, quorumLabel, quorumTone }: { nodes: NodeRow[]; quorumLabel: string; quorumTone: Tone }) {
   const cx = 110, cy = 110, R = 70;
   return (
     <svg viewBox="0 0 220 220" className="w-full h-[220px]">

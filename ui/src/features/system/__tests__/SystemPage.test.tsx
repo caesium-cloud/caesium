@@ -249,6 +249,94 @@ describe("SystemPage cluster health", () => {
     expect(screen.getByTestId("quorum-detail")).toHaveTextContent("Quorum lost");
   });
 
+  // Review round 4: /v1/system/nodes is authenticated and its key lookup is a
+  // leader-dependent read, so it stalls during exactly the outage /health keeps
+  // reporting. The page used to render reachability from the stale cached node
+  // array, putting green rows underneath an unavailable banner.
+  it("renders current liveness even when the node query never resolves", async () => {
+    const lost = cluster({
+      status: "unavailable",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "unreachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "unavailable",
+        total_voters: 3,
+        reachable_voters: 1,
+        unreachable_voters: 2,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: false,
+        degraded: true,
+        leader_address: "",
+      },
+      nodes: { status: "degraded", total: 3, reachable: 1, unreachable: 2, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(lost, "unavailable"));
+    // The protected node query hangs for the whole test, exactly as it does
+    // while the auth key lookup waits for a raft leader.
+    mocked.getSystemNodes.mockImplementation(() => new Promise<Node[]>(() => {}));
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("1/3"));
+
+    // Rows still render, from the health observation.
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    const byAddress = Object.fromEntries(rows.map((r) => [r.dataset.address, r]));
+    expect(byAddress["10.244.0.8:9001"].dataset.reachability).toBe("reachable");
+    expect(byAddress["10.244.0.9:9001"].dataset.reachability).toBe("unreachable");
+    expect(byAddress["10.244.0.10:9001"].dataset.reachability).toBe("unreachable");
+    expect(rows.every((r) => r.dataset.livenessCurrent === "true")).toBe(true);
+
+    // No green row underneath an outage banner.
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "danger");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("1/3");
+  });
+
+  it("does not let a stale node query outvote a newer health observation", async () => {
+    const degraded = cluster({
+      status: "degraded",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "reachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "degraded",
+        total_voters: 3,
+        reachable_voters: 2,
+        unreachable_voters: 1,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: true,
+        degraded: true,
+        leader_address: "10.244.0.8:9001",
+      },
+      nodes: { status: "degraded", total: 3, reachable: 2, unreachable: 1, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(degraded, "degraded"));
+    // Cached from before the crash: every node still looks reachable.
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("2/3"));
+
+    const dead = screen
+      .getAllByTestId("cluster-node-row")
+      .find((r) => r.dataset.address === "10.244.0.10:9001");
+    expect(dead?.dataset.reachability).toBe("unreachable");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("2/3");
+  });
+
   it("never renders unobserved liveness as green", async () => {
     const unobserved = cluster({
       status: "unknown",

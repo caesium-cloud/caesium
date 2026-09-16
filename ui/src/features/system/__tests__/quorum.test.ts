@@ -4,6 +4,7 @@ import {
   checkTone,
   deriveQuorumView,
   deriveSystemBanner,
+  mergeNodeRows,
   reachabilityTone,
   reachableNodeCount,
 } from "../quorum";
@@ -261,32 +262,119 @@ describe("check and node tones", () => {
   });
 });
 
+const node = (address: string, reachability?: Node["reachability"], busy = 0): Node => ({
+  address,
+  arch: "arm64",
+  role: "voter",
+  reachability,
+  workers_busy: busy,
+  workers_total: 1,
+});
+
+describe("mergeNodeRows", () => {
+  const degradedCluster = clusterCheck({
+    status: "degraded",
+    members: [
+      { address: "a:9001", role: "voter", leader: true, reachability: "reachable", latency_ms: 2 },
+      { address: "b:9001", role: "voter", leader: false, reachability: "reachable" },
+      { address: "c:9001", role: "voter", leader: false, reachability: "unreachable" },
+    ],
+    quorum: quorum({
+      status: "degraded",
+      reachable_voters: 2,
+      unreachable_voters: 1,
+      degraded: true,
+    }),
+    nodes: { status: "degraded", total: 3, reachable: 2, unreachable: 1, unknown: 0 },
+  });
+
+  // The regression: /v1/system/nodes is authenticated and its key lookup is a
+  // leader-dependent read, so it stalls during exactly the outage /health keeps
+  // reporting. A stale cached array must never colour the rows.
+  it("takes liveness from the health observation, not the stale node query", () => {
+    const stale = [
+      node("a:9001", "reachable"),
+      node("b:9001", "reachable"),
+      node("c:9001", "reachable"), // stale: this member is actually down
+    ];
+
+    const rows = mergeNodeRows(degradedCluster, stale);
+
+    expect(rows.map((r) => r.address)).toEqual(["a:9001", "b:9001", "c:9001"]);
+    expect(rows.find((r) => r.address === "c:9001")?.reachability).toBe("unreachable");
+    expect(rows.every((r) => r.livenessCurrent)).toBe(true);
+    expect(reachableNodeCount(rows)).toBe(2);
+  });
+
+  it("still renders every member when the node query returned nothing at all", () => {
+    const rows = mergeNodeRows(degradedCluster, []);
+
+    expect(rows).toHaveLength(3);
+    expect(rows.find((r) => r.address === "c:9001")?.reachability).toBe("unreachable");
+    // Worker detail is supplementary and simply unknown.
+    expect(rows.every((r) => r.workersBusy === null && r.workersTotal === null)).toBe(true);
+  });
+
+  it("keeps worker counts from the node query as supplementary detail", () => {
+    const rows = mergeNodeRows(degradedCluster, [node("a:9001", "reachable", 3)]);
+
+    const leader = rows.find((r) => r.address === "a:9001");
+    expect(leader?.workersBusy).toBe(3);
+    expect(leader?.workersTotal).toBe(1);
+    expect(leader?.leader).toBe(true);
+    expect(leader?.latencyMs).toBe(2);
+  });
+
+  it("marks a non-member row unknown however confidently the node query claims otherwise", () => {
+    const rows = mergeNodeRows(degradedCluster, [node("historical:9001", "reachable")]);
+
+    const extra = rows.find((r) => r.address === "historical:9001");
+    expect(extra?.reachability).toBe("unknown");
+    expect(extra?.livenessCurrent).toBe(false);
+  });
+
+  it("falls back to the node query when there is no observed cluster", () => {
+    const rows = mergeNodeRows(undefined, [node("a:9001", "reachable"), node("b:9001", "unknown")]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].reachability).toBe("reachable");
+    expect(rows[1].reachability).toBe("unknown");
+  });
+
+  it("does not trust an unobserved cluster's members", () => {
+    const rows = mergeNodeRows(clusterCheck({ observed: false }), [node("a:9001", "reachable")]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reachability).toBe("unknown");
+  });
+});
+
 describe("reachableNodeCount", () => {
-  const node = (address: string, reachability?: Node["reachability"]): Node => ({
+  const row = (address: string, reachability: "reachable" | "unreachable" | "unknown") => ({
     address,
-    arch: "arm64",
+    leader: false,
     reachability,
-    workers_busy: 0,
-    workers_total: 1,
+    workersBusy: null,
+    workersTotal: null,
+    livenessCurrent: true,
   });
 
   it("counts only nodes observed reachable", () => {
     expect(
       reachableNodeCount([
-        node("a:9001", "reachable"),
-        node("b:9001", "reachable"),
-        node("c:9001", "unreachable"),
+        row("a:9001", "reachable"),
+        row("b:9001", "reachable"),
+        row("c:9001", "unreachable"),
       ]),
     ).toBe(2);
   });
 
   it("returns null when no node reports liveness, so the caller renders ?", () => {
-    expect(reachableNodeCount([node("a:9001"), node("b:9001")])).toBeNull();
-    expect(reachableNodeCount([node("a:9001", "unknown"), node("b:9001", "unknown")])).toBeNull();
+    expect(reachableNodeCount([row("a:9001", "unknown"), row("b:9001", "unknown")])).toBeNull();
   });
 
   it("counts what is known even when some nodes are unverified", () => {
-    expect(reachableNodeCount([node("a:9001", "reachable"), node("b:9001", "unknown")])).toBe(1);
+    expect(reachableNodeCount([row("a:9001", "reachable"), row("b:9001", "unknown")])).toBe(1);
   });
 
   it("returns zero for an empty cluster", () => {

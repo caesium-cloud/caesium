@@ -254,16 +254,94 @@ export function reachabilityLabel(reachability?: Reachability): string {
 }
 
 /**
+ * One row of the cluster node table.
+ *
+ * Liveness comes from the CURRENT health observation, never from the node
+ * query. `/health` is unauthenticated; `/v1/system/nodes` goes through the auth
+ * middleware, whose key lookup is itself a leader-dependent database read — so
+ * during a quorum loss the node query is exactly the request most likely to
+ * stall while `/health` keeps updating. Rendering reachability from the stale
+ * cached node array put green rows underneath an outage banner.
+ */
+export interface NodeRow {
+  address: string;
+  role?: string;
+  leader: boolean;
+  reachability: Reachability;
+  latencyMs?: number;
+  /** Supplementary, from the node query. Null when it is unavailable. */
+  workersBusy: number | null;
+  workersTotal: number | null;
+  /** True when this row's liveness came from the live health observation. */
+  livenessCurrent: boolean;
+}
+
+/**
+ * Merges the current health observation with the node query by address.
+ *
+ * Raft members take their liveness from `checks.cluster.members`. Anything the
+ * node query lists that is NOT a current member — configured seeds, historical
+ * workers, or rows left over from a stalled query — is reported `unknown`,
+ * because nothing current says otherwise.
+ */
+export function mergeNodeRows(cluster: ClusterCheck | null | undefined, nodes: Node[]): NodeRow[] {
+  const supplementary = new Map(nodes.map((n) => [n.address, n]));
+  const rows: NodeRow[] = [];
+  const seen = new Set<string>();
+
+  const clustered = !!cluster?.clustered;
+  const observedMembers = clustered && cluster?.observed ? (cluster.members ?? []) : [];
+  // On a dqlite deployment the raft members are the only current liveness
+  // source. Only a deployment with no raft cluster at all (an external
+  // database) can take liveness from the node query, because there is nothing
+  // else — and there the server reports every row unknown anyway.
+  const trustNodeQuery = !clustered;
+  for (const member of observedMembers) {
+    const extra = supplementary.get(member.address);
+    seen.add(member.address);
+    rows.push({
+      address: member.address,
+      role: member.role,
+      leader: member.leader,
+      reachability: member.reachability ?? "unknown",
+      latencyMs: member.latency_ms,
+      workersBusy: extra?.workers_busy ?? null,
+      workersTotal: extra?.workers_total ?? null,
+      livenessCurrent: true,
+    });
+  }
+
+  for (const node of nodes) {
+    if (seen.has(node.address)) continue;
+    rows.push({
+      address: node.address,
+      role: node.role,
+      leader: trustNodeQuery ? (node.leader ?? false) : false,
+      // Not a current raft member — and the payload that claimed otherwise may
+      // be arbitrarily stale.
+      reachability: trustNodeQuery ? (node.reachability ?? "unknown") : "unknown",
+      latencyMs: trustNodeQuery ? node.latency_ms : undefined,
+      workersBusy: node.workers_busy ?? null,
+      workersTotal: node.workers_total ?? null,
+      livenessCurrent: trustNodeQuery,
+    });
+  }
+
+  rows.sort((a, b) => a.address.localeCompare(b.address));
+  return rows;
+}
+
+/**
  * Nodes counted for the "Nodes" KPI: reachable members over total members.
  * Returns null when NO node's liveness was determined, so the caller renders
  * "?" — "0 reachable" and "not yet probed" are different claims, and neither is
  * the membership count.
  */
-export function reachableNodeCount(nodes: Node[]): number | null {
-  if (nodes.length === 0) return 0;
-  const determined = nodes.some(
-    (n) => n.reachability === "reachable" || n.reachability === "unreachable",
+export function reachableNodeCount(rows: NodeRow[]): number | null {
+  if (rows.length === 0) return 0;
+  const determined = rows.some(
+    (r) => r.reachability === "reachable" || r.reachability === "unreachable",
   );
   if (!determined) return null;
-  return nodes.filter((n) => n.reachability === "reachable").length;
+  return rows.filter((r) => r.reachability === "reachable").length;
 }
