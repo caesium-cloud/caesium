@@ -191,8 +191,12 @@ persisted_address() {
     sed -n 's/^Address: *//p' | tr -d '\r'
 }
 
+# CAESIUM_REPLACEMENT_READY_TIMEOUT shortens the wait for a local reproduction
+# against a build that cannot recover; CI keeps the generous default.
+READY_TIMEOUT="${CAESIUM_REPLACEMENT_READY_TIMEOUT:-480}"
+
 wait_all_ready() {
-  local deadline=$((SECONDS + ${1:-480})) ready=""
+  local deadline=$((SECONDS + READY_TIMEOUT)) ready=""
   while [[ $SECONDS -lt $deadline ]]; do
     ready="$(kcn get statefulset "$RELEASE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
     if [[ "$ready" == "3" ]]; then
@@ -322,8 +326,18 @@ replace_pod() {
     attempt=$((attempt + 1))
     log "replacing $pod (attempt $attempt): pod_ip=$before_ip info.yaml=$before_addr"
     kcn delete pod "$pod" --wait=true --timeout=180s
-    kcn wait --for=condition=Ready "pod/$pod" --timeout=300s >/dev/null 2>&1 || true
-    after_ip="$(pod_ip "$pod")"
+    # Only wait for the replacement to be scheduled and given an address.
+    # Whether it becomes Ready is the assertion, not the precondition — a
+    # regression that crash-loops must not cost this loop a Ready timeout.
+    local waited=0
+    while [[ $waited -lt 120 ]]; do
+      after_ip="$(pod_ip "$pod")"
+      if [[ -n "$after_ip" ]]; then
+        break
+      fi
+      waited=$((waited + 2))
+      sleep 2
+    done
     if [[ -n "$after_ip" && "$after_ip" != "$before_ip" ]]; then
       log "$pod came back at $after_ip (was $before_ip)"
       REPLACED_OLD_ADDR="$before_addr"
@@ -339,7 +353,7 @@ replace_pod() {
 
 assert_recovered() {
   local pod="$1" old_addr="$2" new_ip="$3" persisted members run
-  wait_all_ready 480
+  wait_all_ready
 
   persisted="$(persisted_address "$pod")"
   [[ "$persisted" == "${new_ip}:${DQLITE_PORT}" ]] ||
@@ -369,7 +383,9 @@ assert_recovered() {
 
 # Sequential replacement, one pod at a time, quorum never intentionally broken.
 # StatefulSets roll from the highest ordinal down, so follow the same order.
-for ordinal in 2 1 0; do
+# CAESIUM_REPLACEMENT_ORDINALS narrows the sweep for a quick local reproduction;
+# CI always runs the full set.
+for ordinal in ${CAESIUM_REPLACEMENT_ORDINALS:-2 1 0}; do
   pod="${RELEASE}-${ordinal}"
   REPLACED_OLD_ADDR=""
   REPLACED_NEW_IP=""
