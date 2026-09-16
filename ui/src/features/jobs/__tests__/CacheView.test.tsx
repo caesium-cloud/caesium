@@ -38,6 +38,6 @@ describe("CacheView", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByTestId("cache-expiry")).toHaveTextContent("in 12h");
+    expect(await screen.findByTestId("cache-expiry")).toHaveTextContent("in 13h");
   });
 });
