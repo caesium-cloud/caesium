@@ -83,11 +83,13 @@ describe("api.getAllJobRuns", () => {
     const requested: URL[] = [];
     mockFetch.mockImplementation(paginatedServer(1250, requested));
 
-    const runs = await api.getAllJobRuns("job-1");
+    const result = await api.getAllJobRuns("job-1");
 
-    expect(runs).toHaveLength(1250);
-    expect(runs[0].id).toBe("run-0");
-    expect(runs[1249].id).toBe("run-1249");
+    expect(result.runs).toHaveLength(1250);
+    expect(result.runs[0].id).toBe("run-0");
+    expect(result.runs[1249].id).toBe("run-1249");
+    expect(result.total).toBe(1250);
+    expect(result.truncated).toBe(false);
 
     // 1250 rows at the client's 500-row page size is three requests, and the
     // offsets must be the server's own cursors, not client-side arithmetic.
@@ -99,9 +101,9 @@ describe("api.getAllJobRuns", () => {
     const requested: URL[] = [];
     mockFetch.mockImplementation(paginatedServer(3, requested));
 
-    const runs = await api.getAllJobRuns("job-1");
+    const result = await api.getAllJobRuns("job-1");
 
-    expect(runs).toHaveLength(3);
+    expect(result.runs).toHaveLength(3);
     expect(requested).toHaveLength(1);
   });
 
@@ -115,9 +117,9 @@ describe("api.getAllJobRuns", () => {
       headers: new Headers(),
     });
 
-    const runs = await api.getAllJobRuns("job-1");
+    const result = await api.getAllJobRuns("job-1");
 
-    expect(runs).toHaveLength(2);
+    expect(result.runs).toHaveLength(2);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -129,9 +131,71 @@ describe("api.getAllJobRuns", () => {
       headers: new Headers({ "X-Caesium-Total-Count": "9", "X-Caesium-Next-Offset": "0" }),
     });
 
-    const runs = await api.getAllJobRuns("job-1");
+    const result = await api.getAllJobRuns("job-1");
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(runs).toHaveLength(1);
+    expect(result.runs).toHaveLength(1);
+  });
+
+  // Codex review round 2, finding 1: the underlying list is offset-paginated
+  // over a newest-first order that can mutate mid-walk. A run created
+  // between the offset=0 and offset=500 requests shifts every older run down
+  // by one position, so the offset=500 request re-returns the run that was
+  // already the last entry of the first page (here "run-499") alongside the
+  // genuinely new entry pushed into view ("run-500").
+  it("deduplicates a run that shifts into an already-fetched page", async () => {
+    const pages = [
+      {
+        runs: Array.from({ length: 500 }, (_unused, i) => run(`run-${i}`)),
+        total: 501,
+        next: 500 as number | null,
+      },
+      // A run was inserted before this request fired: newest-first ordering
+      // shifted, so offset 500 now lands on the previous page's last entry
+      // plus one new one, instead of cleanly picking up where page 1 left off.
+      { runs: [run("run-499"), run("run-500")], total: 502, next: null },
+    ];
+    let call = 0;
+    mockFetch.mockImplementation(() => {
+      const page = pages[call++];
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify(page.runs)),
+        headers: new Headers({
+          "X-Caesium-Total-Count": String(page.total),
+          ...(page.next === null ? {} : { "X-Caesium-Next-Offset": String(page.next) }),
+        }),
+      });
+    });
+
+    const result = await api.getAllJobRuns("job-1");
+
+    const ids = result.runs.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(501);
+    expect(ids.filter((id) => id === "run-499")).toHaveLength(1);
+  });
+
+  // Codex review round 2, finding 2: the walk's row cap (10,000, mirroring
+  // getAllPartitions' fan-out safety valve) is an accepted, deliberate
+  // limit — but it must be visible on the result, not a silent truncation.
+  it("marks truncated when the walk hits the row cap with more server history left", async () => {
+    mockFetch.mockImplementation(paginatedServer(10_001, []));
+
+    const result = await api.getAllJobRuns("job-1");
+
+    expect(result.runs).toHaveLength(10_000);
+    expect(result.truncated).toBe(true);
+    expect(result.total).toBe(10_001);
+  });
+
+  it("is not truncated when the row cap and the list's true end coincide", async () => {
+    mockFetch.mockImplementation(paginatedServer(10_000, []));
+
+    const result = await api.getAllJobRuns("job-1");
+
+    expect(result.runs).toHaveLength(10_000);
+    expect(result.truncated).toBe(false);
   });
 });

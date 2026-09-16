@@ -1334,6 +1334,19 @@ export interface JobRunsPage {
   nextOffset: number | null;
 }
 
+/**
+ * The result of walking a job's entire run history via `getAllJobRuns`.
+ * `truncated` is true when the walk stopped at the client-side safety cap
+ * (`jobRunsMaxRows`) with more history left on the server — a caller MUST
+ * check it and say so rather than rendering `runs` as if it were complete.
+ */
+export interface AllJobRunsResult {
+  runs: JobRun[];
+  /** Total run count the server reported on the last page read. */
+  total: number;
+  truncated: boolean;
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
@@ -1345,14 +1358,37 @@ export const api = {
    * counterpart of `getAllPartitions`. Use this (not `getJobRuns`) wherever
    * the console previously relied on the endpoint being unbounded, e.g. the
    * job detail page's Runs tab.
+   *
+   * The underlying list is offset-paginated over a NEWEST-FIRST order that
+   * can mutate between requests: a run created while this walk is in flight
+   * shifts every older run's offset by one, so the next page can re-return
+   * an entry the previous page already returned. Rows are deduplicated by id
+   * as they're collected rather than dropped, at the cost of the walk not
+   * being a perfectly consistent point-in-time snapshot — the server has no
+   * keyset/cursor contract to make it one, and re-seeing a run you already
+   * have is a far smaller correctness problem than silently losing one.
+   *
+   * `jobRunsMaxRows` is a deliberate cap, not a bug — the same safety valve
+   * `getAllPartitions` applies to a fan-out group, so one console tab can
+   * never trigger an unbounded number of requests against a job with
+   * pathological history. `truncated` on the result says so explicitly
+   * instead of quietly rendering a partial list as complete.
    */
-  getAllJobRuns: async (jobId: string): Promise<JobRun[]> => {
+  getAllJobRuns: async (jobId: string): Promise<AllJobRunsResult> => {
     const runs: JobRun[] = [];
+    const seenIDs = new Set<string>();
     let offset = 0;
+    let total = 0;
+    let truncated = false;
 
     for (;;) {
       const page = await fetchJobRunsPage(jobId, { limit: jobRunsPageSize, offset: offset || undefined });
-      runs.push(...page.runs);
+      total = page.total;
+      for (const run of page.runs) {
+        if (seenIDs.has(run.id)) continue;
+        seenIDs.add(run.id);
+        runs.push(run);
+      }
 
       const next = page.nextOffset;
       // null is the end of the list — and is also what a server that
@@ -1363,10 +1399,13 @@ export const api = {
       // total-vs-collected gap be visible instead.
       if (next <= offset) break;
       offset = next;
-      if (runs.length >= jobRunsMaxRows) break;
+      if (runs.length >= jobRunsMaxRows) {
+        truncated = true;
+        break;
+      }
     }
 
-    return runs;
+    return { runs, total, truncated };
   },
   getJobQueue: (jobId: string) => request<RunQueueItem[]>(`/jobs/${encodeURIComponent(jobId)}/queue`),
   cancelQueuedRun: (jobId: string, queueId: string) =>
