@@ -111,7 +111,9 @@ func (s *IntegrationTestSuite) awaitNewRun(jobID string, previousCount int, time
 		if len(runs) <= previousCount {
 			return false
 		}
-		run = runs[len(runs)-1]
+		// tryFetchRuns is newest-first (issue #499), so the new run is at
+		// index 0.
+		run = runs[0]
 		return run.ID != ""
 	}, timeout, 500*time.Millisecond)
 	return run
