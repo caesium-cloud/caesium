@@ -91,6 +91,7 @@ vi.mock("@codemirror/view", () => ({
 }));
 
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -429,4 +430,78 @@ steps:
       "2 jobs on the server are not in this editor (unchanged unless you prune via CLI)",
     );
   });
+
+  it("opens the file chooser from Upload and loads YAML into the editor", async () => {
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+
+    const input = screen.getByTestId("jobdefs-upload-input") as HTMLInputElement;
+    const clickSpy = vi.spyOn(input, "click").mockImplementation(() => {});
+    fireEvent.click(screen.getByTestId("jobdefs-upload"));
+    expect(clickSpy).toHaveBeenCalled();
+    clickSpy.mockRestore();
+
+    const uploaded = singleJobYaml("uploaded-job");
+    await changeUploadFile(new File([uploaded], "uploaded.job.yaml", { type: "text/yaml" }));
+
+    expect(screen.getByLabelText("job.yaml editor")).toHaveValue(uploaded);
+    expect(toast.success).toHaveBeenCalledWith("Loaded uploaded.job.yaml");
+  });
+
+  it("confirms before replacing dirty editor contents on upload", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+
+    const editor = screen.getByLabelText("job.yaml editor") as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "dirty: true\n" } });
+
+    const uploaded = singleJobYaml("uploaded-job");
+    await changeUploadFile(new File([uploaded], "uploaded.job.yaml", { type: "text/yaml" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(editor.value).toBe("dirty: true\n");
+    expect(toast.success).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    await changeUploadFile(new File([uploaded], "uploaded.job.yaml", { type: "text/yaml" }));
+
+    expect(editor.value).toBe(uploaded);
+    expect(toast.success).toHaveBeenCalledWith("Loaded uploaded.job.yaml");
+    confirmSpy.mockRestore();
+  });
+
+  it("rejects binary or oversized uploads", async () => {
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    const editor = screen.getByLabelText("job.yaml editor") as HTMLTextAreaElement;
+    const original = editor.value;
+
+    await changeUploadFile(new File([new Uint8Array([0, 1, 2, 255, 0])], "blob.bin", { type: "application/octet-stream" }));
+    expect(toast.error).toHaveBeenCalledWith("File looks binary and cannot be loaded as YAML");
+    expect(editor.value).toBe(original);
+
+    const huge = new File(["apiVersion: v1\n"], "huge.yaml", { type: "text/yaml" });
+    Object.defineProperty(huge, "size", { value: 2 * 1024 * 1024 });
+    await changeUploadFile(huge);
+    expect(toast.error).toHaveBeenCalledWith("File is too large to load in the editor (max 1 MB)");
+    expect(editor.value).toBe(original);
+  });
+
+  it("opens a Git sync dialog explaining server configuration and the apply CLI", () => {
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+
+    fireEvent.click(screen.getByTestId("jobdefs-git-sync"));
+
+    const dialog = screen.getByRole("dialog", { name: "Git sync" });
+    expect(dialog).toBeVisible();
+    expect(dialog).toHaveTextContent("CAESIUM_JOBDEF_GIT_SOURCES");
+    expect(dialog).toHaveTextContent("CAESIUM_JOBDEF_GIT_ENABLED=true");
+    expect(dialog).toHaveTextContent("caesium job apply --path");
+  });
 });
+
+async function changeUploadFile(file: File) {
+  const input = screen.getByTestId("jobdefs-upload-input");
+  await act(async () => {
+    fireEvent.change(input, { target: { files: [file] } });
+    await Promise.resolve();
+  });
+}

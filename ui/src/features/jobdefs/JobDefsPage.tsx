@@ -1,5 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, type AllowBreakingRequest, type ContractDiffFinding, type DiffResponse, type LintResponse } from "@/lib/api";
@@ -12,6 +11,7 @@ import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
 import { pendingApplyCount, summarizeDiffPreview } from "./diffPreview";
+import { GitSyncDialog } from "./GitSyncDialog";
 import { getJobDefRuntimeHints, type JobDefRuntimeHints } from "./runtimeHints";
 
 export const EXAMPLE_YAML = `apiVersion: v1
@@ -198,10 +198,13 @@ export function JobDefsPage() {
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
   const [isLinting, setIsLinting] = useState(false);
   const [ackReason, setAckReason] = useState("");
+  const [gitSyncOpen, setGitSyncOpen] = useState(false);
   const latestYamlRef = useRef(EXAMPLE_YAML);
+  const baselineYamlRef = useRef(EXAMPLE_YAML);
   const yamlVersionRef = useRef(0);
   const validationSeqRef = useRef(0);
   const editorViewRef = useRef<EditorView | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const syncLatestYaml = useCallback((value: string) => {
     if (latestYamlRef.current !== value) {
@@ -270,7 +273,39 @@ export function JobDefsPage() {
     setYaml(EXAMPLE_YAML);
     setIsLinting(true);
     setAckReason("");
+    baselineYamlRef.current = EXAMPLE_YAML;
   }, [syncLatestYaml]);
+
+  const handleUploadClick = useCallback(() => {
+    uploadInputRef.current?.click();
+  }, []);
+
+  const handleUploadFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+
+    try {
+      const text = await readJobDefUpload(file);
+      const current = currentEditorYaml();
+      if (current !== baselineYamlRef.current) {
+        const replace = window.confirm(
+          "Replace the current editor contents with this file? Unsaved changes will be lost.",
+        );
+        if (!replace) return;
+      }
+      syncLatestYaml(text);
+      setYaml(text);
+      setIsLinting(true);
+      setAckReason("");
+      setTab("editor");
+      baselineYamlRef.current = text;
+      toast.success(`Loaded ${file.name}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to read the selected file");
+    }
+  }, [currentEditorYaml, syncLatestYaml]);
 
   const handleTabChange = useCallback((value: string) => {
     setTab(value);
@@ -371,11 +406,33 @@ export function JobDefsPage() {
           </p>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".yaml,.yml,.job.yaml,text/yaml"
+            className="hidden"
+            data-testid="jobdefs-upload-input"
+            onChange={handleUploadFile}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="bg-transparent border-graphite/50 text-text-2"
+            data-testid="jobdefs-upload"
+            onClick={handleUploadClick}
+          >
             <Upload className="h-3.5 w-3.5 mr-1.5" />
             Upload
           </Button>
-          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="bg-transparent border-graphite/50 text-text-2"
+            data-testid="jobdefs-git-sync"
+            onClick={() => setGitSyncOpen(true)}
+          >
             <GitBranch className="h-3.5 w-3.5 mr-1.5" />
             Git sync
           </Button>
@@ -634,8 +691,45 @@ steps:
           </Card>
         </div>
       </div>
+
+      <GitSyncDialog open={gitSyncOpen} onOpenChange={setGitSyncOpen} />
     </div>
   );
+}
+
+const JOBDEF_UPLOAD_MAX_BYTES = 1024 * 1024;
+
+async function readJobDefUpload(file: File): Promise<string> {
+  if (file.size > JOBDEF_UPLOAD_MAX_BYTES) {
+    throw new Error("File is too large to load in the editor (max 1 MB)");
+  }
+
+  let text: string;
+  try {
+    text = await file.text();
+  } catch {
+    throw new Error("Could not read the selected file");
+  }
+
+  if (looksBinaryYaml(text)) {
+    throw new Error("File looks binary and cannot be loaded as YAML");
+  }
+
+  return text;
+}
+
+function looksBinaryYaml(text: string): boolean {
+  if (text.includes("\u0000")) return true;
+  const limit = Math.min(text.length, 8192);
+  let unusual = 0;
+  for (let i = 0; i < limit; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0xfffd) return true;
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      unusual += 1;
+    }
+  }
+  return limit > 0 && unusual / limit > 0.3;
 }
 
 function RuntimeHint({
