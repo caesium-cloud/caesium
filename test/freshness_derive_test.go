@@ -283,6 +283,14 @@ func (s *IntegrationTestSuite) awaitFreshnessDerivedRun(jobID, produced string, 
 // ingest POST advances the input without running anything) and a produced
 // dataset whose freshness SLO is short enough to be stale the moment the input
 // arrives. metadataExtra injects an optional `metadata.concurrency` block.
+//
+// The step's emitted watermark comes from ${CAESIUM_PARAM_OUTPUT_TOKEN}, a
+// `trigger.defaultParams` entry, so every assertion on the emitted output and on
+// the advanced dataset watermark is ALSO an assertion that the job's declared
+// trigger defaults reached the derived run's task environment. That is not
+// decoration: a missing param ref fails closed (see
+// TestHTTPTriggerMissingParamRefFailsClosed), so a derivation that dropped
+// defaults would fail the run outright.
 func freshnessDerivationManifest(alias, metadataExtra, source, produced, eventType, outputWatermark string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
@@ -303,10 +311,14 @@ metadata:
 trigger:
   type: freshness
   configuration: {}
+  defaultParams:
+    OUTPUT_TOKEN: "%s"
 steps:
   - name: refresh
     image: alpine:3.23
-    command: ["sh", "-c", "echo '##caesium::output {\"wm\":\"%s\"}'"]
+    command: ["sh", "-c", "echo \"##caesium::output {\\\"wm\\\":\\\"$OUT_TOKEN\\\"}\""]
+    env:
+      OUT_TOKEN: "${CAESIUM_PARAM_OUTPUT_TOKEN}"
     datasets:
       consumes:
         - %s

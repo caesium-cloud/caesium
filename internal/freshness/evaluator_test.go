@@ -503,6 +503,150 @@ func TestEvaluatorDoesNotAdoptAForeignRun(t *testing.T) {
 	}
 }
 
+// failJobRunReads makes the next n reads of job_runs fail. Used to prove the
+// evaluator keeps responsibility for a committed run even when it cannot read
+// the row back.
+func failJobRunReads(t *testing.T, db *gorm.DB, n int) {
+	t.Helper()
+	const name = "test:freshness_fail_job_run_reads"
+	remaining := n
+	if err := db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		if remaining <= 0 {
+			return
+		}
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table != "job_runs" {
+			return
+		}
+		remaining--
+		tx.AddError(errors.New("database is locked"))
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+}
+
+// TestEvaluatorHandsOffACommittedRunItCannotReadBack is the regression for
+// abandoning a live run after one failed read.
+//
+// Once a start reports RunCommittedError the run exists and is running. If the
+// evaluator gives up when the read-back also fails, nothing launches or
+// finalizes it: hasActiveOrQueuedRun then suppresses every later derivation for
+// the same watermarks, a maxRuns policy holds its slot forever, and there are no
+// task rows for a worker to recover from.
+func TestEvaluatorHandsOffACommittedRunItCannotReadBack(t *testing.T) {
+	db := openRegistryDB(t)
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "unreadable-commit")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{
+		t:              t,
+		db:             db,
+		commitThenFail: true,
+		err:            errors.New("post-commit read failed"),
+		afterCommit: func(uuid.UUID, uuid.UUID) {
+			// Every read-back attempt fails; the row itself stays live.
+			failJobRunReads(t, db, len(committedRunReadBackoffs)+1)
+		},
+	}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+
+	if err := eval.EvaluateOnce(context.Background()); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("committed runs = %v, want exactly 1", starter.runIDs)
+	}
+	if len(starter.launched) != 1 || starter.launched[0] != starter.runIDs[0] {
+		t.Fatalf("launched runs = %v, want the committed run %v handed to the launcher even though it could not be read back",
+			starter.launched, starter.runIDs)
+	}
+
+	// The row is still there, still running — the launcher (which owns the
+	// load/fence/finalize logic) is what resolves it from here.
+	var persisted models.JobRun
+	if err := db.Take(&persisted, "id = ?", starter.runIDs[0]).Error; err != nil {
+		t.Fatalf("load committed run: %v", err)
+	}
+	if persisted.Status != string(runstorage.StatusRunning) {
+		t.Fatalf("committed run status = %q, want %q", persisted.Status, runstorage.StatusRunning)
+	}
+}
+
+// TestEvaluatorMergesTriggerDefaultParams proves a derived run is entitled to
+// the job's trigger-level defaultParams, exactly like a cron tick or an HTTP
+// fire. Without them a job that declares defaults fails ${CAESIUM_PARAM_X}
+// interpolation and every derived run fails closed.
+func TestEvaluatorMergesTriggerDefaultParams(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "defaults")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	// The importer folds trigger.defaultParams into the trigger configuration,
+	// and a manifest may also spell them there directly. A default that collides
+	// with an evaluator-owned key must lose.
+	var job models.Job
+	if err := db.First(&job, "id = ?", jobID).Error; err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if err := db.Model(&models.Trigger{}).Where("id = ?", job.TriggerID).
+		Update("configuration", `{"defaultParams":{"REGION":"eu-west-1","RETRIES":3,"logical_date":"hijacked"}}`).
+		Error; err != nil {
+		t.Fatalf("set trigger configuration: %v", err)
+	}
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want exactly 1", starter.runIDs)
+	}
+
+	// Read the params off the persisted run row: that is what the executor and a
+	// queued promotion actually see.
+	var persisted models.JobRun
+	if err := db.Take(&persisted, "id = ?", starter.runIDs[0]).Error; err != nil {
+		t.Fatalf("load started run: %v", err)
+	}
+	params := decodeParamsJSON(persisted.Params)
+	if params["REGION"] != "eu-west-1" {
+		t.Fatalf("REGION = %q, want %q (run params: %v)", params["REGION"], "eu-west-1", params)
+	}
+	if params["RETRIES"] != "3" {
+		t.Fatalf("RETRIES = %q, want %q (non-string defaults are coerced like cron's)", params["RETRIES"], "3")
+	}
+	if got := params[freshnessLogicalDateParam]; got != now.Format(time.RFC3339) {
+		t.Fatalf("%s = %q, want the evaluator's own value %q: a default must not shadow the derivation identity",
+			freshnessLogicalDateParam, got, now.Format(time.RFC3339))
+	}
+	if params[freshnessDerivedFromDatasetParam] != "out" {
+		t.Fatalf("%s = %q, want %q", freshnessDerivedFromDatasetParam, params[freshnessDerivedFromDatasetParam], "out")
+	}
+}
+
 // TestEvaluatorPropagatesStartErrorThatCommittedNothing proves the recovery
 // above does not swallow a genuine admission failure: when no run was
 // committed, the error still reaches the caller.
