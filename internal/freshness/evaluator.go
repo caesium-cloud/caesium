@@ -287,7 +287,7 @@ func (e *Evaluator) evaluate(ctx context.Context, targets map[datasetIdentity]st
 }
 
 func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnapshot, targets map[datasetIdentity]struct{}, triggerDepth int) error {
-	budget := e.maxDerivationsPerTick
+	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}}
 	for _, decl := range graph.produced {
 		id := declarationIdentity(decl)
 		if len(targets) > 0 {
@@ -298,14 +298,14 @@ func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnap
 		if strings.TrimSpace(decl.Freshness) == "" {
 			continue
 		}
-		if err := e.evaluateProducedDataset(ctx, graph, decl, triggerDepth, &budget); err != nil {
+		if err := e.evaluateProducedDataset(ctx, graph, decl, triggerDepth, pass); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registrySnapshot, decl models.DatasetDeclaration, triggerDepth int, budget *int) error {
+func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registrySnapshot, decl models.DatasetDeclaration, triggerDepth int, pass *evaluationPass) error {
 	now := e.now().UTC()
 	freshness, err := parsePositiveDuration(decl.Freshness)
 	if err != nil {
@@ -357,9 +357,9 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		if !upstreamReady {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, reason, consumed, nil)
 		}
-		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
 	case models.DatasetStatusStale:
-		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
 	case models.DatasetStatusQuarantined:
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "dataset quarantined", consumed, nil)
 	default:
@@ -518,7 +518,7 @@ func watermarkAdvancedPast(previous, current string) bool {
 	return true
 }
 
-func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
+func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, state models.DatasetState, reason string, consumed map[string]string, triggerDepth int, pass *evaluationPass) error {
 	trigger, err := e.freshnessTriggerForJob(ctx, decl.JobID)
 	if err != nil {
 		return err
@@ -537,7 +537,7 @@ func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.
 	if trigger.paused {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job is paused", consumed, nil)
 	}
-	return e.derive(ctx, decl, trigger, reason, consumed, triggerDepth, budget)
+	return e.derive(ctx, decl, trigger, state, reason, consumed, triggerDepth, pass)
 }
 
 // freshnessTriggerState is what the evaluator needs to know about a produced
@@ -623,8 +623,8 @@ func triggerDefaultParams(configuration string) map[string]string {
 	return out
 }
 
-func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, trigger freshnessTriggerState, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
-	if budget != nil && *budget <= 0 {
+func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, trigger freshnessTriggerState, state models.DatasetState, reason string, consumed map[string]string, triggerDepth int, pass *evaluationPass) error {
+	if pass != nil && pass.budget <= 0 {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness derivation cap reached", consumed, nil)
 	}
 
@@ -654,15 +654,16 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 	params[freshnessDerivedFromDatasetParam] = datasetParamName(decl.Namespace, decl.Name)
 	params[freshnessConsumedWatermarksParam] = string(consumedJSON)
 
-	activeRunID, active, err := e.activeRunForWatermarks(ctx, decl.JobID, params)
+	outputFreshAt, _ := FreshAt(state)
+	covering, err := e.coveringRun(ctx, decl.JobID, params, outputFreshAt, pass)
 	if err != nil {
 		return err
 	}
-	if active {
+	if covering != nil {
 		// Linked to the covering run when there is one, so "why didn't this
 		// dataset derive" answers itself: because that run is already
 		// refreshing it.
-		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, activeRunID)
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, covering.reason, consumed, covering.id)
 	}
 
 	if e.launchRun == nil {
@@ -712,8 +713,9 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "admission declined", consumed, nil)
 	}
 
-	if budget != nil {
-		*budget--
+	if pass != nil {
+		pass.budget--
+		pass.launched[derivationKey{jobID: decl.JobID, consumed: params[freshnessConsumedWatermarksParam]}] = runRecord.ID
 	}
 	metrics.TriggerChainDepth.Observe(float64(nextDepth))
 	// Record the audit row before dispatching so the derivation names the run
@@ -803,21 +805,66 @@ func (e *Evaluator) runByID(ctx context.Context, runID, jobID uuid.UUID) (*runst
 	}, nil
 }
 
-// activeRunForWatermarks reports an active or queued run of this job that is
-// already refreshing from the SAME consumed watermarks, and its run id when it
-// is a live run (a queued row has no run id yet).
+// pendingCaptureWindow bounds how long a SUCCEEDED run is still treated as
+// covering an output whose watermark it has not advanced yet.
 //
-// It coalesces on (job, consumed watermarks) — deliberately NOT on the produced
-// dataset as well. A run executes the job's whole DAG, so it refreshes every
-// output that job produces. Keying the decision on the dataset too meant a job
-// with two stale outputs over one input watermark set started TWO full runs:
-// the second evaluation saw the first run, compared _derived_from_dataset,
-// decided it did not match and admitted a duplicate. Under a maxRuns policy the
-// duplicate was merely refused rather than recognised as redundant work.
+// The Capturer advances a produced dataset from a run_completed subscriber, so
+// there is a real gap between the run row reaching `succeeded` and the dataset
+// looking fresh. Without this the gap reopens the duplicate: the run is no
+// longer `running`, the output still looks stale, and a second full DAG starts —
+// even under maxRuns, because the first run released its slot. The window is
+// short so that a genuinely later arrival (or a capture that never lands,
+// because the non-blocking bus dropped the event) still derives.
+const pendingCaptureWindow = 30 * time.Second
+
+// derivationKey identifies executable work: a job plus the exact consumed-input
+// view a derivation evaluated against. It is deliberately NOT keyed on the
+// produced dataset — one run refreshes every output its DAG produces.
+type derivationKey struct {
+	jobID    uuid.UUID
+	consumed string
+}
+
+// evaluationPass is the per-tick state shared by every produced dataset in one
+// evaluateWithSnapshot pass: the derivation budget, and a memo of the runs this
+// pass already launched.
 //
-// The AUDIT stays per-dataset: the second output still gets its own
-// skipped_active_run derivation row, linked to the run that is covering it.
-func (e *Evaluator) activeRunForWatermarks(ctx context.Context, jobID uuid.UUID, params map[string]string) (*uuid.UUID, bool, error) {
+// The memo is what makes coalescing immune to timing. The store-backed checks
+// read the run's CURRENT status, and a run launched for the first output can
+// reach a terminal status before the pass reaches the second; the memo remembers
+// that this pass already scheduled that work, whatever the row says by then.
+type evaluationPass struct {
+	budget   int
+	launched map[derivationKey]uuid.UUID
+}
+
+func (p *evaluationPass) launchedRun(key derivationKey) (uuid.UUID, bool) {
+	if p == nil || p.launched == nil {
+		return uuid.Nil, false
+	}
+	id, ok := p.launched[key]
+	return id, ok
+}
+
+// coveringRun reports the run that already covers this derivation, or nil when
+// none does. Three layers, cheapest and most certain first:
+//
+//  1. a run THIS pass launched for the same (job, consumed watermarks);
+//  2. a running or queued run carrying the same consumed-watermark view;
+//  3. a recently succeeded run with that view whose completion is newer than the
+//     dataset's own watermark — its capture is still in flight.
+type coveringRun struct {
+	id     *uuid.UUID
+	reason string
+}
+
+func (e *Evaluator) coveringRun(ctx context.Context, jobID uuid.UUID, params map[string]string, outputFreshAt time.Time, pass *evaluationPass) (*coveringRun, error) {
+	consumed := params[freshnessConsumedWatermarksParam]
+	key := derivationKey{jobID: jobID, consumed: consumed}
+	if id, ok := pass.launchedRun(key); ok {
+		return &coveringRun{id: &id, reason: "producer run derived for another output in this evaluation already covers the consumed watermarks"}, nil
+	}
+
 	var running []struct {
 		ID     uuid.UUID
 		Params datatypes.JSON
@@ -826,12 +873,12 @@ func (e *Evaluator) activeRunForWatermarks(ctx context.Context, jobID uuid.UUID,
 		Select("id", "params").
 		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(runstorage.StatusRunning)).
 		Find(&running).Error; err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	for i := range running {
 		if sameConsumedWatermarks(decodeParamsJSON(running[i].Params), params) {
 			id := running[i].ID
-			return &id, true, nil
+			return &coveringRun{id: &id, reason: "producer already has an active or queued run for the consumed watermarks"}, nil
 		}
 	}
 
@@ -842,14 +889,39 @@ func (e *Evaluator) activeRunForWatermarks(ctx context.Context, jobID uuid.UUID,
 		Select("params").
 		Where("job_id = ?", jobID).
 		Find(&queued).Error; err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	for _, row := range queued {
 		if sameConsumedWatermarks(decodeParamsJSON(row.Params), params) {
-			return nil, true, nil
+			return &coveringRun{reason: "producer already has an active or queued run for the consumed watermarks"}, nil
 		}
 	}
-	return nil, false, nil
+
+	var captured []struct {
+		ID          uuid.UUID
+		Params      datatypes.JSON
+		CompletedAt *time.Time
+	}
+	if err := e.db.WithContext(ctx).Table("job_runs").
+		Select("id", "params", "completed_at").
+		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE AND completed_at IS NOT NULL AND completed_at >= ?",
+			jobID, string(runstorage.StatusSucceeded), e.now().UTC().Add(-pendingCaptureWindow)).
+		Find(&captured).Error; err != nil {
+		return nil, err
+	}
+	for i := range captured {
+		if !sameConsumedWatermarks(decodeParamsJSON(captured[i].Params), params) {
+			continue
+		}
+		// Only while the capture can still be outstanding: once the dataset has
+		// advanced to at least this run's completion, the run has had its say.
+		if captured[i].CompletedAt == nil || !captured[i].CompletedAt.After(outputFreshAt) {
+			continue
+		}
+		id := captured[i].ID
+		return &coveringRun{id: &id, reason: "producer run for the consumed watermarks just succeeded; its watermark capture is pending"}, nil
+	}
+	return nil, nil
 }
 
 // sameConsumedWatermarks compares the input view two derivations evaluated

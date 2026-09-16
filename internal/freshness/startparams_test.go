@@ -168,8 +168,8 @@ func TestStartParamsEnricherRefreshesOnQueuePromotion(t *testing.T) {
 }
 
 // TestQueuePromotionKeepsTheDerivationDedupe is the regression for a duplicate
-// freshness run. activeRunForWatermarks recognises work it already scheduled by
-// comparing _consumed_watermarks — the input view the derivation evaluated.
+// freshness run. coveringRun recognises work it already scheduled by comparing
+// _consumed_watermarks — the input view the derivation evaluated.
 // Promotion deletes the run_queue row, so the running row is the only thing left
 // to match against — and when the enricher's refresh shared that key it
 // overwrote the derivation view, the match failed, and the next tick derived a
@@ -225,14 +225,14 @@ func TestQueuePromotionKeepsTheDerivationDedupe(t *testing.T) {
 	seedRunningRun(t, db, jobID, promoted)
 
 	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunStarter{t: t, db: db}})
-	activeID, active, err := eval.activeRunForWatermarks(ctx, jobID, derivation)
+	covering, err := eval.coveringRun(ctx, jobID, derivation, time.Time{}, nil)
 	if err != nil {
-		t.Fatalf("activeRunForWatermarks: %v", err)
+		t.Fatalf("coveringRun: %v", err)
 	}
-	if !active {
+	if covering == nil {
 		t.Fatal("the promoted run no longer matches its derivation view; freshness would derive a duplicate")
 	}
-	if activeID == nil {
+	if covering.id == nil {
 		t.Fatal("a running row must report its run id so the skip can be linked to it")
 	}
 }

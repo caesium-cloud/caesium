@@ -822,6 +822,117 @@ func TestEvaluatorCoalescesDerivationsAcrossAJobsOutputs(t *testing.T) {
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 3)
 }
 
+// TestEvaluatorCoalescesWhenTheRunFinishesMidPass is the deterministic
+// regression for coalescing that depended on timing.
+//
+// The run launched for the first stale output transitions to `succeeded` before
+// the same pass reaches the second output, and its watermark capture has not
+// landed (the Capturer is a run_completed subscriber, so there is a real gap).
+// A store check that only looks at RUNNING rows finds nothing, the second output
+// still looks stale, and a second full DAG starts — even under maxRuns, because
+// the first run already released its slot. The in-pass memo remembers the work
+// whatever the row says by then.
+func TestEvaluatorCoalescesWhenTheRunFinishesMidPass(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "finishes-mid-pass")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "out.a", "1h", ""),
+		produceDecl(jobID, "out.b", "1h", ""),
+		consumeDecl(jobID, "raw"),
+	)
+	seedState(t, db, "out.a", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "out.b", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "raw", "2", now.Add(-time.Minute), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	// The run completes the instant it is created, and NOTHING advances either
+	// output's watermark — capture is still in flight.
+	completedAt := now.Add(-time.Second)
+	starter.afterCommit = func(runID, _ uuid.UUID) {
+		if err := db.Model(&models.JobRun{}).Where("id = ?", runID).Updates(map[string]any{
+			"status":       string(runstorage.StatusSucceeded),
+			"completed_at": completedAt,
+		}).Error; err != nil {
+			t.Fatalf("complete run: %v", err)
+		}
+	}
+
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want exactly 1: a run that finished mid-pass still covers the job's other output", starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
+
+	// A LATER pass has no memo at all; the pending-capture window is what holds
+	// the line until the Capturer advances the outputs.
+	starter.afterCommit = nil
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate 2: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs after a second pass = %v, want still 1 while the watermark capture is pending", starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 3)
+}
+
+// TestEvaluatorDerivesOnceThePendingCaptureWindowLapses proves the
+// succeeded-run grace is bounded: a capture that never lands (the non-blocking
+// bus can drop run_completed) must not suppress derivation forever.
+func TestEvaluatorDerivesOnceThePendingCaptureWindowLapses(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "capture-window")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""), consumeDecl(jobID, "raw"))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "raw", "2", now.Add(-time.Minute), nil)
+
+	// A succeeded run with the same consumed view, completed longer ago than the
+	// window allows, whose capture clearly never landed.
+	completed := now.Add(-pendingCaptureWindow - time.Minute)
+	if err := db.Create(&models.JobRun{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		Status: string(runstorage.StatusSucceeded),
+		Params: datatypes.JSON([]byte(
+			`{"_derived_from_dataset":"out","_consumed_watermarks":"{\"raw\":\"2\"}"}`)),
+		StartedAt:   completed.Add(-time.Minute),
+		CompletedAt: &completed,
+		CreatedAt:   completed,
+		UpdatedAt:   completed,
+	}).Error; err != nil {
+		t.Fatalf("create stale succeeded run: %v", err)
+	}
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want 1: a lapsed pending-capture grace must not suppress derivation", starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
 // TestEvaluatorDoesNotCoalesceOntoAnUnrelatedRun proves the coalescing key is
 // the derivation's own input view, not merely "this job has a run": a manual or
 // cron run carries no consumed-watermark snapshot and must not suppress a
