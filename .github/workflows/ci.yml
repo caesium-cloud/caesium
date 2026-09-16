@@ -1109,6 +1109,86 @@ jobs:
           name: kubernetes-cache-identity
           path: .tmp/kubernetes-cache-identity/
           if-no-files-found: error
+      - name: Distributed Kubernetes deadline regression
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          # The complete three-shard suite above stays local, and the cache
+          # identity controls run before these deadline-specific distributed settings.
+          kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          kubectl set env statefulset/caesium --containers=caesium \
+            CAESIUM_EXECUTION_MODE=distributed \
+            CAESIUM_RUN_OWNER_ENABLED=true \
+            CAESIUM_WORKER_ENABLED=true \
+            CAESIUM_INTERNAL_WAKEUP_TOKEN=integration-distributed-internal-token \
+            CAESIUM_INTERNAL_PORT=8443 \
+            CAESIUM_RUN_LEASE_TTL=30s \
+            CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms \
+            CAESIUM_RUN_OWNER_DISPATCH_DEADLINE=5m \
+            CAESIUM_WORKER_POOL_SIZE=1 \
+            CAESIUM_WORKER_POLL_INTERVAL=500ms \
+            CAESIUM_WORKER_RECLAIM_INTERVAL=500ms \
+            CAESIUM_WORKER_LEASE_TTL=30s
+          # Preserve the chart's POD_IP-based database/node address.
+          kubectl rollout status statefulset/caesium --timeout=240s
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            cat /tmp/port-forward.log
+            exit 1
+          fi
+
+          mkdir -p .tmp
+          kind get kubeconfig > .tmp/deadline-kubeconfig
+          chmod 600 .tmp/deadline-kubeconfig
+          # kind may list its IPv6 subnet first, or omit that subnet's gateway.
+          # The witness listens on IPv4, so select a matching gateway explicitly.
+          network_config=$(docker network inspect kind --format '{{json .IPAM.Config}}')
+          witness_host=$(python3 -c '
+          import ipaddress, json, sys
+          for config in json.load(sys.stdin):
+              gateway = config.get("Gateway")
+              if gateway and ipaddress.ip_address(gateway).version == 4:
+                  print(gateway)
+                  break
+          ' <<< "$network_config")
+          if [ -z "$witness_host" ]; then
+            echo "kind network has no IPv4 gateway for the deadline witness: $network_config" >&2
+            exit 1
+          fi
+          echo "Kubernetes deadline witness gateway: $witness_host"
+          deadline_log=.tmp/distributed-kubernetes-deadlines.log
+          docker run --rm \
+            -v "$(pwd)":/bld/caesium \
+            -v "$(pwd)/.tmp/deadline-kubeconfig":/tmp/deadline-kubeconfig:ro \
+            -e KUBECONFIG=/tmp/deadline-kubeconfig \
+            -e CAESIUM_TEST_WITNESS_HOST="$witness_host" \
+            -e CAESIUM_TEST_ENGINE=kubernetes \
+            -e CAESIUM_EXECUTION_MODE=distributed \
+            -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
+            --network=host \
+            -w /bld/caesium \
+            caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
+            sh scripts/integration-test.sh \
+              -test.run '^TestIntegrationTestSuite$' \
+              -testify.m '^TestDistributedKubernetesDeadlines$' | tee "$deadline_log"
+          # A missing method or skipped subcase must not report green coverage.
+          if ! grep -Eq -- '--- PASS: TestIntegrationTestSuite/TestDistributedKubernetesDeadlines \(' "$deadline_log"; then
+            echo "Distributed Kubernetes deadline scenario did not pass" >&2
+            exit 1
+          fi
+          if grep -Eq -- '--- SKIP: TestIntegrationTestSuite/TestDistributedKubernetesDeadlines' "$deadline_log"; then
+            echo "Distributed Kubernetes deadline scenario skipped required coverage" >&2
+            exit 1
+          fi
       - name: Stop port-forward
         if: always()
         run: kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true

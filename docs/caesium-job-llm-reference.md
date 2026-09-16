@@ -127,6 +127,17 @@ For trigger chaining, match lifecycle events from `source: caesium`, for example
 
 Use `metadata.priority` to order pending work when the cluster is saturated. Valid values are `high`, `normal`, and `low`. Priority is ordering only; it does not preempt running tasks.
 
+`metadata.taskTimeout` limits each execution attempt. A zero or omitted value
+inherits `CAESIUM_TASK_TIMEOUT` (whose default `0` disables the task deadline).
+`metadata.runTimeout` limits the whole execution window; zero or omitted means
+no run deadline. Caesium records both values when it creates the run's task
+rows, so a later `job apply` changes new runs only. Reopened terminal runs keep
+the recorded limits and receive a fresh run-timeout window; owner or worker
+failover within an active run keeps the original absolute deadline. When either
+deadline expires, Caesium force-stops the exact Docker, Podman, or Kubernetes
+atom and persists a failed task. A run deadline also fails every unfinished
+task in the run, including pending and retry-waiting work.
+
 Use `metadata.concurrency` to control new runs of the same job when prior runs are still active:
 
 ```yaml

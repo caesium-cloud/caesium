@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -649,6 +650,76 @@ func TestFanOutLocalContinueRunsIndependentSiblings(t *testing.T) {
 	for _, p := range []string{"b", "c", "d"} {
 		require.Equal(t, string(run.TaskStatusSucceeded), status[p],
 			"continue must keep running independent sibling %s", p)
+	}
+}
+
+func TestFanOutLocalRunTimeoutOverridesEarlierPartitionFailure(t *testing.T) {
+	f := newFanOutFixture(t, `["failed","running","pending"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		MaxParallel:   2,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["failed"] = errors.New("ordinary partition failure")
+	f.engine.runDurationByPartition["running"] = 10 * time.Second
+	f.engine.runDurationByPartition["pending"] = 10 * time.Second
+
+	vars := defaultFanOutVars()
+	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	const timeout = time.Minute
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel(run.NewRunDeadlineError(timeout))
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("local run did not return after run-deadline cancellation")
+		}
+	})
+	go func() {
+		defer close(done)
+		errCh <- New(&models.Job{ID: f.jobID, RunTimeout: timeout}, opts...).Run(runCtx)
+	}()
+
+	// The pending partition can only start after the failed partition's result
+	// has been consumed: MaxParallel initially admits failed and running, then
+	// releases the final slot while handling failed. This makes the earlier
+	// ordinary error a scheduler-observed fact before we deliver the typed run
+	// deadline cause below.
+	require.Eventually(t, func() bool {
+		var jobRun models.JobRun
+		if err := f.db.Where("job_id = ?", f.jobID).First(&jobRun).Error; err != nil {
+			return false
+		}
+		var failed models.TaskRun
+		if err := f.db.Where("job_run_id = ? AND task_id = ? AND partition_value = ?", jobRun.ID, f.fanned, "failed").First(&failed).Error; err != nil {
+			return false
+		}
+		return failed.Status == string(run.TaskStatusFailed) &&
+			strings.Contains(failed.Error, "ordinary partition failure") &&
+			f.engine.createCount("pending") > 0
+	}, 5*time.Second, 5*time.Millisecond, "wait for the scheduler to record and process the ordinary partition failure")
+
+	cancel(run.NewRunDeadlineError(timeout))
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "local run did not return after run-deadline cancellation")
+	}
+	require.ErrorContains(t, err, "run timed out after 1m0s")
+
+	rows := f.instanceRows(t)
+	require.Len(t, rows, 3)
+	for _, row := range rows {
+		require.Equal(t, string(run.TaskStatusFailed), row.Status, "partition %s", row.PartitionValue)
+		if row.PartitionValue == "failed" {
+			require.Contains(t, row.Error, "ordinary partition failure")
+		} else {
+			require.Contains(t, row.Error, "run timed out after 1m0s")
+		}
 	}
 }
 

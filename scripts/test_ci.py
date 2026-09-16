@@ -491,11 +491,93 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(job["strategy"]["fail-fast"])
             self.assertEqual(job["strategy"]["matrix"]["shard"], [1, 2, 3])
             runs = [step["run"] for step in job["steps"] if "sh scripts/integration-test.sh" in step.get("run", "")]
-            self.assertEqual(len(runs), 1)
-            self.assertNotIn("-run", runs[0])
-            self.assertIn("caesiumcloud/caesium-integration:", runs[0])
-            self.assertIn("CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }}", runs[0])
-            self.assertIn("CAESIUM_TEST_SHARD_COUNT=3", runs[0])
+            self.assertEqual(len(runs), 2 if name == "helm-integration-test" else 1)
+            full_suite = [run for run in runs if "CAESIUM_TEST_SHARD_INDEX=" in run]
+            self.assertEqual(len(full_suite), 1)
+            self.assertNotIn("-run", full_suite[0])
+            self.assertNotIn("-testify.m", full_suite[0])
+            self.assertIn("caesiumcloud/caesium-integration:", full_suite[0])
+            self.assertIn("CAESIUM_TEST_SHARD_INDEX=${{ matrix.shard }}", full_suite[0])
+            self.assertIn("CAESIUM_TEST_SHARD_COUNT=3", full_suite[0])
+
+    def test_distributed_kubernetes_deadlines_follow_the_full_local_suite(self):
+        steps = JOBS["helm-integration-test"]["steps"]
+        phase_index, phase = next((i, step) for i, step in enumerate(steps)
+                                  if step.get("name") == "Distributed Kubernetes deadline regression")
+        full_index = next(i for i, step in enumerate(steps)
+                          if "CAESIUM_TEST_SHARD_INDEX=" in step.get("run", ""))
+        self.assertLess(full_index, phase_index)
+        self.assertEqual(phase["if"], "matrix.shard == 1")
+        self.assertFalse(phase.get("continue-on-error", False))
+        command = phase["run"]
+        self.assertTrue(command.startswith("set -euo pipefail\n"))
+        switch = command.index("kubectl set env statefulset/caesium --containers=caesium")
+        rollout = command.index("kubectl rollout status statefulset/caesium --timeout=240s")
+        invocation = command.index("docker run --rm")
+        self.assertLess(switch, rollout)
+        self.assertLess(rollout, invocation)
+        server = command[switch:rollout]
+        runner = command[invocation:]
+        for setting in ("CAESIUM_EXECUTION_MODE=distributed", "CAESIUM_RUN_OWNER_ENABLED=true", "CAESIUM_WORKER_ENABLED=true"):
+            self.assertIn(setting, server)
+        self.assertNotIn("CAESIUM_NODE_ADDRESS=", server)
+        for setting in ("CAESIUM_EXECUTION_MODE=distributed", "CAESIUM_TEST_ENGINE=kubernetes", "KUBECONFIG=/tmp/deadline-kubeconfig", "CAESIUM_TEST_WITNESS_HOST="):
+            self.assertIn(setting, runner)
+        self.assertNotIn("CAESIUM_TEST_SHARD_", runner)
+        self.assertIn("-test.run '^TestIntegrationTestSuite$'", runner)
+        self.assertIn("-testify.m '^TestDistributedKubernetesDeadlines$'", runner)
+        self.assertIn(":/tmp/deadline-kubeconfig:ro", runner)
+        self.assertIn('tee "$deadline_log"', runner)
+
+    def test_distributed_deadline_witness_selects_an_ipv4_gateway(self):
+        phase = next(step for step in JOBS["helm-integration-test"]["steps"]
+                     if step.get("name") == "Distributed Kubernetes deadline regression")
+        command = phase["run"]
+        selector = command[command.index("witness_host=$(python3"):command.index("deadline_log=")]
+        ipv4 = {"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"}
+        ipv6 = {"Subnet": "fc00:f853:ccd:e793::/64", "Gateway": "fc00:f853:ccd:e793::1"}
+        for configs, expected in (
+            ([ipv4], "172.18.0.1"),
+            ([ipv6, ipv4], "172.18.0.1"),
+            ([{"Subnet": "fc00:f853:ccd:e793::/64"}, ipv4], "172.18.0.1"),
+            ([{"Gateway": ""}, ipv6, ipv4], "172.18.0.1"),
+            ([ipv6], None),
+            ([], None),
+        ):
+            with self.subTest(configs=configs):
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", selector],
+                    env={**os.environ, "network_config": json.dumps(configs)},
+                    capture_output=True, text=True,
+                )
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("kind network has no IPv4 gateway", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"Kubernetes deadline witness gateway: {expected}", result.stdout)
+
+    def test_distributed_kubernetes_deadline_gate_rejects_missing_or_skipped_coverage(self):
+        phase = next(step for step in JOBS["helm-integration-test"]["steps"]
+                     if step.get("name") == "Distributed Kubernetes deadline regression")
+        command = phase["run"]
+        verifier = command[command.index("if ! grep -Eq --"):]
+        passed = "    --- PASS: TestIntegrationTestSuite/TestDistributedKubernetesDeadlines (1.00s)\n"
+        for output, expected in (
+            (passed, 0),
+            ("PASS\n", 1),
+            ("", 1),
+            ("    --- SKIP: TestIntegrationTestSuite/TestDistributedKubernetesDeadlines (0.00s)\n", 1),
+            (passed + "        --- SKIP: TestIntegrationTestSuite/TestDistributedKubernetesDeadlines/run_timeout (0.00s)\n", 1),
+            (passed + "    --- SKIP: TestIntegrationTestSuite/Unrelated (0.00s)\n", 0),
+        ):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
+                log = Path(tmp) / "deadline.log"
+                log.write_text(output)
+                result = subprocess.run(["bash", "-c", verifier],
+                                        env={**os.environ, "deadline_log": str(log)},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
     def test_fixture_and_build_paths_select_tests(self):
         filters = yaml.safe_load(next(
