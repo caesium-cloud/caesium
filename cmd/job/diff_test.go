@@ -1,0 +1,256 @@
+package job
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDiffFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"server", "json", "prune", "api-key", "path"} {
+		if diffCmd.Flags().Lookup(name) == nil {
+			t.Fatalf("--%s flag is not registered", name)
+		}
+	}
+
+	server := diffCmd.Flags().Lookup("server")
+	if got := server.DefValue; got != defaultDiffServer {
+		t.Fatalf("--server default = %q, want %q", got, defaultDiffServer)
+	}
+	if got := diffCmd.Flags().Lookup("json").DefValue; got != "false" {
+		t.Fatalf("--json default = %q, want false", got)
+	}
+	if got := diffCmd.Flags().Lookup("prune").DefValue; got != "false" {
+		t.Fatalf("--prune default = %q, want false", got)
+	}
+	if got := diffCmd.Flags().Lookup("api-key").DefValue; got != "" {
+		t.Fatalf("--api-key default = %q, want empty", got)
+	}
+}
+
+func TestDiffHelpDescribesServerNotDatabase(t *testing.T) {
+	require.Contains(t, diffCmd.Short, "server")
+	require.NotContains(t, diffCmd.Short, "database")
+	require.Contains(t, diffCmd.Long, "POST /v1/jobdefs/diff")
+	require.Contains(t, diffCmd.Long, "--prune")
+	require.Contains(t, diffCmd.Long, "--json")
+	require.Contains(t, diffCmd.Long, "Exit status")
+}
+
+func TestScopeJobDiffOmitsRemovesWithoutPrune(t *testing.T) {
+	resp := &jobDiffResponse{
+		Added:    []json.RawMessage{[]byte(`{"alias":"new-job"}`)},
+		Removed:  []json.RawMessage{[]byte(`{"alias":"other-job"}`)},
+		Modified: []json.RawMessage{[]byte(`{"alias":"changed-job","diff":"-old\n+new\n"}`)},
+	}
+
+	scoped := scopeJobDiff(resp, false)
+	require.True(t, scoped.inScope())
+	require.Equal(t, []string{"new-job"}, rawAliases(scoped.Added))
+	require.Equal(t, []string{"changed-job"}, rawAliases(scoped.Modified))
+	require.Empty(t, scoped.Removed)
+	require.Equal(t, []string{"other-job"}, rawAliases(scoped.WouldPrune))
+
+	pruned := scopeJobDiff(resp, true)
+	require.True(t, pruned.inScope())
+	require.Equal(t, []string{"other-job"}, rawAliases(pruned.Removed))
+	require.Empty(t, pruned.WouldPrune)
+}
+
+func TestScopeJobDiffUnrelatedServerJobsAreNotInScope(t *testing.T) {
+	resp := &jobDiffResponse{
+		Removed: []json.RawMessage{
+			[]byte(`{"alias":"already-on-server"}`),
+			[]byte(`{"alias":"another-job"}`),
+		},
+	}
+
+	scoped := scopeJobDiff(resp, false)
+	require.False(t, scoped.inScope())
+	require.Empty(t, scoped.Added)
+	require.Empty(t, scoped.Modified)
+	require.Empty(t, scoped.Removed)
+	require.Equal(t, []string{"already-on-server", "another-job"}, rawAliases(scoped.WouldPrune))
+	require.NoError(t, jobDiffInScopeError(scoped))
+
+	pruned := scopeJobDiff(resp, true)
+	require.True(t, pruned.inScope())
+	err := jobDiffInScopeError(pruned)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errJobDiffInScope)
+	require.Contains(t, err.Error(), "2 to delete")
+}
+
+func TestJobDiffInScopeErrorCountsCreatesAndUpdates(t *testing.T) {
+	scoped := scopedJobDiff{
+		Added:    []json.RawMessage{[]byte(`{"alias":"a"}`)},
+		Modified: []json.RawMessage{[]byte(`{"alias":"b"}`), []byte(`{"alias":"c"}`)},
+	}
+	err := jobDiffInScopeError(scoped)
+	require.ErrorIs(t, err, errJobDiffInScope)
+	require.Contains(t, err.Error(), "1 to create")
+	require.Contains(t, err.Error(), "2 to update")
+	require.True(t, errors.Is(err, errJobDiffInScope))
+}
+
+func TestRenderJobDiffSeparatesPruneCandidates(t *testing.T) {
+	cmd, out := testDiffCmd()
+	scoped := scopeJobDiff(&jobDiffResponse{
+		Added:   []json.RawMessage{[]byte(`{"alias":"new-job"}`)},
+		Removed: []json.RawMessage{[]byte(`{"alias":"other-job"}`)},
+	}, false)
+
+	require.NoError(t, renderJobDiff(cmd, scoped))
+	got := out.String()
+	require.Contains(t, got, "Creates:")
+	require.Contains(t, got, "  - new-job")
+	require.NotContains(t, got, "Deletes:")
+	require.Contains(t, got, jobDiffWouldPruneHdr)
+	require.Contains(t, got, "  - other-job")
+}
+
+func TestRenderJobDiffPruneListsDeletes(t *testing.T) {
+	cmd, out := testDiffCmd()
+	scoped := scopeJobDiff(&jobDiffResponse{
+		Removed: []json.RawMessage{[]byte(`{"alias":"gone"}`)},
+	}, true)
+
+	require.NoError(t, renderJobDiff(cmd, scoped))
+	got := out.String()
+	require.Contains(t, got, "Deletes:")
+	require.Contains(t, got, "  - gone")
+	require.NotContains(t, got, jobDiffWouldPruneHdr)
+}
+
+func TestRenderJobDiffNoChanges(t *testing.T) {
+	cmd, out := testDiffCmd()
+	require.NoError(t, renderJobDiff(cmd, scopedJobDiff{}))
+	require.Equal(t, "No changes detected.\n", out.String())
+}
+
+func TestRenderJobDiffUnchangedWithPruneCandidates(t *testing.T) {
+	cmd, out := testDiffCmd()
+	scoped := scopeJobDiff(&jobDiffResponse{
+		Removed: []json.RawMessage{[]byte(`{"alias":"other"}`)},
+	}, false)
+	require.NoError(t, renderJobDiff(cmd, scoped))
+	got := out.String()
+	require.Contains(t, got, "No changes detected.")
+	require.Contains(t, got, jobDiffWouldPruneHdr)
+	require.Contains(t, got, "  - other")
+	require.NotContains(t, got, "Deletes:")
+}
+
+func TestWriteJobDiffJSONOmitsRemovesWithoutPrune(t *testing.T) {
+	cmd, out := testDiffCmd()
+	scoped := scopeJobDiff(&jobDiffResponse{
+		Added:   []json.RawMessage{[]byte(`{"alias":"new-job","labels":{"k":"v"}}`)},
+		Removed: []json.RawMessage{[]byte(`{"alias":"other-job"}`)},
+	}, false)
+
+	require.NoError(t, writeJobDiffJSON(cmd, scoped))
+	raw := out.Bytes()
+	require.True(t, json.Valid(bytes.TrimSpace(raw)), "stdout: %s", raw)
+
+	var parsed jobDiffJSON
+	require.NoError(t, json.Unmarshal(raw, &parsed))
+	require.Equal(t, jobDiffJSONVersion, parsed.Version)
+	require.Equal(t, []string{"new-job"}, rawAliases(parsed.Added))
+	require.Contains(t, string(parsed.Added[0]), `"labels"`)
+	require.Empty(t, parsed.Removed)
+	require.Equal(t, []string{"other-job"}, rawAliases(parsed.WouldPrune))
+}
+
+func TestSendDiffRequestPostsJSONAndBearerToken(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotAuth   string
+		gotCT     string
+		gotBody   jobDiffRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotCT = r.Header.Get("Content-Type")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":[{"alias":"n"}],"removed":[{"alias":"o"}],"modified":[]}`))
+	}))
+	defer srv.Close()
+
+	defs := []schema.Definition{{
+		APIVersion: schema.APIVersionV1,
+		Kind:       schema.KindJob,
+		Metadata:   schema.Metadata{Alias: "n"},
+	}}
+	resp, err := sendDiffRequest(context.Background(), srv.URL, "secret-key", defs)
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/v1/jobdefs/diff", gotPath)
+	require.Equal(t, "Bearer secret-key", gotAuth)
+	require.Equal(t, "application/json", gotCT)
+	require.Len(t, gotBody.Definitions, 1)
+	require.Equal(t, "n", gotBody.Definitions[0].Metadata.Alias)
+	require.Equal(t, []string{"n"}, rawAliases(resp.Added))
+	require.Equal(t, []string{"o"}, rawAliases(resp.Removed))
+}
+
+func TestSendDiffRequestSurfacesHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request: invalid definition", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	_, err := sendDiffRequest(context.Background(), srv.URL, "", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "job diff failed (400)")
+	require.Contains(t, err.Error(), "invalid definition")
+}
+
+func TestWriteJobDiffJSONPrunePutsDeletesInRemoved(t *testing.T) {
+	cmd, out := testDiffCmd()
+	scoped := scopeJobDiff(&jobDiffResponse{
+		Removed: []json.RawMessage{[]byte(`{"alias":"other-job"}`)},
+	}, true)
+
+	require.NoError(t, writeJobDiffJSON(cmd, scoped))
+	var parsed jobDiffJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &parsed))
+	require.Equal(t, []string{"other-job"}, rawAliases(parsed.Removed))
+	require.Empty(t, parsed.WouldPrune)
+}
+
+func testDiffCmd() (*cobra.Command, *bytes.Buffer) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	return cmd, &out
+}
+
+func rawAliases(items []json.RawMessage) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, rawAlias(item))
+	}
+	return out
+}

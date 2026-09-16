@@ -246,7 +246,7 @@ Useful CLI commands:
 
 ```bash
 caesium job lint --path ./jobs
-caesium job diff --path ./jobs
+caesium job diff --path ./jobs --server http://localhost:8080
 caesium job apply --path ./jobs --server http://localhost:8080
 caesium job schema --doc
 caesium run retry-callbacks --job-id <job-id> --run-id <run-id>
