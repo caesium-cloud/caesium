@@ -271,10 +271,11 @@ steps:
 		assert.Equal(t, "symlink-discovery-test", defs[0].Metadata.Alias)
 
 		watcher := newTestWatcher(t)
-		watchedDirs, err := setupWatches(watcher, resolved)
+		watchedDirs, rootPaths, err := setupWatches(watcher, resolved)
 		require.NoError(t, err)
 		assert.True(t, watchedDirs[resolved[0]], "the resolved directory root must be watched recursively")
 		assert.Contains(t, watcher.WatchList(), resolved[0])
+		assert.Contains(t, rootPaths, resolved[0])
 	})
 }
 
@@ -297,7 +298,7 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 		require.NoError(t, os.MkdirAll(nested, 0o755))
 
 		watcher := newTestWatcher(t)
-		watchedDirs, err := setupWatches(watcher, []string{manifestPath})
+		watchedDirs, _, err := setupWatches(watcher, []string{manifestPath})
 		require.NoError(t, err)
 
 		recursive, ok := watchedDirs[root]
@@ -314,12 +315,13 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 		require.NoError(t, os.MkdirAll(nested, 0o755))
 
 		watcher := newTestWatcher(t)
-		watchedDirs, err := setupWatches(watcher, []string{root})
+		watchedDirs, rootPaths, err := setupWatches(watcher, []string{root})
 		require.NoError(t, err)
 
 		assert.True(t, watchedDirs[root])
 		assert.True(t, watchedDirs[filepath.Join(root, "a")])
 		assert.True(t, watchedDirs[nested])
+		assert.Contains(t, rootPaths, root)
 	})
 
 	t.Run("a directory argument's recursive tag wins over a file argument sharing its parent", func(t *testing.T) {
@@ -331,10 +333,81 @@ func TestSetupWatchesSingleFileInput(t *testing.T) {
 		// root supplied as BOTH a directory input and (via job.yaml) a file
 		// input whose parent is that same directory — the directory's
 		// recursive tag must win regardless of slice order.
-		watchedDirs, err := setupWatches(watcher, []string{manifestPath, root})
+		watchedDirs, _, err := setupWatches(watcher, []string{manifestPath, root})
 		require.NoError(t, err)
 		assert.True(t, watchedDirs[root], "the shared directory must end up tagged recursive")
 	})
+}
+
+// TestRootRecreationAfterMove fixes a round-4 P2 finding: moving a selected
+// DIRECTORY root away (removeWatchedSubtree correctly drops it and every
+// descendant from watchedDirs on the Remove/Rename event) and recreating it
+// left NOTHING watching for its return — a directory root's own tree only
+// ever watches itself and its descendants, never its parent, so the parent
+// directory's watch (which WOULD see the recreation) simply didn't exist.
+// setupWatches now also installs a non-recursive watch on each directory
+// root's OWN parent and records the root in rootPaths; this proves the
+// full sequence a real watch-mode session goes through: initial setup,
+// the root moving away, its recreation being noticed via rootPaths (the
+// event loop's job, exercised here directly since it is the exact check
+// dev.go's Create branch performs), and — critically — that a SUBSEQUENT
+// edit nested inside the recreated root is still picked up, proving full
+// recursive watching was genuinely restored under it, not just the root
+// entry itself.
+func TestRootRecreationAfterMove(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "jobs")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "job.job.yaml"), []byte(testManifest("original")), 0o644))
+
+	watcher := newTestWatcher(t)
+	watchedDirs, rootPaths, err := setupWatches(watcher, []string{root})
+	require.NoError(t, err)
+	require.Contains(t, rootPaths, root)
+	require.True(t, watchedDirs[root])
+	parent := filepath.Dir(root)
+	require.Contains(t, watcher.WatchList(), parent, "the root's own parent must be watched too")
+
+	// Move the root away — the real-world equivalent of `mv jobs /elsewhere`
+	// — and simulate the Rename event's handling exactly as dev.go's event
+	// loop would: removeWatchedSubtree drops the root and its descendant.
+	elsewhere := filepath.Join(base, "elsewhere")
+	require.NoError(t, os.Rename(root, elsewhere))
+	removeWatchedSubtree(watcher, root, watchedDirs)
+	assert.NotContains(t, watchedDirs, root)
+	assert.NotContains(t, watcher.WatchList(), root)
+	// rootPaths must survive: we still want to recognize the root's return.
+	assert.Contains(t, rootPaths, root)
+
+	// Recreate the root with a (different) valid DAG — the real-world
+	// equivalent of `mkdir jobs && write jobs/job.yaml`.
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "job.job.yaml"), []byte(testManifest("recreated")), 0o644))
+
+	// This is the exact check dev.go's event loop's Create branch performs
+	// before falling back to handleDirectoryCreated: is the created name one
+	// of the tracked roots? If so, restore full recursive watching under it.
+	_, isRoot := rootPaths[filepath.Clean(root)]
+	require.True(t, isRoot, "the recreated path must still be recognized as a tracked root")
+	foundYAML, err := addRecursiveWatch(watcher, root, watchedDirs)
+	require.NoError(t, err)
+	assert.True(t, foundYAML, "the recreated root's own manifest must be found on restoration")
+	assert.True(t, watchedDirs[root], "the root must be recursively tracked again")
+	assert.Contains(t, watcher.WatchList(), root)
+
+	// A SUBSEQUENT edit nested inside the recreated root must still be
+	// picked up — proving recursive watching was genuinely restored, not
+	// just a watch on the root entry itself.
+	nested := filepath.Join(root, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+	foundYAML, err = handleDirectoryCreated(watcher, nested, watchedDirs)
+	require.NoError(t, err)
+	assert.False(t, foundYAML, "nothing written into it yet")
+	assert.True(t, watchedDirs[nested], "the newly created nested directory must be watched recursively")
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "nested.job.yaml"), []byte(testManifest("nested")), 0o644))
+	defs, err := jobdef.CollectDefinitions([]string{root}, true)
+	require.NoError(t, err)
+	require.Len(t, defs, 2, "both the recreated root's own manifest and the nested one must be discovered")
 }
 
 // TestHandleDirectoryCreated fixes the same second-round regression at the
@@ -396,7 +469,7 @@ func TestPathNormalizationDefaultRoot(t *testing.T) {
 	t.Chdir(root)
 
 	watcher := newTestWatcher(t)
-	watchedDirs, err := setupWatches(watcher, []string{"."})
+	watchedDirs, _, err := setupWatches(watcher, []string{"."})
 	require.NoError(t, err)
 	assert.True(t, watchedDirs["."], "the default root must be tracked under its clean form")
 

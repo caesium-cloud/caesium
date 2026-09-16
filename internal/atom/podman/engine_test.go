@@ -500,6 +500,44 @@ func (s *PodmanTestSuite) TestCreateGetError() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after TestCreateStartError/TestCreateGetError's fix, a
+// SIGINT landing WHILE the ContainerCreate request itself is in flight
+// could still orphan a container — the server may commit it before the
+// client sees a cancellation error, and Create would return with no ID at
+// all to clean up. The fake backend cancels the engine's context from
+// inside its ContainerCreate handler (simulating the server completing the
+// request at the exact moment SIGINT arrives) and then reports success,
+// proving Create still definitively completes the allocation call, notices
+// the cancellation afterward, and removes the container it just learned
+// about rather than leaking it.
+func (s *PodmanTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockPodmanBackend{}
+	engine := &podmanEngine{backend: backend, ctx: ctx}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	backend.On("ImageExists", req.Image).Return(false, nil)
+	backend.On("ImagePull", req.Image).Return()
+	backend.
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
+		Run(func(mock.Arguments) { cancel() }).
+		Return()
+	backend.On("ContainerStop", testAtomID).Return(nil)
+	backend.On("ContainerRemove", testAtomID).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestWait() {
 	req := &atom.EngineWaitRequest{
 		ID:      testAtomID,

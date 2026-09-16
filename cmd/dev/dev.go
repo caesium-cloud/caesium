@@ -123,7 +123,10 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	// expanding into) that subtree would let the job's own output write
 	// retrigger the run that produced it, forever. setupWatches keeps that
 	// distinction and the event loop's Create handling below respects it.
-	watchedDirs, err := setupWatches(watcher, paths)
+	// rootPaths is the set of directory arguments themselves, each also
+	// watched from its OWN parent — see setupWatches — so moving one away
+	// and recreating it is still observable.
+	watchedDirs, rootPaths, err := setupWatches(watcher, paths)
 	if err != nil {
 		return err
 	}
@@ -147,12 +150,33 @@ func runDev(cmd *cobra.Command, _ []string) error {
 
 			if event.Op&fsnotify.Create != 0 {
 				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
-					// A new (or recreated) subdirectory. handleDirectoryCreated
-					// only expands it (and rescans for YAML written before the
-					// watch was established — the create-dir-then-write-file
-					// race) when it lands inside a RECURSIVELY managed tree; a
-					// directory appearing under a lone file's non-recursive
-					// parent watch is intentionally left unwatched.
+					cleanName := filepath.Clean(event.Name)
+					if _, isRoot := rootPaths[cleanName]; isRoot {
+						// A selected directory root reappeared under its
+						// OWN path (moved away — removeWatchedSubtree
+						// dropped it and everything beneath it on the
+						// Remove/Rename below — then recreated). Nothing
+						// else is watching for this: a root's tree only
+						// ever watches itself and its descendants, never
+						// its parent's other children. Restore full
+						// recursive watching under it.
+						foundYAML, err := addRecursiveWatch(watcher, cleanName, watchedDirs)
+						if err != nil {
+							_, _ = fmt.Fprintf(w, "Watch error: %v\n", err)
+						}
+						if foundYAML {
+							debounce.Reset(200 * time.Millisecond)
+						}
+						continue
+					}
+					// A new (or recreated) NESTED subdirectory.
+					// handleDirectoryCreated only expands it (and rescans
+					// for YAML written before the watch was established —
+					// the create-dir-then-write-file race) when it lands
+					// inside a RECURSIVELY managed tree; a directory
+					// appearing under a lone file's (or a root's own)
+					// non-recursive parent watch is intentionally left
+					// unwatched.
 					foundYAML, err := handleDirectoryCreated(watcher, event.Name, watchedDirs)
 					if err != nil {
 						_, _ = fmt.Fprintf(w, "Watch error: %v\n", err)
@@ -171,10 +195,11 @@ func runDev(cmd *cobra.Command, _ []string) error {
 				// its own when an ancestor moves. Leaving a descendant's old
 				// path in watchedDirs would make a later recreation at that
 				// same path look "already watched" and skip re-adding a real
-				// watch for its new inode. If the same tree is recreated
-				// later, the Create branch above re-adds it from scratch
-				// (the parent directory's watch reports that Create
-				// regardless).
+				// watch for its new inode. rootPaths is untouched here (on
+				// purpose): if event.Name was a selected directory root
+				// itself, we still want to recognize its return — see the
+				// rootPaths check in the Create branch above, and the
+				// parent watch setupWatches installs for exactly this case.
 				removeWatchedSubtree(watcher, event.Name, watchedDirs)
 			}
 			if !jobdef.IsYAML(event.Name) {
@@ -225,34 +250,62 @@ func resolveSymlinks(paths []string) ([]string, error) {
 
 // setupWatches installs the initial fsnotify watches for paths (already
 // symlink-resolved by the caller) and returns the tracking map the event
-// loop's dynamic directory-creation handling (handleDirectoryCreated) reads.
-// watchedDirs maps every watched directory to whether it is part of a
-// RECURSIVELY managed tree: true for a directory --path argument (and
+// loop's dynamic directory-creation handling (handleDirectoryCreated) reads,
+// plus the set of DIRECTORY --path arguments themselves (rootPaths — see
+// below). watchedDirs maps every watched directory to whether it is part of
+// a RECURSIVELY managed tree: true for a directory --path argument (and
 // everything addRecursiveWatch finds beneath it, including subdirectories
-// discovered later), false for the single, non-recursive watch installed on
-// an explicit file argument's containing directory. Directory arguments are
-// processed first so that, if a file argument names a path already covered
-// by one, the recursive tag always wins.
-func setupWatches(watcher *fsnotify.Watcher, paths []string) (map[string]bool, error) {
-	watchedDirs := make(map[string]bool)
+// discovered later), false for a single, non-recursive watch — either an
+// explicit file argument's containing directory, or a directory root's OWN
+// parent (see rootPaths). Directory arguments are processed first so that,
+// if a file argument names a path already covered by one, the recursive tag
+// always wins.
+//
+// rootPaths is the set of directory --path arguments' own (clean) paths.
+// setupWatches also installs a non-recursive watch on each one's PARENT
+// (unless the root has no meaningful parent, e.g. "." or "/"), so that
+// moving the root away and recreating it is observable: removeWatchedSubtree
+// drops the root and everything beneath it on the Remove/Rename event, and
+// nothing would otherwise be left watching for its return — a directory
+// root's own tree only ever watches itself and its descendants, never
+// upward. The event loop reacts to a Create whose name is EXACTLY one of
+// rootPaths (checked before the generic non-recursive-parent gating below)
+// by re-running addRecursiveWatch for that root, restoring full recursive
+// watching under it without expanding into unrelated content the parent
+// might also contain — the same "filtered to one name" idea the single-file
+// case already relies on.
+func setupWatches(watcher *fsnotify.Watcher, paths []string) (watchedDirs map[string]bool, rootPaths map[string]struct{}, err error) {
+	watchedDirs = make(map[string]bool)
+	rootPaths = make(map[string]struct{})
 
 	for _, p := range paths {
 		info, statErr := os.Stat(p)
 		if statErr != nil {
-			return nil, fmt.Errorf("stat %s: %w", p, statErr)
+			return nil, nil, fmt.Errorf("stat %s: %w", p, statErr)
 		}
 		if !info.IsDir() {
 			continue
 		}
 		if _, err := addRecursiveWatch(watcher, p, watchedDirs); err != nil {
-			return nil, fmt.Errorf("watch %s: %w", p, err)
+			return nil, nil, fmt.Errorf("watch %s: %w", p, err)
+		}
+
+		root := filepath.Clean(p)
+		rootPaths[root] = struct{}{}
+		if parentDir := filepath.Dir(root); parentDir != root {
+			if _, ok := watchedDirs[parentDir]; !ok {
+				if err := watcher.Add(parentDir); err != nil {
+					return nil, nil, fmt.Errorf("watch %s: %w", parentDir, err)
+				}
+				watchedDirs[parentDir] = false
+			}
 		}
 	}
 
 	for _, p := range paths {
 		info, statErr := os.Stat(p)
 		if statErr != nil {
-			return nil, fmt.Errorf("stat %s: %w", p, statErr)
+			return nil, nil, fmt.Errorf("stat %s: %w", p, statErr)
 		}
 		if info.IsDir() {
 			continue
@@ -262,12 +315,12 @@ func setupWatches(watcher *fsnotify.Watcher, paths []string) (map[string]bool, e
 			continue
 		}
 		if err := watcher.Add(parentDir); err != nil {
-			return nil, fmt.Errorf("watch %s: %w", parentDir, err)
+			return nil, nil, fmt.Errorf("watch %s: %w", parentDir, err)
 		}
 		watchedDirs[parentDir] = false
 	}
 
-	return watchedDirs, nil
+	return watchedDirs, rootPaths, nil
 }
 
 // handleDirectoryCreated processes a Create event whose target, newDir, is a

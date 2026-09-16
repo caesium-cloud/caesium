@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -186,12 +188,58 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		}
 	}
 
-	pod, err := e.backend.Create(e.ctx, spec, metav1.CreateOptions{})
+	// Issue the allocation call itself against a bounded, DETACHED context
+	// rather than e.ctx: e.ctx is cancellable (e.g. SIGINT from `caesium
+	// dev`), and if it is cancelled WHILE this request is in flight, the
+	// API server may already have persisted the pod by the time the client
+	// sees a context-cancelled error — leaving nothing to clean up, since
+	// we would never learn the pod exists. spec.Name is generated
+	// client-side above, before this call, so it stays findable regardless
+	// of which context the call itself used. Running it to a definitive
+	// completion first, then checking e.ctx separately below, means Create
+	// always knows whether a pod exists and can remove it if the caller
+	// has since given up.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	pod, err := e.backend.Create(createCtx, spec, metav1.CreateOptions{})
 	if err != nil {
+		if e.ctx.Err() != nil {
+			// The call failed for its own reason (possibly unrelated to
+			// e.ctx, since createCtx is independent), but the caller has
+			// ALSO given up in the meantime. Best-effort clean up by the
+			// deterministic name in case the API server persisted the pod
+			// anyway (e.g. the failure was a response-read error after the
+			// server had already committed it).
+			e.cleanupFailedCreate(spec.Name, err)
+			return nil, e.ctx.Err()
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// Create succeeded — the pod exists — but the caller is no longer
+		// waiting for it. Remove it and report the cancellation, not a
+		// spurious success. See #480.
+		e.cleanupFailedCreate(spec.Name, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	return &Atom{metadata: pod}, nil
+}
+
+// createRequestTimeout bounds the Create API call above, independent of the
+// caller's (possibly SIGINT-cancelled) context.
+const createRequestTimeout = 30 * time.Second
+
+// cleanupFailedCreate best-effort deletes a pod that was successfully
+// created but whose Create call is failing for an unrelated reason (most
+// commonly: the caller's context was cancelled around the create request).
+// Stop already deletes against a detached context.Background() (see its own
+// comment), so this is safe to call regardless of why Create is failing.
+func (e *kubernetesEngine) cleanupFailedCreate(name string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: name, Force: true}); err != nil {
+		log.Warn("failed to clean up pod after Create failed", "name", name, "cause", cause, "error", err)
+	}
 }
 
 func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {

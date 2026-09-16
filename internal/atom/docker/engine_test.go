@@ -851,6 +851,48 @@ func (s *DockerTestSuite) TestCreateGetError() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after TestCreateStartError/TestCreateGetError's fix, a
+// SIGINT landing WHILE the ContainerCreate request itself is in flight could
+// still orphan a container — the daemon may commit it before the client
+// sees a cancellation error, and Create would return with no ID at all to
+// clean up. The fake backend cancels the engine's context from inside its
+// ContainerCreate handler (simulating the daemon completing the request at
+// the exact moment SIGINT arrives) and then reports success, proving Create
+// still definitively completes the allocation call, notices the
+// cancellation afterward, and removes the container it just learned about
+// rather than leaking it.
+func (s *DockerTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{
+		backend:            backend,
+		ctx:                ctx,
+		subpathHelperImage: subPathHelperImage,
+	}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).
+		Run(func(mock.Arguments) { cancel() }).
+		Return()
+	backend.On("ContainerStop", testAtomID).Return(nil)
+	backend.On("ContainerRemove", testAtomID).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestStop() {
 	req := &atom.EngineStopRequest{
 		ID: testAtomID,

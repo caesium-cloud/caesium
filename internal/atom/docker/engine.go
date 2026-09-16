@@ -31,6 +31,11 @@ import (
 // sub-directory of the volume rather than its root).
 const subPathMinAPIVersion = "1.45"
 
+// createRequestTimeout bounds the ContainerCreate API call in Create,
+// independent of the caller's (possibly SIGINT-cancelled) context — see the
+// comment at its use site.
+const createRequestTimeout = 30 * time.Second
+
 // subPathHelperImage is the canonical default for the CAESIUM_DOCKER_SUBPATH_HELPER_IMAGE
 // override (env.Environment.DockerSubpathHelperImage): the minimal image used
 // to create the sub-directory a VolumeMount.SubPath addresses before the real
@@ -184,9 +189,40 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 
 	log.Info("creating docker container", "image", imageRef)
 
-	created, err := e.backend.ContainerCreate(e.ctx, cfg, hostCfg, nil, nil, req.Name)
+	// Issue the allocation call itself against a bounded, DETACHED context
+	// rather than e.ctx: e.ctx is cancellable (e.g. SIGINT from `caesium
+	// dev`), and if it is cancelled WHILE this request is in flight, the
+	// daemon may already have committed the container by the time the
+	// client sees a context-cancelled error — leaving nothing to clean up,
+	// since we would never learn the container exists. req.Name is a
+	// deterministic identity fixed by the caller before this call, so it
+	// stays findable regardless of which context the call itself used.
+	// Running it to a definitive completion first, then checking e.ctx
+	// separately below, means Create always knows whether a container
+	// exists and can remove it if the caller has since given up.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
+	defer cancelCreate()
+
+	created, err := e.backend.ContainerCreate(createCtx, cfg, hostCfg, nil, nil, req.Name)
 	if err != nil {
+		if e.ctx.Err() != nil {
+			// The call failed for its own reason (possibly unrelated to
+			// e.ctx, since createCtx is independent), but the caller has
+			// ALSO given up in the meantime. Best-effort clean up by the
+			// deterministic name in case the daemon persisted the
+			// container anyway (e.g. the failure was a response-read error
+			// after the daemon had already committed it).
+			e.cleanupFailedCreate(req.Name, err)
+			return nil, e.ctx.Err()
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the container exists — but the
+		// caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	opts := dockercontainer.StartOptions{}

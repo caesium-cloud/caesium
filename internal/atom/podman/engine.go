@@ -111,9 +111,27 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		return nil, err
 	}
 
+	// ContainerCreate itself runs against a bounded context detached from
+	// e.ctx's cancellation (see podmanClient.ContainerCreate) so it always
+	// reaches a definitive outcome; check e.ctx separately here.
 	created, err := e.backend.ContainerCreate(spec)
 	if err != nil {
+		if e.ctx.Err() != nil {
+			// The call failed for its own reason (possibly unrelated to
+			// e.ctx, since it ran detached), but the caller has ALSO given
+			// up in the meantime. Best-effort clean up by the deterministic
+			// name in case the server persisted the container anyway.
+			e.cleanupFailedCreate(spec.Name, err)
+			return nil, e.ctx.Err()
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the container exists — but the
+		// caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	log.Info(

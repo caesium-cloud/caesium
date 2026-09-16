@@ -343,6 +343,46 @@ func (s *KubernetesTestSuite) TestCreateError() {
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after the docker/podman orphan-cleanup fix, a SIGINT
+// landing WHILE the pod-create API request itself is in flight could still
+// orphan a pod — the API server may persist it before the client sees a
+// cancellation error, and Create would return with no handle at all to
+// clean up. The fake backend cancels the engine's context from inside its
+// Create handler (simulating the server completing the request at the
+// exact moment SIGINT arrives) and then reports success, proving Create
+// still definitively completes the allocation call, notices the
+// cancellation afterward, and deletes the pod it just learned the name of
+// rather than leaking it. The pod's name isn't known ahead of time (a
+// client-generated UUID suffix), so the Delete expectation is registered
+// from inside the Create callback once the actual name is known.
+func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test", "cmd"},
+	}
+
+	backend.
+		On("Create", mock.AnythingOfType("*v1.Pod")).
+		Run(func(args mock.Arguments) {
+			pod := args.Get(0).(*v1.Pod)
+			backend.On("Delete", pod.Name).Return()
+			cancel()
+		}).
+		Return()
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
 func (s *KubernetesTestSuite) TestStop() {
 	req := &atom.EngineStopRequest{
 		ID: testAtomID,
