@@ -112,17 +112,3 @@ func Analyze(def *jobdef.Definition) (*Analysis, error) {
 		LeafSteps:      leaves,
 	}, nil
 }
-
-// UniqueImages returns the deduplicated set of container images in definition order.
-func UniqueImages(def *jobdef.Definition) []string {
-	seen := make(map[string]struct{}, len(def.Steps))
-	var images []string
-	for _, s := range def.Steps {
-		if _, ok := seen[s.Image]; ok {
-			continue
-		}
-		seen[s.Image] = struct{}{}
-		images = append(images, s.Image)
-	}
-	return images
-}
