@@ -8,15 +8,22 @@ import { failOnUnexpectedPageErrors } from "./helpers/fixtures";
  * reports about quorum is what the page must render, and every node row must
  * carry an explicit, server-reported liveness.
  *
- * The remaining tests are explicitly SYNTHETIC. This harness runs a single
- * server, so it cannot stop one replica of a three-replica cluster; they
- * intercept `/health` and `/v1/system/nodes` to drive the multi-replica states
- * the console must never mis-render. The corresponding server-side behaviour —
- * that a member which stops answering a dqlite RPC is reported unreachable and
- * downgrades the quorum — is covered for real in Go, by
- * `internal/cluster` (decision table), `api/health_test.go` (the handler and
- * its HTTP status code) and the `TestSystemHealthReportsProbedQuorum`
- * integration scenario against a live server.
+ * The remaining tests are explicitly SYNTHETIC, and cover ONLY the rendering
+ * contract. This harness starts a single `caesium-server` container, so it
+ * cannot stop one replica of a three-replica cluster; they intercept `/health`
+ * and `/v1/system/nodes` to drive the multi-replica states the console must
+ * never mis-render.
+ *
+ * They are NOT the regression for issue #494 and must not be read as one — a
+ * `liveProbe` that always returned success would sail through every one of
+ * them. The authoritative regression is
+ * `TestClusterLivenessObservesARealStoppedNode` in
+ * `test/cluster_liveness_real_test.go`: three real dqlite nodes, one really
+ * stopped, the real probe observing it, with no stubs anywhere. Between here
+ * and there sit `internal/cluster` (the decision table), `api/health_test.go`
+ * (the real handler and its status codes) and the
+ * `TestSystemHealthReportsProbedQuorum` / `TestHealthProbeEndpointsAreSplit`
+ * integration scenarios against a live server.
  */
 
 failOnUnexpectedPageErrors();
