@@ -20,6 +20,7 @@ The UI is served from `/` by the Go API and currently includes:
 
 - `/jobs`
 - `/jobs/:jobId`
+- `/jobs/:jobId/runs` (the deterministic destination for a run detail's **All runs** link)
 - `/jobs/:jobId/runs/:runId`
 - `/stats`
 - `/triggers`
