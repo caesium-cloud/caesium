@@ -477,9 +477,11 @@ func repairClusterAddress(ctx context.Context, dir string, id uint64, address st
 	if err != nil {
 		return false, err
 	}
-	// A journal for a different identity or a superseded address describes a
-	// repair this boot can no longer complete; the live checks below take over.
-	if journalled && (journal.ID != id || journal.Address != address) {
+	// A journal for another identity cannot describe this node. An address
+	// change after an interrupted remove does not invalidate the saved role:
+	// the next boot must re-add this same node at its latest address in that
+	// role, rather than defaulting an absent spare or standby to a voter.
+	if journalled && journal.ID != id {
 		journalled = false
 	}
 
@@ -680,11 +682,13 @@ func openNativeApp(ctx context.Context, dir, address string, seeds []string, opt
 			"reading membership from the leader instead",
 			"node_id", app.ID(), "node_address", app.Address(), "error", err)
 		if members, err = leaderClusterConfiguration(ctx, candidates); err != nil {
-			// Nothing authoritative is reachable, so there is no repair to
-			// attempt and nothing to assert about this node's membership.
-			log.Error("could not read dqlite cluster membership from the local node or the leader",
-				"node_id", app.ID(), "node_address", app.Address(), "error", err)
-			return readyOrClose(ctx, app)
+			// A never-promoted spare has no local configuration, but the leader
+			// may still record it at a stale address. Without either authoritative
+			// view, readiness cannot prove that this node is a cluster member at
+			// its current address. A later rollout could then replace a voter
+			// while this node is unable to take its place.
+			_ = app.Close()
+			return nil, fmt.Errorf("dqlite: could not read cluster membership from the local node or the leader: %w", err)
 		}
 	}
 

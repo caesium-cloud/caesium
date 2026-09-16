@@ -612,4 +612,40 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 	require.Equal(t, newAddr, members[spare].Address,
 		"a never-promoted spare must still be repaired onto its new address")
 	require.Equal(t, client.Spare, members[spare].Role)
+
+	// Simulate a second pod replacement after an interrupted repair removed
+	// this spare but before it re-added it. The journal names the previous
+	// replacement address, yet its role still belongs to this stable node ID.
+	require.NoError(t, apps[3].Close())
+	apps[3] = nil
+	require.NoError(t, writeYAMLFile(dirs[3], repairFileName, addressRepair{
+		ID: spare, Address: newAddr, Role: client.Spare,
+	}))
+	cli, err := apps[0].FindLeader(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cli.Remove(ctx, spare))
+	require.NoError(t, cli.Close())
+	latestAddr := "127.0.0.3:9484"
+	apps[3], err = restartNode(t, ctx, dirs[3], latestAddr, addrs[:1])
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(dirs[3], repairFileName))
+	members = clusterMembers(t, ctx, apps[0])
+	require.Equal(t, latestAddr, members[spare].Address)
+	require.Equal(t, client.Spare, members[spare].Role,
+		"a superseded repair address must not turn an absent spare into a voter")
+
+	// A spare still has no committed configuration after this repair. If all
+	// voters disappear before its next replacement, neither it nor a leader can
+	// prove where the cluster records its address. It must not advertise
+	// readiness merely because its own info.yaml can be rewritten.
+	_, localErr = localClusterConfiguration(ctx, apps[3])
+	require.ErrorIs(t, localErr, ErrNoLocalConfiguration)
+	for idx := range apps {
+		require.NoError(t, apps[idx].Close())
+		apps[idx] = nil
+	}
+	app, err := restartNode(t, ctx, dirs[3], "127.0.0.4:9484", addrs[:1])
+	require.Error(t, err)
+	require.Nil(t, app)
+	require.ErrorContains(t, err, "could not read cluster membership from the local node or the leader")
 }
