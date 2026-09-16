@@ -16,7 +16,7 @@
 
 ## Reference & scope
 
-- **Spec:** `docs/superpowers/specs/2026-05-27-sso-authentication-design.md` (read §5–§13 before starting).
+- **Spec:** `docs/archive/design-sso-authentication.md` (archived; originally `docs/superpowers/specs/2026-05-27-sso-authentication-design.md`) (read §5–§13 before starting).
 - **This plan covers:** P0 (Principal refactor) and P1 (identity/session foundation).
 - **Out of scope (follow-on plans, see end):** P2 OIDC, P3 SAML, P4 LDAP, P5 docs/hardening. Each gets its own detailed plan written against the real library APIs once this foundation is merged.
 - **Definition of done for this plan:** all existing tests stay green; new units are covered; the server starts with SSO env vars set; a session minted by a test fake authenticates against `/v1` exactly like an API key; no provider exists yet so no end-to-end browser login.
