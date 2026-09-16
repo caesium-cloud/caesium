@@ -53,8 +53,13 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
 
-	// health
+	// health. The probes are split on purpose: readiness answers "can this
+	// replica serve?" and liveness answers "is this process running?", because
+	// a replica that cannot reach a raft leader must leave the Service
+	// endpoints without being restart-looped. See api/health.go.
 	e.GET("/health", Health)
+	e.GET("/health/ready", HealthReady)
+	e.GET("/health/live", HealthLive)
 	e.GET("/auth/status", authStatus(vars))
 	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions, sso, providers)
 	registerInternalWakeup(e, vars, wakeupHandler)

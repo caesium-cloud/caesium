@@ -152,6 +152,46 @@ func (s *IntegrationTestSuite) TestSystemHealthReportsProbedQuorum() {
 	assert.Equal(s.T(), int64(quorum.ReachableVoters), envelope.Checks.Nodes.Count)
 }
 
+// TestHealthProbeEndpointsAreSplit drives the two Kubernetes probe targets the
+// Helm chart points at (helm/caesium/templates/statefulset.yaml). They answer
+// different questions on purpose: readiness is "can this replica serve?", which
+// must fail and pull an unserviceable replica out of the Service endpoints;
+// liveness is "is this process running?", which must not restart-loop a replica
+// that is merely cut off from its peers.
+func (s *IntegrationTestSuite) TestHealthProbeEndpointsAreSplit() {
+	// Liveness: minimal, touches no dependency, and is reachable without auth
+	// so the kubelet can call it.
+	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+"/health/live", nil)
+	require.NoError(s.T(), err)
+	live, err := io.ReadAll(resp.Body)
+	require.NoError(s.T(), resp.Body.Close())
+	require.NoError(s.T(), err)
+
+	require.Equal(s.T(), http.StatusOK, resp.StatusCode, string(live))
+	var liveness struct {
+		Status string `json:"status"`
+		Uptime int64  `json:"uptime"`
+	}
+	require.NoError(s.T(), json.Unmarshal(live, &liveness), string(live))
+	assert.Equal(s.T(), "healthy", liveness.Status)
+	assert.Positive(s.T(), liveness.Uptime)
+	// Liveness must stay cheap: no cluster or dependency detail belongs here.
+	assert.NotContains(s.T(), string(live), "checks")
+
+	// Readiness: the full report, and on a healthy lane a serviceable replica.
+	readyResp, err := s.doRequest(http.MethodGet, s.caesiumURL+"/health/ready", nil)
+	require.NoError(s.T(), err)
+	ready, err := io.ReadAll(readyResp.Body)
+	require.NoError(s.T(), readyResp.Body.Close())
+	require.NoError(s.T(), err)
+
+	require.Equal(s.T(), http.StatusOK, readyResp.StatusCode, string(ready))
+	var envelope healthEnvelope
+	require.NoError(s.T(), json.Unmarshal(ready, &envelope), string(ready))
+	assert.Equal(s.T(), "healthy", envelope.Checks.Database.Status)
+	assert.NotNil(s.T(), envelope.Checks.Cluster, "readiness must carry the cluster assessment")
+}
+
 // TestSystemNodesReportObservedReachability drives `/v1/system/nodes`, the
 // other surface the console's cluster table reads. Every row must carry its
 // observed liveness; the raft members must be flagged reachable with exactly

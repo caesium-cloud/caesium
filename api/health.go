@@ -118,9 +118,41 @@ func defaultHealthChecker() healthChecker {
 	}
 }
 
-// Health is used to determine if Caesium is healthy.
+// LivenessResponse is the minimal body behind /health/live.
+type LivenessResponse struct {
+	Status Status        `json:"status"`
+	Uptime time.Duration `json:"uptime"`
+}
+
+// Health reports full cluster and dependency health, and answers whether THIS
+// node can serve. It is also what /health/ready answers.
 func Health(c *echo.Context) error {
 	return defaultHealthChecker().handle(c)
+}
+
+// HealthReady is the Kubernetes READINESS answer: can this replica serve
+// requests right now? It is the same report as /health, so its status code
+// tracks this node's own serviceability — a replica that cannot reach a raft
+// leader, for whatever reason, must leave the Service endpoints rather than
+// keep receiving traffic it cannot answer.
+func HealthReady(c *echo.Context) error {
+	return defaultHealthChecker().handle(c)
+}
+
+// HealthLive is the Kubernetes LIVENESS answer: is the process running and
+// able to serve HTTP at all?
+//
+// It deliberately touches nothing else. Liveness failure RESTARTS the
+// container, and restarting cures a deadlocked process — never a dependency.
+// A replica whose dqlite traffic is partitioned from its peers is healthy as a
+// process: it must be pulled out of the ready endpoints (readiness) but must
+// not be restart-looped, which would destroy its state and cannot restore a
+// raft majority.
+func HealthLive(c *echo.Context) error {
+	return c.JSON(http.StatusOK, LivenessResponse{
+		Status: Healthy,
+		Uptime: time.Since(startedAt),
+	})
 }
 
 func (h healthChecker) handle(c *echo.Context) error {
@@ -152,21 +184,21 @@ func (h healthChecker) report(ctx context.Context) (HealthResponse, int) {
 	overall = worstStatus(overall, checks.ActiveRuns.Status)
 	overall = worstStatus(overall, checks.Triggers.Status)
 
-	// The HTTP status code answers a different question from the body: it is
-	// what the Kubernetes liveness and readiness probes read (see
-	// helm/caesium/templates/statefulset.yaml). Only THIS node's inability to
-	// serve may fail it.
+	// The HTTP status code answers a different question from the body. The body
+	// describes the CLUSTER; the code describes THIS REPLICA's ability to serve
+	// the request that just arrived, because this is what the Kubernetes
+	// readiness probe reads (helm/caesium/templates/statefulset.yaml).
 	//
-	// A cluster-wide condition must not: when quorum is lost, every replica's
-	// database check fails at once, and failing every probe would restart or
-	// de-register the whole StatefulSet — which cannot restore a raft majority,
-	// and would destroy the one surface still able to report why. So a
-	// database failure is attributed to the cluster when the snapshot has
-	// positively observed a lost quorum, and to this node otherwise (including
-	// when cluster liveness is merely unknown, which keeps the pre-existing
-	// startup behaviour intact).
+	// So a failing database check always fails it. A locally observed quorum
+	// loss is not proof of a cluster-wide outage: a replica whose dqlite
+	// traffic is partitioned from its peers sees exactly the same thing while B
+	// and C carry on serving, and it must leave the Service endpoints rather
+	// than keep accepting traffic it cannot answer.
+	//
+	// Restart-looping that replica would be wrong, which is why LIVENESS points
+	// at /health/live instead and never consults a dependency.
 	code := http.StatusOK
-	if checks.Database.Status != Healthy && !quorumLost(view) {
+	if checks.Database.Status != Healthy {
 		code = http.StatusServiceUnavailable
 	}
 
@@ -177,12 +209,6 @@ func (h healthChecker) report(ctx context.Context) (HealthResponse, int) {
 	}, code
 }
 
-// quorumLost reports a POSITIVELY OBSERVED loss of quorum. An unknown or
-// not-yet-observed cluster is not a lost one.
-func quorumLost(view cluster.View) bool {
-	return view.Clustered && view.Observed && view.Quorum.Status == cluster.StatusUnavailable
-}
-
 type databaseChecks struct {
 	database   *CheckResult
 	activeRuns *CheckResult
@@ -190,10 +216,35 @@ type databaseChecks struct {
 	workers    int64
 }
 
+// checkKind identifies a database-backed check as its result is published.
+type checkKind int
+
+const (
+	kindDatabase checkKind = iota
+	kindActiveRuns
+	kindTriggers
+	kindWorkers
+)
+
+type publishedCheck struct {
+	kind   checkKind
+	result *CheckResult
+	count  int64
+}
+
 // runDatabaseChecks runs every database-backed check under a shared deadline
-// and returns within it whatever the queries do. The deadline is passed to the
-// queries so the dqlite driver abandons leader discovery, and the select is the
-// backstop that guarantees the handler answers even if a query ignores it.
+// and returns within it whatever the queries managed to do. The deadline is
+// passed to the queries so the dqlite driver abandons leader discovery, and the
+// select is the backstop that guarantees the handler answers even if a query
+// ignores it.
+//
+// Each check publishes its own result the moment it finishes, rather than the
+// batch publishing once at the end. Batching meant one slow INFORMATIONAL count
+// discarded an already-successful `SELECT 1` and reported the database check as
+// failed — a spurious 503 (and, now that readiness reads this code, a replica
+// needlessly pulled out of the Service) caused by a query that proves nothing
+// about serviceability. A timeout must degrade only the checks that actually
+// timed out.
 func (h healthChecker) runDatabaseChecks(ctx context.Context, view cluster.View) databaseChecks {
 	timeout := h.timeout
 	if timeout <= 0 {
@@ -203,34 +254,60 @@ func (h healthChecker) runDatabaseChecks(ctx context.Context, view cluster.View)
 	defer cancel()
 
 	start := time.Now()
-	done := make(chan databaseChecks, 1) // buffered: the goroutine never blocks
-	go func() {
-		result := databaseChecks{
-			database:   h.database(ctx),
-			activeRuns: h.activeRuns(ctx),
-			triggers:   h.triggers(ctx),
-		}
-		if !view.Clustered {
-			result.workers = h.workers(ctx)
-		}
-		done <- result
-	}()
+	// Buffered for every possible publication, so a check that finishes after
+	// the deadline still hands off its result and its goroutine exits.
+	published := make(chan publishedCheck, 4)
+	expected := 3
 
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
-		elapsed := time.Since(start).Milliseconds()
-		return databaseChecks{
-			// A check that could not answer in time has failed. Whether that
-			// failure is this node's fault or the cluster's is decided by the
-			// HTTP status code above, not here.
-			database: &CheckResult{Status: Degraded, LatencyMs: elapsed},
-			// The informational counts are simply not known.
-			activeRuns: &CheckResult{Status: Unknown},
-			triggers:   &CheckResult{Status: Unknown},
+	go func() {
+		published <- publishedCheck{kind: kindDatabase, result: h.database(ctx)}
+		published <- publishedCheck{kind: kindActiveRuns, result: h.activeRuns(ctx)}
+		published <- publishedCheck{kind: kindTriggers, result: h.triggers(ctx)}
+		if !view.Clustered {
+			published <- publishedCheck{kind: kindWorkers, count: h.workers(ctx)}
+		}
+	}()
+	if !view.Clustered {
+		expected++
+	}
+
+	var checks databaseChecks
+	for range expected {
+		select {
+		case p := <-published:
+			switch p.kind {
+			case kindDatabase:
+				checks.database = p.result
+			case kindActiveRuns:
+				checks.activeRuns = p.result
+			case kindTriggers:
+				checks.triggers = p.result
+			case kindWorkers:
+				checks.workers = p.count
+			}
+		case <-ctx.Done():
+			return withTimedOutChecks(checks, time.Since(start).Milliseconds())
 		}
 	}
+	return checks
+}
+
+// withTimedOutChecks fills in only the checks that had not published a result
+// by the deadline. Anything already answered keeps its answer.
+func withTimedOutChecks(checks databaseChecks, elapsedMs int64) databaseChecks {
+	if checks.database == nil {
+		// Serviceability could not be established in time, which for this check
+		// is a failure — not a hang, and not something to infer from a slower,
+		// purely informational query.
+		checks.database = &CheckResult{Status: Degraded, LatencyMs: elapsedMs}
+	}
+	if checks.activeRuns == nil {
+		checks.activeRuns = &CheckResult{Status: Unknown}
+	}
+	if checks.triggers == nil {
+		checks.triggers = &CheckResult{Status: Unknown}
+	}
+	return checks
 }
 
 // worstStatus orders the health vocabulary so the overall status can never be

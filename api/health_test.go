@@ -156,14 +156,16 @@ func TestHealthReportsCrashedReplicaAsDegradedButAvailable(t *testing.T) {
 	require.Equal(t, int64(2), body.Checks.Nodes.Count)
 }
 
-func TestHealthReportsLostQuorumAsUnavailableWithoutFailingTheProbe(t *testing.T) {
+func TestHealthReportsLostQuorumWithoutFailingAServiceableReplica(t *testing.T) {
 	body, code := decodeHealth(t, checkerWithView(clusterView([]cluster.Member{
 		voterMember("10.244.0.8:9001", cluster.Reachable),
 		voterMember("10.244.0.9:9001", cluster.Unreachable),
 		voterMember("10.244.0.10:9001", cluster.Unreachable),
 	}, "")))
 
-	require.Equal(t, http.StatusOK, code, "a cluster-wide condition must not restart every replica")
+	// The quorum assessment alone does not decide the code: this replica's own
+	// database check still answered, so it can serve.
+	require.Equal(t, http.StatusOK, code)
 	require.Equal(t, "unavailable", body.Status)
 	require.Equal(t, "unavailable", body.Checks.Cluster.Status)
 	require.Equal(t, "unavailable", body.Checks.Cluster.Quorum.Status)
@@ -295,20 +297,94 @@ func TestHealthAnswersWithinTheBoundWhenTheDatabaseCheckBlocks(t *testing.T) {
 
 	require.Less(t, elapsed, 5*time.Second, "the handler hung instead of bounding the database check")
 
-	// The point of bounding it: the cluster assessment is still reported.
+	// The point of bounding it: the cluster assessment is still reported, so
+	// the console can explain the outage even while nothing can be queried.
 	require.NotNil(t, body.Checks.Cluster)
 	require.Equal(t, "unavailable", body.Checks.Cluster.Quorum.Status)
 	require.Equal(t, "unavailable", body.Status)
 
-	// A check that could not answer in time is a failed check, not a hang...
+	// A check that could not answer in time is a failed check, not a hang.
 	require.Equal(t, "degraded", body.Checks.Database.Status)
 	require.Equal(t, "unknown", body.Checks.ActiveRuns.Status)
 	require.Equal(t, "unknown", body.Checks.Triggers.Status)
 
-	// ...but a cluster-wide failure must not fail every replica's probe, which
-	// cannot restore a raft majority and would take down the only surface still
-	// able to explain why.
-	require.Equal(t, http.StatusOK, code)
+	// This replica cannot serve, so readiness must fail and take it out of the
+	// Service endpoints.
+	require.Equal(t, http.StatusServiceUnavailable, code)
+}
+
+// Review round 3: an isolated replica — dqlite traffic partitioned from its
+// peers, HTTP port still reachable — observes a quorum loss locally while B and
+// C carry on serving. A locally observed quorum loss is not proof of a
+// cluster-wide outage, so it must NOT buy a 200: the Service would keep routing
+// traffic to a node that cannot answer it.
+func TestHealthFailsReadinessForAnIsolatedReplica(t *testing.T) {
+	checker := checkerWithView(clusterView([]cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),   // itself
+		voterMember("10.244.0.9:9001", cluster.Unreachable), // partitioned away
+		voterMember("10.244.0.10:9001", cluster.Unreachable),
+	}, ""))
+	checker.database = func(context.Context) *CheckResult {
+		return &CheckResult{Status: Degraded, LatencyMs: 900}
+	}
+
+	body, code := decodeHealth(t, checker)
+
+	require.Equal(t, http.StatusServiceUnavailable, code,
+		"an isolated replica must leave the ready endpoints")
+
+	// ...and the body still carries the full assessment for the console.
+	require.NotNil(t, body.Checks.Cluster)
+	require.Equal(t, "unavailable", body.Checks.Cluster.Quorum.Status)
+	require.Equal(t, 1, body.Checks.Cluster.Quorum.ReachableVoters)
+	require.Equal(t, 3, body.Checks.Cluster.Quorum.TotalVoters)
+	require.Len(t, body.Checks.Cluster.Members, 3)
+	require.Equal(t, "unavailable", body.Status)
+}
+
+// Liveness must not restart-loop that same isolated replica: restarting cures a
+// deadlocked process, never a dependency, and cannot restore a raft majority.
+func TestHealthLiveIsAliveRegardlessOfDependencies(t *testing.T) {
+	rec := performRequest(t, HealthLive, http.MethodGet, "/health/live")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Status string `json:"status"`
+		Uptime int64  `json:"uptime"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	require.Equal(t, "healthy", body.Status)
+	require.Positive(t, body.Uptime)
+}
+
+// Review round 3: results used to be published as one batch after every check
+// finished, so a slow INFORMATIONAL count discarded an already-successful
+// `SELECT 1` and reported the database as failed — a spurious 503 from a query
+// that proves nothing about serviceability.
+func TestHealthKeepsASuccessfulDatabaseCheckWhenAnInformationalCountTimesOut(t *testing.T) {
+	checker := checkerWithView(clusterView([]cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),
+	}, "10.244.0.8:9001"))
+	checker.database = func(context.Context) *CheckResult {
+		return &CheckResult{Status: Healthy, LatencyMs: 1}
+	}
+	checker.activeRuns = func(ctx context.Context) *CheckResult {
+		<-ctx.Done() // exhausts the shared budget
+		return &CheckResult{Status: Healthy}
+	}
+	checker.triggers = func(context.Context) *CheckResult {
+		return &CheckResult{Status: Healthy, Count: 7}
+	}
+	checker.timeout = 150 * time.Millisecond
+
+	body, code := decodeHealth(t, checker)
+
+	require.Equal(t, http.StatusOK, code, "a slow informational count must not fail readiness")
+	require.Equal(t, "healthy", body.Checks.Database.Status,
+		"the database check answered and must keep its answer")
+	require.Equal(t, "unknown", body.Checks.ActiveRuns.Status, "only the timed-out check degrades")
+	require.Equal(t, "unknown", body.Status, "the unknown count still surfaces in the overall status")
 }
 
 func TestHealthStillFailsTheProbeWhenTheDatabaseBlocksButQuorumHolds(t *testing.T) {
@@ -328,7 +404,7 @@ func TestHealthStillFailsTheProbeWhenTheDatabaseBlocksButQuorumHolds(t *testing.
 	require.Equal(t, "degraded", body.Checks.Database.Status)
 }
 
-func TestHealthKeepsFailingTheProbeWhenClusterLivenessIsUnknown(t *testing.T) {
+func TestHealthFailsReadinessWhenClusterLivenessIsUnknown(t *testing.T) {
 	checker := checkerWithView(cluster.View{
 		Clustered: true,
 		Observed:  false,
@@ -343,7 +419,7 @@ func TestHealthKeepsFailingTheProbeWhenClusterLivenessIsUnknown(t *testing.T) {
 	_, code := decodeHealth(t, checker)
 
 	require.Equal(t, http.StatusServiceUnavailable, code,
-		"an unobserved cluster is not evidence of a cluster-wide outage")
+		"a replica whose database check failed cannot serve, whatever the cluster looks like")
 }
 
 func TestWorstStatusOrdersTheVocabulary(t *testing.T) {
