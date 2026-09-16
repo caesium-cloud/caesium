@@ -1164,6 +1164,34 @@ async function requestURL<T>(
   return JSON.parse(text) as T;
 }
 
+/**
+ * Like `request`, but also returns the response headers — for the one class
+ * of endpoint (today: GET /v1/jobs/:id/runs) that carries pagination
+ * metadata on headers rather than in the JSON body, to keep the body
+ * backward compatible for every caller that already decodes it as a bare
+ * array/object.
+ */
+async function requestWithHeaders<T>(endpoint: string): Promise<{ data: T; headers: Headers }> {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const headers = withAuthHeaders({ "Content-Type": "application/json" });
+
+  const response = await fetch(url, { credentials: "include", headers });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new ApiError(401, "Authentication required", "authentication_required");
+  }
+
+  if (!response.ok) {
+    const message = parseErrorMessage(await response.text());
+    throw new ApiError(response.status, message, classifyApiError(response.status, message));
+  }
+
+  const text = await response.text();
+  const data = (text ? JSON.parse(text) : undefined) as T;
+  return { data, headers: response.headers };
+}
+
 // requestText fetches a non-JSON body verbatim. GET /v1/jobs/:id/manifest
 // answers `application/yaml` — the same bytes the CLI writes to a file — so it
 // must not go through request<T>'s JSON.parse.
@@ -1291,13 +1319,54 @@ export interface JobRunsQuery {
   offset?: number;
 }
 
+/**
+ * One page of a job's run history, plus the pagination metadata the server
+ * carries on `X-Caesium-Total-Count` / `X-Caesium-Next-Offset` response
+ * headers rather than in the (backward-compatible, bare-array) body — see
+ * api/rest/controller/job/run/list.go. A caller that needs the WHOLE history
+ * must use `getAllJobRuns`; reading `runs` here as "the runs" for an
+ * unparameterized job with more than the default page size is the same
+ * truncation shape `getAllPartitions` exists to prevent.
+ */
+export interface JobRunsPage {
+  runs: JobRun[];
+  total: number;
+  nextOffset: number | null;
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
-  getJobRuns: (jobId: string, query?: JobRunsQuery) => {
-    const params = queryString({ limit: query?.limit, offset: query?.offset });
-    const suffix = params ? `?${params}` : "";
-    return request<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  /** One page of a job's runs. See `JobRunsPage`; use `getAllJobRuns` for the whole history. */
+  getJobRuns: (jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> => fetchJobRunsPage(jobId, query),
+  /**
+   * Every run for a job, assembled by following the endpoint's
+   * `X-Caesium-Next-Offset` cursor to the end of the list — the header
+   * counterpart of `getAllPartitions`. Use this (not `getJobRuns`) wherever
+   * the console previously relied on the endpoint being unbounded, e.g. the
+   * job detail page's Runs tab.
+   */
+  getAllJobRuns: async (jobId: string): Promise<JobRun[]> => {
+    const runs: JobRun[] = [];
+    let offset = 0;
+
+    for (;;) {
+      const page = await fetchJobRunsPage(jobId, { limit: jobRunsPageSize, offset: offset || undefined });
+      runs.push(...page.runs);
+
+      const next = page.nextOffset;
+      // null is the end of the list — and is also what a server that
+      // predates pagination sends (no header at all), which correctly
+      // degrades to a single read.
+      if (next === null) break;
+      // A cursor that fails to advance would spin forever; stop and let the
+      // total-vs-collected gap be visible instead.
+      if (next <= offset) break;
+      offset = next;
+      if (runs.length >= jobRunsMaxRows) break;
+    }
+
+    return runs;
   },
   getJobQueue: (jobId: string) => request<RunQueueItem[]>(`/jobs/${encodeURIComponent(jobId)}/queue`),
   cancelQueuedRun: (jobId: string, queueId: string) =>
@@ -1583,6 +1652,35 @@ export const api = {
       { method: "POST" },
     ),
 };
+
+/** One page of a job's runs. See `api.getJobRuns` / `api.getAllJobRuns`. */
+async function fetchJobRunsPage(jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> {
+  const params = queryString({ limit: query?.limit, offset: query?.offset });
+  const suffix = params ? `?${params}` : "";
+  const { data, headers } = await requestWithHeaders<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  const totalHeader = headers.get("X-Caesium-Total-Count");
+  const nextHeader = headers.get("X-Caesium-Next-Offset");
+  const runs = data ?? [];
+  return {
+    runs,
+    total: totalHeader !== null ? Number(totalHeader) : runs.length,
+    nextOffset: nextHeader !== null ? Number(nextHeader) : null,
+  };
+}
+
+/**
+ * Per-request page size for `getAllJobRuns`. The server caps `limit` at 1000;
+ * 500 stays well inside that while halving the round trips of the server
+ * default (mirrors `partitionPageSize`'s reasoning).
+ */
+const jobRunsPageSize = 500;
+
+/**
+ * Hard stop for `getAllJobRuns`'s page walk, matching `partitionMaxRows`: a
+ * runaway walk following a cursor that never terminates stops here instead of
+ * fetching forever.
+ */
+const jobRunsMaxRows = 10_000;
 
 /** One page of a fanned task's instances. See `api.getPartitions`. */
 function fetchPartitionPage(

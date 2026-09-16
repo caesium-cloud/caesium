@@ -95,9 +95,13 @@ export function JobDetailPage() {
     }
   }, [job, jobId, navigate, secondaryView]);
 
+  // getAllJobRuns (not getJobRuns) walks every page: the endpoint now
+  // defaults to a 100-run page, and this tab previously relied on it being
+  // unbounded — reading only the first page here would silently drop a
+  // job's older history once it passed 100 runs.
   const { data: runs, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
-    queryFn: () => api.getJobRuns(jobId),
+    queryFn: () => api.getAllJobRuns(jobId),
     refetchInterval: streamHealthy ? false : 15000,
   });
 

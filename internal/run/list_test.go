@@ -1,6 +1,7 @@
 package run
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -175,4 +176,47 @@ func TestStoreListOrdersNewestFirstAndPages(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 5, emptyTotal)
 	assert.Empty(t, empty, "offset past the end returns no rows, not an error")
+}
+
+// TestPageTaskRunsByJobRunIDExcludesLargePayloadColumns pins a review finding
+// on #489's fix: pageTaskRunsByJobRunID must project only the columns
+// collapseFanOutGroups/summarizeTasks actually read (id, job_run_id, task_id,
+// status, cache_hit) — not the whole TaskRun row. A task_run's persisted log
+// snapshot (LogText) can be up to 1 MiB, and a default 100-run page with a
+// handful of tasks each would otherwise materialize on that order for every
+// list request, solely to throw the rows away after computing three counts.
+func TestPageTaskRunsByJobRunIDExcludesLargePayloadColumns(t *testing.T) {
+	f := newListFixture(t)
+	store := NewStore(f.db)
+
+	runID := f.addRun(t, string(StatusSucceeded))
+	bigLog := strings.Repeat("x", 1<<20) // 1 MiB, matching the executor's persisted log-snapshot ceiling.
+	now := time.Now().UTC()
+	require.NoError(t, f.db.Create(&models.TaskRun{
+		ID: uuid.New(), JobRunID: runID, TaskID: f.taskAlpha, AtomID: f.atomID,
+		Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`,
+		Status: string(TaskStatusSucceeded), Attempt: 1, MaxAttempts: 1,
+		LogText: bigLog, CreatedAt: now, UpdatedAt: now,
+	}).Error)
+	require.NoError(t, f.db.Create(&models.TaskRun{
+		ID: uuid.New(), JobRunID: runID, TaskID: f.taskBeta, AtomID: f.atomID,
+		Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","ok"]`,
+		Status: string(TaskStatusCached), CacheHit: true, Attempt: 1, MaxAttempts: 1,
+		LogText: bigLog, CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	tasksByRun, err := store.pageTaskRunsByJobRunID([]uuid.UUID{runID})
+	require.NoError(t, err)
+	require.Len(t, tasksByRun[runID], 2)
+	for _, row := range tasksByRun[runID] {
+		assert.Empty(t, row.LogText, "the summary-counter query must not load persisted task logs")
+	}
+
+	// The narrow projection must still leave the counters correct end to end.
+	runs, _, err := store.List(f.jobID, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, 1, runs[0].CacheHits)
+	assert.Equal(t, 1, runs[0].ExecutedTasks)
+	assert.Equal(t, 2, runs[0].TotalTasks)
 }

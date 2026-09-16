@@ -5561,13 +5561,30 @@ func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, erro
 // runs, keyed by job_run_id. Scoped to one List() page's run IDs rather than
 // the job's whole history, so a paged call costs one bounded indexed query
 // instead of an unbounded task_runs scan.
+// pageTaskRunsCounterColumns is every column convertRunTaskModel /
+// collapseFanOutGroups / summarizeTasks actually read to derive
+// cache_hits/executed_tasks/total_tasks: the group key (task_id), the status
+// vote (status, cache_hit), and id/job_run_id to address and bucket the row.
+// Deliberately NOT `SELECT *`: a TaskRun row also carries LogText (persisted
+// log snapshots up to 1 MiB each), execution descriptors, outputs, and
+// hash-input blobs — none of which summarizeTasks looks at, and all of which
+// convertRunModel's List() caller discards immediately after computing the
+// three counters (runValue.Tasks is reset to empty for list responses). A
+// full-column load here turned a 100-run page with a handful of tasks each
+// into materializing on the order of the executor's whole per-task log
+// ceiling, for every request.
+var pageTaskRunsCounterColumns = []string{"id", "job_run_id", "task_id", "status", "cache_hit"}
+
 func (s *Store) pageTaskRunsByJobRunID(runIDs []uuid.UUID) (map[uuid.UUID][]*models.TaskRun, error) {
 	out := make(map[uuid.UUID][]*models.TaskRun, len(runIDs))
 	if len(runIDs) == 0 {
 		return out, nil
 	}
 	var rows []*models.TaskRun
-	if err := s.db.Where("job_run_id IN ?", runIDs).Find(&rows).Error; err != nil {
+	if err := s.db.
+		Select(pageTaskRunsCounterColumns).
+		Where("job_run_id IN ?", runIDs).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
