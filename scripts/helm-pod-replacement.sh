@@ -374,6 +374,16 @@ assert_recovered() {
 
   has_member "$members" "${new_ip}:${DQLITE_PORT}" ||
     die "dqlite membership does not list $pod at its new address ${new_ip}:${DQLITE_PORT}"
+  if ! printf '%s\n' "$members" | awk -v addr="${new_ip}:${DQLITE_PORT}" '
+    $1 == addr && $2 == "voter" { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    die "dqlite membership does not list $pod as a voter at ${new_ip}:${DQLITE_PORT}"
+  fi
+  [[ "$(printf '%s\n' "$members" | awk 'NF { count++ } END { print count+0 }')" == "3" ]] ||
+    die "dqlite membership has an unexpected number of members after replacing $pod: $members"
+  [[ "$(printf '%s\n' "$members" | awk '$2 == "voter" { count++ } END { print count+0 }')" == "3" ]] ||
+    die "dqlite membership has fewer than three voters after replacing $pod: $members"
   if has_member "$members" "$old_addr"; then
     die "dqlite membership still lists the replaced pod at its old address $old_addr"
   fi
