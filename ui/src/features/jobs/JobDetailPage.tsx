@@ -95,11 +95,17 @@ export function JobDetailPage() {
     }
   }, [job, jobId, navigate, secondaryView]);
 
-  const { data: runs, isLoading: isLoadingRuns } = useQuery({
+  // getAllJobRuns (not getJobRuns) walks every page: the endpoint now
+  // defaults to a 100-run page, and this tab previously relied on it being
+  // unbounded — reading only the first page here would silently drop a
+  // job's older history once it passed 100 runs. The walk itself has a
+  // safety cap (AllJobRunsResult.truncated), surfaced below the run list.
+  const { data: runsResult, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
-    queryFn: () => api.getJobRuns(jobId),
+    queryFn: () => api.getAllJobRuns(jobId),
     refetchInterval: streamHealthy ? false : 15000,
   });
+  const runs = runsResult?.runs;
 
   const { data: queueRows, isLoading: isLoadingQueue } = useQuery({
     queryKey: ["job", jobId, "queue"],
@@ -625,7 +631,7 @@ export function JobDetailPage() {
             </DialogHeader>
             <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
               {secondaryView === "runs" && (
-                <RunsView runs={sortedRuns} job={job} />
+                <RunsView runs={sortedRuns} job={job} truncated={runsResult?.truncated ?? false} total={runsResult?.total} />
               )}
               {secondaryView === "tasks" && (
                 <TasksView tasks={tasks} atoms={atoms} dag={dag} featuredRunTasks={featuredRunTasks} />
@@ -950,36 +956,59 @@ function JobManifestView({
   );
 }
 
-function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
+function RunsView({
+  runs,
+  job,
+  truncated = false,
+  total,
+}: {
+  runs: JobRun[];
+  job: Job;
+  /** True when the run list was cut off by the client's safety cap and does not cover the job's full history. */
+  truncated?: boolean;
+  /** Total run count the server reports, for the truncation notice. */
+  total?: number;
+}) {
   return (
-    <div className="rounded-md border bg-card divide-y" data-testid="job-runs-list">
-      {runs.length === 0 ? (
-        <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
-      ) : null}
-      {runs.map((run) => (
-        <Link
-          key={run.id}
-          to="/jobs/$jobId/runs/$runId"
-          params={{ jobId: job.id, runId: run.id }}
-          className="flex items-center justify-between gap-3 p-4 transition-colors hover:bg-muted/50"
+    <div className="space-y-3">
+      {truncated ? (
+        <div
+          className="rounded-md border bg-background/40 px-3 py-2 text-xs text-text-3"
+          data-testid="job-runs-truncated-notice"
         >
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">{formatUTCTimestamp(run.started_at, run.started_at)}</span>
-              {run.params && Object.keys(run.params).length > 0 ? (
-                <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
-              ) : null}
+          Showing the {runs.length.toLocaleString()} most recent runs
+          {typeof total === "number" ? ` of ${total.toLocaleString()} total` : ""}. Older history is not shown.
+        </div>
+      ) : null}
+      <div className="rounded-md border bg-card divide-y" data-testid="job-runs-list">
+        {runs.length === 0 ? (
+          <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
+        ) : null}
+        {runs.map((run) => (
+          <Link
+            key={run.id}
+            to="/jobs/$jobId/runs/$runId"
+            params={{ jobId: job.id, runId: run.id }}
+            className="flex items-center justify-between gap-3 p-4 transition-colors hover:bg-muted/50"
+          >
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{formatUTCTimestamp(run.started_at, run.started_at)}</span>
+                {run.params && Object.keys(run.params).length > 0 ? (
+                  <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
+                ) : null}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                <RelativeTime date={run.started_at} /> · <span className="font-mono">{shortId(run.id)}</span> ·{" "}
+                <span className="font-mono">
+                  <Duration start={run.started_at} end={run.completed_at} />
+                </span>
+              </div>
             </div>
-            <div className="text-xs text-muted-foreground">
-              <RelativeTime date={run.started_at} /> · <span className="font-mono">{shortId(run.id)}</span> ·{" "}
-              <span className="font-mono">
-                <Duration start={run.started_at} end={run.completed_at} />
-              </span>
-            </div>
-          </div>
-          {renderRunStatus(run.status)}
-        </Link>
-      ))}
+            {renderRunStatus(run.status)}
+          </Link>
+        ))}
+      </div>
     </div>
   );
 }
