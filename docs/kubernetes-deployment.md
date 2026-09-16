@@ -79,6 +79,70 @@ kubectl exec caesium-1 -- cat /etc/caesium/database-nodes
 kubectl exec caesium-2 -- cat /etc/caesium/database-nodes
 ```
 
+### Quorum health
+
+`/health` reports raft membership and liveness separately, under
+`checks.cluster`. Membership is what the cluster was configured with;
+liveness is what actually answered a bounded dqlite RPC:
+
+```bash
+kubectl port-forward service/caesium 8080:8080
+curl -s http://127.0.0.1:8080/health | jq '.status, .checks.cluster.quorum'
+```
+
+```json
+{
+  "status": "degraded",
+  "total_voters": 3,
+  "reachable_voters": 2,
+  "unreachable_voters": 1,
+  "required_voters": 2,
+  "available": true,
+  "degraded": true,
+  "leader_address": "10.244.0.8:9001"
+}
+```
+
+- `available` — a majority of voters answered, so the cluster can serve writes.
+- `degraded` — it is serving with less than full redundancy, or redundancy could
+  not be confirmed.
+- `status: "unavailable"` — fewer voters answered than a majority requires.
+- `status: "unknown"` — liveness could not be determined. This is never
+  reported as healthy.
+
+The console's `/system` page renders `reachable_voters / total_voters`, so a
+two-of-three cluster shows as `2/3` and DEGRADED rather than as fully
+operational.
+
+### Probe endpoints
+
+The **body** describes the cluster. The **HTTP status code** describes only this
+replica, which is why the two Kubernetes probes point at different endpoints:
+
+| Endpoint | Question | Probe | Fails when |
+| --- | --- | --- | --- |
+| `/health/ready` | Can this replica serve? | readiness, startup | its own database check fails (503) |
+| `/health/live` | Is this process running? | liveness | never, while it answers HTTP |
+| `/health` | Both, for the console | — | same as `/health/ready` |
+
+The split matters during a partition. A replica whose dqlite traffic is cut off
+from its peers sees a quorum loss locally while the others carry on serving. It
+must leave the Service endpoints — otherwise traffic keeps arriving at a node
+that cannot answer — but it must *not* be restarted: restarting cures a
+deadlocked process, never a dependency, and cannot restore a raft majority.
+
+`/health/live` therefore touches no dependency at all, and `/health/ready`
+returns 503 whenever this node cannot serve, whatever the cluster looks like.
+The degraded or unavailable quorum assessment is present in the body either way,
+so the console can explain an outage that the status code alone cannot.
+
+Both probe endpoints are unauthenticated, like `/health`.
+
+Liveness is probed in the background and served from a short-lived cache, so
+`/health` never blocks on cluster RPCs. `checks.cluster.observed_at` carries the
+observation time and `checks.cluster.stale` marks a result older than the
+refresh interval.
+
 ## Configuration Reference
 
 All settings are in `helm/caesium/values.yaml`.

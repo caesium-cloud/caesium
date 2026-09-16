@@ -435,6 +435,63 @@ export interface HealthCheckResult {
   count?: number;
 }
 
+/** Observed liveness of a cluster member. `unknown` is never healthy. */
+export type Reachability = "reachable" | "unreachable" | "unknown";
+
+/** Quorum availability, derived from probed voters — never from membership size. */
+export type QuorumStatus = "available" | "degraded" | "unavailable" | "unknown";
+
+export interface ClusterMember {
+  address: string;
+  id?: number;
+  role: string;
+  leader: boolean;
+  reachability: Reachability;
+  latency_ms?: number;
+}
+
+/**
+ * Quorum separates configured membership (`total_voters`) from what actually
+ * answered a probe (`reachable_voters`). Rendering the former as the latter is
+ * what let a crashed replica display as "quorum 3/3" (issue #494).
+ */
+export interface Quorum {
+  status: QuorumStatus;
+  total_voters: number;
+  reachable_voters: number;
+  unreachable_voters: number;
+  unknown_voters: number;
+  required_voters: number;
+  available: boolean;
+  degraded: boolean;
+  leader_address?: string;
+}
+
+/**
+ * Liveness across EVERY member, including the standbys and spares that quorum
+ * arithmetic deliberately ignores. A dead non-voter cannot cost the cluster its
+ * majority, but it is still a dead node and must not read as operational.
+ */
+export interface NodeSummary {
+  status: QuorumStatus;
+  total: number;
+  reachable: number;
+  unreachable: number;
+  unknown: number;
+}
+
+export interface ClusterCheck {
+  status: string;
+  clustered: boolean;
+  quorum: Quorum;
+  nodes?: NodeSummary;
+  members: ClusterMember[];
+  /** False until the first liveness probe completes; liveness is unknown until then. */
+  observed: boolean;
+  observed_at?: string;
+  stale?: boolean;
+}
+
 export interface HealthResponse {
   status: string;
   uptime: number;
@@ -443,13 +500,19 @@ export interface HealthResponse {
     active_runs?: HealthCheckResult;
     triggers?: HealthCheckResult;
     nodes?: HealthCheckResult;
+    cluster?: ClusterCheck;
   };
 }
 
 export interface Node {
   address: string;
   arch: string;
-  workers_busy: number;
+  role?: string;
+  leader?: boolean;
+  reachability?: Reachability;
+  latency_ms?: number;
+  /** Null when the server could not read the count within its budget. */
+  workers_busy: number | null;
   workers_total: number;
 }
 
@@ -1117,6 +1180,25 @@ export class ApiError extends Error {
 
 type ErrorKindMapper = (status: number, message: string) => ApiErrorKind | undefined;
 
+/**
+ * Deadline for the health-polling surface.
+ *
+ * `fetch` has no timeout of its own: a stalled connection leaves the request
+ * pending forever, React Query keeps serving the last successful response, and
+ * the console would go on rendering a cluster snapshot taken before whatever
+ * stalled the connection. Five seconds is comfortably longer than a healthy
+ * response and far shorter than the 15s poll, so a stalled poll fails and
+ * becomes visible instead of freezing the page on stale good news.
+ */
+export const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+
+/** An abort signal that fires after ms, plus the cleanup for its timer. */
+function timeoutSignal(ms: number): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => clearTimeout(timer) };
+}
+
 async function request<T>(
   endpoint: string,
   options?: RequestInit,
@@ -1496,7 +1578,17 @@ export const api = {
       `${datasetPath(namespace, name)}/derivations${query ? `?${query}` : ""}`,
     );
   },
-  getSystemNodes: () => request<Node[]>("/system/nodes"),
+  getSystemNodes: async (): Promise<Node[]> => {
+    // Bounded for the same reason as the health poll: this endpoint is
+    // authenticated, and its key lookup is a leader-dependent read, so it is
+    // the request most likely to stall during a cluster outage.
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      return await request<Node[]>("/system/nodes", { signal: deadline.signal });
+    } finally {
+      deadline.done();
+    }
+  },
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
   getContractGraph: (query: ContractGraphQuery = {}) => {
     const params = queryString({ dataset: query.dataset });
@@ -1589,14 +1681,23 @@ export const api = {
    */
   getHealthStatus: async (): Promise<HealthResponse> => {
     const headers = withAuthHeaders({ "Content-Type": "application/json" });
-    const response = await fetch("/health", { credentials: "include", headers });
-    if (response.status === 401) {
-      clearApiKey();
-      throw new ApiError(401, "Authentication required", "authentication_required");
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch("/health", {
+        credentials: "include",
+        headers,
+        signal: deadline.signal,
+      });
+      if (response.status === 401) {
+        clearApiKey();
+        throw new ApiError(401, "Authentication required", "authentication_required");
+      }
+      const text = await response.text();
+      if (!text) throw new ApiError(response.status, "Empty health response");
+      return JSON.parse(text) as HealthResponse;
+    } finally {
+      deadline.done();
     }
-    const text = await response.text();
-    if (!text) throw new ApiError(response.status, "Empty health response");
-    return JSON.parse(text) as HealthResponse;
   },
   getDatabaseSchema: () => request<DatabaseSchemaResponse>("/database/schema"),
   queryDatabase: (body: DatabaseQueryRequest) =>
