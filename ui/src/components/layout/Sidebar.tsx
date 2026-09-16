@@ -87,7 +87,7 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
   const queryClient = useQueryClient();
   const counts = useNavCounts();
   const health = useClusterHealth();
-  const quorum = deriveQuorumView(health.raw?.checks?.cluster);
+  const quorum = deriveQuorumView(health.raw?.checks?.cluster, { stale: health.stale });
   // The cluster's own liveness is the most specific thing the footer can say.
   // "All systems nominal" beside a dead replica is what issue #494 reported.
   const stateMeta =

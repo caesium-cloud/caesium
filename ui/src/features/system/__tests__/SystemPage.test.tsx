@@ -56,6 +56,7 @@ function cluster(overrides: Partial<ClusterCheck> = {}): ClusterCheck {
       leader_address: "10.244.0.8:9001",
     },
     nodes: { status: "available", total: 3, reachable: 3, unreachable: 0, unknown: 0 },
+    observed_at: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -372,6 +373,41 @@ describe("SystemPage cluster health", () => {
     expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
     expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
     expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
+  });
+
+  // Review round 6: `fetch` has no deadline and React Query serves the last
+  // successful response through a pending refetch, so a healthy snapshot taken
+  // before the connection stalled used to stay green on screen forever. An
+  // observation that has stopped advancing is treated as stale.
+  it("stops showing a cached healthy observation as green once it goes stale", async () => {
+    const frozen = cluster({
+      // The server answered, but this observation stopped advancing long ago —
+      // which is what a refetch that never settles leaves behind.
+      observed_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(frozen));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    show();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("system-health-badge")).toHaveTextContent("stale"),
+    );
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+
+    // Quorum and per-node liveness are unknown, not the cached green values.
+    expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
+
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
   });
 
   it("never renders unobserved liveness as green", async () => {

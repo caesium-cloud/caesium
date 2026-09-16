@@ -19,6 +19,50 @@ import type { ClusterHealthState } from "./useClusterHealth";
 
 export type Tone = "ok" | "warn" | "danger" | "muted";
 
+/**
+ * How old a health observation may be before the console stops presenting it as
+ * current: three poll intervals (the console polls every 15s).
+ *
+ * Without this, a stalled connection leaves React Query serving the last
+ * successful response indefinitely, and a cluster that was healthy when the
+ * connection stalled stays green on screen forever. An observation that has
+ * stopped advancing says nothing about the cluster now.
+ */
+export const HEALTH_OBSERVATION_MAX_AGE_MS = 45_000;
+
+/**
+ * Whether the last health response is too old to be presented as current.
+ *
+ * Prefers the server's own `observed_at` — which also catches a server whose
+ * background refresh has wedged while it keeps answering HTTP — and falls back
+ * to when the client last received a response.
+ */
+export function isHealthStale(
+  health: HealthResponse | null | undefined,
+  receivedAt: number | null,
+  now: number = Date.now(),
+): boolean {
+  if (!health) return false; // Not stale: absent. The caller reports that instead.
+
+  const observedAt = health.checks?.cluster?.observed_at;
+  if (observedAt) {
+    const parsed = Date.parse(observedAt);
+    if (!Number.isNaN(parsed)) {
+      return now - parsed > HEALTH_OBSERVATION_MAX_AGE_MS;
+    }
+  }
+  if (receivedAt != null) {
+    return now - receivedAt > HEALTH_OBSERVATION_MAX_AGE_MS;
+  }
+  return false;
+}
+
+/** Options shared by the derivations, so a stale observation degrades once. */
+export interface DeriveOptions {
+  /** The last health response is too old to be treated as current. */
+  stale?: boolean;
+}
+
 export type QuorumViewStatus = "available" | "degraded" | "unavailable" | "unknown" | "unreported";
 
 export interface QuorumView {
@@ -45,7 +89,10 @@ const UNREPORTED: QuorumView = {
   detail: "No raft cluster backs this deployment",
 };
 
-export function deriveQuorumView(cluster?: ClusterCheck | null): QuorumView {
+export function deriveQuorumView(
+  cluster?: ClusterCheck | null,
+  options: DeriveOptions = {},
+): QuorumView {
   if (!cluster || !cluster.clustered || !cluster.quorum) {
     return UNREPORTED;
   }
@@ -54,6 +101,18 @@ export function deriveQuorumView(cluster?: ClusterCheck | null): QuorumView {
   const total = quorum.total_voters ?? 0;
   const reachable = quorum.reachable_voters ?? 0;
   const required = quorum.required_voters ?? 0;
+
+  if (options.stale) {
+    return {
+      status: "unknown",
+      reachable: null,
+      total,
+      required,
+      label: total > 0 ? `?/${total}` : "?",
+      tone: "warn",
+      detail: "Health data is stale — this observation has stopped updating",
+    };
+  }
 
   // Liveness was never observed, or could not be determined. Report it as
   // unknown rather than borrowing the membership count as the numerator.
@@ -131,12 +190,23 @@ export interface SystemBanner {
 export function deriveSystemBanner(
   state: ClusterHealthState,
   health: HealthResponse | null,
+  options: DeriveOptions = {},
 ): SystemBanner {
   if (state === "unknown" && !health) {
     return {
       tone: "danger",
       badge: "unknown",
       headline: "Health check failed — API unreachable",
+    };
+  }
+
+  if (options.stale) {
+    // The last response was good, but it is old enough that it says nothing
+    // about the cluster now. It must never read as operational.
+    return {
+      tone: "warn",
+      badge: "stale",
+      headline: "Health data is stale — the last observation has stopped updating",
     };
   }
 
@@ -291,15 +361,39 @@ export interface NodeRow {
  * down, the cached node array is of unknown age and may well predate whatever
  * took health down with it.
  */
-export function mergeNodeRows(health: HealthResponse | null | undefined, nodes: Node[]): NodeRow[] {
+export function mergeNodeRows(
+  health: HealthResponse | null | undefined,
+  nodes: Node[],
+  options: DeriveOptions = {},
+): NodeRow[] {
   const supplementary = new Map(nodes.map((n) => [n.address, n]));
   const rows: NodeRow[] = [];
   const seen = new Set<string>();
 
-  const healthAvailable = health != null;
+  // A stale observation is no better evidence of liveness than a missing one.
+  const healthAvailable = health != null && !options.stale;
   const cluster = health?.checks?.cluster;
   const clustered = !!cluster?.clustered;
-  const observedMembers = clustered && cluster?.observed ? (cluster.members ?? []) : [];
+  const observedMembers =
+    clustered && cluster?.observed && !options.stale ? (cluster.members ?? []) : [];
+
+  // Even when the observation is stale, the member LIST is still the best
+  // record of which nodes exist; only their liveness is discarded.
+  if (options.stale && clustered) {
+    for (const member of cluster?.members ?? []) {
+      seen.add(member.address);
+      const extra = supplementary.get(member.address);
+      rows.push({
+        address: member.address,
+        role: member.role,
+        leader: false,
+        reachability: "unknown",
+        workersBusy: extra?.workers_busy ?? null,
+        workersTotal: extra?.workers_total ?? null,
+        livenessCurrent: false,
+      });
+    }
+  }
   // On a dqlite deployment the raft members are the only current liveness
   // source. Only a deployment with no raft cluster at all (an external
   // database) can take liveness from the node query, because there is nothing

@@ -1180,6 +1180,25 @@ export class ApiError extends Error {
 
 type ErrorKindMapper = (status: number, message: string) => ApiErrorKind | undefined;
 
+/**
+ * Deadline for the health-polling surface.
+ *
+ * `fetch` has no timeout of its own: a stalled connection leaves the request
+ * pending forever, React Query keeps serving the last successful response, and
+ * the console would go on rendering a cluster snapshot taken before whatever
+ * stalled the connection. Five seconds is comfortably longer than a healthy
+ * response and far shorter than the 15s poll, so a stalled poll fails and
+ * becomes visible instead of freezing the page on stale good news.
+ */
+export const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+
+/** An abort signal that fires after ms, plus the cleanup for its timer. */
+function timeoutSignal(ms: number): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => clearTimeout(timer) };
+}
+
 async function request<T>(
   endpoint: string,
   options?: RequestInit,
@@ -1451,7 +1470,17 @@ export const api = {
       `${datasetPath(namespace, name)}/derivations${query ? `?${query}` : ""}`,
     );
   },
-  getSystemNodes: () => request<Node[]>("/system/nodes"),
+  getSystemNodes: async (): Promise<Node[]> => {
+    // Bounded for the same reason as the health poll: this endpoint is
+    // authenticated, and its key lookup is a leader-dependent read, so it is
+    // the request most likely to stall during a cluster outage.
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      return await request<Node[]>("/system/nodes", { signal: deadline.signal });
+    } finally {
+      deadline.done();
+    }
+  },
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
   getContractGraph: (query: ContractGraphQuery = {}) => {
     const params = queryString({ dataset: query.dataset });
@@ -1544,14 +1573,23 @@ export const api = {
    */
   getHealthStatus: async (): Promise<HealthResponse> => {
     const headers = withAuthHeaders({ "Content-Type": "application/json" });
-    const response = await fetch("/health", { credentials: "include", headers });
-    if (response.status === 401) {
-      clearApiKey();
-      throw new ApiError(401, "Authentication required", "authentication_required");
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch("/health", {
+        credentials: "include",
+        headers,
+        signal: deadline.signal,
+      });
+      if (response.status === 401) {
+        clearApiKey();
+        throw new ApiError(401, "Authentication required", "authentication_required");
+      }
+      const text = await response.text();
+      if (!text) throw new ApiError(response.status, "Empty health response");
+      return JSON.parse(text) as HealthResponse;
+    } finally {
+      deadline.done();
     }
-    const text = await response.text();
-    if (!text) throw new ApiError(response.status, "Empty health response");
-    return JSON.parse(text) as HealthResponse;
   },
   getDatabaseSchema: () => request<DatabaseSchemaResponse>("/database/schema"),
   queryDatabase: (body: DatabaseQueryRequest) =>

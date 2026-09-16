@@ -1,7 +1,13 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type HealthResponse } from "@/lib/api";
+import { isHealthStale } from "./quorum";
 
 const REFETCH_MS = 15_000;
+// How often the age of the last observation is re-evaluated. A stalled refetch
+// produces no render of its own, so without a tick the banner would only flip
+// on the next successful response — which may never arrive.
+const STALE_TICK_MS = 5_000;
 
 export type ClusterHealthState =
   | "operational"
@@ -14,6 +20,14 @@ export interface ClusterHealth {
   state: ClusterHealthState;
   uptimeSeconds: number | null;
   raw: HealthResponse | null;
+  /**
+   * The last successful response is too old to be treated as current — the
+   * poll is stalling, or the server's own observation has stopped advancing.
+   * React Query keeps serving cached data through a pending refetch, so without
+   * this a cluster that was healthy when the connection stalled would stay
+   * green on screen indefinitely.
+   */
+  stale: boolean;
 }
 
 const KNOWN_HEALTHY = new Set(["ok", "healthy", "operational", "ready", "up"]);
@@ -51,7 +65,7 @@ export function classify(status: string | undefined): ClusterHealthState {
  * `state !== 'unknown'`.
  */
 export function useClusterHealth(): ClusterHealth {
-  const { data, isError } = useQuery({
+  const { data, isError, dataUpdatedAt } = useQuery({
     queryKey: ["cluster-health"],
     queryFn: api.getHealthStatus,
     refetchInterval: REFETCH_MS,
@@ -59,13 +73,22 @@ export function useClusterHealth(): ClusterHealth {
     retry: 1,
   });
 
+  // Staleness is a function of elapsed time, and a stalled refetch never
+  // re-renders on its own, so the age is re-evaluated on a slow tick.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), STALE_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   if (isError || !data) {
-    return { state: "unknown", uptimeSeconds: null, raw: null };
+    return { state: "unknown", uptimeSeconds: null, raw: null, stale: false };
   }
 
   return {
     state: classify(data.status),
     uptimeSeconds: typeof data.uptime === "number" ? data.uptime / 1e9 : null,
     raw: data,
+    stale: isHealthStale(data, dataUpdatedAt || null, now),
   };
 }

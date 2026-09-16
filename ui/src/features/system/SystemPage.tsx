@@ -88,13 +88,14 @@ export function SystemPage() {
   const clusterCheck = rawHealth?.checks?.cluster;
   // Membership and liveness are read from separate fields on purpose: the
   // quorum numerator is what answered a probe, never the length of this list.
-  const quorum = deriveQuorumView(clusterCheck);
-  const banner = deriveSystemBanner(health.state, rawHealth);
+  const derive = { stale: health.stale };
+  const quorum = deriveQuorumView(clusterCheck, derive);
+  const banner = deriveSystemBanner(health.state, rawHealth, derive);
   // Liveness is merged from the CURRENT health observation; the node query is
   // only supplementary. It is authenticated, and its auth key lookup is itself
   // a leader-dependent read, so it is the request most likely to stall during
   // the very outage this page has to describe.
-  const nodeRows = mergeNodeRows(rawHealth, nodes);
+  const nodeRows = mergeNodeRows(rawHealth, nodes, derive);
   const reachableNodes = reachableNodeCount(nodeRows);
   // Node liveness spans every member, voters and non-voters alike.
   const nodeLiveness = nodeLivenessLabel(clusterCheck);

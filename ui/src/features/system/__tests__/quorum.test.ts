@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ClusterCheck, HealthResponse, Node, Quorum, QuorumStatus } from "@/lib/api";
 import {
+  HEALTH_OBSERVATION_MAX_AGE_MS,
   checkTone,
   deriveQuorumView,
   deriveSystemBanner,
+  isHealthStale,
   mergeNodeRows,
   reachabilityTone,
   reachableNodeCount,
@@ -229,6 +231,84 @@ describe("deriveSystemBanner", () => {
 
     expect(banner.tone).toBe("danger");
     expect(banner.headline).toContain("API unreachable");
+  });
+});
+
+// Review round 6: `fetch` has no deadline, and React Query keeps serving the
+// last successful response through a pending refetch — so a cluster that was
+// healthy when the connection stalled stayed green on screen forever.
+describe("stale health observations", () => {
+  const NOW = Date.UTC(2026, 8, 16, 12, 0, 0);
+  const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+  const observed = (msAgo: number) =>
+    health(clusterCheck({ observed_at: at(msAgo) }));
+
+  describe("isHealthStale", () => {
+    it("uses the server's own observation time", () => {
+      expect(isHealthStale(observed(1_000), NOW, NOW)).toBe(false);
+      expect(isHealthStale(observed(HEALTH_OBSERVATION_MAX_AGE_MS + 1_000), NOW, NOW)).toBe(true);
+    });
+
+    it("falls back to when the client last received a response", () => {
+      const withoutCluster = health(undefined);
+
+      expect(isHealthStale(withoutCluster, NOW - 1_000, NOW)).toBe(false);
+      expect(
+        isHealthStale(withoutCluster, NOW - HEALTH_OBSERVATION_MAX_AGE_MS - 1_000, NOW),
+      ).toBe(true);
+    });
+
+    it("reports an absent response as absent, not stale", () => {
+      expect(isHealthStale(null, null, NOW)).toBe(false);
+    });
+
+    it("ignores an unparseable observation time", () => {
+      const bad = health(clusterCheck({ observed_at: "not-a-date" }));
+      expect(isHealthStale(bad, NOW, NOW)).toBe(false);
+    });
+  });
+
+  it("never renders a stale healthy observation as green", () => {
+    const stale = { stale: true };
+
+    const banner = deriveSystemBanner("operational", health(clusterCheck()), stale);
+    expect(banner.tone).toBe("warn");
+    expect(banner.badge).toBe("stale");
+    expect(banner.headline).toContain("stale");
+    expect(banner.headline).not.toContain("operational");
+  });
+
+  it("reports quorum as unknown while the observation is stale", () => {
+    const view = deriveQuorumView(clusterCheck(), { stale: true });
+
+    expect(view.status).toBe("unknown");
+    expect(view.tone).not.toBe("ok");
+    expect(view.reachable).toBeNull();
+    expect(view.label).toBe("?/3");
+    expect(view.detail).toContain("stale");
+  });
+
+  it("keeps member identities but discards their liveness while stale", () => {
+    const healthy = clusterCheck({
+      members: [
+        { address: "a:9001", role: "voter", leader: true, reachability: "reachable" },
+        { address: "b:9001", role: "voter", leader: false, reachability: "reachable" },
+        { address: "c:9001", role: "voter", leader: false, reachability: "reachable" },
+      ],
+    });
+
+    const rows = mergeNodeRows(health(healthy), [node("a:9001", "reachable", 2)], {
+      stale: true,
+    });
+
+    expect(rows.map((r) => r.address)).toEqual(["a:9001", "b:9001", "c:9001"]);
+    expect(rows.every((r) => r.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.livenessCurrent === false)).toBe(true);
+    expect(rows.every((r) => r.leader === false)).toBe(true);
+    expect(reachableNodeCount(rows)).toBeNull();
+    // Supplementary worker detail survives — it was never a liveness claim.
+    expect(rows.find((r) => r.address === "a:9001")?.workersBusy).toBe(2);
   });
 });
 
