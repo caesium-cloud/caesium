@@ -106,6 +106,19 @@ just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs t
 
 On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`. `just run` (see [Server Workflow](#server-workflow)) remains the from-source path for running the server itself.
 
+The wrapper is what makes `caesium dev --once`, harness scenarios, `--check-images`, and `caesium reproduce` work on macOS: at **invocation** time it mounts the host container runtime socket into the CLI container and sets `DOCKER_HOST=unix:///var/run/docker.sock`. Lookup order:
+
+1. `DOCKER_HOST` when it is a `unix://` path
+2. `CAESIUM_SOCK` if set
+3. Docker Desktop's `$HOME/.docker/run/docker.sock` (or `$HOME/.docker/desktop/docker.sock`) if that socket exists
+4. `/var/run/docker.sock`, or the Podman socket when `CAESIUM_PODMAN=true`
+
+If a command needs the runtime and the socket is missing, the wrapper exits with an error (start Docker Desktop, or set `DOCKER_HOST` / `CAESIUM_SOCK`) instead of starting a container that cannot talk to Docker. `job lint`, `job preview`, and `--help` do not require the socket.
+
+If `KUBECONFIG` is set, that file is mounted read-only; otherwise a present `$HOME/.kube/config` is mounted. `KUBECONFIG` inside the container points at the mount. This is opt-in host-credential sharing.
+
+**Access boundary:** a wrapper invocation that mounts the runtime socket can create containers on the host Docker/Podman daemon, and a mounted kubeconfig is your cluster credentials. Docker Desktop sockets are usually user-owned, so the wrapper keeps `--user uid:gid`. If the socket is not writable by your user (typical Linux `root:docker` socket when you are not in `docker`), the wrapper runs as root or adds the socket's group so the daemon is reachable; files written into `$PWD` may then be root-owned.
+
 ### 1. Write a job definition
 
 ```yaml

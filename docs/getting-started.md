@@ -30,6 +30,20 @@ just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs t
 
 On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`.
 
+`caesium dev --once` (step 3) needs the host Docker/Podman socket. The wrapper resolves it at invocation time: `DOCKER_HOST` when it is a `unix://` path, then `CAESIUM_SOCK`, then Docker Desktop's `$HOME/.docker/run/docker.sock` if present, then `/var/run/docker.sock` (or the Podman socket when `CAESIUM_PODMAN=true`). Override with:
+
+```bash
+export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock
+# or
+export CAESIUM_SOCK=$HOME/.docker/run/docker.sock
+```
+
+If the socket is missing, `dev` exits with an error rather than starting a CLI container that cannot talk to Docker. `job lint` and `--help` still run without the socket.
+
+Kubernetes jobs also need cluster credentials. If `KUBECONFIG` is set, that file is mounted read-only into the wrapper; otherwise `$HOME/.kube/config` is used when it exists. That is opt-in host-credential sharing — the wrapper container can reach the host daemon and your kubeconfig.
+
+Docker Desktop sockets are usually user-owned, so the wrapper keeps your uid/gid. On a root-owned `docker.sock` the wrapper may run as root or add the socket's group; that is full daemon access, and files written into `$PWD` may be root-owned.
+
 The `caesiumcloud/caesium:v0.1.0` image used above is also pullable by
 digest, if you want to pin exactly what you run:
 `caesiumcloud/caesium@sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917` (the `v0.1.0` multi-arch manifest; per-arch digests in `docs/ci.md` § `v0.1.0` image digests).
