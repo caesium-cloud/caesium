@@ -112,7 +112,7 @@ export function JobDetailPage() {
     queryFn: () => api.getJobDAG(jobId),
   });
 
-  const { data: tasks, isLoading: isLoadingTasks } = useQuery({
+  const { data: tasks, isLoading: isLoadingTasks, isError: isTasksError } = useQuery({
     queryKey: ["job", jobId, "tasks"],
     queryFn: () => api.getJobTasks(jobId),
   });
@@ -644,7 +644,13 @@ export function JobDetailPage() {
                 <BackfillsView jobId={job.id} />
               )}
               {secondaryView === "cache" && (
-                <CacheView jobId={job.id} job={job} featuredRun={featuredRun} tasks={tasks} />
+                <CacheView
+                  jobId={job.id}
+                  job={job}
+                  featuredRun={featuredRun}
+                  tasks={tasks}
+                  taskPoliciesAvailable={!isLoadingTasks && !isTasksError}
+                />
               )}
             </div>
           </DialogContent>

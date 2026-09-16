@@ -119,14 +119,19 @@ export function normalizeCacheConfig(raw?: CacheConfigValue): CachePolicySummary
     return { enabled: false };
   }
 
+  // Match pkg/jobdef.applyCache: any map form enables caching. The server does
+  // not currently honor an `enabled` key within that map.
   return {
-    enabled: raw.enabled ?? true,
+    enabled: true,
     ttl: raw.ttl,
     version: raw.version,
   };
 }
 
 export function describeCachePolicy(raw?: CacheConfigValue): string {
+  if (raw === undefined || raw === null) {
+    return "Server default";
+  }
   return describeNormalizedCachePolicy(normalizeCacheConfig(raw));
 }
 
@@ -141,7 +146,8 @@ export function resolveCachePolicy(task?: CacheConfigValue, job?: CacheConfigVal
   }
 
   return {
-    enabled: task.enabled ?? true,
+    // Keep the inventory truthful to the server's current map semantics.
+    enabled: true,
     ttl: task.ttl ?? inherited.ttl,
     version: task.version ?? inherited.version,
   };
