@@ -2,6 +2,8 @@ package jobdef
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,43 @@ func TestParseJSONDuration(t *testing.T) {
 		{name: "null", raw: `null`, field: "retryDelay", want: 0},
 		{name: "empty", raw: ``, field: "retryDelay", want: 0},
 		{name: "scientific integer", raw: `1e9`, field: "retryDelay", want: time.Second},
+		{name: "integral decimal", raw: `1.0`, field: "retryDelay", want: time.Nanosecond},
+		{
+			name:  "max int64",
+			raw:   strconv.FormatInt(math.MaxInt64, 10),
+			field: "retryDelay",
+			want:  time.Duration(math.MaxInt64),
+		},
+		{
+			name:  "min int64",
+			raw:   strconv.FormatInt(math.MinInt64, 10),
+			field: "retryDelay",
+			want:  time.Duration(math.MinInt64),
+		},
+		{
+			name:  "mantissa beyond float64 exact integer",
+			raw:   `9007199254740993e0`,
+			field: "retryDelay",
+			want:  time.Duration(9007199254740993),
+		},
+		{
+			name:    "overflow max int64 plus one",
+			raw:     `9223372036854775808`,
+			field:   "retryDelay",
+			wantErr: "retryDelay must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
+		{
+			name:    "overflow min int64 minus one",
+			raw:     `-9223372036854775809`,
+			field:   "retryDelay",
+			wantErr: "retryDelay must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
+		{
+			name:    "scientific overflow",
+			raw:     `1e19`,
+			field:   "retryDelay",
+			wantErr: "retryDelay must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
 		{
 			name:    "invalid string",
 			raw:     `"not-a-duration"`,
