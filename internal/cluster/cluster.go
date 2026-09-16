@@ -10,11 +10,11 @@
 //	Reachability – per member, the result of an actual bounded dqlite RPC
 //	Quorum       – how many VOTERS answered, versus how many a majority needs
 //
-// Probing is deliberately kept off the request path. `/health` is also the
-// Kubernetes liveness/readiness probe target and those default to a one second
-// timeout, so a synchronous fan-out of dqlite RPCs there could restart the very
-// pods it is meant to observe. Snapshot returns the last observation
-// immediately and refreshes in the background when it goes stale.
+// Probing is deliberately kept off the request path. `/health/ready` is the
+// Kubernetes readiness probe target with a default one-second timeout, so a
+// synchronous fan-out of dqlite RPCs there could remove serving pods from the
+// endpoints. Snapshot returns the last observation immediately and refreshes
+// in the background when it goes stale.
 package cluster
 
 import (
@@ -223,8 +223,8 @@ func SetRefreshInterval(d time.Duration) func() {
 
 // Snapshot returns the most recent observation without blocking, scheduling a
 // background refresh when the observation is missing or stale. It never issues
-// network calls on the caller's goroutine: `/health` doubles as the Kubernetes
-// liveness probe, whose default timeout is one second.
+// network calls on the caller's goroutine: `/health/ready` is the Kubernetes
+// readiness probe, whose default timeout is one second.
 func Snapshot() View {
 	mu.Lock()
 	view := current
@@ -399,9 +399,21 @@ func probeMembers(ctx context.Context, members []Member) {
 
 			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
+			if ctx.Err() != nil {
+				// The refresh budget ended before this probe started. No member
+				// liveness was measured, even if the semaphore happened to be
+				// available when the canceled context won a select race.
+				return
+			}
 
 			start := time.Now()
 			if err := probeFunc(probeCtx, m.Address); err != nil {
+				if ctx.Err() != nil {
+					// A canceled refresh says nothing about this member. Keep
+					// Unknown; only its own probe deadline or RPC failure proves
+					// it did not answer within the member budget.
+					return
+				}
 				log.Debug("cluster liveness probe failed", "address", m.Address, "error", err)
 				m.Reachability = Unreachable
 				return

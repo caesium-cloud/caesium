@@ -33,28 +33,20 @@ export const HEALTH_OBSERVATION_MAX_AGE_MS = 45_000;
 /**
  * Whether the last health response is too old to be presented as current.
  *
- * Prefers the server's own `observed_at` — which also catches a server whose
- * background refresh has wedged while it keeps answering HTTP — and falls back
- * to when the client last received a response.
+ * Both ages are measured using the client clock. Comparing `observed_at` with
+ * the browser clock would misclassify a live cluster when the clocks differ.
+ * The caller remembers when `observed_at` last changed to detect a server
+ * whose background observation has stopped advancing.
  */
 export function isHealthStale(
   health: HealthResponse | null | undefined,
   receivedAt: number | null,
   now: number = Date.now(),
+  observedSince: number | null = receivedAt,
 ): boolean {
   if (!health) return false; // Not stale: absent. The caller reports that instead.
-
-  const observedAt = health.checks?.cluster?.observed_at;
-  if (observedAt) {
-    const parsed = Date.parse(observedAt);
-    if (!Number.isNaN(parsed)) {
-      return now - parsed > HEALTH_OBSERVATION_MAX_AGE_MS;
-    }
-  }
-  if (receivedAt != null) {
-    return now - receivedAt > HEALTH_OBSERVATION_MAX_AGE_MS;
-  }
-  return false;
+  return (receivedAt != null && now - receivedAt > HEALTH_OBSERVATION_MAX_AGE_MS) ||
+    (observedSince != null && now - observedSince > HEALTH_OBSERVATION_MAX_AGE_MS);
 }
 
 /** Options shared by the derivations, so a stale observation degrades once. */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type HealthResponse } from "@/lib/api";
 import { isHealthStale } from "./quorum";
 
@@ -28,6 +28,12 @@ export interface ClusterHealth {
    * green on screen indefinitely.
    */
   stale: boolean;
+}
+
+interface ObservedHealth {
+  response: HealthResponse;
+  observedAt: string | null;
+  observedSince: number | null;
 }
 
 const KNOWN_HEALTHY = new Set(["ok", "healthy", "operational", "ready", "up"]);
@@ -60,14 +66,28 @@ export function classify(status: string | undefined): ClusterHealthState {
  * `data.uptime` is a Go `time.Duration` (nanoseconds); divide by 1e9 to get
  * seconds, matching the conversion in `SystemPage.tsx`.
  *
- * Returns `{ state: 'unknown' }` only on genuine network failure or when no
- * response has arrived yet. Callers gate the cluster footer on
- * `state !== 'unknown'`.
+ * Returns `{ state: 'unknown' }` when the network fails, no response has
+ * arrived, or the last observation expires. Callers use `raw` to distinguish
+ * a missing response from an expired one.
  */
 export function useClusterHealth(): ClusterHealth {
+  const queryClient = useQueryClient();
   const { data, isError, dataUpdatedAt } = useQuery({
     queryKey: ["cluster-health"],
-    queryFn: api.getHealthStatus,
+    queryFn: async (): Promise<ObservedHealth> => {
+      const response = await api.getHealthStatus();
+      const observedAt = response.checks?.cluster?.observed_at ?? null;
+      const previous = queryClient.getQueryData<ObservedHealth>(["cluster-health"]);
+      return {
+        response,
+        observedAt,
+        // Keep the first client receipt time while the server repeats the
+        // same observation. A new observation starts a fresh age window.
+        observedSince: observedAt
+          ? previous?.observedAt === observedAt ? previous.observedSince : Date.now()
+          : null,
+      };
+    },
     refetchInterval: REFETCH_MS,
     staleTime: REFETCH_MS / 2,
     retry: 1,
@@ -85,10 +105,12 @@ export function useClusterHealth(): ClusterHealth {
     return { state: "unknown", uptimeSeconds: null, raw: null, stale: false };
   }
 
+  const stale = isHealthStale(data.response, dataUpdatedAt || null, now, data.observedSince);
+
   return {
-    state: classify(data.status),
-    uptimeSeconds: typeof data.uptime === "number" ? data.uptime / 1e9 : null,
-    raw: data,
-    stale: isHealthStale(data, dataUpdatedAt || null, now),
+    state: stale ? "unknown" : classify(data.response.status),
+    uptimeSeconds: typeof data.response.uptime === "number" ? data.response.uptime / 1e9 : null,
+    raw: data.response,
+    stale,
   };
 }

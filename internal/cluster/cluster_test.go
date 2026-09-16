@@ -387,6 +387,51 @@ func TestObserveProbesEveryMemberBeyondTheConcurrencyCap(t *testing.T) {
 	require.LessOrEqual(t, peak, maxConcurrentProbes, "probe concurrency exceeded the cap")
 }
 
+func TestObserveKeepsProbeLivenessUnknownWhenRefreshBudgetEnds(t *testing.T) {
+	started := make(chan struct{})
+	restore := stub(t,
+		func(context.Context) ([]client.NodeInfo, string, error) {
+			return []client.NodeInfo{{ID: 1, Address: "a:9001", Role: client.Voter}}, "a:9001", nil
+		},
+		func(ctx context.Context, _ string) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	)
+	defer restore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan View, 1)
+	go func() { result <- observe(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe did not start")
+	}
+	cancel()
+	var view View
+	select {
+	case view = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh did not finish after cancellation")
+	}
+
+	require.Equal(t, Unknown, view.Members[0].Reachability)
+	require.Equal(t, StatusUnknown, view.Quorum.Status)
+	require.Equal(t, 1, view.Quorum.UnknownVoters)
+	require.Zero(t, view.Quorum.UnreachableVoters)
+}
+
+func TestProbeMembersKeepsUnstartedProbeUnknownAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	members := []Member{voter("a:9001", Unknown)}
+	probeMembers(ctx, members)
+	require.Equal(t, Unknown, members[0].Reachability)
+}
+
 func TestObserveWithUnavailableMembershipReportsUnknownNotHealthy(t *testing.T) {
 	restore := stub(t,
 		func(context.Context) ([]client.NodeInfo, string, error) {

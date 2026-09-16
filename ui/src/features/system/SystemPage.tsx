@@ -98,7 +98,8 @@ export function SystemPage() {
   const nodeRows = mergeNodeRows(rawHealth, nodes, derive);
   const reachableNodes = reachableNodeCount(nodeRows);
   // Node liveness spans every member, voters and non-voters alike.
-  const nodeLiveness = nodeLivenessLabel(clusterCheck);
+  const nodeLiveness = health.stale ? null : nodeLivenessLabel(clusterCheck);
+  const currentStatus = (status?: string) => health.stale ? "unknown" : status;
 
   return (
     <div className="space-y-6 pb-12">
@@ -163,9 +164,9 @@ export function SystemPage() {
 
       {/* KPI strips */}
       <div data-testid="system-kpis" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <SysKpi icon={Database} label="Database" value={<span className="capitalize">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} tone={checkTone(db?.status)} />
-        <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{activeRuns?.count ?? 0}</span>} sub="Currently executing" />
-        <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{triggers?.count ?? 0}</span>} sub="Registered" />
+        <SysKpi icon={Database} label="Database" value={<span className="capitalize">{currentStatus(db?.status) || "unknown"}</span>} sub={!health.stale && db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} tone={checkTone(currentStatus(db?.status))} />
+        <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{health.stale ? "?" : activeRuns?.count ?? 0}</span>} sub={health.stale ? "Observation stale" : "Currently executing"} />
+        <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{health.stale ? "?" : triggers?.count ?? 0}</span>} sub={health.stale ? "Observation stale" : "Registered"} />
         <SysKpi
           icon={Server}
           label="Nodes"
@@ -176,7 +177,7 @@ export function SystemPage() {
             </span>
           }
           sub="Reachable / tracked"
-          tone={nodesCheck?.status ? checkTone(nodesCheck.status) : reachableNodes === null ? "warn" : "ok"}
+          tone={health.stale ? "warn" : nodesCheck?.status ? checkTone(nodesCheck.status) : reachableNodes === null ? "warn" : "ok"}
         />
       </div>
 
@@ -318,14 +319,14 @@ export function SystemPage() {
                 key={c.key}
                 data-testid="health-check-row"
                 data-check={c.key}
-                data-tone={checkTone(c.status)}
+                data-tone={health.stale ? "warn" : checkTone(c.status)}
                 className={`flex justify-between items-center px-4 py-3 ${i !== arr.length - 1 ? "border-b border-graphite/30" : ""}`}
               >
                 <div className="flex items-center gap-2.5">
-                  <StatusDot tone={checkTone(c.status)} title={c.status ?? "unknown"} />
+                  <StatusDot tone={health.stale ? "warn" : checkTone(c.status)} title={health.stale ? "stale" : c.status ?? "unknown"} />
                   <span className="text-[13px] text-text-1">{c.key}</span>
                 </div>
-                <span className="font-mono text-[11px] text-text-3">{c.detail || "--"}</span>
+                <span className="font-mono text-[11px] text-text-3">{health.stale ? "Observation stale" : c.detail || "--"}</span>
               </div>
             ))}
           </div>

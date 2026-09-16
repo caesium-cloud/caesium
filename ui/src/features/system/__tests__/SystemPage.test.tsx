@@ -75,10 +75,17 @@ function health(clusterCheck: ClusterCheck, status = "healthy"): HealthResponse 
   };
 }
 
-function show() {
+function show(cachedHealth?: HealthResponse, updatedAt?: number) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  if (cachedHealth) {
+    client.setQueryData(["cluster-health"], {
+      response: cachedHealth,
+      observedAt: cachedHealth.checks?.cluster?.observed_at ?? null,
+      observedSince: updatedAt ?? Date.now(),
+    }, { updatedAt });
+  }
   const tree = (
     <QueryClientProvider client={client}>
       <SystemPage />
@@ -375,30 +382,26 @@ describe("SystemPage cluster health", () => {
     expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
   });
 
-  // Review round 6: `fetch` has no deadline and React Query serves the last
-  // successful response through a pending refetch, so a healthy snapshot taken
-  // before the connection stalled used to stay green on screen forever. An
-  // observation that has stopped advancing is treated as stale.
+  // A pending refetch preserves React Query's cached response. All health
+  // indicators must expire even though the request has not errored.
   it("stops showing a cached healthy observation as green once it goes stale", async () => {
-    const frozen = cluster({
-      // The server answered, but this observation stopped advancing long ago —
-      // which is what a refetch that never settles leaves behind.
-      observed_at: new Date(Date.now() - 10 * 60_000).toISOString(),
-    });
-    mocked.getHealthStatus.mockResolvedValue(health(frozen));
+    const frozen = cluster();
+    mocked.getHealthStatus.mockImplementation(() => new Promise(() => {}));
     mocked.getSystemNodes.mockResolvedValue([
       node("10.244.0.8:9001", "reachable", true),
       node("10.244.0.9:9001", "reachable"),
       node("10.244.0.10:9001", "reachable"),
     ]);
 
-    show();
+    const { client } = show(health(frozen), Date.now() - 10 * 60_000);
 
     await waitFor(() =>
       expect(screen.getByTestId("system-health-badge")).toHaveTextContent("stale"),
     );
     expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
     expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.dataset.tone !== "ok")).toBe(true);
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.textContent?.includes("Observation stale"))).toBe(true);
 
     // Quorum and per-node liveness are unknown, not the cached green values.
     expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3");
@@ -408,6 +411,22 @@ describe("SystemPage cluster health", () => {
     expect(rows).toHaveLength(3);
     expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
     expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
+
+    expect(client.getQueryState(["cluster-health"])?.fetchStatus).toBe("fetching");
+  });
+
+  it("keeps a repeated server observation stale after a successful poll", async () => {
+    const frozen = cluster();
+    mocked.getHealthStatus.mockResolvedValue(health(frozen));
+    mocked.getSystemNodes.mockResolvedValue([]);
+
+    const { client } = show(health(frozen), Date.now() - 10 * 60_000);
+    await waitFor(() => expect(mocked.getHealthStatus).toHaveBeenCalled());
+    await waitFor(() => expect(client.getQueryState(["cluster-health"])?.fetchStatus).toBe("idle"));
+
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("stale");
+    expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3");
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.dataset.tone !== "ok")).toBe(true);
   });
 
   it("never renders unobserved liveness as green", async () => {

@@ -91,7 +91,9 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
   // The cluster's own liveness is the most specific thing the footer can say.
   // "All systems nominal" beside a dead replica is what issue #494 reported.
   const stateMeta =
-    quorum.status === "available" || quorum.status === "unreported"
+    health.stale
+      ? { ...STATE_META.unknown, copy: "Health data is stale" }
+      : quorum.status === "available" || quorum.status === "unreported"
       ? STATE_META[health.state]
       : { ...STATE_META[health.state], copy: quorum.detail };
   const { data: features } = useQuery({

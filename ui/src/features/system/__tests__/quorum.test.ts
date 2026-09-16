@@ -239,15 +239,22 @@ describe("deriveSystemBanner", () => {
 // healthy when the connection stalled stayed green on screen forever.
 describe("stale health observations", () => {
   const NOW = Date.UTC(2026, 8, 16, 12, 0, 0);
-  const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+  const at = (offset: number) => new Date(NOW + offset).toISOString();
 
-  const observed = (msAgo: number) =>
-    health(clusterCheck({ observed_at: at(msAgo) }));
+  const observed = (offset: number) =>
+    health(clusterCheck({ observed_at: at(offset) }));
 
   describe("isHealthStale", () => {
-    it("uses the server's own observation time", () => {
-      expect(isHealthStale(observed(1_000), NOW, NOW)).toBe(false);
-      expect(isHealthStale(observed(HEALTH_OBSERVATION_MAX_AGE_MS + 1_000), NOW, NOW)).toBe(true);
+    it("expires a cached response and a server observation that stops advancing", () => {
+      expect(isHealthStale(observed(0), NOW, NOW)).toBe(false);
+      expect(isHealthStale(observed(0), NOW - HEALTH_OBSERVATION_MAX_AGE_MS - 1, NOW)).toBe(true);
+      expect(isHealthStale(observed(0), NOW, NOW, NOW - HEALTH_OBSERVATION_MAX_AGE_MS - 1)).toBe(true);
+    });
+
+    it("does not use browser/server clock skew as liveness evidence", () => {
+      expect(isHealthStale(observed(-60_000), NOW, NOW)).toBe(false);
+      expect(isHealthStale(observed(5 * 60_000), NOW, NOW)).toBe(false);
+      expect(isHealthStale(observed(5 * 60_000), NOW - 2 * 60_000, NOW)).toBe(true);
     });
 
     it("falls back to when the client last received a response", () => {
