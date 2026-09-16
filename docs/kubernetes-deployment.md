@@ -267,6 +267,45 @@ The full field shape is in
 - For backup/restore, snapshot or back up the PVCs using your storage platform tooling.
 - If `persistence.enabled=false`, all data is ephemeral and lost on pod restart/recreation.
 
+### Pod replacement and the dqlite node address
+
+A StatefulSet pod keeps its identity and its PVC when it is replaced — by a
+`helm upgrade`, a node drain, an eviction or a reschedule — but Kubernetes never
+promises it the same pod IP. The chart advertises each node to dqlite as
+`$(POD_IP):9001`, and dqlite records that address in `info.yaml` inside the data
+directory, so a replacement pod normally comes back with a data directory that
+disagrees with its own address.
+
+Caesium reconciles this on startup: it rewrites the persisted identity to the
+current address, keeping the node ID, and then corrects a multi-member cluster's
+raft configuration through the leader so the other members dial the address the
+pod actually has. A sole member instead recovers its local raft configuration
+after checking that no peer is reachable. If membership cannot be verified or
+repaired, startup fails and the rollout waits rather than accepting reduced
+quorum. The migration is logged as
+`dqlite node address changed since this data directory was created; migrating`,
+followed by
+`dqlite cluster membership updated to this node's current address`. No manual
+step is needed and the volume must not be discarded.
+
+The address cannot simply be pinned to the pod's stable headless-service DNS
+name: dqlite binds its raft listener to the advertised address, and
+`dqlite_node_set_bind_address` accepts only a numeric IP.
+
+Two limits are worth knowing:
+
+- Replace pods **one at a time** and let the StatefulSet return to full
+  readiness in between, which is what a normal rolling upgrade does. The
+  repair runs through the cluster leader, so it needs a quorum of members
+  still reachable at their recorded addresses.
+- If every member's IP changes at once while the cluster is down, no member can
+  reach another and the repair has nothing to talk to. Recover by restoring
+  from a volume snapshot.
+
+Replacing a pod with an **empty** PVC is a different case: a replaced ordinal 0
+with no data directory re-bootstraps instead of rejoining, because the chart
+gives ordinal 0 an empty peer list.
+
 ## Air-Gapped Deployment Notes
 
 Caesium itself has **no external runtime dependencies** — the binary embeds dqlite and requires no outbound network access to operate. The considerations for an air-gapped Kubernetes deployment are specific to the cluster runtime and image availability, not to Caesium itself.

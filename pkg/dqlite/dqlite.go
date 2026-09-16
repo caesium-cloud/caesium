@@ -161,8 +161,16 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 	}
 
 	vars := env.Variables()
-	dqApp, err := dqliteapp.New(
+
+	// A StatefulSet pod keeps its PVC across replacement but not its IP, while
+	// dqlite records the node's advertised address inside that PVC. openNativeApp
+	// reconciles a data directory created at a different address and puts this
+	// node back in the raft configuration before waiting on readiness (#493).
+	dqApp, err := openNativeApp(
+		ctx,
 		vars.DatabasePath,
+		vars.NodeAddress,
+		vars.DatabaseNodes,
 		dqliteapp.WithAddress(vars.NodeAddress),
 		dqliteapp.WithCluster(vars.DatabaseNodes),
 		dqliteapp.WithVoters(vars.DatabaseVoters),
@@ -171,10 +179,6 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 		dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
 	)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := dqApp.Ready(ctx); err != nil {
 		return nil, err
 	}
 
@@ -239,13 +243,29 @@ func Cluster(ctx context.Context) ([]ClusterNode, error) {
 	cluster := make([]ClusterNode, 0, len(nodes))
 	for _, node := range nodes {
 		cluster = append(cluster, ClusterNode{
-			ID:       node.ID,
-			Address:  node.Address,
+			ID: node.ID,
+			// A single-member cluster whose pod was replaced keeps its previous
+			// address in the raft configuration: there is no leader to route a
+			// membership change through, and rewriting the configuration
+			// locally is never this node's call to make. Nothing dials that
+			// entry, but reporting it would be a lie, so substitute the address
+			// this node is really listening on for its own ID (#493).
+			Address:  localAddress(dqApp, node),
 			Role:     node.Role.String(),
 			IsLeader: leader != nil && node.ID == leader.ID,
 		})
 	}
 	return cluster, nil
+}
+
+// localAddress returns the address a cluster member should be reported at,
+// preferring what this process knows about itself over what the raft
+// configuration records.
+func localAddress(dqApp *dqliteapp.App, node client.NodeInfo) string {
+	if dqApp != nil && node.ID == dqApp.ID() {
+		return dqApp.Address()
+	}
+	return node.Address
 }
 
 // IsLocalLeader reports whether this process hosts the current dqlite leader.
@@ -265,7 +285,10 @@ func IsLocalLeader(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return leader != nil && leader.Address == dqApp.Address(), nil
+	// Compare node IDs: the ID is this node's stable identity across a pod
+	// replacement, while the address recorded in the raft configuration can
+	// lag behind it (#493).
+	return leader != nil && leader.ID == dqApp.ID(), nil
 }
 
 func (dialector Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {
@@ -458,5 +481,13 @@ func ClusterNodes(ctx context.Context) ([]client.NodeInfo, error) {
 	}
 	defer func() { _ = c.Close() }()
 
-	return c.Cluster(ctx)
+	nodes, err := c.Cluster(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dqApp := currentApp.Load()
+	for idx := range nodes {
+		nodes[idx].Address = localAddress(dqApp, nodes[idx])
+	}
+	return nodes, nil
 }

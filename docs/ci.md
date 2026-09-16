@@ -230,13 +230,15 @@ integration-extra
 integration-arm64
 helm-lint
 helm-integration-test
+helm-pod-replacement-test
 podman-integration-test
 ```
 
 Concretely: a PR can merge into `master` on the strength of `ci-ok`
 alone, while `integration-extra` (distributed / owner-memory / infra),
-`integration-arm64`, `helm-lint`, `helm-integration-test`, and
-`podman-integration-test` — exactly the lanes §2 leaves non-required —
+`integration-arm64`, `helm-lint`, `helm-integration-test`,
+`helm-pod-replacement-test`, and `podman-integration-test` — exactly the
+lanes §2 leaves non-required —
 may have run on that same commit but did not block the merge. Do not
 assume a green required set means `master`'s tip is taggable: before
 pushing a `v*` tag, check that every job in `publish.needs` is green on
@@ -294,6 +296,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
+| `helm-pod-replacement-test` | ubuntu-24.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
 | `early-evidence` | ubuntu-24.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
 | `ci-config` | ubuntu-24.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
@@ -1003,6 +1006,8 @@ Lanes that set server env inline and do **not** go through any
   but not calling the `integration-test-podman` justfile recipe. The Go
   invocation runs the full suite in three shards.
 - `helm-integration-test` — server env comes from Helm values
+- `helm-pod-replacement-test` — server env comes from
+  `helm/caesium/ci/test-values-replacement.yaml`
   (`helm/caesium/ci/test-values-k8s.yaml`), not from any `docker run -e`
   block or justfile recipe; env parity has to be checked in that values file
   separately. After `helm test`, the Go invocation runs the full suite

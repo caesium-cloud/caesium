@@ -126,6 +126,7 @@ jobs:
           actionlint .github/workflows/ci.yml
           python3 -m pip install PyYAML==6.0.3
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          bash scripts/test_helm_pod_replacement_membership.sh
 
   builder:
     permissions:
@@ -1199,6 +1200,55 @@ jobs:
           kubectl get pods -A || true
           kubectl describe pods -l cloud.caesium -A || true
 
+  # Issue #493: an ordinary StatefulSet pod replacement hands the pod a new IP
+  # while its PVC — and the dqlite address recorded inside it — survives. This
+  # lane replaces all three replicas in turn on retained volumes, fails unless
+  # the pod IP actually changed, and asserts the member rejoins the dqlite
+  # cluster at its new address with prior runs readable and new jobs executing.
+  # The other Helm lanes cannot catch this: they run one replica with
+  # persistence disabled, so every boot writes a fresh info.yaml.
+  helm-pod-replacement-test:
+    needs: [changes, images, helm-lint]
+    if: needs.changes.outputs.helm == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: product-amd64
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      - name: Pre-pull the task image
+        run: docker pull alpine:3.23
+      - name: Replace every replica on retained volumes
+        env:
+          CAESIUM_REPLACEMENT_ID: rp-${{ github.run_id }}
+          CAESIUM_REPLACEMENT_ARTIFACTS: ${{ github.workspace }}/.tmp/pod-replacement
+          CAESIUM_REPLACEMENT_IMAGE: caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+          CAESIUM_REPLACEMENT_KIND_IMAGE: kindest/node:v1.36.1
+          CAESIUM_REPLACEMENT_TASK_IMAGE: alpine:3.23
+        run: bash scripts/helm-pod-replacement.sh
+      - name: Upload pod-replacement artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: helm-pod-replacement
+          path: .tmp/pod-replacement/
+          if-no-files-found: warn
+          retention-days: 7
+
   # First persistent three-node robustness lane: B1's owner-crash regression on
   # kind + the Helm StatefulSet, plus E5's SQL-work budget on the existing
   # Docker integration server. Both reduce to one scenario evidence report that
@@ -1457,6 +1507,7 @@ jobs:
       - integration-arm64
       - helm-lint
       - helm-integration-test
+      - helm-pod-replacement-test
       - podman-integration-test
     runs-on: ubuntu-24.04
     environment: Docker
