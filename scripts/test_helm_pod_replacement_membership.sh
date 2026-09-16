@@ -30,6 +30,22 @@ actual="$(replacement_wait_membership "$OLD" "$NEW" 2 0.05)"
 [[ "$actual" == "$FRESH" ]]
 [[ "$(cat "$tmp/calls")" -ge 2 ]]
 
+# A transient endpoint/JSON failure is not evidence of recovery; wait for a
+# later complete snapshot instead.
+printf '0' >"$tmp/calls"
+raft_members_once() {
+  local calls
+  calls="$(cat "$tmp/calls")"
+  printf '%s' "$((calls + 1))" >"$tmp/calls"
+  if (( calls == 0 )); then
+    return 1
+  fi
+  printf '%s\n' "$FRESH"
+}
+actual="$(replacement_wait_membership "$OLD" "$NEW" 2 0.05)"
+[[ "$actual" == "$FRESH" ]]
+[[ "$(cat "$tmp/calls")" -ge 2 ]]
+
 # Persistent stale membership, including the old address, cannot be accepted.
 raft_members_once() { printf '%s\n' "$STALE"; }
 if replacement_wait_membership "$OLD" "$NEW" 1 0.05 >"$tmp/accepted" 2>"$tmp/last"; then
@@ -38,6 +54,26 @@ if replacement_wait_membership "$OLD" "$NEW" 1 0.05 >"$tmp/accepted" 2>"$tmp/las
 fi
 [[ ! -s "$tmp/accepted" ]]
 grep -qF "$OLD voter" "$tmp/last"
+
+# A later read error must not overwrite the last successful stale snapshot in
+# timeout diagnostics.
+printf '0' >"$tmp/calls"
+raft_members_once() {
+  local calls
+  calls="$(cat "$tmp/calls")"
+  printf '%s' "$((calls + 1))" >"$tmp/calls"
+  if (( calls == 0 )); then
+    printf '%s\n' "$STALE"
+  else
+    return 1
+  fi
+}
+if replacement_wait_membership "$OLD" "$NEW" 1 0.05 >"$tmp/accepted" 2>"$tmp/last"; then
+  echo 'accepted stale membership followed by read errors' >&2
+  exit 1
+fi
+grep -qF "$OLD voter" "$tmp/last"
+grep -qF 'latest nodes read error:' "$tmp/last"
 
 # A replacement present as a spare is still a failed voter repair.
 raft_members_once() { printf '%s\n' "$WRONG_ROLE"; }

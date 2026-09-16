@@ -22,21 +22,25 @@ replacement_membership_complete() {
 # The budget covers its normal 10s refresh interval and up to 60s refresh work.
 replacement_wait_membership() {
   local old_addr="$1" new_addr="$2" timeout="${3:-120}" interval="${4:-2}"
-  local deadline=$((SECONDS + timeout)) members="" last="<no successful nodes response>"
+  local deadline=$((SECONDS + timeout)) members=""
+  local last_success="<no successful nodes response>" last_error=""
 
   while (( SECONDS < deadline )); do
     if members="$(raft_members_once 2>/dev/null)"; then
-      last="$members"
+      last_success="$members"
       if replacement_membership_complete "$members" "$old_addr" "$new_addr"; then
         printf '%s\n' "$members"
         return 0
       fi
     else
-      last="<nodes endpoint unavailable or returned invalid JSON>"
+      last_error="nodes endpoint unavailable or returned invalid JSON"
     fi
     sleep "$interval"
   done
 
-  printf 'last raft membership observation: %s\n' "$last" >&2
+  printf 'last successful raft membership observation: %s\n' "$last_success" >&2
+  if [[ -n "$last_error" ]]; then
+    printf 'latest nodes read error: %s\n' "$last_error" >&2
+  fi
   return 1
 }

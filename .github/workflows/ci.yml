@@ -126,6 +126,7 @@ jobs:
           actionlint .github/workflows/ci.yml
           python3 -m pip install PyYAML==6.0.3
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          bash scripts/test_helm_pod_replacement_membership.sh
 
   builder:
     permissions:

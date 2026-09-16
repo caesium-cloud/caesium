@@ -382,8 +382,6 @@ assert_recovered() {
   printf '%s\n' "$members" >"$ARTIFACTS/members-after-${pod}.txt"
   log "dqlite membership after replacing $pod:"
   printf '%s\n' "$members" | sed 's/^/  /'
-  replacement_membership_complete "$members" "$old_addr" "${new_ip}:${DQLITE_PORT}" ||
-    die "dqlite membership changed after convergence for $pod: $members"
 
   # Durable data written before any replacement is still readable ...
   [[ "$(run_status "$JOB_ID" "$FIRST_RUN")" == "succeeded" ]] ||

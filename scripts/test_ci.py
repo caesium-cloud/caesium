@@ -190,6 +190,11 @@ class GateTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_ci_config_runs_replacement_membership_regression(self):
+        commands = [line.strip() for step in JOBS["ci-config"]["steps"]
+                    for line in step.get("run", "").splitlines()]
+        self.assertIn("bash scripts/test_helm_pod_replacement_membership.sh", commands)
+
     def test_ci_config_discovers_all_validator_tests(self):
         commands = [line.strip() for step in JOBS["ci-config"]["steps"]
                     for line in step.get("run", "").splitlines()
