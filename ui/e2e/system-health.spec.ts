@@ -17,9 +17,10 @@ import { failOnUnexpectedPageErrors } from "./helpers/fixtures";
  * They are NOT the regression for issue #494 and must not be read as one — a
  * `liveProbe` that always returned success would sail through every one of
  * them. The authoritative regression is
- * `TestClusterLivenessObservesARealStoppedNode` in
- * `test/cluster_liveness_real_test.go`: three real dqlite nodes, one really
- * stopped, the real probe observing it, with no stubs anywhere. Between here
+ * `TestHealthObservesARealStoppedNodeOverHTTP` in
+ * `api/health_real_cluster_test.go`: three real dqlite nodes, one really
+ * stopped, observed through the real background refresh and read back from the
+ * real `/health` handler over HTTP, with no stubs anywhere. Between here
  * and there sit `internal/cluster` (the decision table), `api/health_test.go`
  * (the real handler and its status codes) and the
  * `TestSystemHealthReportsProbedQuorum` / `TestHealthProbeEndpointsAreSplit`
