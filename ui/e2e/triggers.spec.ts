@@ -61,15 +61,17 @@ test("triggers page renders cron next-fire and event summaries", async ({ page, 
 });
 
 test("triggers page distinguishes future minute, day, and yearly fires with UTC timestamps", async ({ page, request }) => {
-  await page.clock.setFixedTime(new Date("2026-09-14T12:00:00.000Z"));
   const suffix = uniqueSuffix();
   const schedules = [
     { alias: `next-minute-${suffix}`, cron: "*/1 * * * *", relative: "in 1m", timestamp: "2026-09-14 12:01:00 UTC" },
     { alias: `next-day-${suffix}`, cron: "0 0 * * *", relative: "in 12h", timestamp: "2026-09-15 00:00:00 UTC" },
-    { alias: `next-year-${suffix}`, cron: "0 0 1 1 *", relative: "in 108d", timestamp: "2027-01-01 00:00:00 UTC" },
+    { alias: `next-year-${suffix}`, cron: "0 0 1 1 *", relative: "in 109d", timestamp: "2027-01-01 00:00:00 UTC" },
   ];
   await applyDefinitions(request, ...schedules.map(({ alias, cron }) => futureCronDefinition(alias, cron)));
 
+  // Freeze Date without replacing timers: rendering sees exact, deterministic
+  // future durations while the separate scenario below drives the real timer.
+  await page.clock.setFixedTime(new Date("2026-09-14T12:00:00.000Z"));
   await page.goto("/triggers");
   await expect(page.getByRole("heading", { name: "Triggers", exact: true })).toBeVisible();
 
@@ -80,6 +82,29 @@ test("triggers page distinguishes future minute, day, and yearly fires with UTC 
     await expect(nextFire).not.toContainText("just now");
     await expect(nextFire.getByTestId("trigger-next-fire-timestamp")).toHaveText(schedule.timestamp);
   }
+});
+
+test("triggers page recomputes a cron next-fire at its real minute boundary", async ({ page, request }) => {
+  test.slow();
+  const alias = `next-fire-boundary-${uniqueSuffix()}`;
+  await applyDefinitions(request, futureCronDefinition(alias, "*/1 * * * *"));
+
+  await page.goto("/triggers");
+  const nextFire = page.getByTestId("trigger-card").filter({ hasText: alias }).first().getByTestId("trigger-next-fire");
+  const timestamp = nextFire.getByTestId("trigger-next-fire-timestamp");
+  await expect(nextFire).toContainText(/^Next: in /);
+  const initialTimestamp = await timestamp.textContent();
+  expect(initialTimestamp).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
+  const toEpochMs = (value: string | null) => Date.parse(value?.replace(" UTC", "Z").replace(" ", "T") ?? "");
+  const initialEpochMs = toEpochMs(initialTimestamp);
+  expect(Number.isFinite(initialEpochMs)).toBe(true);
+  // A mount-relative 60-second interval would miss this deadline when the
+  // page opens late in the minute; permit only the captured cron boundary.
+  const boundaryTimeoutMs = Math.min(65_000, Math.max(3_000, initialEpochMs - Date.now() + 3_000));
+  await expect.poll(async () => timestamp.textContent(), { timeout: boundaryTimeoutMs, intervals: [500, 1_000] }).not.toBe(initialTimestamp);
+  const nextTimestamp = await timestamp.textContent();
+  expect(toEpochMs(nextTimestamp)).toBe(initialEpochMs + 60_000);
+  await expect(nextFire).toContainText(/^Next: in /);
 });
 
 test("cache inventory renders a future expiry as a countdown", async ({ page, request }) => {
@@ -93,6 +118,6 @@ test("cache inventory renders a future expiry as a countdown", async ({ page, re
   await page.goto(`/jobs/${job.id}/cache`);
   await expect(page.getByRole("heading", { name: "Cache Inventory", exact: true })).toBeVisible();
   const expiry = page.getByTestId("cache-expiry");
-  await expect(expiry).toHaveText(/^in 12h$/);
+  await expect(expiry).toHaveText(/^in 13h$/);
   await expect(expiry).not.toHaveText("just now");
 });

@@ -3,9 +3,11 @@ import { formatRelativeTime } from "./relative-time-format";
 
 interface RelativeTimeProps {
   date: string;
+  /** A scheduled or expiry instant that should count down instead of absorbing clock skew. */
+  future?: boolean;
 }
 
-export function RelativeTime({ date }: RelativeTimeProps) {
+export function RelativeTime({ date, future = false }: RelativeTimeProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -16,5 +18,5 @@ export function RelativeTime({ date }: RelativeTimeProps) {
     return () => clearInterval(timer);
   }, []);
 
-  return <span>{formatRelativeTime(date, now)}</span>;
+  return <span>{formatRelativeTime(date, now, future)}</span>;
 }

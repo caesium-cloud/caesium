@@ -132,13 +132,22 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
   const [nextDate, setNextDate] = useState<Date | null>(null);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const compute = () => {
-      setNextDate(getNextFireDate(expression, timezone));
+      const next = getNextFireDate(expression, timezone);
+      setNextDate(next);
+      if (!next) return;
+
+      // Wake at the cron boundary, not an arbitrary minute tick. Long waits
+      // are capped because browser timers cannot represent every future date.
+      const delay = Math.max(1, next.getTime() - Date.now());
+      timer = setTimeout(compute, Math.min(delay, 2_147_483_647));
     };
-    
+
     compute();
-    const timer = setInterval(compute, 60000);
-    return () => clearInterval(timer);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [expression, timezone]);
 
   if (!nextDate) return <span className="text-[10px] text-text-4 font-mono">Invalid cron</span>;
@@ -148,7 +157,7 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
       className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20"
       data-testid="trigger-next-fire"
     >
-      Next: <RelativeTime date={nextDate.toISOString()} />
+      Next: <RelativeTime date={nextDate.toISOString()} future />
       <span className="text-text-4"> · </span>
       <time dateTime={nextDate.toISOString()} data-testid="trigger-next-fire-timestamp">
         {formatUTCTimestamp(nextDate)}
