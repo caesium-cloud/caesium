@@ -116,6 +116,26 @@ func (s *SLAConfig) HasSLA() bool {
 	return s != nil && (s.Duration > 0 || s.CompletedBy != "")
 }
 
+// UnmarshalJSON accepts duration strings ("30m") and integer nanoseconds so
+// REST/UI JSON apply matches YAML authoring.
+func (s *SLAConfig) UnmarshalJSON(data []byte) error {
+	type slaConfig SLAConfig
+	aux := struct {
+		slaConfig
+		Duration json.RawMessage `json:"duration"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*s = SLAConfig(aux.slaConfig)
+	d, err := parseJSONDuration(aux.Duration, "duration")
+	if err != nil {
+		return err
+	}
+	s.Duration = d
+	return nil
+}
+
 // Metadata contains descriptive data for the job.
 type Metadata struct {
 	Alias            string            `yaml:"alias" json:"alias"`
@@ -174,6 +194,32 @@ func (m *Metadata) EffectiveOnUpstreamHold() string {
 		return OnUpstreamHoldSkip
 	}
 	return strings.TrimSpace(m.OnUpstreamHold)
+}
+
+// UnmarshalJSON accepts YAML-style duration strings for taskTimeout and
+// runTimeout in addition to integer nanoseconds.
+func (m *Metadata) UnmarshalJSON(data []byte) error {
+	type metadata Metadata
+	aux := struct {
+		metadata
+		TaskTimeout json.RawMessage `json:"taskTimeout"`
+		RunTimeout  json.RawMessage `json:"runTimeout"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*m = Metadata(aux.metadata)
+	taskTimeout, err := parseJSONDuration(aux.TaskTimeout, "taskTimeout")
+	if err != nil {
+		return err
+	}
+	runTimeout, err := parseJSONDuration(aux.RunTimeout, "runTimeout")
+	if err != nil {
+		return err
+	}
+	m.TaskTimeout = taskTimeout
+	m.RunTimeout = runTimeout
+	return nil
 }
 
 // Concurrency controls admission of new runs for the same job.
@@ -989,7 +1035,8 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // UnmarshalJSON mirrors the YAML defaults so REST/UI JSON apply requests behave
-// the same as YAML manifests loaded from disk.
+// the same as YAML manifests loaded from disk. Duration fields accept the
+// documented string syntax ("1s") as well as integer nanoseconds.
 func (s *Step) UnmarshalJSON(data []byte) error {
 	type rawStep struct {
 		Name                         string                    `json:"name"`
@@ -1001,7 +1048,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		Next                         []string                  `json:"next"`
 		DependsOn                    []string                  `json:"dependsOn"`
 		Retries                      int                       `json:"retries"`
-		RetryDelay                   time.Duration             `json:"retryDelay"`
+		RetryDelay                   json.RawMessage           `json:"retryDelay"`
 		RetryBackoff                 bool                      `json:"retryBackoff"`
 		TriggerRule                  string                    `json:"triggerRule"`
 		ReplaySafe                   bool                      `json:"replaySafe"`
@@ -1023,6 +1070,10 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &rs); err != nil {
 		return err
 	}
+	retryDelay, err := parseJSONDuration(rs.RetryDelay, "retryDelay")
+	if err != nil {
+		return err
+	}
 
 	s.Name = rs.Name
 	s.Type = rs.Type
@@ -1039,7 +1090,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.Next = rs.Next
 	s.DependsOn = rs.DependsOn
 	s.Retries = rs.Retries
-	s.RetryDelay = rs.RetryDelay
+	s.RetryDelay = retryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
 	s.ReplaySafe = rs.ReplaySafe
