@@ -114,7 +114,9 @@ func (s *IntegrationTestSuite) triggerHeldRun(jobID string) runResponse {
 		if len(runs) <= before {
 			return false
 		}
-		latest := runs[len(runs)-1]
+		// fetchRuns is newest-first (issue #499), so the run just triggered
+		// is at index 0.
+		latest := runs[0]
 		latestID = latest.ID
 		return latest.Status != "running"
 	}, 60*time.Second, 250*time.Millisecond,

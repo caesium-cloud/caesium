@@ -5476,7 +5476,34 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(runID)
 }
 
-func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
+// List returns a page of a job's runs, newest first (created_at DESC, id DESC
+// as a deterministic tiebreak for runs created in the same instant), together
+// with the total row count so a caller can tell whether more pages remain.
+//
+// limit and offset are applied as given: bounds validation, defaulting, and
+// the documented page-size ceiling belong to the REST layer (see
+// runListPageBounds in api/rest/controller/job/run/list.go), which is what
+// actually rejects an out-of-range request with 400 instead of silently
+// clamping it. A limit <= 0 here means "no LIMIT clause".
+//
+// cache_hits / executed_tasks / total_tasks are populated from the REAL
+// TaskRun rows belonging to the runs on THIS PAGE, not from
+// Preload("Tasks") — which is a silent no-op under Scan() (GORM does not
+// hydrate preloaded associations for Scan targets) and used to leave every
+// list entry reporting a measured zero while GET .../runs/:run_id, which
+// loads real rows via First(), reported the true count (issue #489).
+// Loading just the page's own task rows (bounded to however many runs the
+// page holds, never the job's whole history) and running them through the
+// same collapseFanOutGroups/summarizeTasks pipeline convertRunModel uses for
+// the detail endpoint guarantees the two agree, fan-out groups included.
+func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, error) {
+	var total int64
+	if err := s.db.Model(&models.JobRun{}).
+		Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
+		Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
 	var results []struct {
 		models.JobRun
 		JobAlias     string
@@ -5484,32 +5511,69 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 		TriggerAlias string
 	}
 
-	err := s.db.Table("job_runs").
+	q := s.db.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
-		Order("job_runs.started_at ASC").
-		Preload("Tasks").
-		Scan(&results).Error
+		Order("job_runs.created_at DESC, job_runs.id DESC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	if err := q.Scan(&results).Error; err != nil {
+		return nil, 0, err
+	}
 
+	runIDs := make([]uuid.UUID, 0, len(results))
+	for i := range results {
+		runIDs = append(runIDs, results[i].ID)
+	}
+	tasksByRun, err := s.pageTaskRunsByJobRunID(runIDs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	runs := make([]*JobRun, 0, len(results))
 	for i := range results {
+		results[i].Tasks = tasksByRun[results[i].ID]
 		runValue, err := s.convertRunModel(&results[i].JobRun)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		runValue.JobAlias = results[i].JobAlias
 		runValue.TriggerType = results[i].TriggerType
 		runValue.TriggerAlias = results[i].TriggerAlias
+		// The list response stays a summary: full task rows are the detail
+		// endpoint's surface (GET .../runs/:run_id). Only the derived
+		// counters computed above — from the same real rows — are list
+		// surface, matching the shape clients already parse.
+		runValue.Tasks = []*TaskRun{}
 		runs = append(runs, runValue)
 	}
 
-	return runs, nil
+	return runs, total, nil
+}
+
+// pageTaskRunsByJobRunID loads the TaskRun rows belonging to the given job
+// runs, keyed by job_run_id. Scoped to one List() page's run IDs rather than
+// the job's whole history, so a paged call costs one bounded indexed query
+// instead of an unbounded task_runs scan.
+func (s *Store) pageTaskRunsByJobRunID(runIDs []uuid.UUID) (map[uuid.UUID][]*models.TaskRun, error) {
+	out := make(map[uuid.UUID][]*models.TaskRun, len(runIDs))
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	var rows []*models.TaskRun
+	if err := s.db.Where("job_run_id IN ?", runIDs).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.JobRunID] = append(out[row.JobRunID], row)
+	}
+	return out, nil
 }
 
 func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
