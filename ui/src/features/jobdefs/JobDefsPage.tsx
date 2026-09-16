@@ -11,6 +11,7 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
+import { pendingApplyCount, summarizeDiffPreview } from "./diffPreview";
 import { getJobDefRuntimeHints, type JobDefRuntimeHints } from "./runtimeHints";
 
 export const EXAMPLE_YAML = `apiVersion: v1
@@ -93,9 +94,9 @@ function contractStatusLabel(summary: string) {
 
 function collectContractFindings(diff: DiffResponse | null) {
   if (!diff) return [];
+  // Apply is non-pruning, so only added/modified findings gate the request.
   return dedupeContractFindings([
     ...(diff.added ?? []).flatMap((job) => job.contractFindings ?? []),
-    ...(diff.removed ?? []).flatMap((job) => job.contractFindings ?? []),
     ...(diff.modified ?? []).flatMap((job) => job.contractFindings ?? []),
   ]);
 }
@@ -313,8 +314,8 @@ export function JobDefsPage() {
     : undefined;
 
   const applyMutation = useMutation({
-    mutationFn: () => api.applyJobDef(yaml, allowBreaking),
-    onSuccess: (data) => {
+    mutationFn: () => api.applyJobDef(currentEditorYaml(), allowBreaking),
+    onSuccess: async (data) => {
       toast.success(`Applied successfully (${data.applied} jobs)`);
       for (const warning of data.contract_warnings ?? []) {
         toast.warning(warning.message || `Contract warning for ${warning.subject}`);
@@ -324,8 +325,9 @@ export function JobDefsPage() {
       queryClient.invalidateQueries({ queryKey: ["atoms"] });
       queryClient.invalidateQueries({ queryKey: ["triggers"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
-      // re-trigger diff to clear changes
-      api.diffJobDef(yaml).then(dr => setDiffResult(dr)).catch(() => {});
+      const sourceYaml = currentEditorYaml();
+      const sourceVersion = syncLatestYaml(sourceYaml);
+      await runValidation(sourceYaml, sourceVersion);
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to apply job definition");
@@ -350,7 +352,7 @@ export function JobDefsPage() {
   });
 
   const lineCount = yaml.split("\n").length;
-  const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
+  const diffCount = pendingApplyCount(diffResult);
   const hasErrors = lintResult.errors && lintResult.errors.length > 0;
   const stepLabel = formatStepCount(lintResult.summary?.steps ?? 0);
   const contractSummary = lintResult.summary?.contracts?.trim() ?? "";
@@ -429,7 +431,10 @@ export function JobDefsPage() {
             >
               Diff vs server
               {diffCount > 0 && !hasErrors && (
-                <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gold/20 text-gold">
+                <span
+                  data-testid="diff-tab-badge"
+                  className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gold/20 text-gold"
+                >
                   {diffCount}
                 </span>
               )}
@@ -694,51 +699,42 @@ function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contract
     );
   }
 
-  const added = diff.added || [];
-  const modified = diff.modified || [];
-  const removed = diff.removed || [];
-  const total = added.length + modified.length + removed.length;
+  const preview = summarizeDiffPreview(diff);
+  const { added, modified, pruneCandidates, pendingCount, pendingSummary, pruneSummary } = preview;
 
   return (
     <Card className="bg-midnight/30 border-graphite/50 overflow-hidden shadow-lg">
       <div className="px-4 py-3 border-b border-graphite/50 bg-obsidian/30 flex justify-between items-start sm:items-center flex-col sm:flex-row gap-2">
         <div>
           <div className="text-[13px] font-medium text-text-1">Diff vs server state</div>
-          <div className="text-[11px] text-text-3 mt-0.5">{total} {total === 1 ? "change" : "changes"} pending apply</div>
+          <div data-testid="diff-pending-summary" className="text-[11px] text-text-3 mt-0.5">{pendingSummary}</div>
         </div>
         <div className="flex gap-3 text-[11px] font-medium bg-obsidian/60 px-3 py-1.5 rounded-full border border-graphite/40">
           <span className="text-success flex items-center gap-1"><span className="text-[14px] leading-none">+</span> {added.length} added</span>
           <span className="text-gold flex items-center gap-1"><span className="text-[14px] leading-none">~</span> {modified.length} modified</span>
-          <span className="text-danger flex items-center gap-1"><span className="text-[14px] leading-none">-</span> {removed.length} removed</span>
         </div>
       </div>
       
       <div className="p-0">
-        {total === 0 ? (
+        {pendingCount === 0 ? (
           <div className="p-8 text-center text-text-3 text-sm">
             Local definitions exactly match the server state.
           </div>
         ) : (
           <div className="font-mono text-xs leading-relaxed overflow-x-auto bg-void p-4">
             {added.map((a, i) => (
-              <div key={`a-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
+              <div
+                key={`a-${i}`}
+                data-testid="diff-pending-add"
+                data-alias={a.alias}
+                className="py-1.5 border-b border-graphite/20 last:border-0"
+              >
                 <div className="flex gap-3">
                   <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
                   <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
                   <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
                 </div>
                 <ContractFindingsList findings={a.contractFindings} contractTeams={contractTeams} />
-              </div>
-            ))}
-            
-            {removed.map((r, i) => (
-              <div key={`r-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
-                <div className="flex gap-3">
-                  <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
-                  <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
-                  <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
-                </div>
-                <ContractFindingsList findings={r.contractFindings} contractTeams={contractTeams} />
               </div>
             ))}
             
@@ -756,6 +752,21 @@ function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contract
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {pruneSummary && (
+          <div
+            data-testid="diff-prune-candidates"
+            className="border-t border-graphite/40 bg-obsidian/20 px-4 py-3 text-[11px] text-text-4"
+          >
+            <div>{pruneSummary}</div>
+            <ul className="mt-2 m-0 p-0 list-none flex flex-col gap-1 font-mono">
+              {pruneCandidates.map((job) => (
+                <li key={job.alias} data-testid="diff-prune-candidate" data-alias={job.alias}>
+                  {job.alias}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </div>

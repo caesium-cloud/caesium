@@ -115,6 +115,37 @@ function openDiffTab() {
   fireEvent.keyDown(tab, { key: "Enter", code: "Enter" });
 }
 
+function singleJobYaml(alias: string) {
+  return `apiVersion: v1
+kind: Job
+metadata:
+  alias: ${alias}
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+steps:
+  - name: run
+    image: alpine:3.23
+`;
+}
+
+async function flushUntil(assert: () => void, attempts = 30) {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      assert();
+      return;
+    } catch (err) {
+      lastError = err;
+    }
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+  throw lastError;
+}
+
 const breakingFinding = {
   edgeId: "inferred:producer:consumer",
   edgeClass: "inferred" as const,
@@ -313,5 +344,89 @@ steps:
       dataset: "producer.output.customer_id",
       reason: "customer migration accepted",
     });
+  });
+
+  it("excludes prune-only removals from the pending apply preview and badge", async () => {
+    const addedAlias = "qa-diff-scope";
+    const unrelated = ["cron-nightly", "http-ingest", "k8s-deploy"];
+    vi.mocked(api.diffJobDef).mockResolvedValue({
+      added: [{ alias: addedAlias }],
+      removed: unrelated.map((alias) => ({ alias })),
+      modified: [],
+    });
+
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    fireEvent.change(screen.getByLabelText("job.yaml editor"), {
+      target: { value: singleJobYaml(addedAlias) },
+    });
+    await settleLintAndDiff();
+    openDiffTab();
+
+    expect(screen.getByTestId("diff-pending-summary")).toHaveTextContent("1 change pending apply");
+    expect(screen.queryByText(/4 changes pending apply/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("diff-tab-badge")).toHaveTextContent("1");
+    expect(screen.getByTestId("diff-tab-badge")).not.toHaveTextContent("4");
+    expect(screen.queryByText("Job will be deleted (if prune enabled)")).not.toBeInTheDocument();
+    expect(screen.getByTestId("diff-pending-add")).toHaveAttribute("data-alias", addedAlias);
+    expect(screen.getByText("Job will be created")).toBeInTheDocument();
+
+    const pruneSection = screen.getByTestId("diff-prune-candidates");
+    expect(pruneSection).toHaveTextContent(
+      "3 jobs on the server are not in this editor (unchanged unless you prune via CLI)",
+    );
+    for (const alias of unrelated) {
+      expect(screen.getByTestId("diff-prune-candidates")).toHaveTextContent(alias);
+    }
+  });
+
+  it("recomputes the diff after apply so the applied job is no longer a pending add", async () => {
+    const addedAlias = "qa-diff-scope";
+    const unrelated = [{ alias: "cron-nightly" }, { alias: "http-ingest" }];
+    const pendingDiff = {
+      added: [{ alias: addedAlias }],
+      removed: unrelated,
+      modified: [],
+    };
+    const postApplyDiff = {
+      added: [],
+      removed: unrelated,
+      modified: [],
+    };
+    let applied = false;
+    vi.mocked(api.diffJobDef).mockImplementation(async () => (
+      applied ? postApplyDiff : pendingDiff
+    ));
+    vi.mocked(api.applyJobDef).mockImplementation(async (yaml: string) => {
+      expect(yaml).toContain(`alias: ${addedAlias}`);
+      applied = true;
+      return { applied: 1, contract_warnings: [] };
+    });
+
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    fireEvent.change(screen.getByLabelText("job.yaml editor"), {
+      target: { value: singleJobYaml(addedAlias) },
+    });
+    await settleLintAndDiff();
+    openDiffTab();
+    await flushUntil(() => {
+      expect(screen.getByTestId("diff-pending-add")).toHaveAttribute("data-alias", addedAlias);
+      expect(screen.getByRole("button", { name: /Apply definition/i })).toBeEnabled();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Apply definition/i }));
+    });
+    await flushUntil(() => {
+      expect(api.applyJobDef).toHaveBeenCalled();
+      expect(screen.queryByTestId("diff-pending-add")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("diff-pending-summary")).toHaveTextContent("0 changes pending apply");
+    expect(screen.queryByTestId("diff-tab-badge")).not.toBeInTheDocument();
+    expect(screen.getByText("Local definitions exactly match the server state.")).toBeInTheDocument();
+    expect(screen.queryByText("Job will be created")).not.toBeInTheDocument();
+    expect(screen.getByTestId("diff-prune-candidates")).toHaveTextContent(
+      "2 jobs on the server are not in this editor (unchanged unless you prune via CLI)",
+    );
   });
 });
