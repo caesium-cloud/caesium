@@ -827,3 +827,68 @@ func mustJSONString(t *testing.T, v any) string {
 	require.NoError(t, err)
 	return string(data)
 }
+
+func TestReplayUnresolvedPinnedBaselineReexecutesDespiteLegacyEntry(t *testing.T) {
+	f := newReplayFixture(t)
+	id := f.seedTask(t, seedTaskConfig{name: "unknown", replaySafe: true, result: "success", output: map[string]string{"token": "same"}})
+	var row models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", f.runID, id).First(&row).Error)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	desc.Cache.PinDigests = true
+	require.NoError(t, f.db.Model(&row).Update("execution_descriptor", mustJSON(t, desc)).Error)
+	dispatcher := &recordingDispatcher{}
+	got, err := New(f.store, dispatcher).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.NoError(t, err)
+	require.Len(t, dispatcher.calls, 1)
+	require.Len(t, got.Decisions, 1)
+	require.True(t, got.Decisions[0].Reexecute)
+	require.False(t, got.Decisions[0].CacheHit)
+}
+
+func TestReplayRefreshesFrozenImageIdentityGate(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		legacy, pin, nonce, want bool
+	}{
+		{name: "verified unpinned"},
+		{name: "legacy", legacy: true, want: true},
+		{name: "pinned ancestor", pin: true, want: true},
+		{name: "legacy ancestor nonce", nonce: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReplayFixture(t)
+			root := f.seedTask(t, seedTaskConfig{name: "root", replaySafe: true, result: "success", output: map[string]string{"token": "same"}})
+			leaf := f.seedTask(t, seedTaskConfig{name: "leaf", replaySafe: true, result: "success", output: map[string]string{"token": "same"}})
+			f.linkDescriptors(t, root, leaf)
+			for _, id := range []uuid.UUID{root, leaf} {
+				var row models.TaskRun
+				require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", f.runID, id).First(&row).Error)
+				var desc models.TaskExecutionDescriptor
+				require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+				checks := false
+				if !tc.legacy {
+					desc.Run.ImageIdentityChecksRequired = &checks
+				}
+				if id == root {
+					desc.Cache.PinDigests = tc.pin
+				}
+				updates := map[string]any{"execution_descriptor": mustJSON(t, desc)}
+				if id == root && tc.nonce {
+					updates["hash_input_blob"] = datatypes.JSON(`{"unresolvedImageIdentity":"previous-execution"}`)
+				}
+				require.NoError(t, f.db.Model(&row).Updates(updates).Error)
+			}
+			got, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{BaselineRunID: f.runID, Set: map[string]string{"mode": "override"}})
+			require.NoError(t, err)
+			for _, id := range []uuid.UUID{root, leaf} {
+				var row models.TaskRun
+				require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", got.Run.ID, id).First(&row).Error)
+				var desc models.TaskExecutionDescriptor
+				require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+				require.NotNil(t, desc.Run.ImageIdentityChecksRequired)
+				require.Equal(t, tc.want, *desc.Run.ImageIdentityChecksRequired)
+			}
+		})
+	}
+}

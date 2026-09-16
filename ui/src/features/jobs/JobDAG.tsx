@@ -308,7 +308,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
       </div>
 
       <Dialog open={selectedEdge !== null} onOpenChange={(open) => !open && setSelectedEdge(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl p-4 sm:rounded-lg sm:p-6">
             <DialogHeader>
             <DialogTitle>
               {selectedEdge ? `${selectedEdge.sourceName} → ${selectedEdge.targetName}` : 'Edge details'}

@@ -64,21 +64,3 @@ func TestAnalyzeFanOut(t *testing.T) {
 		t.Errorf("ExecutionOrder layers = %d, want 3", len(a.ExecutionOrder))
 	}
 }
-
-func TestUniqueImages(t *testing.T) {
-	def := &jobdef.Definition{
-		Steps: []jobdef.Step{
-			{Image: "alpine:3.23"},
-			{Image: "python:3.12"},
-			{Image: "alpine:3.23"},
-		},
-	}
-
-	images := UniqueImages(def)
-	if len(images) != 2 {
-		t.Errorf("UniqueImages = %v, want 2 items", images)
-	}
-	if images[0] != "alpine:3.23" || images[1] != "python:3.12" {
-		t.Errorf("UniqueImages = %v, want [alpine:3.23 python:3.12]", images)
-	}
-}

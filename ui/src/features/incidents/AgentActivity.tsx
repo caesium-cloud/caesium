@@ -72,7 +72,7 @@ function SessionPanel({ session, actions }: { session: AgentSession; actions: Ag
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge status={session.state} size="sm" />
+            <StatusBadge status={session.state} domain="agent-session" size="sm" />
             <span className="font-mono text-xs text-text-2">session {shortId(session.id)}</span>
             <Badge variant="outline" className="text-[10px]">
               profile {sessionProfileLabel(session)}
@@ -99,7 +99,7 @@ function SessionPanel({ session, actions }: { session: AgentSession; actions: Ag
                 tier {action.tier}
               </Badge>
               <span className="text-text-2">{actionSummary(action)}</span>
-              <StatusBadge status={action.status} size="sm" />
+              <StatusBadge status={action.status} domain="agent-action" size="sm" />
             </div>
           ))}
         </div>

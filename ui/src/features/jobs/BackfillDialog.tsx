@@ -80,7 +80,7 @@ export function BackfillDialog({ jobId, open, onOpenChange, disabled }: Backfill
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md p-4 sm:rounded-lg sm:p-6">
         <DialogHeader>
           <DialogTitle>Start Backfill</DialogTitle>
         </DialogHeader>

@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { Clock, Globe, Plus, Pencil, Copy, Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
 import {
   describeTrigger,
   getNextFireDate,
@@ -132,20 +132,36 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
   const [nextDate, setNextDate] = useState<Date | null>(null);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const compute = () => {
-      setNextDate(getNextFireDate(expression, timezone));
+      const next = getNextFireDate(expression, timezone);
+      setNextDate(next);
+      if (!next) return;
+
+      // Wake at the cron boundary, not an arbitrary minute tick. Long waits
+      // are capped because browser timers cannot represent every future date.
+      const delay = Math.max(1, next.getTime() - Date.now());
+      timer = setTimeout(compute, Math.min(delay, 2_147_483_647));
     };
-    
+
     compute();
-    const timer = setInterval(compute, 60000);
-    return () => clearInterval(timer);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [expression, timezone]);
 
   if (!nextDate) return <span className="text-[10px] text-text-4 font-mono">Invalid cron</span>;
 
   return (
-    <span className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20">
-      Next: <RelativeTime date={nextDate.toISOString()} />
+    <span
+      className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20"
+      data-testid="trigger-next-fire"
+    >
+      Next: <RelativeTime date={nextDate.toISOString()} future />
+      <span className="text-text-4"> · </span>
+      <time dateTime={nextDate.toISOString()} data-testid="trigger-next-fire-timestamp">
+        {formatUTCTimestamp(nextDate)}
+      </time>
     </span>
   );
 }
@@ -532,7 +548,7 @@ export function TriggersPage() {
       </div>
 
       <Dialog open={editorOpen} onOpenChange={(open) => !editorPending && setEditorOpen(open)}>
-        <DialogContent className="max-w-2xl bg-midnight border-graphite/50 text-text-1">
+        <DialogContent className="max-w-2xl bg-midnight border-graphite/50 p-4 text-text-1 sm:rounded-lg sm:p-6">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold">{editorMode === "create" ? "New HTTP Trigger" : "Edit HTTP Trigger"}</DialogTitle>
             <DialogDescription className="text-text-3">

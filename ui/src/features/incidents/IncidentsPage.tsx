@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Incident, type IncidentListParams } from "@/lib/api";
 import { events } from "@/lib/events";
+import { ALL_INCIDENT_STATUSES } from "@/lib/status";
 import { cn, shortId } from "@/lib/utils";
 import {
   buildJobAliasMap,
@@ -28,17 +29,6 @@ type IncidentSearch = {
   job_id?: string;
   needs_approval?: boolean;
 };
-
-const STATUS_OPTIONS = [
-  "open",
-  "triaging",
-  "awaiting_approval",
-  "remediated",
-  "escalated",
-  "closed",
-  "suppressed",
-  "abandoned",
-];
 
 const CLASS_OPTIONS = [
   "transient_infra",
@@ -184,7 +174,7 @@ export function IncidentsPage() {
                   data-testid="incident-status-filter"
                 >
                   <option value="">Any status</option>
-                  {STATUS_OPTIONS.map((status) => (
+                  {ALL_INCIDENT_STATUSES.map((status) => (
                     <option key={status} value={status}>
                       {formatIncidentClass(status)}
                     </option>
@@ -308,7 +298,7 @@ function IncidentFeedRow({ incident, jobAlias }: { incident: Incident; jobAlias:
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-text-1">{jobAlias}</span>
-            <StatusBadge status={incident.status} size="sm" />
+            <StatusBadge status={incident.status} domain="incident" size="sm" />
             <Badge variant="outline" className="text-[10px]">
               {formatIncidentClass(incident.class)}
             </Badge>

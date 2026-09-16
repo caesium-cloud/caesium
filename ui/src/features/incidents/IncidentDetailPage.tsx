@@ -180,7 +180,7 @@ export function IncidentDetailPage() {
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight">Incident {shortId(incident.id)}</h1>
-            <StatusBadge status={incident.status} size="sm" />
+            <StatusBadge status={incident.status} domain="incident" size="sm" />
             <Badge variant="outline">{formatIncidentClass(incident.class)}</Badge>
             {isAwaitingApproval(incident) ? (
               <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
@@ -292,7 +292,7 @@ export function IncidentDetailPage() {
                       <Badge variant="outline" className="text-[10px]">
                         tier {action.tier}
                       </Badge>
-                      <StatusBadge status={action.status} size="sm" />
+                      <StatusBadge status={action.status} domain="agent-action" size="sm" />
                       <span className="text-xs text-text-2">{actionSummary(action)}</span>
                     </div>
                   </div>
@@ -377,7 +377,7 @@ function buildTimeline(
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">actor {action.actor}</Badge>
             <Badge variant="outline">tier {action.tier}</Badge>
-            <StatusBadge status={action.status} size="sm" />
+            <StatusBadge status={action.status} domain="agent-action" size="sm" />
           </div>
           {action.type !== "note" ? <JsonDetails title="Params" value={action.params} /> : null}
           {action.result ? <JsonDetails title="Result" value={action.result} /> : null}

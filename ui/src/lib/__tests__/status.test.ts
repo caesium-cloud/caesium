@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { ALL_RUN_STATUSES, statusMeta } from "../status";
+import {
+  ALL_AGENT_ACTION_STATUSES,
+  ALL_AGENT_SESSION_STATUSES,
+  ALL_INCIDENT_STATUSES,
+  ALL_RUN_STATUSES,
+  statusMeta,
+  statusMetaForDomain,
+  statusKeyForDomain,
+} from "../status";
 
 describe("statusMeta", () => {
   it("returns a stable shape for every canonical status", () => {
@@ -52,5 +60,42 @@ describe("statusMeta", () => {
     expect(statusMeta(null).label).toBe("unknown");
     expect(statusMeta(undefined).label).toBe("unknown");
     expect(statusMeta("").label).toBe("unknown");
+  });
+
+  it("preserves every incident lifecycle label", () => {
+    for (const status of ALL_INCIDENT_STATUSES) {
+      expect(statusMetaForDomain(status, "incident").label).toBe(status.replaceAll("_", " "));
+    }
+    expect(statusMetaForDomain("open", "incident").label).toBe("open");
+    expect(statusMeta("open").label).toBe("unknown");
+  });
+
+  it("keeps agent lifecycles distinct from run aliases", () => {
+    for (const status of ALL_AGENT_ACTION_STATUSES) {
+      expect(statusMetaForDomain(status, "agent-action").label).toBe(status.replaceAll("_", " "));
+    }
+    for (const status of ALL_AGENT_SESSION_STATUSES) {
+      expect(statusMetaForDomain(status, "agent-session").label).toBe(status.replaceAll("_", " "));
+    }
+    expect(statusMetaForDomain("cancelled", "agent-session").label).toBe("cancelled");
+    expect(statusMeta("cancelled").label).toBe("failed");
+  });
+
+  it("falls back for inherited property names in every explicit domain", () => {
+    expect(statusMetaForDomain("constructor", "run").label).toBe("unknown");
+    expect(statusKeyForDomain("__proto__", "run")).toBeNull();
+    expect(statusMetaForDomain("constructor", "incident").label).toBe("unknown");
+    expect(statusMetaForDomain("__proto__", "agent-action").label).toBe("unknown");
+    expect(statusMetaForDomain("toString", "agent-session").label).toBe("unknown");
+    expect(statusMetaForDomain("length", "constructor" as never).label).toBe("unknown");
+    expect(statusKeyForDomain("length", "constructor" as never)).toBeNull();
+    expect(statusMetaForDomain("open", "unknown-domain" as never).label).toBe("unknown");
+  });
+
+  it("keeps resting incident and action states still", () => {
+    expect(statusMetaForDomain("open", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("triaging", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("awaiting_approval", "incident").dotClass).toBe("");
+    expect(statusMetaForDomain("executing", "agent-action").dotClass).toBe("");
   });
 });

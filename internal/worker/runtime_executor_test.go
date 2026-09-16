@@ -330,125 +330,166 @@ func TestRunSchemaValidationFailReturnsErrorForMissingRequiredOutput(t *testing.
 }
 
 func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() {
-		jobdeftestutil.CloseDB(db)
-	})
+	for _, tc := range []struct {
+		name, freeze  string
+		checks        bool
+		rejected      bool
+		errorContains string
+	}{
+		{name: "unpinned", freeze: `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`},
+		{name: "pinned ancestor", freeze: `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":true}}`, checks: true},
+		{name: "missing identity freeze", freeze: `{"schemaVersion":1,"run":{}}`, checks: true},
+		{name: "unsupported schema", freeze: `{}`, rejected: true, errorContains: "unsupported task execution descriptor version"},
+		{name: "malformed descriptor", freeze: `{`, rejected: true, errorContains: "decode task execution descriptor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := jobdeftestutil.OpenTestDB(t)
+			t.Cleanup(func() {
+				jobdeftestutil.CloseDB(db)
+			})
 
-	store := run.NewStore(db)
-	now := time.Now().UTC()
-	trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, db.Create(trigger).Error)
-	job := &models.Job{ID: uuid.New(), Alias: "worker-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, db.Create(job).Error)
+			store := run.NewStore(db)
+			now := time.Now().UTC()
+			trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
+			require.NoError(t, db.Create(trigger).Error)
+			job := &models.Job{ID: uuid.New(), Alias: "worker-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+			require.NoError(t, db.Create(job).Error)
 
-	specBytes, err := json.Marshal(container.Spec{
-		Env: map[string]string{
-			"PLAIN":  "value",
-			"SECRET": "secret://env/TOKEN",
-		},
-		WorkDir: "/workspace",
-		Mounts: []container.Mount{{
-			Type:   container.MountTypeBind,
-			Source: "/host",
-			Target: "/data",
-		}},
-		ResolvedVolumeMounts: []container.VolumeMount{{
-			Name:   "work",
-			Type:   container.VolumeMountTypeVolume,
-			Source: "caesium-work",
-			Target: "/work",
-		}},
-	})
-	require.NoError(t, err)
-	atomModel := &models.Atom{
-		ID:        uuid.New(),
-		Engine:    models.AtomEngineDocker,
-		Image:     "alpine:3.23",
-		Command:   `["sh","-c","true"]`,
-		Spec:      datatypes.JSON(specBytes),
-		CreatedAt: now,
-		UpdatedAt: now,
+			specBytes, err := json.Marshal(container.Spec{
+				Env: map[string]string{
+					"PLAIN":  "value",
+					"SECRET": "secret://env/TOKEN",
+				},
+				WorkDir: "/workspace",
+				Mounts: []container.Mount{{
+					Type:   container.MountTypeBind,
+					Source: "/host",
+					Target: "/data",
+				}},
+				ResolvedVolumeMounts: []container.VolumeMount{{
+					Name:   "work",
+					Type:   container.VolumeMountTypeVolume,
+					Source: "caesium-work",
+					Target: "/work",
+				}},
+			})
+			require.NoError(t, err)
+			atomModel := &models.Atom{
+				ID:        uuid.New(),
+				Engine:    models.AtomEngineDocker,
+				Image:     "alpine:3.23",
+				Command:   `["sh","-c","true"]`,
+				Spec:      datatypes.JSON(specBytes),
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			require.NoError(t, db.Create(atomModel).Error)
+
+			predAtom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`, CreatedAt: now, UpdatedAt: now}
+			require.NoError(t, db.Create(predAtom).Error)
+			predTask := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: predAtom.ID, Name: "extract", CreatedAt: now, UpdatedAt: now}
+			task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "load", CreatedAt: now, UpdatedAt: now}
+			require.NoError(t, db.Create(predTask).Error)
+			require.NoError(t, db.Create(task).Error)
+			require.NoError(t, db.Create(&models.TaskEdge{ID: uuid.New(), JobID: job.ID, FromTaskID: predTask.ID, ToTaskID: task.ID, CreatedAt: now, UpdatedAt: now}).Error)
+
+			paramsBytes, err := json.Marshal(map[string]string{"branch": "main"})
+			require.NoError(t, err)
+			jobRun := &models.JobRun{
+				ID:          uuid.New(),
+				JobID:       job.ID,
+				TriggerID:   trigger.ID,
+				TriggerType: string(trigger.Type),
+				Status:      string(run.StatusRunning),
+				Params:      datatypes.JSON(paramsBytes),
+				StartedAt:   now,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			require.NoError(t, db.Create(jobRun).Error)
+			outputBytes, err := json.Marshal(map[string]string{"plan": "/work/tf.plan"})
+			require.NoError(t, err)
+			require.NoError(t, db.Create(&models.TaskRun{
+				ID:        uuid.New(),
+				JobRunID:  jobRun.ID,
+				TaskID:    predTask.ID,
+				AtomID:    predAtom.ID,
+				Engine:    predAtom.Engine,
+				Image:     predAtom.Image,
+				Command:   predAtom.Command,
+				Status:    string(run.TaskStatusSucceeded),
+				Result:    string(atom.Success),
+				Output:    datatypes.JSON(outputBytes),
+				CreatedAt: now,
+				UpdatedAt: now,
+			}).Error)
+			taskRun := &models.TaskRun{
+				ID:          uuid.New(),
+				JobRunID:    jobRun.ID,
+				TaskID:      task.ID,
+				AtomID:      atomModel.ID,
+				Engine:      atomModel.Engine,
+				Image:       atomModel.Image,
+				Command:     atomModel.Command,
+				Status:      string(run.TaskStatusRunning),
+				ClaimedBy:   "node-a",
+				Attempt:     1,
+				MaxAttempts: 1,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			taskRun.ExecutionDescriptor = datatypes.JSON(tc.freeze)
+			require.NoError(t, db.Create(taskRun).Error)
+			identityQueries := 0
+			require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:identity_query_guard", func(tx *gorm.DB) {
+				for _, column := range tx.Statement.Selects {
+					if strings.Contains(column, "hash_input_blob") {
+						identityQueries++
+					}
+					if strings.Contains(strings.ToLower(column), "exists(") {
+						t.Errorf("unexpected whole-run identity scan: %s", column)
+					}
+				}
+			}))
+
+			engine := &captureCreateEngine{}
+			executor := &runtimeExecutor{
+				store:          store,
+				localSink:      NewLocalSink(store),
+				secretResolver: staticSecretResolver{"secret://env/TOKEN": "resolved-token"},
+				engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+					return engine, nil
+				},
+			}
+			executor.Execute(context.Background(), taskRun)
+			if tc.rejected {
+				require.Zero(t, identityQueries, "invalid deadline descriptors must fail before cache identity work")
+				require.Nil(t, engine.createReq, "invalid deadline descriptors must not launch an atom")
+				var persisted models.TaskRun
+				require.NoError(t, db.First(&persisted, "id = ?", taskRun.ID).Error)
+				require.Equal(t, string(run.TaskStatusFailed), persisted.Status)
+				require.Contains(t, persisted.Error, tc.errorContains)
+				return
+			}
+			if tc.checks {
+				require.Positive(t, identityQueries)
+			} else {
+				require.Zero(t, identityQueries)
+			}
+
+			require.NotNil(t, engine.createReq)
+			got := engine.createReq.Spec
+			require.Equal(t, "/workspace", got.WorkDir)
+			require.Equal(t, []container.Mount{{Type: container.MountTypeBind, Source: "/host", Target: "/data"}}, got.Mounts)
+			require.Equal(t, []container.VolumeMount{{Name: "work", Type: container.VolumeMountTypeVolume, Source: "caesium-work", Target: "/work"}}, got.ResolvedVolumeMounts)
+			require.Equal(t, "value", got.Env["PLAIN"])
+			require.Equal(t, "resolved-token", got.Env["SECRET"])
+			require.Equal(t, jobRun.ID.String(), got.Env["CAESIUM_RUN_ID"])
+			require.Equal(t, "worker-job", got.Env["CAESIUM_JOB_ALIAS"])
+			require.Equal(t, "main", got.Env["CAESIUM_PARAM_BRANCH"])
+			require.Equal(t, "/work/tf.plan", got.Env["CAESIUM_OUTPUT_EXTRACT_PLAN"])
+		})
 	}
-	require.NoError(t, db.Create(atomModel).Error)
-
-	predAtom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`, CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, db.Create(predAtom).Error)
-	predTask := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: predAtom.ID, Name: "extract", CreatedAt: now, UpdatedAt: now}
-	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "load", CreatedAt: now, UpdatedAt: now}
-	require.NoError(t, db.Create(predTask).Error)
-	require.NoError(t, db.Create(task).Error)
-	require.NoError(t, db.Create(&models.TaskEdge{ID: uuid.New(), JobID: job.ID, FromTaskID: predTask.ID, ToTaskID: task.ID, CreatedAt: now, UpdatedAt: now}).Error)
-
-	paramsBytes, err := json.Marshal(map[string]string{"branch": "main"})
-	require.NoError(t, err)
-	jobRun := &models.JobRun{
-		ID:          uuid.New(),
-		JobID:       job.ID,
-		TriggerID:   trigger.ID,
-		TriggerType: string(trigger.Type),
-		Status:      string(run.StatusRunning),
-		Params:      datatypes.JSON(paramsBytes),
-		StartedAt:   now,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	require.NoError(t, db.Create(jobRun).Error)
-	outputBytes, err := json.Marshal(map[string]string{"plan": "/work/tf.plan"})
-	require.NoError(t, err)
-	require.NoError(t, db.Create(&models.TaskRun{
-		ID:        uuid.New(),
-		JobRunID:  jobRun.ID,
-		TaskID:    predTask.ID,
-		AtomID:    predAtom.ID,
-		Engine:    predAtom.Engine,
-		Image:     predAtom.Image,
-		Command:   predAtom.Command,
-		Status:    string(run.TaskStatusSucceeded),
-		Result:    string(atom.Success),
-		Output:    datatypes.JSON(outputBytes),
-		CreatedAt: now,
-		UpdatedAt: now,
-	}).Error)
-	taskRun := &models.TaskRun{
-		ID:          uuid.New(),
-		JobRunID:    jobRun.ID,
-		TaskID:      task.ID,
-		AtomID:      atomModel.ID,
-		Engine:      atomModel.Engine,
-		Image:       atomModel.Image,
-		Command:     atomModel.Command,
-		Status:      string(run.TaskStatusRunning),
-		ClaimedBy:   "node-a",
-		Attempt:     1,
-		MaxAttempts: 1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	require.NoError(t, db.Create(taskRun).Error)
-
-	engine := &captureCreateEngine{}
-	executor := &runtimeExecutor{
-		store:          store,
-		localSink:      NewLocalSink(store),
-		secretResolver: staticSecretResolver{"secret://env/TOKEN": "resolved-token"},
-		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
-			return engine, nil
-		},
-	}
-	executor.Execute(context.Background(), taskRun)
-
-	require.NotNil(t, engine.createReq)
-	got := engine.createReq.Spec
-	require.Equal(t, "/workspace", got.WorkDir)
-	require.Equal(t, []container.Mount{{Type: container.MountTypeBind, Source: "/host", Target: "/data"}}, got.Mounts)
-	require.Equal(t, []container.VolumeMount{{Name: "work", Type: container.VolumeMountTypeVolume, Source: "caesium-work", Target: "/work"}}, got.ResolvedVolumeMounts)
-	require.Equal(t, "value", got.Env["PLAIN"])
-	require.Equal(t, "resolved-token", got.Env["SECRET"])
-	require.Equal(t, jobRun.ID.String(), got.Env["CAESIUM_RUN_ID"])
-	require.Equal(t, "worker-job", got.Env["CAESIUM_JOB_ALIAS"])
-	require.Equal(t, "main", got.Env["CAESIUM_PARAM_BRANCH"])
-	require.Equal(t, "/work/tf.plan", got.Env["CAESIUM_OUTPUT_EXTRACT_PLAN"])
 }
 
 func TestRuntimeExecutorInterpolatesParamRefsInStepEnv(t *testing.T) {
@@ -888,4 +929,29 @@ func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, erro
 		return e.logsReader, nil
 	}
 	return io.NopCloser(strings.NewReader(e.logs)), nil
+}
+
+func TestWorkerImageIdentityChecksRequiredConservativeFreeze(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		raw    string
+		ownPin bool
+		blob   string
+		want   bool
+	}{
+		{"false", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`, false, "", false},
+		{"true", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":true}}`, false, "", true},
+		{"legacy", `{}`, false, "", true},
+		{"missing", "", false, "", true},
+		{"malformed", `{`, false, "", true},
+		{"malformed runtime freeze", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false},"containerSpec":9}`, false, "", true},
+		{"unsupported schema", `{"schemaVersion":2,"run":{"imageIdentityChecksRequired":false}}`, false, "", true},
+		{"own pin overrides false", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`, true, "", true},
+		{"legacy nonce overrides false", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`, false, `{"unresolvedImageIdentity":"previous-attempt"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := &models.TaskRun{ExecutionDescriptor: datatypes.JSON(tc.raw), CacheEnabled: true, CachePinDigests: tc.ownPin, HashInputBlob: datatypes.JSON(tc.blob)}
+			require.Equal(t, tc.want, workerImageIdentityChecksRequired(row, nil))
+		})
+	}
 }

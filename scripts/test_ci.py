@@ -106,6 +106,39 @@ def results(outputs):
     return needs
 
 
+def browser_nsenter_invocation(script):
+    """Parse the parent nsenter options, stopping before its child command."""
+    tokens = shlex.split(script.replace("\\\n", " "))
+    # The executable also appears as the argument to `test -x`; an invocation
+    # must begin with options so it selects the intended network namespace.
+    calls = [i for i, token in enumerate(tokens[:-1])
+             if token == "$nsenter_bin" and tokens[i + 1].startswith("-")]
+    if len(calls) != 1:
+        raise AssertionError("expected one nsenter invocation")
+    index = calls[0] + 1
+    namespaces = []
+    targets = []
+    while index < len(tokens) and tokens[index].startswith("-"):
+        option = tokens[index]
+        index += 1
+        if option == "--":
+            break
+        if option in ("--net", "-n"):
+            namespaces.append("net")
+        elif option in ("--target", "-t"):
+            if index >= len(tokens):
+                raise AssertionError("nsenter target is missing")
+            targets.append(tokens[index])
+            index += 1
+        elif option.startswith("--target="):
+            targets.append(option.split("=", 1)[1])
+        else:
+            raise AssertionError(f"unexpected nsenter option: {option}")
+    if index >= len(tokens):
+        raise AssertionError("nsenter child command is missing")
+    return namespaces, targets, tokens[index]
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -277,12 +310,67 @@ class WorkflowTests(unittest.TestCase):
                         self.assertEqual(structured, {"error": "[REDACTED_API_KEY]", "status": "flaky"})
 
     def test_default_browser_lane_selects_network_recovery_with_dependencies(self):
+        setup_node = next(step for step in JOBS["ui-e2e"]["steps"]
+                          if step.get("uses") == "actions/setup-node@v6")
+        dependencies = next(step for step in JOBS["ui-e2e"]["steps"]
+                            if step.get("id") == "dependencies")
         browser = next(step for step in JOBS["ui-e2e"]["steps"]
                        if step.get("id") == "playwright")
-        self.assertEqual(
-            shlex.split(browser["run"]),
-            ["npm", "run", "test:e2e", "--", "--project=network-recovery"],
-        )
+        self.assertEqual(setup_node["with"]["node-version"], "22")
+        self.assertEqual(setup_node["with"]["cache"], "npm")
+        self.assertEqual(setup_node["with"]["cache-dependency-path"], "ui/package-lock.json")
+        self.assertEqual(dependencies["working-directory"], "ui")
+        self.assertIn("npm ci", dependencies["run"])
+        self.assertIn("npx playwright install --with-deps chromium", dependencies["run"])
+
+        self.assertEqual(browser["working-directory"], "ui")
+        self.assertEqual(browser["env"]["CI"], "true")
+        self.assertEqual(browser["env"]["PLAYWRIGHT_BASE_URL"], "http://127.0.0.1:8080")
+        self.assertEqual(browser["env"]["CAESIUM_MANUAL_TRIGGER_API_KEY"], "e2e-test-key")
+        self.assertIn("docker inspect --format '{{.State.Pid}}' caesium-server", browser["run"])
+        self.assertIn("case \"$server_pid\"", browser["run"])
+        self.assertIn('sudo test -e "/proc/$server_pid/ns/net"', browser["run"])
+        self.assertIn("runner_uid=\"$(id -u)\"", browser["run"])
+        self.assertIn("runner_gid=\"$(id -g)\"", browser["run"])
+        self.assertIn("runner_groups=\"$(id -G | tr ' ' ',')\"", browser["run"])
+        self.assertIn("runner_home=\"${HOME:?runner HOME is required}\"", browser["run"])
+        self.assertIn('runner_path="$PATH"', browser["run"])
+        self.assertIn('runner_pwd="$PWD"', browser["run"])
+        self.assertIn('host_mount_ns="$(readlink /proc/self/ns/mnt)"', browser["run"])
+        self.assertIn("docker inspect --format '{{.ResolvConfPath}}' caesium-server", browser["run"])
+        self.assertIn('sudo test -f "$server_resolv_conf"', browser["run"])
+        self.assertIn("node_bin=\"$(command -v node)\"", browser["run"])
+        self.assertIn("npm_bin=\"$(command -v npm)\"", browser["run"])
+        self.assertIn("nsenter_bin=\"$(command -v nsenter)\"", browser["run"])
+        self.assertIn("unshare_bin=\"$(command -v unshare)\"", browser["run"])
+        self.assertIn("setpriv_bin=\"$(command -v setpriv)\"", browser["run"])
+        self.assertIn('require("playwright")', browser["run"])
+        self.assertIn('test -x "$browser_bin"', browser["run"])
+        self.assertIn("sudo env", browser["run"])
+        self.assertIn('HOME="$runner_home"', browser["run"])
+        self.assertIn('PATH="$runner_path"', browser["run"])
+        self.assertIn('PWD="$runner_pwd"', browser["run"])
+        self.assertEqual(browser_nsenter_invocation(browser["run"]),
+                         (["net"], ["$server_pid"], "$unshare_bin"))
+        self.assertIn('"$unshare_bin" --mount --propagation private', browser["run"])
+        self.assertIn('mount --make-rprivate /', browser["run"])
+        self.assertIn('mount --bind "$CAESIUM_E2E_SERVER_RESOLV_CONF" /etc/resolv.conf', browser["run"])
+        self.assertIn('CAESIUM_E2E_HOST_MOUNT_NS="$host_mount_ns"', browser["run"])
+        self.assertIn('test /etc/resolv.conf -ef "$CAESIUM_E2E_SERVER_RESOLV_CONF"', browser["run"])
+        self.assertIn('"$CAESIUM_E2E_SETPRIV_BIN" --reuid="$CAESIUM_E2E_RUNNER_UID"', browser["run"])
+        self.assertIn('--groups="$CAESIUM_E2E_RUNNER_GROUPS" --inh-caps=-all --ambient-caps=-all', browser["run"])
+        self.assertIn('--bounding-set=-all --no-new-privs', browser["run"])
+        self.assertIn("PLAYWRIGHT_BASE_URL=\"$PLAYWRIGHT_BASE_URL\"", browser["run"])
+        self.assertIn("CAESIUM_MANUAL_TRIGGER_API_KEY=\"$CAESIUM_MANUAL_TRIGGER_API_KEY\"", browser["run"])
+        self.assertIn('curl -sf "$PLAYWRIGHT_BASE_URL/health"', browser["run"])
+        self.assertIn('for font_host in fonts.googleapis.com fonts.gstatic.com', browser["run"])
+        self.assertIn('--input-type=module', browser["run"])
+        self.assertIn('const browser = await chromium.launch()', browser["run"])
+        self.assertIn('exec "$CAESIUM_E2E_NPM_BIN" run test:e2e -- --project=network-recovery', browser["run"])
+        self.assertIn("Host resolver nameservers:", browser["run"])
+        self.assertIn("Server resolver nameservers:", browser["run"])
+        self.assertNotIn("--network=host", browser["run"])
+        self.assertNotIn("mcr.microsoft.com/playwright", browser["run"])
 
         justfile = (ROOT / "justfile").read_text()
         recipe_start = justfile.index("\nui-e2e:")
@@ -290,6 +378,45 @@ class WorkflowTests(unittest.TestCase):
         recipe = justfile[recipe_start:recipe_end]
         self.assertIn("npm run test:e2e -- --project=network-recovery", recipe)
         self.assertNotIn("--no-deps", recipe)
+
+    def test_browser_nsenter_scope_is_independent_of_option_order(self):
+        for arguments in ('--target "$server_pid" --net',
+                          '--net --target "$server_pid"',
+                          '--net --target="$server_pid"',
+                          '-n -t "$server_pid"'):
+            with self.subTest(arguments=arguments):
+                command = f'test -x "$nsenter_bin"\n"$nsenter_bin" {arguments} "$unshare_bin" --mount --propagation private'
+                self.assertEqual(browser_nsenter_invocation(command),
+                                 (["net"], ["$server_pid"], "$unshare_bin"))
+
+    def test_browser_nsenter_scope_rejects_extra_namespaces_and_context(self):
+        for option in ('--mount', '-m', '--pid', '-p', '--user', '-U',
+                       '--root', '-r', '--wd', '-w', '--wdns', '-W',
+                       '--all', '-a', '--uts', '-u', '--ipc', '-i',
+                       '--cgroup', '-C', '--time', '-T', '--mount=/proc/1/ns/mnt'):
+            for arguments in (f'{option} --target "$server_pid" --net',
+                              f'--target "$server_pid" --net {option}'):
+                with self.subTest(arguments=arguments), self.assertRaises(AssertionError):
+                    browser_nsenter_invocation(f'"$nsenter_bin" {arguments} "$unshare_bin" --mount')
+
+    def test_external_font_dns_failure_warns_and_allows_browser_assertions(self):
+        browser = next(step for step in JOBS["ui-e2e"]["steps"]
+                       if step.get("id") == "playwright")
+        probe = re.search(r'^for font_host in .*?^done$', browser["run"], re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(probe)
+        with tempfile.TemporaryDirectory() as tmp:
+            getent = Path(tmp) / "getent"
+            getent.write_text('#!/bin/sh\nexit 2\n')
+            getent.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", probe.group() + '\nprintf "browser assertions reached\\n"'],
+                env={**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"]},
+                capture_output=True, text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("browser assertions reached", result.stdout)
+        for hostname in ("fonts.googleapis.com", "fonts.gstatic.com"):
+            self.assertIn(f"::warning::preflight: cannot resolve {hostname} (external DNS)", result.stderr)
 
     def test_malformed_browser_archive_never_uploads_raw_credentials(self):
         for name in ("ui-e2e", "ui-e2e-auth"):
@@ -460,6 +587,7 @@ class WorkflowTests(unittest.TestCase):
         # recognizes the concrete (non-root) fixture paths below.
         for path, group in (
             ("test/definitions/job_one.yaml", "go"),
+            ("test/kubernetes_cache_identity.py", "go"),
             ("pkg/jobdef/testdata/schema.json", "go"),
             ("docs/examples/minimal.job.yaml", "go"),
             ("docs/examples-k8s/minimal.job.yaml", "go"),
@@ -470,6 +598,44 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(any(fnmatch.fnmatchcase(path, rule) for rule in filters[group]), path)
         for path in ("docs/ci.md", "README.md"):
             self.assertFalse(any(fnmatch.fnmatchcase(path, rule) for rules in filters.values() for rule in rules))
+
+    def test_kubernetes_cache_identity_runs_both_modes_and_retains_evidence(self):
+        steps = JOBS["helm-integration-test"]["steps"]
+        scenario = next(step for step in steps if "test/kubernetes_cache_identity.py" in step.get("run", ""))
+        self.assertEqual(scenario["if"], "matrix.shard == 1")
+        commands = scenario["run"]
+        self.assertIn("set -euo pipefail", commands)
+        self.assertEqual(commands.count("python3 test/kubernetes_cache_identity.py"), 2)
+        download = next(step for step in steps if step.get("with", {}).get("name") == "release-cli-amd64")
+        self.assertEqual(download["if"], "matrix.shard == 1")
+        self.assertEqual(download["with"]["path"], ".tmp/cache-identity-cli")
+        self.assertEqual(commands.count("--cli .tmp/cache-identity-cli/caesium-linux-amd64"), 2)
+        self.assertIn("chmod +x .tmp/cache-identity-cli/caesium-linux-amd64", commands)
+        self.assertIn("--mode local", commands)
+        self.assertIn("--mode distributed", commands)
+        self.assertIn("CAESIUM_EXECUTION_MODE=distributed", commands)
+        self.assertIn("kubectl rollout status", commands)
+        not_run = next(step for step in steps if '"result":"not_run"' in step.get("run", ""))
+        self.assertEqual(not_run["if"], "always() && matrix.shard == 1")
+        self.assertIn("for mode in local distributed", not_run["run"])
+        self.assertIn('[ ! -f "$evidence" ]', not_run["run"])
+        evidence = next(step for step in steps if step.get("with", {}).get("name") == "kubernetes-cache-identity")
+        self.assertLess(steps.index(not_run), steps.index(evidence))
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            root = Path(directory) / ".tmp/kubernetes-cache-identity"
+            for mode in ("local", "distributed"):
+                record = json.loads((root / f"{mode}.log").read_text())
+                self.assertEqual(record["result"], "not_run")
+                self.assertEqual(record["mode"], mode)
+            (root / "local.log").write_text("retained scenario failure\n")
+            subprocess.run(["bash", "-e", "-c", not_run["run"]], cwd=directory, check=True)
+            self.assertEqual((root / "local.log").read_text(), "retained scenario failure\n")
+
+        self.assertEqual(evidence["if"], "always() && matrix.shard == 1")
+        self.assertEqual(evidence["with"]["if-no-files-found"], "error")
+        for mode in ("local", "distributed"):
+            self.assertIn(f'tee {evidence["with"]["path"]}{mode}.log', commands)
 
     def test_downloaded_artifacts_have_producers(self):
         saved = set()

@@ -1,5 +1,40 @@
 import { expect, test } from "@playwright/test";
-import { applyDefinitions, loadFixtureDefinition, loadFixtureDefinitions } from "./helpers/fixtures";
+import {
+  applyDefinitions,
+  awaitRun,
+  findJobByAlias,
+  loadFixtureDefinition,
+  loadFixtureDefinitions,
+  triggerJob,
+  uniqueSuffix,
+  type FixtureDefinition,
+} from "./helpers/fixtures";
+
+function futureCronDefinition(alias: string, cron: string): FixtureDefinition {
+  return {
+    apiVersion: "v1",
+    kind: "Job",
+    metadata: { alias },
+    trigger: { type: "cron", configuration: { cron, timezone: "UTC" } },
+    steps: [{ name: "scheduled", engine: "docker", image: "alpine:3.23", command: ["sh", "-c", "true"] }],
+  } as FixtureDefinition;
+}
+
+function cacheDefinition(alias: string): FixtureDefinition {
+  return {
+    apiVersion: "v1",
+    kind: "Job",
+    metadata: { alias },
+    trigger: { type: "cron", configuration: { cron: "0 0 1 1 *", timezone: "UTC" } },
+    steps: [{
+      name: "cached",
+      engine: "docker",
+      image: "alpine:3.23",
+      command: ["sh", "-c", "true"],
+      cache: { ttl: "13h" },
+    }],
+  } as FixtureDefinition;
+}
 
 test("triggers page renders cron next-fire and event summaries", async ({ page, request }) => {
   const cronDefinitions = await loadFixtureDefinitions("run-history.job.yaml");
@@ -23,4 +58,66 @@ test("triggers page renders cron next-fire and event summaries", async ({ page, 
   await expect(eventRow).toContainText("deployment.* from github-actions");
   await expect(eventRow).toContainText("2 filters, 3 mapped params, 2 default params");
   await expect(eventRow).not.toContainText("{\"defaultParams\"");
+});
+
+test("triggers page distinguishes future minute, day, and yearly fires with UTC timestamps", async ({ page, request }) => {
+  const suffix = uniqueSuffix();
+  const schedules = [
+    { alias: `next-minute-${suffix}`, cron: "*/1 * * * *", relative: "in 1m", timestamp: "2026-09-14 12:01:00 UTC" },
+    { alias: `next-day-${suffix}`, cron: "0 0 * * *", relative: "in 12h", timestamp: "2026-09-15 00:00:00 UTC" },
+    { alias: `next-year-${suffix}`, cron: "0 0 1 1 *", relative: "in 109d", timestamp: "2027-01-01 00:00:00 UTC" },
+  ];
+  await applyDefinitions(request, ...schedules.map(({ alias, cron }) => futureCronDefinition(alias, cron)));
+
+  // Freeze Date without replacing timers: rendering sees exact, deterministic
+  // future durations while the separate scenario below drives the real timer.
+  await page.clock.setFixedTime(new Date("2026-09-14T12:00:00.000Z"));
+  await page.goto("/triggers");
+  await expect(page.getByRole("heading", { name: "Triggers", exact: true })).toBeVisible();
+
+  for (const schedule of schedules) {
+    const row = page.getByTestId("trigger-card").filter({ hasText: schedule.alias }).first();
+    const nextFire = row.getByTestId("trigger-next-fire");
+    await expect(nextFire).toContainText(`Next: ${schedule.relative}`);
+    await expect(nextFire).not.toContainText("just now");
+    await expect(nextFire.getByTestId("trigger-next-fire-timestamp")).toHaveText(schedule.timestamp);
+  }
+});
+
+test("triggers page recomputes a cron next-fire at its real minute boundary", async ({ page, request }) => {
+  test.slow();
+  const alias = `next-fire-boundary-${uniqueSuffix()}`;
+  await applyDefinitions(request, futureCronDefinition(alias, "*/1 * * * *"));
+
+  await page.goto("/triggers");
+  const nextFire = page.getByTestId("trigger-card").filter({ hasText: alias }).first().getByTestId("trigger-next-fire");
+  const timestamp = nextFire.getByTestId("trigger-next-fire-timestamp");
+  await expect(nextFire).toContainText(/^Next: in /);
+  const initialTimestamp = await timestamp.textContent();
+  expect(initialTimestamp).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
+  const toEpochMs = (value: string | null) => Date.parse(value?.replace(" UTC", "Z").replace(" ", "T") ?? "");
+  const initialEpochMs = toEpochMs(initialTimestamp);
+  expect(Number.isFinite(initialEpochMs)).toBe(true);
+  // A mount-relative 60-second interval would miss this deadline when the
+  // page opens late in the minute; permit only the captured cron boundary.
+  const boundaryTimeoutMs = Math.min(65_000, Math.max(3_000, initialEpochMs - Date.now() + 3_000));
+  await expect.poll(async () => timestamp.textContent(), { timeout: boundaryTimeoutMs, intervals: [500, 1_000] }).not.toBe(initialTimestamp);
+  const nextTimestamp = await timestamp.textContent();
+  expect(toEpochMs(nextTimestamp)).toBe(initialEpochMs + 60_000);
+  await expect(nextFire).toContainText(/^Next: in /);
+});
+
+test("cache inventory renders a future expiry as a countdown", async ({ page, request }) => {
+  test.slow();
+  const alias = `cache-expiry-${uniqueSuffix()}`;
+  await applyDefinitions(request, cacheDefinition(alias));
+  const job = await findJobByAlias(request, alias);
+  await triggerJob(request, job.id);
+  await awaitRun(request, job.id, { status: "succeeded" });
+
+  await page.goto(`/jobs/${job.id}/cache`);
+  await expect(page.getByRole("heading", { name: "Cache Inventory", exact: true })).toBeVisible();
+  const expiry = page.getByTestId("cache-expiry");
+  await expect(expiry).toHaveText(/^in 13h$/);
+  await expect(expiry).not.toHaveText("just now");
 });

@@ -569,6 +569,7 @@ caesium job apply --path jobs/          # Deploy definitions to running server
 caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
+caesium test --path jobs/ --check-images # Strict gate for Docker-backed images
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
 ```
 
@@ -588,6 +589,16 @@ ignored.
 `caesium test --scenario` likewise fails when it selects zero scenarios. This
 prevents an empty or mismatched path from producing a successful check or
 deployment.
+
+`caesium test --check-images` fails when an image used by a Docker step is
+absent from the local Docker daemon, or when that daemon cannot be queried. It
+performs no pull, so a passing result means only local Docker-cache presence.
+An image used only by Podman or Kubernetes steps is reported as advisory and
+does not probe Docker; neither result proves registry pullability, target
+runtime availability, or Kubernetes node availability. If an image is shared
+by Docker and another engine, the Docker check remains strict and prints the
+other runtime caveats. The flag cannot be combined with `--scenario`, which has
+no job definitions to inspect.
 
 `caesium job export` calls `GET /v1/jobs/:id/manifest`, which rebuilds the
 manifest server-side from the stored job (the inverse of the apply importer) and

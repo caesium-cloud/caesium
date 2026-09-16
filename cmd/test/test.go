@@ -4,12 +4,14 @@ package test
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/dag"
 	"github.com/caesium-cloud/caesium/internal/harness"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 )
 
@@ -24,19 +26,22 @@ var (
 var Cmd = &cobra.Command{
 	Use:   "test",
 	Short: "Dry-run validation of job definitions",
-	Long:  "Validates YAML schemas, analyses the DAG topology, optionally checks local Docker image availability, and can execute harness scenarios.",
+	Long:  "Validates YAML schemas, analyses the DAG topology, optionally gates on local Docker image availability, and can execute harness scenarios.",
 	RunE:  runTest,
 }
 
 func init() {
 	Cmd.Flags().StringSliceVarP(&testPaths, "path", "p", nil, "Paths to job definition files or directories (default: current directory)")
 	Cmd.Flags().StringSliceVar(&scenarioPaths, "scenario", nil, "Paths to harness scenario files or directories")
-	Cmd.Flags().BoolVar(&checkImages, "check-images", false, "Check local Docker image availability")
+	Cmd.Flags().BoolVar(&checkImages, "check-images", false, "Require every referenced image in the local Docker daemon (no pull or remote-runtime check)")
 	Cmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", false, "Show detailed DAG analysis")
 }
 
 func runTest(cmd *cobra.Command, _ []string) error {
 	if len(scenarioPaths) > 0 {
+		if checkImages {
+			return fmt.Errorf("--check-images cannot be combined with --scenario")
+		}
 		return runScenarios(cmd)
 	}
 
@@ -78,22 +83,35 @@ func runTest(cmd *cobra.Command, _ []string) error {
 
 	if checkImages {
 		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Image availability:")
-		var allImages []string
-		for i := range defs {
-			allImages = append(allImages, dag.UniqueImages(&defs[i])...)
+		_, _ = fmt.Fprintln(w, "Image availability (local Docker daemon only; no registry pull is attempted):")
+		targets := imageCheckTargets(defs)
+		dockerImages := make([]string, 0, len(targets))
+		for _, target := range targets {
+			if target.usesDocker() {
+				dockerImages = append(dockerImages, target.image)
+			}
 		}
-		allImages = dedup(allImages)
-		results := imagecheck.Check(cmd.Context(), allImages)
-		for _, r := range results {
+		results := make(map[string]imagecheck.Result, len(dockerImages))
+		if len(dockerImages) > 0 {
+			for _, result := range imagecheck.Check(cmd.Context(), dockerImages) {
+				results[result.Image] = result
+			}
+		}
+		for _, target := range targets {
+			if !target.usesDocker() {
+				_, _ = fmt.Fprintf(w, "  ADVISORY  %s  (%s)\n", target.image, target.availabilityDetail("no local Docker daemon probe"))
+				continue
+			}
+			r := results[target.image]
 			switch {
 			case r.Error != nil:
-				_, _ = fmt.Fprintf(w, "  FAIL  %s  (error: %v)\n", r.Image, r.Error)
+				_, _ = fmt.Fprintf(w, "  FAIL  %s  (%s)\n", r.Image, target.availabilityDetail(fmt.Sprintf("local Docker daemon error: %v", r.Error)))
 				allOK = false
 			case r.Available:
-				_, _ = fmt.Fprintf(w, "  PASS  %s  (local)\n", r.Image)
+				_, _ = fmt.Fprintf(w, "  PASS  %s  (%s)\n", r.Image, target.availabilityDetail("available in local Docker daemon"))
 			default:
-				_, _ = fmt.Fprintf(w, "  MISS  %s  (not found locally)\n", r.Image)
+				_, _ = fmt.Fprintf(w, "  MISS  %s  (%s)\n", r.Image, target.availabilityDetail("not found in local Docker daemon"))
+				allOK = false
 			}
 		}
 	}
@@ -102,6 +120,58 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("one or more checks failed")
 	}
 	return nil
+}
+
+type imageCheckTarget struct {
+	image   string
+	engines []string
+}
+
+// imageCheckTargets keeps the definition order while recording where an image
+// is used. --check-images deliberately asks only the local Docker daemon, so
+// an image referenced by another engine must retain that caveat in its result.
+func imageCheckTargets(defs []schema.Definition) []imageCheckTarget {
+	index := make(map[string]int)
+	var targets []imageCheckTarget
+	for i := range defs {
+		for _, step := range defs[i].Steps {
+			image := strings.TrimSpace(step.Image)
+			if image == "" {
+				continue
+			}
+			engine := strings.TrimSpace(step.Engine)
+			if engine == "" {
+				engine = schema.EngineDocker
+			}
+			if targetIndex, ok := index[image]; ok {
+				if !slices.Contains(targets[targetIndex].engines, engine) {
+					targets[targetIndex].engines = append(targets[targetIndex].engines, engine)
+				}
+				continue
+			}
+			index[image] = len(targets)
+			targets = append(targets, imageCheckTarget{image: image, engines: []string{engine}})
+		}
+	}
+	return targets
+}
+
+func (t imageCheckTarget) usesDocker() bool {
+	return slices.Contains(t.engines, schema.EngineDocker)
+}
+
+func (t imageCheckTarget) availabilityDetail(result string) string {
+	var caveats []string
+	if slices.Contains(t.engines, schema.EnginePodman) {
+		caveats = append(caveats, "Podman runtime availability is not checked")
+	}
+	if slices.Contains(t.engines, schema.EngineKubernetes) {
+		caveats = append(caveats, "Kubernetes target availability is not checked")
+	}
+	if len(caveats) == 0 {
+		return result
+	}
+	return result + "; " + strings.Join(caveats, "; ")
 }
 
 func runScenarios(cmd *cobra.Command) error {
@@ -175,17 +245,4 @@ func formatExecutionOrder(layers [][]string) []string {
 		}
 	}
 	return result
-}
-
-func dedup(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	var out []string
-	for _, item := range items {
-		if _, ok := seen[item]; ok {
-			continue
-		}
-		seen[item] = struct{}{}
-		out = append(out, item)
-	}
-	return out
 }
