@@ -79,6 +79,10 @@ func TestWorkerCompletionRecoveryRetainsClaimUntilBoundOrLoss(t *testing.T) {
 				t.Fatal("recovery did not release the worker")
 			}
 			require.NoError(t, ctx.Err(), "worker remains usable after this completion stops")
+			// Stop the polling loop before inspecting capacity: an idle worker
+			// briefly reserves the slot each time it checks for new claims.
+			cancel()
+			require.NoError(t, <-workerDone)
 			pool.Wait()
 			require.True(t, pool.TryAcquire(), "completion must release its slot")
 			pool.Release()
@@ -86,8 +90,6 @@ func TestWorkerCompletionRecoveryRetainsClaimUntilBoundOrLoss(t *testing.T) {
 			remaining := len(w.inFlight)
 			w.inFlightMu.Unlock()
 			require.Zero(t, remaining)
-			cancel()
-			require.NoError(t, <-workerDone)
 		})
 	}
 }
