@@ -18,6 +18,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+source "$ROOT/scripts/helm-pod-replacement-membership.sh"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -289,8 +290,8 @@ await_run() {
 # Raft membership only. /v1/system/nodes also reports historical worker
 # addresses taken from task_runs.claimed_by, and a node that ran a task before
 # its replacement is still recorded there; those are not cluster members.
-raft_members() {
-  api_retry GET /v1/system/nodes | python3 -c '
+parse_raft_members() {
+  python3 -c '
 import json, sys
 payload = json.load(sys.stdin)
 nodes = payload.get("nodes", []) if isinstance(payload, dict) else payload
@@ -300,8 +301,14 @@ for node in nodes:
 '
 }
 
-has_member() {
-  printf '%s\n' "$1" | awk -v addr="$2" '$1 == addr { found = 1 } END { exit found ? 0 : 1 }'
+raft_members() {
+  api_retry GET /v1/system/nodes | parse_raft_members
+}
+
+# One bounded read for the snapshot-polling loop. api_retry is intentionally
+# not used here: its own long retry loop would defeat the membership deadline.
+raft_members_once() {
+  curl -fsS --max-time 5 "${API}/v1/system/nodes" | parse_raft_members
 }
 
 pf_start
@@ -367,26 +374,16 @@ assert_recovered() {
     die "$pod info.yaml records $persisted, expected ${new_ip}:${DQLITE_PORT}"
 
   pf_start
-  members="$(raft_members)"
+  if ! members="$(replacement_wait_membership "$old_addr" "${new_ip}:${DQLITE_PORT}" \
+    120 2 2>"$ARTIFACTS/membership-wait-${pod}.log")"; then
+    collect
+    die "dqlite membership did not converge after replacing $pod: $(cat "$ARTIFACTS/membership-wait-${pod}.log")"
+  fi
   printf '%s\n' "$members" >"$ARTIFACTS/members-after-${pod}.txt"
   log "dqlite membership after replacing $pod:"
   printf '%s\n' "$members" | sed 's/^/  /'
-
-  has_member "$members" "${new_ip}:${DQLITE_PORT}" ||
-    die "dqlite membership does not list $pod at its new address ${new_ip}:${DQLITE_PORT}"
-  if ! printf '%s\n' "$members" | awk -v addr="${new_ip}:${DQLITE_PORT}" '
-    $1 == addr && $2 == "voter" { found = 1 }
-    END { exit found ? 0 : 1 }
-  '; then
-    die "dqlite membership does not list $pod as a voter at ${new_ip}:${DQLITE_PORT}"
-  fi
-  [[ "$(printf '%s\n' "$members" | awk 'NF { count++ } END { print count+0 }')" == "3" ]] ||
-    die "dqlite membership has an unexpected number of members after replacing $pod: $members"
-  [[ "$(printf '%s\n' "$members" | awk '$2 == "voter" { count++ } END { print count+0 }')" == "3" ]] ||
-    die "dqlite membership has fewer than three voters after replacing $pod: $members"
-  if has_member "$members" "$old_addr"; then
-    die "dqlite membership still lists the replaced pod at its old address $old_addr"
-  fi
+  replacement_membership_complete "$members" "$old_addr" "${new_ip}:${DQLITE_PORT}" ||
+    die "dqlite membership changed after convergence for $pod: $members"
 
   # Durable data written before any replacement is still readable ...
   [[ "$(run_status "$JOB_ID" "$FIRST_RUN")" == "succeeded" ]] ||
