@@ -619,7 +619,22 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
-		return err
+		// A start can fail AFTER it has committed the run: Store.startRun
+		// publishes run_started and takes the run lease before it reads the
+		// record back, and the tick context may itself be what failed (server
+		// shutdown). Dropping the error here would leave a live `running` row
+		// with no tasks and no engine — the strand this whole path exists to
+		// prevent. Look for the run the failed start committed, on a context
+		// that cannot be the reason the lookup fails too.
+		recoverCtx := context.WithoutCancel(ctx)
+		adopted, lookupErr := e.committedRunFor(recoverCtx, decl.JobID, params)
+		if lookupErr != nil || adopted == nil {
+			return err
+		}
+		log.Warn("freshness: run start reported an error after committing the run; driving the committed run",
+			"job_id", decl.JobID, "run_id", adopted.ID,
+			"dataset", datasetParamName(decl.Namespace, decl.Name), "error", err)
+		ctx, runRecord = recoverCtx, adopted
 	}
 	if runRecord == nil {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "admission declined", consumed, nil)
@@ -635,6 +650,39 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 	derivationErr := e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
 	e.launchRun(ctx, runRecord)
 	return derivationErr
+}
+
+// committedRunFor finds the run a failed start already committed, keyed on the
+// derivation identity (the produced dataset plus the consumed-watermark
+// snapshot) that hasActiveOrQueuedRun already dedupes on. It returns nil when
+// the start committed nothing, which is the ordinary case for a real admission
+// failure. Only `running` rows qualify: a run that reached a terminal status
+// needs neither launching nor rescuing.
+func (e *Evaluator) committedRunFor(ctx context.Context, jobID uuid.UUID, params map[string]string) (*runstorage.JobRun, error) {
+	var rows []models.JobRun
+	if err := e.db.WithContext(ctx).
+		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(runstorage.StatusRunning)).
+		Order("started_at DESC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rowParams := decodeParamsJSON(rows[i].Params)
+		if !sameDerivationParams(rowParams, params) {
+			continue
+		}
+		return &runstorage.JobRun{
+			ID:        rows[i].ID,
+			JobID:     rows[i].JobID,
+			Status:    runstorage.Status(rows[i].Status),
+			Priority:  rows[i].Priority,
+			Params:    rowParams,
+			StartedAt: rows[i].StartedAt,
+			CreatedAt: rows[i].CreatedAt,
+			UpdatedAt: rows[i].UpdatedAt,
+		}, nil
+	}
+	return nil, nil
 }
 
 func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, params map[string]string) (bool, error) {

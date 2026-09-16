@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
@@ -150,6 +151,112 @@ func TestLaunchDerivedRunStopsRetryingOnRecordNotFound(t *testing.T) {
 	}
 	if status := runStatus(t, conn, derived.ID); status != string(run.StatusFailed) {
 		t.Fatalf("run status = %q, want %q", status, run.StatusFailed)
+	}
+}
+
+// TestFreshnessRunLauncherFencesCancellationDuringLookup is the regression for
+// a run cancelled in the window between admission and job.Run's own cancel
+// registration.
+//
+// The admitted run is already visible to CancelRun and to the concurrency
+// `replace` admission, but job.Run's registration sits on the far side of the
+// job-lookup retries. Without a kickoff-site registration the cancel reaches no
+// registered context; job.Run then resolves the cancelled run without checking
+// its status and RegisterTasks has no parent-status guard, so the local executor
+// launches containers for a run the operator already cancelled.
+func TestFreshnessRunLauncherFencesCancellationDuringLookup(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+
+	release := make(chan struct{})
+	// Buffered: the launcher's goroutine records that it entered the lookup
+	// whether or not the test goroutine is already waiting.
+	lookupEntered := make(chan struct{}, 1)
+	executed := make(chan struct{}, 1)
+
+	launcher := newFreshnessRunLauncher(
+		store,
+		func(_ context.Context, id uuid.UUID) (*models.Job, error) {
+			select {
+			case lookupEntered <- struct{}{}:
+			default:
+			}
+			<-release
+			var j models.Job
+			if err := conn.First(&j, "id = ?", id).Error; err != nil {
+				return nil, err
+			}
+			return &j, nil
+		},
+		func(context.Context, *models.Job, *run.JobRun) error {
+			executed <- struct{}{}
+			return nil
+		},
+	)
+
+	launcher(context.Background(), derived)
+
+	select {
+	case <-lookupEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the launcher to start its job lookup")
+	}
+
+	// The launcher must already have registered the run's cancellation: this
+	// returns the number of contexts it cancelled, so > 0 proves registration
+	// happened BEFORE the lookup finished.
+	if cancelled := job.CancelRunContexts(derived.ID); cancelled == 0 {
+		close(release)
+		t.Fatal("the launcher did not register the run's cancellation before looking up its job")
+	}
+	close(release)
+
+	select {
+	case <-executed:
+		t.Fatal("a run cancelled during the job lookup must not execute its DAG")
+	case <-time.After(time.Second):
+	}
+}
+
+// TestLaunchDerivedRunSkipsTerminalRun covers the other half of the fence: a
+// cancellation that landed BEFORE this launcher registered, or whose
+// run_cancelled event the non-blocking bus dropped, is only visible in the row.
+func TestLaunchDerivedRunSkipsTerminalRun(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+
+	executed := false
+	launchDerivedRun(
+		context.Background(),
+		store,
+		derived,
+		func(_ context.Context, id uuid.UUID) (*models.Job, error) {
+			// The run is cancelled while the lookup is in flight.
+			if err := conn.Model(&models.JobRun{}).
+				Where("id = ?", derived.ID).
+				Update("status", string(run.StatusCancelled)).Error; err != nil {
+				return nil, err
+			}
+			var j models.Job
+			if err := conn.First(&j, "id = ?", id).Error; err != nil {
+				return nil, err
+			}
+			return &j, nil
+		},
+		func(context.Context, *models.Job, *run.JobRun) error {
+			executed = true
+			return nil
+		},
+	)
+
+	if executed {
+		t.Fatal("a run that reached a terminal status must not execute its DAG")
+	}
+	if status := runStatus(t, conn, derived.ID); status != string(run.StatusCancelled) {
+		t.Fatalf("run status = %q, want %q: the fence must not rewrite a terminal run",
+			status, run.StatusCancelled)
 	}
 }
 

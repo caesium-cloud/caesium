@@ -124,8 +124,22 @@ func newFreshnessRunLauncher(
 		}
 		// Detached from the evaluator's tick context on purpose: the run
 		// outlives the evaluation that derived it.
-		runCtx := run.WithContext(context.WithoutCancel(ctx), r.ID)
-		go launchDerivedRun(runCtx, store, r, loadJob, execute)
+		//
+		// Register the run's cancellation BEFORE the job lookup, not after.
+		// job.Run registers too — the registry holds a SET per run id, so both
+		// entries cancel the same work — but its registration is on the far side
+		// of loadDerivedRunJob's retry schedule. The admitted run is already
+		// visible to CancelRun and to the concurrency `replace` admission, so a
+		// cancel landing in that window would otherwise reach no registered
+		// context and the DAG would start anyway. This is the same reason the
+		// other kickoff sites register: to close the gap between the run row
+		// existing and Run being entered (internal/job/job.go).
+		cancelCtx, releaseCancel := job.RegisterRunCancel(context.WithoutCancel(ctx), r.ID)
+		runCtx := run.WithContext(cancelCtx, r.ID)
+		go func() {
+			defer releaseCancel()
+			launchDerivedRun(runCtx, store, r, loadJob, execute)
+		}()
 	}
 }
 
@@ -156,10 +170,48 @@ func launchDerivedRun(
 		}
 		return
 	}
+	// Fence before the engine: the run may have been cancelled or replaced while
+	// the lookup ran. job.Run resolves a run id from the context without
+	// checking its status, and RegisterTasks has no parent-status guard, so
+	// without this the local executor would launch containers for a cancelled
+	// run — the cancel reconciler stops them later, but a short task finishes
+	// its side effects first.
+	if reason := derivedRunNotLaunchable(ctx, store, r); reason != "" {
+		log.Info("freshness: derived run is no longer launchable; not executing",
+			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
+		return
+	}
 	if err := execute(ctx, j, r); err != nil {
 		log.Error("freshness: derived job run failure",
 			"job_id", r.JobID, "run_id", r.ID, "error", err)
 	}
+}
+
+// derivedRunNotLaunchable reports why an admitted derived run must not be
+// executed, or "" when it is still launchable.
+//
+// Two independent checks, because they cover different windows: ctx.Err()
+// catches a cancellation delivered through the in-process registry, and the
+// store read catches one that landed BEFORE this launcher registered, or whose
+// run_cancelled event the non-blocking bus dropped (the reason
+// StartRunCancelReconciler exists at all).
+func derivedRunNotLaunchable(ctx context.Context, store *run.Store, r *run.JobRun) string {
+	if err := ctx.Err(); err != nil {
+		return err.Error()
+	}
+	current, err := store.Get(r.ID)
+	if err != nil || current == nil {
+		// An unreadable status is treated as launchable: job.Run re-reads the
+		// run and finalizes it, which beats silently dropping a live run.
+		log.Warn("freshness: could not re-read a derived run before executing it; proceeding",
+			"job_id", r.JobID, "run_id", r.ID, "error", err)
+		return ""
+	}
+	switch current.Status {
+	case run.StatusCancelled, run.StatusSucceeded, run.StatusFailed, run.StatusSkipped:
+		return "run is " + string(current.Status)
+	}
+	return ""
 }
 
 // loadDerivedRunJob reads the job behind an already-admitted derived run,

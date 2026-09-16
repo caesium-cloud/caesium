@@ -22,16 +22,23 @@ type fakeRunStarter struct {
 	db *gorm.DB
 	// decline makes StartWithContext return (nil, nil) — the defensive
 	// "the store created nothing and said nothing" branch.
-	decline  bool
-	err      error
-	calls    int
-	runIDs   []uuid.UUID
-	launched []uuid.UUID
+	decline bool
+	// commitThenFail commits the run row and THEN returns err, reproducing a
+	// start that failed after the run was already live (Store.startRun publishes
+	// run_started and takes the lease before it reads the record back).
+	commitThenFail bool
+	// cancelOnStart, when set, cancels the caller's context from inside
+	// StartWithContext — the shutdown-lands-mid-admission case.
+	cancelOnStart context.CancelFunc
+	err           error
+	calls         int
+	runIDs        []uuid.UUID
+	launched      []uuid.UUID
 }
 
 func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
 	f.calls++
-	if f.err != nil {
+	if f.err != nil && !f.commitThenFail {
 		return nil, f.err
 	}
 	if f.decline {
@@ -66,6 +73,14 @@ func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, tr
 		f.t.Fatalf("create started run: %v", err)
 	}
 	f.runIDs = append(f.runIDs, runID)
+	if f.cancelOnStart != nil {
+		f.cancelOnStart()
+	}
+	if f.commitThenFail {
+		// The run is committed and live, but the caller only learns about the
+		// failure — exactly what a post-commit read cancellation looks like.
+		return nil, f.err
+	}
 	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, nil
 }
 
@@ -359,6 +374,92 @@ func TestEvaluatorRefusesToDeriveWithoutLauncher(t *testing.T) {
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+}
+
+// TestEvaluatorAdoptsRunCommittedByAFailedStart is the regression for a run
+// stranded by a start that failed AFTER committing. Store.startRun publishes
+// run_started and takes the run lease before it reads the record back, so a
+// cancellation (server shutdown mid-tick) or any post-commit read failure hands
+// the evaluator an error for a run that is already live. Returning that error
+// would leave a `running` row with no tasks and no engine: skipped_active_run
+// forever, and a maxRuns policy occupied for good.
+func TestEvaluatorAdoptsRunCommittedByAFailedStart(t *testing.T) {
+	db := openRegistryDB(t)
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "post-commit")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	// The tick context dies from inside the admission call, after the run row is
+	// committed — the shutdown-mid-admission case. Recovery must not depend on
+	// that context.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	starter := &fakeRunStarter{
+		t:              t,
+		db:             db,
+		commitThenFail: true,
+		err:            context.Canceled,
+		cancelOnStart:  cancel,
+	}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the fault injection must actually have cancelled the tick context")
+	}
+
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("committed runs = %v, want exactly 1", starter.runIDs)
+	}
+	if len(starter.launched) != 1 || starter.launched[0] != starter.runIDs[0] {
+		t.Fatalf("launched runs = %v, want the committed run %v", starter.launched, starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+
+	var derivation models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionDerived).Take(&derivation).Error; err != nil {
+		t.Fatalf("load derivation: %v", err)
+	}
+	if derivation.RunID == nil || *derivation.RunID != starter.runIDs[0] {
+		t.Fatalf("derivation run id = %v, want %v", derivation.RunID, starter.runIDs[0])
+	}
+}
+
+// TestEvaluatorPropagatesStartErrorThatCommittedNothing proves the recovery
+// above does not swallow a genuine admission failure: when no run was
+// committed, the error still reaches the caller.
+func TestEvaluatorPropagatesStartErrorThatCommittedNothing(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "no-commit")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db, err: errors.New("boom")}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err == nil {
+		t.Fatal("a start failure that committed nothing must propagate")
+	}
+	if len(starter.launched) != 0 {
+		t.Fatalf("launched %v runs for a start that committed nothing", starter.launched)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
 }
 
 // TestEvaluatorRecordsDeclinedAdmission covers the defensive branch: a run store

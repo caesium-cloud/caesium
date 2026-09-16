@@ -1486,7 +1486,14 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		s.startedMu.Unlock()
 	}
 
-	return s.loadRunWithDB(conn, model.ID)
+	// The run is COMMITTED by this point: the row exists, run_started has been
+	// published, the lease is taken and callers drive the run from the record
+	// returned here. Reading it back on the CALLER's context would let a
+	// cancellation landing in this window turn a live run into
+	// (nil, context.Canceled) — the caller then neither executes nor finalizes
+	// it, and the row is stranded `running` with no tasks and no engine. Only
+	// the transaction above honours cancellation; this read is detached.
+	return s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), model.ID)
 }
 
 // taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
