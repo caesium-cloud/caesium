@@ -340,12 +340,49 @@ func TestRunLocalRunTimeoutOverridesEarlierOrdinaryFailure(t *testing.T) {
 		ExecutionMode:     executionModeLocal,
 	}, taskSvc, atomSvc, &fakeTaskEdgeService{edges: edges}, engine)
 
-	err := New(&models.Job{ID: jobID, RunTimeout: 80 * time.Millisecond}, opts...).Run(context.Background())
-	require.ErrorContains(t, err, "run timed out after 80ms")
+	const timeout = time.Minute
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel(run.NewRunDeadlineError(timeout))
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("local run did not return after run-deadline cancellation")
+		}
+	})
+	go func() {
+		defer close(done)
+		errCh <- New(&models.Job{ID: jobID, RunTimeout: timeout}, opts...).Run(runCtx)
+	}()
+
+	// With MaxParallelTasks=1, creating running proves the scheduler consumed
+	// failed's result and released its slot. Waiting only for the durable failed
+	// row would still allow the deadline to win before local scheduling observed
+	// that ordinary error.
+	require.Eventually(t, func() bool {
+		var failed models.TaskRun
+		if err := db.Where("task_id = ?", failedID).First(&failed).Error; err != nil {
+			return false
+		}
+		return failed.Status == string(run.TaskStatusFailed) &&
+			strings.Contains(failed.Error, "ordinary first failure") &&
+			len(engine.createRequestsForTask(runningID)) > 0
+	}, 5*time.Second, 5*time.Millisecond, "wait for the scheduler to record and process the ordinary task failure")
+
+	cancel(run.NewRunDeadlineError(timeout))
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "local run did not return after run-deadline cancellation")
+	}
+	require.ErrorContains(t, err, "run timed out after 1m0s")
 
 	snapshot := latestRunSnapshot(t, store, jobID)
 	require.Equal(t, run.StatusFailed, snapshot.Status)
-	require.Contains(t, snapshot.Error, "run timed out after 80ms")
+	require.Contains(t, snapshot.Error, "run timed out after 1m0s")
 	status := taskStatusByID(snapshot)
 	require.Equal(t, run.TaskStatusFailed, status[failedID])
 	require.Equal(t, run.TaskStatusFailed, status[runningID])

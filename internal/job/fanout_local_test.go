@@ -666,8 +666,50 @@ func TestFanOutLocalRunTimeoutOverridesEarlierPartitionFailure(t *testing.T) {
 
 	vars := defaultFanOutVars()
 	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
-	err := New(&models.Job{ID: f.jobID, RunTimeout: 100 * time.Millisecond}, opts...).Run(context.Background())
-	require.ErrorContains(t, err, "run timed out after 100ms")
+	const timeout = time.Minute
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel(run.NewRunDeadlineError(timeout))
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("local run did not return after run-deadline cancellation")
+		}
+	})
+	go func() {
+		defer close(done)
+		errCh <- New(&models.Job{ID: f.jobID, RunTimeout: timeout}, opts...).Run(runCtx)
+	}()
+
+	// The pending partition can only start after the failed partition's result
+	// has been consumed: MaxParallel initially admits failed and running, then
+	// releases the final slot while handling failed. This makes the earlier
+	// ordinary error a scheduler-observed fact before we deliver the typed run
+	// deadline cause below.
+	require.Eventually(t, func() bool {
+		var jobRun models.JobRun
+		if err := f.db.Where("job_id = ?", f.jobID).First(&jobRun).Error; err != nil {
+			return false
+		}
+		var failed models.TaskRun
+		if err := f.db.Where("job_run_id = ? AND task_id = ? AND partition_value = ?", jobRun.ID, f.fanned, "failed").First(&failed).Error; err != nil {
+			return false
+		}
+		return failed.Status == string(run.TaskStatusFailed) &&
+			strings.Contains(failed.Error, "ordinary partition failure") &&
+			f.engine.createCount("pending") > 0
+	}, 5*time.Second, 5*time.Millisecond, "wait for the scheduler to record and process the ordinary partition failure")
+
+	cancel(run.NewRunDeadlineError(timeout))
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "local run did not return after run-deadline cancellation")
+	}
+	require.ErrorContains(t, err, "run timed out after 1m0s")
 
 	rows := f.instanceRows(t)
 	require.Len(t, rows, 3)
@@ -676,7 +718,7 @@ func TestFanOutLocalRunTimeoutOverridesEarlierPartitionFailure(t *testing.T) {
 		if row.PartitionValue == "failed" {
 			require.Contains(t, row.Error, "ordinary partition failure")
 		} else {
-			require.Contains(t, row.Error, "run timed out after 100ms")
+			require.Contains(t, row.Error, "run timed out after 1m0s")
 		}
 	}
 }
