@@ -110,11 +110,12 @@ func parseDecimalJSONNumber(s string) (int64, bool) {
 			i++
 		}
 		u, err := strconv.ParseInt(s[expStart:i], 10, 64)
-		if err != nil {
+		switch {
+		case err != nil:
 			expOverflow = true
-		} else if expSign < 0 {
+		case expSign < 0:
 			exp = -u
-		} else {
+		default:
 			exp = u
 		}
 	}
