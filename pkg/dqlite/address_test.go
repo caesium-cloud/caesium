@@ -499,3 +499,117 @@ func requireEventualWrite(t *testing.T, ctx context.Context, db *sql.DB, stmt st
 	}
 	require.NoError(t, err, fmt.Sprintf("write never committed: %s", stmt))
 }
+
+// shortenAddressRepairBudget keeps a test that deliberately cannot reach a
+// leader from spending the production retry budget.
+func shortenAddressRepairBudget(t *testing.T, budget, interval time.Duration) {
+	t.Helper()
+	oldBudget, oldInterval := addressRepairBudget, addressRepairInterval
+	addressRepairBudget, addressRepairInterval = budget, interval
+	t.Cleanup(func() { addressRepairBudget, addressRepairInterval = oldBudget, oldInterval })
+}
+
+// TestUnresolvedRepairFailsStartup covers a repair that fails before it ever
+// writes a journal. The node is a voter the leader still records at its old
+// address, so go-dqlite has nothing to promote and would report ready — and the
+// rollout would then replace the next member and take the quorum with it.
+// Startup has to fail instead, journal or no journal.
+func TestUnresolvedRepairFailsStartup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	shortenAddressRepairBudget(t, 5*time.Second, 100*time.Millisecond)
+
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9471", "127.0.0.1:9472", "127.0.0.1:9473"}
+	apps := make([]*dqliteapp.App, len(dirs))
+	for idx := range dirs {
+		var seeds []string
+		if idx > 0 {
+			seeds = addrs[:1]
+		}
+		apps[idx] = startNode(t, ctx, dirs[idx], addrs[idx], seeds)
+	}
+	replaced := apps[2].ID()
+	require.Equal(t, client.Voter, clusterMembers(t, ctx, apps[0])[replaced].Role)
+
+	// Take the whole cluster down, so the replacement cannot reach a leader and
+	// the repair fails at the first step — before any journal exists.
+	for idx := range apps {
+		require.NoError(t, apps[idx].Close())
+		apps[idx] = nil
+	}
+
+	app, err := restartNode(t, ctx, dirs[2], "127.0.0.2:9473", addrs[:1])
+	require.Error(t, err, "a node the cluster cannot reach must not report ready")
+	require.Nil(t, app)
+	require.ErrorContains(t, err, "could not reconcile this node's cluster membership")
+	require.NoFileExists(t, filepath.Join(dirs[2], repairFileName),
+		"the failure must be enforced without relying on a journal")
+}
+
+// TestNeverPromotedSpareRejoinsAtNewAddress covers a member that was added as a
+// spare and never promoted. A spare neither replicates the log nor votes, so it
+// holds no raft configuration of its own — membership has to come from the
+// leader, or its address is never repaired at all.
+func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9481", "127.0.0.1:9482", "127.0.0.1:9483", "127.0.0.1:9484"}
+	apps := make([]*dqliteapp.App, len(dirs))
+
+	// Voters 3 / stand-bys 0 leaves a fourth node nothing to be promoted to, so
+	// it joins as a spare and stays one.
+	start := func(idx int) *dqliteapp.App {
+		opts := []dqliteapp.Option{
+			dqliteapp.WithAddress(addrs[idx]),
+			dqliteapp.WithVoters(3),
+			dqliteapp.WithStandBys(0),
+		}
+		if idx > 0 {
+			opts = append(opts, dqliteapp.WithCluster(addrs[:1]))
+		}
+		app, err := dqliteapp.New(dirs[idx], opts...)
+		require.NoError(t, err)
+		readyCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		require.NoError(t, app.Ready(readyCtx))
+		return app
+	}
+	for idx := range dirs {
+		apps[idx] = start(idx)
+	}
+	defer func() {
+		for _, app := range apps {
+			if app != nil {
+				_ = app.Close()
+			}
+		}
+	}()
+
+	spare := apps[3].ID()
+	require.Equal(t, client.Spare, clusterMembers(t, ctx, apps[0])[spare].Role,
+		"the fourth node must never have been promoted")
+
+	// It holds no configuration of its own, which is what makes the leader the
+	// only place its membership can be read from.
+	_, localErr := localClusterConfiguration(ctx, apps[3])
+	require.ErrorIs(t, localErr, ErrNoLocalConfiguration)
+
+	require.NoError(t, apps[3].Close())
+	apps[3] = nil
+
+	newAddr := "127.0.0.2:9484"
+	var err error
+	apps[3], err = restartNode(t, ctx, dirs[3], newAddr, addrs[:1])
+	require.NoError(t, err)
+	require.Equal(t, spare, apps[3].ID())
+	require.NoFileExists(t, filepath.Join(dirs[3], repairFileName))
+
+	members := clusterMembers(t, ctx, apps[0])
+	require.Len(t, members, 4)
+	require.Equal(t, newAddr, members[spare].Address,
+		"a never-promoted spare must still be repaired onto its new address")
+	require.Equal(t, client.Spare, members[spare].Role)
+}

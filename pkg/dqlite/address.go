@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -27,12 +28,6 @@ const (
 	// repairFileName is Caesium's own journal, described on addressRepair.
 	repairFileName = "address-repair.yaml"
 
-	// How long to keep trying to correct this node's address in the raft
-	// configuration. A rolling pod replacement normally succeeds on the first
-	// attempt; the retries cover a leader election in flight.
-	addressRepairAttempts = 12
-	addressRepairInterval = 5 * time.Second
-
 	// How long to wait for the local node to answer a request for its own raft
 	// configuration after it has been started.
 	localConfigurationTimeout = 30 * time.Second
@@ -41,6 +36,27 @@ const (
 	// How long to wait when checking whether some other address answers as a
 	// live dqlite node. Only used to refuse a local raft reconfiguration.
 	peerProbeTimeout = 3 * time.Second
+
+	// How long a single attempt may spend looking for a leader. go-dqlite's
+	// connector walks every candidate with its own backoff, which on a cluster
+	// that is entirely down runs far longer than one repair attempt should.
+	leaderConnectTimeout = 15 * time.Second
+)
+
+// How long to keep trying to correct this node's address in the raft
+// configuration, and how long to wait between attempts.
+//
+// A rolling pod replacement normally succeeds on the first attempt. The budget
+// covers a leader election in flight, and the shorter contention interval
+// covers a leader that is busy with a configuration change of its own — which
+// is the steady state when it is retrying a promotion of this very node, since
+// that promotion cannot complete until this repair lands. Variables rather than
+// constants only so tests can shorten the budget.
+var (
+	addressRepairBudget            = 90 * time.Second
+	addressRepairInterval          = 5 * time.Second
+	addressRepairContentionRetry   = 500 * time.Millisecond
+	errConfigurationChangeInFlight = "a configuration change is already in progress"
 )
 
 // ErrAddressRepairWhileLeading is returned when this node's address is stale in
@@ -255,13 +271,26 @@ func reconcilePersistedNodeAddress(dir, address string, seeds []string) (*Addres
 	return &AddressMigration{ID: info.ID, OldAddress: previous, NewAddress: address}, nil
 }
 
+// ErrNoLocalConfiguration means the local node has no committed raft
+// configuration of its own to read.
+//
+// It is the normal state of a node that was added as a spare and never
+// promoted: a spare neither replicates the log nor participates in quorum, so
+// it holds no configuration even though the leader has it registered. Such a
+// node still needs its address repaired, just not from a local proof.
+var ErrNoLocalConfiguration = errors.New("dqlite: local node has no raft configuration of its own")
+
 // localClusterConfiguration asks the started local node for its own committed
 // raft configuration.
 //
 // This is the authoritative membership for this node: unlike cluster.yaml it is
 // replicated state, not a cache that go-dqlite refreshes on a timer (30s by
 // default), so a bootstrap node whose cache still says "one member" long after
-// two peers joined cannot mislead it.
+// two peers joined cannot mislead it. Only that guarantee makes it safe to
+// decide that a cluster has a single member.
+//
+// An empty answer is definitive rather than transient, and returns
+// ErrNoLocalConfiguration immediately.
 func localClusterConfiguration(ctx context.Context, app *dqliteapp.App) ([]client.NodeInfo, error) {
 	deadline := time.Now().Add(localConfigurationTimeout)
 	var lastErr error
@@ -274,13 +303,13 @@ func localClusterConfiguration(ctx context.Context, app *dqliteapp.App) ([]clien
 			defer func() { _ = cli.Close() }()
 			return cli.Cluster(ctx)
 		}()
-		if err == nil && len(members) > 0 {
+		switch {
+		case err == nil && len(members) > 0:
 			return members, nil
-		}
-		if err != nil {
+		case err == nil:
+			return nil, ErrNoLocalConfiguration
+		default:
 			lastErr = err
-		} else {
-			lastErr = errors.New("local node reported an empty raft configuration")
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("read local raft configuration: %w", lastErr)
@@ -291,6 +320,22 @@ func localClusterConfiguration(ctx context.Context, app *dqliteapp.App) ([]clien
 		case <-time.After(localConfigurationRetry):
 		}
 	}
+}
+
+// leaderClusterConfiguration reads membership from the cluster leader, for the
+// nodes that hold no configuration of their own.
+//
+// The leader's view is authoritative about who is registered and at what
+// address; it is only insufficient for the one decision that must never be
+// taken on hearsay — that this node is a cluster's sole member, which is what
+// authorizes rewriting the raft configuration locally.
+func leaderClusterConfiguration(ctx context.Context, candidates []string) ([]client.NodeInfo, error) {
+	cli, err := findLeaderAmong(ctx, candidates)
+	if err != nil {
+		return nil, fmt.Errorf("find leader: %w", err)
+	}
+	defer func() { _ = cli.Close() }()
+	return cli.Cluster(ctx)
 }
 
 func memberByID(members []client.NodeInfo, id uint64) *client.NodeInfo {
@@ -407,7 +452,12 @@ func findLeaderAmong(ctx context.Context, addresses []string) (*client.Client, e
 	if err := store.Set(ctx, nodes); err != nil {
 		return nil, err
 	}
-	return client.FindLeader(ctx, store)
+	// Bound the search, not the client: the timeout covers dialling and the
+	// handshake, while the caller drives the returned connection on its own
+	// context.
+	connectCtx, cancel := context.WithTimeout(ctx, leaderConnectTimeout)
+	defer cancel()
+	return client.FindLeader(connectCtx, store)
 }
 
 // repairClusterAddress makes the cluster's record of this node agree with the
@@ -546,19 +596,11 @@ func ensureClusterAddress(
 	id uint64,
 	address string,
 	candidates []string,
-	attempts int,
-	interval time.Duration,
+	budget time.Duration,
 ) error {
+	deadline := time.Now().Add(budget)
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(interval):
-			}
-		}
-
+	for attempt := 1; ; attempt++ {
 		repaired, err := repairClusterAddress(ctx, dir, id, address, candidates)
 		if err == nil {
 			if repaired {
@@ -569,10 +611,26 @@ func ensureClusterAddress(
 		}
 		lastErr = err
 		log.Warn("could not reconcile this node's dqlite cluster address yet",
-			"node_id", id, "node_address", address,
-			"attempt", attempt+1, "attempts", attempts, "error", err)
+			"node_id", id, "node_address", address, "attempt", attempt, "error", err)
+
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		// The leader refuses overlapping configuration changes. When this node
+		// is a spare, the change in its way is the leader's own retrying
+		// promotion of this node — which can only ever succeed once this repair
+		// has landed — so come back quickly enough to slot between its attempts
+		// instead of waiting out the full interval.
+		delay := addressRepairInterval
+		if strings.Contains(err.Error(), errConfigurationChangeInFlight) {
+			delay = addressRepairContentionRetry
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-	return lastErr
 }
 
 // openNativeApp starts the local dqlite node at the configured address,
@@ -609,15 +667,25 @@ func openNativeApp(ctx context.Context, dir, address string, seeds []string, opt
 	}
 
 	cached, seedCandidates := discoveryCandidates(dir, seeds)
+	candidates := peerAddresses(nil, app.ID(), app.Address(), cached, seedCandidates)
 
+	// localProof records that membership came from this node's own committed
+	// raft configuration. Only that authorizes the local reconfiguration below;
+	// everything else is equally well served by the leader's view.
+	localProof := true
 	members, err := localClusterConfiguration(ctx, app)
 	if err != nil {
-		// Without an authoritative membership nothing may be forced and there
-		// is nowhere reliable to repair towards; let readiness proceed and
-		// leave the diagnosis in the log.
-		log.Error("could not read this node's own dqlite raft configuration",
+		localProof = false
+		log.Warn("this node has no dqlite raft configuration of its own; "+
+			"reading membership from the leader instead",
 			"node_id", app.ID(), "node_address", app.Address(), "error", err)
-		return readyOrClose(ctx, app)
+		if members, err = leaderClusterConfiguration(ctx, candidates); err != nil {
+			// Nothing authoritative is reachable, so there is no repair to
+			// attempt and nothing to assert about this node's membership.
+			log.Error("could not read dqlite cluster membership from the local node or the leader",
+				"node_id", app.ID(), "node_address", app.Address(), "error", err)
+			return readyOrClose(ctx, app)
+		}
 	}
 
 	self := memberByID(members, app.ID())
@@ -628,17 +696,16 @@ func openNativeApp(ctx context.Context, dir, address string, seeds []string, opt
 		return readyOrClose(ctx, app)
 	}
 
-	if len(members) == 1 && self != nil {
-		// Authoritative: this came from the node's own committed raft
-		// configuration, not from the cluster.yaml discovery cache.
+	if localProof && len(members) == 1 && self != nil {
 		id, listening, previous := app.ID(), app.Address(), self.Address
-		candidates := peerAddresses(members, id, listening, cached, seedCandidates)
 		// raft_recover refuses to run against a live node, so stop first and
 		// start again afterwards.
 		if err := app.Close(); err != nil {
 			return nil, err
 		}
-		if err := recoverSoleMemberAddress(ctx, dir, id, listening, candidates); err != nil {
+		if err := recoverSoleMemberAddress(
+			ctx, dir, id, listening, peerAddresses(members, id, listening, cached, seedCandidates),
+		); err != nil {
 			return nil, err
 		}
 		log.Warn("rewrote the raft configuration of a single-member dqlite cluster onto its new address",
@@ -649,20 +716,20 @@ func openNativeApp(ctx context.Context, dir, address string, seeds []string, opt
 		return readyOrClose(ctx, app)
 	}
 
-	candidates := peerAddresses(members, app.ID(), app.Address(), cached, seedCandidates)
 	if err := ensureClusterAddress(
-		ctx, dir, app.ID(), app.Address(), candidates, addressRepairAttempts, addressRepairInterval,
+		ctx, dir, app.ID(), app.Address(),
+		peerAddresses(members, app.ID(), app.Address(), cached, seedCandidates),
+		addressRepairBudget,
 	); err != nil {
-		if fileExists(dir, repairFileName) {
-			// This process removed the member and could not put it back. The
-			// cluster is a voter short; failing loudly beats serving on with a
-			// silently reduced quorum.
-			_ = app.Close()
-			return nil, fmt.Errorf("dqlite: could not restore this node's cluster membership: %w", err)
-		}
-		log.Error("dqlite cluster membership still records this node at a stale address; "+
-			"it cannot be reached by its peers",
-			"node_id", app.ID(), "node_address", app.Address(), "error", err)
+		// Reaching here means the cluster does not record this node where it
+		// actually listens, whether or not this process got as far as writing a
+		// journal — a repair that failed before the journal existed leaves the
+		// leader dialling an address nobody answers just the same. Reporting
+		// ready would let the rollout replace the next member and take the
+		// quorum with it, so fail the startup instead: the pod restarts and
+		// tries again, and the rollout stalls rather than losing quorum.
+		_ = app.Close()
+		return nil, fmt.Errorf("dqlite: could not reconcile this node's cluster membership: %w", err)
 	}
 
 	return readyOrClose(ctx, app)

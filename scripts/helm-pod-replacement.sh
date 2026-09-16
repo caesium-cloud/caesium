@@ -187,7 +187,11 @@ api_retry() {
   return 1
 }
 
-pod_ip() { kcn get pod "$1" -o jsonpath='{.status.podIP}' 2>/dev/null; }
+# Empty when the pod does not exist yet or has no address. Never fails: a
+# deleted pod is NotFound until the StatefulSet recreates it, and under `set -e`
+# an unguarded `$(pod_ip ...)` would abort the run inside that window instead of
+# polling through it.
+pod_ip() { kcn get pod "$1" -o jsonpath='{.status.podIP}' 2>/dev/null || true; }
 
 persisted_address() {
   kcn exec "$1" -c caesium -- cat /var/lib/caesium/dqlite/info.yaml 2>/dev/null |
@@ -320,8 +324,8 @@ REPLACED_NEW_IP=""
 
 replace_pod() {
   local pod="$1" before_ip before_addr attempt=0 after_ip=""
-  before_ip="$(pod_ip "$pod")"
-  before_addr="$(persisted_address "$pod")"
+  before_ip="$(pod_ip "$pod" || true)"
+  before_addr="$(persisted_address "$pod" || true)"
   [[ -n "$before_ip" ]] || die "could not read the pod IP of $pod"
   [[ -n "$before_addr" ]] || die "could not read the persisted dqlite address of $pod"
 
@@ -334,7 +338,7 @@ replace_pod() {
     # regression that crash-loops must not cost this loop a Ready timeout.
     local waited=0
     while [[ $waited -lt 120 ]]; do
-      after_ip="$(pod_ip "$pod")"
+      after_ip="$(pod_ip "$pod" || true)"
       if [[ -n "$after_ip" ]]; then
         break
       fi
@@ -358,7 +362,7 @@ assert_recovered() {
   local pod="$1" old_addr="$2" new_ip="$3" persisted members run
   wait_all_ready
 
-  persisted="$(persisted_address "$pod")"
+  persisted="$(persisted_address "$pod" || true)"
   [[ "$persisted" == "${new_ip}:${DQLITE_PORT}" ]] ||
     die "$pod info.yaml records $persisted, expected ${new_ip}:${DQLITE_PORT}"
 
