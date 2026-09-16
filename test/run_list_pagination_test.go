@@ -53,9 +53,10 @@ steps:
 		run := s.awaitRun(job.ID, runID, runTimeout)
 		s.Require().Equal("succeeded", run.Status)
 		runIDs = append(runIDs, runID)
-		// Give created_at a chance to advance so ordering is unambiguous even
-		// on a coarse clock; the tiebreak (id) makes this belt-and-braces.
-		time.Sleep(250 * time.Millisecond)
+		// Give created_at a chance to advance past whatever granularity the
+		// column stores, so newest-first ordering is unambiguous rather than
+		// resting on the (unordered, UUID) tiebreak.
+		time.Sleep(1100 * time.Millisecond)
 	}
 
 	// Unparameterized request: still an array (backward compatible for
@@ -68,19 +69,19 @@ steps:
 	s.Equal(runIDs[1], all[1].ID)
 	s.Equal(runIDs[0], all[2].ID)
 
-	// Successive single-row pages must be non-overlapping, ordered, and
-	// together cover exactly the three runs — the actual repro from #499,
-	// where limit=1&offset=0 and limit=1&offset=1 came back identical.
+	// Successive single-row pages must be non-overlapping, ordered the same
+	// way the canonical (unparameterized) list is, and together cover
+	// exactly the three runs — the actual repro from #499, where
+	// limit=1&offset=0 and limit=1&offset=1 came back identical.
 	seen := map[string]bool{}
-	wantOrder := []string{runIDs[2], runIDs[1], runIDs[0]}
-	for offset, wantID := range wantOrder {
+	for offset := 0; offset < len(all); offset++ {
 		page, headers := s.fetchRunsPage(job.ID, fmt.Sprintf("limit=1&offset=%d", offset))
 		s.Require().Len(page, 1, "offset %d should return exactly one run", offset)
 		s.False(seen[page[0].ID], "offset %d repeated a run an earlier page already returned", offset)
 		seen[page[0].ID] = true
-		s.Equal(wantID, page[0].ID, "offset %d returned the wrong run", offset)
+		s.Equal(all[offset].ID, page[0].ID, "offset %d must agree with the canonical list's ordering", offset)
 		s.Equal("3", headers.Get("X-Caesium-Total-Count"), "total must count the whole job, not the page")
-		if offset < len(wantOrder)-1 {
+		if offset < len(all)-1 {
 			s.Equal(fmt.Sprint(offset+1), headers.Get("X-Caesium-Next-Offset"),
 				"a truncated page must say where to continue")
 		} else {
