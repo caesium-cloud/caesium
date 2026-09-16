@@ -182,6 +182,7 @@ export function ReplayDialog({
                     onClick={() => removeOverrideRow(row.id)}
                     disabled={mutation.isPending}
                     title="Remove override"
+                    aria-label="Remove override"
                     data-testid={`replay-remove-set-${index}`}
                   >
                     <Trash2 className="h-3.5 w-3.5" />

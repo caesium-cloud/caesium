@@ -294,6 +294,8 @@ export function TaskDetailPanel({
       style={{ width: `${panelWidth}px`, maxWidth: "90vw" }}
     >
       <div
+        role="separator"
+        aria-orientation="vertical"
         aria-label="Resize task panel"
         data-testid="task-detail-panel-resize-handle"
         className="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize"
@@ -330,6 +332,8 @@ export function TaskDetailPanel({
           size="icon"
           className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
           onClick={handleClose}
+          title="Close task panel"
+          aria-label="Close task panel"
         >
           <X className="h-4 w-4" />
         </Button>
@@ -646,6 +650,7 @@ function PartitionTable({
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           data-testid="partition-status-filter"
+          aria-label="Filter partitions by status"
           className="rounded border border-border/50 bg-card px-1.5 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
         >
           <option value="">All statuses</option>
