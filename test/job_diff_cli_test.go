@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -101,6 +102,29 @@ func (s *IntegrationTestSuite) TestJobDiffCLIAgainstLiveServer() {
 	s.Contains(jobDiffCLIAliases(pruned.Removed), aliasA)
 	s.NotContains(jobDiffCLIAliases(pruned.Removed), aliasB)
 	s.Empty(pruned.WouldPrune)
+}
+
+// TestJobDiffCLIRejectsDuplicateAliases is the CLI-surface proof that two
+// manifests sharing metadata.alias fail closed locally. The check runs before
+// POST /v1/jobdefs/diff, so a closed dummy --server must not be contacted.
+func (s *IntegrationTestSuite) TestJobDiffCLIRejectsDuplicateAliases() {
+	alias := fmt.Sprintf("job-diff-dup-%d", time.Now().UnixNano())
+	dir, err := os.MkdirTemp("", "caesium-job-diff-dup-*")
+	s.Require().NoError(err)
+	defer os.RemoveAll(dir)
+
+	one := strings.TrimSpace(s.injectEngine(jobDiffCLIManifest(alias, "echo first")))
+	two := strings.TrimSpace(s.injectEngine(jobDiffCLIManifest(alias, "echo second")))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "one.yaml"), []byte(one), 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "two.yaml"), []byte(two), 0o644))
+
+	stdout, stderr, err := s.runCLISeparate("job", "diff", "--path", dir, "--server", "http://127.0.0.1:1")
+	s.Require().Error(err, "duplicate aliases must exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	s.Equal(1, jobDiffCLIExitCode(err))
+	s.Contains(stderr+stdout, fmt.Sprintf("duplicate job alias %q", alias))
+	s.NotContains(stdout, "Creates:")
+	s.NotContains(stdout, "Updates:")
+	s.NotContains(stdout, "No changes detected.")
 }
 
 func jobDiffCLIManifest(alias, command string) string {

@@ -41,15 +41,21 @@ var diffCmd = &cobra.Command{
 	Long: `Compare job definition manifests against a Caesium server via POST /v1/jobdefs/diff,
 using the same --server / --api-key authentication as job apply.
 
-By default the output is what a non-pruning apply would do: creates and updates
-for jobs in --path. Jobs present on the server but missing from --path are prune
-candidates. They are listed as deletes only with --prune; without --prune they
-appear under "Would delete if --prune" and do not fail the command.
+The comparison uses the fields the server JobSpec projection compares, not a
+byte-equal apply. Creates and updates therefore reflect in-scope changes in
+those diffed fields only (for example metadata.schemaValidation, timeouts,
+dependsOn/next, and retries can change without appearing here).
+
+By default the output is what a non-pruning apply would do for those fields:
+creates and updates for jobs in --path. Jobs present on the server but missing
+from --path are prune candidates. They are listed as deletes only with --prune;
+without --prune they appear under "Would delete if --prune" and do not fail
+the command.
 
 --json writes versioned JSON to stdout (logs stay on stderr).
 
 Exit status:
-  0  no in-scope changes (creates/updates, and deletes only when --prune is set)
+  0  no in-scope changes in the diffed fields (creates/updates, and deletes only when --prune is set)
   1  in-scope changes, or a parse / validation / request error`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
@@ -60,6 +66,9 @@ Exit status:
 		}
 		if len(defs) == 0 {
 			return errors.New("no job definitions selected")
+		}
+		if err := rejectDuplicateAliases(defs); err != nil {
+			return err
 		}
 
 		server := strings.TrimSuffix(diffServer, "/")
@@ -122,6 +131,18 @@ type jobDiffJSON struct {
 type jobDiffAlias struct {
 	Alias string `json:"alias"`
 	Diff  string `json:"diff"`
+}
+
+func rejectDuplicateAliases(defs []schema.Definition) error {
+	seen := make(map[string]struct{}, len(defs))
+	for i := range defs {
+		alias := defs[i].Metadata.Alias
+		if _, exists := seen[alias]; exists {
+			return fmt.Errorf("duplicate job alias %q", alias)
+		}
+		seen[alias] = struct{}{}
+	}
+	return nil
 }
 
 func sendDiffRequest(ctx context.Context, server, apiKey string, defs []schema.Definition) (*jobDiffResponse, error) {

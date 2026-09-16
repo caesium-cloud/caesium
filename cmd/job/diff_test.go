@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -44,6 +47,41 @@ func TestDiffHelpDescribesServerNotDatabase(t *testing.T) {
 	require.Contains(t, diffCmd.Long, "--prune")
 	require.Contains(t, diffCmd.Long, "--json")
 	require.Contains(t, diffCmd.Long, "Exit status")
+	require.Contains(t, diffCmd.Long, "diffed fields")
+	require.Contains(t, diffCmd.Long, "JobSpec")
+	require.Contains(t, diffCmd.Long, "byte-equal apply")
+}
+
+func TestRejectDuplicateAliases(t *testing.T) {
+	unique := []schema.Definition{
+		{Metadata: schema.Metadata{Alias: "a"}},
+		{Metadata: schema.Metadata{Alias: "b"}},
+	}
+	require.NoError(t, rejectDuplicateAliases(unique))
+	require.NoError(t, rejectDuplicateAliases(nil))
+
+	err := rejectDuplicateAliases([]schema.Definition{
+		{Metadata: schema.Metadata{Alias: "dup-job"}},
+		{Metadata: schema.Metadata{Alias: "other"}},
+		{Metadata: schema.Metadata{Alias: "dup-job"}},
+	})
+	require.EqualError(t, err, `duplicate job alias "dup-job"`)
+}
+
+func TestDiffRejectsDuplicateAliasesWithoutHittingServer(t *testing.T) {
+	const alias = "dup-job"
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "one.yaml"), []byte(diffTestManifest(alias, "echo first")), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "two.yaml"), []byte(diffTestManifest(alias, "echo second")), 0o644))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("job diff must reject duplicate aliases before POST, got %s %s", r.Method, r.URL.Path)
+		http.Error(w, "server should not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, _, err := executeDiffCommand(t, "--path", dir, "--server", srv.URL)
+	require.EqualError(t, err, `duplicate job alias "dup-job"`)
 }
 
 func TestScopeJobDiffOmitsRemovesWithoutPrune(t *testing.T) {
@@ -245,6 +283,49 @@ func testDiffCmd() (*cobra.Command, *bytes.Buffer) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 	return cmd, &out
+}
+
+func executeDiffCommand(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	require.False(t, Cmd.HasParent(),
+		"cmd/job.Cmd gained a parent; Execute() would run on the real root and parse os.Args")
+
+	prevPaths := append([]string(nil), diffPaths...)
+	prevServer, prevAPIKey, prevJSON, prevPrune := diffServer, diffAPIKey, diffJSON, diffPrune
+	t.Cleanup(func() {
+		diffPaths, diffServer, diffAPIKey, diffJSON, diffPrune = prevPaths, prevServer, prevAPIKey, prevJSON, prevPrune
+		if f := diffCmd.Flags().Lookup("path"); f != nil {
+			f.Changed = false
+		}
+		diffCmd.SilenceUsage = false
+		diffCmd.SilenceErrors = false
+		Cmd.SetOut(nil)
+		Cmd.SetErr(nil)
+		Cmd.SetArgs(nil)
+	})
+
+	var out, errOut bytes.Buffer
+	Cmd.SetOut(&out)
+	Cmd.SetErr(&errOut)
+	Cmd.SetArgs(append([]string{"diff"}, args...))
+	err = Cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+func diffTestManifest(alias, command string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    cron: "0 0 1 1 *"
+steps:
+  - name: run
+    image: alpine:3.23
+    command: ["sh", "-c", %q]
+`, alias, command)
 }
 
 func rawAliases(items []json.RawMessage) []string {

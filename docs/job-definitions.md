@@ -645,9 +645,9 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 
 ## Diffing Job Definitions
 
-- Use `caesium job diff --path <dir> --server <url>` to preview what a non-pruning `job apply` would do against that server (creates and updates). `--server` defaults to `http://localhost:8080`, matching apply.
+- Use `caesium job diff --path <dir> --server <url>` to preview creates and updates in the fields the server JobSpec projection compares, not a byte-equal apply (`metadata.schemaValidation`, timeouts, `dependsOn`/`next`, and retries are persisted by apply but omitted from the projection). `--server` defaults to `http://localhost:8080`, matching apply.
 - Jobs present on the server but missing from `--path` are prune candidates. They appear as deletes only with `--prune`; without `--prune` they are listed under "Would delete if --prune" and do not fail the command.
-- `--json` writes versioned JSON to stdout (logs stay on stderr). Exit status 0 means no in-scope changes; nonzero means in-scope creates/updates (and deletes only when `--prune` is set), or a parse/validation/request error.
+- `--json` writes versioned JSON to stdout (logs stay on stderr). Exit status 0 means no in-scope changes in the diffed fields; nonzero means in-scope creates/updates (and deletes only when `--prune` is set), or a parse/validation/request error.
 - Use `caesium job apply --path <dir> --server <url>` to persist definitions.
 - Add `--force` to override provenance conflicts when the existing active job was imported from a different source.
 - Add `--prune` to retire active jobs that were previously imported from the same source but are no longer present in the manifest set.
