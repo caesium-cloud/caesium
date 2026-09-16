@@ -4,6 +4,7 @@ package test
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -80,6 +81,81 @@ func (s *IntegrationTestSuite) TestFreshnessDerivedRunExecutesWithoutConcurrency
 // forever after.
 func (s *IntegrationTestSuite) TestFreshnessDerivedRunExecutesUnderConcurrencyPolicy() {
 	s.runFreshnessDerivationScenario("maxruns", "  concurrency:\n    maxRuns: 1\n    strategy: fail\n")
+}
+
+// TestFreshnessDerivedRunHonoursJobPause proves pause reaches the derivation
+// path. Freshness derivation is the one scheduler route that creates AND
+// executes a run without going through a trigger object — cron, HTTP, event and
+// webhook each check `paused` before calling job.Run, and a manual run answers
+// 409 — so without an explicit guard a paused job would execute on every
+// arrival even though the Console promises pause blocks new runs.
+//
+// It drives the real `PUT /v1/jobs/:id/pause` route and a real arrival, asserts
+// nothing runs while paused (with the derivation audit naming pause as the
+// cause), then unpauses and proves the same circuit does run — so the "no run"
+// half cannot pass because the scenario was simply broken.
+func (s *IntegrationTestSuite) TestFreshnessDerivedRunHonoursJobPause() {
+	s.requireFreshnessLane()
+
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("integration-freshness-paused-%d", suffix)
+	source := fmt.Sprintf("integration.derive.src.paused.%d", suffix)
+	produced := fmt.Sprintf("integration.derive.out.paused.%d", suffix)
+	eventType := fmt.Sprintf("derive.integration.paused.%d", suffix)
+	outputWatermark := fmt.Sprintf("out-%d", suffix)
+
+	dir := s.writeJobManifest(freshnessDerivationManifest(alias, "", source, produced, eventType, outputWatermark))
+	defer os.RemoveAll(dir)
+	s.runCLIWithFreshness("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	s.Require().Equal(http.StatusOK, s.setJobPaused(job.ID, "pause"))
+	s.Require().True(s.fetchJobPaused(job.ID), "the job must report paused before the arrival")
+
+	// Age the produced dataset past its 1s SLO, then deliver the arrival that
+	// would otherwise derive a run.
+	time.Sleep(3 * time.Second)
+	s.postEvent(fmt.Sprintf(`{
+		"type":%q,
+		"source":"ignored-by-arrival",
+		"data":{"detail":{"kind":"orders","objects":[{"key":%q}]}}
+	}`, eventType, fmt.Sprintf("vendor/orders/%d-paused.json", suffix)))
+
+	// The evaluator must record the refusal, and it must create no run. Waiting
+	// for the derivation first means the "no runs" assertion is not vacuous:
+	// the evaluator has demonstrably looked at this dataset.
+	s.Require().Eventually(func() bool {
+		var derivations datasetDerivationsTypedResponse
+		if err := s.tryGetJSON("/v1/datasets/_/"+produced+"/derivations", &derivations); err != nil {
+			return false
+		}
+		for _, d := range derivations.Derivations {
+			if d.Decision == "skipped_admission" && d.Reason == "job is paused" {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, time.Second, "a paused freshness job should record a paused admission skip")
+
+	s.Require().Never(func() bool {
+		return len(s.fetchRuns(job.ID)) > 0
+	}, 20*time.Second, time.Second, "a paused freshness job must not run on arrival")
+
+	// Unpausing must restore derivation through exactly the same circuit.
+	s.Require().Equal(http.StatusOK, s.setJobPaused(job.ID, "unpause"))
+	s.Require().False(s.fetchJobPaused(job.ID), "the job must report unpaused")
+
+	s.postEvent(fmt.Sprintf(`{
+		"type":%q,
+		"source":"ignored-by-arrival",
+		"data":{"detail":{"kind":"orders","objects":[{"key":%q}]}}
+	}`, eventType, fmt.Sprintf("vendor/orders/%d-unpaused.json", suffix)))
+
+	derived := s.awaitFreshnessDerivedRun(job.ID, produced, 4*time.Minute)
+	s.Equal("succeeded", derived.Status, "an unpaused freshness job must derive and execute (error: %s)", derived.Error)
+	s.NotEmpty(derived.Tasks, "the unpaused derived run must have task rows")
 }
 
 // runFreshnessDerivationScenario drives the whole freshness derivation circuit

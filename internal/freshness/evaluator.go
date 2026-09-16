@@ -518,40 +518,61 @@ func watermarkAdvancedPast(previous, current string) bool {
 }
 
 func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
-	triggerID, ok, err := e.freshnessTriggerIDForJob(ctx, decl.JobID)
+	trigger, err := e.freshnessTriggerForJob(ctx, decl.JobID)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !trigger.freshnessTriggered {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job trigger is not freshness; waiting for scheduler", consumed, nil)
 	}
-	return e.derive(ctx, decl, triggerID, reason, consumed, triggerDepth, budget)
+	// Pause is a job-level "start nothing new" switch, and derivation is the one
+	// scheduler path that reaches an engine without going through a trigger
+	// object: cron (internal/trigger/cron), http, event and the webhook
+	// controller each check models.Job.Paused before calling job.Run, and the
+	// manual-run controller answers 409. Neither the run store's admission nor
+	// job.Run re-checks it, so a paused freshness job would otherwise execute on
+	// every arrival. The decision stays `skipped_admission` (the closed set the
+	// Console renders); the reason carries the cause.
+	if trigger.paused {
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job is paused", consumed, nil)
+	}
+	return e.derive(ctx, decl, trigger.id, reason, consumed, triggerDepth, budget)
 }
 
-func (e *Evaluator) freshnessTriggerIDForJob(ctx context.Context, jobID uuid.UUID) (*uuid.UUID, bool, error) {
+// freshnessTriggerState is what the evaluator needs to know about a produced
+// dataset's owning job before deriving: whether the job is freshness-triggered
+// at all, its trigger id, and whether an operator has paused it.
+type freshnessTriggerState struct {
+	id                 *uuid.UUID
+	freshnessTriggered bool
+	paused             bool
+}
+
+func (e *Evaluator) freshnessTriggerForJob(ctx context.Context, jobID uuid.UUID) (freshnessTriggerState, error) {
 	var row struct {
 		TriggerID   uuid.UUID
 		TriggerType models.TriggerType
+		Paused      bool
 	}
 	// Filter GORM soft-deletes on both sides of the raw join: a plain Joins does
 	// not apply the deleted_at scope, so a soft-deleted trigger could otherwise
 	// still match an active job's trigger_id.
 	err := e.db.WithContext(ctx).Table("jobs").
-		Select("jobs.trigger_id AS trigger_id, triggers.type AS trigger_type").
+		Select("jobs.trigger_id AS trigger_id, jobs.paused AS paused, triggers.type AS trigger_type").
 		Joins("JOIN triggers ON triggers.id = jobs.trigger_id AND triggers.deleted_at IS NULL").
 		Where("jobs.id = ? AND jobs.deleted_at IS NULL", jobID).
 		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, false, nil
+			return freshnessTriggerState{}, nil
 		}
-		return nil, false, err
+		return freshnessTriggerState{}, err
 	}
 	if row.TriggerType != models.TriggerTypeFreshness || row.TriggerID == uuid.Nil {
-		return nil, false, nil
+		return freshnessTriggerState{}, nil
 	}
 	id := row.TriggerID
-	return &id, true, nil
+	return freshnessTriggerState{id: &id, freshnessTriggered: true, paused: row.Paused}, nil
 }
 
 func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, triggerID *uuid.UUID, reason string, consumed map[string]string, triggerDepth int, budget *int) error {

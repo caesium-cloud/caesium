@@ -272,6 +272,67 @@ func TestEvaluatorDispatchesDerivedRun(t *testing.T) {
 	}
 }
 
+// TestEvaluatorDoesNotDerivePausedJob proves pause reaches the one scheduler
+// path that creates AND executes a run without going through a trigger object.
+// Cron, HTTP, event and webhook all check models.Job.Paused before job.Run, and
+// the manual-run controller answers 409; neither run admission nor job.Run
+// re-checks it, so before this guard a paused freshness job executed on every
+// arrival.
+func TestEvaluatorDoesNotDerivePausedJob(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "paused")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+	if err := db.Model(&models.Job{}).Where("id = ?", jobID).Update("paused", true).Error; err != nil {
+		t.Fatalf("pause job: %v", err)
+	}
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("paused job started %d runs, want 0", starter.calls)
+	}
+	if len(starter.launched) != 0 {
+		t.Fatalf("paused job launched %v runs, want none", starter.launched)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+
+	var derivation models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionSkippedAdmission).Take(&derivation).Error; err != nil {
+		t.Fatalf("load derivation: %v", err)
+	}
+	if derivation.Reason != "job is paused" {
+		t.Fatalf("derivation reason = %q, want %q", derivation.Reason, "job is paused")
+	}
+
+	// Unpausing restores derivation on the very next evaluation.
+	if err := db.Model(&models.Job{}).Where("id = ?", jobID).Update("paused", false).Error; err != nil {
+		t.Fatalf("unpause job: %v", err)
+	}
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate after unpause: %v", err)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("start calls after unpause = %d, want 1", starter.calls)
+	}
+	if len(starter.launched) != 1 {
+		t.Fatalf("launched runs after unpause = %v, want 1", starter.launched)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
 // TestEvaluatorRefusesToDeriveWithoutLauncher proves the evaluator fails closed:
 // with no executor wired it must not create a run it cannot dispatch, because a
 // stranded `running` row with no tasks is worse than an explicit skip.

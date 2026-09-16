@@ -3,6 +3,7 @@ package start
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -48,7 +49,9 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"gorm.io/gorm"
 )
 
 // dqliteDispatchPeerResolver returns a PeerLister that discovers all dqlite
@@ -72,6 +75,16 @@ func dqliteDispatchPeerResolver() dispatch.PeerLister {
 	})
 }
 
+// derivedRunJobLookupBackoffs bounds the retry of the post-admission job read in
+// the freshness launcher. The run row is already committed by the time the
+// launcher runs, so a transient contention error must not cost the run; a
+// persistent one must still terminalize it rather than spin forever.
+var derivedRunJobLookupBackoffs = []time.Duration{
+	50 * time.Millisecond,
+	250 * time.Millisecond,
+	time.Second,
+}
+
 // freshnessRunLauncher executes a freshness-derived run's DAG.
 //
 // The evaluator admits the run through the shared run store (the same
@@ -82,29 +95,99 @@ func dqliteDispatchPeerResolver() dispatch.PeerLister {
 // internal/job through the run context, and let job.Run build and dispatch the
 // DAG (it registers the run-cancel entry itself).
 func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
+	return newFreshnessRunLauncher(
+		store,
+		func(ctx context.Context, jobID uuid.UUID) (*models.Job, error) {
+			return jsvc.Service(ctx).Get(jobID)
+		},
+		func(ctx context.Context, j *models.Job, r *run.JobRun) error {
+			return job.New(
+				j,
+				job.WithRunStoreFactory(func() *run.Store { return store }),
+				job.WithParams(r.Params),
+			).Run(ctx)
+		},
+	)
+}
+
+// newFreshnessRunLauncher is freshnessRunLauncher with its job lookup and its
+// executor injected, so the post-admission failure path is testable without a
+// container runtime or the global database handle.
+func newFreshnessRunLauncher(
+	store *run.Store,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+	execute func(context.Context, *models.Job, *run.JobRun) error,
+) freshness.RunLauncher {
 	return func(ctx context.Context, r *run.JobRun) {
 		if r == nil {
-			return
-		}
-		j, err := jsvc.Service(ctx).Get(r.JobID)
-		if err != nil {
-			log.Error("freshness: derived run could not load its job",
-				"job_id", r.JobID, "run_id", r.ID, "error", err)
 			return
 		}
 		// Detached from the evaluator's tick context on purpose: the run
 		// outlives the evaluation that derived it.
 		runCtx := run.WithContext(context.WithoutCancel(ctx), r.ID)
-		go func() {
-			if err := job.New(
-				j,
-				job.WithRunStoreFactory(func() *run.Store { return store }),
-				job.WithParams(r.Params),
-			).Run(runCtx); err != nil {
-				log.Error("freshness: derived job run failure",
-					"job_id", r.JobID, "run_id", r.ID, "error", err)
+		go launchDerivedRun(runCtx, store, r, loadJob, execute)
+	}
+}
+
+// launchDerivedRun is the synchronous body of the freshness launcher.
+func launchDerivedRun(
+	ctx context.Context,
+	store *run.Store,
+	r *run.JobRun,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+	execute func(context.Context, *models.Job, *run.JobRun) error,
+) {
+	j, err := loadDerivedRunJob(ctx, r.JobID, loadJob)
+	if err != nil {
+		// The run row and its `derived` audit are already committed. job.Run —
+		// whose aborted-resume finalizer would normally terminalize a run that
+		// never reached an engine — is never entered on this path, so a bare
+		// log would leave exactly the stranded `running`-with-no-tasks row this
+		// launcher exists to prevent: the evaluator would then report
+		// skipped_active_run forever, and a maxRuns policy would refuse every
+		// later arrival. Finalize it here instead. CompleteIfActive is the
+		// conditional transition — it is a no-op on an already-terminal run.
+		log.Error("freshness: derived run could not load its job; failing the run",
+			"job_id", r.JobID, "run_id", r.ID, "error", err)
+		cause := fmt.Errorf("freshness: derived run could not load job %s: %w", r.JobID, err)
+		if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+			log.Error("freshness: derived run could not be finalized after a failed job lookup; leaving it for an operator",
+				"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+		}
+		return
+	}
+	if err := execute(ctx, j, r); err != nil {
+		log.Error("freshness: derived job run failure",
+			"job_id", r.JobID, "run_id", r.ID, "error", err)
+	}
+}
+
+// loadDerivedRunJob reads the job behind an already-admitted derived run,
+// retrying on a bounded schedule so transient database contention does not
+// terminalize a run that is otherwise perfectly launchable.
+func loadDerivedRunJob(
+	ctx context.Context,
+	jobID uuid.UUID,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+) (*models.Job, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		j, err := loadJob(ctx, jobID)
+		if err == nil {
+			if j == nil {
+				return nil, fmt.Errorf("job %s not found", jobID)
 			}
-		}()
+			return j, nil
+		}
+		lastErr = err
+		if errors.Is(err, gorm.ErrRecordNotFound) || attempt >= len(derivedRunJobLookupBackoffs) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(derivedRunJobLookupBackoffs[attempt]):
+		}
 	}
 }
 
