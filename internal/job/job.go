@@ -175,7 +175,7 @@ type job struct {
 	newDockerEngine        func(context.Context) atom.Engine
 	// newKubernetesEngine returns an error (instead of panicking) when the
 	// kubernetes engine cannot be constructed — e.g. no reachable kubeconfig —
-	// so buildLocalRunners can surface a clean, actionable failure. See #479.
+	// so the local attempt can surface a clean, actionable failure. See #479.
 	newKubernetesEngine func(context.Context) (atom.Engine, error)
 	newPodmanEngine     func(context.Context) atom.Engine
 	atomPollInterval    time.Duration
@@ -381,7 +381,10 @@ type atomRunner struct {
 	outputSchema     []byte
 	schemaValidation string
 	spec             container.Spec
-	engine           atom.Engine
+	// Each execution attempt needs its own engine bound to that attempt's task
+	// context. The runner recipe is shared by retry attempts and fan-out
+	// siblings, so never store a context-bound engine on it.
+	newEngine func(context.Context) (atom.Engine, error)
 	// resolvedImageDigest is the content digest pinDigests resolved for this
 	// task. Create pins the runtime image to it so a locally cached tag cannot
 	// execute older content than the cache key recorded.
@@ -794,15 +797,15 @@ func buildLocalRunners(
 
 		switch taskState.Engine {
 		case models.AtomEngineDocker:
-			runner.engine = j.newDockerEngine(ctx)
-		case models.AtomEngineKubernetes:
-			engine, err := j.newKubernetesEngine(ctx)
-			if err != nil {
-				return fmt.Errorf("task %s: %w", taskID, err)
+			runner.newEngine = func(ctx context.Context) (atom.Engine, error) {
+				return j.newDockerEngine(ctx), nil
 			}
-			runner.engine = engine
+		case models.AtomEngineKubernetes:
+			runner.newEngine = j.newKubernetesEngine
 		case models.AtomEnginePodman:
-			runner.engine = j.newPodmanEngine(ctx)
+			runner.newEngine = func(ctx context.Context) (atom.Engine, error) {
+				return j.newPodmanEngine(ctx), nil
+			}
 		default:
 			return fmt.Errorf("unable to run atom with engine: %v", taskState.Engine)
 		}
@@ -1475,6 +1478,21 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// sibling rows share (runID, taskID) and every store write and container name
 	// must therefore be keyed on the instance, not the catalog task.
 	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, attemptTimeout time.Duration, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
+		attemptContextError := func() error {
+			cause := context.Cause(taskCtx)
+			switch {
+			case cause == nil:
+				return nil
+			case run.IsRunDeadlineError(cause):
+				return cause
+			case errors.Is(cause, context.DeadlineExceeded):
+				return fmt.Errorf("task %s timed out after %s", taskID, attemptTimeout)
+			case errors.Is(cause, context.Canceled):
+				return fmt.Errorf("task %s cancelled: %w", taskID, cause)
+			default:
+				return cause
+			}
+		}
 		// taskRef is what the run store resolves this execution to; see
 		// loadTaskRunByIDOrUnique for the primary-key-or-task-ID contract.
 		taskRef := taskID
@@ -1533,14 +1551,36 @@ func (j *job) Run(ctx context.Context) (err error) {
 			spec.Env = merged
 		}
 
-		a, err := runner.engine.Create(&atom.EngineCreateRequest{
+		if ctxErr := attemptContextError(); ctxErr != nil {
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
+		}
+		engine, err := runner.newEngine(taskCtx)
+		if err != nil {
+			if ctxErr := attemptContextError(); ctxErr != nil {
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
+			}
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s: %w", taskID, err)
+		}
+		if ctxErr := attemptContextError(); ctxErr != nil {
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
+		}
+		a, err := engine.Create(&atom.EngineCreateRequest{
 			Name:    atomName,
 			Image:   image,
 			Command: runner.command,
 			Spec:    spec,
 		})
 		if err != nil {
+			if ctxErr := attemptContextError(); ctxErr != nil {
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
+			}
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
+		}
+		if ctxErr := attemptContextError(); ctxErr != nil {
+			if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w; failed to stop atom %s: %v", ctxErr, a.ID(), stopErr)
+			}
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
 		}
 
 		if err := store.StartTask(runID, taskRef, a.ID()); err != nil {
@@ -1553,7 +1593,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			secretLogResult    <-chan run.SecretLogCaptureResult
 		)
 		if secretBearing {
-			if stream, streamErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
+			if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
 				log.Warn("failed to open scrubbed live task log; will retry after completion",
 					"task_id", taskID, "atom_id", a.ID(), "error", streamErr)
 			} else {
@@ -1571,7 +1611,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			err  error
 		}, 1)
 		go func() {
-			next, waitErr := runner.engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: taskCtx})
+			next, waitErr := engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: taskCtx})
 			waitResult <- struct {
 				atom atom.Atom
 				err  error
@@ -1610,7 +1650,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if secretLogStream != nil {
 				_ = secretLogStream.Close()
 			}
-			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+			stopErr := engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
 			})
@@ -1686,7 +1726,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					log.Warn("failed to persist scrubbed live task log", "task_id", taskID, "error", capture.PersistErr)
 				}
 			} else {
-				logStream, openErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+				logStream, openErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 				logErr = openErr
 				if openErr == nil {
 					if secretBearing {
@@ -1713,7 +1753,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				switch {
 				case parseErr != nil:
 					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
-						stopErr := runner.engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
+						stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
 							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
 						}
@@ -1742,7 +1782,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				}
 			}
 
-			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+			stopErr := engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
 			})
