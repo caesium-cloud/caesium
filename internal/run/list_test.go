@@ -107,9 +107,10 @@ func TestStoreListPopulatesRealTaskCounters(t *testing.T) {
 	f.addTaskRun(t, failedRun, f.taskAlpha, string(TaskStatusFailed), false)
 	f.addTaskRun(t, failedRun, f.taskBeta, string(TaskStatusSucceeded), false)
 
-	runs, total, err := store.List(f.jobID, 0, 0)
+	runs, total, hasMore, err := store.List(f.jobID, 0, 0)
 	require.NoError(t, err)
 	assert.EqualValues(t, 3, total)
+	assert.False(t, hasMore, "an unbounded fetch has no continuation")
 	require.Len(t, runs, 3)
 
 	byID := make(map[uuid.UUID]*JobRun, len(runs))
@@ -152,9 +153,10 @@ func TestStoreListOrdersNewestFirstAndPages(t *testing.T) {
 		runIDs = append(runIDs, f.addRun(t, string(StatusSucceeded)))
 	}
 
-	all, total, err := store.List(f.jobID, 0, 0)
+	all, total, hasMore, err := store.List(f.jobID, 0, 0)
 	require.NoError(t, err)
 	assert.EqualValues(t, 5, total)
+	assert.False(t, hasMore)
 	require.Len(t, all, 5)
 	for i, r := range all {
 		assert.Equal(t, runIDs[len(runIDs)-1-i], r.ID, "unbounded List must be newest-first")
@@ -162,9 +164,10 @@ func TestStoreListOrdersNewestFirstAndPages(t *testing.T) {
 
 	seen := map[uuid.UUID]bool{}
 	for offset := 0; offset < 5; offset++ {
-		page, pageTotal, err := store.List(f.jobID, 1, offset)
+		page, pageTotal, pageHasMore, err := store.List(f.jobID, 1, offset)
 		require.NoError(t, err)
 		assert.EqualValues(t, 5, pageTotal)
+		assert.Equal(t, offset < 4, pageHasMore, "hasMore must be true until the last single-row page")
 		require.Len(t, page, 1)
 		assert.False(t, seen[page[0].ID], "page at offset %d overlapped an earlier page", offset)
 		seen[page[0].ID] = true
@@ -172,10 +175,62 @@ func TestStoreListOrdersNewestFirstAndPages(t *testing.T) {
 	}
 	assert.Len(t, seen, 5, "five single-row pages must cover every run exactly once")
 
-	empty, emptyTotal, err := store.List(f.jobID, 1, 5)
+	empty, emptyTotal, emptyHasMore, err := store.List(f.jobID, 1, 5)
 	require.NoError(t, err)
 	assert.EqualValues(t, 5, emptyTotal)
+	assert.False(t, emptyHasMore)
 	assert.Empty(t, empty, "offset past the end returns no rows, not an error")
+}
+
+// TestStoreListDerivesContinuationFromPageQueryNotStaleCount pins a review
+// finding: List's total COUNT and its page SELECT are two separate reads
+// with no shared snapshot. A run committed in the window between them can
+// shift the newest-first page enough that comparing the page length against
+// that (now-stale) total would silently report no more pages — even though
+// older history still exists. hasMore must instead come from the page query
+// itself (a limit+1 probe), which is correct regardless of what the earlier
+// COUNT saw.
+//
+// listCountToPageHook lets the test insert a run in exactly that window,
+// deterministically, without real concurrency: with 5 existing runs and
+// limit=5, a naive `len(page) < total` check sees 5 == 5 and reports no more
+// pages; the fix must still report hasMore=true because its own limit+1
+// fetch — issued AFTER the insert — sees 6 rows.
+func TestStoreListDerivesContinuationFromPageQueryNotStaleCount(t *testing.T) {
+	f := newListFixture(t)
+	store := NewStore(f.db)
+
+	for i := 0; i < 5; i++ {
+		f.addRun(t, string(StatusSucceeded))
+	}
+
+	var injectedRun uuid.UUID
+	t.Cleanup(func() { listCountToPageHook = nil })
+	listCountToPageHook = func() {
+		// Runs once, after Count (which reads 5) and before the page Scan —
+		// simulating a run committed in that exact window.
+		injectedRun = f.addRun(t, string(StatusSucceeded))
+		listCountToPageHook = nil // fire once; re-listing later must not re-trigger it
+	}
+
+	runs, total, hasMore, err := store.List(f.jobID, 5, 0)
+	require.NoError(t, err)
+	// total reflects the COUNT read before the insert — it is display data,
+	// not the truncation signal, so it is allowed to be stale here.
+	assert.EqualValues(t, 5, total)
+	require.Len(t, runs, 5, "the page must still be exactly limit rows")
+	assert.True(t, hasMore,
+		"a run committed between Count and the page Scan must still be visible to the page's own limit+1 probe")
+
+	// The newly-inserted run is newest, so it must be ON this page, and the
+	// previously-oldest-of-five run must have been pushed off it — proving
+	// the page itself (not a stale total) is what the client actually saw.
+	seenIDs := make(map[uuid.UUID]bool, len(runs))
+	for _, r := range runs {
+		seenIDs[r.ID] = true
+	}
+	require.NotZero(t, injectedRun)
+	assert.True(t, seenIDs[injectedRun], "the inserted run is newest-first and must be on this page")
 }
 
 // TestPageTaskRunsByJobRunIDExcludesLargePayloadColumns pins a review finding
@@ -213,7 +268,7 @@ func TestPageTaskRunsByJobRunIDExcludesLargePayloadColumns(t *testing.T) {
 	}
 
 	// The narrow projection must still leave the counters correct end to end.
-	runs, _, err := store.List(f.jobID, 0, 0)
+	runs, _, _, err := store.List(f.jobID, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	assert.Equal(t, 1, runs[0].CacheHits)

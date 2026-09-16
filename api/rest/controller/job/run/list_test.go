@@ -62,13 +62,3 @@ func TestRunListPageBoundsDefaultsAndValidates(t *testing.T) {
 		})
 	}
 }
-
-// TestNextRunListOffset pins the null-means-done continuation contract.
-func TestNextRunListOffset(t *testing.T) {
-	assert.Nil(t, nextRunListOffset(0, 0, 0), "no rows returned means no next page")
-	assert.Nil(t, nextRunListOffset(0, 5, 5), "exactly exhausting total means no next page")
-
-	next := nextRunListOffset(0, 2, 5)
-	require.NotNil(t, next)
-	assert.Equal(t, 2, *next)
-}

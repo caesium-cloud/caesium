@@ -17,7 +17,7 @@ type Service interface {
 	Start(jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error)
 	Get(uuid.UUID) (*runstorage.JobRun, error)
 	GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.TaskLogSnapshot, error)
-	List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, error)
+	List(jobID uuid.UUID, limit, offset int) (runs []*runstorage.JobRun, total int64, hasMore bool, err error)
 	Latest(uuid.UUID) (*runstorage.JobRun, error)
 }
 
@@ -67,7 +67,7 @@ func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.Ta
 	return r.store.GetTaskLogSnapshot(runID, taskID)
 }
 
-func (r *runService) List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, error) {
+func (r *runService) List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, bool, error) {
 	return r.store.List(jobID, limit, offset)
 }
 

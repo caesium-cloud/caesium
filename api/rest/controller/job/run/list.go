@@ -55,14 +55,19 @@ func List(c *echo.Context) error {
 		return err
 	}
 
-	runs, total, err := runsvc.New(ctx).List(id, limit, offset)
+	runs, total, hasMore, err := runsvc.New(ctx).List(id, limit, offset)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	c.Response().Header().Set(runListHeaderTotalCount, strconv.FormatInt(total, 10))
-	if next := nextRunListOffset(offset, len(runs), total); next != nil {
-		c.Response().Header().Set(runListHeaderNextOffset, strconv.Itoa(*next))
+	// hasMore comes from the store's own page query (a limit+1 probe), not
+	// from comparing len(runs) against total: those are two separate reads
+	// with no shared snapshot, and a run committed between them could shift
+	// the page enough that the comparison silently missed real remaining
+	// history. See Store.List's doc comment for the race this replaced.
+	if hasMore {
+		c.Response().Header().Set(runListHeaderNextOffset, strconv.Itoa(offset+len(runs)))
 	}
 
 	return c.JSON(http.StatusOK, runs)
@@ -92,15 +97,4 @@ func runListPageBounds(limitParam, offsetParam string) (limit, offset int, err e
 		offset = parsed
 	}
 	return limit, offset, nil
-}
-
-// nextRunListOffset returns the offset a client should request next, or nil
-// when this page is the last one — the same null-means-done contract
-// nextPartitionOffset uses.
-func nextRunListOffset(offset, returned int, total int64) *int {
-	next := offset + returned
-	if returned == 0 || int64(next) >= total {
-		return nil
-	}
-	return &next
 }

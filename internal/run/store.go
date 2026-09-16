@@ -5476,15 +5476,38 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(runID)
 }
 
+// listCountToPageHook is a test seam invoked between List's total COUNT and
+// its page SELECT. Nil in production. It exists so a test can deterministically
+// reproduce a run committed in that window — the exact race a review caught:
+// two separate reads with no shared snapshot mean a run inserted after Count
+// but before Scan shifts the newest-first page, and comparing the page length
+// against the (now-stale) total can silently suppress next_offset even though
+// real older history still exists. See the limit+1 probe below, which is the
+// actual fix — this hook only lets a test PROVE the fix by forcing the race.
+var listCountToPageHook func()
+
 // List returns a page of a job's runs, newest first (created_at DESC, id DESC
-// as a deterministic tiebreak for runs created in the same instant), together
-// with the total row count so a caller can tell whether more pages remain.
+// as a deterministic tiebreak for runs created in the same instant), the
+// total row count, and whether more rows exist past this page.
 //
 // limit and offset are applied as given: bounds validation, defaulting, and
 // the documented page-size ceiling belong to the REST layer (see
 // runListPageBounds in api/rest/controller/job/run/list.go), which is what
 // actually rejects an out-of-range request with 400 instead of silently
-// clamping it. A limit <= 0 here means "no LIMIT clause".
+// clamping it. A limit <= 0 here means "no LIMIT clause", and hasMore is
+// always false in that case (an unbounded fetch has no continuation).
+//
+// hasMore is derived from the PAGE QUERY ITSELF — it fetches one row past
+// limit and reports hasMore when that extra row exists, trimming it back off
+// before converting results — rather than by comparing the page length
+// against total. total comes from a separate, earlier COUNT with no shared
+// read snapshot, so a run committed between the two statements can shift the
+// newest-first page enough that total's comparison alone would report no
+// more pages when older history in fact remains. The limit+1 probe answers
+// "is there another row after this page, right now, in this same read" and
+// is correct regardless of what total said a moment earlier; total itself is
+// still returned, but purely as the display count a client shows, never as
+// the truncation signal.
 //
 // cache_hits / executed_tasks / total_tasks are populated from the REAL
 // TaskRun rows belonging to the runs on THIS PAGE, not from
@@ -5496,12 +5519,15 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 // page holds, never the job's whole history) and running them through the
 // same collapseFanOutGroups/summarizeTasks pipeline convertRunModel uses for
 // the detail endpoint guarantees the two agree, fan-out groups included.
-func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, error) {
-	var total int64
+func (s *Store) List(jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
 	if err := s.db.Model(&models.JobRun{}).
 		Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
 		Count(&total).Error; err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
+	}
+
+	if listCountToPageHook != nil {
+		listCountToPageHook()
 	}
 
 	var results []struct {
@@ -5518,13 +5544,21 @@ func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, erro
 		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
 		Order("job_runs.created_at DESC, job_runs.id DESC")
 	if limit > 0 {
-		q = q.Limit(limit)
+		// Fetch one extra row so "is there more" is answered by this same
+		// query, not by a comparison against the (possibly now-stale) total
+		// counted above.
+		q = q.Limit(limit + 1)
 	}
 	if offset > 0 {
 		q = q.Offset(offset)
 	}
 	if err := q.Scan(&results).Error; err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
+	}
+
+	if limit > 0 && len(results) > limit {
+		hasMore = true
+		results = results[:limit]
 	}
 
 	runIDs := make([]uuid.UUID, 0, len(results))
@@ -5533,15 +5567,15 @@ func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, erro
 	}
 	tasksByRun, err := s.pageTaskRunsByJobRunID(runIDs)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
-	runs := make([]*JobRun, 0, len(results))
+	runs = make([]*JobRun, 0, len(results))
 	for i := range results {
 		results[i].Tasks = tasksByRun[results[i].ID]
 		runValue, err := s.convertRunModel(&results[i].JobRun)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		runValue.JobAlias = results[i].JobAlias
 		runValue.TriggerType = results[i].TriggerType
@@ -5554,7 +5588,7 @@ func (s *Store) List(jobID uuid.UUID, limit, offset int) ([]*JobRun, int64, erro
 		runs = append(runs, runValue)
 	}
 
-	return runs, total, nil
+	return runs, total, hasMore, nil
 }
 
 // pageTaskRunsByJobRunID loads the TaskRun rows belonging to the given job
