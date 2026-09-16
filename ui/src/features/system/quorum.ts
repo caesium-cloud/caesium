@@ -121,6 +121,12 @@ export interface SystemBanner {
 /**
  * Banner copy for the /system header. Only a fully observed, fully reachable
  * cluster is allowed to read "All systems operational".
+ *
+ * Node liveness is assessed alongside quorum, never folded into it: a dead
+ * standby or spare cannot cost the cluster its voter majority, so quorum stays
+ * `available` — but the deployment has still lost a node, and saying
+ * "operational" next to an explicitly unreachable member is the same lie this
+ * page was fixed for.
  */
 export function deriveSystemBanner(
   state: ClusterHealthState,
@@ -134,7 +140,10 @@ export function deriveSystemBanner(
     };
   }
 
-  const quorum = deriveQuorumView(health?.checks?.cluster);
+  const cluster = health?.checks?.cluster;
+  const quorum = deriveQuorumView(cluster);
+  const nodes = cluster?.clustered ? cluster.nodes : undefined;
+  const degradedBadge = state === "operational" || state === "unknown" ? "degraded" : state;
 
   if (state === "unavailable" || quorum.status === "unavailable") {
     return {
@@ -151,29 +160,66 @@ export function deriveSystemBanner(
   if (quorum.status === "unknown") {
     return {
       tone: "warn",
-      badge: state === "operational" ? "degraded" : state,
+      badge: degradedBadge,
       headline: "Cluster liveness unknown — voters have not been verified",
     };
   }
 
-  if (state === "degraded" || quorum.status === "degraded") {
+  if (quorum.status === "degraded") {
     return {
       tone: "warn",
       badge: "degraded",
-      headline:
-        quorum.status === "degraded"
-          ? `Degraded — ${quorum.reachable} of ${quorum.total} voters reachable`
-          : "System degraded — review the failing checks",
+      headline: `Degraded — ${quorum.reachable} of ${quorum.total} voters reachable`,
     };
+  }
+
+  if (nodes && nodes.unreachable > 0) {
+    return {
+      tone: "warn",
+      badge: "degraded",
+      headline: `Degraded — ${nodes.reachable} of ${nodes.total} cluster nodes reachable`,
+    };
+  }
+
+  if (nodes && nodes.unknown > 0) {
+    return {
+      tone: "warn",
+      badge: degradedBadge,
+      headline: `Cluster liveness unknown — ${nodes.unknown} of ${nodes.total} nodes unverified`,
+    };
+  }
+
+  if (state === "degraded") {
+    return { tone: "warn", badge: "degraded", headline: "System degraded — review the failing checks" };
+  }
+
+  if (state !== "operational") {
+    // The server answered with something we cannot map to "all good".
+    return { tone: "warn", badge: degradedBadge, headline: "Health status unknown" };
   }
 
   return { tone: "ok", badge: "operational", headline: "All systems operational" };
 }
 
-/** A health check's dot colour. A check with no status is never green. */
+/** Reachable / total across every member, or null when none was determined. */
+export function nodeLivenessLabel(cluster?: ClusterCheck | null): string | null {
+  if (!cluster?.clustered || !cluster.nodes || cluster.nodes.total === 0) return null;
+  const { nodes } = cluster;
+  if (nodes.reachable === 0 && nodes.unknown === nodes.total) return `?/${nodes.total}`;
+  return `${nodes.reachable}/${nodes.total}`;
+}
+
+/**
+ * A health check's dot colour. A check with no status is never green.
+ *
+ * Accepts both vocabularies: the health-check statuses (`healthy`) and the
+ * quorum statuses (`available`), so the Quorum row can be coloured straight
+ * from the quorum assessment.
+ */
 export function checkTone(status?: string): Tone {
   switch (status) {
     case "healthy":
+    case "available":
       return "ok";
     case "degraded":
       return "warn";

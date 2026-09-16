@@ -150,6 +150,131 @@ func TestSummarizeNeverReportsFullQuorumFromMembershipAlone(t *testing.T) {
 	require.Equal(t, StatusDegraded, q.Status)
 }
 
+// TestSummarizeNodesCoversNonVoters pins the complement to the quorum table:
+// quorum ignores standbys and spares by design, so node liveness must not.
+func TestSummarizeNodesCoversNonVoters(t *testing.T) {
+	standby := func(addr string, r Reachability) Member {
+		return Member{Address: addr, Role: RoleStandby, Reachability: r}
+	}
+	spare := func(addr string, r Reachability) Member {
+		return Member{Address: addr, Role: RoleSpare, Reachability: r}
+	}
+
+	cases := []struct {
+		name            string
+		members         []Member
+		wantStatus      Status
+		wantTotal       int
+		wantReachable   int
+		wantUnreachable int
+		wantUnknown     int
+	}{
+		{
+			name:       "every member reachable",
+			members:    []Member{voter("a:9001", Reachable), standby("b:9001", Reachable)},
+			wantStatus: StatusAvailable, wantTotal: 2, wantReachable: 2,
+		},
+		{
+			name:       "an unreachable standby degrades node health",
+			members:    []Member{voter("a:9001", Reachable), voter("b:9001", Reachable), voter("c:9001", Reachable), standby("d:9001", Unreachable)},
+			wantStatus: StatusDegraded, wantTotal: 4, wantReachable: 3, wantUnreachable: 1,
+		},
+		{
+			name:       "an unreachable spare degrades node health",
+			members:    []Member{voter("a:9001", Reachable), spare("d:9001", Unreachable)},
+			wantStatus: StatusDegraded, wantTotal: 2, wantReachable: 1, wantUnreachable: 1,
+		},
+		{
+			name:       "an unverified standby is unknown, never healthy",
+			members:    []Member{voter("a:9001", Reachable), standby("b:9001", Unknown)},
+			wantStatus: StatusUnknown, wantTotal: 2, wantReachable: 1, wantUnknown: 1,
+		},
+		{
+			name:       "a known failure outranks an unverified member",
+			members:    []Member{voter("a:9001", Unreachable), standby("b:9001", Unknown)},
+			wantStatus: StatusDegraded, wantTotal: 2, wantUnreachable: 1, wantUnknown: 1,
+		},
+		{
+			name:       "no members at all is unknown",
+			members:    nil,
+			wantStatus: StatusUnknown,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := SummarizeNodes(tc.members)
+
+			require.Equal(t, tc.wantStatus, s.Status)
+			require.Equal(t, tc.wantTotal, s.Total, "total")
+			require.Equal(t, tc.wantReachable, s.Reachable, "reachable")
+			require.Equal(t, tc.wantUnreachable, s.Unreachable, "unreachable")
+			require.Equal(t, tc.wantUnknown, s.Unknown, "unknown")
+		})
+	}
+}
+
+// TestViewStatusIsTheWorseOfQuorumAndNodes is the wiring between the two
+// summaries: an intact voter majority must not mask a dead non-voter.
+func TestViewStatusIsTheWorseOfQuorumAndNodes(t *testing.T) {
+	members := []Member{
+		voter("a:9001", Reachable),
+		voter("b:9001", Reachable),
+		voter("c:9001", Reachable),
+		{Address: "d:9001", Role: RoleStandby, Reachability: Unreachable},
+	}
+	view := View{
+		Clustered: true,
+		Observed:  true,
+		Members:   members,
+		Quorum:    Summarize(members, "a:9001"),
+		Nodes:     SummarizeNodes(members),
+	}
+
+	require.Equal(t, StatusAvailable, view.Quorum.Status, "quorum arithmetic stays voter-only")
+	require.Equal(t, StatusDegraded, view.Nodes.Status)
+	require.Equal(t, StatusDegraded, view.Status())
+
+	// A lost quorum still outranks a merely degraded node count.
+	lost := []Member{voter("a:9001", Reachable), voter("b:9001", Unreachable), voter("c:9001", Unreachable)}
+	lostView := View{Quorum: Summarize(lost, ""), Nodes: SummarizeNodes(lost)}
+	require.Equal(t, StatusUnavailable, lostView.Status())
+}
+
+func TestObserveSummarizesNonVoterLiveness(t *testing.T) {
+	restore := stub(t,
+		func(context.Context) ([]client.NodeInfo, string, error) {
+			return []client.NodeInfo{
+				{ID: 1, Address: "10.244.0.8:9001", Role: client.Voter},
+				{ID: 2, Address: "10.244.0.9:9001", Role: client.Voter},
+				{ID: 3, Address: "10.244.0.10:9001", Role: client.Voter},
+				{ID: 4, Address: "10.244.0.11:9001", Role: client.StandBy},
+			}, "10.244.0.8:9001", nil
+		},
+		func(_ context.Context, addr string) error {
+			if addr == "10.244.0.11:9001" {
+				return errors.New("connection refused")
+			}
+			return nil
+		},
+	)
+	defer restore()
+
+	view := observe(context.Background())
+
+	require.Equal(t, StatusAvailable, view.Quorum.Status)
+	require.Equal(t, 3, view.Quorum.TotalVoters)
+	require.Equal(t, StatusDegraded, view.Nodes.Status)
+	require.Equal(t, 4, view.Nodes.Total)
+	require.Equal(t, 1, view.Nodes.Unreachable)
+	require.Equal(t, StatusDegraded, view.Status())
+
+	standby, ok := view.MemberOf("10.244.0.11:9001")
+	require.True(t, ok)
+	require.Equal(t, RoleStandby, standby.Role)
+	require.Equal(t, Unreachable, standby.Reachability)
+}
+
 func TestObserveProbesEveryMemberAndMarksTheLeader(t *testing.T) {
 	restore := stub(t,
 		func(context.Context) ([]client.NodeInfo, string, error) {
@@ -271,6 +396,7 @@ func TestViewJSONContract(t *testing.T) {
 			Reachability: Reachable, LatencyMs: &latency,
 		}},
 		Quorum: Summarize([]Member{voter("a:9001", Reachable)}, "a:9001"),
+		Nodes:  SummarizeNodes([]Member{voter("a:9001", Reachable)}),
 	}
 
 	raw, err := json.Marshal(view)
@@ -280,6 +406,13 @@ func TestViewJSONContract(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 	require.Contains(t, decoded, "quorum")
 	require.Contains(t, decoded, "members")
+	require.Contains(t, decoded, "nodes")
+
+	nodes, ok := decoded["nodes"].(map[string]any)
+	require.True(t, ok)
+	for _, field := range []string{"status", "total", "reachable", "unreachable", "unknown"} {
+		require.Contains(t, nodes, field)
+	}
 
 	quorum, ok := decoded["quorum"].(map[string]any)
 	require.True(t, ok)

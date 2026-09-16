@@ -467,10 +467,24 @@ export interface Quorum {
   leader_address?: string;
 }
 
+/**
+ * Liveness across EVERY member, including the standbys and spares that quorum
+ * arithmetic deliberately ignores. A dead non-voter cannot cost the cluster its
+ * majority, but it is still a dead node and must not read as operational.
+ */
+export interface NodeSummary {
+  status: QuorumStatus;
+  total: number;
+  reachable: number;
+  unreachable: number;
+  unknown: number;
+}
+
 export interface ClusterCheck {
   status: string;
   clustered: boolean;
   quorum: Quorum;
+  nodes?: NodeSummary;
   members: ClusterMember[];
   /** False until the first liveness probe completes; liveness is unknown until then. */
   observed: boolean;

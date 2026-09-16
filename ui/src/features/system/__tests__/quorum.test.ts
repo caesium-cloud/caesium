@@ -30,6 +30,7 @@ function clusterCheck(overrides: Partial<ClusterCheck> = {}): ClusterCheck {
     observed: true,
     members: [],
     quorum: quorum({ status: "available" }),
+    nodes: { status: "available", total: 3, reachable: 3, unreachable: 0, unknown: 0 },
     ...overrides,
   };
 }
@@ -171,6 +172,45 @@ describe("deriveSystemBanner", () => {
     expect(banner.tone).toBe("danger");
     expect(banner.badge).toBe("unavailable");
     expect(banner.headline).toContain("Quorum lost");
+  });
+
+  // Review P2: a crashed standby never enters the voter arithmetic, so quorum
+  // stays available — the banner must still not read "All systems operational".
+  it("never says operational while a non-voter is unreachable", () => {
+    const standbyDown = clusterCheck({
+      status: "degraded",
+      quorum: quorum({ status: "available" }),
+      nodes: { status: "degraded", total: 4, reachable: 3, unreachable: 1, unknown: 0 },
+    });
+
+    const banner = deriveSystemBanner("degraded", health(standbyDown, "degraded"));
+
+    expect(banner.tone).toBe("warn");
+    expect(banner.badge).toBe("degraded");
+    expect(banner.headline).toBe("Degraded — 3 of 4 cluster nodes reachable");
+    // Quorum itself is still correctly reported as a full voter majority.
+    expect(deriveQuorumView(standbyDown).label).toBe("3/3");
+    expect(deriveQuorumView(standbyDown).status).toBe("available");
+  });
+
+  it("never says operational while a non-voter is unverified", () => {
+    const standbyUnknown = clusterCheck({
+      status: "unknown",
+      quorum: quorum({ status: "available" }),
+      nodes: { status: "unknown", total: 4, reachable: 3, unreachable: 0, unknown: 1 },
+    });
+
+    const banner = deriveSystemBanner("unknown", health(standbyUnknown, "unknown"));
+
+    expect(banner.tone).toBe("warn");
+    expect(banner.headline).toContain("1 of 4 nodes unverified");
+  });
+
+  it("never falls through to operational on an unmapped server status", () => {
+    const banner = deriveSystemBanner("unknown", health(clusterCheck(), "something-new"));
+
+    expect(banner.tone).not.toBe("ok");
+    expect(banner.headline).not.toBe("All systems operational");
   });
 
   it("never says operational when liveness is unknown", () => {

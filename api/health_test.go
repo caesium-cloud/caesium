@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -22,11 +23,24 @@ type healthBody struct {
 			Status string `json:"status"`
 			Count  int64  `json:"count"`
 		} `json:"nodes"`
+		ActiveRuns struct {
+			Status string `json:"status"`
+		} `json:"active_runs"`
+		Triggers struct {
+			Status string `json:"status"`
+		} `json:"triggers"`
 		Cluster *struct {
 			Status    string `json:"status"`
 			Clustered bool   `json:"clustered"`
 			Observed  bool   `json:"observed"`
-			Quorum    struct {
+			Nodes     struct {
+				Status      string `json:"status"`
+				Total       int    `json:"total"`
+				Reachable   int    `json:"reachable"`
+				Unreachable int    `json:"unreachable"`
+				Unknown     int    `json:"unknown"`
+			} `json:"nodes"`
+			Quorum struct {
 				Status            string `json:"status"`
 				TotalVoters       int    `json:"total_voters"`
 				ReachableVoters   int    `json:"reachable_voters"`
@@ -49,12 +63,13 @@ type healthBody struct {
 
 func checkerWithView(view cluster.View) healthChecker {
 	return healthChecker{
-		database:   func() *CheckResult { return &CheckResult{Status: Healthy, LatencyMs: 1} },
-		activeRuns: func() *CheckResult { return &CheckResult{Status: Healthy} },
-		triggers:   func() *CheckResult { return &CheckResult{Status: Healthy} },
-		workers:    func() int64 { return 0 },
+		database:   func(context.Context) *CheckResult { return &CheckResult{Status: Healthy, LatencyMs: 1} },
+		activeRuns: func(context.Context) *CheckResult { return &CheckResult{Status: Healthy} },
+		triggers:   func(context.Context) *CheckResult { return &CheckResult{Status: Healthy} },
+		workers:    func(context.Context) int64 { return 0 },
 		cluster:    func() cluster.View { return view },
 		uptime:     func() time.Duration { return time.Minute },
+		timeout:    databaseCheckTimeout,
 	}
 }
 
@@ -65,6 +80,7 @@ func clusterView(members []cluster.Member, leader string) cluster.View {
 		ObservedAt: time.Now().UTC(),
 		Members:    members,
 		Quorum:     cluster.Summarize(members, leader),
+		Nodes:      cluster.SummarizeNodes(members),
 	}
 }
 
@@ -162,6 +178,7 @@ func TestHealthNeverReportsUnobservedLivenessAsHealthy(t *testing.T) {
 		Observed:  false,
 		Members:   []cluster.Member{},
 		Quorum:    cluster.Quorum{Status: cluster.StatusUnknown},
+		Nodes:     cluster.NodeSummary{Status: cluster.StatusUnknown},
 	}))
 
 	require.Equal(t, http.StatusOK, code)
@@ -174,7 +191,7 @@ func TestHealthNeverReportsUnobservedLivenessAsHealthy(t *testing.T) {
 
 func TestHealthOmitsClusterCheckWhenNotClustered(t *testing.T) {
 	checker := checkerWithView(cluster.View{Clustered: false})
-	checker.workers = func() int64 { return 4 }
+	checker.workers = func(context.Context) int64 { return 4 }
 
 	body, code := decodeHealth(t, checker)
 
@@ -189,13 +206,144 @@ func TestHealthStillFailsTheProbeWhenTheLocalDatabaseIsDegraded(t *testing.T) {
 	checker := checkerWithView(clusterView([]cluster.Member{
 		voterMember("10.244.0.8:9001", cluster.Reachable),
 	}, "10.244.0.8:9001"))
-	checker.database = func() *CheckResult { return &CheckResult{Status: Degraded, LatencyMs: 2000} }
+	checker.database = func(context.Context) *CheckResult { return &CheckResult{Status: Degraded, LatencyMs: 2000} }
 
 	body, code := decodeHealth(t, checker)
 
 	require.Equal(t, http.StatusServiceUnavailable, code)
 	require.Equal(t, "degraded", body.Status)
 	require.Equal(t, "degraded", body.Checks.Database.Status)
+}
+
+// Review P2: an unreachable standby or spare never reaches the voter
+// arithmetic, so /health used to stay healthy — and the console said "All
+// systems operational" beside an explicitly unreachable member.
+func TestHealthDegradesForAnUnreachableNonVoter(t *testing.T) {
+	members := []cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),
+		voterMember("10.244.0.9:9001", cluster.Reachable),
+		voterMember("10.244.0.10:9001", cluster.Reachable),
+		{Address: "10.244.0.11:9001", Role: cluster.RoleStandby, Reachability: cluster.Unreachable},
+	}
+
+	body, code := decodeHealth(t, checkerWithView(clusterView(members, "10.244.0.8:9001")))
+
+	require.Equal(t, http.StatusOK, code)
+
+	// Quorum arithmetic stays voter-only and correct: all three voters serve.
+	require.Equal(t, "available", body.Checks.Cluster.Quorum.Status)
+	require.Equal(t, 3, body.Checks.Cluster.Quorum.TotalVoters)
+	require.Equal(t, 3, body.Checks.Cluster.Quorum.ReachableVoters)
+	require.True(t, body.Checks.Cluster.Quorum.Available)
+
+	// Node liveness covers every member, so the dead standby still degrades.
+	require.Equal(t, "degraded", body.Checks.Cluster.Nodes.Status)
+	require.Equal(t, 4, body.Checks.Cluster.Nodes.Total)
+	require.Equal(t, 3, body.Checks.Cluster.Nodes.Reachable)
+	require.Equal(t, 1, body.Checks.Cluster.Nodes.Unreachable)
+
+	require.Equal(t, "degraded", body.Checks.Cluster.Status)
+	require.Equal(t, "degraded", body.Checks.Nodes.Status)
+	require.Equal(t, int64(3), body.Checks.Nodes.Count)
+	require.Equal(t, "degraded", body.Status, "overall health must not stay healthy beside a dead node")
+}
+
+func TestHealthDegradesForAnUnreachableSpare(t *testing.T) {
+	members := []cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),
+		{Address: "10.244.0.11:9001", Role: cluster.RoleSpare, Reachability: cluster.Unreachable},
+	}
+
+	body, _ := decodeHealth(t, checkerWithView(clusterView(members, "10.244.0.8:9001")))
+
+	require.Equal(t, "available", body.Checks.Cluster.Quorum.Status)
+	require.Equal(t, "degraded", body.Checks.Cluster.Nodes.Status)
+	require.Equal(t, "degraded", body.Status)
+}
+
+// Review P1: the dqlite driver retries leader discovery without limit, bounded
+// only by its context, and `SELECT 1` was issued without one. On a real quorum
+// loss the handler blocked before it ever reached the cluster assessment it
+// exists to report, and the Kubernetes probes timed out and restarted the
+// surviving replicas.
+func TestHealthAnswersWithinTheBoundWhenTheDatabaseCheckBlocks(t *testing.T) {
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+
+	blocked := func(ctx context.Context) *CheckResult {
+		select {
+		case <-ctx.Done():
+		case <-released:
+		case <-time.After(time.Minute):
+		}
+		return &CheckResult{Status: Healthy}
+	}
+
+	checker := checkerWithView(clusterView([]cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),
+		voterMember("10.244.0.9:9001", cluster.Unreachable),
+		voterMember("10.244.0.10:9001", cluster.Unreachable),
+	}, ""))
+	checker.database = blocked
+	checker.activeRuns = blocked
+	checker.triggers = blocked
+	checker.timeout = 150 * time.Millisecond
+
+	start := time.Now()
+	body, code := decodeHealth(t, checker)
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 5*time.Second, "the handler hung instead of bounding the database check")
+
+	// The point of bounding it: the cluster assessment is still reported.
+	require.NotNil(t, body.Checks.Cluster)
+	require.Equal(t, "unavailable", body.Checks.Cluster.Quorum.Status)
+	require.Equal(t, "unavailable", body.Status)
+
+	// A check that could not answer in time is a failed check, not a hang...
+	require.Equal(t, "degraded", body.Checks.Database.Status)
+	require.Equal(t, "unknown", body.Checks.ActiveRuns.Status)
+	require.Equal(t, "unknown", body.Checks.Triggers.Status)
+
+	// ...but a cluster-wide failure must not fail every replica's probe, which
+	// cannot restore a raft majority and would take down the only surface still
+	// able to explain why.
+	require.Equal(t, http.StatusOK, code)
+}
+
+func TestHealthStillFailsTheProbeWhenTheDatabaseBlocksButQuorumHolds(t *testing.T) {
+	checker := checkerWithView(clusterView([]cluster.Member{
+		voterMember("10.244.0.8:9001", cluster.Reachable),
+	}, "10.244.0.8:9001"))
+	checker.database = func(ctx context.Context) *CheckResult {
+		<-ctx.Done()
+		return &CheckResult{Status: Healthy}
+	}
+	checker.timeout = 150 * time.Millisecond
+
+	body, code := decodeHealth(t, checker)
+
+	require.Equal(t, http.StatusServiceUnavailable, code,
+		"a local database failure with a healthy quorum is this node's problem")
+	require.Equal(t, "degraded", body.Checks.Database.Status)
+}
+
+func TestHealthKeepsFailingTheProbeWhenClusterLivenessIsUnknown(t *testing.T) {
+	checker := checkerWithView(cluster.View{
+		Clustered: true,
+		Observed:  false,
+		Members:   []cluster.Member{},
+		Quorum:    cluster.Quorum{Status: cluster.StatusUnknown},
+		Nodes:     cluster.NodeSummary{Status: cluster.StatusUnknown},
+	})
+	checker.database = func(context.Context) *CheckResult {
+		return &CheckResult{Status: Degraded, LatencyMs: 2000}
+	}
+
+	_, code := decodeHealth(t, checker)
+
+	require.Equal(t, http.StatusServiceUnavailable, code,
+		"an unobserved cluster is not evidence of a cluster-wide outage")
 }
 
 func TestWorstStatusOrdersTheVocabulary(t *testing.T) {

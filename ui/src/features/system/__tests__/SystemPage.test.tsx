@@ -55,6 +55,7 @@ function cluster(overrides: Partial<ClusterCheck> = {}): ClusterCheck {
       degraded: false,
       leader_address: "10.244.0.8:9001",
     },
+    nodes: { status: "available", total: 3, reachable: 3, unreachable: 0, unknown: 0 },
     ...overrides,
   };
 }
@@ -163,6 +164,54 @@ describe("SystemPage cluster health", () => {
       .getAllByTestId("health-check-row")
       .find((r) => r.dataset.check === "Nodes");
     expect(nodesRow?.dataset.tone).toBe("warn");
+  });
+
+  // Review P2: a crashed standby never enters the voter arithmetic, so the
+  // page kept saying "All systems operational" beside an unreachable member.
+  it("degrades for an unreachable standby while quorum stays 3/3", async () => {
+    const standbyDown = cluster({
+      status: "degraded",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "reachable"),
+        member("10.244.0.10:9001", "reachable"),
+        { address: "10.244.0.11:9001", role: "standby", leader: false, reachability: "unreachable" },
+      ],
+      nodes: { status: "degraded", total: 4, reachable: 3, unreachable: 1, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(standbyDown, "degraded"));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+      { address: "10.244.0.11:9001", arch: "arm64", role: "standby", leader: false, reachability: "unreachable", workers_busy: 0, workers_total: 4 },
+    ]);
+
+    show();
+
+    // Quorum is still honestly reported as a full voter majority...
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("3/3"));
+    const quorumRow = screen
+      .getAllByTestId("health-check-row")
+      .find((r) => r.dataset.check === "Quorum");
+    expect(quorumRow?.dataset.tone).toBe("ok");
+
+    // ...but the page must not call that operational.
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("degraded");
+    expect(screen.getByText("Degraded — 3 of 4 cluster nodes reachable")).toBeInTheDocument();
+
+    const nodesRow = screen
+      .getAllByTestId("health-check-row")
+      .find((r) => r.dataset.check === "Nodes");
+    expect(nodesRow?.dataset.tone).toBe("warn");
+    expect(nodesRow).toHaveTextContent("3/4 nodes reachable");
+
+    const dead = screen
+      .getAllByTestId("cluster-node-row")
+      .find((r) => r.dataset.address === "10.244.0.11:9001");
+    expect(dead?.dataset.reachability).toBe("unreachable");
   });
 
   it("shows an outage when quorum is lost", async () => {

@@ -93,6 +93,22 @@ type Quorum struct {
 	LeaderAddress string `json:"leader_address,omitempty"`
 }
 
+// NodeSummary reports liveness across ALL observed members, voters and
+// non-voters alike.
+//
+// Quorum arithmetic is deliberately voter-only — a standby or spare replicates
+// but cannot vote, so it can never make a cluster available. It can, however,
+// be dead, and a dead node is a loss of redundancy that must show up somewhere:
+// counting only voters here would let an unreachable standby sit next to "All
+// systems operational", which is the same class of lie as issue #494 itself.
+type NodeSummary struct {
+	Status      Status `json:"status"`
+	Total       int    `json:"total"`
+	Reachable   int    `json:"reachable"`
+	Unreachable int    `json:"unreachable"`
+	Unknown     int    `json:"unknown"`
+}
+
 // View is a point-in-time observation of the cluster.
 type View struct {
 	// Clustered reports whether a dqlite raft cluster backs this process at
@@ -107,6 +123,36 @@ type View struct {
 	Stale   bool     `json:"stale"`
 	Members []Member `json:"members"`
 	Quorum  Quorum   `json:"quorum"`
+	// Nodes assesses every member's liveness, including non-voters, which
+	// quorum deliberately ignores.
+	Nodes NodeSummary `json:"nodes"`
+}
+
+// Status is the worst of the quorum assessment and the node assessment: a
+// cluster that holds quorum but has lost a standby is degraded, not healthy.
+func (v View) Status() Status {
+	return worstStatus(v.Quorum.Status, v.Nodes.Status)
+}
+
+// worstStatus orders the vocabulary from best to worst so a summary can never
+// be better than its worst component.
+func worstStatus(a, b Status) Status {
+	rank := func(s Status) int {
+		switch s {
+		case StatusAvailable:
+			return 0
+		case StatusDegraded:
+			return 1
+		case StatusUnavailable:
+			return 3
+		default: // StatusUnknown and anything unrecognised
+			return 2
+		}
+	}
+	if rank(b) > rank(a) {
+		return b
+	}
+	return a
 }
 
 // MemberOf returns the observed member for an address, if the address is part
@@ -227,6 +273,7 @@ func unobserved() View {
 			Available: false,
 			Degraded:  false,
 		},
+		Nodes: NodeSummary{Status: StatusUnknown},
 	}
 }
 
@@ -239,6 +286,7 @@ func observe(ctx context.Context) View {
 			ObservedAt: time.Now().UTC(),
 			Members:    []Member{},
 			Quorum:     Quorum{Status: StatusUnknown},
+			Nodes:      NodeSummary{Status: StatusUnknown},
 		}
 	}
 
@@ -250,12 +298,14 @@ func observe(ctx context.Context) View {
 		// Membership itself is unknown. Fall back to the configured seeds so
 		// the console still lists something, but every entry stays Unknown —
 		// an unverified member must never be presented as healthy.
+		seeds := seedMembers()
 		return View{
 			Clustered:  true,
 			Observed:   true,
 			ObservedAt: time.Now().UTC(),
-			Members:    seedMembers(),
+			Members:    seeds,
 			Quorum:     Quorum{Status: StatusUnknown},
+			Nodes:      SummarizeNodes(seeds),
 		}
 	}
 
@@ -279,6 +329,7 @@ func observe(ctx context.Context) View {
 		ObservedAt: time.Now().UTC(),
 		Members:    members,
 		Quorum:     Summarize(members, leader),
+		Nodes:      SummarizeNodes(members),
 	}
 }
 
@@ -362,6 +413,38 @@ func Summarize(members []Member, leader string) Quorum {
 		q.Degraded = true
 	}
 	return q
+}
+
+// SummarizeNodes assesses liveness across every observed member, whatever its
+// role. Quorum ignores non-voters by design; this does not, so a crashed
+// standby or spare still degrades cluster health instead of hiding behind an
+// intact voter majority.
+func SummarizeNodes(members []Member) NodeSummary {
+	s := NodeSummary{Total: len(members)}
+	for _, m := range members {
+		switch m.Reachability {
+		case Reachable:
+			s.Reachable++
+		case Unreachable:
+			s.Unreachable++
+		default:
+			s.Unknown++
+		}
+	}
+
+	switch {
+	case s.Total == 0:
+		s.Status = StatusUnknown
+	case s.Unreachable > 0:
+		// A member is known to be down. That is a loss of redundancy even when
+		// the voters that remain still form a majority.
+		s.Status = StatusDegraded
+	case s.Unknown > 0:
+		s.Status = StatusUnknown
+	default:
+		s.Status = StatusAvailable
+	}
+	return s
 }
 
 func normalizeRole(role client.NodeRole) string {

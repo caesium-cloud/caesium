@@ -15,6 +15,7 @@ import {
   checkTone,
   deriveQuorumView,
   deriveSystemBanner,
+  nodeLivenessLabel,
   reachabilityLabel,
   reachabilityTone,
   reachableNodeCount,
@@ -89,6 +90,8 @@ export function SystemPage() {
   const quorum = deriveQuorumView(clusterCheck);
   const banner = deriveSystemBanner(health.state, rawHealth);
   const reachableNodes = reachableNodeCount(nodes);
+  // Node liveness spans every member, voters and non-voters alike.
+  const nodeLiveness = nodeLivenessLabel(clusterCheck);
 
   return (
     <div className="space-y-6 pb-12">
@@ -287,12 +290,16 @@ export function SystemPage() {
               {
                 key: "Nodes",
                 status: nodesCheck?.status,
-                detail: quorum.status === "unreported"
-                  ? (nodesCheck?.count != null ? `${nodesCheck.count} tracking` : undefined)
-                  : `${quorum.label} voters reachable`,
+                // Node liveness spans every member; quorum counts voters only.
+                detail: nodeLiveness
+                  ? `${nodeLiveness} nodes reachable`
+                  : (nodesCheck?.count != null ? `${nodesCheck.count} tracking` : undefined),
               },
               ...(clusterCheck
-                ? [{ key: "Quorum", status: clusterCheck.status, detail: quorum.detail }]
+                // The Quorum row reports the VOTER assessment specifically, not
+                // the combined cluster status, so a dead standby degrades the
+                // Nodes row above without misreporting the voter majority.
+                ? [{ key: "Quorum", status: clusterCheck.quorum?.status, detail: quorum.detail }]
                 : []),
             ].map((c, i, arr) => (
               <div

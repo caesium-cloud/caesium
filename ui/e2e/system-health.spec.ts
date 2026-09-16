@@ -41,6 +41,23 @@ function node(address: string, reachability: Reachability, leader = false) {
   return { ...member(address, reachability, leader), arch: "amd64", workers_busy: 0, workers_total: 4 };
 }
 
+function nodeSummary(members: ReturnType<typeof member>[]) {
+  const count = (r: Reachability) => members.filter((m) => m.reachability === r).length;
+  const unreachable = count("unreachable");
+  const unknown = count("unknown");
+  let status = "available";
+  if (members.length === 0 || (unreachable === 0 && unknown === members.length)) status = "unknown";
+  else if (unreachable > 0) status = "degraded";
+  else if (unknown > 0) status = "unknown";
+  return {
+    status,
+    total: members.length,
+    reachable: count("reachable"),
+    unreachable,
+    unknown,
+  };
+}
+
 function healthBody(
   status: string,
   quorum: Record<string, unknown>,
@@ -61,6 +78,7 @@ function healthBody(
         observed,
         observed_at: new Date().toISOString(),
         quorum,
+        nodes: nodeSummary(members),
         members,
       },
     },
@@ -179,6 +197,61 @@ test("SYNTHETIC: a crashed replica renders as degraded 2/3, not operational 3/3"
   // ...and neither is the sidebar.
   await expect(page.getByText("All systems nominal")).toHaveCount(0);
   await expect(page.getByTestId("sidebar-quorum")).toHaveText("2/3");
+});
+
+test("SYNTHETIC: an unreachable standby degrades the page even with a full voter quorum", async ({
+  page,
+}) => {
+  const STANDBY = "10.244.0.11:9001";
+  const members = [
+    member(LEADER, "reachable", true),
+    member(FOLLOWER, "reachable"),
+    member(CRASHED, "reachable"),
+    { ...member(STANDBY, "unreachable"), role: "standby" },
+  ];
+
+  await stubCluster(
+    page,
+    healthBody(
+      "degraded",
+      {
+        status: "available",
+        total_voters: 3,
+        reachable_voters: 3,
+        unreachable_voters: 0,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: true,
+        degraded: false,
+        leader_address: LEADER,
+      },
+      members,
+    ),
+    [
+      node(LEADER, "reachable", true),
+      node(FOLLOWER, "reachable"),
+      node(CRASHED, "reachable"),
+      { ...node(STANDBY, "unreachable"), role: "standby" },
+    ],
+  );
+
+  await page.goto("/system");
+
+  // Quorum arithmetic is voter-only and still correct.
+  await expect(page.getByTestId("quorum-count")).toHaveText("3/3");
+
+  // The page must not call that operational.
+  await expect(page.getByText("All systems operational")).toHaveCount(0);
+  await expect(page.getByText("All systems nominal")).toHaveCount(0);
+  await expect(page.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+  await expect(page.getByTestId("system-health-badge")).toHaveText("degraded");
+  await expect(page.locator('[data-testid="health-check-row"][data-check="Nodes"]')).toHaveAttribute(
+    "data-tone",
+    "warn",
+  );
+
+  const standby = page.locator(`[data-testid="cluster-node-row"][data-address="${STANDBY}"]`);
+  await expect(standby).toHaveAttribute("data-reachability", "unreachable");
 });
 
 test("SYNTHETIC: a lost quorum renders as an outage", async ({ page }) => {
