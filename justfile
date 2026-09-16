@@ -94,6 +94,7 @@ robustness_kind_image := env("CAESIUM_ROBUSTNESS_KIND_IMAGE", "kindest/node:v1.3
 robustness_task_image := env("CAESIUM_ROBUSTNESS_TASK_IMAGE", "alpine:3.23")
 evidence_dir := env("CAESIUM_EVIDENCE_DIR", repo_dir + "/.tmp/evidence")
 robustness_artifacts := env("CAESIUM_ROBUSTNESS_ARTIFACTS", evidence_dir + "/robustness")
+replacement_artifacts := env("CAESIUM_REPLACEMENT_ARTIFACTS", evidence_dir + "/pod-replacement")
 # check-test-evidence.py requires a real commit SHA, so a `-amd64` image tag
 # can never stand in for it.
 candidate_sha := env("CANDIDATE_SHA", `git rev-parse HEAD 2>/dev/null || echo unknown`)
@@ -1071,6 +1072,31 @@ helm-template:
 
 helm-test:
     helm test caesium --timeout 120s
+
+# Issue #493: replace every StatefulSet pod on retained PVCs, prove the pod IP
+# really changed, and assert the replacement rejoins the dqlite cluster with its
+# data and prior runs intact. Creates and deletes its own kind cluster.
+helm-pod-replacement-test: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for cmd in kind kubectl helm curl python3; do
+        command -v "$cmd" >/dev/null || { echo "required command not found: $cmd" >&2; exit 1; }
+    done
+    artifacts="{{ replacement_artifacts }}"
+    # This directory is wiped; never let a stray env var point it somewhere real.
+    case "$artifacts" in
+        /*/*/*) ;;
+        *) echo "refusing to clear CAESIUM_REPLACEMENT_ARTIFACTS=$artifacts (want an absolute path at least three levels deep)" >&2; exit 1 ;;
+    esac
+    rm -rf "$artifacts"
+    mkdir -p "$artifacts"
+    id="${CAESIUM_REPLACEMENT_ID:-rp-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:20])')}"
+    CAESIUM_REPLACEMENT_ID="$id" \
+    CAESIUM_REPLACEMENT_ARTIFACTS="$artifacts" \
+    CAESIUM_REPLACEMENT_IMAGE="{{ local_image_ref }}:{{ tag }}" \
+    CAESIUM_REPLACEMENT_KIND_IMAGE="{{ robustness_kind_image }}" \
+    CAESIUM_REPLACEMENT_TASK_IMAGE="{{ robustness_task_image }}" \
+        bash scripts/helm-pod-replacement.sh
 
 # --------------------------------------------------------------------------
 # Early-evidence lane (distributed-testing G3).
