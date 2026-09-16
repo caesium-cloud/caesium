@@ -317,6 +317,9 @@ func TestAddressRepairTransfersLeadershipToAnotherVoter(t *testing.T) {
 	members, err := cli.Cluster(ctx)
 	require.NoError(t, err)
 	require.Len(t, members, 3)
+	cancelled, cancelTransfer := context.WithCancel(ctx)
+	cancelTransfer()
+	require.ErrorIs(t, transferLeadershipFromStaleNode(cancelled, cli, members, leader.ID), context.Canceled)
 	require.NoError(t, cli.Close())
 	leaderIdx := -1
 	for idx, app := range apps {

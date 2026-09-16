@@ -576,6 +576,9 @@ func repairClusterAddress(ctx context.Context, dir string, id uint64, address st
 func transferLeadershipFromStaleNode(ctx context.Context, cli *client.Client, members []client.NodeInfo, id uint64) error {
 	var transferErr error
 	for _, member := range members {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if member.ID == id || member.Role != client.Voter {
 			continue
 		}
@@ -589,6 +592,9 @@ func transferLeadershipFromStaleNode(ctx context.Context, cli *client.Client, me
 			return fmt.Errorf("%w: voter %d at %s", errLeadershipTransferred, member.ID, member.Address)
 		}
 		transferErr = errors.Join(transferErr, fmt.Errorf("voter %d at %s: %w", member.ID, member.Address, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if transferErr != nil {
 		return fmt.Errorf("%w: %v", ErrAddressRepairWhileLeading, transferErr)
