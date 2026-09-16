@@ -234,12 +234,29 @@ func TestSubscriberPropagatesRuntimeOOMEvidence(t *testing.T) {
 	bus := event.New()
 	startSubscriber(t, bus, db, 0)
 	jobID, runID, taskID := seedFailedTask(t, db, "no diagnostic log")
-	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runID).Updates(map[string]any{"result": "resource_failure", "oom_killed": true, "exit_code": nil}).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runID).Updates(map[string]any{"result": "resource_failure", "oom_known": true, "oom_killed": true, "exit_code": nil}).Error)
 	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()})
 	waitForIncidents(t, db, 1)
 	var inc models.Incident
 	require.NoError(t, db.First(&inc).Error)
 	require.Equal(t, string(ClassOOM), inc.Class)
+}
+
+func TestSubscriberPreservesObservedNonOOMExit137(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+	jobID, runID, taskID := seedFailedTask(t, db, "no diagnostic log")
+	exitCode := 137
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runID).Updates(map[string]any{
+		"result": "killed", "oom_known": true, "oom_killed": false, "exit_code": exitCode,
+	}).Error)
+	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()})
+	waitForIncidents(t, db, 1)
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, string(ClassUnknown), inc.Class)
 }
 
 // TestSubscriberPublishesIncidentOpened is #419's contract: opening an

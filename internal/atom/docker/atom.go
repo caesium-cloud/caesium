@@ -74,7 +74,7 @@ func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
 	if c.metadata.ContainerJSONBase == nil || c.metadata.State == nil {
 		return atom.ResourceOutcome{}
 	}
-	out := atom.ResourceOutcome{OOMKilled: c.metadata.State.OOMKilled}
+	out := atom.ResourceOutcome{OOMKnown: true, OOMKilled: c.metadata.State.OOMKilled}
 	if c.metadata.HostConfig != nil && c.metadata.HostConfig.Memory > 0 {
 		value := c.metadata.HostConfig.Memory
 		out.MemoryLimitBytes = &value

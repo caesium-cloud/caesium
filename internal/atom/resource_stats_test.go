@@ -82,7 +82,8 @@ func TestResourceSamplerOOMLowerBoundAndUnavailableMeasurements(t *testing.T) {
 			engine := &samplingEngine{entered: make(chan struct{}), exited: make(chan struct{})}
 			sampler := StartResourceSampler(context.Background(), engine, "runtime", time.Hour)
 			<-engine.entered
-			out := sampler.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: true, MemoryLimitBytes: tc.limit}})
+			out := sampler.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKnown: true, OOMKilled: true, MemoryLimitBytes: tc.limit}})
+			require.True(t, out.OOMKnown)
 			require.True(t, out.OOMKilled)
 			require.Equal(t, tc.peak, out.PeakMemoryBytes)
 			require.Nil(t, out.CPUSeconds)
@@ -95,7 +96,8 @@ func TestResourceSamplerOOMRaisesSampledPeakToLimit(t *testing.T) {
 	s := &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
 	close(s.done)
 	s.reducer.add(ResourceStats{MemoryBytes: new(int64(41291776))})
-	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: true, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKnown: true, OOMKilled: true, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	require.True(t, out.OOMKnown)
 	require.True(t, out.OOMKilled)
 	require.Equal(t, int64(64*1024*1024), *out.PeakMemoryBytes)
 	require.Equal(t, "oom_inferred", out.StatsSource)
@@ -104,7 +106,8 @@ func TestResourceSamplerOOMRaisesSampledPeakToLimit(t *testing.T) {
 func TestResourceSamplerSIGKILLWithLimitDoesNotInferOOM(t *testing.T) {
 	s := &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
 	close(s.done)
-	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: false, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	out := s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKnown: true, OOMKilled: false, MemoryLimitBytes: new(int64(64 * 1024 * 1024))}})
+	require.True(t, out.OOMKnown)
 	require.False(t, out.OOMKilled)
 	require.Nil(t, out.PeakMemoryBytes)
 	require.Equal(t, "none", out.StatsSource)
@@ -122,7 +125,8 @@ func TestResourceSamplerZeroSampleIsUnavailable(t *testing.T) {
 	s = &ResourceSampler{cancel: func() {}, done: make(chan struct{})}
 	close(s.done)
 	s.reducer.add(ResourceStats{MemoryBytes: new(int64(0)), CPUSeconds: new(0.0)})
-	out = s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKilled: true}})
+	out = s.Stop(outcomeAtom{evidence: ResourceOutcome{OOMKnown: true, OOMKilled: true}})
+	require.True(t, out.OOMKnown)
 	require.True(t, out.OOMKilled)
 	require.Nil(t, out.PeakMemoryBytes)
 	require.Equal(t, "oom_inferred", out.StatsSource)

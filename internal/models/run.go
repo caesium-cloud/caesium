@@ -177,6 +177,7 @@ type TaskRun struct {
 	PeakMemoryBytes         *int64         `gorm:"type:bigint" json:"peak_memory_bytes,omitempty"`
 	CPUSeconds              *float64       `json:"cpu_seconds,omitempty"`
 	StatsSource             string         `gorm:"not null;default:''" json:"stats_source,omitempty"`
+	OOMKnown                bool           `gorm:"not null;default:false" json:"oom_known,omitempty"`
 	OOMKilled               bool           `gorm:"not null;default:false" json:"oom_killed,omitempty"`
 	AppliedResources        datatypes.JSON `gorm:"type:json" json:"applied_resources,omitempty"`
 	EscalationLevel         int            `gorm:"not null;default:0" json:"escalation_level,omitempty"`

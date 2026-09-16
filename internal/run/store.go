@@ -179,6 +179,7 @@ type TaskRun struct {
 	PeakMemoryBytes  *int64                    `json:"peak_memory_bytes,omitempty"`
 	CPUSeconds       *float64                  `json:"cpu_seconds,omitempty"`
 	StatsSource      string                    `json:"stats_source,omitempty"`
+	OOMKnown         bool                      `json:"oom_known,omitempty"`
 	OOMKilled        bool                      `json:"oom_killed,omitempty"`
 	AppliedResources datatypes.JSON            `json:"applied_resources,omitempty"`
 	EscalationLevel  int                       `json:"escalation_level,omitempty"`
@@ -5674,6 +5675,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		PeakMemoryBytes:         model.PeakMemoryBytes,
 		CPUSeconds:              model.CPUSeconds,
 		StatsSource:             model.StatsSource,
+		OOMKnown:                model.OOMKnown,
 		OOMKilled:               model.OOMKilled,
 		AppliedResources:        append(datatypes.JSON(nil), model.AppliedResources...),
 		EscalationLevel:         model.EscalationLevel,
@@ -5797,7 +5799,7 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 			// first sibling selected for this collapsed group. Read partitions
 			// for the individual observations.
 			head.ExitCode, head.PeakMemoryBytes, head.CPUSeconds = nil, nil, nil
-			head.StatsSource, head.OOMKilled = "", false
+			head.StatsSource, head.OOMKnown, head.OOMKilled = "", false, false
 			head.AppliedResources, head.EscalationLevel = nil, 0
 			modelsRows := make([]models.TaskRun, 0, n)
 			var firstStart *time.Time

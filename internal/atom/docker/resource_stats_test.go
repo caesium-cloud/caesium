@@ -43,6 +43,7 @@ func TestResourceOOMUsesInspectAndHonorsGate(t *testing.T) {
 			a := &Atom{metadata: metadata}
 			require.Equal(t, tc.want, a.Result())
 			require.Equal(t, tc.exit, *a.ExitCode())
+			require.True(t, a.ResourceOutcome().OOMKnown)
 			require.Equal(t, tc.wantOOM, a.ResourceOutcome().OOMKilled)
 			if tc.memory > 0 {
 				require.Equal(t, tc.memory, *a.ResourceOutcome().MemoryLimitBytes)

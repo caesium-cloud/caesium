@@ -28,6 +28,9 @@ type ResourceStats struct {
 // ResourceOutcome is inspect evidence from the completed runtime, separate from
 // the coarse Result. ResourceFailure alone does not establish an OOM.
 type ResourceOutcome struct {
+	// OOMKnown distinguishes an observed false verdict from unavailable inspect
+	// evidence. OOMKilled alone cannot represent that distinction.
+	OOMKnown         bool
 	OOMKilled        bool
 	MemoryLimitBytes *int64
 }
@@ -39,6 +42,7 @@ type ResourceOutcomeProvider interface{ ResourceOutcome() ResourceOutcome }
 type ResourceSummary struct {
 	PeakMemoryBytes *int64
 	CPUSeconds      *float64
+	OOMKnown        bool
 	OOMKilled       bool
 	StatsSource     string
 }
@@ -137,6 +141,7 @@ func (s *ResourceSampler) Stop(final Atom) ResourceSummary {
 	}
 	if provider, ok := final.(ResourceOutcomeProvider); ok {
 		evidence := provider.ResourceOutcome()
+		out.OOMKnown = evidence.OOMKnown || evidence.OOMKilled
 		out.OOMKilled = evidence.OOMKilled
 		if out.OOMKilled {
 			// An observed cgroup limit is a censored lower bound, not a sampled

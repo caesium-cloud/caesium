@@ -30,6 +30,7 @@ type resourceTaskObservation struct {
 	PeakMemoryBytes *int64   `json:"peak_memory_bytes"`
 	CPUSeconds      *float64 `json:"cpu_seconds"`
 	StatsSource     string   `json:"stats_source"`
+	OOMKnown        bool     `json:"oom_known"`
 	OOMKilled       bool     `json:"oom_killed"`
 }
 type resourceRunObservation struct {
@@ -205,6 +206,59 @@ steps:
 				s.Greater(*task.CPUSeconds, 0.0)
 			}
 		})
+	}
+}
+
+// TestResourceStatsPersistsObservedNonOOMExit137 drives the real CLI, runtime,
+// store, REST projection, and (in the auth lane) incident subscriber. A known
+// non-OOM exit 137 must not be reclassified by the legacy exit-137 heuristic.
+func (s *IntegrationTestSuite) TestResourceStatsPersistsObservedNonOOMExit137() {
+	alias := fmt.Sprintf("resource-stats-non-oom-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: kill
+    image: alpine:3.23
+    cache: false
+    command: ["sh", "-c", "exit 137"]
+`, alias)
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	completed := s.awaitRun(job.ID, runID, runTimeout)
+	s.Equal("failed", completed.Status)
+
+	var observation resourceRunObservation
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s", job.ID, runID), &observation)
+	s.Require().Len(observation.Tasks, 1)
+	task := observation.Tasks[0]
+	s.Equal("killed", task.Result)
+	s.Require().NotNil(task.ExitCode)
+	s.Equal(137, *task.ExitCode)
+	s.True(task.OOMKnown, "a completed runtime inspect must make false OOM evidence explicit")
+	s.False(task.OOMKilled)
+
+	if s.authAPIKey != "" {
+		s.Require().Eventually(func() bool {
+			var list approvalIncidentList
+			if s.tryGetJSON("/v1/incidents?job_id="+job.ID, &list) != nil {
+				return false
+			}
+			for _, inc := range list.Incidents {
+				if inc.TaskName == "kill" {
+					return inc.Class == "unknown"
+				}
+			}
+			return false
+		}, 15*time.Second, 100*time.Millisecond, "observed non-OOM exit 137 must not open an OOM incident")
 	}
 }
 

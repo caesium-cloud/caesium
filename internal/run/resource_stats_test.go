@@ -37,6 +37,7 @@ func TestResourceOutcomeInstanceIdentityRetryAndClaimFences(t *testing.T) {
 	other := out
 	other.RuntimeID = "second"
 	other.PeakMemoryBytes = new(int64(16))
+	other.OOMKnown = true
 	other.OOMKilled = false
 	other.StatsSource = "sampled"
 	require.NoError(t, store.SetTaskResourceOutcome(run.ID, rows[1].ID, other))
@@ -45,6 +46,7 @@ func TestResourceOutcomeInstanceIdentityRetryAndClaimFences(t *testing.T) {
 	require.NoError(t, db.First(&second, "id = ?", rows[1].ID).Error)
 	require.Equal(t, int64(64), *first.PeakMemoryBytes)
 	require.Equal(t, int64(16), *second.PeakMemoryBytes)
+	require.True(t, second.OOMKnown)
 	require.False(t, second.OOMKilled)
 	labels := []string{jobID.String(), taskID.String(), string(models.AtomEngineDocker)}
 	require.Equal(t, 1.0, metrictestutil.CounterValue(t, metrics.TaskOOMKillsTotal, labels...))
@@ -52,6 +54,7 @@ func TestResourceOutcomeInstanceIdentityRetryAndClaimFences(t *testing.T) {
 	require.Equal(t, 3.0, metrictestutil.CounterValue(t, metrics.TaskCPUSecondsTotal, labels...))
 	view := convertRunTaskModel(&first)
 	require.Equal(t, first.PeakMemoryBytes, view.PeakMemoryBytes)
+	require.True(t, view.OOMKnown)
 	require.True(t, view.OOMKilled)
 
 	// Retry clears old observations; a delayed prior runtime cannot restore them.
@@ -61,6 +64,7 @@ func TestResourceOutcomeInstanceIdentityRetryAndClaimFences(t *testing.T) {
 	require.NoError(t, db.First(&first, "id = ?", rows[0].ID).Error)
 	require.Nil(t, first.PeakMemoryBytes)
 	require.Nil(t, first.CPUSeconds)
+	require.False(t, first.OOMKnown)
 	require.False(t, first.OOMKilled)
 	require.Empty(t, first.StatsSource)
 	require.Nil(t, first.ExitCode)
@@ -180,6 +184,7 @@ func TestResourceOutcomeReclaimClearsEvidenceAndAdmitsReplacement(t *testing.T) 
 				var unchanged models.TaskRun
 				require.NoError(t, db.First(&unchanged, "id = ?", row.ID).Error)
 				require.True(t, unchanged.OOMKilled, "stale owner must not clear a newer owner's evidence")
+				require.True(t, unchanged.OOMKnown, "stale owner must not clear a newer owner's verdict")
 				reset, err := store.ReclaimOwnerExpiredClaims(jr.ID, 3)
 				require.NoError(t, err)
 				require.Len(t, reset, 1)
@@ -194,12 +199,14 @@ func TestResourceOutcomeReclaimClearsEvidenceAndAdmitsReplacement(t *testing.T) 
 			require.Nil(t, reset.PeakMemoryBytes)
 			require.Nil(t, reset.CPUSeconds)
 			require.Empty(t, reset.StatsSource)
+			require.False(t, reset.OOMKnown)
 			require.False(t, reset.OOMKilled)
 			require.Empty(t, reset.AppliedResources)
 			require.Zero(t, reset.EscalationLevel)
 			var preserved models.TaskRun
 			require.NoError(t, db.First(&preserved, "id = ?", completed.ID).Error)
 			require.Equal(t, "succeeded", preserved.Status)
+			require.True(t, preserved.OOMKnown, "a completed sibling's verdict survives reclaim")
 			require.True(t, preserved.OOMKilled, "a completed sibling's observations survive reclaim")
 
 			require.NoError(t, store.ClaimTaskForDispatch(jr.ID, row.ID, "new-worker", 3, time.Minute, true))
@@ -215,6 +222,7 @@ func TestResourceOutcomeReclaimClearsEvidenceAndAdmitsReplacement(t *testing.T) 
 			require.Equal(t, "sampled", reset.StatsSource)
 			require.Equal(t, int64(16), *reset.PeakMemoryBytes)
 			require.Equal(t, 0, *reset.ExitCode)
+			require.False(t, reset.OOMKnown)
 			require.False(t, reset.OOMKilled)
 		})
 	}

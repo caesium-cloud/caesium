@@ -25,10 +25,14 @@ func TestResourceOOMUsesTerminationReasonAndHonorsGate(t *testing.T) {
 		}
 		require.Equal(t, want, a.Result())
 		require.Equal(t, 137, *a.ExitCode())
+		require.True(t, a.ResourceOutcome().OOMKnown)
 		require.Equal(t, int64(64*1024*1024), *a.ResourceOutcome().MemoryLimitBytes)
 	}
 	pod.Status.ContainerStatuses[0].State.Terminated.Reason = "Error"
-	require.Equal(t, atom.Killed, (&Atom{metadata: pod}).Result())
+	nonOOM := &Atom{metadata: pod}
+	require.Equal(t, atom.Killed, nonOOM.Result())
+	require.True(t, nonOOM.ResourceOutcome().OOMKnown)
+	require.False(t, nonOOM.ResourceOutcome().OOMKilled)
 }
 
 func TestResourceStatsKubernetesUnavailableDoesNotFabricateZero(t *testing.T) {

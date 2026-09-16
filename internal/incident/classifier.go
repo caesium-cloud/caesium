@@ -47,7 +47,9 @@ type Signal struct {
 	EventType string
 	// Result is the atom.Result string persisted on TaskRun.Result.
 	Result string
-	// OOMKilled is runtime inspect evidence, not an inference from exit 137.
+	// OOMKnown distinguishes an observed false verdict from unavailable runtime
+	// inspect evidence. OOMKilled is never inferred from exit 137.
+	OOMKnown  bool
 	OOMKilled bool
 	// HasSchemaViolations reports whether the task run recorded schema violations.
 	HasSchemaViolations bool
@@ -139,7 +141,7 @@ func (c *Classifier) WithLogRule(pattern string, class FailureClass) (*Classifie
 //
 //  1. run_timed_out / sla_missed          → sla_risk
 //  2. schema_violation event / violations → schema_violation
-//  3. Runtime OOMKilled evidence          → oom
+//  3. Runtime OOMKilled evidence          → oom; known false suppresses 137 fallback
 //  4. StartupFailure / ResourceFailure    → transient_infra
 //  5. log-tail regex table                → data_unavailable|auth_failure|oom|quota
 //  6. exit-code table                     → (default 137 → oom)
@@ -180,6 +182,9 @@ func (c *Classifier) Classify(sig Signal) FailureClass {
 	// Exit-code table.
 	if sig.ExitCode != nil {
 		if class, ok := c.exitCodeRules[*sig.ExitCode]; ok {
+			if sig.OOMKnown && *sig.ExitCode == 137 && class == ClassOOM {
+				return ClassUnknown
+			}
 			return class
 		}
 	}

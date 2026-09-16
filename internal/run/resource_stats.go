@@ -47,6 +47,9 @@ func (s *Store) SetTaskResourceOutcome(runID, taskRef uuid.UUID, outcome TaskRes
 	if outcome.CPUSeconds != nil && *outcome.CPUSeconds == 0 {
 		outcome.CPUSeconds = nil
 	}
+	if outcome.OOMKilled {
+		outcome.OOMKnown = true
+	}
 	if outcome.StatsSource == "sampled" && outcome.PeakMemoryBytes == nil && outcome.CPUSeconds == nil {
 		if outcome.OOMKilled {
 			outcome.StatsSource = "oom_inferred"
@@ -72,6 +75,7 @@ func (s *Store) SetTaskResourceOutcome(runID, taskRef uuid.UUID, outcome TaskRes
 		"exit_code":         outcome.ExitCode,
 		"cpu_seconds":       outcome.CPUSeconds,
 		"stats_source":      outcome.StatsSource,
+		"oom_known":         outcome.OOMKnown,
 		"oom_killed":        outcome.OOMKilled,
 	})
 	if result.Error != nil || result.RowsAffected == 0 {
@@ -109,6 +113,7 @@ func TaskResourceResetColumns() map[string]any {
 		"peak_memory_bytes": nil,
 		"cpu_seconds":       nil,
 		"stats_source":      "",
+		"oom_known":         false,
 		"oom_killed":        false,
 		"applied_resources": nil,
 		"escalation_level":  0,

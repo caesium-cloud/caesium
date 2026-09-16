@@ -66,6 +66,7 @@ type partitionRow struct {
 	PeakMemoryBytes *int64    `json:"peak_memory_bytes,omitempty"`
 	CPUSeconds      *float64  `json:"cpu_seconds,omitempty"`
 	StatsSource     string    `json:"stats_source,omitempty"`
+	OOMKnown        bool      `json:"oom_known,omitempty"`
 	OOMKilled       bool      `json:"oom_killed,omitempty"`
 	Value           string    `json:"value"`
 	Index           int       `json:"index"`
@@ -345,7 +346,7 @@ func projectPartitionRows(rows []models.TaskRun) []partitionRow {
 			TaskRunID:   r.ID,
 			RuntimeID:   r.RuntimeID, Result: r.Result, ExitCode: r.ExitCode,
 			PeakMemoryBytes: r.PeakMemoryBytes, CPUSeconds: r.CPUSeconds,
-			StatsSource: r.StatsSource, OOMKilled: r.OOMKilled,
+			StatsSource: r.StatsSource, OOMKnown: r.OOMKnown, OOMKilled: r.OOMKilled,
 		}
 		if r.StartedAt != nil {
 			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339)

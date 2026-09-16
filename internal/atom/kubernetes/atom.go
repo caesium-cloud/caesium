@@ -122,7 +122,7 @@ func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
 	if term == nil {
 		return atom.ResourceOutcome{}
 	}
-	out := atom.ResourceOutcome{OOMKilled: term.Reason == "OOMKilled"}
+	out := atom.ResourceOutcome{OOMKnown: true, OOMKilled: term.Reason == "OOMKilled"}
 	// Match the same container whose terminated state supplied the verdict.
 	for _, status := range c.metadata.Status.ContainerStatuses {
 		if status.State.Terminated != term {
