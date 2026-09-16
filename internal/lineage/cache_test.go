@@ -30,7 +30,7 @@ func TestCacheGetSet(t *testing.T) {
 }
 
 func TestCacheExpiry(t *testing.T) {
-	cache := newJobCache(1 * time.Millisecond)
+	cache := newJobCache(200 * time.Millisecond)
 	id := uuid.New()
 
 	cache.Set(id, jobCacheEntry{alias: "my-job"})
@@ -40,7 +40,7 @@ func TestCacheExpiry(t *testing.T) {
 		t.Fatal("expected cache hit immediately after set")
 	}
 
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 
 	_, ok = cache.Get(id)
 	if ok {

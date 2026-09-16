@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -36,14 +37,40 @@ const (
 
 type LeaderCheck func(context.Context) (bool, error)
 
-type RunAdmitter interface {
-	AdmitRun(uuid.UUID, *uuid.UUID, ...runstorage.StartOption) (*runstorage.JobRun, bool, error)
+// RunStarter creates a derived run. It is deliberately the SAME seam every
+// other trigger uses — internal/run.Store.StartWithContext → startRun → admit —
+// so a freshness derivation passes the job's declared concurrency policy, the
+// data circuit breaker's upstream-hold gate and every other admission rule, and
+// so a derived run is created exactly the way a cron, HTTP, event or manual run
+// is.
+//
+// Store.AdmitRun is deliberately NOT used here. Its policy-only mode means "do
+// nothing unless a concurrency policy decides", which exists so internal/job can
+// fall back to reusing an already-running run; for a job with no
+// metadata.concurrency it creates nothing and returns (nil, false, nil), which
+// the evaluator could only record as `skipped_admission: admission declined` —
+// issue #501's first reproduction.
+type RunStarter interface {
+	StartWithContext(context.Context, uuid.UUID, *uuid.UUID, ...runstorage.StartOption) (*runstorage.JobRun, error)
 }
+
+// RunLauncher executes an admitted derived run's DAG: it is handed the run the
+// evaluator just created and must build and dispatch its tasks.
+//
+// It is injected rather than called directly because this package cannot import
+// internal/job: internal/job → internal/jobdef/git → internal/jobdef →
+// internal/freshness is a real import cycle. cmd/start wires the production
+// launcher, the same shape as runqueue.Config.LaunchRun. Without it a derived
+// run would be admitted and then never executed — a `running` row with zero
+// task rows, issue #501's second reproduction — so derive() refuses to create a
+// run at all when no launcher is configured.
+type RunLauncher func(ctx context.Context, run *runstorage.JobRun)
 
 type Config struct {
 	DB                      *gorm.DB
 	Bus                     event.Bus
-	RunStore                RunAdmitter
+	RunStore                RunStarter
+	LaunchRun               RunLauncher
 	Interval                time.Duration
 	MaxDerivationsPerTick   int
 	MaxTriggerDepth         int
@@ -58,7 +85,8 @@ type Evaluator struct {
 	bus                   event.Bus
 	store                 *Store
 	registry              *Registry
-	runStore              RunAdmitter
+	runStore              RunStarter
+	launchRun             RunLauncher
 	interval              time.Duration
 	maxDerivationsPerTick int
 	maxTriggerDepth       int
@@ -109,6 +137,7 @@ func NewEvaluator(cfg Config) *Evaluator {
 		store:                 NewStore(cfg.DB),
 		registry:              NewRegistry(cfg.DB),
 		runStore:              runStore,
+		launchRun:             cfg.LaunchRun,
 		interval:              interval,
 		maxDerivationsPerTick: maxDerivations,
 		maxTriggerDepth:       maxDepth,
@@ -258,7 +287,7 @@ func (e *Evaluator) evaluate(ctx context.Context, targets map[datasetIdentity]st
 }
 
 func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnapshot, targets map[datasetIdentity]struct{}, triggerDepth int) error {
-	budget := e.maxDerivationsPerTick
+	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}}
 	for _, decl := range graph.produced {
 		id := declarationIdentity(decl)
 		if len(targets) > 0 {
@@ -269,14 +298,14 @@ func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnap
 		if strings.TrimSpace(decl.Freshness) == "" {
 			continue
 		}
-		if err := e.evaluateProducedDataset(ctx, graph, decl, triggerDepth, &budget); err != nil {
+		if err := e.evaluateProducedDataset(ctx, graph, decl, triggerDepth, pass); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registrySnapshot, decl models.DatasetDeclaration, triggerDepth int, budget *int) error {
+func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registrySnapshot, decl models.DatasetDeclaration, triggerDepth int, pass *evaluationPass) error {
 	now := e.now().UTC()
 	freshness, err := parsePositiveDuration(decl.Freshness)
 	if err != nil {
@@ -328,9 +357,9 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		if !upstreamReady {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, reason, consumed, nil)
 		}
-		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
 	case models.DatasetStatusStale:
-		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
 	case models.DatasetStatusQuarantined:
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "dataset quarantined", consumed, nil)
 	default:
@@ -489,45 +518,113 @@ func watermarkAdvancedPast(previous, current string) bool {
 	return true
 }
 
-func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
-	triggerID, ok, err := e.freshnessTriggerIDForJob(ctx, decl.JobID)
+func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, state models.DatasetState, reason string, consumed map[string]string, triggerDepth int, pass *evaluationPass) error {
+	trigger, err := e.freshnessTriggerForJob(ctx, decl.JobID)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !trigger.freshnessTriggered {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job trigger is not freshness; waiting for scheduler", consumed, nil)
 	}
-	return e.derive(ctx, decl, triggerID, reason, consumed, triggerDepth, budget)
+	// Pause is a job-level "start nothing new" switch, and derivation is the one
+	// scheduler path that reaches an engine without going through a trigger
+	// object: cron (internal/trigger/cron), http, event and the webhook
+	// controller each check models.Job.Paused before calling job.Run, and the
+	// manual-run controller answers 409. Neither the run store's admission nor
+	// job.Run re-checks it, so a paused freshness job would otherwise execute on
+	// every arrival. The decision stays `skipped_admission` (the closed set the
+	// Console renders); the reason carries the cause.
+	if trigger.paused {
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job is paused", consumed, nil)
+	}
+	return e.derive(ctx, decl, trigger, state, reason, consumed, triggerDepth, pass)
 }
 
-func (e *Evaluator) freshnessTriggerIDForJob(ctx context.Context, jobID uuid.UUID) (*uuid.UUID, bool, error) {
+// freshnessTriggerState is what the evaluator needs to know about a produced
+// dataset's owning job before deriving: whether the job is freshness-triggered
+// at all, its trigger id, whether an operator has paused it, and the
+// trigger-level default params every run of that job is entitled to.
+type freshnessTriggerState struct {
+	id                 *uuid.UUID
+	freshnessTriggered bool
+	paused             bool
+	defaultParams      map[string]string
+}
+
+func (e *Evaluator) freshnessTriggerForJob(ctx context.Context, jobID uuid.UUID) (freshnessTriggerState, error) {
 	var row struct {
-		TriggerID   uuid.UUID
-		TriggerType models.TriggerType
+		TriggerID     uuid.UUID
+		TriggerType   models.TriggerType
+		Paused        bool
+		Configuration string
 	}
 	// Filter GORM soft-deletes on both sides of the raw join: a plain Joins does
 	// not apply the deleted_at scope, so a soft-deleted trigger could otherwise
 	// still match an active job's trigger_id.
 	err := e.db.WithContext(ctx).Table("jobs").
-		Select("jobs.trigger_id AS trigger_id, triggers.type AS trigger_type").
+		Select("jobs.trigger_id AS trigger_id, jobs.paused AS paused, triggers.type AS trigger_type, triggers.configuration AS configuration").
 		Joins("JOIN triggers ON triggers.id = jobs.trigger_id AND triggers.deleted_at IS NULL").
 		Where("jobs.id = ? AND jobs.deleted_at IS NULL", jobID).
 		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, false, nil
+			return freshnessTriggerState{}, nil
 		}
-		return nil, false, err
+		return freshnessTriggerState{}, err
 	}
 	if row.TriggerType != models.TriggerTypeFreshness || row.TriggerID == uuid.Nil {
-		return nil, false, nil
+		return freshnessTriggerState{}, nil
 	}
 	id := row.TriggerID
-	return &id, true, nil
+	return freshnessTriggerState{
+		id:                 &id,
+		freshnessTriggered: true,
+		paused:             row.Paused,
+		defaultParams:      triggerDefaultParams(row.Configuration),
+	}, nil
 }
 
-func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, triggerID *uuid.UUID, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
-	if budget != nil && *budget <= 0 {
+// triggerDefaultParams reads `defaultParams` out of a persisted trigger
+// configuration. A manifest may spell them either as `trigger.defaultParams` or
+// as `trigger.configuration.defaultParams`; the importer folds the former into
+// the latter (internal/jobdef/importer.go), so reading the configuration covers
+// both. The value coercion mirrors internal/trigger/cron's extractDefaultParams
+// - that helper is unexported and lives in a package which imports this one, so
+// it cannot be shared without an import cycle.
+//
+// A malformed block yields no defaults rather than an error: the schema already
+// validates the shape at apply time, and a derivation must not be blocked by a
+// configuration key it does not own.
+func triggerDefaultParams(configuration string) map[string]string {
+	configuration = strings.TrimSpace(configuration)
+	if configuration == "" {
+		return nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(configuration), &cfg); err != nil {
+		return nil
+	}
+	raw, ok := cfg["defaultParams"]
+	if !ok || raw == nil {
+		return nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if str, ok := value.(string); ok {
+			out[key] = str
+			continue
+		}
+		out[key] = fmt.Sprintf("%v", value)
+	}
+	return out
+}
+
+func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, trigger freshnessTriggerState, state models.DatasetState, reason string, consumed map[string]string, triggerDepth int, pass *evaluationPass) error {
+	if pass != nil && pass.budget <= 0 {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness derivation cap reached", consumed, nil)
 	}
 
@@ -539,52 +636,249 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 
 	now := e.now().UTC()
 	consumedJSON := canonicalConsumedJSON(consumed)
-	params := map[string]string{
-		freshnessTriggerDepthParam:       strconv.Itoa(nextDepth),
-		freshnessLogicalDateParam:        now.Format(time.RFC3339),
-		freshnessDerivedFromDatasetParam: datasetParamName(decl.Namespace, decl.Name),
-		freshnessConsumedWatermarksParam: string(consumedJSON),
-	}
+	// The job's trigger-level defaultParams go in FIRST, so a derived run is
+	// entitled to them exactly like a cron tick (internal/trigger/cron's
+	// scheduledRunParams) or an HTTP fire (internal/trigger/http's config
+	// merge). Without them a freshness job that declares defaults fails
+	// ${CAESIUM_PARAM_X} interpolation and the whole run fails closed. The
+	// evaluator-owned keys are layered ON TOP, so a default can never shadow the
+	// derivation identity the dedupe and the audit trail depend on.
+	//
+	// This happens before admission on purpose: the merged set is what lands on
+	// the job_runs row (and on run_queue, for a `queue` concurrency policy), so
+	// a run promoted out of the queue later keeps them too.
+	params := make(map[string]string, len(trigger.defaultParams)+4)
+	maps.Copy(params, trigger.defaultParams)
+	params[freshnessTriggerDepthParam] = strconv.Itoa(nextDepth)
+	params[freshnessLogicalDateParam] = now.Format(time.RFC3339)
+	params[freshnessDerivedFromDatasetParam] = datasetParamName(decl.Namespace, decl.Name)
+	params[freshnessConsumedWatermarksParam] = string(consumedJSON)
 
-	active, err := e.hasActiveOrQueuedRun(ctx, decl.JobID, params)
+	outputFreshAt, _ := FreshAt(state)
+	covering, err := e.coveringRun(ctx, decl.JobID, params, outputFreshAt, pass)
 	if err != nil {
 		return err
 	}
-	if active {
-		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, nil)
+	if covering != nil {
+		// Linked to the covering run when there is one, so "why didn't this
+		// dataset derive" answers itself: because that run is already
+		// refreshing it.
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, covering.reason, consumed, covering.id)
 	}
 
-	runRecord, handled, err := e.runStore.AdmitRun(decl.JobID, triggerID, runstorage.WithStartParams(params))
+	if e.launchRun == nil {
+		// Creating the run here would admit it and then strand it: nothing else
+		// in the system builds a DAG for a freshness-derived run. Refuse loudly
+		// instead of leaving a `running` row with zero tasks.
+		log.Error("freshness evaluator has no run launcher configured; refusing to derive a run that cannot execute",
+			"job_id", decl.JobID, "dataset", datasetParamName(decl.Namespace, decl.Name))
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness run launcher not configured", consumed, nil)
+	}
+
+	// ErrRunHeldUpstream wraps ErrRunSkipped, so the data circuit breaker's
+	// refusal is recorded as an admission skip rather than aborting the tick.
+	runRecord, err := e.runStore.StartWithContext(ctx, decl.JobID, trigger.id, runstorage.WithStartParams(params))
 	if err != nil {
 		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
-		return err
+		// A start can fail AFTER it has committed the run: Store.startRun
+		// publishes run_started and takes the run lease before it reads the
+		// record back, and the tick context may itself be what failed (server
+		// shutdown). Dropping the error here would leave a live `running` row
+		// with no tasks and no engine — the strand this whole path exists to
+		// prevent.
+		//
+		// Recover ONLY the run this attempt committed, by the exact id the store
+		// reports. Searching for "a matching running run" would be unsafe across
+		// a leader change: a run the new leader created and is already executing
+		// matches the same (dataset, consumed-watermark) identity, and adopting
+		// it would execute it a second time on this node. The lookup runs on a
+		// context that cannot be the reason it fails too.
+		committedID, ok := runstorage.CommittedRunID(err)
+		if !ok {
+			return err
+		}
+		recoverCtx := context.WithoutCancel(ctx)
+		adopted := e.recoverCommittedRun(recoverCtx, committedID, decl.JobID, params)
+		if adopted == nil {
+			return err
+		}
+		log.Warn("freshness: run start reported an error after committing the run; driving the committed run",
+			"job_id", decl.JobID, "run_id", adopted.ID,
+			"dataset", datasetParamName(decl.Namespace, decl.Name), "error", err)
+		ctx, runRecord = recoverCtx, adopted
 	}
-	if !handled || runRecord == nil {
+	if runRecord == nil {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "admission declined", consumed, nil)
 	}
 
-	if budget != nil {
-		*budget--
+	if pass != nil {
+		pass.budget--
+		pass.launched[derivationKey{jobID: decl.JobID, consumed: params[freshnessConsumedWatermarksParam]}] = runRecord.ID
 	}
 	metrics.TriggerChainDepth.Observe(float64(nextDepth))
-	return e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
+	// Record the audit row before dispatching so the derivation names the run
+	// before the run can complete and advance the dataset. The run is launched
+	// either way: a failed audit write must not strand an admitted run.
+	derivationErr := e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
+	e.launchRun(ctx, runRecord)
+	return derivationErr
 }
 
-func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, params map[string]string) (bool, error) {
+// committedRunReadBackoffs bounds the retry of the post-failure read-back of a
+// committed run. Responsibility for that run does not end with one failed
+// SELECT: if it is neither launched nor finalized, hasActiveOrQueuedRun
+// suppresses every later derivation for the same watermarks and a maxRuns
+// policy holds its slot forever, with no task rows for a worker to recover.
+var committedRunReadBackoffs = []time.Duration{
+	50 * time.Millisecond,
+	250 * time.Millisecond,
+	time.Second,
+}
+
+// recoverCommittedRun resolves the run a failed start committed, retrying the
+// read on a bounded schedule.
+//
+// It returns nil only when the row was READ and needs no driving — missing,
+// terminal, or another job's. When the row can never be read it returns a
+// minimal record built from the identity the store reported, so the run still
+// reaches the launcher: the launcher loads the job, fences on the run's status
+// and, when neither can be resolved, finalizes the run conditionally. Either
+// way the run ends up executed or terminal, never stranded.
+func (e *Evaluator) recoverCommittedRun(ctx context.Context, runID, jobID uuid.UUID, params map[string]string) *runstorage.JobRun {
+	var lastErr error
+retry:
+	for attempt := 0; attempt <= len(committedRunReadBackoffs); attempt++ {
+		adopted, err := e.runByID(ctx, runID, jobID)
+		if err == nil {
+			return adopted
+		}
+		lastErr = err
+		if attempt == len(committedRunReadBackoffs) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break retry
+		case <-time.After(committedRunReadBackoffs[attempt]):
+		}
+	}
+	log.Error("freshness: a committed run could not be read back; handing its identity to the launcher so it is executed or finalized",
+		"job_id", jobID, "run_id", runID, "error", lastErr)
+	return &runstorage.JobRun{
+		ID:     runID,
+		JobID:  jobID,
+		Status: runstorage.StatusRunning,
+		Params: params,
+	}
+}
+
+// runByID loads the exact run a failed start committed. It is addressed by id
+// — never matched by shape — so this evaluator can only ever adopt the run its
+// own admission attempt created, not one another node is already executing.
+//
+// It returns nil when the row is missing, belongs to a different job, or is no
+// longer `running`: a run that reached a terminal status needs neither
+// launching nor rescuing.
+func (e *Evaluator) runByID(ctx context.Context, runID, jobID uuid.UUID) (*runstorage.JobRun, error) {
+	var row models.JobRun
+	if err := e.db.WithContext(ctx).Take(&row, "id = ?", runID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if row.JobID != jobID || row.Status != string(runstorage.StatusRunning) {
+		return nil, nil
+	}
+	return &runstorage.JobRun{
+		ID:         row.ID,
+		JobID:      row.JobID,
+		Status:     runstorage.Status(row.Status),
+		Priority:   row.Priority,
+		Params:     decodeParamsJSON(row.Params),
+		Quarantine: row.Quarantine,
+		StartedAt:  row.StartedAt,
+		CreatedAt:  row.CreatedAt,
+		UpdatedAt:  row.UpdatedAt,
+	}, nil
+}
+
+// pendingCaptureWindow bounds how long a SUCCEEDED run is still treated as
+// covering an output whose watermark it has not advanced yet.
+//
+// The Capturer advances a produced dataset from a run_completed subscriber, so
+// there is a real gap between the run row reaching `succeeded` and the dataset
+// looking fresh. Without this the gap reopens the duplicate: the run is no
+// longer `running`, the output still looks stale, and a second full DAG starts —
+// even under maxRuns, because the first run released its slot. The window is
+// short so that a genuinely later arrival (or a capture that never lands,
+// because the non-blocking bus dropped the event) still derives.
+const pendingCaptureWindow = 30 * time.Second
+
+// derivationKey identifies executable work: a job plus the exact consumed-input
+// view a derivation evaluated against. It is deliberately NOT keyed on the
+// produced dataset — one run refreshes every output its DAG produces.
+type derivationKey struct {
+	jobID    uuid.UUID
+	consumed string
+}
+
+// evaluationPass is the per-tick state shared by every produced dataset in one
+// evaluateWithSnapshot pass: the derivation budget, and a memo of the runs this
+// pass already launched.
+//
+// The memo is what makes coalescing immune to timing. The store-backed checks
+// read the run's CURRENT status, and a run launched for the first output can
+// reach a terminal status before the pass reaches the second; the memo remembers
+// that this pass already scheduled that work, whatever the row says by then.
+type evaluationPass struct {
+	budget   int
+	launched map[derivationKey]uuid.UUID
+}
+
+func (p *evaluationPass) launchedRun(key derivationKey) (uuid.UUID, bool) {
+	if p == nil || p.launched == nil {
+		return uuid.Nil, false
+	}
+	id, ok := p.launched[key]
+	return id, ok
+}
+
+// coveringRun reports the run that already covers this derivation, or nil when
+// none does. Three layers, cheapest and most certain first:
+//
+//  1. a run THIS pass launched for the same (job, consumed watermarks);
+//  2. a running or queued run carrying the same consumed-watermark view;
+//  3. a recently succeeded run with that view whose completion is newer than the
+//     dataset's own watermark — its capture is still in flight.
+type coveringRun struct {
+	id     *uuid.UUID
+	reason string
+}
+
+func (e *Evaluator) coveringRun(ctx context.Context, jobID uuid.UUID, params map[string]string, outputFreshAt time.Time, pass *evaluationPass) (*coveringRun, error) {
+	consumed := params[freshnessConsumedWatermarksParam]
+	key := derivationKey{jobID: jobID, consumed: consumed}
+	if id, ok := pass.launchedRun(key); ok {
+		return &coveringRun{id: &id, reason: "producer run derived for another output in this evaluation already covers the consumed watermarks"}, nil
+	}
+
 	var running []struct {
+		ID     uuid.UUID
 		Params datatypes.JSON
 	}
 	if err := e.db.WithContext(ctx).Table("job_runs").
-		Select("params").
+		Select("id", "params").
 		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(runstorage.StatusRunning)).
 		Find(&running).Error; err != nil {
-		return false, err
+		return nil, err
 	}
-	for _, row := range running {
-		if sameDerivationParams(decodeParamsJSON(row.Params), params) {
-			return true, nil
+	for i := range running {
+		if sameConsumedWatermarks(decodeParamsJSON(running[i].Params), params) {
+			id := running[i].ID
+			return &coveringRun{id: &id, reason: "producer already has an active or queued run for the consumed watermarks"}, nil
 		}
 	}
 
@@ -595,19 +889,48 @@ func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, p
 		Select("params").
 		Where("job_id = ?", jobID).
 		Find(&queued).Error; err != nil {
-		return false, err
+		return nil, err
 	}
 	for _, row := range queued {
-		if sameDerivationParams(decodeParamsJSON(row.Params), params) {
-			return true, nil
+		if sameConsumedWatermarks(decodeParamsJSON(row.Params), params) {
+			return &coveringRun{reason: "producer already has an active or queued run for the consumed watermarks"}, nil
 		}
 	}
-	return false, nil
+
+	var captured []struct {
+		ID          uuid.UUID
+		Params      datatypes.JSON
+		CompletedAt *time.Time
+	}
+	if err := e.db.WithContext(ctx).Table("job_runs").
+		Select("id", "params", "completed_at").
+		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE AND completed_at IS NOT NULL AND completed_at >= ?",
+			jobID, string(runstorage.StatusSucceeded), e.now().UTC().Add(-pendingCaptureWindow)).
+		Find(&captured).Error; err != nil {
+		return nil, err
+	}
+	for i := range captured {
+		if !sameConsumedWatermarks(decodeParamsJSON(captured[i].Params), params) {
+			continue
+		}
+		// Only while the capture can still be outstanding: once the dataset has
+		// advanced to at least this run's completion, the run has had its say.
+		if captured[i].CompletedAt == nil || !captured[i].CompletedAt.After(outputFreshAt) {
+			continue
+		}
+		id := captured[i].ID
+		return &coveringRun{id: &id, reason: "producer run for the consumed watermarks just succeeded; its watermark capture is pending"}, nil
+	}
+	return nil, nil
 }
 
-func sameDerivationParams(a, b map[string]string) bool {
-	return a[freshnessDerivedFromDatasetParam] == b[freshnessDerivedFromDatasetParam] &&
-		a[freshnessConsumedWatermarksParam] == b[freshnessConsumedWatermarksParam]
+// sameConsumedWatermarks compares the input view two derivations evaluated
+// against. Both sides carry the canonical JSON the evaluator stamped, so this is
+// a string comparison; a run with no snapshot at all (a manual or cron run of
+// the same job) has an empty value and therefore never coalesces a derivation.
+func sameConsumedWatermarks(a, b map[string]string) bool {
+	consumed := b[freshnessConsumedWatermarksParam]
+	return consumed != "" && a[freshnessConsumedWatermarksParam] == consumed
 }
 
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
