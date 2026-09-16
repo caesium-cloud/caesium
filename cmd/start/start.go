@@ -72,6 +72,42 @@ func dqliteDispatchPeerResolver() dispatch.PeerLister {
 	})
 }
 
+// freshnessRunLauncher executes a freshness-derived run's DAG.
+//
+// The evaluator admits the run through the shared run store (the same
+// startRun → admit seam cron, HTTP, event and manual runs use) but cannot
+// execute it itself: internal/job depends on internal/freshness, so the
+// executor is injected here. This mirrors the run-queue dequeuer's launch path
+// and the manual-run controller: register nothing extra, hand the run id to
+// internal/job through the run context, and let job.Run build and dispatch the
+// DAG (it registers the run-cancel entry itself).
+func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
+	return func(ctx context.Context, r *run.JobRun) {
+		if r == nil {
+			return
+		}
+		j, err := jsvc.Service(ctx).Get(r.JobID)
+		if err != nil {
+			log.Error("freshness: derived run could not load its job",
+				"job_id", r.JobID, "run_id", r.ID, "error", err)
+			return
+		}
+		// Detached from the evaluator's tick context on purpose: the run
+		// outlives the evaluation that derived it.
+		runCtx := run.WithContext(context.WithoutCancel(ctx), r.ID)
+		go func() {
+			if err := job.New(
+				j,
+				job.WithRunStoreFactory(func() *run.Store { return store }),
+				job.WithParams(r.Params),
+			).Run(runCtx); err != nil {
+				log.Error("freshness: derived job run failure",
+					"job_id", r.JobID, "run_id", r.ID, "error", err)
+			}
+		}()
+	}
+}
+
 const (
 	usage   = "start"
 	short   = "Start a caesium scheduling instance"
@@ -234,6 +270,7 @@ func start(cmd *cobra.Command, args []string) error {
 			DB:                    conn,
 			Bus:                   bus,
 			RunStore:              runStore,
+			LaunchRun:             freshnessRunLauncher(runStore),
 			Interval:              vars.FreshnessEvalInterval,
 			MaxDerivationsPerTick: vars.FreshnessMaxDerivationsPerTick,
 			MaxTriggerDepth:       vars.MaxTriggerDepth,

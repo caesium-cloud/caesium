@@ -17,22 +17,25 @@ import (
 	"gorm.io/gorm"
 )
 
-type fakeRunAdmitter struct {
-	t       *testing.T
-	db      *gorm.DB
-	handled bool
-	err     error
-	calls   int
-	runIDs  []uuid.UUID
+type fakeRunStarter struct {
+	t  *testing.T
+	db *gorm.DB
+	// decline makes StartWithContext return (nil, nil) — the defensive
+	// "the store created nothing and said nothing" branch.
+	decline  bool
+	err      error
+	calls    int
+	runIDs   []uuid.UUID
+	launched []uuid.UUID
 }
 
-func (f *fakeRunAdmitter) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, bool, error) {
+func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
 	f.calls++
 	if f.err != nil {
-		return nil, true, f.err
+		return nil, f.err
 	}
-	if !f.handled {
-		return nil, false, nil
+	if f.decline {
+		return nil, nil
 	}
 
 	var startOpts runstorage.StartOptions
@@ -60,10 +63,21 @@ func (f *fakeRunAdmitter) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts .
 		row.TriggerID = *triggerID
 	}
 	if err := f.db.Create(&row).Error; err != nil {
-		f.t.Fatalf("create admitted run: %v", err)
+		f.t.Fatalf("create started run: %v", err)
 	}
 	f.runIDs = append(f.runIDs, runID)
-	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, true, nil
+	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, nil
+}
+
+// launch stands in for the production RunLauncher (cmd/start's job.Run
+// dispatch). Recording the run ids it receives is how these tests prove a
+// derived run is actually handed to an executor rather than left admitted and
+// stranded (issue #501).
+func (f *fakeRunStarter) launch(_ context.Context, r *runstorage.JobRun) {
+	if r == nil {
+		f.t.Fatalf("run launcher received a nil run")
+	}
+	f.launched = append(f.launched, r.ID)
 }
 
 func TestEvaluatorLeaderGateSkipsNonLeader(t *testing.T) {
@@ -74,10 +88,11 @@ func TestEvaluatorLeaderGateSkipsNonLeader(t *testing.T) {
 		produceDecl(jobID, "out", "1h", ""),
 	)
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		LeaderCheck: func(context.Context) (bool, error) {
 			return false, nil
@@ -88,8 +103,8 @@ func TestEvaluatorLeaderGateSkipsNonLeader(t *testing.T) {
 	if err := eval.EvaluateOnce(ctx); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	if admitter.calls != 0 {
-		t.Fatalf("non-leader admitted %d runs, want 0", admitter.calls)
+	if starter.calls != 0 {
+		t.Fatalf("non-leader started %d runs, want 0", starter.calls)
 	}
 	var derivations int64
 	if err := db.Model(&models.DatasetDerivation{}).Count(&derivations).Error; err != nil {
@@ -129,7 +144,9 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 			consumedAtRun: map[string]string{"raw": "10"},
 			inputs:        map[string]string{"raw": "11"},
 			wantStatus:    models.DatasetStatusStale,
-			wantDecision:  models.DatasetDecisionSkippedAdmission,
+			// A stale, upstream-ready output whose job is freshness-triggered
+			// derives a run — with or without a concurrency policy (issue #501).
+			wantDecision: models.DatasetDecisionDerived,
 		},
 		{
 			name:          "stale-upstream",
@@ -146,7 +163,7 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 			maxStaleness: "2h",
 			outputAt:     now.Add(-3 * time.Hour),
 			wantStatus:   models.DatasetStatusViolated,
-			wantDecision: models.DatasetDecisionSkippedAdmission,
+			wantDecision: models.DatasetDecisionDerived,
 		},
 	}
 
@@ -171,13 +188,14 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 				t.Fatalf("subscribe: %v", err)
 			}
 
-			admitter := &fakeRunAdmitter{t: t, db: db, handled: false}
+			starter := &fakeRunStarter{t: t, db: db}
 			beforeDecision := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, "out", tc.wantDecision)
 			beforeViolation := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, "out", models.DatasetStatusViolated)
 			eval := NewEvaluator(Config{
 				DB:                    db,
 				Bus:                   bus,
-				RunStore:              admitter,
+				RunStore:              starter,
+				LaunchRun:             starter.launch,
 				MaxDerivationsPerTick: 50,
 				Now:                   func() time.Time { return now },
 			})
@@ -214,6 +232,106 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 	}
 }
 
+// TestEvaluatorDispatchesDerivedRun is issue #501's unit-level guard: a
+// derivation must hand the run it created to an executor. Recording only a
+// `derived` row (or admitting a run nothing dispatches) is what left a job with
+// `metadata.concurrency` sitting at `running` with zero task rows.
+func TestEvaluatorDispatchesDerivedRun(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "dispatch")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want exactly 1", starter.runIDs)
+	}
+	if len(starter.launched) != 1 || starter.launched[0] != starter.runIDs[0] {
+		t.Fatalf("launched runs = %v, want the derived run %v", starter.launched, starter.runIDs)
+	}
+
+	var derivation models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionDerived).Take(&derivation).Error; err != nil {
+		t.Fatalf("load derivation: %v", err)
+	}
+	if derivation.RunID == nil || *derivation.RunID != starter.runIDs[0] {
+		t.Fatalf("derivation run id = %v, want %v", derivation.RunID, starter.runIDs[0])
+	}
+}
+
+// TestEvaluatorRefusesToDeriveWithoutLauncher proves the evaluator fails closed:
+// with no executor wired it must not create a run it cannot dispatch, because a
+// stranded `running` row with no tasks is worse than an explicit skip.
+func TestEvaluatorRefusesToDeriveWithoutLauncher(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "no-launcher")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("started %d runs without a launcher, want 0", starter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+}
+
+// TestEvaluatorRecordsDeclinedAdmission covers the defensive branch: a run store
+// that creates nothing and reports no error must be recorded as an admission
+// skip, never launched.
+func TestEvaluatorRecordsDeclinedAdmission(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "declined")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db, decline: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("start calls = %d, want 1", starter.calls)
+	}
+	if len(starter.launched) != 0 {
+		t.Fatalf("launched %v runs on a declined admission, want none", starter.launched)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+}
+
 func TestEvaluatorFanInDerivesOneRunAndDedupesActiveWatermarks(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
@@ -234,26 +352,27 @@ func TestEvaluatorFanInDerivesOneRunAndDedupesActiveWatermarks(t *testing.T) {
 	seedState(t, db, "raw.b", "2", now.Add(-time.Minute), nil)
 	seedState(t, db, "raw.c", "2", now.Add(-time.Minute), nil)
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
 	if err := eval.EvaluateOnce(ctx); err != nil {
 		t.Fatalf("evaluate 1: %v", err)
 	}
-	if admitter.calls != 1 {
-		t.Fatalf("admit calls after first eval = %d, want 1", admitter.calls)
+	if starter.calls != 1 {
+		t.Fatalf("start calls after first eval = %d, want 1", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
 
 	if err := eval.EvaluateOnce(ctx); err != nil {
 		t.Fatalf("evaluate 2: %v", err)
 	}
-	if admitter.calls != 1 {
-		t.Fatalf("admit calls after dedupe eval = %d, want 1", admitter.calls)
+	if starter.calls != 1 {
+		t.Fatalf("start calls after dedupe eval = %d, want 1", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
 }
@@ -266,18 +385,19 @@ func TestEvaluatorDoesNotDeriveCronTriggeredJob(t *testing.T) {
 	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
 	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
 	if err := eval.EvaluateOnce(ctx); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	if admitter.calls != 0 {
-		t.Fatalf("cron-triggered job admitted %d runs, want 0", admitter.calls)
+	if starter.calls != 0 {
+		t.Fatalf("cron-triggered job started %d runs, want 0", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
@@ -302,18 +422,19 @@ func TestEvaluatorSkipsJobWithSoftDeletedFreshnessTrigger(t *testing.T) {
 		t.Fatalf("soft-delete trigger: %v", err)
 	}
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
 	if err := eval.EvaluateOnce(ctx); err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	if admitter.calls != 0 {
-		t.Fatalf("soft-deleted-trigger job admitted %d runs, want 0", admitter.calls)
+	if starter.calls != 0 {
+		t.Fatalf("soft-deleted-trigger job started %d runs, want 0", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
@@ -327,10 +448,11 @@ func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
 	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
 	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true, err: runstorage.ErrRunQueued}
+	starter := &fakeRunStarter{t: t, db: db, err: runstorage.ErrRunQueued}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
@@ -339,7 +461,7 @@ func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
 
-	admitter.err = errors.New("boom")
+	starter.err = errors.New("boom")
 	if err := eval.EvaluateOnce(ctx); err == nil {
 		t.Fatalf("expected non-admission error to propagate")
 	}
@@ -367,10 +489,11 @@ func TestEvaluatorReactsToDatasetAdvancedPostState(t *testing.T) {
 	seedState(t, db, "mart", "500", now.Add(-2*time.Hour), map[string]string{"staging": "1"})
 	seedState(t, db, "staging", "1", now.Add(-30*time.Minute), nil)
 
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
@@ -382,8 +505,8 @@ func TestEvaluatorReactsToDatasetAdvancedPostState(t *testing.T) {
 	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
 		t.Fatalf("evaluate pre-advance: %v", err)
 	}
-	if admitter.calls != 0 {
-		t.Fatalf("pre-advance derived %d runs, want 0", admitter.calls)
+	if starter.calls != 0 {
+		t.Fatalf("pre-advance derived %d runs, want 0", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedUpstream, 1)
 
@@ -400,8 +523,8 @@ func TestEvaluatorReactsToDatasetAdvancedPostState(t *testing.T) {
 	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
 		t.Fatalf("evaluate post-advance: %v", err)
 	}
-	if admitter.calls != 1 {
-		t.Fatalf("post-advance derived %d runs, want 1", admitter.calls)
+	if starter.calls != 1 {
+		t.Fatalf("post-advance derived %d runs, want 1", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
 }
@@ -463,18 +586,19 @@ func TestArrivalAdvanceTriggersReactiveEvaluation(t *testing.T) {
 	}
 
 	// Feeding the reactive event to the evaluator derives the downstream mart.
-	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	starter := &fakeRunStarter{t: t, db: db}
 	eval := NewEvaluator(Config{
 		DB:                    db,
-		RunStore:              admitter,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
 		MaxDerivationsPerTick: 50,
 		Now:                   func() time.Time { return now },
 	})
 	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
 		t.Fatalf("evaluate reactive: %v", err)
 	}
-	if admitter.calls != 1 {
-		t.Fatalf("reactive derived %d runs, want 1", admitter.calls)
+	if starter.calls != 1 {
+		t.Fatalf("reactive derived %d runs, want 1", starter.calls)
 	}
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
 }

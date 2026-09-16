@@ -36,14 +36,40 @@ const (
 
 type LeaderCheck func(context.Context) (bool, error)
 
-type RunAdmitter interface {
-	AdmitRun(uuid.UUID, *uuid.UUID, ...runstorage.StartOption) (*runstorage.JobRun, bool, error)
+// RunStarter creates a derived run. It is deliberately the SAME seam every
+// other trigger uses — internal/run.Store.StartWithContext → startRun → admit —
+// so a freshness derivation passes the job's declared concurrency policy, the
+// data circuit breaker's upstream-hold gate and every other admission rule, and
+// so a derived run is created exactly the way a cron, HTTP, event or manual run
+// is.
+//
+// Store.AdmitRun is deliberately NOT used here. Its policy-only mode means "do
+// nothing unless a concurrency policy decides", which exists so internal/job can
+// fall back to reusing an already-running run; for a job with no
+// metadata.concurrency it creates nothing and returns (nil, false, nil), which
+// the evaluator could only record as `skipped_admission: admission declined` —
+// issue #501's first reproduction.
+type RunStarter interface {
+	StartWithContext(context.Context, uuid.UUID, *uuid.UUID, ...runstorage.StartOption) (*runstorage.JobRun, error)
 }
+
+// RunLauncher executes an admitted derived run's DAG: it is handed the run the
+// evaluator just created and must build and dispatch its tasks.
+//
+// It is injected rather than called directly because this package cannot import
+// internal/job: internal/job → internal/jobdef/git → internal/jobdef →
+// internal/freshness is a real import cycle. cmd/start wires the production
+// launcher, the same shape as runqueue.Config.LaunchRun. Without it a derived
+// run would be admitted and then never executed — a `running` row with zero
+// task rows, issue #501's second reproduction — so derive() refuses to create a
+// run at all when no launcher is configured.
+type RunLauncher func(ctx context.Context, run *runstorage.JobRun)
 
 type Config struct {
 	DB                      *gorm.DB
 	Bus                     event.Bus
-	RunStore                RunAdmitter
+	RunStore                RunStarter
+	LaunchRun               RunLauncher
 	Interval                time.Duration
 	MaxDerivationsPerTick   int
 	MaxTriggerDepth         int
@@ -58,7 +84,8 @@ type Evaluator struct {
 	bus                   event.Bus
 	store                 *Store
 	registry              *Registry
-	runStore              RunAdmitter
+	runStore              RunStarter
+	launchRun             RunLauncher
 	interval              time.Duration
 	maxDerivationsPerTick int
 	maxTriggerDepth       int
@@ -109,6 +136,7 @@ func NewEvaluator(cfg Config) *Evaluator {
 		store:                 NewStore(cfg.DB),
 		registry:              NewRegistry(cfg.DB),
 		runStore:              runStore,
+		launchRun:             cfg.LaunchRun,
 		interval:              interval,
 		maxDerivationsPerTick: maxDerivations,
 		maxTriggerDepth:       maxDepth,
@@ -554,14 +582,25 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, nil)
 	}
 
-	runRecord, handled, err := e.runStore.AdmitRun(decl.JobID, triggerID, runstorage.WithStartParams(params))
+	if e.launchRun == nil {
+		// Creating the run here would admit it and then strand it: nothing else
+		// in the system builds a DAG for a freshness-derived run. Refuse loudly
+		// instead of leaving a `running` row with zero tasks.
+		log.Error("freshness evaluator has no run launcher configured; refusing to derive a run that cannot execute",
+			"job_id", decl.JobID, "dataset", datasetParamName(decl.Namespace, decl.Name))
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness run launcher not configured", consumed, nil)
+	}
+
+	// ErrRunHeldUpstream wraps ErrRunSkipped, so the data circuit breaker's
+	// refusal is recorded as an admission skip rather than aborting the tick.
+	runRecord, err := e.runStore.StartWithContext(ctx, decl.JobID, triggerID, runstorage.WithStartParams(params))
 	if err != nil {
 		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
 		return err
 	}
-	if !handled || runRecord == nil {
+	if runRecord == nil {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "admission declined", consumed, nil)
 	}
 
@@ -569,7 +608,12 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		*budget--
 	}
 	metrics.TriggerChainDepth.Observe(float64(nextDepth))
-	return e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
+	// Record the audit row before dispatching so the derivation names the run
+	// before the run can complete and advance the dataset. The run is launched
+	// either way: a failed audit write must not strand an admitted run.
+	derivationErr := e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
+	e.launchRun(ctx, runRecord)
+	return derivationErr
 }
 
 func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, params map[string]string) (bool, error) {

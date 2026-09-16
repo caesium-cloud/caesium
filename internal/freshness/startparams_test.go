@@ -224,7 +224,7 @@ func TestQueuePromotionKeepsTheDerivationDedupe(t *testing.T) {
 	// only the running job_runs row remains for the dedupe to see.
 	seedRunningRun(t, db, jobID, promoted)
 
-	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunAdmitter{t: t, db: db}})
+	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunStarter{t: t, db: db}})
 	active, err := eval.hasActiveOrQueuedRun(ctx, jobID, derivation)
 	if err != nil {
 		t.Fatalf("hasActiveOrQueuedRun: %v", err)
