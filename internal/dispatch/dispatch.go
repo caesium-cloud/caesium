@@ -964,7 +964,7 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 		return &result, nil
 	}
 	// Recovery is distinct from short write contention so the worker can retain
-	// the result for the lifetime of its claim instead of exhausting that budget.
+	// the result within its claim-aware reporting window instead of exhausting that budget.
 	// Unknown 503 bodies retain the existing contention classification.
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		var failure ErrorResponse

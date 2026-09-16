@@ -120,12 +120,13 @@ type completePoster func(ctx context.Context, ownerURL, token string, req dispat
 // worker_node identity it arrived with; those are threaded onto the sink so the
 // CompleteRequest envelope matches what the owner expects to fence against.
 type ownerSink struct {
-	ownerBaseURL string
-	token        string
-	workerNode   string
-	generation   int64
-	attempt      int
-	post         completePoster
+	ownerBaseURL    string
+	token           string
+	workerNode      string
+	generation      int64
+	attempt         int
+	post            completePoster
+	recoveryTimeout time.Duration
 }
 
 // newOwnerSink builds an owner-routed completion sink from a dispatch envelope's
@@ -135,13 +136,18 @@ func newOwnerSink(meta dispatchMeta, post completePoster) *ownerSink {
 	if post == nil {
 		post = dispatch.PostComplete
 	}
+	recoveryTimeout := meta.CompletionTimeout
+	if recoveryTimeout <= 0 {
+		recoveryTimeout = defaultLeaseTTL
+	}
 	return &ownerSink{
-		ownerBaseURL: meta.OwnerBaseURL,
-		token:        meta.Token,
-		workerNode:   meta.WorkerNode,
-		generation:   meta.OwnerGeneration,
-		attempt:      meta.Attempt,
-		post:         post,
+		ownerBaseURL:    meta.OwnerBaseURL,
+		token:           meta.Token,
+		workerNode:      meta.WorkerNode,
+		generation:      meta.OwnerGeneration,
+		attempt:         meta.Attempt,
+		post:            post,
+		recoveryTimeout: recoveryTimeout,
 	}
 }
 
@@ -194,12 +200,32 @@ func (s *ownerSink) CachedWithPartitions(ctx context.Context, taskRun *models.Ta
 
 // send fills the fencing fields common to every completion and POSTs the
 // envelope to the owner. Recovery waits retain the result until acceptance or
-// context/claim cancellation. Transient contention uses a short bounded retry
+// context/claim cancellation or one worker lease TTL. Transient contention uses a short bounded retry
 // schedule; a true fence rejection (409) or a network failure
 // is terminal.  A failure to report is logged and surfaced as a dispatch-side
 // metric (the task's claim lease eventually expires and recovery re-dispatches)
 // — the error is never swallowed silently.
-func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispatch.CompleteRequest) error {
+func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispatch.CompleteRequest) (reportErr error) {
+	// A completed atom must not hold a worker slot forever when a live owner
+	// remains in recovery. The worker keeps renewing/checking its claim while
+	// this bounded delivery is in flight; expiration yields to owner recovery.
+	recoveryTimeout := s.recoveryTimeout
+	if recoveryTimeout <= 0 {
+		recoveryTimeout = defaultLeaseTTL
+	}
+	ctx, cancel := context.WithTimeoutCause(ctx, recoveryTimeout, errOwnerCompletionRetentionExpired)
+	defer cancel()
+	defer func() {
+		if reportErr != nil && !errors.Is(reportErr, run.ErrTaskClaimMismatch) && errors.Is(context.Cause(ctx), errOwnerCompletionRetentionExpired) {
+			if !taskRun.Quarantine {
+				metrics.CompleteReportFailedTotal.WithLabelValues("retention_timeout").Inc()
+			}
+			log.Warn("dispatched task: completion retention expired; awaiting owner recovery",
+				"run_id", taskRun.JobRunID, "task_run_id", taskRun.ID, "timeout", recoveryTimeout)
+			reportErr = fmt.Errorf("owner sink: %w", errOwnerCompletionRetentionExpired)
+		}
+	}()
+
 	req.RunID = taskRun.JobRunID
 	req.TaskID = taskRun.TaskID
 	// Instance identity is set here, once, for every route. A fanned sibling
@@ -242,10 +268,9 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 			return fmt.Errorf("owner sink: completion fenced: %w", run.ErrTaskClaimMismatch)
 		}
 
-		// Recovery duration scales with the run. Keep this already-finished
-		// result until recovery accepts it or the worker loses its context/claim.
+		// Keep the identical result while recovery is pending. Do not reset
+		// contentionAttempts: alternating response types cannot replenish it.
 		if errors.Is(err, dispatch.ErrOwnerNotReady) {
-			contentionAttempts = 0
 			if sleepErr := sleepOwnerBusy(ctx, ownerRecoveryRetryDelay); sleepErr != nil {
 				return fmt.Errorf("owner sink: recovery wait aborted: %w", sleepErr)
 			}
@@ -267,6 +292,10 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 			continue
 		}
 
+		if errors.Is(context.Cause(ctx), errOwnerCompletionRetentionExpired) {
+			return err // The deferred retention mapper records this outcome once.
+		}
+
 		reason := "post_error"
 		if errors.Is(err, dispatch.ErrOwnerBusy) {
 			reason = "owner_busy"
@@ -282,9 +311,18 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 			"attempts", attempt+1,
 			"error", err,
 		)
+		if errors.Is(err, dispatch.ErrOwnerBusy) {
+			// Delivery exhaustion cannot turn a finished result into a new atom
+			// attempt, including when recovery and contention responses alternate.
+			return fmt.Errorf("owner sink: report completion: %w", errors.Join(errOwnerCompletionNotDelivered, err))
+		}
 		return fmt.Errorf("owner sink: report completion: %w", err)
 	}
 }
+
+var errOwnerCompletionNotDelivered = errors.New("owner completion not delivered")
+
+var errOwnerCompletionRetentionExpired = fmt.Errorf("owner completion retention expired: %w", errOwnerCompletionNotDelivered)
 
 const ownerRecoveryRetryDelay = time.Second
 
@@ -317,6 +355,8 @@ type dispatchMeta struct {
 	WorkerNode      string
 	OwnerGeneration int64
 	Attempt         int
+	// CompletionTimeout is supplied by the receiving worker, never by the remote envelope.
+	CompletionTimeout time.Duration
 }
 
 // dispatchMetaKey is the context key under which a dispatched task's owner

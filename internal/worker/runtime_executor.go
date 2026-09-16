@@ -488,7 +488,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 					if e.deferRunDeadline(taskRun, timeouts, "cache_report", time.Now()) {
 						return
 					}
-					if errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+					if errors.Is(err, errOwnerCompletionNotDelivered) || errors.Is(err, context.Canceled) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
 						log.Info("worker cache completion canceled", "task_run_id", taskRun.ID, "run_id", taskRun.JobRunID, "error", err)
 						return
 					}
@@ -543,7 +543,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return
 		}
 
-		if errors.Is(execErr, context.Canceled) || (ctx.Err() != nil && errors.Is(execErr, ctx.Err())) {
+		if errors.Is(execErr, errOwnerCompletionNotDelivered) || errors.Is(execErr, context.Canceled) || (ctx.Err() != nil && errors.Is(execErr, ctx.Err())) {
 			log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
 		}
@@ -644,7 +644,7 @@ func (e *runtimeExecutor) reportTaskFailure(ctx context.Context, sink Completion
 			e.haltRunAfterFailure(taskRun)
 			return
 		}
-		if errors.Is(persistErr, context.Canceled) || (ctx.Err() != nil && errors.Is(persistErr, ctx.Err())) {
+		if errors.Is(persistErr, errOwnerCompletionNotDelivered) || errors.Is(persistErr, context.Canceled) || (ctx.Err() != nil && errors.Is(persistErr, ctx.Err())) {
 			log.Info("worker failure report canceled", "task_run_id", taskRun.ID, "run_id", taskRun.JobRunID, "error", persistErr)
 			return
 		}
