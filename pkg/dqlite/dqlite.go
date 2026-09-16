@@ -162,25 +162,15 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 
 	vars := env.Variables()
 
-	// A StatefulSet pod keeps its PVC across replacement but not its IP, and
-	// dqlite refuses to start when the configured address disagrees with the
-	// one recorded in the data directory. Bring the persisted identity forward
-	// before handing the directory to go-dqlite (issue #493).
-	migration, err := reconcilePersistedNodeAddress(vars.DatabasePath, vars.NodeAddress, vars.DatabaseNodes)
-	if err != nil {
-		return nil, err
-	}
-	if migration != nil {
-		log.Warn(
-			"dqlite node address changed since this data directory was created; migrating",
-			"node_id", migration.ID,
-			"previous_address", migration.OldAddress,
-			"node_address", migration.NewAddress,
-			"sole_member", migration.SoleMember)
-	}
-
-	dqApp, err := dqliteapp.New(
+	// A StatefulSet pod keeps its PVC across replacement but not its IP, while
+	// dqlite records the node's advertised address inside that PVC. openNativeApp
+	// reconciles a data directory created at a different address and puts this
+	// node back in the raft configuration before waiting on readiness (#493).
+	dqApp, err := openNativeApp(
+		ctx,
 		vars.DatabasePath,
+		vars.NodeAddress,
+		vars.DatabaseNodes,
 		dqliteapp.WithAddress(vars.NodeAddress),
 		dqliteapp.WithCluster(vars.DatabaseNodes),
 		dqliteapp.WithVoters(vars.DatabaseVoters),
@@ -190,23 +180,6 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	if err := dqApp.Ready(ctx); err != nil {
-		return nil, err
-	}
-
-	// The raft configuration still carries whatever address this node was last
-	// added under, which is what every other member dials. Correct it through
-	// the leader, unconditionally: a crash between the info.yaml rewrite above
-	// and this repair would otherwise strand the member with nothing left on
-	// disk to detect it by. A failure here is not fatal — the node still serves
-	// the API through the leader — so it is logged rather than returned.
-	if err := ensureClusterAddress(ctx, dqApp, addressRepairAttempts, addressRepairInterval); err != nil {
-		log.Error(
-			"dqlite cluster membership still records this node at a stale address; "+
-				"it cannot be reached by its peers",
-			"node_id", dqApp.ID(), "node_address", dqApp.Address(), "error", err)
 	}
 
 	currentApp.Store(dqApp)

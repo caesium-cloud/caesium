@@ -74,7 +74,6 @@ func TestReconcilePersistedNodeAddressRewritesIdentityAndStore(t *testing.T) {
 	require.Equal(t, uint64(42), migration.ID)
 	require.Equal(t, "10.244.0.10:9001", migration.OldAddress)
 	require.Equal(t, "10.244.0.45:9001", migration.NewAddress)
-	require.False(t, migration.SoleMember)
 
 	info, ok, err := readNodeIdentity(dir)
 	require.NoError(t, err)
@@ -113,7 +112,8 @@ func TestReconcilePersistedNodeAddressRejectsHalfInitializedDirectory(t *testing
 	require.ErrorContains(t, err, clusterFileName)
 }
 
-// startNode boots a dqlite app, waiting for it to be ready.
+// startNode boots a bare dqlite app, the way go-dqlite would without any of the
+// reconciliation in this package.
 func startNode(t *testing.T, ctx context.Context, dir, address string, cluster []string) *dqliteapp.App {
 	t.Helper()
 	opts := []dqliteapp.Option{dqliteapp.WithAddress(address)}
@@ -127,6 +127,19 @@ func startNode(t *testing.T, ctx context.Context, dir, address string, cluster [
 	defer cancel()
 	require.NoError(t, app.Ready(readyCtx))
 	return app
+}
+
+// restartNode reopens a data directory the way cmd/start does, through the
+// reconciliation this package installs.
+func restartNode(t *testing.T, ctx context.Context, dir, address string, seeds []string) (*dqliteapp.App, error) {
+	t.Helper()
+	opts := []dqliteapp.Option{dqliteapp.WithAddress(address)}
+	if len(seeds) > 0 {
+		opts = append(opts, dqliteapp.WithCluster(seeds))
+	}
+	openCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return openNativeApp(openCtx, dir, address, seeds, opts...)
 }
 
 func clusterMembers(t *testing.T, ctx context.Context, app *dqliteapp.App) map[uint64]client.NodeInfo {
@@ -181,16 +194,10 @@ func TestSoleMemberRejoinsAtNewAddress(t *testing.T) {
 	require.NoError(t, db.Close())
 	require.NoError(t, app.Close())
 
-	migration, err := reconcilePersistedNodeAddress(dir, newAddr, nil)
+	app, err = restartNode(t, ctx, dir, newAddr, nil)
 	require.NoError(t, err)
-	require.NotNil(t, migration)
-	require.True(t, migration.SoleMember)
-	require.Equal(t, id, migration.ID)
-
-	app = startNode(t, ctx, dir, newAddr, nil)
 	defer func() { _ = app.Close() }()
-
-	require.NoError(t, ensureClusterAddress(ctx, app, 6, time.Second))
+	require.Equal(t, id, app.ID())
 
 	members := clusterMembers(t, ctx, app)
 	require.Len(t, members, 1)
@@ -212,6 +219,66 @@ func TestSoleMemberRejoinsAtNewAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, leader)
 	require.Equal(t, app.Address(), leader.Address)
+}
+
+// TestStaleSingletonCacheNeverForcesRecovery is the review finding behind the
+// authoritative-membership rule: cluster.yaml is a discovery cache go-dqlite
+// refreshes on a 30s timer, so a bootstrap node can still hold a singleton copy
+// long after two peers joined and became voters. Replacing that pod must never
+// rewrite the raft configuration down to one member — that would fork a live
+// cluster — so this test freezes the cache back to a singleton and requires the
+// node to rejoin the real three-member cluster instead.
+func TestStaleSingletonCacheNeverForcesRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9441", "127.0.0.1:9442", "127.0.0.1:9443"}
+	apps := make([]*dqliteapp.App, len(dirs))
+	for idx := range dirs {
+		var seeds []string
+		if idx > 0 {
+			seeds = addrs[:1]
+		}
+		apps[idx] = startNode(t, ctx, dirs[idx], addrs[idx], seeds)
+	}
+	defer func() {
+		for _, app := range apps {
+			if app != nil {
+				_ = app.Close()
+			}
+		}
+	}()
+
+	db, err := apps[1].Open(ctx, "test")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.ExecContext(ctx, "CREATE TABLE durable (n INT)")
+	require.NoError(t, err)
+
+	bootstrap := apps[0].ID()
+	require.Len(t, clusterMembers(t, ctx, apps[1]), 3)
+
+	// Replace the bootstrap node, and hand it back the singleton discovery
+	// cache it held before its peers joined.
+	require.NoError(t, apps[0].Close())
+	apps[0] = nil
+
+	newAddr := "127.0.0.2:9441"
+	writeYAML(t, filepath.Join(dirs[0], clusterFileName),
+		fmt.Sprintf("- ID: %d\n  Address: %s\n  Role: 0\n", bootstrap, addrs[0]))
+
+	// Seeds are what the chart gives ordinal 0: nothing.
+	apps[0], err = restartNode(t, ctx, dirs[0], newAddr, nil)
+	require.NoError(t, err)
+
+	// The cluster must still be three members, not two clusters of one and two.
+	for _, app := range apps {
+		members := clusterMembers(t, ctx, app)
+		require.Len(t, members, 3, "membership must never be forced down to a singleton")
+		require.Equal(t, newAddr, members[bootstrap].Address)
+		require.Equal(t, client.Voter, members[bootstrap].Role)
+	}
 }
 
 // TestReplacedMemberRejoinsAtNewAddress is the three-replica pod-replacement
@@ -258,21 +325,10 @@ func TestReplacedMemberRejoinsAtNewAddress(t *testing.T) {
 	apps[2] = nil
 
 	newAddr := "127.0.0.2:9423"
-	migration, err := reconcilePersistedNodeAddress(dirs[2], newAddr, addrs[:1])
+	apps[2], err = restartNode(t, ctx, dirs[2], newAddr, addrs[:1])
 	require.NoError(t, err)
-	require.NotNil(t, migration)
-	require.False(t, migration.SoleMember)
-	require.Equal(t, replaced, migration.ID)
-	require.Equal(t, addrs[2], migration.OldAddress)
-
-	apps[2] = startNode(t, ctx, dirs[2], newAddr, nil)
 	require.Equal(t, replaced, apps[2].ID(), "node identity must survive the address change")
-
-	// Before the repair the cluster still dials the address the pod no longer
-	// has, so the member is unreachable even though it looks healthy locally.
-	require.Equal(t, addrs[2], clusterMembers(t, ctx, apps[0])[replaced].Address)
-
-	require.NoError(t, ensureClusterAddress(ctx, apps[2], 6, 2*time.Second))
+	require.NoFileExists(t, filepath.Join(dirs[2], repairFileName))
 
 	after := clusterMembers(t, ctx, apps[0])
 	require.Len(t, after, 3, "the replaced member must not be duplicated or dropped")
@@ -299,12 +355,12 @@ func TestReplacedMemberRejoinsAtNewAddress(t *testing.T) {
 	require.Equal(t, 2, total)
 }
 
-// TestInterruptedRepairRejoins covers a repair that was cut short between its
-// remove and its re-add — a pod killed mid-migration. Nothing is left on disk to
-// notice it by, so the next boot has to see that this node is simply not in the
-// configuration and rejoin.
-func TestInterruptedRepairRejoins(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+// TestInterruptedRepairRestoresVotingRole covers a repair cut short between its
+// remove and its re-add — a pod killed mid-migration. Coming back as a
+// non-replicating spare while reporting success would leave the cluster a voter
+// short, so the next boot has to restore the recorded role before it is done.
+func TestInterruptedRepairRestoresVotingRole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
@@ -319,30 +375,112 @@ func TestInterruptedRepairRejoins(t *testing.T) {
 	}
 	defer func() {
 		for _, app := range apps {
-			_ = app.Close()
+			if app != nil {
+				_ = app.Close()
+			}
 		}
 	}()
 
-	orphan := apps[2].ID()
+	db, err := apps[0].Open(ctx, "test")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.ExecContext(ctx, "CREATE TABLE durable (n INT)")
+	require.NoError(t, err)
 
+	orphan := apps[2].ID()
+	require.NoError(t, apps[2].Close())
+	apps[2] = nil
+
+	// Exactly what a crash after Remove and before Add leaves behind: the
+	// journal on disk and no member in the configuration.
+	require.NoError(t, writeYAMLFile(dirs[2], repairFileName, addressRepair{
+		ID: orphan, Address: addrs[2], Role: client.Voter,
+	}))
 	cli, err := apps[0].FindLeader(ctx)
 	require.NoError(t, err)
 	require.NoError(t, cli.Remove(ctx, orphan))
 	require.NoError(t, cli.Close())
 	require.NotContains(t, clusterMembers(t, ctx, apps[0]), orphan)
 
-	require.NoError(t, ensureClusterAddress(ctx, apps[2], 6, 2*time.Second))
+	apps[2], err = restartNode(t, ctx, dirs[2], addrs[2], addrs[:1])
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(dirs[2], repairFileName),
+		"the journal must only clear once the role is confirmed")
 
 	members := clusterMembers(t, ctx, apps[0])
 	require.Contains(t, members, orphan)
 	require.Equal(t, addrs[2], members[orphan].Address)
+	require.Equal(t, client.Voter, members[orphan].Role,
+		"an interrupted repair must not leave a non-replicating spare behind")
+
+	// Quorum proof: stopping another voter immediately must still leave a
+	// writable cluster, which only holds if the rejoined member really votes.
+	require.NoError(t, apps[1].Close())
+	apps[1] = nil
+	requireEventualWrite(t, ctx, db, "INSERT INTO durable VALUES (1)")
+}
+
+// TestSpareMemberAtStaleAddressStillStarts covers the ordering finding: a spare
+// whose address changed cannot be promoted, because promotion needs the leader
+// to reach it at an address it no longer has. go-dqlite's startup loop retries
+// that promotion forever before reporting ready, so the membership repair has to
+// run before readiness is awaited or the node never starts at all.
+func TestSpareMemberAtStaleAddressStillStarts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9451", "127.0.0.1:9452", "127.0.0.1:9453"}
+	apps := make([]*dqliteapp.App, len(dirs))
+	for idx := range dirs {
+		var seeds []string
+		if idx > 0 {
+			seeds = addrs[:1]
+		}
+		apps[idx] = startNode(t, ctx, dirs[idx], addrs[idx], seeds)
+	}
+	defer func() {
+		for _, app := range apps {
+			if app != nil {
+				_ = app.Close()
+			}
+		}
+	}()
+
+	demoted := apps[2].ID()
+	cli, err := apps[0].FindLeader(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cli.Assign(ctx, demoted, client.Spare))
+	require.NoError(t, cli.Close())
+	require.Equal(t, client.Spare, clusterMembers(t, ctx, apps[0])[demoted].Role)
+
+	require.NoError(t, apps[2].Close())
+	apps[2] = nil
+
+	newAddr := "127.0.0.2:9453"
+	done := make(chan error, 1)
+	go func() {
+		app, err := restartNode(t, ctx, dirs[2], newAddr, addrs[:1])
+		apps[2] = app
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Minute):
+		t.Fatal("a spare whose address changed never finished starting")
+	}
+
+	members := clusterMembers(t, ctx, apps[0])
+	require.Equal(t, newAddr, members[demoted].Address)
 }
 
 // requireEventualWrite retries a write while the cluster settles after a member
 // goes away; losing a follower can cost one leader election.
 func requireEventualWrite(t *testing.T, ctx context.Context, db *sql.DB, stmt string) {
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	var err error
 	for time.Now().Before(deadline) {
 		if _, err = db.ExecContext(ctx, stmt); err == nil {
