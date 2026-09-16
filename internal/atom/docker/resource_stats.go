@@ -8,6 +8,12 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
+)
+
+const (
+	dockerOOMMetadataSettleTimeout = 5 * time.Second
+	dockerOOMMetadataPollInterval  = 50 * time.Millisecond
 )
 
 func (e *dockerEngine) Stats(req *atom.EngineStatsRequest) (atom.ResourceStats, error) {
@@ -66,20 +72,33 @@ func (e *dockerEngine) inspectWaitOutcome(ctx context.Context, id string) (atom.
 	if !env.Variables().ResourceStatsEnabled || metadata.State == nil || metadata.State.ExitCode != 137 || metadata.State.OOMKilled {
 		return final, nil
 	}
-	settleCtx, cancel := context.WithTimeout(ctx, time.Second)
+	settleCtx, cancel := context.WithTimeout(ctx, dockerOOMMetadataSettleTimeout)
 	defer cancel()
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(dockerOOMMetadataPollInterval)
 	defer ticker.Stop()
+	started := time.Now()
+	attempts := 0
+	lastInspectError := ""
 	for {
 		select {
 		case <-settleCtx.Done():
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			log.Debug("docker OOM observation window expired without OOM evidence",
+				"container_id", metadata.ID,
+				"started_at", metadata.State.StartedAt,
+				"exit_code", metadata.State.ExitCode,
+				"elapsed", time.Since(started).Round(time.Millisecond),
+				"inspect_attempts", attempts,
+				"last_inspect_error", lastInspectError,
+			)
 			return final, nil
 		case <-ticker.C:
+			attempts++
 			inspected, inspectErr := e.backend.ContainerInspect(settleCtx, id)
 			if inspectErr != nil {
+				lastInspectError = inspectErr.Error()
 				continue
 			}
 			// A restarted or mismatched runtime is not evidence for this attempt.

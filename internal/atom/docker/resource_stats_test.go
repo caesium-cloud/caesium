@@ -106,8 +106,11 @@ func TestWaitCapturesLateOOMEvidenceWithoutInferringSIGKILL(t *testing.T) {
 		name                        string
 		enabled, lateOOM, restarted bool
 		memory                      int64
+		lateOOMDelay                time.Duration
 	}{
-		{name: "late OOM", enabled: true, lateOOM: true},
+		// Docker can deliver OOM metadata after its wait notification. This
+		// deliberately publishes evidence after the previous one-second window.
+		{name: "late OOM after prior window", enabled: true, lateOOM: true, lateOOMDelay: 1100 * time.Millisecond},
 		{name: "ordinary SIGKILL", enabled: true},
 		{name: "gate disabled", lateOOM: true},
 		{name: "replacement runtime", enabled: true, lateOOM: true, restarted: true},
@@ -117,10 +120,22 @@ func TestWaitCapturesLateOOMEvidenceWithoutInferringSIGKILL(t *testing.T) {
 			t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", fmt.Sprint(tc.enabled))
 			require.NoError(t, env.Process())
 			calls := 0
-			backend := &waitOutcomeBackend{inspect: func(context.Context) (container.InspectResponse, error) {
+			backend := &waitOutcomeBackend{inspect: func(ctx context.Context) (container.InspectResponse, error) {
 				calls++
 				state := &container.State{Status: "exited", ExitCode: 137, StartedAt: "original"}
-				if calls > 1 {
+				if tc.lateOOMDelay > 0 && calls > 1 {
+					// Start this delay after the terminal wait's first inspect. A
+					// one-second production window must expire before it can observe
+					// this metadata, independent of test setup scheduling.
+					timer := time.NewTimer(tc.lateOOMDelay)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						return container.InspectResponse{}, ctx.Err()
+					}
+				}
+				if tc.lateOOM && calls > 1 {
 					state.OOMKilled = tc.lateOOM
 					if tc.restarted {
 						state.StartedAt = "replacement"
