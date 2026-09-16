@@ -127,6 +127,55 @@ func (s *IntegrationTestSuite) TestJobDiffCLIRejectsDuplicateAliases() {
 	s.NotContains(stdout, "No changes detected.")
 }
 
+// TestJobDiffCLIPrintsBreakingContractFindings is the CLI-surface proof for
+// issue #509: a producer that drops customer_id is an ordinary update in text
+// mode, but POST /v1/jobdefs/diff attaches contractFindings that text output
+// must print (verdict, consumer, key) instead of hiding them in --json only.
+func (s *IntegrationTestSuite) TestJobDiffCLIPrintsBreakingContractFindings() {
+	suffix := time.Now().UnixNano()
+	producer := fmt.Sprintf("job-diff-contract-producer-%d", suffix)
+	consumer := fmt.Sprintf("job-diff-contract-consumer-%d", suffix)
+
+	dir := s.writeContractManifests(map[string]string{
+		producer: contractProducerManifest(producer, []string{"customer_id", "row_count"}),
+		consumer: contractConsumerManifest(consumer, producer, "reporting", "customer", "customer_id"),
+	})
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	brokenDir := s.writeContractManifests(map[string]string{
+		producer: contractProducerManifest(producer, []string{"row_count"}),
+		consumer: contractConsumerManifest(consumer, producer, "reporting", "customer", "customer_id"),
+	})
+	defer os.RemoveAll(brokenDir)
+
+	stdout, stderr, err := s.runCLISeparate("job", "diff", "--path", brokenDir, "--server", s.caesiumURL)
+	s.Require().Error(err, "broken producer must be an in-scope update\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	s.Equal(1, jobDiffCLIExitCode(err))
+	s.Contains(stdout, "Updates:")
+	s.Contains(stdout, producer)
+	s.Contains(stdout, consumer)
+	s.Contains(stdout, "customer_id")
+	s.Contains(stdout, "breaking")
+	s.NotContains(stderr, `"contractFindings"`)
+	s.NotContains(stderr, `"level":"`)
+
+	jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "diff", "--path", brokenDir, "--json", "--server", s.caesiumURL)
+	s.Require().Error(jsonCmdErr, "broken producer --json must exit nonzero\nstdout:\n%s\nstderr:\n%s", jsonOut, jsonErr)
+	s.Equal(1, jobDiffCLIExitCode(jsonCmdErr))
+	s.Require().True(json.Valid([]byte(strings.TrimSpace(jsonOut))), "--json stdout must be valid JSON with no log prefix:\n%s", jsonOut)
+	s.NotContains(jsonOut, `"level":"`)
+	s.NotContains(jsonErr, `"contractFindings"`)
+	parsed := parseJobDiffCLIJSON(s, jsonOut)
+	s.Contains(jobDiffCLIAliases(parsed.Modified), producer)
+	s.True(jobDiffCLIFindingsNameConsumer(parsed.Modified, producer, consumer),
+		"modified producer %s must carry contractFindings naming consumer %s: %+v", producer, consumer, parsed.Modified)
+	s.True(jobDiffCLIFindingsHaveKey(parsed.Modified, producer, "customer_id"),
+		"modified producer %s must carry contractFindings for customer_id: %+v", producer, parsed.Modified)
+	s.True(jobDiffCLIFindingsHaveVerdict(parsed.Modified, producer, "breaking"),
+		"modified producer %s must carry a breaking verdict: %+v", producer, parsed.Modified)
+}
+
 func jobDiffCLIManifest(alias, command string) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Job
@@ -152,7 +201,17 @@ type jobDiffCLIJSON struct {
 }
 
 type jobDiffCLIJob struct {
-	Alias string `json:"alias"`
+	Alias            string              `json:"alias"`
+	ContractFindings []jobDiffCLIFinding `json:"contractFindings"`
+}
+
+type jobDiffCLIFinding struct {
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Key     string `json:"key"`
+	Path    string `json:"path"`
+	Detail  string `json:"detail"`
+	Verdict string `json:"verdict"`
 }
 
 func parseJobDiffCLIJSON(s *IntegrationTestSuite, stdout string) jobDiffCLIJSON {
@@ -169,6 +228,42 @@ func jobDiffCLIAliases(jobs []jobDiffCLIJob) []string {
 		out = append(out, job.Alias)
 	}
 	return out
+}
+
+func jobDiffCLIFindingsForAlias(jobs []jobDiffCLIJob, alias string) []jobDiffCLIFinding {
+	for _, job := range jobs {
+		if job.Alias == alias {
+			return job.ContractFindings
+		}
+	}
+	return nil
+}
+
+func jobDiffCLIFindingsNameConsumer(jobs []jobDiffCLIJob, producer, consumer string) bool {
+	for _, finding := range jobDiffCLIFindingsForAlias(jobs, producer) {
+		if strings.Contains(finding.To, consumer) || strings.Contains(finding.Detail, consumer) {
+			return true
+		}
+	}
+	return false
+}
+
+func jobDiffCLIFindingsHaveKey(jobs []jobDiffCLIJob, producer, key string) bool {
+	for _, finding := range jobDiffCLIFindingsForAlias(jobs, producer) {
+		if finding.Key == key || strings.Contains(finding.Path, key) || strings.Contains(finding.Detail, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func jobDiffCLIFindingsHaveVerdict(jobs []jobDiffCLIJob, producer, verdict string) bool {
+	for _, finding := range jobDiffCLIFindingsForAlias(jobs, producer) {
+		if finding.Verdict == verdict {
+			return true
+		}
+	}
+	return false
 }
 
 func jobDiffCLIExitCode(err error) int {

@@ -129,8 +129,24 @@ type jobDiffJSON struct {
 }
 
 type jobDiffAlias struct {
-	Alias string `json:"alias"`
-	Diff  string `json:"diff"`
+	Alias            string           `json:"alias"`
+	Diff             string           `json:"diff"`
+	ContractFindings []jobDiffFinding `json:"contractFindings,omitempty"`
+}
+
+// jobDiffFinding is the CLI projection of POST /v1/jobdefs/diff contractFindings
+// (api/rest/service/contract.Finding). Text output must surface at least verdict,
+// the consumer (to), and the affected key; JSON keeps the raw objects.
+type jobDiffFinding struct {
+	EdgeID    string `json:"edgeId,omitempty"`
+	EdgeClass string `json:"edgeClass,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Verdict   string `json:"verdict"`
 }
 
 func rejectDuplicateAliases(defs []schema.Definition) error {
@@ -277,6 +293,9 @@ func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
 			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
 				return err
 			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
 		}
 		if err := writeCmdOut(cmd, "\n"); err != nil {
 			return err
@@ -298,6 +317,9 @@ func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
 					return err
 				}
 			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
 		}
 		if err := writeCmdOut(cmd, "\n"); err != nil {
 			return err
@@ -311,6 +333,9 @@ func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
 		}
 		for _, spec := range sortedRawByAlias(scoped.Removed) {
 			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
+				return err
+			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
 				return err
 			}
 		}
@@ -330,9 +355,37 @@ func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
 			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
 				return err
 			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func renderJobDiffFindings(cmd *cobra.Command, findings []jobDiffFinding) error {
+	for _, finding := range findings {
+		if err := writeCmdOut(cmd, "      - %s\n", formatJobDiffFinding(finding)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatJobDiffFinding(finding jobDiffFinding) string {
+	path := dashIfEmpty(finding.Path)
+	if key := strings.TrimSpace(finding.Key); key != "" {
+		path = path + " " + key
+	}
+	return fmt.Sprintf("%s: %s -> %s [%s] %s %s: %s",
+		dashIfEmpty(finding.Verdict),
+		dashIfEmpty(finding.From),
+		dashIfEmpty(finding.To),
+		dashIfEmpty(finding.EdgeClass),
+		dashIfEmpty(finding.Kind),
+		path,
+		dashIfEmpty(finding.Detail),
+	)
 }
 
 func rawAlias(raw json.RawMessage) string {
@@ -349,6 +402,14 @@ func rawDiff(raw json.RawMessage) string {
 		return ""
 	}
 	return spec.Diff
+}
+
+func rawFindings(raw json.RawMessage) []jobDiffFinding {
+	var spec jobDiffAlias
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return nil
+	}
+	return spec.ContractFindings
 }
 
 func sortedRawByAlias(items []json.RawMessage) []json.RawMessage {

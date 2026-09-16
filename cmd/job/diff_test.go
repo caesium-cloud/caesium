@@ -156,6 +156,110 @@ func TestRenderJobDiffSeparatesPruneCandidates(t *testing.T) {
 	require.Contains(t, got, "  - other-job")
 }
 
+func TestRenderJobDiffPrintsContractFindings(t *testing.T) {
+	cmd, out := testDiffCmd()
+	modified := []byte(`{
+		"alias":"producer",
+		"diff":"- required: [customer_id]\n+ required: [row_count]\n",
+		"contractFindings":[{
+			"edgeClass":"inferred",
+			"from":"job:producer",
+			"to":"job:consumer",
+			"kind":"requirement_unsatisfied",
+			"path":"trigger.configuration.paramMapping.customer",
+			"key":"customer_id",
+			"detail":"missing customer_id",
+			"verdict":"breaking"
+		}]
+	}`)
+	created := []byte(`{
+		"alias":"new-job",
+		"contractFindings":[{
+			"from":"job:new-job",
+			"to":"job:downstream",
+			"edgeClass":"inferred",
+			"kind":"requirement_unsatisfied",
+			"path":"steps[0].datasets.consumes",
+			"key":"row_count",
+			"detail":"missing row_count",
+			"verdict":"warning"
+		}]
+	}`)
+	removed := []byte(`{
+		"alias":"gone",
+		"contractFindings":[{
+			"from":"job:gone",
+			"to":"job:consumer",
+			"key":"customer_id",
+			"verdict":"breaking",
+			"detail":"producer removed"
+		}]
+	}`)
+
+	require.NoError(t, renderJobDiff(cmd, scopedJobDiff{
+		Added:    []json.RawMessage{created},
+		Modified: []json.RawMessage{modified},
+		Removed:  []json.RawMessage{removed},
+	}))
+	got := out.String()
+	require.Contains(t, got, "Creates:")
+	require.Contains(t, got, "  - new-job")
+	require.Contains(t, got, "warning: job:new-job -> job:downstream [inferred]")
+	require.Contains(t, got, "row_count")
+	require.Contains(t, got, "Updates:")
+	require.Contains(t, got, "  - producer")
+	require.Contains(t, got, "breaking: job:producer -> job:consumer [inferred] requirement_unsatisfied trigger.configuration.paramMapping.customer customer_id: missing customer_id")
+	require.Contains(t, got, "Deletes:")
+	require.Contains(t, got, "  - gone")
+	require.Contains(t, got, "breaking:")
+	require.Contains(t, got, "job:consumer")
+	require.Contains(t, got, "customer_id")
+}
+
+func TestDiffPrintsContractFindingsFromServer(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.yaml"), []byte(diffTestManifest("producer", "echo producer")), 0o644))
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/v1/jobdefs/diff", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"added":[],
+			"removed":[],
+			"modified":[{
+				"alias":"producer",
+				"diff":"- required: [customer_id, row_count]\n+ required: [row_count]\n",
+				"contractFindings":[{
+					"edgeId":"inferred:producer:consumer",
+					"edgeClass":"inferred",
+					"from":"job:producer",
+					"to":"job:consumer",
+					"kind":"requirement_unsatisfied",
+					"path":"trigger.configuration.paramMapping.customer",
+					"key":"customer_id",
+					"detail":"missing customer_id",
+					"verdict":"breaking"
+				}]
+			}]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	stdout, stderr, err := executeDiffCommand(t, "--path", dir, "--server", srv.URL)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errJobDiffInScope)
+	require.Equal(t, 1, hits, "job diff must POST to the dummy server")
+	require.Contains(t, stdout, "Updates:")
+	require.Contains(t, stdout, "producer")
+	require.Contains(t, stdout, "job:consumer")
+	require.Contains(t, stdout, "customer_id")
+	require.Contains(t, stdout, "breaking")
+	require.NotContains(t, stderr, `"contractFindings"`)
+}
+
 func TestRenderJobDiffPruneListsDeletes(t *testing.T) {
 	cmd, out := testDiffCmd()
 	scoped := scopeJobDiff(&jobDiffResponse{
