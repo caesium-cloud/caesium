@@ -198,6 +198,7 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
 
       <ClusterFooter
         state={health.state}
+        reported={health.raw !== null}
         uptimeSeconds={health.uptimeSeconds}
         stateMeta={stateMeta}
         quorum={quorum}
@@ -208,6 +209,8 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
 
 interface ClusterFooterProps {
   state: ClusterHealthState;
+  /** A health response arrived, whatever it said. */
+  reported: boolean;
   uptimeSeconds: number | null;
   stateMeta: (typeof STATE_META)[ClusterHealthState];
   quorum: QuorumView;
@@ -220,8 +223,12 @@ const QUORUM_DOT: Record<QuorumView["tone"], string> = {
   muted: "bg-text-4",
 };
 
-function ClusterFooter({ state, uptimeSeconds, stateMeta, quorum }: ClusterFooterProps) {
-  if (state === "unknown") {
+function ClusterFooter({ state, reported, uptimeSeconds, stateMeta, quorum }: ClusterFooterProps) {
+  // Hide the footer only when no health response arrived at all. The server
+  // also reports an overall status of "unknown" — meaning it is answering but
+  // could not determine cluster liveness — and that must stay visible rather
+  // than silently removing the cluster panel.
+  if (state === "unknown" && !reported) {
     return null;
   }
   return (

@@ -172,13 +172,23 @@ func Snapshot() View {
 	view.Members = append([]Member(nil), view.Members...)
 	if start {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout*2)
+			// Membership and the probe fan-out each get probeTimeout; the
+			// headroom here keeps a slow membership call from cutting the
+			// probes short and reporting a live member as unreachable.
+			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout*3)
 			defer cancel()
+			// The flag is cleared even if observe panics, so one bad refresh
+			// cannot wedge the cache as permanently stale.
+			defer func() {
+				mu.Lock()
+				refreshing = false
+				mu.Unlock()
+			}()
+
 			observed := observe(ctx)
 
 			mu.Lock()
 			current = observed
-			refreshing = false
 			mu.Unlock()
 		}()
 	}
