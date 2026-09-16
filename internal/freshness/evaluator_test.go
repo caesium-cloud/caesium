@@ -27,13 +27,14 @@ type fakeRunStarter struct {
 	// start that failed after the run was already live (Store.startRun publishes
 	// run_started and takes the lease before it reads the record back).
 	commitThenFail bool
-	// cancelOnStart, when set, cancels the caller's context from inside
-	// StartWithContext — the shutdown-lands-mid-admission case.
-	cancelOnStart context.CancelFunc
-	err           error
-	calls         int
-	runIDs        []uuid.UUID
-	launched      []uuid.UUID
+	// afterCommit runs inside StartWithContext once the run row exists, so a
+	// test can reproduce what happens concurrently with an admission: a
+	// cancelled tick context, or another node committing its own run.
+	afterCommit func(runID, jobID uuid.UUID)
+	err         error
+	calls       int
+	runIDs      []uuid.UUID
+	launched    []uuid.UUID
 }
 
 func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
@@ -73,13 +74,14 @@ func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, tr
 		f.t.Fatalf("create started run: %v", err)
 	}
 	f.runIDs = append(f.runIDs, runID)
-	if f.cancelOnStart != nil {
-		f.cancelOnStart()
+	if f.afterCommit != nil {
+		f.afterCommit(runID, jobID)
 	}
 	if f.commitThenFail {
 		// The run is committed and live, but the caller only learns about the
-		// failure — exactly what a post-commit read cancellation looks like.
-		return nil, f.err
+		// failure. The real store reports this shape — the error carries the
+		// exact run id — precisely so the caller cannot adopt a look-alike.
+		return nil, &runstorage.RunCommittedError{RunID: runID, JobID: jobID, Err: f.err}
 	}
 	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, nil
 }
@@ -400,7 +402,7 @@ func TestEvaluatorAdoptsRunCommittedByAFailedStart(t *testing.T) {
 		db:             db,
 		commitThenFail: true,
 		err:            context.Canceled,
-		cancelOnStart:  cancel,
+		afterCommit:    func(uuid.UUID, uuid.UUID) { cancel() },
 	}
 	eval := NewEvaluator(Config{
 		DB:                    db,
@@ -431,6 +433,73 @@ func TestEvaluatorAdoptsRunCommittedByAFailedStart(t *testing.T) {
 	}
 	if derivation.RunID == nil || *derivation.RunID != starter.runIDs[0] {
 		t.Fatalf("derivation run id = %v, want %v", derivation.RunID, starter.runIDs[0])
+	}
+}
+
+// TestEvaluatorDoesNotAdoptAForeignRun is the regression for cross-node double
+// execution. During a leader change both evaluators can commit a run for the
+// same (dataset, consumed-watermark) identity. If the failing start's recovery
+// searched for "a matching running run" it would find the OTHER node's row —
+// newest-first, so preferentially the wrong one — and dispatch a run that node
+// is already executing. Recovery is by exact run id, so it cannot.
+func TestEvaluatorDoesNotAdoptAForeignRun(t *testing.T) {
+	db := openRegistryDB(t)
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "foreign-run")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	var foreignID uuid.UUID
+	starter := &fakeRunStarter{
+		t:              t,
+		db:             db,
+		commitThenFail: true,
+		err:            errors.New("post-commit read failed"),
+		afterCommit: func(runID, committedJobID uuid.UUID) {
+			// Another node commits an identical-looking run, LATER than ours.
+			var mine models.JobRun
+			if err := db.Take(&mine, "id = ?", runID).Error; err != nil {
+				t.Fatalf("load committed run: %v", err)
+			}
+			foreignID = uuid.New()
+			if err := db.Create(&models.JobRun{
+				ID:        foreignID,
+				JobID:     committedJobID,
+				Status:    string(runstorage.StatusRunning),
+				Params:    mine.Params,
+				StartedAt: mine.StartedAt.Add(time.Second),
+				CreatedAt: mine.CreatedAt.Add(time.Second),
+				UpdatedAt: mine.UpdatedAt.Add(time.Second),
+			}).Error; err != nil {
+				t.Fatalf("create foreign run: %v", err)
+			}
+		},
+	}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+
+	if err := eval.EvaluateOnce(context.Background()); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("committed runs = %v, want exactly 1", starter.runIDs)
+	}
+	if foreignID == uuid.Nil {
+		t.Fatal("the fault injection did not create a foreign run")
+	}
+	if len(starter.launched) != 1 {
+		t.Fatalf("launched runs = %v, want exactly 1", starter.launched)
+	}
+	if starter.launched[0] == foreignID {
+		t.Fatalf("adopted the foreign run %s; another node is already executing it", foreignID)
+	}
+	if starter.launched[0] != starter.runIDs[0] {
+		t.Fatalf("launched %v, want this attempt's own run %v", starter.launched[0], starter.runIDs[0])
 	}
 }
 

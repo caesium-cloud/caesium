@@ -624,10 +624,20 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		// record back, and the tick context may itself be what failed (server
 		// shutdown). Dropping the error here would leave a live `running` row
 		// with no tasks and no engine — the strand this whole path exists to
-		// prevent. Look for the run the failed start committed, on a context
-		// that cannot be the reason the lookup fails too.
+		// prevent.
+		//
+		// Recover ONLY the run this attempt committed, by the exact id the store
+		// reports. Searching for "a matching running run" would be unsafe across
+		// a leader change: a run the new leader created and is already executing
+		// matches the same (dataset, consumed-watermark) identity, and adopting
+		// it would execute it a second time on this node. The lookup runs on a
+		// context that cannot be the reason it fails too.
+		committedID, ok := runstorage.CommittedRunID(err)
+		if !ok {
+			return err
+		}
 		recoverCtx := context.WithoutCancel(ctx)
-		adopted, lookupErr := e.committedRunFor(recoverCtx, decl.JobID, params)
+		adopted, lookupErr := e.runByID(recoverCtx, committedID, decl.JobID)
 		if lookupErr != nil || adopted == nil {
 			return err
 		}
@@ -652,37 +662,35 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 	return derivationErr
 }
 
-// committedRunFor finds the run a failed start already committed, keyed on the
-// derivation identity (the produced dataset plus the consumed-watermark
-// snapshot) that hasActiveOrQueuedRun already dedupes on. It returns nil when
-// the start committed nothing, which is the ordinary case for a real admission
-// failure. Only `running` rows qualify: a run that reached a terminal status
-// needs neither launching nor rescuing.
-func (e *Evaluator) committedRunFor(ctx context.Context, jobID uuid.UUID, params map[string]string) (*runstorage.JobRun, error) {
-	var rows []models.JobRun
-	if err := e.db.WithContext(ctx).
-		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(runstorage.StatusRunning)).
-		Order("started_at DESC").
-		Find(&rows).Error; err != nil {
+// runByID loads the exact run a failed start committed. It is addressed by id
+// — never matched by shape — so this evaluator can only ever adopt the run its
+// own admission attempt created, not one another node is already executing.
+//
+// It returns nil when the row is missing, belongs to a different job, or is no
+// longer `running`: a run that reached a terminal status needs neither
+// launching nor rescuing.
+func (e *Evaluator) runByID(ctx context.Context, runID, jobID uuid.UUID) (*runstorage.JobRun, error) {
+	var row models.JobRun
+	if err := e.db.WithContext(ctx).Take(&row, "id = ?", runID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	for i := range rows {
-		rowParams := decodeParamsJSON(rows[i].Params)
-		if !sameDerivationParams(rowParams, params) {
-			continue
-		}
-		return &runstorage.JobRun{
-			ID:        rows[i].ID,
-			JobID:     rows[i].JobID,
-			Status:    runstorage.Status(rows[i].Status),
-			Priority:  rows[i].Priority,
-			Params:    rowParams,
-			StartedAt: rows[i].StartedAt,
-			CreatedAt: rows[i].CreatedAt,
-			UpdatedAt: rows[i].UpdatedAt,
-		}, nil
+	if row.JobID != jobID || row.Status != string(runstorage.StatusRunning) {
+		return nil, nil
 	}
-	return nil, nil
+	return &runstorage.JobRun{
+		ID:         row.ID,
+		JobID:      row.JobID,
+		Status:     runstorage.Status(row.Status),
+		Priority:   row.Priority,
+		Params:     decodeParamsJSON(row.Params),
+		Quarantine: row.Quarantine,
+		StartedAt:  row.StartedAt,
+		CreatedAt:  row.CreatedAt,
+		UpdatedAt:  row.UpdatedAt,
+	}, nil
 }
 
 func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, params map[string]string) (bool, error) {

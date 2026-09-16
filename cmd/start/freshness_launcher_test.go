@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -103,9 +104,9 @@ func TestLaunchDerivedRunFinalizesWhenJobLookupFails(t *testing.T) {
 	if executed {
 		t.Fatal("the executor must not run when the job cannot be loaded")
 	}
-	if attempts != len(derivedRunJobLookupBackoffs)+1 {
+	if attempts != len(derivedRunRetryBackoffs)+1 {
 		t.Fatalf("job lookup attempts = %d, want %d (initial try plus every backoff)",
-			attempts, len(derivedRunJobLookupBackoffs)+1)
+			attempts, len(derivedRunRetryBackoffs)+1)
 	}
 	if status := runStatus(t, conn, derived.ID); status != string(run.StatusFailed) {
 		t.Fatalf("run status = %q, want %q: an unlaunchable admitted run must not stay running",
@@ -258,6 +259,101 @@ func TestLaunchDerivedRunSkipsTerminalRun(t *testing.T) {
 		t.Fatalf("run status = %q, want %q: the fence must not rewrite a terminal run",
 			status, run.StatusCancelled)
 	}
+}
+
+// failJobRunReads makes the first n reads of job_runs fail, simulating
+// transient database contention on the status fence.
+func failJobRunReads(t *testing.T, conn *gorm.DB, n int) {
+	t.Helper()
+	const name = "test:fail_job_run_reads"
+	remaining := n
+	require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		if remaining <= 0 {
+			return
+		}
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table != "job_runs" {
+			return
+		}
+		remaining--
+		tx.AddError(errors.New("database is locked"))
+	}))
+	t.Cleanup(func() { _ = conn.Callback().Query().Remove(name) })
+}
+
+// TestLaunchDerivedRunFenceRetriesTransientStatusRead is the regression for a
+// fence that waved a run through because it could not read its status.
+//
+// The dangerous combination is a cancellation that landed BEFORE this launcher
+// registered — so ctx.Err() is nil and the row is the only evidence — together
+// with a transient read failure. Treating "unreadable" as "still active"
+// executed the cancelled run: job.Run re-reads it but does not reject a
+// cancelled status, and RegisterTasks has no parent-status guard.
+func TestLaunchDerivedRunFenceRetriesTransientStatusRead(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+
+	// Cancelled before this launcher ever registered: only the row knows.
+	require.NoError(t, conn.Model(&models.JobRun{}).
+		Where("id = ?", derived.ID).
+		Update("status", string(run.StatusCancelled)).Error)
+
+	var j models.Job
+	require.NoError(t, conn.First(&j, "id = ?", derived.JobID).Error)
+
+	failJobRunReads(t, conn, 1)
+
+	executed := false
+	launchDerivedRun(
+		context.Background(),
+		store,
+		derived,
+		func(context.Context, uuid.UUID) (*models.Job, error) { return &j, nil },
+		func(context.Context, *models.Job, *run.JobRun) error {
+			executed = true
+			return nil
+		},
+	)
+
+	require.False(t, executed,
+		"a cancelled run must not execute just because the first status read failed")
+	require.Equal(t, string(run.StatusCancelled), runStatus(t, conn, derived.ID),
+		"the fence must not rewrite a terminal run")
+}
+
+// TestLaunchDerivedRunFinalizesWhenFenceCannotResolveStatus proves the fence
+// fails CLOSED: when the status can never be established it neither executes
+// nor strands the run.
+func TestLaunchDerivedRunFinalizesWhenFenceCannotResolveStatus(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+
+	var j models.Job
+	require.NoError(t, conn.First(&j, "id = ?", derived.JobID).Error)
+
+	// Exhaust every fence attempt, then let the finalization read through.
+	failJobRunReads(t, conn, len(derivedRunRetryBackoffs)+1)
+
+	executed := false
+	launchDerivedRun(
+		context.Background(),
+		store,
+		derived,
+		func(context.Context, uuid.UUID) (*models.Job, error) { return &j, nil },
+		func(context.Context, *models.Job, *run.JobRun) error {
+			executed = true
+			return nil
+		},
+	)
+
+	require.False(t, executed, "an unconfirmed run status must not dispatch a DAG")
+	require.Equal(t, string(run.StatusFailed), runStatus(t, conn, derived.ID),
+		"an unlaunchable admitted run must be finalized, not stranded running")
 }
 
 // TestLaunchDerivedRunRetriesTransientLookupFailure proves a run is not thrown

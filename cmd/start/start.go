@@ -75,11 +75,12 @@ func dqliteDispatchPeerResolver() dispatch.PeerLister {
 	})
 }
 
-// derivedRunJobLookupBackoffs bounds the retry of the post-admission job read in
-// the freshness launcher. The run row is already committed by the time the
-// launcher runs, so a transient contention error must not cost the run; a
-// persistent one must still terminalize it rather than spin forever.
-var derivedRunJobLookupBackoffs = []time.Duration{
+// derivedRunRetryBackoffs bounds the freshness launcher's two post-admission
+// reads: the job lookup and the pre-execution status fence. The run row is
+// already committed by the time the launcher runs, so a transient contention
+// error must neither cost the run nor be mistaken for an answer; a persistent
+// one must still terminalize it rather than spin forever.
+var derivedRunRetryBackoffs = []time.Duration{
 	50 * time.Millisecond,
 	250 * time.Millisecond,
 	time.Second,
@@ -176,9 +177,26 @@ func launchDerivedRun(
 	// without this the local executor would launch containers for a cancelled
 	// run — the cancel reconciler stops them later, but a short task finishes
 	// its side effects first.
-	if reason := derivedRunNotLaunchable(ctx, store, r); reason != "" {
+	switch verdict, reason := derivedRunFence(ctx, store, r); verdict {
+	case fenceStop:
 		log.Info("freshness: derived run is no longer launchable; not executing",
 			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
+		return
+	case fenceUnresolved:
+		// Fail CLOSED. A cancellation that landed before this launcher
+		// registered is visible only in the row, so an unreadable status cannot
+		// be read as "still active" — that is precisely the case where
+		// proceeding executes a cancelled run. Terminalize conditionally so the
+		// run is not stranded either; if it was already cancelled this is a
+		// no-op, and if the database is this unwell the run could not have
+		// executed anyway.
+		log.Error("freshness: could not confirm a derived run is still active; failing it instead of executing",
+			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
+		cause := fmt.Errorf("freshness: could not confirm derived run %s is still active: %s", r.ID, reason)
+		if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+			log.Error("freshness: derived run could not be finalized after an unresolved status fence; leaving it for an operator",
+				"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+		}
 		return
 	}
 	if err := execute(ctx, j, r); err != nil {
@@ -187,31 +205,61 @@ func launchDerivedRun(
 	}
 }
 
-// derivedRunNotLaunchable reports why an admitted derived run must not be
-// executed, or "" when it is still launchable.
+// fenceVerdict is the pre-execution status fence's answer.
+type fenceVerdict int
+
+const (
+	// fenceLaunch means the run was CONFIRMED still active.
+	fenceLaunch fenceVerdict = iota
+	// fenceStop means the run is cancelled or otherwise terminal.
+	fenceStop
+	// fenceUnresolved means the run's status could not be established. It is
+	// deliberately distinct from fenceLaunch: "I could not check" is not
+	// "it is fine".
+	fenceUnresolved
+)
+
+// derivedRunFence decides whether an admitted derived run may still be handed
+// to an engine.
 //
 // Two independent checks, because they cover different windows: ctx.Err()
 // catches a cancellation delivered through the in-process registry, and the
 // store read catches one that landed BEFORE this launcher registered, or whose
 // run_cancelled event the non-blocking bus dropped (the reason
-// StartRunCancelReconciler exists at all).
-func derivedRunNotLaunchable(ctx context.Context, store *run.Store, r *run.JobRun) string {
+// StartRunCancelReconciler exists at all). The store read is the only evidence
+// for that second window, so a transient failure to perform it is retried on a
+// bounded schedule and, if it never succeeds, reported as unresolved rather
+// than waved through.
+func derivedRunFence(ctx context.Context, store *run.Store, r *run.JobRun) (fenceVerdict, string) {
 	if err := ctx.Err(); err != nil {
-		return err.Error()
+		return fenceStop, err.Error()
 	}
-	current, err := store.Get(r.ID)
-	if err != nil || current == nil {
-		// An unreadable status is treated as launchable: job.Run re-reads the
-		// run and finalizes it, which beats silently dropping a live run.
-		log.Warn("freshness: could not re-read a derived run before executing it; proceeding",
-			"job_id", r.JobID, "run_id", r.ID, "error", err)
-		return ""
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		current, err := store.Get(r.ID)
+		switch {
+		case err != nil:
+			lastErr = err
+		case current == nil:
+			lastErr = fmt.Errorf("run %s not found", r.ID)
+		default:
+			switch current.Status {
+			case run.StatusCancelled, run.StatusSucceeded, run.StatusFailed, run.StatusSkipped:
+				return fenceStop, "run is " + string(current.Status)
+			}
+			return fenceLaunch, ""
+		}
+		// A row that is genuinely gone will not reappear; do not burn the
+		// schedule on it.
+		if errors.Is(lastErr, gorm.ErrRecordNotFound) || attempt >= len(derivedRunRetryBackoffs) {
+			return fenceUnresolved, lastErr.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return fenceStop, ctx.Err().Error()
+		case <-time.After(derivedRunRetryBackoffs[attempt]):
+		}
 	}
-	switch current.Status {
-	case run.StatusCancelled, run.StatusSucceeded, run.StatusFailed, run.StatusSkipped:
-		return "run is " + string(current.Status)
-	}
-	return ""
 }
 
 // loadDerivedRunJob reads the job behind an already-admitted derived run,
@@ -232,13 +280,13 @@ func loadDerivedRunJob(
 			return j, nil
 		}
 		lastErr = err
-		if errors.Is(err, gorm.ErrRecordNotFound) || attempt >= len(derivedRunJobLookupBackoffs) {
+		if errors.Is(err, gorm.ErrRecordNotFound) || attempt >= len(derivedRunRetryBackoffs) {
 			return nil, lastErr
 		}
 		select {
 		case <-ctx.Done():
 			return nil, lastErr
-		case <-time.After(derivedRunJobLookupBackoffs[attempt]):
+		case <-time.After(derivedRunRetryBackoffs[attempt]):
 		}
 	}
 }

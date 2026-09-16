@@ -550,6 +550,38 @@ var (
 	// retry is refused because the job is paused. A human pause outranks an agent
 	// retry (design-agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
+)
+
+// RunCommittedError reports a start that FAILED after its run was already
+// committed and live: the row exists, run_started has been published and the
+// lease is taken, but the record could not be read back.
+//
+// It carries the exact run id so a caller can drive or finalize the run it
+// actually created. That identity matters: searching for "a matching running
+// run" instead would, during a leader change, let one node adopt and execute a
+// run another node created and is already executing.
+type RunCommittedError struct {
+	RunID uuid.UUID
+	JobID uuid.UUID
+	Err   error
+}
+
+func (e *RunCommittedError) Error() string {
+	return fmt.Sprintf("run: %s was committed but could not be read back: %v", e.RunID, e.Err)
+}
+
+func (e *RunCommittedError) Unwrap() error { return e.Err }
+
+// CommittedRunID reports the run a failed start already committed, if any.
+func CommittedRunID(err error) (uuid.UUID, bool) {
+	var committed *RunCommittedError
+	if errors.As(err, &committed) && committed.RunID != uuid.Nil {
+		return committed.RunID, true
+	}
+	return uuid.Nil, false
+}
+
+var (
 	// ErrPartitionNotRetryable is returned by RetryPartition when the addressed
 	// instance is terminal but not FAILED. The retryable set is documented at
 	// the guard in RetryPartition; controllers surface this as 409 with the
@@ -1493,7 +1525,15 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	// (nil, context.Canceled) — the caller then neither executes nor finalizes
 	// it, and the row is stranded `running` with no tasks and no engine. Only
 	// the transaction above honours cancellation; this read is detached.
-	return s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), model.ID)
+	loaded, err := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), model.ID)
+	if err != nil {
+		// Still committed, still live. Report the failure with the run's exact
+		// identity so the caller can drive or finalize THAT run — never a
+		// look-alike found by searching, which on another node would mean
+		// executing someone else's run twice.
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Err: err}
+	}
+	return loaded, nil
 }
 
 // taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
