@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -15,12 +16,17 @@ import (
 // All operations are safe to call when owner mode is disabled — they
 // simply become no-ops.
 type LeaseStore struct {
-	db *gorm.DB
+	db            *gorm.DB
+	ownerInMemory bool
 }
 
 // NewLeaseStore constructs a LeaseStore backed by the given connection.
 func NewLeaseStore(db *gorm.DB) *LeaseStore {
-	return &LeaseStore{db: db}
+	vars := env.Variables()
+	return &LeaseStore{
+		db:            db,
+		ownerInMemory: ownerMemoryAdvancementMode(vars),
+	}
 }
 
 func deleteRunLeaseTx(tx *gorm.DB, runID uuid.UUID) error {
@@ -50,24 +56,41 @@ func (ls *LeaseStore) AcquireLease(ctx context.Context, runID uuid.UUID, ownerNo
 		Generation:     1,
 	}
 
-	// INSERT OR IGNORE — if the row already exists, leave it alone.
-	result := ls.db.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(lease)
-	if result.Error != nil {
-		return 0, result.Error
-	}
-
-	if result.RowsAffected == 0 {
-		// Row already existed; read back the current generation so callers know.
-		var existing models.RunLease
-		if err := ls.db.WithContext(ctx).First(&existing, "run_id = ?", runID.String()).Error; err != nil {
-			return 0, err
+	var generation int64
+	acquire := func(tx *gorm.DB) error {
+		// INSERT OR IGNORE — if the row already exists, leave it alone.
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(lease)
+		if result.Error != nil {
+			return result.Error
 		}
-		return existing.Generation, nil
+		generation = lease.Generation
+		if result.RowsAffected == 0 {
+			var existing models.RunLease
+			if err := tx.First(&existing, "run_id = ?", runID.String()).Error; err != nil {
+				return err
+			}
+			generation = existing.Generation
+		}
+		return nil
 	}
-
-	return lease.Generation, nil
+	conn := ls.db.WithContext(ctx)
+	if !ls.ownerInMemory {
+		err := acquire(conn)
+		return generation, err
+	}
+	// The first memory-owner lease is a durable handoff from SQL fallback.
+	// Serialize it with primary SQL terminal writes on the JobRun: a fallback
+	// commit wins before this lease (and recovery replays its sequence), or the
+	// lease wins and the fallback's no-lease predicate rejects the late write.
+	err := withStoreBusyRetry(func() error {
+		return conn.Transaction(func(tx *gorm.DB) error {
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
+			return acquire(tx)
+		})
+	})
+	return generation, err
 }
 
 // AcquireExpiredLeases takes over every run lease whose holder let it expire

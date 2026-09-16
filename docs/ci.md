@@ -328,6 +328,17 @@ Distributed / owner-memory / agent-auth / infra keep their existing mode
 filters and PASS floors. `-count=1` ensures a cached test result never
 replaces a live integration run.
 
+After its full local-mode suite, Helm shard 1 rolls the same single-replica
+StatefulSet into distributed owner/worker mode and runs only
+`TestDistributedKubernetesDeadlines`. The phase preserves the chart's node
+identity, waits for the rollout, and provides the runner with the kind
+kubeconfig and a host address reachable by task pods for its execution witness.
+The regression must observe actual distributed work and covers task/run
+expiry plus a positive control. Its log must contain the scenario's PASS and
+no skipped subcases; an empty selection or skipped method fails the job.
+The other Helm shards and the existing complete-suite coverage keep their
+current execution mode. Helm's existing promotion/merge-gate policy is unchanged.
+
 `test/shard_timings.json` contains scheduling estimates in milliseconds:
 the maximum duration across the four full-suite engine/architecture lanes
 in [run 34236365746](https://github.com/caesium-cloud/caesium/actions/runs/34236365746),

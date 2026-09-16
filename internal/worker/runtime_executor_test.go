@@ -78,6 +78,148 @@ func TestMonitorTaskStopsAtomOnContextCancel(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Same(t, preExec, got)
 	require.Equal(t, 1, engine.stopCalls, "monitorTask must clean up the atom on context cancellation to avoid leaks")
+	require.NotNil(t, engine.stopRequest)
+	require.Equal(t, preExec.ID(), engine.stopRequest.ID, "cleanup must target the exact attempt atom")
+	require.True(t, engine.stopRequest.Force)
+	require.Zero(t, engine.stopRequest.Timeout, "force-stop must retain immediate Docker/Podman termination semantics")
+}
+
+func TestRuntimeExecutorExpiredRunDeadlineDefersAtomicFailureToOwner(t *testing.T) {
+	f := seedProducerTaskRun(t, "expired-run-deadline")
+	setWorkerRunDeadline(t, f.db, f.jobRun, f.taskRun, time.Second, time.Now().Add(-2*time.Second))
+
+	sink := &fakeSink{}
+	engine := &captureCreateEngine{}
+	executor := &runtimeExecutor{
+		store:     f.store,
+		localSink: sink,
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}
+	executor.Execute(context.Background(), f.taskRun)
+
+	require.Zero(t, sink.failed, "run deadlines must not enter the ordinary task-failure sink")
+	require.Zero(t, sink.cached)
+	require.Zero(t, sink.succeeded)
+	require.Nil(t, engine.createReq, "an already-expired run must not start an atom")
+}
+
+func TestRuntimeExecutorCacheCrossingRunDeadlineDefersAtomicFailureToOwner(t *testing.T) {
+	f := seedProducerTaskRun(t, "cache-crossed-run-deadline")
+
+	// Populate a real cache entry before applying the short deadline to the
+	// next execution window.
+	coldEngine := &partitionEmittingEngine{logs: producerMarkerLog}
+	(&runtimeExecutor{
+		store:     f.store,
+		localSink: NewLocalSink(f.store),
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return coldEngine, nil
+		},
+	}).Execute(context.Background(), f.taskRun)
+
+	fresh := f.newProducerRunAttempt(t)
+	setWorkerRunDeadline(t, f.db, f.jobRun, fresh, 150*time.Millisecond, time.Now())
+
+	blocked := false
+	callbackName := "test:cross_run_deadline_during_cache_read"
+	require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "task_caches" && !blocked {
+			blocked = true
+			time.Sleep(200 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Query().Remove(callbackName) })
+
+	sink := &fakeSink{}
+	hitEngine := &captureCreateEngine{}
+	(&runtimeExecutor{
+		store:     f.store,
+		localSink: sink,
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return hitEngine, nil
+		},
+	}).Execute(context.Background(), fresh)
+
+	require.True(t, blocked, "the test must cross the deadline inside the real cache read")
+	require.Zero(t, sink.failed, "a run deadline discovered after cache lookup must not enter ordinary task failure")
+	require.Zero(t, sink.cached, "the stale cache result must not publish")
+	require.Zero(t, sink.succeeded)
+	require.Nil(t, hitEngine.createReq, "a cache hit whose run budget expired must not fall through to execution")
+}
+
+func TestRuntimeExecutorLogCaptureCrossingRunDeadlineRejectsTerminalResult(t *testing.T) {
+	for _, result := range []atom.Result{atom.Success, atom.Failure} {
+		t.Run(string(result), func(t *testing.T) {
+			f := seedProducerTaskRun(t, "log-crossed-run-deadline-"+string(result))
+			f.taskRun.CacheEnabled = false
+			require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", f.taskRun.ID).
+				Update("cache_enabled", false).Error)
+			setWorkerRunDeadline(t, f.db, f.jobRun, f.taskRun, 100*time.Millisecond, time.Now())
+
+			sink := &fakeSink{}
+			engine := &captureCreateEngine{
+				logs:       "container finished before its run budget\n",
+				logsDelay:  150 * time.Millisecond,
+				waitResult: result,
+			}
+			(&runtimeExecutor{
+				store:     f.store,
+				localSink: sink,
+				engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+					return engine, nil
+				},
+			}).Execute(context.Background(), f.taskRun)
+
+			require.NotNil(t, engine.createReq)
+			require.Zero(t, sink.failed, "a crossed run deadline must not enter the ordinary failure sink")
+			require.Zero(t, sink.cached)
+			require.Zero(t, sink.succeeded, "a result captured after the run deadline must not publish")
+		})
+	}
+}
+
+func TestRuntimeExecutorLogParseErrorAfterRunDeadlineDefersToOwner(t *testing.T) {
+	f := seedProducerTaskRun(t, "log-parse-error-crossed-run-deadline")
+	f.taskRun.CacheEnabled = false
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", f.taskRun.ID).
+		Update("cache_enabled", false).Error)
+	setWorkerRunDeadline(t, f.db, f.jobRun, f.taskRun, 100*time.Millisecond, time.Now())
+
+	sink := &fakeSink{}
+	engine := &captureCreateEngine{
+		logs:       "##caesium::partitions not-json\n",
+		logsDelay:  150 * time.Millisecond,
+		waitResult: atom.Success,
+	}
+	(&runtimeExecutor{
+		store:     f.store,
+		localSink: sink,
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}).Execute(context.Background(), f.taskRun)
+
+	require.NotNil(t, engine.createReq)
+	require.Zero(t, sink.failed, "a post-deadline parse error must not enter the ordinary failure sink")
+	require.Zero(t, sink.cached)
+	require.Zero(t, sink.succeeded)
+}
+
+func setWorkerRunDeadline(t *testing.T, db *gorm.DB, jobRun *models.JobRun, taskRun *models.TaskRun, timeout time.Duration, started time.Time) {
+	t.Helper()
+	descriptor, err := json.Marshal(models.TaskExecutionDescriptor{
+		SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
+		Timing:        models.TaskExecutionTiming{RunTimeout: timeout},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", jobRun.ID).
+		Update("timeout_started_at", started).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRun.ID).
+		Update("execution_descriptor", descriptor).Error)
+	jobRun.TimeoutStartedAt = &started
+	taskRun.ExecutionDescriptor = datatypes.JSON(descriptor)
 }
 
 type fakeMonitorAtom struct {
@@ -95,10 +237,11 @@ func (a *fakeMonitorAtom) StoppedAt() time.Time { return time.Time{} }
 func (a *fakeMonitorAtom) Engine() atom.Engine  { return nil }
 
 type fakeMonitorEngine struct {
-	waitResult atom.Atom
-	waitErr    error
-	waitBlocks bool
-	stopCalls  int
+	waitResult  atom.Atom
+	waitErr     error
+	waitBlocks  bool
+	stopCalls   int
+	stopRequest *atom.EngineStopRequest
 }
 
 func (e *fakeMonitorEngine) Get(*atom.EngineGetRequest) (atom.Atom, error) { return e.waitResult, nil }
@@ -118,8 +261,9 @@ func (e *fakeMonitorEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error)
 	}
 	return e.waitResult, nil
 }
-func (e *fakeMonitorEngine) Stop(*atom.EngineStopRequest) error {
+func (e *fakeMonitorEngine) Stop(req *atom.EngineStopRequest) error {
 	e.stopCalls++
+	e.stopRequest = req
 	return nil
 }
 func (e *fakeMonitorEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
@@ -187,13 +331,16 @@ func TestRunSchemaValidationFailReturnsErrorForMissingRequiredOutput(t *testing.
 
 func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
 	for _, tc := range []struct {
-		name, freeze string
-		checks       bool
+		name, freeze  string
+		checks        bool
+		rejected      bool
+		errorContains string
 	}{
-		{"unpinned", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`, false},
-		{"pinned ancestor", `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":true}}`, true},
-		{"legacy", `{}`, true},
-		{"malformed", `{`, true},
+		{name: "unpinned", freeze: `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":false}}`},
+		{name: "pinned ancestor", freeze: `{"schemaVersion":1,"run":{"imageIdentityChecksRequired":true}}`, checks: true},
+		{name: "missing identity freeze", freeze: `{"schemaVersion":1,"run":{}}`, checks: true},
+		{name: "unsupported schema", freeze: `{}`, rejected: true, errorContains: "unsupported task execution descriptor version"},
+		{name: "malformed descriptor", freeze: `{`, rejected: true, errorContains: "decode task execution descriptor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := jobdeftestutil.OpenTestDB(t)
@@ -315,6 +462,15 @@ func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
 				},
 			}
 			executor.Execute(context.Background(), taskRun)
+			if tc.rejected {
+				require.Zero(t, identityQueries, "invalid deadline descriptors must fail before cache identity work")
+				require.Nil(t, engine.createReq, "invalid deadline descriptors must not launch an atom")
+				var persisted models.TaskRun
+				require.NoError(t, db.First(&persisted, "id = ?", taskRun.ID).Error)
+				require.Equal(t, string(run.TaskStatusFailed), persisted.Status)
+				require.Contains(t, persisted.Error, tc.errorContains)
+				return
+			}
 			if tc.checks {
 				require.Positive(t, identityQueries)
 			} else {
@@ -733,6 +889,8 @@ type captureCreateEngine struct {
 	// container, which is what every pre-existing caller expects.
 	logs       string
 	logsReader io.ReadCloser
+	logsDelay  time.Duration
+	waitResult atom.Result
 	stopCalls  int
 }
 
@@ -751,7 +909,11 @@ func (e *captureCreateEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, 
 }
 
 func (e *captureCreateEngine) Wait(*atom.EngineWaitRequest) (atom.Atom, error) {
-	return &fakeMonitorAtom{id: "runtime", result: atom.Success}, nil
+	result := e.waitResult
+	if result == atom.Unknown {
+		result = atom.Success
+	}
+	return &fakeMonitorAtom{id: "runtime", result: result}, nil
 }
 
 func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
@@ -760,6 +922,9 @@ func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
 }
 
 func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	if e.logsDelay > 0 {
+		time.Sleep(e.logsDelay)
+	}
 	if e.logsReader != nil {
 		return e.logsReader, nil
 	}

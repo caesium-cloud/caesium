@@ -22,7 +22,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent claimed tasks per node. |
 | `CAESIUM_WORKER_POLL_INTERVAL` | `15s` | Fallback poll cadence for new claimable tasks. Distributed wakeups should handle normal claim latency. |
 | `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts. |
-| `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
+| `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim; also caps each finished completion report during owner recovery (default `5m`). |
 | `CAESIUM_DATABASE_MAX_OPEN_CONNS` | `4` | Max SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_MAX_IDLE_CONNS` | `2` | Max idle SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_SHARDS` | `1` | Number of dqlite hot write shards. Values greater than `1` are Phase 4 horizontal-scaling mode and require the internal dqlite backend. |
@@ -35,6 +35,17 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
 | `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
+
+Job metadata can override the server task timeout with `taskTimeout` and set a
+whole-run deadline with `runTimeout`. These values are frozen when task rows are
+registered. A worker or run-owner takeover therefore uses the original absolute
+deadline rather than granting fresh time, while explicitly reopening a terminal
+run starts a new execution window under the same recorded limits. A run timeout
+atomically fails every unfinished task before late worker, owner, or cache-hit
+completion can publish successors.
+Kubernetes cleanup requests a one-second termination grace period. The pod
+remains visible while kubelet terminates it; Caesium does not use zero-grace API
+deletion as evidence that a container has stopped.
 
 ## Cancelling a Run Reaches the Container
 
@@ -80,6 +91,8 @@ Run-owner mode assigns each in-flight job run to a single owner node. The owner 
 **Backwards compatibility:** When disabled (the default), the system behaves byte-identically to Phase 1. No `run_leases` rows are written and the `/internal/dispatch` and `/internal/complete` endpoints are not registered.
 
 **Security note:** mTLS on `/internal/dispatch` and `/internal/complete` is **recommended** for Phase A. The `CAESIUM_INTERNAL_WAKEUP_TOKEN` bearer-token is used for Phase A authentication. A startup warning is emitted if owner mode is on without mTLS material configured. Phase B will enforce mTLS as a hard requirement. Both endpoints require the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` as the existing wakeup endpoint.
+
+Finished completion reports keep their worker claim registered for renewal and claim-loss checks. Owner recovery retries retain the same result for at most one `CAESIUM_WORKER_LEASE_TTL` from the start of reporting, or until the run deadline or claim context ends earlier. If this window expires, the worker logs `completion retention expired`, releases its slot, and leaves recovery to the owner after lease expiry. It does not retry the finished atom or publish a task failure for a delivery timeout. Alternating recovery and contention replies do not reset the contention retry budget.
 
 **Recovery fallback:** If the owner node crashes, its run lease expires after `CAESIUM_RUN_LEASE_TTL` (default 30s). Tasks left with `claimed_by=""` are recovered by the existing `ClaimNext` path on any node. The `owner_generation=0` on legacy and flag-off rows ensures they remain mutable by any node.
 

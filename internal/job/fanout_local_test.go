@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -649,6 +650,34 @@ func TestFanOutLocalContinueRunsIndependentSiblings(t *testing.T) {
 	for _, p := range []string{"b", "c", "d"} {
 		require.Equal(t, string(run.TaskStatusSucceeded), status[p],
 			"continue must keep running independent sibling %s", p)
+	}
+}
+
+func TestFanOutLocalRunTimeoutOverridesEarlierPartitionFailure(t *testing.T) {
+	f := newFanOutFixture(t, `["failed","running","pending"]`, &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 16,
+		MaxParallel:   2,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}, 0)
+	f.engine.createErrByPartition["failed"] = errors.New("ordinary partition failure")
+	f.engine.runDurationByPartition["running"] = 10 * time.Second
+	f.engine.runDurationByPartition["pending"] = 10 * time.Second
+
+	vars := defaultFanOutVars()
+	opts := withTestDeps(f.store, vars, f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	err := New(&models.Job{ID: f.jobID, RunTimeout: 100 * time.Millisecond}, opts...).Run(context.Background())
+	require.ErrorContains(t, err, "run timed out after 100ms")
+
+	rows := f.instanceRows(t)
+	require.Len(t, rows, 3)
+	for _, row := range rows {
+		require.Equal(t, string(run.TaskStatusFailed), row.Status, "partition %s", row.PartitionValue)
+		if row.PartitionValue == "failed" {
+			require.Contains(t, row.Error, "ordinary partition failure")
+		} else {
+			require.Contains(t, row.Error, "run timed out after 100ms")
+		}
 	}
 }
 

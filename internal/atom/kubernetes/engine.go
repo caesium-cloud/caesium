@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -26,6 +27,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+const kubernetesStopAPITimeout = 30 * time.Second
 
 // kueueQueueLabel is the label Kueue reads to assign a workload to a LocalQueue.
 // Stamping it on the pod delegates admission to Kueue: its webhook gates the pod
@@ -196,14 +199,58 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 	// sees a context-cancelled error — leaving nothing to clean up, since
 	// we would never learn the pod exists. spec.Name is generated
 	// client-side above, before this call, so it stays findable regardless
-	// of which context the call itself used. Running it to a definitive
-	// completion first, then checking e.ctx separately below, means Create
-	// always knows whether a pod exists and can remove it if the caller
-	// has since given up.
+	// of which context the call itself used. The bounded request may still
+	// end with an ambiguous allocation; cleanup uses that unique name both
+	// while the response is pending and after it returns.
 	createCtx, cancelCreate := context.WithTimeout(context.Background(), createRequestTimeout)
 	defer cancelCreate()
+	if err := e.ctx.Err(); err != nil {
+		return nil, err
+	}
+	// The API may have persisted and scheduled this pod while its Create
+	// response is still in flight. Start deletion at the caller's deadline,
+	// using the name generated above, rather than waiting for that response.
+	// A delete may race ahead of creation and return NotFound; retry while
+	// Create remains pending, then reconcile once more after its response.
+	createReturned := make(chan struct{})
+	earlyCleanupDone := make(chan struct{})
+	stopEarlyCleanup := context.AfterFunc(e.ctx, func() {
+		defer close(earlyCleanupDone)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-createReturned:
+				return
+			case <-createCtx.Done():
+				return
+			default:
+			}
+			// Create may return while a delete is in flight. Keep this
+			// individual API call short so joining the watcher cannot add
+			// the full ordinary 30-second Stop budget to completion.
+			err := e.Stop(&atom.EngineStopRequest{ID: spec.Name, Force: true, Timeout: time.Second})
+			if err == nil {
+				return
+			}
+			if !apierrors.IsNotFound(err) {
+				log.Warn("failed to delete pod during pending Create; retrying", "name", spec.Name, "error", err)
+			}
+			select {
+			case <-createReturned:
+				return
+			case <-createCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	})
 
 	pod, err := e.backend.Create(createCtx, spec, metav1.CreateOptions{})
+	close(createReturned)
+	if !stopEarlyCleanup() {
+		<-earlyCleanupDone
+	}
 	if err != nil {
 		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			// A caller cancellation or the detached request's own deadline
@@ -237,7 +284,7 @@ const createRequestTimeout = 30 * time.Second
 // Stop already deletes against a detached context.Background() (see its own
 // comment), so this is safe to call regardless of why Create is failing.
 func (e *kubernetesEngine) cleanupFailedCreate(name string, cause error) {
-	if err := e.Stop(&atom.EngineStopRequest{ID: name, Force: true}); err != nil {
+	if err := e.Stop(&atom.EngineStopRequest{ID: name, Force: true}); err != nil && !apierrors.IsNotFound(err) {
 		log.Warn("failed to clean up pod after Create failed", "name", name, "cause", cause, "error", err)
 	}
 }
@@ -287,21 +334,27 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 // (e.g. by a run-level timeout).
 func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 	var (
-		cancel context.CancelFunc
-		ctx    = context.Background()
-		bg     = metav1.DeletePropagationBackground
-		fg     = metav1.DeletePropagationForeground
-		opts   = metav1.DeleteOptions{PropagationPolicy: &fg}
+		bg   = metav1.DeletePropagationBackground
+		fg   = metav1.DeletePropagationForeground
+		opts = metav1.DeleteOptions{PropagationPolicy: &fg}
 	)
 
 	if req.Force {
 		opts.PropagationPolicy = &bg
+		// Use a short graceful deletion for deadline stops and ordinary teardown.
+		// Kubelet kills a TERM-ignoring container after this grace period before
+		// removing the pod. Zero would instead remove the API object without
+		// waiting for kubelet, losing the record of a possibly still-running pod.
+		grace := int64(1)
+		opts.GracePeriodSeconds = &grace
 	}
 
-	if req.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
-		defer cancel()
+	apiTimeout := req.Timeout
+	if apiTimeout <= 0 {
+		apiTimeout = kubernetesStopAPITimeout
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
 
 	return e.backend.Delete(ctx, req.ID, opts)
 }
