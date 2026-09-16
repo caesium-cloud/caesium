@@ -195,8 +195,30 @@ func sendDiffRequest(ctx context.Context, server, apiKey string, defs []schema.D
 		return nil, fmt.Errorf("job diff failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	return decodeJobDiffResponse(body)
+}
+
+func decodeJobDiffResponse(body []byte) (*jobDiffResponse, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, fmt.Errorf("job diff response was empty")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return nil, fmt.Errorf("job diff response was not valid JSON: %w", err)
+	}
+	for _, key := range []string{"added", "modified", "removed"} {
+		v, ok := raw[key]
+		if !ok {
+			return nil, fmt.Errorf("job diff response missing %s", key)
+		}
+		v = bytes.TrimSpace(v)
+		if len(v) == 0 || bytes.Equal(v, []byte("null")) || v[0] != '[' {
+			return nil, fmt.Errorf("job diff response %s must be an array", key)
+		}
+	}
 	var diffResp jobDiffResponse
-	if err := json.Unmarshal(body, &diffResp); err != nil {
+	if err := json.Unmarshal(trimmed, &diffResp); err != nil {
 		return nil, fmt.Errorf("job diff response was not valid JSON: %w", err)
 	}
 	return &diffResp, nil

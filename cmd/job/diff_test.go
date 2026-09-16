@@ -368,6 +368,81 @@ func TestSendDiffRequestSurfacesHTTPError(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid definition")
 }
 
+func TestSendDiffRequestRejectsMalformedResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "null", body: "null", wantErr: "job diff response was empty"},
+		{name: "empty object", body: "{}", wantErr: "job diff response missing added"},
+		{name: "unrelated message", body: `{"message":"backend unavailable"}`, wantErr: "job diff response missing added"},
+		{name: "empty body", body: "", wantErr: "job diff response was empty"},
+		{name: "not an object", body: `"not-an-object"`, wantErr: "job diff response was not valid JSON"},
+		{name: "null added", body: `{"added":null,"modified":[],"removed":[]}`, wantErr: "job diff response added must be an array"},
+		{name: "missing removed", body: `{"added":[],"modified":[]}`, wantErr: "job diff response missing removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			_, err := sendDiffRequest(context.Background(), srv.URL, "", nil)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+			require.NotContains(t, err.Error(), "No changes detected.")
+		})
+	}
+}
+
+func TestSendDiffRequestAcceptsEmptyDiffArrays(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":[],"modified":[],"removed":[]}`))
+	}))
+	defer srv.Close()
+
+	resp, err := sendDiffRequest(context.Background(), srv.URL, "", nil)
+	require.NoError(t, err)
+	require.Empty(t, resp.Added)
+	require.Empty(t, resp.Modified)
+	require.Empty(t, resp.Removed)
+}
+
+func TestDiffMalformedHTTPResponseIsNotNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.yaml"), []byte(diffTestManifest("n", "echo n")), 0o644))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	stdout, _, err := executeDiffCommand(t, "--path", dir, "--server", srv.URL)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "job diff response missing added")
+	require.NotContains(t, stdout, "No changes detected.")
+}
+
+func TestDiffEmptyArraysPrintNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.yaml"), []byte(diffTestManifest("n", "echo n")), 0o644))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"added":[],"modified":[],"removed":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	stdout, _, err := executeDiffCommand(t, "--path", dir, "--server", srv.URL)
+	require.NoError(t, err)
+	require.Equal(t, "No changes detected.\n", stdout)
+}
+
 func TestWriteJobDiffJSONPrunePutsDeletesInRemoved(t *testing.T) {
 	cmd, out := testDiffCmd()
 	scoped := scopeJobDiff(&jobDiffResponse{
