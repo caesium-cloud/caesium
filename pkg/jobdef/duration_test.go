@@ -26,10 +26,14 @@ func TestParseJSONDuration(t *testing.T) {
 		{name: "string minute", raw: `"1m"`, field: "runTimeout", want: time.Minute},
 		{name: "integer nanoseconds", raw: `1000000000`, field: "retryDelay", want: time.Second},
 		{name: "zero integer", raw: `0`, field: "taskTimeout", want: 0},
+		{name: "zero decimal", raw: `0.0`, field: "retryDelay", want: 0},
+		{name: "zero scientific", raw: `0e10`, field: "retryDelay", want: 0},
+		{name: "zero huge negative exponent", raw: `0e-1000000000`, field: "retryDelay", want: 0},
 		{name: "null", raw: `null`, field: "retryDelay", want: 0},
 		{name: "empty", raw: ``, field: "retryDelay", want: 0},
 		{name: "scientific integer", raw: `1e9`, field: "retryDelay", want: time.Second},
 		{name: "integral decimal", raw: `1.0`, field: "retryDelay", want: time.Nanosecond},
+		{name: "integral scientific decimal", raw: `10e-1`, field: "retryDelay", want: time.Nanosecond},
 		{
 			name:  "max int64",
 			raw:   strconv.FormatInt(math.MaxInt64, 10),
@@ -84,6 +88,30 @@ func TestParseJSONDuration(t *testing.T) {
 			field:   "runTimeout",
 			wantErr: "runTimeout must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
 		},
+		{
+			name:    "fractional scientific",
+			raw:     `1e-9`,
+			field:   "runTimeout",
+			wantErr: "runTimeout must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
+		{
+			name:    "underflow scientific",
+			raw:     `1e-1000000000`,
+			field:   "runTimeout",
+			wantErr: "runTimeout must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
+		{
+			name:    "underflow scientific 1e-700000000",
+			raw:     `1e-700000000`,
+			field:   "runTimeout",
+			wantErr: "runTimeout must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
+		{
+			name:    "huge positive exponent",
+			raw:     `1e600000000`,
+			field:   "retryDelay",
+			wantErr: "retryDelay must be a duration string (e.g. 1s, 30s) or integer nanoseconds",
+		},
 	}
 
 	for _, tt := range tests {
@@ -98,6 +126,23 @@ func TestParseJSONDuration(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseExactInt64JSONNumberHugeExponentAllocs(t *testing.T) {
+	// AllocsPerRun pins GOMAXPROCS to 1; keep this test sequential.
+	lits := []string{"1e600000000", "-1e600000000", "1e-1000000000", "1e-700000000"}
+	for _, lit := range lits {
+		t.Run(lit, func(t *testing.T) {
+			n, ok := parseExactInt64JSONNumber(lit)
+			require.False(t, ok)
+			require.Zero(t, n)
+
+			allocs := testing.AllocsPerRun(200, func() {
+				_, _ = parseExactInt64JSONNumber(lit)
+			})
+			require.Less(t, allocs, 8.0, "extreme exponent %q allocated %v times; must not materialize an exponent-sized integer", lit, allocs)
 		})
 	}
 }
