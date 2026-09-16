@@ -124,10 +124,16 @@ type LivenessResponse struct {
 	Uptime time.Duration `json:"uptime"`
 }
 
+// activeHealthChecker builds the checker the exported handlers use. It is a var
+// only so a test can drive the REAL handlers — the same routes, status-code
+// logic and JSON — against a real dqlite cluster without also standing up a
+// database. Production never writes it.
+var activeHealthChecker = defaultHealthChecker
+
 // Health reports full cluster and dependency health, and answers whether THIS
 // node can serve. It is also what /health/ready answers.
 func Health(c *echo.Context) error {
-	return defaultHealthChecker().handle(c)
+	return activeHealthChecker().handle(c)
 }
 
 // HealthReady is the Kubernetes READINESS answer: can this replica serve
@@ -136,7 +142,7 @@ func Health(c *echo.Context) error {
 // leader, for whatever reason, must leave the Service endpoints rather than
 // keep receiving traffic it cannot answer.
 func HealthReady(c *echo.Context) error {
-	return defaultHealthChecker().handle(c)
+	return activeHealthChecker().handle(c)
 }
 
 // HealthLive is the Kubernetes LIVENESS answer: is the process running and

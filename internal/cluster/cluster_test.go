@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -439,13 +440,65 @@ func TestSnapshotReturnsUnknownBeforeAnyObservationAndDoesNotBlock(t *testing.T)
 	require.False(t, warm.Stale)
 }
 
+// TestSnapshotRefreshesAnAlreadyObservedView: an observation that has already
+// been taken must keep being retaken. A regression that only ever populated the
+// cache once would still satisfy every "first observation" assertion, and the
+// console would then show a snapshot frozen at the moment the cluster was last
+// healthy — which is the failure mode issue #494 reported in the first place.
+func TestSnapshotRefreshesAnAlreadyObservedView(t *testing.T) {
+	var healthy atomic.Bool
+	healthy.Store(true)
+
+	restore := stub(t,
+		func(context.Context) ([]client.NodeInfo, string, error) {
+			return []client.NodeInfo{
+				{ID: 1, Address: "a:9001", Role: client.Voter},
+				{ID: 2, Address: "b:9001", Role: client.Voter},
+				{ID: 3, Address: "c:9001", Role: client.Voter},
+			}, "a:9001", nil
+		},
+		func(_ context.Context, addr string) error {
+			if addr == "c:9001" && !healthy.Load() {
+				return errors.New("connection refused")
+			}
+			return nil
+		},
+	)
+	defer restore()
+	defer SetRefreshInterval(10 * time.Millisecond)()
+
+	require.Eventually(t, func() bool {
+		return Snapshot().Quorum.Status == StatusAvailable
+	}, 5*time.Second, 10*time.Millisecond, "the first observation never completed")
+
+	// The cluster changes underneath an ALREADY observed snapshot.
+	healthy.Store(false)
+
+	require.Eventually(t, func() bool {
+		v := Snapshot()
+		return v.Quorum.Status == StatusDegraded && v.Quorum.ReachableVoters == 2
+	}, 5*time.Second, 10*time.Millisecond, "an already-observed snapshot was never refreshed")
+
+	degraded := Snapshot()
+	dead, ok := degraded.MemberOf("c:9001")
+	require.True(t, ok)
+	require.Equal(t, Unreachable, dead.Reachability)
+
+	// ...and back again, so the refresh is not a one-way latch.
+	healthy.Store(true)
+
+	require.Eventually(t, func() bool {
+		return Snapshot().Quorum.Status == StatusAvailable
+	}, 5*time.Second, 10*time.Millisecond, "recovery was never observed")
+}
+
 func TestSnapshotOnNonDqliteDeploymentIsNotClustered(t *testing.T) {
 	reset()
 	prev := clusteredFunc
 	clusteredFunc = func() bool { return false }
 	t.Cleanup(func() {
-		clusteredFunc = prev
 		reset()
+		clusteredFunc = prev
 	})
 
 	view := Refresh(context.Background())
@@ -515,9 +568,11 @@ func stub(
 	clusteredFunc = func() bool { return true }
 
 	return func() {
+		// reset() first: it waits for any in-flight background refresh, so the
+		// restore below cannot race the goroutine still reading these vars.
+		reset()
 		membershipFunc = prevMembership
 		probeFunc = prevProbe
 		clusteredFunc = prevClustered
-		reset()
 	}
 }

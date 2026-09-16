@@ -94,7 +94,7 @@ export function SystemPage() {
   // only supplementary. It is authenticated, and its auth key lookup is itself
   // a leader-dependent read, so it is the request most likely to stall during
   // the very outage this page has to describe.
-  const nodeRows = mergeNodeRows(clusterCheck, nodes);
+  const nodeRows = mergeNodeRows(rawHealth, nodes);
   const reachableNodes = reachableNodeCount(nodeRows);
   // Node liveness spans every member, voters and non-voters alike.
   const nodeLiveness = nodeLivenessLabel(clusterCheck);

@@ -283,19 +283,29 @@ export interface NodeRow {
  * node query lists that is NOT a current member — configured seeds, historical
  * workers, or rows left over from a stalled query — is reported `unknown`,
  * because nothing current says otherwise.
+ *
+ * It takes the whole health response rather than just the cluster check so it
+ * can tell "health says this deployment has no raft cluster" from "health is
+ * not answering at all". Both leave the cluster check undefined, but only the
+ * first makes the node query a trustworthy liveness source: when health is
+ * down, the cached node array is of unknown age and may well predate whatever
+ * took health down with it.
  */
-export function mergeNodeRows(cluster: ClusterCheck | null | undefined, nodes: Node[]): NodeRow[] {
+export function mergeNodeRows(health: HealthResponse | null | undefined, nodes: Node[]): NodeRow[] {
   const supplementary = new Map(nodes.map((n) => [n.address, n]));
   const rows: NodeRow[] = [];
   const seen = new Set<string>();
 
+  const healthAvailable = health != null;
+  const cluster = health?.checks?.cluster;
   const clustered = !!cluster?.clustered;
   const observedMembers = clustered && cluster?.observed ? (cluster.members ?? []) : [];
   // On a dqlite deployment the raft members are the only current liveness
   // source. Only a deployment with no raft cluster at all (an external
   // database) can take liveness from the node query, because there is nothing
-  // else — and there the server reports every row unknown anyway.
-  const trustNodeQuery = !clustered;
+  // else — and there the server reports every row unknown anyway. And nothing
+  // at all is trustworthy while health itself is unavailable.
+  const trustNodeQuery = healthAvailable && !clustered;
   for (const member of observedMembers) {
     const extra = supplementary.get(member.address);
     seen.add(member.address);

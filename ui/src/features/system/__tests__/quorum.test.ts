@@ -298,7 +298,7 @@ describe("mergeNodeRows", () => {
       node("c:9001", "reachable"), // stale: this member is actually down
     ];
 
-    const rows = mergeNodeRows(degradedCluster, stale);
+    const rows = mergeNodeRows(health(degradedCluster, "degraded"), stale);
 
     expect(rows.map((r) => r.address)).toEqual(["a:9001", "b:9001", "c:9001"]);
     expect(rows.find((r) => r.address === "c:9001")?.reachability).toBe("unreachable");
@@ -307,7 +307,7 @@ describe("mergeNodeRows", () => {
   });
 
   it("still renders every member when the node query returned nothing at all", () => {
-    const rows = mergeNodeRows(degradedCluster, []);
+    const rows = mergeNodeRows(health(degradedCluster, "degraded"), []);
 
     expect(rows).toHaveLength(3);
     expect(rows.find((r) => r.address === "c:9001")?.reachability).toBe("unreachable");
@@ -316,7 +316,7 @@ describe("mergeNodeRows", () => {
   });
 
   it("keeps worker counts from the node query as supplementary detail", () => {
-    const rows = mergeNodeRows(degradedCluster, [node("a:9001", "reachable", 3)]);
+    const rows = mergeNodeRows(health(degradedCluster, "degraded"), [node("a:9001", "reachable", 3)]);
 
     const leader = rows.find((r) => r.address === "a:9001");
     expect(leader?.workersBusy).toBe(3);
@@ -326,7 +326,7 @@ describe("mergeNodeRows", () => {
   });
 
   it("marks a non-member row unknown however confidently the node query claims otherwise", () => {
-    const rows = mergeNodeRows(degradedCluster, [node("historical:9001", "reachable")]);
+    const rows = mergeNodeRows(health(degradedCluster, "degraded"), [node("historical:9001", "reachable")]);
 
     const extra = rows.find((r) => r.address === "historical:9001");
     expect(extra?.reachability).toBe("unknown");
@@ -334,15 +334,37 @@ describe("mergeNodeRows", () => {
   });
 
   it("falls back to the node query when there is no observed cluster", () => {
-    const rows = mergeNodeRows(undefined, [node("a:9001", "reachable"), node("b:9001", "unknown")]);
+    const rows = mergeNodeRows(health(undefined), [
+      node("a:9001", "reachable"),
+      node("b:9001", "unknown"),
+    ]);
 
     expect(rows).toHaveLength(2);
     expect(rows[0].reachability).toBe("reachable");
     expect(rows[1].reachability).toBe("unknown");
   });
 
+  // Review round 5: when /health itself fails the hook returns raw: null, but
+  // React Query keeps serving the cached node array. Treating that as a
+  // "no raft cluster" deployment restored cached reachability as current,
+  // green, beside a "Health check failed" banner.
+  it("does not restore cached liveness when health is unavailable", () => {
+    const cached = [node("a:9001", "reachable"), node("b:9001", "reachable")];
+
+    const rows = mergeNodeRows(null, cached);
+
+    // Identities are kept — the operator still sees which nodes exist.
+    expect(rows.map((r) => r.address)).toEqual(["a:9001", "b:9001"]);
+    // ...but nothing current says they are alive.
+    expect(rows.every((r) => r.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.livenessCurrent === false)).toBe(true);
+    expect(reachableNodeCount(rows)).toBeNull();
+  });
+
   it("does not trust an unobserved cluster's members", () => {
-    const rows = mergeNodeRows(clusterCheck({ observed: false }), [node("a:9001", "reachable")]);
+    const rows = mergeNodeRows(health(clusterCheck({ observed: false })), [
+      node("a:9001", "reachable"),
+    ]);
 
     expect(rows).toHaveLength(1);
     expect(rows[0].reachability).toBe("unknown");

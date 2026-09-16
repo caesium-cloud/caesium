@@ -78,11 +78,13 @@ function show() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const tree = (
     <QueryClientProvider client={client}>
       <SystemPage />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const rendered = render(tree);
+  return { ...rendered, client, rerender: () => rendered.rerender(tree) };
 }
 
 beforeEach(() => {
@@ -335,6 +337,41 @@ describe("SystemPage cluster health", () => {
       .find((r) => r.dataset.address === "10.244.0.10:9001");
     expect(dead?.dataset.reachability).toBe("unreachable");
     expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("2/3");
+  });
+
+  // Review round 5: when /health stops answering the hook returns raw: null,
+  // but React Query keeps serving the cached node array. That used to be read
+  // as a "no raft cluster" deployment, restoring the cached reachability as
+  // current — green rows beside a "Health check failed" banner.
+  it("stops showing cached liveness as current once health polling fails", async () => {
+    const healthy = cluster();
+    mocked.getHealthStatus.mockResolvedValueOnce(health(healthy));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    const { rerender, client } = show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("3/3"));
+
+    // Health goes away; the node query keeps serving its cached array.
+    mocked.getHealthStatus.mockRejectedValue(new Error("network down"));
+    await client.invalidateQueries({ queryKey: ["cluster-health"] });
+    rerender();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "danger"),
+    );
+    expect(screen.getByText(/API unreachable/)).toBeInTheDocument();
+
+    // Identities survive, liveness does not.
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
   });
 
   it("never renders unobserved liveness as green", async () => {

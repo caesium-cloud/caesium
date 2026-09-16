@@ -167,10 +167,10 @@ func (v View) MemberOf(address string) (Member, bool) {
 }
 
 const (
-	// refreshInterval is how long an observation is served before a background
-	// refresh is scheduled. The console polls every 15s, so a failure surfaces
-	// within roughly one poll cycle.
-	refreshInterval = 10 * time.Second
+	// defaultRefreshInterval is how long an observation is served before a
+	// background refresh is scheduled. The console polls every 15s, so a
+	// failure surfaces within roughly one poll cycle.
+	defaultRefreshInterval = 10 * time.Second
 	// probeTimeout bounds a single member's dqlite RPC.
 	probeTimeout = 2 * time.Second
 	// maxConcurrentProbes caps how many probes are IN FLIGHT at once, so a
@@ -198,7 +198,28 @@ var (
 	mu         sync.Mutex
 	current    View
 	refreshing bool
+	// refreshInterval is a var only so a test can watch an observation change
+	// without waiting a full interval. Production never writes it.
+	refreshInterval = defaultRefreshInterval
 )
+
+// SetRefreshInterval shortens the background refresh interval and returns a
+// function restoring the previous value. It exists so tests can observe a
+// CHANGED observation propagate through the production Snapshot path rather
+// than calling Refresh directly, which would bypass the very refresh they mean
+// to exercise.
+func SetRefreshInterval(d time.Duration) func() {
+	mu.Lock()
+	previous := refreshInterval
+	refreshInterval = d
+	mu.Unlock()
+
+	return func() {
+		mu.Lock()
+		refreshInterval = previous
+		mu.Unlock()
+	}
+}
 
 // Snapshot returns the most recent observation without blocking, scheduling a
 // background refresh when the observation is missing or stale. It never issues
@@ -259,12 +280,23 @@ func Refresh(ctx context.Context) View {
 	return observed
 }
 
-// reset clears the cached observation. Test-only.
+// reset clears the cached observation, waiting first for any background refresh
+// to finish so a test can restore its stubs without racing the goroutine that
+// is still reading them. Test-only.
 func reset() {
-	mu.Lock()
-	current = View{}
-	refreshing = false
-	mu.Unlock()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		mu.Lock()
+		idle := !refreshing
+		if idle || time.Now().After(deadline) {
+			current = View{}
+			refreshing = false
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func unobserved() View {
