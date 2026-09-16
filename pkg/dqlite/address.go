@@ -254,16 +254,31 @@ func repairClusterAddress(ctx context.Context, app *dqliteapp.App) (bool, error)
 		return false, fmt.Errorf("read cluster membership: %w", err)
 	}
 
-	var stale *client.NodeInfo
+	var current *client.NodeInfo
 	for idx := range members {
-		if members[idx].ID == app.ID() && members[idx].Address != app.Address() {
-			stale = &members[idx]
+		if members[idx].ID == app.ID() {
+			current = &members[idx]
 			break
 		}
 	}
-	if stale == nil {
+	if current != nil && current.Address == app.Address() {
 		return false, nil
 	}
+
+	if current == nil {
+		// This node holds a data directory for the cluster but is not in the
+		// configuration, which is what a repair interrupted between its remove
+		// and its re-add leaves behind. Nothing else in Caesium removes a
+		// member, so finish the job rather than run on as a non-member.
+		log.Warn(
+			"this node is absent from the dqlite cluster configuration; rejoining",
+			"node_id", app.ID(), "node_address", app.Address())
+		if err := cli.Add(ctx, client.NodeInfo{ID: app.ID(), Address: app.Address(), Role: client.Spare}); err != nil {
+			return false, fmt.Errorf("rejoin as member %d at %s: %w", app.ID(), app.Address(), err)
+		}
+		return true, nil
+	}
+	stale := current
 
 	if len(members) < 2 {
 		// Removing the only member would destroy the cluster. A sole member's

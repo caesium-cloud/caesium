@@ -115,6 +115,9 @@ cleanup() {
     log "cleanup: kind delete cluster --name $OWNED_CLUSTER"
     kind delete cluster --name "$OWNED_CLUSTER" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${CHART_TAG:-}" ]]; then
+    docker rmi "${CHART_REPO}:${CHART_TAG}" >/dev/null 2>&1 || true
+  fi
   exit "$status"
 }
 trap cleanup EXIT INT TERM

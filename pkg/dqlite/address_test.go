@@ -299,6 +299,45 @@ func TestReplacedMemberRejoinsAtNewAddress(t *testing.T) {
 	require.Equal(t, 2, total)
 }
 
+// TestInterruptedRepairRejoins covers a repair that was cut short between its
+// remove and its re-add — a pod killed mid-migration. Nothing is left on disk to
+// notice it by, so the next boot has to see that this node is simply not in the
+// configuration and rejoin.
+func TestInterruptedRepairRejoins(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	addrs := []string{"127.0.0.1:9431", "127.0.0.1:9432", "127.0.0.1:9433"}
+	apps := make([]*dqliteapp.App, len(dirs))
+	for idx := range dirs {
+		var seeds []string
+		if idx > 0 {
+			seeds = addrs[:1]
+		}
+		apps[idx] = startNode(t, ctx, dirs[idx], addrs[idx], seeds)
+	}
+	defer func() {
+		for _, app := range apps {
+			_ = app.Close()
+		}
+	}()
+
+	orphan := apps[2].ID()
+
+	cli, err := apps[0].FindLeader(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cli.Remove(ctx, orphan))
+	require.NoError(t, cli.Close())
+	require.NotContains(t, clusterMembers(t, ctx, apps[0]), orphan)
+
+	require.NoError(t, ensureClusterAddress(ctx, apps[2], 6, 2*time.Second))
+
+	members := clusterMembers(t, ctx, apps[0])
+	require.Contains(t, members, orphan)
+	require.Equal(t, addrs[2], members[orphan].Address)
+}
+
 // requireEventualWrite retries a write while the cluster settles after a member
 // goes away; losing a follower can cost one leader election.
 func requireEventualWrite(t *testing.T, ctx context.Context, db *sql.DB, stmt string) {
