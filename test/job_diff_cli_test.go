@@ -157,8 +157,8 @@ func (s *IntegrationTestSuite) TestJobDiffCLIPrintsBreakingContractFindings() {
 	s.Contains(stdout, consumer)
 	s.Contains(stdout, "customer_id")
 	s.Contains(stdout, "breaking")
+	s.NotContains(stdout, `"level":"`)
 	s.NotContains(stderr, `"contractFindings"`)
-	s.NotContains(stderr, `"level":"`)
 
 	jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "diff", "--path", brokenDir, "--json", "--server", s.caesiumURL)
 	s.Require().Error(jsonCmdErr, "broken producer --json must exit nonzero\nstdout:\n%s\nstderr:\n%s", jsonOut, jsonErr)
