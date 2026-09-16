@@ -718,7 +718,7 @@ function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contract
       <div className="p-0">
         {pendingCount === 0 ? (
           <div className="p-8 text-center text-text-3 text-sm">
-            Local definitions exactly match the server state.
+            No changes pending for the definitions in this editor.
           </div>
         ) : (
           <div className="font-mono text-xs leading-relaxed overflow-x-auto bg-void p-4">

@@ -423,7 +423,7 @@ steps:
 
     expect(screen.getByTestId("diff-pending-summary")).toHaveTextContent("0 changes pending apply");
     expect(screen.queryByTestId("diff-tab-badge")).not.toBeInTheDocument();
-    expect(screen.getByText("Local definitions exactly match the server state.")).toBeInTheDocument();
+    expect(screen.getByText("No changes pending for the definitions in this editor.")).toBeInTheDocument();
     expect(screen.queryByText("Job will be created")).not.toBeInTheDocument();
     expect(screen.getByTestId("diff-prune-candidates")).toHaveTextContent(
       "2 jobs on the server are not in this editor (unchanged unless you prune via CLI)",
