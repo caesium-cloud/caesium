@@ -654,12 +654,15 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 	params[freshnessDerivedFromDatasetParam] = datasetParamName(decl.Namespace, decl.Name)
 	params[freshnessConsumedWatermarksParam] = string(consumedJSON)
 
-	active, err := e.hasActiveOrQueuedRun(ctx, decl.JobID, params)
+	activeRunID, active, err := e.activeRunForWatermarks(ctx, decl.JobID, params)
 	if err != nil {
 		return err
 	}
 	if active {
-		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, nil)
+		// Linked to the covering run when there is one, so "why didn't this
+		// dataset derive" answers itself: because that run is already
+		// refreshing it.
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, activeRunID)
 	}
 
 	if e.launchRun == nil {
@@ -800,19 +803,35 @@ func (e *Evaluator) runByID(ctx context.Context, runID, jobID uuid.UUID) (*runst
 	}, nil
 }
 
-func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, params map[string]string) (bool, error) {
+// activeRunForWatermarks reports an active or queued run of this job that is
+// already refreshing from the SAME consumed watermarks, and its run id when it
+// is a live run (a queued row has no run id yet).
+//
+// It coalesces on (job, consumed watermarks) — deliberately NOT on the produced
+// dataset as well. A run executes the job's whole DAG, so it refreshes every
+// output that job produces. Keying the decision on the dataset too meant a job
+// with two stale outputs over one input watermark set started TWO full runs:
+// the second evaluation saw the first run, compared _derived_from_dataset,
+// decided it did not match and admitted a duplicate. Under a maxRuns policy the
+// duplicate was merely refused rather than recognised as redundant work.
+//
+// The AUDIT stays per-dataset: the second output still gets its own
+// skipped_active_run derivation row, linked to the run that is covering it.
+func (e *Evaluator) activeRunForWatermarks(ctx context.Context, jobID uuid.UUID, params map[string]string) (*uuid.UUID, bool, error) {
 	var running []struct {
+		ID     uuid.UUID
 		Params datatypes.JSON
 	}
 	if err := e.db.WithContext(ctx).Table("job_runs").
-		Select("params").
+		Select("id", "params").
 		Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(runstorage.StatusRunning)).
 		Find(&running).Error; err != nil {
-		return false, err
+		return nil, false, err
 	}
-	for _, row := range running {
-		if sameDerivationParams(decodeParamsJSON(row.Params), params) {
-			return true, nil
+	for i := range running {
+		if sameConsumedWatermarks(decodeParamsJSON(running[i].Params), params) {
+			id := running[i].ID
+			return &id, true, nil
 		}
 	}
 
@@ -823,19 +842,23 @@ func (e *Evaluator) hasActiveOrQueuedRun(ctx context.Context, jobID uuid.UUID, p
 		Select("params").
 		Where("job_id = ?", jobID).
 		Find(&queued).Error; err != nil {
-		return false, err
+		return nil, false, err
 	}
 	for _, row := range queued {
-		if sameDerivationParams(decodeParamsJSON(row.Params), params) {
-			return true, nil
+		if sameConsumedWatermarks(decodeParamsJSON(row.Params), params) {
+			return nil, true, nil
 		}
 	}
-	return false, nil
+	return nil, false, nil
 }
 
-func sameDerivationParams(a, b map[string]string) bool {
-	return a[freshnessDerivedFromDatasetParam] == b[freshnessDerivedFromDatasetParam] &&
-		a[freshnessConsumedWatermarksParam] == b[freshnessConsumedWatermarksParam]
+// sameConsumedWatermarks compares the input view two derivations evaluated
+// against. Both sides carry the canonical JSON the evaluator stamped, so this is
+// a string comparison; a run with no snapshot at all (a manual or cron run of
+// the same job) has an empty value and therefore never coalesces a derivation.
+func sameConsumedWatermarks(a, b map[string]string) bool {
+	consumed := b[freshnessConsumedWatermarksParam]
+	return consumed != "" && a[freshnessConsumedWatermarksParam] == consumed
 }
 
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {

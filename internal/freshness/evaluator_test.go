@@ -752,6 +752,109 @@ func TestEvaluatorFanInDerivesOneRunAndDedupesActiveWatermarks(t *testing.T) {
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
 }
 
+// TestEvaluatorCoalescesDerivationsAcrossAJobsOutputs is the regression for
+// duplicate executable work. A run executes the job's WHOLE DAG, so one run
+// refreshes every output the job produces. Deduping per-dataset meant a job with
+// two stale outputs over one input watermark set started two full runs: the
+// second evaluation saw the first run, compared _derived_from_dataset, decided
+// it did not match, and admitted a duplicate.
+func TestEvaluatorCoalescesDerivationsAcrossAJobsOutputs(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "two-outputs")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "out.a", "1h", ""),
+		produceDecl(jobID, "out.b", "1h", ""),
+		consumeDecl(jobID, "raw"),
+	)
+	// Both outputs are stale against the same, freshly advanced input.
+	seedState(t, db, "out.a", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "out.b", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "raw", "2", now.Add(-time.Minute), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want exactly 1 for a job whose single DAG refreshes both outputs", starter.runIDs)
+	}
+	if len(starter.launched) != 1 {
+		t.Fatalf("launched runs = %v, want exactly 1", starter.launched)
+	}
+
+	// The audit stays per-dataset: one `derived`, one `skipped_active_run`.
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
+
+	var skipped models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionSkippedActiveRun).Take(&skipped).Error; err != nil {
+		t.Fatalf("load skipped derivation: %v", err)
+	}
+	if skipped.RunID == nil || *skipped.RunID != starter.runIDs[0] {
+		t.Fatalf("skipped_active_run run id = %v, want the covering run %v", skipped.RunID, starter.runIDs[0])
+	}
+
+	var derived models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionDerived).Take(&derived).Error; err != nil {
+		t.Fatalf("load derived derivation: %v", err)
+	}
+	if derived.Name == skipped.Name {
+		t.Fatalf("both derivations recorded for %q; the audit must stay per-dataset", derived.Name)
+	}
+
+	// A second tick adds no work at all.
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate 2: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs after a second tick = %v, want still 1", starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 3)
+}
+
+// TestEvaluatorDoesNotCoalesceOntoAnUnrelatedRun proves the coalescing key is
+// the derivation's own input view, not merely "this job has a run": a manual or
+// cron run carries no consumed-watermark snapshot and must not suppress a
+// freshness derivation.
+func TestEvaluatorDoesNotCoalesceOntoAnUnrelatedRun(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "unrelated-run")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""), consumeDecl(jobID, "raw"))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), map[string]string{"raw": "1"})
+	seedState(t, db, "raw", "2", now.Add(-time.Minute), nil)
+
+	// A run of the same job with no derivation params at all.
+	seedRunningRun(t, db, jobID, map[string]string{"mode": "manual"})
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if len(starter.runIDs) != 1 {
+		t.Fatalf("started runs = %v, want 1: a run with no consumed-watermark view must not coalesce a derivation", starter.runIDs)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
 func TestEvaluatorDoesNotDeriveCronTriggeredJob(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()

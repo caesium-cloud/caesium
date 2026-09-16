@@ -158,6 +158,80 @@ func (s *IntegrationTestSuite) TestFreshnessDerivedRunHonoursJobPause() {
 	s.NotEmpty(derived.Tasks, "the unpaused derived run must have task rows")
 }
 
+// TestFreshnessDerivedRunCoalescesAJobsStaleOutputs proves one run covers every
+// stale output of a job.
+//
+// A run executes the job'"'"'s whole DAG, so a job producing two datasets from one
+// input refreshes both in a single run. Deduping executable work per-dataset
+// admitted a SECOND full run for the same consumed watermarks — twice the
+// containers, twice the writes, for identical work — and under a maxRuns policy
+// merely refused it instead of recognising it as redundant.
+//
+// The scenario has no concurrency policy on purpose: nothing but the evaluator'"'"'s
+// own coalescing can keep the count at one.
+func (s *IntegrationTestSuite) TestFreshnessDerivedRunCoalescesAJobsStaleOutputs() {
+	s.requireFreshnessLane()
+
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("integration-freshness-coalesce-%d", suffix)
+	source := fmt.Sprintf("integration.coalesce.src.%d", suffix)
+	producedA := fmt.Sprintf("integration.coalesce.out.a.%d", suffix)
+	producedB := fmt.Sprintf("integration.coalesce.out.b.%d", suffix)
+	eventType := fmt.Sprintf("coalesce.integration.%d", suffix)
+	tokenA := fmt.Sprintf("out-a-%d", suffix)
+	tokenB := fmt.Sprintf("out-b-%d", suffix)
+
+	dir := s.writeJobManifest(freshnessTwoOutputManifest(alias, source, producedA, producedB, eventType, tokenA, tokenB))
+	defer os.RemoveAll(dir)
+	s.runCLIWithFreshness("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+	s.Require().Empty(s.fetchRuns(job.ID), "a freshness-triggered job must not run before its source arrives")
+
+	// Age both produced datasets past their 1s SLO, then deliver one arrival.
+	time.Sleep(3 * time.Second)
+	s.postEvent(fmt.Sprintf(`{
+		"type":%q,
+		"source":"ignored-by-arrival",
+		"data":{"detail":{"kind":"orders","objects":[{"key":%q}]}}
+	}`, eventType, fmt.Sprintf("vendor/orders/%d.json", suffix)))
+
+	derived := s.awaitFreshnessDerivedRun(job.ID, producedA, 4*time.Minute)
+	s.Require().Equal("succeeded", derived.Status, "derived run failed: %s", derived.Error)
+
+	// Both outputs advance from that ONE run.
+	for dataset, want := range map[string]string{producedA: tokenA, producedB: tokenB} {
+		var observed string
+		s.Require().Eventually(func() bool {
+			var detail datasetDetailResponse
+			if err := s.tryGetJSON("/v1/datasets/_/"+dataset, &detail); err != nil {
+				return false
+			}
+			observed = detail.State.Watermark
+			return observed == want
+		}, 90*time.Second, 500*time.Millisecond,
+			"dataset %s should advance to %q from the single derived run (observed %q)", dataset, want, observed)
+	}
+
+	// And exactly one run exists for the job — the whole point.
+	runs := s.fetchRuns(job.ID)
+	s.Require().Len(runs, 1,
+		"one run must cover every stale output of the job; a second run is duplicate work for the same consumed watermarks: %+v", runs)
+
+	// The second output records its own audit row, linked to the covering run.
+	var derivations datasetDerivationsTypedResponse
+	s.getJSON("/v1/datasets/_/"+producedB+"/derivations", &derivations)
+	var linked bool
+	for _, d := range derivations.Derivations {
+		if d.Decision == "skipped_active_run" && d.RunID == derived.ID {
+			linked = true
+		}
+	}
+	s.True(linked,
+		"the coalesced output should record skipped_active_run linked to the covering run %s: %+v", derived.ID, derivations.Derivations)
+}
+
 // runFreshnessDerivationScenario drives the whole freshness derivation circuit
 // through its real surfaces: `caesium job apply` installs a freshness-triggered
 // job, POST /v1/events delivers a synthetic source arrival, and the assertions
@@ -328,4 +402,46 @@ steps:
           watermark:
             key: wm
 `, alias, metadataExtra, source, eventType, outputWatermark, source, produced)
+}
+
+// freshnessTwoOutputManifest declares one freshness-triggered job producing TWO
+// datasets from a single arrival-bound source, each with its own watermark key,
+// so a single run refreshes both.
+func freshnessTwoOutputManifest(alias, source, producedA, producedB, eventType, tokenA, tokenB string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  datasets:
+    sources:
+      - name: %s
+        expectedEvery: 24h
+        external: true
+        arrival:
+          event:
+            type: %s
+            filter:
+              detail.kind: orders
+          watermark: "$.detail.objects[0].key"
+trigger:
+  type: freshness
+  configuration: {}
+steps:
+  - name: refresh
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::output {\"wm_a\":\"%s\",\"wm_b\":\"%s\"}'"]
+    datasets:
+      consumes:
+        - %s
+      produces:
+        - name: %s
+          freshness: 1s
+          watermark:
+            key: wm_a
+        - name: %s
+          freshness: 1s
+          watermark:
+            key: wm_b
+`, alias, source, eventType, tokenA, tokenB, source, producedA, producedB)
 }
