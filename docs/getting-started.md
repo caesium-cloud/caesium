@@ -40,7 +40,7 @@ export CAESIUM_SOCK=$HOME/.docker/run/docker.sock
 
 If the socket is missing, `dev` exits with an error rather than starting a CLI container that cannot talk to Docker. `job lint` and `--help` still run without the socket.
 
-Kubernetes jobs also need cluster credentials. If `KUBECONFIG` is set, that file is mounted read-only; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config` is used. The wrapper sets `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` inside the container so `caesium dev` Kubernetes steps load it. That is opt-in host-credential sharing.
+Kubernetes jobs also need cluster credentials. If `KUBECONFIG` is set, that file is used; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config`. The wrapper flattens file-referenced certs/keys into the mounted copy and sets `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` so `caesium dev` Kubernetes steps load it. That is opt-in host-credential sharing.
 
 Host socket ownership does not describe the Docker Desktop VM: the wrapper probes the mounted socket from inside the CLI container and falls back to root when your uid cannot write it. On a root-owned Linux `docker.sock` it may run as root or add the socket's group; files written into `$PWD` may then be root-owned.
 

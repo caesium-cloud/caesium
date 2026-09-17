@@ -363,7 +363,7 @@ cli:
     echo "Wrote a ${image} CLI wrapper to:"
     echo "  $out_dir/caesium"
     echo "note: the wrapper mounts the host Docker/Podman socket (DOCKER_HOST / CAESIUM_SOCK) so local dev, harness, image checks, and reproduce can reach the daemon."
-    echo "note: if KUBECONFIG, CAESIUM_KUBERNETES_CONFIG/.kube/config, or ~/.kube/config exists, it is mounted at /caesium-kube/.kube/config (host credential sharing)."
+    echo "note: if KUBECONFIG, CAESIUM_KUBERNETES_CONFIG/.kube/config, or ~/.kube/config exists, file-referenced certs are flattened and the copy is mounted at /caesium-kube/.kube/config (host credential sharing)."
     if [ "$(uname -s)" != "Linux" ]; then
         echo "note: on $(uname -s) the wrapper cannot use host networking; address a server on this machine as http://host.docker.internal:8080"
     fi

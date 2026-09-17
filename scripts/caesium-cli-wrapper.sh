@@ -229,6 +229,98 @@ caesium_cli_kubeconfig_src() {
     return 1
 }
 
+# Rewrite certificate-authority / client-certificate / client-key file
+# references into *-data fields so relocating the kubeconfig does not break
+# sibling or absolute credential files. python3 is required.
+caesium_cli_flatten_kubeconfig() {
+    src=$1
+    dest=$2
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf '%s\n' "error: python3 is required to flatten kubeconfig credential file references." >&2
+        return 1
+    fi
+    python3 - "$src" "$dest" <<'PY'
+import base64
+import os
+import re
+import sys
+from pathlib import Path
+
+FILE_KEYS = {
+    "certificate-authority": "certificate-authority-data",
+    "client-certificate": "client-certificate-data",
+    "client-key": "client-key-data",
+}
+
+src = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+text = src.read_text(encoding="utf-8")
+src_dir = src.parent
+
+
+def unquote(val: str) -> str:
+    val = val.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        return val[1:-1]
+    return val
+
+
+def embed(val: str) -> str:
+    path = Path(os.path.expanduser(val))
+    if not path.is_absolute():
+        path = src_dir / path
+    path = path.resolve()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"error: kubeconfig references {path} ({exc})") from exc
+    return base64.b64encode(data).decode("ascii")
+
+
+def yaml_sub(match):
+    indent, key, raw = match.group(1), match.group(2), match.group(3)
+    val = unquote(raw)
+    if not val or val in ("~", "null", "|", ">", "{}", "[]"):
+        return match.group(0)
+    return f"{indent}{FILE_KEYS[key]}: {embed(val)}"
+
+
+text = re.sub(
+    r"^([ \t]*)(certificate-authority|client-certificate|client-key):[ \t]+(\S.*)$",
+    yaml_sub,
+    text,
+    flags=re.M,
+)
+
+
+def json_sub(match):
+    key = match.group(2)
+    val = bytes(match.group(4), "utf-8").decode("unicode_escape")
+    if not val:
+        return match.group(0)
+    return f'"{FILE_KEYS[key]}": "{embed(val)}"'
+
+
+text = re.sub(
+    r'(")(certificate-authority|client-certificate|client-key)("\s*:\s*")((?:\\.|[^"\\])*)(")',
+    json_sub,
+    text,
+)
+
+dest.parent.mkdir(parents=True, exist_ok=True)
+dest.write_text(text, encoding="utf-8")
+os.chmod(dest, 0o600)
+PY
+}
+
+caesium_cli_kubeconfig_flat_path() {
+    uid=$(id -u)
+    dir="${TMPDIR:-/tmp}/caesium-cli-${uid}"
+    mkdir -p "$dir"
+    chmod 700 "$dir" 2>/dev/null || true
+    printf '%s' "$dir/kubeconfig"
+}
+
 caesium_cli_socket_error() {
     sock=${1:-/var/run/docker.sock}
     printf '%s\n' "error: container runtime socket not found at ${sock}." >&2
@@ -327,10 +419,16 @@ EOF
     fi
 
     if caesium_cli_kubeconfig_src; then
-        # Layout getKubernetesCore expects: $CAESIUM_KUBERNETES_CONFIG/.kube/config
+        # Layout getKubernetesCore expects: $CAESIUM_KUBERNETES_CONFIG/.kube/config.
+        # Flatten file-referenced certs/keys first so relocating the config does
+        # not leave certificate-authority: ca.crt pointing at a missing mount.
         kube_root=/caesium-kube
         kube_dest=${kube_root}/.kube/config
-        caesium_cli_docker_add -v "${CAESIUM_CLI_KUBECONFIG_SRC}:${kube_dest}:ro"
+        kube_flat=$(caesium_cli_kubeconfig_flat_path)
+        if ! caesium_cli_flatten_kubeconfig "$CAESIUM_CLI_KUBECONFIG_SRC" "$kube_flat"; then
+            return 1
+        fi
+        caesium_cli_docker_add -v "${kube_flat}:${kube_dest}:ro"
         caesium_cli_docker_add -e "KUBECONFIG=${kube_dest}"
         caesium_cli_docker_add -e "CAESIUM_KUBERNETES_CONFIG=${kube_root}"
     fi
@@ -410,9 +508,10 @@ caesium_cli_generate() {
         printf '%s\n' "# a user-owned host socket to 0:0), the wrapper probes and falls back"
         printf '%s\n' "# to root — that is full daemon access. When KUBECONFIG,"
         printf '%s\n' "# CAESIUM_KUBERNETES_CONFIG/.kube/config, or ~/.kube/config exists, it"
-        printf '%s\n' "# is mounted at /caesium-kube/.kube/config"
-        printf '%s\n' "# and CAESIUM_KUBERNETES_CONFIG is set to /caesium-kube so kubernetes"
-        printf '%s\n' "# steps in \`caesium dev\` load it (opt-in host-credential sharing)."
+        printf '%s\n' "# is flattened (file-referenced certs/keys become *-data) and mounted"
+        printf '%s\n' "# at /caesium-kube/.kube/config, and CAESIUM_KUBERNETES_CONFIG is set"
+        printf '%s\n' "# to /caesium-kube so kubernetes steps in \`caesium dev\` load it"
+        printf '%s\n' "# (opt-in host-credential sharing)."
         printf '%s\n' "CAESIUM_CLI_IMAGE=$(caesium_cli_quote "$image")"
         printf '%s\n' "CAESIUM_CLI_CONTAINER_CLI=$(caesium_cli_quote "$container_cli")"
         printf '%s\n' "CAESIUM_CLI_DEFAULT_PODMAN=$(caesium_cli_quote "$podman")"

@@ -106,9 +106,12 @@ class WrapperTests(unittest.TestCase):
         self.assertTrue(os.access(self.wrapper, os.X_OK))
 
     def _env(self, extra=None):
+        tmpdir = self.tmp / "tmp"
+        tmpdir.mkdir(exist_ok=True)
         env = {
             "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(self.home),
+            "TMPDIR": str(tmpdir),
             "CLI_WRAPPER_STUB_LOG": str(self.stub_log),
             "LANG": os.environ.get("LANG", "C"),
         }
@@ -128,6 +131,14 @@ class WrapperTests(unittest.TestCase):
     def _args(self):
         self.assertTrue(self.stub_log.is_file(), "stub container CLI was not invoked")
         return self.stub_log.read_text(encoding="utf-8").splitlines()
+
+    def _kube_mount_src(self, args=None):
+        args = args if args is not None else self._args()
+        suffix = ":/caesium-kube/.kube/config:ro"
+        for item in args:
+            if item.endswith(suffix):
+                return Path(item[: -len(suffix)])
+        self.fail(f"no kubeconfig mount in {args}")
 
     def _socket(self, rel="run/docker.sock"):
         path = self.tmp / rel
@@ -284,9 +295,11 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
-        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        mounted = self._kube_mount_src(args)
+        self.assertTrue(mounted.is_file(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
+        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
 
     def test_default_home_kubeconfig_is_mounted(self):
         sock = self._socket("k8s.sock")
@@ -302,9 +315,11 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
-        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        mounted = self._kube_mount_src(args)
+        self.assertTrue(mounted.is_file(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
+        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
 
     def test_kubernetes_config_dir_is_preferred_after_kubeconfig_unset(self):
         sock = self._socket("k8s.sock")
@@ -322,8 +337,10 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
-        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        mounted = self._kube_mount_src(args)
+        self.assertTrue(mounted.is_file(), mounted)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
+        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
 
     def test_kubeconfig_layout_when_running_as_root(self):
         sock = self._socket("k8s.sock")
@@ -337,9 +354,59 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
         self.assertIn("--user=0:0", args)
-        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        mounted = self._kube_mount_src(args)
+        self.assertTrue(mounted.is_file(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
+
+    def test_external_ca_file_is_flattened_into_mounted_kubeconfig(self):
+        sock = self._socket("k8s.sock")
+        kube_dir = self.tmp / "cluster"
+        kube_dir.mkdir()
+        ca = kube_dir / "ca.crt"
+        user_crt = kube_dir / "user.crt"
+        user_key = kube_dir / "user.key"
+        ca.write_bytes(b"CA CERT\n")
+        user_crt.write_bytes(b"USER CERT\n")
+        user_key.write_bytes(b"USER KEY\n")
+        kube = kube_dir / "config"
+        kube.write_text(
+            "apiVersion: v1\n"
+            "kind: Config\n"
+            "clusters:\n"
+            "- cluster:\n"
+            "    certificate-authority: ca.crt\n"
+            "    server: https://127.0.0.1:1\n"
+            "  name: test\n"
+            "contexts:\n"
+            "- context:\n"
+            "    cluster: test\n"
+            "    user: test\n"
+            "  name: test\n"
+            "current-context: test\n"
+            "users:\n"
+            "- name: test\n"
+            "  user:\n"
+            "    client-certificate: user.crt\n"
+            "    client-key: user.key\n",
+            encoding="utf-8",
+        )
+        result = self._run(
+            ["dev", "--once"],
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "KUBECONFIG": str(kube),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "1",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mounted = self._kube_mount_src().read_text(encoding="utf-8")
+        self.assertNotIn("certificate-authority:", mounted)
+        self.assertNotIn("client-certificate:", mounted)
+        self.assertNotIn("client-key:", mounted)
+        self.assertIn("certificate-authority-data: Q0EgQ0VSVAo=", mounted)
+        self.assertIn("client-certificate-data: VVNFUiBDRVJUCg==", mounted)
+        self.assertIn("client-key-data: VVNFUiBLRVkK", mounted)
 
     def test_check_images_requires_socket(self):
         missing = self.tmp / "nope.sock"
@@ -409,6 +476,124 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CAESIUM_AUTH_MODE", self._args())
+
+
+class FlattenKubeconfigTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="c8f-", dir="/tmp"))
+
+    def tearDown(self):
+        for child in sorted(self.tmp.rglob("*"), reverse=True):
+            try:
+                if child.is_file() or child.is_symlink():
+                    child.unlink()
+                elif child.is_dir():
+                    child.rmdir()
+            except OSError:
+                pass
+        try:
+            self.tmp.rmdir()
+        except OSError:
+            pass
+
+    def _flatten(self, src, dest):
+        script = f"""
+CAESIUM_CLI_WRAPPER_SOURCED=1
+. "{SCRIPT}"
+caesium_cli_flatten_kubeconfig '{src}' '{dest}'
+"""
+        return subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+
+    def test_relative_ca_and_client_files_become_data(self):
+        kube_dir = self.tmp / "k"
+        kube_dir.mkdir()
+        (kube_dir / "ca.crt").write_bytes(b"CA CERT\n")
+        (kube_dir / "user.crt").write_bytes(b"USER CERT\n")
+        (kube_dir / "user.key").write_bytes(b"USER KEY\n")
+        src = kube_dir / "config"
+        src.write_text(
+            "apiVersion: v1\n"
+            "clusters:\n"
+            "- cluster:\n"
+            "    certificate-authority: ca.crt\n"
+            "    server: https://127.0.0.1:1\n"
+            "  name: test\n"
+            "users:\n"
+            "- name: test\n"
+            "  user:\n"
+            '    client-certificate: "user.crt"\n'
+            "    client-key: user.key\n",
+            encoding="utf-8",
+        )
+        dest = self.tmp / "flat"
+        result = self._flatten(src, dest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = dest.read_text(encoding="utf-8")
+        self.assertNotIn("certificate-authority:", text)
+        self.assertNotIn("client-certificate:", text)
+        self.assertNotIn("client-key:", text)
+        self.assertIn("certificate-authority-data: Q0EgQ0VSVAo=", text)
+        self.assertIn("client-certificate-data: VVNFUiBDRVJUCg==", text)
+        self.assertIn("client-key-data: VVNFUiBLRVkK", text)
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
+
+    def test_absolute_ca_path_is_embedded(self):
+        ca = self.tmp / "elsewhere" / "ca.crt"
+        ca.parent.mkdir()
+        ca.write_bytes(b"ABS CA\n")
+        src = self.tmp / "config"
+        src.write_text(
+            "apiVersion: v1\n"
+            "clusters:\n"
+            "- cluster:\n"
+            f"    certificate-authority: {ca}\n"
+            "    server: https://127.0.0.1:1\n"
+            "  name: test\n",
+            encoding="utf-8",
+        )
+        dest = self.tmp / "flat"
+        result = self._flatten(src, dest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = dest.read_text(encoding="utf-8")
+        self.assertNotIn(str(ca), text)
+        self.assertIn("certificate-authority-data: QUJTIENBCg==", text)
+
+    def test_missing_ca_file_fails(self):
+        src = self.tmp / "config"
+        src.write_text(
+            "apiVersion: v1\n"
+            "clusters:\n"
+            "- cluster:\n"
+            "    certificate-authority: missing.crt\n"
+            "    server: https://127.0.0.1:1\n"
+            "  name: test\n",
+            encoding="utf-8",
+        )
+        dest = self.tmp / "flat"
+        result = self._flatten(src, dest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.crt", result.stderr)
+
+    def test_existing_data_fields_are_left_alone(self):
+        src = self.tmp / "config"
+        src.write_text(
+            "apiVersion: v1\n"
+            "clusters:\n"
+            "- cluster:\n"
+            "    certificate-authority-data: Q0EK\n"
+            "    server: https://127.0.0.1:1\n"
+            "  name: test\n",
+            encoding="utf-8",
+        )
+        dest = self.tmp / "flat"
+        result = self._flatten(src, dest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(dest.read_text(encoding="utf-8"), src.read_text(encoding="utf-8"))
 
 
 class ChooseUserFlagsTests(unittest.TestCase):
