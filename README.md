@@ -106,6 +106,23 @@ just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs t
 
 On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`. `just run` (see [Server Workflow](#server-workflow)) remains the from-source path for running the server itself.
 
+The wrapper is what makes `caesium dev --once`, harness scenarios, `--check-images`, and `caesium reproduce` work on macOS: at **invocation** time it mounts the host container runtime socket into the CLI container and sets `DOCKER_HOST=unix:///var/run/docker.sock`. Lookup order:
+
+1. `DOCKER_HOST` when it is a `unix://` path
+2. `CAESIUM_SOCK` if set
+3. Docker Desktop's `$HOME/.docker/run/docker.sock` (or `$HOME/.docker/desktop/docker.sock`) if that socket exists
+4. `/var/run/docker.sock`, or the Podman socket when `CAESIUM_PODMAN=true`
+
+If a command needs the runtime and the socket is missing, the wrapper exits with an error (start Docker Desktop, or set `DOCKER_HOST` / `CAESIUM_SOCK`) instead of starting a container that cannot talk to Docker. `job lint`, `job preview`, and `--help` do not require the socket.
+
+If `KUBECONFIG` is set, that file is used; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config`. The wrapper flattens file-referenced certs/keys (`certificate-authority: ca.crt`, client cert/key) into `*-data` fields, then mounts the result at `/caesium-kube/.kube/config` with `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` (what the Kubernetes engine actually reads). This shares the selected host credentials with the CLI container.
+
+**Host `kubectl` is required when a kubeconfig is selected**; the wrapper uses its offline `config view --raw --flatten` parser, including normal YAML comments and quoting. Without a kubeconfig, host `kubectl` is not needed.
+
+Each invocation mounts its own mode-600 file in a mode-700 temporary directory. The wrapper forwards termination signals and removes that directory after the container exits, including failed commands.
+
+**Access boundary:** a wrapper invocation that mounts the runtime socket can create containers on the host Docker/Podman daemon, and a mounted kubeconfig is your cluster credentials. Host socket ownership is not the Docker Desktop VM's: the wrapper probes whether the CLI container can write the mounted socket as your uid and falls back to root when that probe fails (typical Docker Desktop `0:0`/`0660` socket). On Linux it still adds the socket group or runs as root when the host socket is not user-writable. Files written into `$PWD` may then be root-owned.
+
 ### 1. Write a job definition
 
 ```yaml

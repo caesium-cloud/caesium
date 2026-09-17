@@ -121,6 +121,15 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Install kubectl for wrapper contract tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/wrapper-kubectl"
+          cd "$RUNNER_TEMP/wrapper-kubectl"
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl.sha256
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+          chmod +x kubectl
+          echo "$RUNNER_TEMP/wrapper-kubectl" >> "$GITHUB_PATH"
       - name: Validate workflow and CI contracts
         run: |
           actionlint .github/workflows/ci.yml
