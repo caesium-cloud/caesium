@@ -589,12 +589,18 @@ raise SystemExit(int(os.environ.get("PROBE_EXIT", "0")))
 
     def test_child_retains_stdin(self):
         self._lifecycle_stub()
-        result = subprocess.run([str(self.wrapper), "--help"],
-                                env=self._lifecycle_env("stdin", PROBE_STDIN="1"),
-                                input="synthetic stdin\n", capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads((self.tmp / "stdin.capture").read_text())["stdin"],
-                         "synthetic stdin\n")
+        shells = ["/bin/sh"]
+        if Path("/bin/dash").exists():
+            shells.append("/bin/dash")
+        for shell in shells:
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, str(self.wrapper), "--help"],
+                                        env=self._lifecycle_env("stdin", PROBE_STDIN="1"),
+                                        input="synthetic stdin\n", capture_output=True,
+                                        text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads((self.tmp / "stdin.capture").read_text())["stdin"],
+                                 "synthetic stdin\n")
 
     def test_signal_forwarding_keeps_config_until_child_handles_signal(self):
         self._lifecycle_stub()

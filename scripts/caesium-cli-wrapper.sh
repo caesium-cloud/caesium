@@ -393,8 +393,12 @@ EOF
     # Keep the parent alive to own the temporary config for the complete
     # container lifetime. Forward signals and do not clean up on an interrupted
     # wait until the child really exits. Preserve its status and stdin.
-    eval "exec $(caesium_cli_quote "$container_cli") $CAESIUM_CLI_DOCKER_ARGS $user_q" <&0 &
+    # dash redirects stdin for asynchronous lists before applying <&0. Save
+    # the original descriptor first so piped input survives that redirection.
+    exec 3<&0
+    eval "exec $(caesium_cli_quote "$container_cli") $CAESIUM_CLI_DOCKER_ARGS $user_q" <&3 3<&- &
     CAESIUM_CLI_CHILD=$!
+    exec 3<&-
     trap 'caesium_cli_forward_signal HUP' HUP
     trap 'caesium_cli_forward_signal INT' INT
     trap 'caesium_cli_forward_signal TERM' TERM
