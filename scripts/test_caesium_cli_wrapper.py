@@ -1,13 +1,15 @@
-"""Hermetic tests for the just-cli container wrapper.
+"""Generated-wrapper tests using a stub container CLI and real host kubectl.
 
-These drive scripts/caesium-cli-wrapper.sh through generate + a stub
-container CLI. They never call a live Docker daemon or just build/integration
-recipes.
+The optional socket probe also exercises Docker when the image is available.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import signal
+import sys
+import time
 import socket
 import subprocess
 import tempfile
@@ -43,6 +45,7 @@ class WrapperTests(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.stub_log = self.tmp / "docker.args"
+        self.kube_capture = self.tmp / "captured-kubeconfig"
         self.wrapper = self.tmp / "caesium"
         stub = self.bin / "docker"
         stub.write_text(
@@ -51,6 +54,10 @@ class WrapperTests(unittest.TestCase):
             ': > "$log"\n'
             'for a in "$@"; do\n'
             '  printf "%s\\n" "$a" >> "$log"\n'
+            '  case "$a" in\n'
+            '    *:/caesium-kube/.kube/config:ro)\n'
+            '      cp "${a%:/caesium-kube/.kube/config:ro}" "$CLI_WRAPPER_KUBE_CAPTURE" ;;\n'
+            '  esac\n'
             "done\n"
             "exit 0\n",
             encoding="utf-8",
@@ -113,6 +120,7 @@ class WrapperTests(unittest.TestCase):
             "HOME": str(self.home),
             "TMPDIR": str(tmpdir),
             "CLI_WRAPPER_STUB_LOG": str(self.stub_log),
+            "CLI_WRAPPER_KUBE_CAPTURE": str(self.kube_capture),
             "LANG": os.environ.get("LANG", "C"),
         }
         if extra:
@@ -296,10 +304,11 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
         mounted = self._kube_mount_src(args)
-        self.assertTrue(mounted.is_file(), mounted)
+        self.assertTrue(self.kube_capture.is_file())
+        self.assertFalse(mounted.parent.exists(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
-        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.kube_capture.read_text())["kind"], "Config")
 
     def test_default_home_kubeconfig_is_mounted(self):
         sock = self._socket("k8s.sock")
@@ -316,10 +325,11 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
         mounted = self._kube_mount_src(args)
-        self.assertTrue(mounted.is_file(), mounted)
+        self.assertTrue(self.kube_capture.is_file())
+        self.assertFalse(mounted.parent.exists(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
-        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.kube_capture.read_text())["kind"], "Config")
 
     def test_kubernetes_config_dir_is_preferred_after_kubeconfig_unset(self):
         sock = self._socket("k8s.sock")
@@ -338,9 +348,10 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
         mounted = self._kube_mount_src(args)
-        self.assertTrue(mounted.is_file(), mounted)
+        self.assertTrue(self.kube_capture.is_file())
+        self.assertFalse(mounted.parent.exists(), mounted)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
-        self.assertEqual(mounted.read_text(encoding="utf-8"), kube.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.kube_capture.read_text())["kind"], "Config")
 
     def test_kubeconfig_layout_when_running_as_root(self):
         sock = self._socket("k8s.sock")
@@ -355,7 +366,8 @@ class WrapperTests(unittest.TestCase):
         args = self._args()
         self.assertIn("--user=0:0", args)
         mounted = self._kube_mount_src(args)
-        self.assertTrue(mounted.is_file(), mounted)
+        self.assertTrue(self.kube_capture.is_file())
+        self.assertFalse(mounted.parent.exists(), mounted)
         self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
         self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
 
@@ -400,13 +412,14 @@ class WrapperTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        mounted = self._kube_mount_src().read_text(encoding="utf-8")
+        mounted = self.kube_capture.read_text(encoding="utf-8")
+        self.assertFalse(self._kube_mount_src().parent.exists())
         self.assertNotIn("certificate-authority:", mounted)
         self.assertNotIn("client-certificate:", mounted)
         self.assertNotIn("client-key:", mounted)
-        self.assertIn("certificate-authority-data: Q0EgQ0VSVAo=", mounted)
-        self.assertIn("client-certificate-data: VVNFUiBDRVJUCg==", mounted)
-        self.assertIn("client-key-data: VVNFUiBLRVkK", mounted)
+        self.assertEqual(json.loads(mounted)["clusters"][0]["cluster"]["certificate-authority-data"], "Q0EgQ0VSVAo=")
+        self.assertEqual(json.loads(mounted)["users"][0]["user"]["client-certificate-data"], "VVNFUiBDRVJUCg==")
+        self.assertEqual(json.loads(mounted)["users"][0]["user"]["client-key-data"], "VVNFUiBLRVkK")
 
     def test_check_images_requires_socket(self):
         missing = self.tmp / "nope.sock"
@@ -478,6 +491,175 @@ class WrapperTests(unittest.TestCase):
         self.assertIn("CAESIUM_AUTH_MODE", self._args())
 
 
+    def _lifecycle_stub(self):
+        # The barrier delays the actual config read until another invocation has
+        # finished, reproducing Docker's interval between argv and bind-mount use.
+        stub = self.bin / "docker"
+        stub.write_text(f"#!{sys.executable}\n" + '''
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+suffix = ":/caesium-kube/.kube/config:ro"
+src = Path(next(a[:-len(suffix)] for a in sys.argv[1:] if a.endswith(suffix)))
+root = Path(os.environ["PROBE_ROOT"])
+name = os.environ["PROBE_NAME"]
+def capture():
+    return {"source": str(src), "config": json.loads(src.read_text()),
+            "mode": src.stat().st_mode & 0o777,
+            "directory_mode": src.parent.stat().st_mode & 0o777}
+def finish_signal(number, frame):
+    result = capture()
+    result["signal"] = number
+    (root / (name + ".capture")).write_text(json.dumps(result))
+    raise SystemExit(128 + number)
+for number in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(number, finish_signal)
+(root / (name + ".ready")).write_text(str(src))
+if os.environ.get("PROBE_WAIT"):
+    deadline = time.monotonic() + 10
+    while not (root / (name + ".release")).exists():
+        if time.monotonic() > deadline:
+            raise SystemExit("barrier timeout")
+        time.sleep(0.01)
+result = capture()
+if os.environ.get("PROBE_STDIN"):
+    result["stdin"] = sys.stdin.read()
+(root / (name + ".capture")).write_text(json.dumps(result))
+raise SystemExit(int(os.environ.get("PROBE_EXIT", "0")))
+''')
+        stub.chmod(0o755)
+
+    def _lifecycle_env(self, name, **extra):
+        kube = self.tmp / (name + ".config")
+        kube.write_text(json.dumps({
+            "apiVersion": "v1", "kind": "Config", "current-context": name,
+            "clusters": [{"name": name, "cluster": {"server": "https://127.0.0.1:1"}}],
+            "contexts": [{"name": name, "context": {"cluster": name, "user": name}}],
+            "users": [{"name": name, "user": {"token": "synthetic-" + name}}],
+        }))
+        return self._env({"KUBECONFIG": str(kube), "PROBE_ROOT": str(self.tmp),
+                          "PROBE_NAME": name, "DOCKER_HOST": "tcp://unused.invalid:2375",
+                          **extra})
+
+    def _wait_ready(self, process, name):
+        deadline = time.monotonic() + 10
+        while not (self.tmp / (name + ".ready")).exists():
+            self.assertIsNone(process.poll(), "container CLI exited before barrier")
+            self.assertLess(time.monotonic(), deadline, "container CLI barrier timeout")
+            time.sleep(0.01)
+        return Path((self.tmp / (name + ".ready")).read_text())
+
+    def test_concurrent_invocations_keep_separate_configs_until_child_exit(self):
+        self._lifecycle_stub()
+        first = subprocess.Popen([str(self.wrapper), "dev", "--once"],
+                                 env=self._lifecycle_env("A", PROBE_WAIT="1"),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            first_path = self._wait_ready(first, "A")
+            second = subprocess.run([str(self.wrapper), "dev", "--once"],
+                                    env=self._lifecycle_env("B"), capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertTrue(first_path.is_file())
+            second_capture = json.loads((self.tmp / "B.capture").read_text())
+            self.assertFalse(Path(second_capture["source"]).parent.exists())
+        finally:
+            (self.tmp / "A.release").touch()
+            out, err = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, err)
+        first_capture = json.loads((self.tmp / "A.capture").read_text())
+        self.assertNotEqual(first_capture["source"], second_capture["source"])
+        for name, result in (("A", first_capture), ("B", second_capture)):
+            self.assertEqual(result["config"]["current-context"], name)
+            self.assertEqual(result["config"]["users"][0]["user"]["token"], "synthetic-" + name)
+            self.assertEqual(result["mode"], 0o600)
+            self.assertEqual(result["directory_mode"], 0o700)
+            self.assertFalse(Path(result["source"]).parent.exists())
+
+    def test_child_failure_preserves_status_and_cleans_config(self):
+        self._lifecycle_stub()
+        result = subprocess.run([str(self.wrapper), "--help"],
+                                env=self._lifecycle_env("failure", PROBE_EXIT="37"),
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(list((self.tmp / "tmp").iterdir()), [])
+
+    def test_child_retains_stdin(self):
+        self._lifecycle_stub()
+        result = subprocess.run([str(self.wrapper), "--help"],
+                                env=self._lifecycle_env("stdin", PROBE_STDIN="1"),
+                                input="synthetic stdin\n", capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.tmp / "stdin.capture").read_text())["stdin"],
+                         "synthetic stdin\n")
+
+    def test_signal_forwarding_keeps_config_until_child_handles_signal(self):
+        self._lifecycle_stub()
+        shells = ["/bin/sh"]
+        if Path("/bin/dash").exists():
+            shells.append("/bin/dash")
+        for shell in shells:
+            for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+                with self.subTest(shell=shell, signal=sig):
+                    name = Path(shell).name + str(sig.value)
+                    child = subprocess.Popen([shell, str(self.wrapper), "dev", "--once"],
+                                             env=self._lifecycle_env(name, PROBE_WAIT="1"),
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        source = self._wait_ready(child, name)
+                        child.send_signal(sig)
+                        out, err = child.communicate(timeout=10)
+                        self.assertEqual(child.returncode, 128 + sig, err)
+                        capture = json.loads((self.tmp / (name + ".capture")).read_text())
+                        self.assertEqual(capture["signal"], sig)
+                        self.assertEqual(capture["config"]["current-context"], name)
+                        self.assertFalse(source.parent.exists())
+                    finally:
+                        (self.tmp / (name + ".release")).touch()
+                        child.communicate(timeout=10)
+
+    def test_flatten_failure_cleans_config_without_starting_container(self):
+        kube = self.tmp / "broken.config"
+        kube.write_text('apiVersion: v1\nclusters:\n- name: test\n  cluster:\n'
+                        '    certificate-authority: missing.crt\n')
+        result = self._run(["--help"], {"KUBECONFIG": str(kube),
+                                      "DOCKER_HOST": "tcp://unused.invalid:2375"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.crt", result.stderr)
+        self.assertFalse(self.stub_log.exists())
+        self.assertEqual(list((self.tmp / "tmp").iterdir()), [])
+
+    def test_yaml_comments_quoting_and_flow_fields_reach_container(self):
+        (self.tmp / "ca.crt").write_bytes(b"CA CERT\n")
+        (self.tmp / "client's #cert.crt").write_bytes(b"USER CERT\n")
+        (self.tmp / "key with spaces").write_bytes(b"USER KEY\n")
+        kube = self.tmp / "valid.config"
+        kube.write_text('''apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: https://127.0.0.1:1
+    certificate-authority: ca.crt # local CA
+contexts: [{name: test, context: {cluster: test, user: test}}]
+current-context: test
+users:
+- name: test
+  user: {client-certificate: 'client''s #cert.crt', client-key: "key\\u0020with spaces"}
+''')
+        result = self._run(["--help"], {"KUBECONFIG": str(kube),
+                                      "DOCKER_HOST": "tcp://unused.invalid:2375"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(self.kube_capture.read_text())
+        self.assertEqual(config["clusters"][0]["cluster"]["certificate-authority-data"], "Q0EgQ0VSVAo=")
+        self.assertEqual(config["users"][0]["user"]["client-certificate-data"], "VVNFUiBDRVJUCg==")
+        self.assertEqual(config["users"][0]["user"]["client-key-data"], "VVNFUiBLRVkK")
+        self.assertFalse(self._kube_mount_src().parent.exists())
+
+
 class FlattenKubeconfigTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="c8f-", dir="/tmp"))
@@ -497,17 +679,24 @@ class FlattenKubeconfigTests(unittest.TestCase):
             pass
 
     def _flatten(self, src, dest):
-        script = f"""
-CAESIUM_CLI_WRAPPER_SOURCED=1
-. "{SCRIPT}"
-caesium_cli_flatten_kubeconfig '{src}' '{dest}'
-"""
+        script = 'CAESIUM_CLI_WRAPPER_SOURCED=1; . "$1"; caesium_cli_flatten_kubeconfig "$2" "$3"'
         return subprocess.run(
-            ["sh", "-c", script],
+            ["sh", "-c", script, "flatten", str(SCRIPT), str(src), str(dest)],
             capture_output=True,
             text=True,
             cwd=str(ROOT),
         )
+
+    def test_missing_kubectl_reports_host_requirement(self):
+        result = subprocess.run(
+            ["/bin/sh", "-c", 'CAESIUM_CLI_WRAPPER_SOURCED=1; . "$1"; '
+             'caesium_cli_flatten_kubeconfig "$2" "$3"',
+             "flatten", str(SCRIPT), str(self.tmp / "config"), str(self.tmp / "flat")],
+            env={"PATH": str(self.tmp)}, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl is required on the host", result.stderr)
+        self.assertFalse((self.tmp / "flat").exists())
 
     def test_relative_ca_and_client_files_become_data(self):
         kube_dir = self.tmp / "k"
@@ -537,9 +726,9 @@ caesium_cli_flatten_kubeconfig '{src}' '{dest}'
         self.assertNotIn("certificate-authority:", text)
         self.assertNotIn("client-certificate:", text)
         self.assertNotIn("client-key:", text)
-        self.assertIn("certificate-authority-data: Q0EgQ0VSVAo=", text)
-        self.assertIn("client-certificate-data: VVNFUiBDRVJUCg==", text)
-        self.assertIn("client-key-data: VVNFUiBLRVkK", text)
+        self.assertEqual(json.loads(text)["clusters"][0]["cluster"]["certificate-authority-data"], "Q0EgQ0VSVAo=")
+        self.assertEqual(json.loads(text)["users"][0]["user"]["client-certificate-data"], "VVNFUiBDRVJUCg==")
+        self.assertEqual(json.loads(text)["users"][0]["user"]["client-key-data"], "VVNFUiBLRVkK")
         self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
 
     def test_absolute_ca_path_is_embedded(self):
@@ -561,7 +750,7 @@ caesium_cli_flatten_kubeconfig '{src}' '{dest}'
         self.assertEqual(result.returncode, 0, result.stderr)
         text = dest.read_text(encoding="utf-8")
         self.assertNotIn(str(ca), text)
-        self.assertIn("certificate-authority-data: QUJTIENBCg==", text)
+        self.assertEqual(json.loads(text)["clusters"][0]["cluster"]["certificate-authority-data"], "QUJTIENBCg==")
 
     def test_missing_ca_file_fails(self):
         src = self.tmp / "config"
@@ -593,7 +782,7 @@ caesium_cli_flatten_kubeconfig '{src}' '{dest}'
         dest = self.tmp / "flat"
         result = self._flatten(src, dest)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(dest.read_text(encoding="utf-8"), src.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(dest.read_text())["clusters"][0]["cluster"]["certificate-authority-data"], "Q0EK")
 
 
 class ChooseUserFlagsTests(unittest.TestCase):
