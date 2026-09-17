@@ -23,15 +23,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
 JOBS = WORKFLOW["jobs"]
+# PyYAML parses the unquoted `on:` key as the boolean True (YAML 1.1), not the
+# string "on" -- this is the workflow's declared trigger map.
+TRIGGERS = WORKFLOW[True]
 CI_OK = runpy.run_path(str(ROOT / "scripts/ci-ok.py"))
 SELECTORS = CI_OK["SELECTORS"]
 EVIDENCE_JOB = CI_OK["EVIDENCE_JOB"]
 EVIDENCE_GATE = CI_OK["EVIDENCE_GATE"]
+RECOGNIZED_EVENTS = CI_OK["RECOGNIZED_EVENTS"]
+VERIFY_CANDIDATE_IDENTITY = CI_OK["verify_candidate_identity"]
+VERIFY_BASE_FRESHNESS = CI_OK["verify_base_freshness"]
+VERIFY_PULL_REQUEST_CANDIDATE_PARENTS = CI_OK["verify_pull_request_candidate_parents"]
 FLAGS = ("go", "ui", "helm", "reagents", "ci")
 MANIFEST_PATH = ROOT / "test/contracts/scenarios.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text())
 CANDIDATE_SHA = "b3f1c0de" + "0" * 32
 CANDIDATE_DIGEST = "sha256:" + "cd" * 32
+CANDIDATE_BASE_SHA = "base0000" + "0" * 32
+CANDIDATE_HEAD_SHA = "head0000" + "0" * 32
 
 
 def gated_scenarios(manifest=None):
@@ -80,12 +89,25 @@ def evidence_report(sha=CANDIDATE_SHA, digest=CANDIDATE_DIGEST):
     }
 
 
-def gate_command(report, manifest=MANIFEST_PATH, sha=CANDIDATE_SHA, jobs=None):
+def gate_command(report, manifest=MANIFEST_PATH, sha=CANDIDATE_SHA, jobs=None,
+                  event_name="pull_request", base_sha=CANDIDATE_BASE_SHA,
+                  head_sha=CANDIDATE_HEAD_SHA, current_base_sha="",
+                  candidate_parents=f"{CANDIDATE_BASE_SHA} {CANDIDATE_HEAD_SHA}"):
+    # Defaults describe a well-formed pull_request candidate identity --
+    # including two matching git parents, [base, head] -- so every existing
+    # evidence-focused test keeps exercising exactly the evidence wiring it
+    # did before G7 added these flags; tests that care about identity/
+    # freshness/parents override the relevant keyword.
     return [
         sys.executable, str(ROOT / "scripts/ci-ok.py"),
         "--evidence-report", str(report),
         "--evidence-manifest", str(manifest),
         "--candidate-sha", sha,
+        "--event-name", event_name,
+        "--base-sha", base_sha,
+        "--head-sha", head_sha,
+        "--current-base-sha", current_base_sha,
+        "--candidate-parents", candidate_parents,
         *(JOBS["ci-ok"]["needs"] if jobs is None else jobs),
     ]
 
@@ -1010,12 +1032,525 @@ class EarlyEvidencePromotionTests(unittest.TestCase):
         self.assertIn("test-evidence passed", output)
 
     def test_existing_optional_lanes_keep_their_current_status(self):
+        # helm-pod-replacement-test (issue #493, PR #536) landed after G5 with
+        # the same unpromoted shape as its siblings here; G7 keeps that honest
+        # by covering it with the same assertion rather than leaving it
+        # unchecked.
         for name in ("helm-integration-test", "podman-integration-test",
-                     "integration-extra", "integration-arm64"):
+                     "integration-extra", "integration-arm64",
+                     "helm-pod-replacement-test"):
             self.assertIn(name, JOBS, name)
             self.assertNotIn(name, JOBS["ci-ok"]["needs"], name)
             self.assertNotIn(name, SELECTORS, name)
             self.assertNotIn(name, self.gate_argv(), name)
+
+
+class CandidateIdentityUnitTests(unittest.TestCase):
+    """Pure-function coverage for G7's identity/staleness checks (no subprocess)."""
+
+    def test_recognized_events_match_the_workflows_declared_triggers(self):
+        self.assertEqual(set(RECOGNIZED_EVENTS), {"pull_request", "merge_group", "push"})
+        self.assertEqual(set(TRIGGERS), set(RECOGNIZED_EVENTS))
+
+    def test_identity_requires_event_name_and_candidate_sha(self):
+        self.assertEqual(
+            VERIFY_CANDIDATE_IDENTITY("", "sha", "base", "head"),
+            ["candidate identity: no --event-name was passed to the gate"],
+        )
+        self.assertEqual(
+            VERIFY_CANDIDATE_IDENTITY("pull_request", "", "base", "head"),
+            ["candidate identity: no --candidate-sha was passed to the gate"],
+        )
+
+    def test_identity_rejects_an_unrecognized_event(self):
+        self.assertEqual(
+            VERIFY_CANDIDATE_IDENTITY("workflow_dispatch", "sha", "", ""),
+            ["candidate identity: unrecognized event 'workflow_dispatch'"],
+        )
+
+    def test_identity_requires_base_and_head_for_pull_request_and_merge_group(self):
+        for event in ("pull_request", "merge_group"):
+            with self.subTest(event=event):
+                problems = VERIFY_CANDIDATE_IDENTITY(event, "sha", "", "")
+                self.assertEqual(len(problems), 2, problems)
+                self.assertTrue(any("--base-sha" in p for p in problems), problems)
+                self.assertTrue(any("--head-sha" in p for p in problems), problems)
+                # merge_group additionally requires candidate == head (see
+                # test_identity_merge_group_candidate_must_equal_head);
+                # pull_request's candidate is a synthetic merge commit and is
+                # never expected to equal its own head.
+                head = "sha" if event == "merge_group" else "head"
+                self.assertEqual(VERIFY_CANDIDATE_IDENTITY(event, "sha", "base", head), [])
+
+    def test_identity_push_needs_no_base_or_head(self):
+        self.assertEqual(VERIFY_CANDIDATE_IDENTITY("push", "sha", "", ""), [])
+
+    def test_identity_merge_group_candidate_must_equal_head(self):
+        # GitHub's contract: on merge_group, the tested commit IS the queue
+        # entry's head commit -- unlike pull_request, whose tested commit is
+        # a separate synthetic merge (covered by the parent-derivation tests
+        # below instead).
+        self.assertEqual(
+            VERIFY_CANDIDATE_IDENTITY("merge_group", "sha1", "base", "sha1"), [],
+        )
+        problems = VERIFY_CANDIDATE_IDENTITY("merge_group", "sha1", "base", "sha2")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("does not match head sha", problems[0])
+        # pull_request has no such constraint: candidate != head is normal.
+        self.assertEqual(
+            VERIFY_CANDIDATE_IDENTITY("pull_request", "merge-sha", "base", "head"), [],
+        )
+
+    def test_freshness_is_a_noop_outside_pull_request_and_merge_group(self):
+        self.assertEqual(VERIFY_BASE_FRESHNESS("push", "", ""), ([], None))
+        self.assertEqual(VERIFY_BASE_FRESHNESS("workflow_dispatch", "a", "a"), ([], None))
+
+    def test_freshness_on_pull_request_reports_but_never_fails(self):
+        for base, current, contains in (
+            ("a", "b", "does not match"),
+            ("a", "a", "matches current master tip"),
+            ("", "a", "no tested base sha"),
+            ("a", "", "no --current-base-sha"),
+        ):
+            with self.subTest(base=base, current=current):
+                problems, message = VERIFY_BASE_FRESHNESS("pull_request", base, current)
+                self.assertEqual(problems, [])
+                self.assertIn(contains, message)
+
+    def test_freshness_on_merge_group_fails_closed_on_stale_or_missing(self):
+        for base, current, contains in (
+            ("a", "b", "does not match"),
+            ("", "b", "no tested base sha"),
+            ("a", "", "no --current-base-sha"),
+        ):
+            with self.subTest(base=base, current=current):
+                problems, message = VERIFY_BASE_FRESHNESS("merge_group", base, current)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(contains, problems[0])
+                self.assertEqual(problems[0], message)
+
+    def test_freshness_on_merge_group_passes_when_fresh(self):
+        problems, message = VERIFY_BASE_FRESHNESS("merge_group", "a", "a")
+        self.assertEqual(problems, [])
+        self.assertIn("matches current master tip", message)
+
+
+class PullRequestCandidateParentsUnitTests(unittest.TestCase):
+    """Pure-function coverage for verifying a pull_request candidate's real
+    git parents against the event payload (no subprocess, no git)."""
+
+    # staticmethod: a plain function stored as a class attribute is a
+    # descriptor, so `self.VERIFY(...)` would otherwise implicitly bind
+    # `self` as its first positional argument.
+    VERIFY = staticmethod(VERIFY_PULL_REQUEST_CANDIDATE_PARENTS)
+
+    def test_exactly_two_matching_parents_passes_and_resolves_the_base(self):
+        problems, base, disagreement = self.VERIFY(["base-sha", "head-sha"], "base-sha", "head-sha")
+        self.assertEqual(problems, [])
+        self.assertEqual(base, "base-sha")
+        self.assertIsNone(disagreement)
+
+    def test_wrong_parent_count_refuses(self):
+        for parents in ([], ["only-one"], ["a", "b", "c"]):
+            with self.subTest(parents=parents):
+                problems, base, disagreement = self.VERIFY(parents, "base-sha", "head-sha")
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(f"got {len(parents)}", problems[0])
+                # Falls back to the payload base since there is no resolved
+                # parent to use; the run fails regardless, from `problems`.
+                self.assertEqual(base, "base-sha")
+                self.assertIsNone(disagreement)
+
+    def test_second_parent_mismatch_refuses(self):
+        problems, base, disagreement = self.VERIFY(["base-sha", "wrong-head"], "base-sha", "head-sha")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("second parent", problems[0])
+        self.assertIn("'wrong-head'", problems[0])
+        self.assertIn("'head-sha'", problems[0])
+
+    def test_first_parent_disagreement_is_reported_not_refused(self):
+        problems, base, disagreement = self.VERIFY(["actual-base", "head-sha"], "stale-payload-base", "head-sha")
+        self.assertEqual(problems, [])
+        self.assertEqual(base, "actual-base")
+        self.assertIsNotNone(disagreement)
+        self.assertIn("actual-base", disagreement)
+        self.assertIn("stale-payload-base", disagreement)
+
+    def test_empty_payload_fields_are_not_compared(self):
+        # Missing payload values were already caught by
+        # verify_candidate_identity; this function must not pile on a
+        # second, confusing complaint about the same root cause.
+        problems, base, disagreement = self.VERIFY(["actual-base", "actual-head"], "", "")
+        self.assertEqual(problems, [])
+        self.assertEqual(base, "actual-base")
+        self.assertIsNone(disagreement)
+
+
+class CandidateIdentityGateTests(unittest.TestCase):
+    """End-to-end CLI wiring: scripts/ci-ok.py's --event-name/--base-sha/
+    --head-sha/--current-base-sha flags, as the `ci-ok` job actually passes
+    them (see gate_command's pull_request-shaped defaults)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.evidence = Path(tmp.name) / "evidence.json"
+        self.evidence.write_text(json.dumps(evidence_report()))
+
+    def gate(self, expected, needs=None, **kwargs):
+        needs = needs if needs is not None else results(selected_outputs(FLAGS))
+        result = subprocess.run(
+            gate_command(self.evidence, **kwargs),
+            env={**os.environ, "NEEDS_JSON": json.dumps(needs)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout + result.stderr
+
+    def test_default_pull_request_identity_passes_and_is_logged(self):
+        output = self.gate(0)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn(
+            "ci-ok candidate identity: event='pull_request' "
+            f"sha={CANDIDATE_SHA!r} base={CANDIDATE_BASE_SHA!r} head={CANDIDATE_HEAD_SHA!r}",
+            output,
+        )
+
+    def test_missing_event_name_fails_closed(self):
+        self.assertIn("no --event-name", self.gate(1, event_name=""))
+
+    def test_unrecognized_event_fails_closed(self):
+        self.assertIn("unrecognized event", self.gate(1, event_name="workflow_dispatch"))
+
+    def test_pull_request_missing_base_or_head_fails_closed(self):
+        self.assertIn("missing --base-sha", self.gate(1, base_sha=""))
+        self.assertIn("missing --head-sha", self.gate(1, head_sha=""))
+
+    def test_merge_group_missing_base_or_head_fails_closed(self):
+        self.assertIn("missing --base-sha",
+                       self.gate(1, event_name="merge_group", base_sha=""))
+        self.assertIn("missing --head-sha",
+                       self.gate(1, event_name="merge_group", head_sha=""))
+
+    def test_merge_group_candidate_sha_must_equal_head_sha(self):
+        # gate_command's default sha (CANDIDATE_SHA) represents a
+        # pull_request-shaped merge commit and deliberately does NOT equal
+        # CANDIDATE_HEAD_SHA -- on merge_group that mismatch must itself
+        # refuse, per GitHub's contract that the tested commit IS the queue
+        # entry's head.
+        output = self.gate(1, event_name="merge_group")
+        self.assertIn("does not match head sha", output)
+        # Passing a sha that actually matches head fixes it. Deselect
+        # early-evidence (its fixture report is bound to CANDIDATE_SHA, not
+        # CANDIDATE_HEAD_SHA) so this isolates the identity check.
+        output = self.gate(0, needs=results(selected_outputs(())),
+                            event_name="merge_group", sha=CANDIDATE_HEAD_SHA,
+                            current_base_sha=CANDIDATE_BASE_SHA)
+        self.assertIn("ci-ok passed", output)
+
+    def test_push_needs_no_base_or_head(self):
+        output = self.gate(0, event_name="push", base_sha="", head_sha="")
+        self.assertIn("ci-ok passed", output)
+
+    def test_pull_request_stale_base_is_reported_not_failed(self):
+        output = self.gate(0, current_base_sha="c" * 40)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("base freshness", output)
+        self.assertIn("does not match", output)
+
+    def test_pull_request_missing_current_base_sha_is_not_failed(self):
+        output = self.gate(0, current_base_sha="")
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("no --current-base-sha", output)
+
+    def test_merge_group_fresh_base_passes(self):
+        output = self.gate(0, needs=results(selected_outputs(())),
+                            event_name="merge_group", sha=CANDIDATE_HEAD_SHA,
+                            current_base_sha=CANDIDATE_BASE_SHA)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("matches current master tip", output)
+
+    def test_merge_group_stale_base_fails_closed(self):
+        output = self.gate(1, event_name="merge_group", sha=CANDIDATE_HEAD_SHA,
+                            current_base_sha="c" * 40)
+        self.assertIn("base freshness", output)
+        self.assertIn("does not match", output)
+
+    def test_merge_group_missing_current_base_sha_fails_closed(self):
+        self.assertIn("no --current-base-sha",
+                       self.gate(1, event_name="merge_group", sha=CANDIDATE_HEAD_SHA,
+                                 current_base_sha=""))
+
+    def test_identity_check_ignores_callers_that_pass_no_candidate_sha(self):
+        # The two legacy build-and-integration-test* wrapper jobs never pass
+        # --candidate-sha (or any identity flag); they must keep passing.
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/ci-ok.py"), "changes", "images", "integration"],
+            env={**os.environ, "NEEDS_JSON": json.dumps(results(selected_outputs(FLAGS)))},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("candidate identity", result.stdout)
+
+    def test_explicit_empty_candidate_sha_still_triggers_validation(self):
+        # A broken template expression could hand the gate `--candidate-sha
+        # ''` -- as opposed to omitting the flag entirely, which is the ONLY
+        # thing that exempts the two legacy wrapper jobs above. This must
+        # refuse, not silently skip -- even with early-evidence itself
+        # deselected, so there is no evidence-report reason to fail instead
+        # (isolating that this specific refusal comes from identity, not
+        # evidence).
+        needs = results(selected_outputs(()))
+        self.assertIn("early-evidence", needs)
+        self.assertEqual(needs["early-evidence"]["result"], "skipped")
+        output = self.gate(1, needs=needs, sha="")
+        self.assertIn("no --candidate-sha", output)
+
+    def test_explicit_empty_identity_flags_still_trigger_validation(self):
+        # Same concern, but every identity flag (not just --candidate-sha)
+        # came out empty -- e.g. a fully broken template block. Any ONE of
+        # the four being explicitly passed (even empty) is enough to turn
+        # validation on; here all four are.
+        needs = results(selected_outputs(()))
+        output = self.gate(1, needs=needs, sha="", event_name="", base_sha="", head_sha="")
+        self.assertIn("no --event-name", output)
+
+    def test_pull_request_parent_count_mismatch_fails_closed(self):
+        output = self.gate(1, candidate_parents=CANDIDATE_BASE_SHA)  # only one parent
+        self.assertIn("candidate parents", output)
+        self.assertIn("got 1", output)
+
+    def test_pull_request_second_parent_mismatch_fails_closed(self):
+        output = self.gate(1, candidate_parents=f"{CANDIDATE_BASE_SHA} not-the-head-sha")
+        self.assertIn("second parent", output)
+        self.assertIn("does not match the payload head sha", output)
+
+    def test_pull_request_first_parent_disagreement_is_reported_not_failed(self):
+        actual_base = "c" * 40
+        output = self.gate(0, candidate_parents=f"{actual_base} {CANDIDATE_HEAD_SHA}",
+                            current_base_sha=actual_base)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("candidate parents", output)
+        self.assertIn("disagrees with the payload base sha", output)
+        # Freshness must have compared against the resolved (parent) base,
+        # not the stale payload base -- which is exactly why this passes
+        # with current_base_sha=actual_base rather than CANDIDATE_BASE_SHA.
+        self.assertIn("matches current master tip", output)
+
+    def test_pull_request_no_candidate_parents_input_fails_closed(self):
+        # Mirrors a real transient failure of the workflow's `git cat-file`
+        # step (continue-on-error: true leaves the output empty).
+        output = self.gate(1, candidate_parents="")
+        self.assertIn("candidate parents", output)
+        self.assertIn("got 0", output)
+
+
+class MergeGroupWorkflowWiringTests(unittest.TestCase):
+    """G7: merge_group is wired end-to-end so a queue is activatable by a
+    repository-settings change alone. No ruleset exists today (2026-09-16
+    `gh api repos/caesium-cloud/caesium/rulesets` returned `[]`), so this
+    trigger has never fired; everything here is proven statically."""
+
+    def test_merge_group_trigger_is_declared(self):
+        self.assertIn("merge_group", TRIGGERS)
+        self.assertEqual(TRIGGERS["merge_group"], {"types": ["checks_requested"]})
+
+    def test_concurrency_never_mixes_pull_request_and_merge_group(self):
+        group = WORKFLOW["concurrency"]["group"]
+        self.assertIn("github.event.pull_request.number", group)
+        self.assertIn("github.event.merge_group.head_sha", group)
+        self.assertIn("github.event_name == 'merge_group'", group)
+        # cancel-in-progress must never apply to a merge_group run.
+        self.assertEqual(WORKFLOW["concurrency"]["cancel-in-progress"],
+                          "${{ github.event_name == 'pull_request' }}")
+
+    def test_image_tag_is_already_event_agnostic(self):
+        self.assertEqual(WORKFLOW["env"]["IMAGE_TAG"],
+                          "${{ github.ref_type == 'tag' && github.ref_name || github.sha }}")
+
+    def test_publish_stays_tag_only(self):
+        self.assertEqual(JOBS["publish"]["if"], "startsWith(github.ref, 'refs/tags/v')")
+
+    def test_event_name_appears_only_in_audited_locations(self):
+        """Every job-level `if:` must be event-agnostic (drive purely off
+        `changes` outputs) so merge_group support required no per-job edits.
+        Exactly four step-level `if:` conditions may reference event_name:
+        the `changes` job's checkout and filter steps, and `ci-ok`'s
+        base-freshness and candidate-parents steps. Any other appearance is
+        unaudited and must fail this test rather than land silently."""
+        for job_name, job in JOBS.items():
+            self.assertNotIn("event_name", job.get("if") or "", job_name)
+            for step in job.get("steps", []) or []:
+                condition = step.get("if") or ""
+                if "event_name" not in condition:
+                    continue
+                allowed = (
+                    (job_name == "changes"
+                     and (step.get("uses") == "actions/checkout@v6" or step.get("id") == "filter"))
+                    or (job_name == "ci-ok" and step.get("id") in ("base-freshness", "candidate-parents"))
+                )
+                self.assertTrue(allowed, f"{job_name}: unaudited event_name if: {condition!r}")
+
+    def test_changes_job_filters_on_both_pull_request_and_merge_group(self):
+        steps = JOBS["changes"]["steps"]
+        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v6")
+        filter_step = next(step for step in steps if step.get("id") == "filter")
+        both = "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
+        self.assertEqual(checkout["if"], both)
+        self.assertEqual(filter_step["if"], both)
+        self.assertEqual(checkout["with"]["fetch-depth"],
+                          "${{ github.event_name == 'merge_group' && '0' || '1' }}")
+        self.assertEqual(filter_step["with"]["base"],
+                          "${{ github.event_name == 'merge_group' && "
+                          "github.event.merge_group.base_sha || '' }}")
+
+    @staticmethod
+    def _gh_ternary(condition, true_branch, false_branch):
+        """Mimic a GitHub Actions `cond && a || b` expression's actual
+        short-circuit truthiness (JS-like: only `""`, `0`, `false`, `null`
+        are falsy -- notably the non-empty STRING "0" is truthy). Used to
+        prove the fetch-depth fix by evaluating behavior, not by re-matching
+        the same literal text the workflow already contains."""
+        def truthy(value):
+            if isinstance(value, str):
+                return value != ""
+            if isinstance(value, (int, float)):
+                return value != 0
+            return bool(value)
+        if condition and truthy(true_branch):
+            return true_branch
+        return false_branch
+
+    def test_fetch_depth_ternary_uses_truthy_string_operands_not_falsy_zero(self):
+        checkout = next(step for step in JOBS["changes"]["steps"]
+                        if step.get("uses") == "actions/checkout@v6")
+        expr = checkout["with"]["fetch-depth"]
+        self.assertIn("'0'", expr)
+        self.assertIn("'1'", expr)
+        self.assertNotIn("&& 0 ", expr, "a bare numeric 0 is falsy in GitHub expressions")
+        # The historic bug shape: `cond && 0 || 1` always evaluates to 1,
+        # even when cond is true, because a true `cond && 0` immediately
+        # falls through the `|| 1` (0 is falsy).
+        self.assertEqual(self._gh_ternary(True, 0, 1), 1)
+        self.assertEqual(self._gh_ternary(False, 0, 1), 1)
+        # The fix: quoted string operands are truthy regardless of their
+        # digits, so the merge_group branch ('0') is actually reachable.
+        self.assertEqual(self._gh_ternary(True, "0", "1"), "0")
+        self.assertEqual(self._gh_ternary(False, "0", "1"), "1")
+
+    def test_pull_request_candidate_parents_step_is_wired(self):
+        steps = JOBS["ci-ok"]["steps"]
+        parents_step = next(step for step in steps if step.get("id") == "candidate-parents")
+        self.assertEqual(parents_step["if"], "github.event_name == 'pull_request'")
+        self.assertTrue(parents_step.get("continue-on-error"))
+        self.assertIn('git cat-file -p "${{ github.sha }}"', parents_step["run"])
+        self.assertIn("parent", parents_step["run"])
+        gate = next(step for step in steps if step.get("name") == "Evaluate merge gate")
+        self.assertLess(steps.index(parents_step), steps.index(gate))
+        argv = shlex.split(gate["run"].replace("\\\n", " "))
+        self.assertEqual(argv[argv.index("--candidate-parents") + 1],
+                          "${{ steps.candidate-parents.outputs.parents }}")
+
+    def test_no_checkout_overrides_ref_anywhere_in_the_workflow(self):
+        """Every job that produces evidence or a required context must test
+        exactly the commit `actions/checkout@v6` gives it by default -- on
+        pull_request that is GitHub's prospective merge commit
+        (refs/pull/N/merge). An explicit `ref:` could silently swap in the PR
+        head (or anything else) instead."""
+        checked = 0
+        for job_name, job in JOBS.items():
+            for step in job.get("steps", []) or []:
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    checked += 1
+                    with self.subTest(job=job_name):
+                        self.assertNotIn("ref", step.get("with") or {}, job_name)
+        self.assertGreater(checked, 20, "expected checkout to appear in most jobs")
+
+    def test_set_step_fails_closed_instead_of_treating_a_bad_filter_as_skip(self):
+        step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
+        self.assertIn("merge_group", step["run"])
+        self.assertIn('"${!name:-}"', step["run"])
+
+        def run(event, outputs):
+            # Every one of these five names must get an EXPLICIT value on
+            # every call -- exactly like the real step's own `env:` block,
+            # which always assigns `${{ steps.filter.outputs.X }}` (empty
+            # string when that output doesn't exist, never "absent"). Do not
+            # rely on omission-from-`outputs` to simulate "missing": GitHub
+            # Actions runners set CI=true ambiently for every job by
+            # convention, so building env from `{**os.environ, ...}` without
+            # this masks exactly the "unset filter output" case this test
+            # exists to catch -- the real regression the runner caught here.
+            values = {name: outputs.get(name, "") for name in ("GO", "UI", "HELM", "REAGENTS", "CI")}
+            env = {**os.environ, "EVENT": event, **values}
+            with tempfile.TemporaryDirectory() as tmp:
+                output_file = Path(tmp) / "output"
+                env["GITHUB_OUTPUT"] = str(output_file)
+                script_file = Path(tmp) / "step.sh"
+                script_file.write_text(step["run"])
+                # Match the runner's actual invocation, not just its text:
+                # ci.yml's `defaults.run.shell: bash` maps to GitHub Actions'
+                # documented default `bash --noprofile --norc -eo pipefail
+                # {0}` (a script FILE), not an inline `bash -c` string.
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script_file)],
+                    env=env, capture_output=True, text=True,
+                )
+                parsed = {}
+                if output_file.exists():
+                    for line in output_file.read_text().splitlines():
+                        key, _, value = line.partition("=")
+                        parsed[key] = value
+                return result.returncode, result.stderr, parsed
+
+        # push (and any other non-PR/merge_group event) never filters.
+        code, _, parsed = run("push", {})
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed, {k: "true" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
+
+        for event in ("pull_request", "merge_group"):
+            with self.subTest(event=event):
+                code, _, parsed = run(event, {"GO": "true", "UI": "false", "HELM": "false",
+                                              "REAGENTS": "false", "CI": "false"})
+                self.assertEqual(code, 0)
+                self.assertEqual(parsed["go"], "true")
+                self.assertEqual(parsed["ui"], "false")
+                self.assertEqual(parsed["images"], "true")
+
+                # A filter output that never ran (unset) must fail closed.
+                code, stderr, _ = run(event, {"GO": "true", "UI": "false", "HELM": "false",
+                                              "REAGENTS": "false"})
+                self.assertNotEqual(code, 0)
+                self.assertIn("not true/false", stderr)
+                self.assertIn(event, stderr)
+
+                # A malformed (non-boolean-string) filter output must also
+                # fail closed rather than being coerced to false.
+                code, stderr, _ = run(event, {"GO": "true", "UI": "false", "HELM": "false",
+                                              "REAGENTS": "false", "CI": "maybe"})
+                self.assertNotEqual(code, 0)
+                self.assertIn("not true/false", stderr)
+
+    def test_ci_ok_wires_identity_and_base_freshness(self):
+        steps = JOBS["ci-ok"]["steps"]
+        freshness = next(step for step in steps if step.get("id") == "base-freshness")
+        self.assertEqual(freshness["if"],
+                          "github.event_name == 'pull_request' || github.event_name == 'merge_group'")
+        self.assertTrue(freshness.get("continue-on-error"))
+        self.assertIn("git ls-remote origin refs/heads/master", freshness["run"])
+        gate = next(step for step in steps if step.get("name") == "Evaluate merge gate")
+        self.assertLess(steps.index(freshness), steps.index(gate))
+
+        argv = shlex.split(gate["run"].replace("\\\n", " "))
+        self.assertEqual(argv[argv.index("--event-name") + 1], "${{ github.event_name }}")
+        self.assertEqual(argv[argv.index("--current-base-sha") + 1],
+                          "${{ steps.base-freshness.outputs.sha }}")
+        base = argv[argv.index("--base-sha") + 1]
+        self.assertIn("github.event.pull_request.base.sha", base)
+        self.assertIn("github.event.merge_group.base_sha", base)
+        head = argv[argv.index("--head-sha") + 1]
+        self.assertIn("github.event.pull_request.head.sha", head)
+        self.assertIn("github.event.merge_group.head_sha", head)
 
 
 class IntegrationRunnerTests(unittest.TestCase):

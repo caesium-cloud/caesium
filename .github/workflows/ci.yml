@@ -2,15 +2,28 @@ name: CI
 
 # PRs run once (the pull_request event). Pushes to feature branches do not
 # duplicate that. master and v* tags still run the full workflow on push.
+#
+# merge_group (distributed-testing G7): wired so a merge queue is activatable
+# by a repository-settings change alone -- no ruleset exists today (2026-09-16
+# `gh api repos/caesium-cloud/caesium/rulesets` returned `[]`), so this trigger
+# never fires yet and every merge_group-specific path below is proven only
+# statically (actionlint + scripts/test_ci.py), never by a live run. See the
+# G7 note in docs/exec-plans/active/distributed-testing.md.
 on:
   push:
     branches: [master]
     tags: ['v*']
   pull_request:
     branches: [master]
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A merge_group run must never share a group with, or be cancelled by, a PR
+  # run: name its group from the queue entry's own head SHA rather than
+  # falling through to `github.ref` (which merge_group also sets, but keying
+  # off it here would tie the two event types' fates together implicitly).
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'merge_group' && format('mergegroup-{0}', github.event.merge_group.head_sha)) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -40,11 +53,34 @@ jobs:
       images: ${{ steps.set.outputs.images }}
     steps:
       - uses: actions/checkout@v6
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          # merge_group has no PR to diff through the GitHub API, so the
+          # filter step below falls back to a local `git diff` against
+          # `base`, which needs history beyond the default shallow clone.
+          # pull_request keeps depth 1 and its existing API-based file list
+          # (its `base` input stays unset below).
+          #
+          # The operands MUST be the strings '0'/'1', not bare numbers: in a
+          # GitHub Actions expression, `cond && a || b` is JS-like
+          # short-circuit truthiness, and the NUMBER 0 is falsy -- so
+          # `cond && 0 || 1` always evaluates to 1 regardless of `cond` (a
+          # true `cond && 0` immediately falls through the `|| 1`). The
+          # STRING '0' is non-empty and therefore truthy, which is what
+          # makes this actually branch. scripts/test_ci.py pins this with a
+          # semantic check, not just a text match.
+          fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '1' }}
       - uses: dorny/paths-filter@v3
         id: filter
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
+          # Empty string reproduces this input's own unset default for
+          # pull_request -- verified live by every pull_request run of this
+          # workflow, since that is the branch this expression takes there.
+          # merge_group has no PR to auto-detect a base from, so it has to
+          # name one explicitly; this half of the expression is unverified by
+          # any live run (see the `on:` comment above).
+          base: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || '' }}
           filters: |
             go:
               - '**/*.go'
@@ -81,7 +117,9 @@ jobs:
           CI: ${{ steps.filter.outputs.ci }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" != "pull_request" ]; then
+          # push (master/tag) never path-filters: every output is true. This
+          # is the only event allowed to skip the checkout/filter steps above.
+          if [ "$EVENT" != "pull_request" ] && [ "$EVENT" != "merge_group" ]; then
             {
               echo "go=true"
               echo "ui=true"
@@ -92,16 +130,32 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # pull_request and merge_group both select from the real diff. A
+          # filter output that is missing or not exactly true/false -- the
+          # step above was skipped, or its `base` ref could not be resolved --
+          # must fail this job rather than silently read as false: that would
+          # let a required producer skip a change it was never actually
+          # compared against.
+          for name in GO UI HELM REAGENTS CI; do
+            value="${!name:-}"
+            case "$value" in
+              true|false) ;;
+              *)
+                echo "changes: $EVENT path-filter output for $name is '$value', not true/false; failing closed instead of treating an unreadable filter as everything-skipped" >&2
+                exit 1
+                ;;
+            esac
+          done
           images=false
-          if [ "${GO:-false}" = true ] || [ "${UI:-false}" = true ] || [ "${HELM:-false}" = true ] || [ "${REAGENTS:-false}" = true ] || [ "${CI:-false}" = true ]; then
+          if [ "$GO" = true ] || [ "$UI" = true ] || [ "$HELM" = true ] || [ "$REAGENTS" = true ] || [ "$CI" = true ]; then
             images=true
           fi
           {
-            echo "go=${GO:-false}"
-            echo "ui=${UI:-false}"
-            echo "helm=${HELM:-false}"
-            echo "reagents=${REAGENTS:-false}"
-            echo "ci=${CI:-false}"
+            echo "go=$GO"
+            echo "ui=$UI"
+            echo "helm=$HELM"
+            echo "reagents=$REAGENTS"
+            echo "ci=$CI"
             echo "images=$images"
           } >> "$GITHUB_OUTPUT"
 
@@ -1441,6 +1495,13 @@ jobs:
   # build-and-integration-test and build-and-integration-test-agent-auth). This
   # job gates `publish`; making it gate PR merge is a repository-settings change
   # for the CODEOWNER, not a workflow change.
+  #
+  # distributed-testing G7: the gate also carries this run's full candidate
+  # identity (event, tested SHA, base/head SHA) and a base-freshness check.
+  # `scripts/ci-ok.py` refuses missing/malformed identity and, on merge_group
+  # only, a base SHA that no longer matches master's current tip -- see its
+  # module docstring and the Q6 record in
+  # docs/exec-plans/active/distributed-testing.md.
   ci-ok:
     if: always()
     needs:
@@ -1472,6 +1533,34 @@ jobs:
         with:
           name: early-evidence
           path: .tmp/evidence
+      # Q6/G7 staleness input: master's actual tip at evaluation time, read
+      # fresh rather than trusted from any earlier step. A transient failure
+      # here must not hard-fail the job -- ci-ok.py's own fail-closed logic
+      # decides what an empty result means per event (informational on
+      # pull_request, a hard failure on merge_group).
+      - name: Determine current master tip (base freshness)
+        id: base-freshness
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        continue-on-error: true
+        run: |
+          sha="$(git ls-remote origin refs/heads/master | cut -f1)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      # Q6/G7: on pull_request, github.sha is a synthetic merge of base+head
+      # (refs/pull/N/merge) -- read its REAL parents rather than trusting the
+      # event payload's base.sha/head.sha at face value. `git cat-file -p`
+      # reads them straight out of the commit object, which is unaffected by
+      # the default fetch-depth 1 checkout above: a shallow fetch omits the
+      # parent COMMITS, never the parent SHAs recorded in the fetched
+      # commit's own header. A transient failure here must not hard-fail the
+      # job -- scripts/ci-ok.py's own verify_pull_request_candidate_parents
+      # refuses closed on anything other than exactly two parents.
+      - name: Read pull_request candidate merge-commit parents
+        id: candidate-parents
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          parents="$(git cat-file -p "${{ github.sha }}" | awk '$1 == "parent" { print $2 }' | tr '\n' ' ')"
+          echo "parents=$parents" >> "$GITHUB_OUTPUT"
       - name: Evaluate merge gate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -1480,6 +1569,11 @@ jobs:
             --evidence-report .tmp/evidence/evidence.json \
             --evidence-manifest test/contracts/scenarios.json \
             --candidate-sha "${{ github.sha }}" \
+            --event-name "${{ github.event_name }}" \
+            --base-sha "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha) || '' }}" \
+            --head-sha "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || '' }}" \
+            --current-base-sha "${{ steps.base-freshness.outputs.sha }}" \
+            --candidate-parents "${{ steps.candidate-parents.outputs.parents }}" \
             changes \
             ci-config \
             builder \
