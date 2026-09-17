@@ -194,8 +194,10 @@ function CopyWebhookUrl({ path, externalUrl }: { path: string; externalUrl?: str
       <Button 
         variant="ghost" 
         size="icon" 
-        className="h-5 w-5 text-text-4 hover:text-cyan-glow hover:bg-transparent" 
+        className="h-5 w-5 text-text-4 hover:text-cyan-glow hover:bg-transparent"
         onClick={handleCopy}
+        title={copied ? "Copied" : "Copy webhook URL"}
+        aria-label={copied ? "Webhook URL copied" : "Copy webhook URL"}
       >
         {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
       </Button>
@@ -489,6 +491,9 @@ export function TriggersPage() {
                       size="icon"
                       variant="ghost"
                       className="h-7 w-7 text-text-4 hover:text-text-2"
+                      title={isExpanded ? "Collapse trigger details" : "Expand trigger details"}
+                      aria-label={isExpanded ? "Collapse trigger details" : "Expand trigger details"}
+                      aria-expanded={isExpanded}
                       onClick={(e) => {
                         e.stopPropagation();
                         setExpanded(isExpanded ? null : trigger.id);

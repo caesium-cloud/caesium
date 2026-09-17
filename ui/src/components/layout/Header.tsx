@@ -1,11 +1,12 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Bell, ChevronRight, LogOut, Menu } from "lucide-react";
+import { ChevronRight, LogOut, Menu } from "lucide-react";
 import { type Ref, useState } from "react";
 import { ModeToggle } from "../mode-toggle";
 import { CommandMenu } from "../command-menu";
 import { Button } from "@/components/ui/button";
 import { UTCClock } from "@/components/ui/utc-clock";
 import { logout } from "@/lib/auth";
+import { NotificationsPopover } from "./NotificationsPopover";
 
 interface Crumb {
   label: string;
@@ -125,14 +126,7 @@ export function Header({ onOpenNavigation, navigationButtonRef }: HeaderProps) {
       <div className="flex items-center gap-2">
         <CommandMenu />
         <UTCClock className="hidden md:flex" />
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Notifications"
-          className="text-text-2 hover:text-text-1"
-        >
-          <Bell className="h-4 w-4" />
-        </Button>
+        <NotificationsPopover />
         <Button
           variant="ghost"
           size="icon"

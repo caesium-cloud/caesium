@@ -315,8 +315,10 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
 
       {/* Sort */}
       <div className="flex items-center gap-1.5 text-[11px] text-text-3 sm:ml-auto">
-        <span>Sort</span>
+        <label htmlFor="jobs-sort">Sort</label>
         <select
+          id="jobs-sort"
+          aria-label="Sort jobs"
           value={sort}
           onChange={(e) => onSort(e.target.value as SortKey)}
           className={cn(
