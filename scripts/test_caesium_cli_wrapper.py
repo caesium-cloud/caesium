@@ -231,13 +231,37 @@ class WrapperTests(unittest.TestCase):
     def test_user_owned_writable_socket_keeps_user_mapping(self):
         sock = self._socket("user.sock")
         os.chmod(sock, 0o600)
-        result = self._run(["dev", "--once"], extra={"CAESIUM_SOCK": str(sock)})
+        result = self._run(
+            ["dev", "--once"],
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "1",
+            },
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         uid = os.getuid()
         gid = os.getgid()
         args = self._args()
         self.assertIn(f"--user={uid}:{gid}", args)
         self.assertNotIn("--user=0:0", args)
+
+    def test_docker_desktop_vm_socket_falls_back_to_root(self):
+        # Host-owned and writable, but the Linux VM presents 0:0/0660.
+        sock = self._socket("desktop.sock")
+        os.chmod(sock, 0o600)
+        result = self._run(
+            ["dev", "--once"],
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "0",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self._args()
+        self.assertIn("--user=0:0", args)
+        uid = os.getuid()
+        gid = os.getgid()
+        self.assertNotIn(f"--user={uid}:{gid}", args)
 
     def test_unwritable_socket_falls_back_to_root(self):
         sock = self._socket("root-only.sock")
@@ -246,31 +270,62 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--user=0:0", self._args())
 
-    def test_kubeconfig_env_is_mounted_readonly(self):
+    def test_kubeconfig_env_is_mounted_for_engine_loader(self):
         sock = self._socket("k8s.sock")
         kube = self.tmp / "my kube config"
         kube.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
         result = self._run(
             ["dev", "--once"],
-            extra={"CAESIUM_SOCK": str(sock), "KUBECONFIG": str(kube)},
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "KUBECONFIG": str(kube),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "1",
+            },
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
-        self.assertIn(f"{kube}:/tmp/caesium-kubeconfig:ro", args)
-        self.assertIn("KUBECONFIG=/tmp/caesium-kubeconfig", args)
+        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
+        self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
 
     def test_default_home_kubeconfig_is_mounted(self):
         sock = self._socket("k8s.sock")
         kube = self.home / ".kube" / "config"
         kube.parent.mkdir()
         kube.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
-        result = self._run(["dev", "--once"], extra={"CAESIUM_SOCK": str(sock)})
+        result = self._run(
+            ["dev", "--once"],
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "1",
+            },
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
-        self.assertIn(f"{kube}:/tmp/caesium-kubeconfig:ro", args)
-        self.assertIn("KUBECONFIG=/tmp/caesium-kubeconfig", args)
+        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
+        self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
 
-    def test_kubeconfig_root_dest_when_running_as_root(self):
+    def test_kubernetes_config_dir_is_preferred_after_kubeconfig_unset(self):
+        sock = self._socket("k8s.sock")
+        cfg_dir = self.tmp / "k8s-home"
+        kube = cfg_dir / ".kube" / "config"
+        kube.parent.mkdir(parents=True)
+        kube.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+        result = self._run(
+            ["dev", "--once"],
+            extra={
+                "CAESIUM_SOCK": str(sock),
+                "CAESIUM_KUBERNETES_CONFIG": str(cfg_dir),
+                "CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE": "1",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self._args()
+        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
+
+    def test_kubeconfig_layout_when_running_as_root(self):
         sock = self._socket("k8s.sock")
         os.chmod(sock, 0o000)
         kube = self.tmp / "my.kubeconfig"
@@ -282,8 +337,9 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = self._args()
         self.assertIn("--user=0:0", args)
-        self.assertIn(f"{kube}:/root/.kube/config:ro", args)
-        self.assertIn("KUBECONFIG=/root/.kube/config", args)
+        self.assertIn(f"{kube}:/caesium-kube/.kube/config:ro", args)
+        self.assertIn("KUBECONFIG=/caesium-kube/.kube/config", args)
+        self.assertIn("CAESIUM_KUBERNETES_CONFIG=/caesium-kube", args)
 
     def test_check_images_requires_socket(self):
         missing = self.tmp / "nope.sock"
@@ -447,6 +503,77 @@ if caesium_cli_mode_group_writable {mode}; then echo yes; else echo no; fi
         self.assertEqual(self._group_writable("640"), "no")
         self.assertEqual(self._group_writable("666"), "yes")
         self.assertEqual(self._group_writable("0770"), "yes")
+
+
+class ContainerSocketProbeTests(unittest.TestCase):
+    def _probe(self, writable_env):
+        script = f"""
+CAESIUM_CLI_WRAPPER_SOURCED=1
+. "{SCRIPT}"
+CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE={writable_env}
+if caesium_cli_container_can_write_socket /tmp/sock img docker --user=501:20; then echo yes; else echo no; fi
+"""
+        result = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_env_override(self):
+        self.assertEqual(self._probe("0"), "no")
+        self.assertEqual(self._probe("1"), "yes")
+
+    def test_live_docker_probe_when_image_present(self):
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            self.skipTest("docker daemon not available")
+        if subprocess.run(
+            ["docker", "image", "inspect", "alpine:3.23"],
+            capture_output=True,
+        ).returncode != 0:
+            self.skipTest("alpine:3.23 is not present locally")
+        sock = Path("/var/run/docker.sock")
+        desktop = Path.home() / ".docker/run/docker.sock"
+        if not sock.exists() and desktop.exists():
+            sock = desktop
+        if not sock.exists():
+            self.skipTest("no docker socket on this host")
+        uid = os.getuid()
+        gid = os.getgid()
+        probe = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{sock}:/var/run/docker.sock",
+                "--user",
+                f"{uid}:{gid}",
+                "--entrypoint",
+                "/bin/sh",
+                "alpine:3.23",
+                "-c",
+                "test -w /var/run/docker.sock",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        script = f"""
+CAESIUM_CLI_WRAPPER_SOURCED=1
+. "{SCRIPT}"
+if caesium_cli_container_can_write_socket {sock} alpine:3.23 docker --user={uid}:{gid}; then echo yes; else echo no; fi
+"""
+        result = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        want = "yes" if probe.returncode == 0 else "no"
+        self.assertEqual(result.stdout.strip(), want, result.stderr)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,28 @@ caesium_cli_choose_user_flags() {
     printf '%s' "--user=0:0"
 }
 
+# Host socket ownership is not the Docker Desktop VM's. Probe whether a
+# container running with the candidate --user/--group-add flags can write
+# the mounted socket. CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE=0|1 stubs
+# the probe for hermetic tests.
+# Remaining args after image/cli are docker user flags.
+caesium_cli_container_can_write_socket() {
+    sock=$1
+    image=$2
+    cli=$3
+    shift 3
+    case ${CAESIUM_CLI_SOCKET_IN_CONTAINER_WRITABLE:-} in
+        0|false|no) return 1 ;;
+        1|true|yes) return 0 ;;
+    esac
+    "$cli" run --rm \
+        -v "${sock}:/var/run/docker.sock" \
+        "$@" \
+        --entrypoint /bin/sh \
+        "$image" \
+        -c 'test -w /var/run/docker.sock' >/dev/null 2>&1
+}
+
 caesium_cli_stat_ids() {
     path=$1
     CAESIUM_CLI_STAT_UID=
@@ -196,6 +218,10 @@ caesium_cli_kubeconfig_src() {
         fi
         return 1
     fi
+    if [ -n "${CAESIUM_KUBERNETES_CONFIG:-}" ] && [ -f "${CAESIUM_KUBERNETES_CONFIG}/.kube/config" ]; then
+        CAESIUM_CLI_KUBECONFIG_SRC=${CAESIUM_KUBERNETES_CONFIG}/.kube/config
+        return 0
+    fi
     if [ -n "${HOME:-}" ] && [ -f "$HOME/.kube/config" ]; then
         CAESIUM_CLI_KUBECONFIG_SRC=$HOME/.kube/config
         return 0
@@ -272,6 +298,19 @@ EOF
             "$host_uid" "$host_gid" \
             "$CAESIUM_CLI_STAT_UID" "$CAESIUM_CLI_STAT_GID" \
             "$CAESIUM_CLI_STAT_MODE" "$writable")
+        # Docker Desktop presents a user-owned host socket but remaps it to
+        # 0:0 mode 0660 inside the Linux VM. Probe with the candidate flags
+        # and fall back to root when the container cannot write the mount.
+        case $user_flags in
+            --user=0:0) ;;
+            *)
+                if ! caesium_cli_container_can_write_socket \
+                    "$CAESIUM_CLI_RESOLVED_SOCK" "$image" "$container_cli" \
+                    $user_flags; then
+                    user_flags="--user=0:0"
+                fi
+                ;;
+        esac
         # Flags are tokens without whitespace (--user=uid:gid, --group-add=gid).
         # Word-splitting here must not use `set --`, which would clobber CLI argv.
         for flag in $user_flags; do
@@ -288,13 +327,12 @@ EOF
     fi
 
     if caesium_cli_kubeconfig_src; then
-        if [ "$CAESIUM_CLI_AS_ROOT" = "1" ]; then
-            kube_dest=/root/.kube/config
-        else
-            kube_dest=/tmp/caesium-kubeconfig
-        fi
+        # Layout getKubernetesCore expects: $CAESIUM_KUBERNETES_CONFIG/.kube/config
+        kube_root=/caesium-kube
+        kube_dest=${kube_root}/.kube/config
         caesium_cli_docker_add -v "${CAESIUM_CLI_KUBECONFIG_SRC}:${kube_dest}:ro"
         caesium_cli_docker_add -e "KUBECONFIG=${kube_dest}"
+        caesium_cli_docker_add -e "CAESIUM_KUBERNETES_CONFIG=${kube_root}"
     fi
 
     caesium_cli_docker_add -v "${PWD}:/work" -w /work
@@ -368,10 +406,13 @@ caesium_cli_generate() {
         printf '%s\n' "# At runtime this wrapper mounts the host Docker/Podman socket (see"
         printf '%s\n' "# DOCKER_HOST / CAESIUM_SOCK) so \`caesium dev\`, harness scenarios,"
         printf '%s\n' "# --check-images, and reproduce can talk to the daemon. If the socket"
-        printf '%s\n' "# is not writable by the host user, the CLI container runs as root or"
-        printf '%s\n' "# with the socket group added — that is full daemon access. When"
-        printf '%s\n' "# KUBECONFIG or ~/.kube/config exists, it is mounted read-only"
-        printf '%s\n' "# (opt-in host-credential sharing)."
+        printf '%s\n' "# is not writable *inside the CLI container* (Docker Desktop remaps"
+        printf '%s\n' "# a user-owned host socket to 0:0), the wrapper probes and falls back"
+        printf '%s\n' "# to root — that is full daemon access. When KUBECONFIG,"
+        printf '%s\n' "# CAESIUM_KUBERNETES_CONFIG/.kube/config, or ~/.kube/config exists, it"
+        printf '%s\n' "# is mounted at /caesium-kube/.kube/config"
+        printf '%s\n' "# and CAESIUM_KUBERNETES_CONFIG is set to /caesium-kube so kubernetes"
+        printf '%s\n' "# steps in \`caesium dev\` load it (opt-in host-credential sharing)."
         printf '%s\n' "CAESIUM_CLI_IMAGE=$(caesium_cli_quote "$image")"
         printf '%s\n' "CAESIUM_CLI_CONTAINER_CLI=$(caesium_cli_quote "$container_cli")"
         printf '%s\n' "CAESIUM_CLI_DEFAULT_PODMAN=$(caesium_cli_quote "$podman")"

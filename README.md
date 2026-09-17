@@ -115,9 +115,9 @@ The wrapper is what makes `caesium dev --once`, harness scenarios, `--check-imag
 
 If a command needs the runtime and the socket is missing, the wrapper exits with an error (start Docker Desktop, or set `DOCKER_HOST` / `CAESIUM_SOCK`) instead of starting a container that cannot talk to Docker. `job lint`, `job preview`, and `--help` do not require the socket.
 
-If `KUBECONFIG` is set, that file is mounted read-only; otherwise a present `$HOME/.kube/config` is mounted. `KUBECONFIG` inside the container points at the mount. This is opt-in host-credential sharing.
+If `KUBECONFIG` is set, that file is mounted read-only; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config` is used. Inside the container the file is at `/caesium-kube/.kube/config` with `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` (what the Kubernetes engine actually reads) and `KUBECONFIG` pointing at the same file. This is opt-in host-credential sharing.
 
-**Access boundary:** a wrapper invocation that mounts the runtime socket can create containers on the host Docker/Podman daemon, and a mounted kubeconfig is your cluster credentials. Docker Desktop sockets are usually user-owned, so the wrapper keeps `--user uid:gid`. If the socket is not writable by your user (typical Linux `root:docker` socket when you are not in `docker`), the wrapper runs as root or adds the socket's group so the daemon is reachable; files written into `$PWD` may then be root-owned.
+**Access boundary:** a wrapper invocation that mounts the runtime socket can create containers on the host Docker/Podman daemon, and a mounted kubeconfig is your cluster credentials. Host socket ownership is not the Docker Desktop VM's: the wrapper probes whether the CLI container can write the mounted socket as your uid and falls back to root when that probe fails (typical Docker Desktop `0:0`/`0660` socket). On Linux it still adds the socket group or runs as root when the host socket is not user-writable. Files written into `$PWD` may then be root-owned.
 
 ### 1. Write a job definition
 
