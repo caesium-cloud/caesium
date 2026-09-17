@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -495,6 +495,72 @@ steps:
     expect(dialog).toHaveTextContent("CAESIUM_JOBDEF_GIT_SOURCES");
     expect(dialog).toHaveTextContent("CAESIUM_JOBDEF_GIT_ENABLED=true");
     expect(dialog).toHaveTextContent("caesium job apply --path");
+  });
+
+  it("keeps Apply enabled when the same file is uploaded again", async () => {
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    const uploaded = singleJobYaml("uploaded-job");
+    await changeUploadFile(new File([uploaded], "uploaded.job.yaml", { type: "text/yaml" }));
+    await settleLintAndDiff();
+
+    const apply = screen.getByRole("button", { name: /Apply definition/i });
+    expect(apply).toBeEnabled();
+    const lintCalls = vi.mocked(api.lintJobDef).mock.calls.length;
+
+    await changeUploadFile(new File([uploaded], "uploaded.job.yaml", { type: "text/yaml" }));
+    await settleLintAndDiff();
+
+    expect(apply).toBeEnabled();
+    expect(vi.mocked(api.lintJobDef).mock.calls.length).toBe(lintCalls);
+    expect(toast.success).toHaveBeenLastCalledWith("Loaded uploaded.job.yaml");
+  });
+
+  it("ignores completions from superseded file selections", async () => {
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+
+    let resolveFirst: ((value: string) => void) | undefined;
+    const first = new File(["stale: true\n"], "first.yaml", { type: "text/yaml" });
+    vi.spyOn(first, "text").mockReturnValue(
+      new Promise((resolve) => {
+        resolveFirst = resolve;
+      }),
+    );
+    const secondYaml = singleJobYaml("second-job");
+    const second = new File([secondYaml], "second.yaml", { type: "text/yaml" });
+
+    const input = screen.getByTestId("jobdefs-upload-input");
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [first] } });
+      await Promise.resolve();
+    });
+    await changeUploadFile(second);
+    expect(screen.getByLabelText("job.yaml editor")).toHaveValue(secondYaml);
+
+    await act(async () => {
+      resolveFirst?.("stale: true\n");
+      await Promise.resolve();
+    });
+    expect(screen.getByLabelText("job.yaml editor")).toHaveValue(secondYaml);
+    expect(toast.success).toHaveBeenLastCalledWith("Loaded second.yaml");
+  });
+
+  it("restores focus to Git sync when the dialog closes", async () => {
+    vi.useRealTimers();
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+
+    const opener = screen.getByTestId("jobdefs-git-sync");
+    opener.focus();
+    fireEvent.click(opener);
+
+    const dialog = await screen.findByRole("dialog", { name: "Git sync" });
+    fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Git sync" })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("jobdefs-git-sync")).toHaveFocus();
+    });
   });
 });
 

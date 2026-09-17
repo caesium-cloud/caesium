@@ -198,13 +198,13 @@ export function JobDefsPage() {
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
   const [isLinting, setIsLinting] = useState(false);
   const [ackReason, setAckReason] = useState("");
-  const [gitSyncOpen, setGitSyncOpen] = useState(false);
   const latestYamlRef = useRef(EXAMPLE_YAML);
   const baselineYamlRef = useRef(EXAMPLE_YAML);
   const yamlVersionRef = useRef(0);
   const validationSeqRef = useRef(0);
   const editorViewRef = useRef<EditorView | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadGenRef = useRef(0);
 
   const syncLatestYaml = useCallback((value: string) => {
     if (latestYamlRef.current !== value) {
@@ -269,6 +269,7 @@ export function JobDefsPage() {
   }, [syncLatestYaml]);
 
   const handleResetExample = useCallback(() => {
+    uploadGenRef.current += 1;
     syncLatestYaml(EXAMPLE_YAML);
     setYaml(EXAMPLE_YAML);
     setIsLinting(true);
@@ -285,15 +286,23 @@ export function JobDefsPage() {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    const gen = ++uploadGenRef.current;
 
     try {
       const text = await readJobDefUpload(file);
+      if (gen !== uploadGenRef.current) return;
       const current = currentEditorYaml();
       if (current !== baselineYamlRef.current) {
         const replace = window.confirm(
           "Replace the current editor contents with this file? Unsaved changes will be lost.",
         );
+        if (gen !== uploadGenRef.current) return;
         if (!replace) return;
+      }
+      if (text === current) {
+        baselineYamlRef.current = text;
+        toast.success(`Loaded ${file.name}`);
+        return;
       }
       syncLatestYaml(text);
       setYaml(text);
@@ -303,6 +312,7 @@ export function JobDefsPage() {
       baselineYamlRef.current = text;
       toast.success(`Loaded ${file.name}`);
     } catch (err) {
+      if (gen !== uploadGenRef.current) return;
       toast.error(err instanceof Error ? err.message : "Failed to read the selected file");
     }
   }, [currentEditorYaml, syncLatestYaml]);
@@ -425,17 +435,20 @@ export function JobDefsPage() {
             <Upload className="h-3.5 w-3.5 mr-1.5" />
             Upload
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="bg-transparent border-graphite/50 text-text-2"
-            data-testid="jobdefs-git-sync"
-            onClick={() => setGitSyncOpen(true)}
-          >
-            <GitBranch className="h-3.5 w-3.5 mr-1.5" />
-            Git sync
-          </Button>
+          <GitSyncDialog
+            trigger={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="bg-transparent border-graphite/50 text-text-2"
+                data-testid="jobdefs-git-sync"
+              >
+                <GitBranch className="h-3.5 w-3.5 mr-1.5" />
+                Git sync
+              </Button>
+            }
+          />
           {hasBreakingContractFindings && !hasMultipleBreakingSubjects && (
             <input
               aria-label="Breaking change acknowledgement reason"
@@ -692,7 +705,6 @@ steps:
         </div>
       </div>
 
-      <GitSyncDialog open={gitSyncOpen} onOpenChange={setGitSyncOpen} />
     </div>
   );
 }

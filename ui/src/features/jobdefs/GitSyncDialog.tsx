@@ -1,21 +1,24 @@
+import { type ReactElement } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 
 interface GitSyncDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  trigger: ReactElement;
 }
 
-export function GitSyncDialog({ open, onOpenChange }: GitSyncDialogProps) {
+export function GitSyncDialog({ trigger }: GitSyncDialogProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent
         data-testid="jobdefs-git-sync-dialog"
         className="bg-midnight border-graphite/50 p-4 text-text-1 sm:max-w-lg sm:rounded-lg sm:p-6"
@@ -47,14 +50,15 @@ export function GitSyncDialog({ open, onOpenChange }: GitSyncDialogProps) {
           </p>
         </div>
         <DialogFooter className="mt-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            className="border-graphite/50 bg-transparent text-text-2 hover:bg-graphite/20 hover:text-text-1"
-          >
-            Close
-          </Button>
+          <DialogClose asChild>
+            <Button
+              type="button"
+              variant="outline"
+              className="border-graphite/50 bg-transparent text-text-2 hover:bg-graphite/20 hover:text-text-1"
+            >
+              Close
+            </Button>
+          </DialogClose>
         </DialogFooter>
       </DialogContent>
     </Dialog>
