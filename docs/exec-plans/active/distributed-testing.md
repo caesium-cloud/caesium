@@ -1077,10 +1077,148 @@ below is mandatory, including append-only edits.
   Verify: Generate bounded DAGs and sequences of admission, completion, cancellation, retry, lease expiry, checkpoint, and recovery using Rapid; minimize and retain failures. The independent `test/model` package is deliberately untagged, pure Go, and has no cluster/client startup, Docker socket, real network, or product decision-function dependency, so it belongs in `just unit-test`. Any test that launches external infrastructure must instead be integration-tagged and run by the system runner. Use Porcupine only for valid sequential contracts, with separate liveness/event models. Check checkpoint/replay equivalence and partition accounting with hermetic fixtures; compare real execution modes in B3 rather than claiming the pure model proves wiring. C1 owns its used model dependencies; adding a future proxy/container library needs a separately assigned owner.
   Note: shipped with `pgregory.net/rapid v1.3.0` and `github.com/anishathalye/porcupine v1.3.0` (toolchain-generated sums; `go mod tidy` also promoted the already-direct `prometheus/common` out of the indirect block). `test/model` is untagged pure Go and `independence_test.go` enforces its import allowlist mechanically, so the no-product-dependency and hermetic claims are a test rather than a convention. Porcupine checks only the run-status register; delivery, liveness and lease safety have separate models, each with a negative control proving the oracle rejects a planted defect. Retained minimized failures are committed as deterministic tests in `test/model/regression_test.go`, not as Rapid `.fail` artifacts: a fixed defect's bitstream replays as "no longer valid" and documents nothing, so the workflow in `doc.go` keeps `.fail` files only while a defect is open. The four counterexamples found were all in the new model; the product's `RunState`/recovery paths agreed with it under 4000+ generated cases per property. No cluster evidence is claimed — B1/B3 remain the only source for that.
 
-- [ ] C2. Expand native fuzzing and deterministic concurrency regressions.
+- [x] C2. Expand native fuzzing and deterministic concurrency regressions.
   Files: `pkg/jobdef/schemacompat/fuzz_test.go`, `internal/jobdef/diff/fuzz_test.go`, `internal/trigger/cron/fuzz_test.go`, new `internal/run/descriptor_fuzz_test.go`, new `internal/run/recovery_fuzz_test.go`, new `internal/worker/renewal_synctest_test.go`, new `scripts/fuzz-tests.sh`.
   Depends on: C1.
   Verify: the containerized script discovers/selects each intended fuzz target, performs a bounded exploration rather than seed-only execution, and preserves corpus artifacts. Persist minimized failures as normal regressions. Exercise isolated timer/cancellation/renewal logic with `testing/synctest` where supported; real sockets and CGO/dqlite remain outside its deterministic claim. Repeat selected concurrency tests with race detection and varied scheduling. No sleep-only success oracle or arbitrary valid-input rejection substitutes for a property.
+  Note (W4-δ): 8 fuzz targets across 4 packages, each asserting a property
+  beyond "didn't panic" — reflexivity (`Compare(s,s)` never reports a schema
+  breaking against itself, `pkg/jobdef/schemacompat`), differential agreement
+  between two independent real decode paths (`decodeDefinitions` vs.
+  `schema.Parse`, `internal/jobdef/diff`; `extractExpression`/`extractLocation`
+  vs. the real `ParseSchedule` consumer, `internal/trigger/cron`), round-trip
+  fixed point at the byte level plus decode-gate determinism
+  (`FuzzTaskExecutionDescriptorRoundTrip`, the frozen `TaskExecutionDescriptor`
+  every replay/deadline/worker consumer decodes identically), idempotence and
+  conservation (`FuzzMergeDescriptorSecretRefs`), and checkpoint/recovery
+  agreement plus corrupted-checkpoint-fallback-equals-from-scratch-replay
+  (`FuzzValidateCheckpointBlob`, `FuzzRecoverRunStateTerminalRows`, new
+  `internal/run` targets, hermetic, no DB/build tag). `scripts/fuzz-tests.sh`
+  re-execs itself inside the `caesium-builder:latest-full` image (POSIX `sh`,
+  no bash in that image), mirrors `unit-test`'s repo mount and
+  `ui/dist/index.html` touch, adds its own GOCACHE volume for corpus
+  persistence, discovers targets via `go test -list '^Fuzz'` per package and
+  fails on any declared/discovered mismatch, runs one target per `go test
+  -run=^Name$ -fuzz=^Name$ -fuzztime=<budget>` invocation, parses `execs:`/`new
+  interesting:` to reject a seed-only or zero-exec run, exports
+  `testdata/fuzz/<Target>` plus the exploratory GOCACHE corpus to a host
+  artifact dir, and repeats a selected `internal/worker` renewal-test set
+  under `-race -count=3` at `-cpu=1,2,4` (one `go test` per cpu value rather
+  than a single `-cpu=1,2,4` invocation, for clean per-configuration
+  logs/results). Measured real run (`CAESIUM_FUZZ_SECONDS=20s`, this base):
+  all 8 targets explored genuinely (23–75s each incl. per-target build,
+  61k–358k execs, 123–242 new-interesting entries, zero crashers) and all 9
+  concurrency-matrix configurations passed (72 pass/0 fail at each of
+  cpu=1,2,4). Negative-proof evidence (uncommitted, reverted after): (a)
+  temporarily narrowing a package's declared-target list made the script fail
+  fast at the discovery step with the exact undeclared-target message, exit 1;
+  (b) temporarily planting `t.Fatalf` at the top of `FuzzExtractLocation`'s
+  body made the run report `CRASH: FuzzExtractLocation failed`, print the
+  guaranteed-correct `go test -run=<Target> ./<pkg>` reproduction command, keep
+  processing every remaining target/concurrency config, and exit 1 overall.
+  `internal/worker/renewal_synctest_test.go` drives the real `runLeaseRenewal`/
+  `runRunLeaseRenewal` goroutines (worker.go) through `testing/synctest`
+  against the package's existing `LeaseRenewer`/`RunLeaseRenewer` fakes — no
+  production edit, no new clock seam (A1 deferred that): renewal fires exactly
+  once per configured tick in fake time, cancellation stops the goroutine with
+  no leaked reader on the ticker (proven by advancing fake time further and
+  observing zero additional calls, and by `synctest.Test` itself refusing to
+  return over a still-blocked goroutine), a proven lease loss surfaces as task
+  context cancellation on the very next tick (replacing
+  `TestRunLeaseRenewalTickCancelsLostClaim`'s real
+  `time.After(10*time.Second)` wait with a deterministic one), a transient
+  renewal error is retried on the following tick rather than killing the loop,
+  and a slow renew call structurally cannot overlap a second one (single
+  select-loop goroutine; pinned against a future concurrent-dispatch
+  refactor). Out of reach, stated per A1's Clock table: real dqlite
+  `RenewLeases`/`RenewOwnedLeases` SQL behavior, real wall-clock/host-jitter
+  interaction, and the HTTP dispatch path — B-stream's live cluster and the
+  non-synctest tests in the same package remain the source for those. One real
+  (very minor, currently unreachable) product defect found by reasoning about
+  `mergeDescriptorSecretRefs`'s empty-existing fast path before ever running
+  the fuzzer: filed as
+  [#549](https://github.com/caesium-cloud/caesium/issues/549); not fixed (out
+  of file scope) and `FuzzMergeDescriptorSecretRefs`'s properties are scoped to
+  what the function actually guarantees rather than asserting the disproven
+  claim. `just unit-test` (`-race`, full `./...`) and `just lint` both pass
+  clean on the final state; `just integration-test` was not run — this
+  stream's diff is test-only plus a script, with no `test/` scenario added.
+  Review-fix round (PR #551, three verified P2 findings, all confirmed real
+  before fixing): (1) `FuzzDecodeDefinitions`'s cross-check compared
+  `decodeDefinitions` against `schema.Parse` whenever exactly one definition
+  was yielded, but `len(viaDecode)==1` does not mean "one document" —
+  `decodeDefinitions` silently skips a blank document
+  (`isBlankDefinition`) before deciding what to hand its callback, so
+  `"{}\n---\n<valid manifest>"` yields one accepted definition while
+  `schema.Parse` (first-document-only) rejects the leading blank `{}` —
+  a false positive. Fixed with `singleYAMLDocument`, an independent
+  `yaml.Node`-based document-count check gating the comparison; the exact
+  reported input is now a committed passing seed. (2) `fuzz-tests.sh`'s
+  crasher export resolved Go's printed `testdata/fuzz/<Target>/<hash>` path
+  (relative to the PACKAGE directory, since that's the test binary's cwd)
+  against the repo root instead, so the file existence check always failed
+  and the corpus-preserving `cp` silently no-opped; the same `continue` also
+  skipped the correctly-pathed directory-level copy on any crash. Fixed by
+  resolving the printed path against `$pkg` and moving the directory-level
+  corpus copy before the crash branch so it always runs. Re-verified with a
+  GENERATED (not seed) failing input — planted a single-byte trigger
+  one bit-flip from a seed, `go test` discovered `[]byte("\x01")` via
+  mutation in 6s, and the artifact dir ended up with
+  `corpus/FuzzValidateCheckpointBlob/97dc7172b48e6ffd` containing that exact
+  byte, reproduction command printed as
+  `go test -run=FuzzValidateCheckpointBlob ./internal/run`. (3) the
+  undeclared-target guard only ever inspected `go test -list` output within
+  the four hardcoded `PACKAGES`, so a new `FuzzX` in any other package was
+  invisible and the run still exited 0. Fixed with a repo-wide sweep (`find
+  -prune` over `.git`/`vendor`/`node_modules` piped through `grep -H -n`
+  against a `func FuzzX(<any identifier> *testing.F)` pattern, since BusyBox
+  grep has no `--include`/`--exclude-dir`) cross-checked against the
+  manifest in both directions. Re-verified by planting
+  `FuzzNegativeProofUndeclaredPackage` in
+  `pkg/dbtrace` (outside `PACKAGES`): the sweep caught it and failed before
+  any target ran. All three fixes re-verified with a full clean
+  `scripts/fuzz-tests.sh` run (all 8 targets genuinely explored, zero
+  crashers, all 9 concurrency configurations passing) plus `just lint` and
+  `just unit-test` (`-race`, full `./...`), both clean; all planted
+  fixtures were uncommitted and reverted.
+  Review-fix round 2 (PR #551, three more verified P2 findings): the
+  concurrency matrix required only `rc==0`, so `-count=0`, a `-run` pattern
+  matching nothing, or an all-skipped selection all reported a false
+  `OK … pass=0 fail=0`. Fixed: `CONCURRENCY_COUNT` is validated as a
+  positive integer up front, and every `-cpu` configuration now also
+  requires `passed > 0` and `failed == 0`. Re-verified by swapping
+  `CONCURRENCY_RUN` to a non-matching pattern: all three `-cpu` configs
+  correctly reported `ran ZERO subtests`, exit 1. The repo-wide sweep regex
+  hard-coded the `*testing.F` parameter name as literally `f`, so
+  `func FuzzX(fuzz *testing.F)` was invisible to it. Fixed: the pattern now
+  matches any valid identifier there. Re-verified by planting
+  `FuzzProbe(fuzz *testing.F)` in `pkg/dbtrace` (outside `PACKAGES`): the
+  sweep caught it, exit 1. The `execs > 0` exploration check accepted a
+  budget that expired during baseline/seed replay (Go's `execs:` counter
+  includes those), reporting a false `OK` with zero real mutation. Fixed:
+  the completed-baseline denominator is parsed from Go's own
+  `gathering baseline coverage: N/N completed` line and `execs` must exceed
+  it. Re-verified with `-fuzztime=3x` (Go's `-fuzztime` also accepts an `Nx`
+  iteration-count form, not just a duration) against seed counts of 4–11 per
+  target: every target correctly failed as `at or below its baseline`,
+  exit 1. All three re-verified together with a full clean
+  `scripts/fuzz-tests.sh` run (8/8 targets genuinely explored, 0 crashers,
+  9/9 concurrency configs passing) plus `just lint`/`just unit-test`, both
+  clean; all fixtures uncommitted and reverted. (Round 2 also fixed an
+  unrelated guardrail trip: `internal/guardrails`' bare-image-ref scanner
+  scans `.md` among other extensions and treats a lowercase mention of the
+  BusyBox project's name as an unpinned image reference — reworded to the
+  capitalized project name throughout this Note.)
+  Round 3 (orchestrator fix-forward): the sweep still required the literal
+  selector `testing.F`, so a target declared through an aliased import
+  (`import test "testing"` -> `f *test.F`) or with its parameter list split
+  across lines stayed invisible. The sweep now matches ANY top-level
+  `func FuzzX(` in a test file regardless of signature; over-matching is the
+  safe direction, since a helper that merely happens to be named `FuzzX` is
+  flagged and must be declared or renamed. Checked against the tree (exactly
+  the 8 declared targets match) and re-verified by planting
+  `FuzzAliasedImportProbe` and `FuzzMultilineProbe` in `pkg/dbtrace`: both
+  were reported by name and the script exited 1 before running any target.
 
 - [ ] C3. Prove the checkers still detect known classes of defects.
   Files: new `test/model/oracle_regression_test.go`, new `test/model/testdata/`, new `scripts/validate-test-oracles.sh`.
