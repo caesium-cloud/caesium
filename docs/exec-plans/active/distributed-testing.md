@@ -1,6 +1,6 @@
 # Distributed Testing and Performance Confidence
 
-Last updated: 2026-09-14
+Last updated: 2026-09-19
 
 Make a passing required CI result meaningful evidence that Caesium preserves
 its backend guarantees, developer workflows, and Console behavior under normal
@@ -924,20 +924,19 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-14, W3)
+## Progress (as of 2026-09-19, W4)
 
-**W1 and W2 are closed, W3 implementation is merged, and W3/N-1 is this PR.**
-A1, A2, B1, C1, D1, D2, E1, E5, F1, G1, G3 and G5 have merged acceptance
-evidence and are checked. The other 15 implementation items remain
-undispatched. This documentation checkpoint is based on merged master
-`894f645b`, which includes all six W3 items. W3 wires B1's owner-crash runner
-and E5's SQL-work budget into a real CI lane (`early-evidence`), promotes that
-lane into the fail-closed `ci-ok` aggregate with evidence-binding checks, adds
-an independent pure reference model with generated property tests, extends the
-binary-driven developer journey, expands browser accessibility/visual/scale/
-recovery coverage, and records the F1 lifecycle decision that resolves Q4.
-**No repository settings have changed** — see the milestone note after the W3
-table, and Q6.
+**W1, W2 and W3 are closed, W4 implementation is merged, and W4/N-1 is this PR.**
+A1, A2, B1, B2, C1, C2, D1, D2, E1, E2, E5, F1, F4, G1, G3, G5 and G7 have
+merged acceptance evidence and are checked. The other 10 implementation items
+remain undispatched: G2 was dependency-ready in W4 and was not selected. This
+documentation checkpoint is based on merged master `334f99b3`, which includes
+all five W4 items. W4 adds targeted multi-node faults and event/effect history
+correlation, an open-loop load driver with lifecycle measurements, single-node
+previous-release upgrade qualification, native fuzzing plus synctest concurrency
+regressions, and merge-candidate identity / `merge_group` wiring.
+**No repository settings have changed** — `ci-ok` is still absent from master's
+required status checks, and no merge queue exists. See Q6 and the G7 row.
 
 | W1 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
@@ -967,18 +966,28 @@ closed; no further status-only PR is owed for it.
 | δ | D2 / [#482](https://github.com/caesium-cloud/caesium/pull/482), merged | Merge `894f645b85d4b17e5bb0abac6bd9d4903501fb12`. Delivered `ui/e2e/accessibility.spec.ts` (scoped axe over WCAG2/2.1 A+AA critical/serious findings plus keyboard/focus, with the react-flow DAG canvas and xterm terminal excluded as DOM-less by construction), `ui/e2e/visual.spec.ts` with committed `-linux.png` baselines, `ui/e2e/scale.spec.ts` (a real 18-node DAG, 24 individually reachable pipelines, a synthetic 240-row partition set, a real 2000-line log stream), `ui/e2e/network-recovery.spec.ts`, the shared `failOnUnexpectedPageErrors` guard plus `uniqueSuffix`/`buildFanDefinition` in `ui/e2e/helpers/fixtures.ts`, `toHaveScreenshot` defaults in `ui/playwright.config.ts`, and a pinned `@axe-core/playwright`. Adversarial-review findings were fixed in-PR (commits `ab450ddb`, `503517fa`, `527c737c`, `ac0582be`): the axe baseline is tracked per violating **node** rather than per rule id, matched by leaf class set and, for `color-contrast`, by `fgColor` within an RGB tolerance, because axe's selector minimization and these opacity-composited tokens both vary run to run against an unmodified UI; the Trigger Job dialog's single-Tab focus check became a real wrap-around boundary proof in both directions; the partition-table baseline was re-taken from CI's actual render; and the console-error guard's network-level `net::ERR_*` allowance ended up file-scoped to `network-recovery.spec.ts` alone, every other spec keeping the strict default. **Limits:** `KNOWN_VIOLATIONS`/`KNOWN_CONTRAST_TOKENS` is a tracked baseline of real pre-existing product defects, filed as [#483](https://github.com/caesium-cloud/caesium/issues/483) — not a pass; shrinking it is product-code work outside this stream. The visual tests self-skip off Linux, so the per-pixel comparison happens only in CI's `ui-e2e`. The large partition set and the credential/permission-denial cases are explicitly SYNTHETIC (this e2e server runs `CAESIUM_FANOUT_MAX_PARTITIONS=8` and no `CAESIUM_AUTH_MODE`); real scope denial stays covered live in `ui/e2e/auth/`. Local `just ui-lint`, `ui-test`, `ui-e2e` (41 passed, 3 darwin screenshot skips), `ui-e2e-auth` (8 passed), `just lint` and `just unit-test` all green. |
 | ε | F1 / [#474](https://github.com/caesium-cloud/caesium/pull/474) + [#478](https://github.com/caesium-cloud/caesium/pull/478), merged | Merges `937a9feac5e51b7358331356bb95d8247617bff7` and `da08e7ef81dc0f5a0818e6283eba78bec9f054b1`. Delivered the F1 lifecycle decision record under Strategic Decisions and closed **Q4** there. Audited against real code, chart, workflow and registry: there are no hand-written migrations and no schema-version table (`pkg/db/Migrate()` AutoMigrates `internal/models.All` from struct tags, with one explicit DDL repair), every node migrates unconditionally on boot, and the shard count is frozen for the life of a data directory. Exactly one release exists (`v0.1.0`); the record pins its multi-arch and per-arch image digests and release asset checksums, and flags Docker Hub's `latest` as a 2021 amd64-only image the publish chain never updates. Q4: CLI platforms `linux/amd64`+`linux/arm64` only, Chromium only, adjacent-pair upgrades only, mixed-version operation limited to internal protocol 2 with an identical shard count, restore-from-snapshot supported and binary rollback not. **Blocking finding, reproduced locally against `caesiumcloud/caesium:v0.1.0` on a retained volume:** go-dqlite refuses to start when the supplied address differs from `info.yaml` (`pkg/db/db.go`), and the chart sets `CAESIUM_NODE_ADDRESS=$(POD_IP):9001`, so a persistent StatefulSet upgrade depends on the CNI reusing the pod IP — and `helm upgrade` is never executed in CI at all. Five external product prerequisites are recorded (backup/restore, member removal, build/version reporting, stable dqlite node address, ordinal-0 rejoin/re-bootstrap). #478 accepted and fixed all five P2 findings from the adversarial review of #474: `data_violations` belongs to `task_runs` and not `job_runs`; the event fixture records identities as a set with an explicit resume cursor instead of a forbidden gap-free high-water mark; the Helm upgrade command must keep its kubeconfig/namespace/values and diff `helm get manifest` before and after; ordinal-0 loss is a separate blocked case, with `caesium-1` named for replacement; and restore must be distinguishable from peer catch-up, which downgrades the rollback-versus-restore row from "supported" to "intended, not yet qualified". **Limits:** this is lifecycle policy and procedure, not upgrade certification — no upgrade, rollback, replacement or restore was executed. F4 and F2 are dispatchable without further design, but F2's upgrade case is blocked-by-prerequisite on the stable node address and its disk-loss case on ordinal-0 bootstrap. Docs-only; `just lint` 0 issues and `just unit-test` green on both PRs. |
 | ζ | G5 / [#481](https://github.com/caesium-cloud/caesium/pull/481), merged | Merge `5d4bf73e0d194301090e147a17daf5c883f7e0bc`, merged by the CODEOWNER. `ci-ok` now requires `early-evidence` with `SELECTORS["early-evidence"] = ("go", "helm", "ci")` — exactly the lane's own `if:` condition, so a lane that vanishes cannot read as an allowed skip — and `helm-lint`, the lane's unconditional producer, is promoted with it so a chart failure reports as itself rather than as a skipped consumer. **A green job result is not accepted as evidence:** `ci-ok` downloads the report the lane uploaded and `scripts/ci-ok.py` requires it to exist and parse as an object, to bind to this run's `github.sha`, to have at least one registered `early` scenario (an ungated manifest cannot vacuously pass), to report every `early`-gated row `pass` with its required fault-activation kind and observations, and to pass `check-test-evidence.py --require early --strict`. Measured on hosted `ubuntu-24.04` runners across five green runs: 6m19s, 5m57s, 6m18s, 7m15s and 7m32s (mean ~6m40s), with no lane flake and no lane retry. The aggregate's verdict now lands ~2m07s later; total workflow wall clock grew 0s on one attempt (13m12s, `helm-integration-test` still the critical path) and +25s on the other, where `ci-ok` became the critical path, and the promotion costs no new runner minutes because the lane already ran on every `go`/`helm`/`ci` PR. It also fail-closed for real on [run 34868499191](https://github.com/caesium-cloud/caesium/actions/runs/34868499191) attempt 1, where a transient `images`/`bake-images` failure skipped the lane and the gate refused for both the missing dependency and the absent evidence report. **Q6 finding — `ci-ok` is NOT enforced at merge.** Master's protection lists eight required contexts (`lint`, `unit-test`, `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`, `build-and-integration-test`, `build-and-integration-test-agent-auth`), `strict: false`, `enforce_admins: false`, one CODEOWNER review, and there are no rulesets; `ci-ok` is absent, so this promotion blocks `v*` tag publication (through `publish.needs`) but not PR merge. Exactly one repository-settings change closes that — adding `ci-ok` to `required_status_checks` — which is outside execution authorization and was **not** made; it is surfaced to the CODEOWNER. Existing optional lanes (`helm-integration-test`, `podman-integration-test`, `integration-extra`, `integration-arm64`) keep their unpromoted status, asserted by a test. |
-| W3/N-1 | this PR | Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the six merged W3 items, authored from merged master `894f645b`. It also carries the one-line G5 note refresh (`ed62d4a0`) that was raised on the W3-ζ branch but never merged. Its merge SHA is unavailable until merge; resolve it on the next invocation and record it here. |
+| W3/N-1 | [#518](https://github.com/caesium-cloud/caesium/pull/518), merged | Merge `e864d780bb5fcb18bfe7e8f516b838a43d7cf6b9`. Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the six merged W3 items, authored from merged master `894f645b`. It also carries the one-line G5 note refresh (`ed62d4a0`) that was raised on the W3-ζ branch but never merged. W3 is closed; no further status-only PR is owed for it. |
+
+| W4 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | B2 / [#555](https://github.com/caesium-cloud/caesium/pull/555), merged | Merge `334f99b391e7d638ee42bc5580b26214d93daea2`; verified candidate `acd2cd9c53e30c0387567aebd1d21bf19de2cdf0`. Live-proven `TestTargetedFaults` on owned kind clusters: `external_pause_resume`, `asymmetric_partition` (external iptables on discovered Raft/dispatch addresses; A1 forbade proxies), `response_loss_possibly_committed` (client-side interposer after an observed commit; timeouts stay possibly committed), `event_history_correlation` (SSE vs persisted rows as a set inside DT-EVENT-01's store scope), and `bus_publish_pause` (test-only durable-event-before-publication hook on both `PublishAndMarkBusDispatched` and `DispatchOnce`). **EX-HOOKS** re-verified at the execution base: last `bus_dispatch.go` commit still `573edfee` (PR #423); open sibling #449 does not list the file. Compile-time absence of `internal/testfault` in the release image is scanned on every `scripts/robustness.sh` run. Default `CAESIUM_ROBUSTNESS_RUN` remains `^TestOwnerCrash$`, so the `early-evidence` merge gate is unchanged; `TestOwnerCrash` still PASS on the ordinary release image. `justfile`, bake files, the workflow and `test/contracts/scenarios.json` were not edited — B3 registers these scenarios. **Limits:** targeted faults are not a CI lane; missing recorder data, vanished hook logs, or a broken SSE subscription are inconclusive, never a pass. |
+| β | E2 / [#552](https://github.com/caesium-cloud/caesium/pull/552), merged | Merge `12feeec0d48c6cc50aa9911ce6f58b309e178e48`; verified candidate `d18d0313bbe0f18d68d2a8aff1abe1b340e098c5`. Extended E1's containerized Go driver in place (no k6, no `justfile`/`go.mod` edit). `mode=open` places arrivals on an absolute clock grid; the ledger separates dropped / admitted (DT-ADMIT-01 UUID-202) / queued-or-skipped (bare 202) / rejected / `transport_uncertain` (DT-QUORUM-01, never a rejection). Report schema 2 keeps every schema-1 field. Live `go test -tags=integration ./test/performance` against the `integration-up` server: 10/10 catalog workloads plus two extra tests, `ok` in 350.766s; full `just integration-test` green (276 scenario PASS). Three adversarial-review rounds on #552, all findings fixed with regressions. **Limits:** `open-tiny-sustained` and `open-api-read-mix` gate on the backlog verdict; four other open workloads report `backlog_growing` on the shared host and pass only because they omit `require-sustained` (each carries an enforced `sustained_rationale`). Not a CI job and not a calibrated SLO — E3/E4 own comparison and budgets. No product-code fix was required. |
+| γ | F4 / [#554](https://github.com/caesium-cloud/caesium/pull/554), merged | Merge `456a4102b6ca5a709785cc9d62d20e910694627c`; verified candidate `24abe043fcb06c03c5020c1d0f44b61f99753077`. Shipped `scripts/lifecycle-tests.sh`, integration-tagged `test/lifecycle/standalone_test.go` (compiled explicitly; the precompiled `./test` runner does not contain subpackages) and `test/lifecycle/versions.json` (pinned `v0.1.0` index digest `sha256:2e6996f9…73917`, per-arch digests, CLI checksums, protocol 2, shard count 1, explicit `{table, column}` delta). One command, candidate image built from this checkout unless supplied (supplied images are `unverified` and block unless `CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1`). Measured qualification **pass**: 17 pass + 3 recorded-outcome cases. **#536 re-grounding:** F1's required "changed `CAESIUM_NODE_ADDRESS` exits 1" case is stale on the candidate after PR #536 (`35bced63`); F4 asserts #536's recover-and-rewrite contract on the candidate and keeps the pinned v0.1.0 image as the deterministic failing transition. Recorded-outcome: rollback (v0.1.0 starts on the migrated volume), shard-count change (no stranding observed at this size — does not unfreeze the shard count), retained in-flight run still `running` and holding a concurrency slot (filed [#553](https://github.com/caesium-cloud/caesium/issues/553)). **Limits:** one node, one shard, local execution mode, purely additive pair so `MigrateTaskRunUniquePartitionIndex` is not exercised. Not wired into CI or `ci-ok` — G6 owns that; `test/contracts/scenarios.json` is untouched. |
+| δ | C2 / [#551](https://github.com/caesium-cloud/caesium/pull/551), merged | Merge `0aa96d5556a52d64844d542ccd2214983acc8a21`; verified candidate `b2c990971dbabb63e958e7fff4bd6a419e7ab6a4`. Eight fuzz targets across four packages, each asserting a property beyond "didn't panic", plus `scripts/fuzz-tests.sh` (re-execs inside `caesium-builder:latest-full`, POSIX `sh`, discovers via `go test -list '^Fuzz'`, rejects seed-only/zero-exec runs, exports corpus artifacts) and `internal/worker/renewal_synctest_test.go` (real renewal goroutines through `testing/synctest`; no production clock seam). Measured `CAESIUM_FUZZ_SECONDS=20s`: 8/8 targets explored (61k–358k execs), 9/9 `-race -count=3` concurrency configs at `-cpu=1,2,4` passed. Three review-fix rounds on #551, all verified real. Product defect found by reasoning, filed not fixed: [#549](https://github.com/caesium-cloud/caesium/issues/549) (`mergeDescriptorSecretRefs` empty-existing fast path). **Limits:** real dqlite SQL, wall-clock jitter and HTTP dispatch stay out of synctest's claim. `justfile` untouched (G6-owned). `just integration-test` not run (test-only plus a script). |
+| ε | G7 / [#550](https://github.com/caesium-cloud/caesium/pull/550), merged | Merge `d3199bc22c519626452179591400fb9cf8e4537c`; verified candidate `a23d97a3224b27b883e37b3596087981558637bf`. Settings evidence read twice (2026-09-16 and 2026-09-17) and **not modified**: required contexts remain the eight G5 listed; `strict: false`; `enforce_admins: false`; `require_code_owner_reviews: true`; `rulesets` → `[]`; `allow_update_branch: false`; `ci-ok` still absent. Wired `merge_group` (`types: [checks_requested]`), disjoint concurrency groups, fail-closed `changes` filter outputs, and `scripts/ci-ok.py` candidate-identity / base-freshness / pull-request parent checks. The two legacy `build-and-integration-test*` wrappers still omit `--candidate-sha` and stay exempt. **Live-queue limitation:** no ruleset exists, so `merge_group` has never fired; every queue-specific path is proven only statically (`actionlint` + `scripts/test_ci.py`). The `pull_request` path is live: [run 35221628892](https://github.com/caesium-cloud/caesium/actions/runs/35221628892) `ci-ok` logged `event='pull_request'` identity plus matching base freshness. Recommendation to the CODEOWNER (not applied): add `ci-ok` to required contexts, then either `strict: true` (also needs `allow_update_branch: true` or manual rebases) or a merge-queue ruleset. |
+| W4/N-1 | this PR | Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the five merged W4 items, authored from merged master `334f99b3`. Its merge SHA is unavailable until merge; resolve it on the next invocation and record it here. |
 
 The overall 27-item plan remains active. **The minimum credible gate milestone
-(G3 + G5) is delivered in CI but is not merge-enforced.** `early-evidence` runs
-on every `go`/`helm`/`ci` pull request, and `ci-ok` fails closed on the lane's
-report rather than on its job result — but `ci-ok` is not one of master's eight
-required status checks, so today the promotion blocks `v*` tag publication and
-not PR merge. Closing that gap is exactly one repository-settings change (add
-`ci-ok` to `required_status_checks`), recorded under Q6 as a CODEOWNER decision
-outside this plan's execution authorization; no settings were changed in W3.
-Calibrated performance budgets, partitions, upgrade qualification, real
-CLI/server coverage and Console fault journeys have not shipped.
+(G3 + G5) is delivered in CI but is not merge-enforced**, and G7 did not close
+that Q6 gap: `early-evidence` still runs on every `go`/`helm`/`ci` pull request,
+`ci-ok` fails closed on the lane's report and now also binds candidate identity,
+but `ci-ok` is still not one of master's eight required status checks, so the
+promotion blocks `v*` tag publication rather than PR merge. No merge queue
+exists; `merge_group` is wired and dormant. Targeted faults, open-loop load,
+fuzz campaigns and single-node upgrade qualification shipped as **commands and
+evidence, not CI jobs** — G6 wires the remaining matrix. Console fault journeys,
+calibrated performance budgets, cluster upgrades and real CLI/server coverage
+have not shipped.
 
 ### Resume and tracking rules
 
@@ -991,40 +1000,41 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile these
 rows against live PR state, head/merge SHAs, reviews and current-head checks.
-Resume the W3/N-1 PR while it is unfinished. Checkboxes mean merged acceptance
+Resume the W4/N-1 PR while it is unfinished. Checkboxes mean merged acceptance
 evidence; rows distinguish implementation and verification from merge. Once
-W3/N-1 is verified merged, record its merge SHA and select **W4** in that
+W4/N-1 is verified merged, record its merge SHA and select **W5** in that
 invocation; choose dependency-ready items while preserving unresolved Q1–Q3, Q5
 and Q6 and shared-file ownership. Dependency readiness alone does not authorize
 dispatch before the current wave's checkpoint.
 
-Dependency-ready after W3: **E2** (A1, E1), **G2** (A2, G1), **F4** (F1),
-**C2** (C1) and **G7** (G5). Their Files lists are pairwise disjoint, and G7 is
-the only writer of the `.github/workflows/ci.yml` / `scripts/ci-ok.py` /
-`scripts/test_ci.py` chain in that set — G2's new Python validator module is
-discovered by G1's wildcard and must not be edited into the workflow.
-**B2** is dependency-ready on B1 and C1 but **must not be dispatched until the
-EX-HOOKS sibling check is done**: identify the merged SHA/PR of any intersecting
-closed-loop-arc work on `internal/event/bus_dispatch.go` and record exclusive
-ownership for the wave, or record that no sibling has an active claim. A checked
-box in a sibling plan is not that evidence.
+Dependency-ready after W4: **B3** (A2, B2, G3), **G2** (A2, G1) and **E3**
+(E2, D2, C2). Their Files lists are pairwise disjoint. B3 is the sole writer of
+`test/contracts/scenarios.json` in that set (A2 → G3 → B3) and the next
+serialized writer of the cluster harness (B1 → B2 → B3). G2's new Python
+validator is discovered by G1's wildcard and must not be edited into the
+workflow. E3's new `scripts/test_compare_performance.py` is likewise
+wildcard-discovered; it does not edit `scripts/test_ci.py`. G2 was already
+ready in W4 and was not selected — do not treat that as a blocker.
 
-Still blocked after W3: **B3** (needs B2), **C3** (B3, C2), **D3** (B3, D2),
-**E3** (E2, D2, C2), **E4** (E3, plus Q2/Q5), **F2** (F4, B3, and
-blocked-by-prerequisite on the stable node address), **F3** (B3, C3, E4, F2,
-plus Q2), **G4** (F3, G6) and **G6** (B3, C3, D3, E4, F2, G2, G7).
+Still blocked after W4: **C3** (needs B3), **D3** (B3, D2), **E4** (E3, plus
+Q2/Q5), **F2** (F4, B3; F1 recorded the upgrade case as blocked-by-prerequisite
+on a stable dqlite node address — PR #536 later made the *candidate* reconcile
+`info.yaml`, which F4 re-grounds, but F2 still waits on B3 and must re-evaluate
+the cluster upgrade case against current code rather than inherit a pass or a
+block from the F1 snapshot), **F3** (B3, C3, E4, F2, plus Q2), **G4** (F3, G6)
+and **G6** (B3, C3, D3, E4, F2, G2, G7).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three of thirteen manifest rows are now `proven` with `gates: ["early"]` (registered by G3 #477); the other ten stay `absent` and belong to B2/B3/D3, then G6 |
-| B | Real multi-node robustness (3 items) | P0 | B1 merged #472 and now executed by the `early-evidence` lane on every `go`/`helm`/`ci` PR (wired by G3 #477, gated by G5 #481); B2 dependency-ready on B1/C1 but held for the EX-HOOKS sibling check; B3 needs B2 |
-| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475 — `test/model` runs inside `just unit-test` and found no product defect; C2 dependency-ready for W4; C3 needs B3 + C2 |
-| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482, with product defects filed as #479/#480 and Console accessibility debt as #483; D3 needs B3 + D2; Q4 has settled the supported platform/browser scope |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466 and E5 merged #471, and E5's budget is now gated through `early-evidence`; E2 dependency-ready for W4; E3 needs E2/D2/C2; E4 needs Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474 and corrected by #478; Q4 resolved. F4 dependency-ready for W4; F2 follows F4/B3 and is blocked-by-prerequisite on the stable node address; F3 needs B3/C3/E4/F2 |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464, G3 merged #477, G5 merged #481 — `early-evidence` is a fail-closed `ci-ok` dependency, but `ci-ok` is not itself a required status check (Q6, CODEOWNER decision). G2 and G7 dependency-ready for W4; G6 then G4 follow |
+| A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three of thirteen manifest rows remain `proven` with `gates: ["early"]` (registered by G3 #477). B2's targeted-fault scenarios are live-proven but still `absent` in the manifest — B3 registers them — then D3/G6 |
+| B | Real multi-node robustness (3 items) | P0 | B1 merged #472 and executed by `early-evidence`; B2 merged #555 with live kind proofs of pause, partition, response-loss, event-history correlation and the test-only bus-publish hook. Default runner selection is still `TestOwnerCrash`, so the merge gate is unchanged. B3 is dependency-ready for W5 |
+| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475; C2 merged #551 — 8 fuzz targets, `scripts/fuzz-tests.sh`, and synctest renewal regressions. C3 needs B3 + C2 |
+| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482, with product defects filed as #479/#480 (later addressed outside this plan by #532) and Console accessibility debt as #483; D3 needs B3 + D2 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552 (open-loop catalog, schema 2) and E5 merged #471 (still the only performance row in `early-evidence`). E3 is dependency-ready for W5; E4 needs Q2/Q5 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554 — single-node `v0.1.0 → candidate` qualification, not a CI lane. F2 follows F4/B3 and must re-evaluate the stable-address prerequisite against #536 rather than inherit F1's block; F3 needs B3/C3/E4/F2 |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1 merged #464, G3 merged #477, G5 merged #481, G7 merged #550 — `merge_group` is wired and dormant, candidate identity is bound, and `ci-ok` is still not a required status check (Q6). G2 was ready in W4 and not selected; G6 then G4 follow |
 
 ## Streams
 

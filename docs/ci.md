@@ -12,15 +12,20 @@ Shipped W1 load reporting and browser evidence; the W2 owner-crash robustness
 runner, integration SQL-work budget and scenario evidence validator; the W3
 `early-evidence` lane and its promotion into `ci-ok`, pure reference models,
 developer-journey CLI scenarios and browser accessibility/visual/scale/recovery
-coverage; plus the remaining distributed failure tests, Console fault journeys
-and performance gates, are tracked in
+coverage; the W4 targeted-fault harness, open-loop load driver, native fuzz
+campaigns, single-node previous-release upgrade qualification, and
+merge-candidate identity / `merge_group` wiring; plus the remaining distributed
+failure tests, Console fault journeys and performance gates, are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
-`ci-ok` (`early-evidence` and `helm-lint`). It changed **no repository
-settings**: `ci-ok` is still absent from master's required status checks, so
-that promotion gates `v*` publication rather than PR merge. See §1 and
-"Early evidence lane and the promoted gate" in §4.
+`ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
+dependencies**: G7 wired the `merge_group` trigger and candidate-identity
+checks on the existing aggregate. Neither wave changed repository settings:
+`ci-ok` is still absent from master's required status checks, so that
+promotion gates `v*` publication rather than PR merge, and `merge_group` is
+dormant until a ruleset exists. See §1 and "Early evidence lane and the
+promoted gate" / "Candidate identity and merge-group wiring" in §4.
 
 ## 1. Required-to-merge checks
 
@@ -84,7 +89,13 @@ it does not control skipped jobs. GitHub accepts a job skipped by an `if`
 condition as successful for branch protection. The aggregate gate checks
 whether each skip was expected. During migration, retain the existing
 `strict: false` policy; enable strict mode if desired when `ci-ok` becomes
-the sole required context.
+the sole required context. G7 (distributed-testing W4) reconfirmed these
+settings on 2026-09-16 and 2026-09-17 and did **not** change them. Flipping
+`strict: true` today would also need `allow_update_branch: true` (currently
+false) or manual rebases, because GitHub's "Update branch" button is
+disabled. A merge queue is the other Q6 option; `merge_group` is already
+wired and has never fired — see "Candidate identity and merge-group wiring"
+in §4. No settings command in this document was executed by W4.
 
 ### Command
 
@@ -249,9 +260,14 @@ required-to-merge for the builder, product/static CLI smoke, and
 
 ## 4. Job matrix and artifact flow
 
-Triggers: `pull_request` to `master`, `push` to `master`, `v*` tags.
-Feature-branch pushes do **not** run CI (the PR event covers them). A
-`concurrency` group cancels superseded PR runs.
+Triggers: `pull_request` to `master`, `push` to `master`, `v*` tags, and
+`merge_group` (`types: [checks_requested]`). Feature-branch pushes do **not**
+run CI (the PR event covers them). A `concurrency` group cancels superseded
+PR runs and keys `pull_request` / `merge_group` into disjoint namespaces
+(`pr-<number>` vs `mergegroup-<head_sha>`) so a queued run cannot share a
+slot with, or be cancelled by, a PR run. No merge queue exists today, so
+`merge_group` has never fired — see "Candidate identity and merge-group
+wiring" in this section.
 
 Each compiled artifact is produced once per architecture and loaded by
 consumers. `CAESIUM_SKIP_IMAGE_BUILD=true` on the integration recipes
@@ -497,12 +513,19 @@ just load-test
 
 The human summary goes to stdout by default. Set `CAESIUM_LOAD_JSON_OUTPUT=-`
 for JSON on stdout and the human summary on stderr. Output files are opt-in,
-with no automatic dated baseline file. JSON `schema_version: 1` records configuration without
+with no automatic dated baseline file. JSON `schema_version` is currently **2**; every schema-1 field is still
+emitted and still means what it meant. The report records configuration without
 credentials, expected/observed/outcome counts, per-run identity/status/times,
-samples, row/statement deltas, failure class and workload interval. `observed`
-means an acknowledged run ID; an uncertain trigger response does not prove
-that the server rejected the write. Reconcile all expected work, including
-untriggered work and uncertain admission, before interpreting throughput.
+samples, row/statement deltas, failure class and workload interval. Schema 2
+adds mode/workload identity, the open-loop admission ledger, backlog and
+throughput verdicts, observed lifecycle intervals with explicit unavailability
+markers, external container resource observations, API-read and SSE-subscriber
+mixes, and the workload-driven / timer-driven split of the existing DB
+counters — see "Open-loop load driver and lifecycle measurements" below.
+`observed` means an acknowledged run ID; an uncertain trigger response does
+not prove that the server rejected the write. Reconcile all expected work,
+including untriggered work and uncertain admission, before interpreting
+throughput.
 
 Exit 0 requires successful expected work and valid measurements. Failed,
 cancelled, skipped, unconfirmed, untriggered or timed-out work; missing/reset
@@ -521,8 +544,9 @@ exit 1 with both expected runs untriggered and none observed. Full local
 lint/unit and all executed checks in
 [run 34499466191](https://github.com/caesium-cloud/caesium/actions/runs/34499466191)
 passed. These are correctness checks for reporting, not calibrated performance
-SLOs, an arrival-rate driver, or proof of multi-node fault tolerance. Those
-remain later plan items.
+SLOs or proof of multi-node fault tolerance. The arrival-rate driver is E2
+(`mode=open`, schema 2) — see "Open-loop load driver and lifecycle
+measurements" below. E3/E4 still own comparison and budgets.
 
 ### Owner-crash robustness runner (distributed-testing W2/B1)
 
@@ -575,7 +599,12 @@ cluster and the namespace, which is what lets two instances coexist.
 `build/Dockerfile.robustness` compiles `go test -tags=integration -c
 ./test/robustness` in the builder image; the root `./test` binary does not
 contain that package, so it has to be built separately. The runner pod executes
-`/bin/robustness.test -test.v -test.run '^TestOwnerCrash$' -test.timeout 15m`.
+`/bin/robustness.test -test.v -test.run "$CAESIUM_ROBUSTNESS_RUN" -test.timeout …`.
+`CAESIUM_ROBUSTNESS_RUN` defaults to `^TestOwnerCrash$`. Neither the workflow
+nor `just robustness-test` sets it, so the `early-evidence` lane is unchanged.
+B2's `TestTargetedFaults` is an explicit opt-in — see "Targeted cluster faults"
+below. A selection with no declared required subtests is refused rather than
+passed vacuously.
 
 Host-side logic lives in `test/robustness/hostlogic.py`, and the script aborts
 unless `python3 "$HOSTLOGIC" self-test` passes first. The Go helpers are in
@@ -662,9 +691,11 @@ with reasons, artifact identity fields and fault-activation requirements.
 `gates: ["early"]`** — `b1-owner-crash-leader`, `b1-owner-crash-nonleader` and
 `e5-sql-work-budget`, registered by W3/G3 and actually executed by the
 `early-evidence` lane. **Every other row is `status: absent` with empty
-`gates`**: the file names those scenarios and certifies none of them. B2, B3 and
-D3 register theirs once their runners exist, and G6 wires the full suite. Do not
-read an `absent` row as coverage.
+`gates`**: the file names those scenarios and certifies none of them. B2's
+targeted-fault scenarios are live-proven on owned kind clusters but remain
+`absent` in this file — B3 registers them — then D3 and G6. Do not read an
+`absent` row as coverage, and do not read a passing local `TestTargetedFaults`
+run as an `early-evidence` result.
 
 `scripts/check-test-evidence.py` validates an evidence report against that
 manifest. It is fail-closed and stdlib-only:
@@ -979,6 +1010,331 @@ The network-level `net::ERR_*` allowance is **file-scoped and opted into only by
 allowNetworkLevelErrors: true })`), because the real offline cut was observed
 producing `net::ERR_NETWORK_CHANGED` noise against later, unrelated tests in
 that same file. Every other spec keeps the strict default.
+
+### Candidate identity and merge-group wiring (distributed-testing W4/G7)
+
+G7 did not add a job, a `ci-ok` dependency, or a repository setting. It made
+the existing aggregate describe the commit it actually tested, and it wired
+`merge_group` so a merge queue is activatable by a settings change alone.
+
+**Settings evidence, unchanged by this item.** Read at execution time on
+2026-09-16 and reconfirmed 2026-09-17:
+
+- required contexts: `lint`, `unit-test`, `unit-test-arm64`, `ui-test`,
+  `ui-e2e`, `ui-e2e-auth`, `build-and-integration-test`,
+  `build-and-integration-test-agent-auth`
+- `strict: false`, `enforce_admins: false`, one CODEOWNER review
+- `gh api repos/caesium-cloud/caesium/rulesets` → `[]`
+- `allow_auto_merge: false`, `allow_update_branch: false`
+
+`ci-ok` remains absent from required contexts (G5's Q6 finding). No PATCH in
+§1 was executed.
+
+**What the workflow now does.** Every `actions/checkout@v6` step omits `ref:`,
+so each evidence-producing job tests the commit GitHub hands it — on
+`pull_request` that is the prospective merge commit (`refs/pull/N/merge`). The
+`ci-ok` job passes this run's `github.event_name`, the base/head SHAs from
+`github.event.pull_request.*` or `github.event.merge_group.*`, a
+`--current-base-sha` from `git ls-remote origin refs/heads/master`
+(`continue-on-error: true`, so a transient failure lands as an empty string
+and `ci-ok.py` decides what that means), and on `pull_request` the candidate's
+real git parents from `git cat-file -p "${{ github.sha }}"` (parent SHA lines
+survive a fetch-depth 1 checkout). The two legacy
+`build-and-integration-test*` wrappers still omit `--candidate-sha` and stay
+exempt; an *explicit* empty `--candidate-sha ''` is the opposite case and
+refuses.
+
+`changes` diffs `merge_group` against `github.event.merge_group.base_sha`
+(`fetch-depth: 0`; the `'0'`/`'1'` operands are quoted strings because a bare
+number `0` is falsy in Actions expressions). A missing or non-boolean filter
+output fails the job instead of defaulting to "everything skipped". `push`
+still forces every selector true, now explicitly excluding `merge_group`.
+
+**What `scripts/ci-ok.py` refuses.** Supplying any of `--candidate-sha` /
+`--event-name` / `--base-sha` / `--head-sha` turns identity on (`is not None`,
+not truthiness):
+
+- missing event name, missing candidate SHA, or an unrecognized event
+- `pull_request` / `merge_group` missing base or head
+- `merge_group` candidate SHA ≠ head SHA (GitHub's contract is that they are
+  the same)
+- `pull_request` candidate with other than exactly two parents, or a second
+  parent that disagrees with the payload head. A first-parent / payload-base
+  disagreement is **reported, not refused**, because GitHub can regenerate
+  the merge ref after the payload was recorded; freshness then compares the
+  first parent
+- on `merge_group` only: tested base ≠ current master tip, or either side
+  missing. The same comparison on `pull_request` is informational (`strict:
+  false`, no queue)
+
+The early-evidence report checks from G5 are unchanged.
+
+**Live vs static proof.** The `pull_request` path is live:
+[run 35221628892](https://github.com/caesium-cloud/caesium/actions/runs/35221628892)
+logged `ci-ok candidate identity: event='pull_request'` and `base freshness:
+tested base … matches current master tip`. `merge_group` has never fired; every
+queue-specific path is proven only by `actionlint .github/workflows/ci.yml`
+and `python3 -m unittest scripts/test_ci.py`. There is no substitute for a
+live queued run once a ruleset exists.
+
+**Q1 cost (informational).** Last 10 green `pull_request` runs as of
+2026-09-17: wall-clock 0.60–35.57 min, mean 15.9 min. A representative required
+critical path (`changes` start to `ci-ok`) is ~13 min; the full matrix
+including optional Helm shards is ~17.3 min. `strict: true` costs one extra
+~13-minute required-set rerun each time master advances during review.
+A merge queue costs one extra ~13-minute run per merged PR (or per batch).
+G7's recommendation to the CODEOWNER, not applied: add `ci-ok` to required
+contexts first, then either `strict: true` (and `allow_update_branch: true`)
+or a `merge_queue` ruleset targeting `master`.
+
+### Targeted cluster faults (distributed-testing W4/B2)
+
+B2 extends B1's owned kind/Helm harness. The `early-evidence` lane is
+**unchanged**: it still runs `TestOwnerCrash` on the ordinary release image.
+Targeted faults are an explicit opt-in on the same host controller.
+
+```sh
+# Pause / partition / response-loss / event-history (release image):
+CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' just tag="$CANDIDATE_SHA" robustness-test
+
+# Durable-event-before-publication hook (instrumented image required):
+# build the server image with the testfault tag, then:
+CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' \
+CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
+  just tag="$CANDIDATE_SHA" robustness-test
+```
+
+`scripts/robustness.sh` refuses a `CAESIUM_ROBUSTNESS_RUN` whose required
+subtests are undeclared, and it scans the deployed **release** image for
+`testfault` markers (`caesium-testfault-control`, `CAESIUM_TESTFAULT_DIR`,
+`bus-publish-pause.json`, `internal/testfault`, `testfault`) — a leak fails
+the run. When an instrumented image is supplied it must *contain* those
+markers, so a build tag that failed to apply cannot make the hook assertions
+vacuous. The control surface is a file on the pod's own emptyDir written
+through the host controller's container runtime: no listener, port, route,
+token or new RBAC. `internal/testfault` is a test-only twin with
+`const Enabled = false` in release builds.
+
+What a pass proves, each with independent activation/heal evidence:
+
+- `external_pause_resume` — `ctr tasks pause` of a non-leader after kubelet
+  is stopped (so a liveness probe cannot turn resume into replace); runtime
+  `PAUSED` plus `/health` ceasing are two observations; held past the 30s
+  run lease, then resumed
+- `asymmetric_partition` — EXTERNAL iptables inside the owned kind nodes,
+  keyed by addresses the dqlite `Cluster` RPC actually returned. A1 forbade
+  proxies without a routing spike; none was adopted. The blocked dispatch
+  rule's own packet counter must be positive or the route is UNPROVEN
+- `response_loss_possibly_committed` — a client-side interposer on the
+  runner after an observed 202+UUID; dropped-response and
+  delayed-past-deadline variants mark the operation possibly committed and
+  reconcile the run by identity on a different member. A client timeout is
+  never a rejection
+- `event_history_correlation` — SSE vs persisted rows as a **set** inside
+  the read scope (DT-EVENT-01); duplicates and out-of-order arrivals are
+  legal; a gap-free or high-water-mark check is invalid. A broken or empty
+  subscription is inconclusive, not legal at-least-once loss. Catch-up uses
+  the run's lowest persisted sequence as `Last-Event-ID`
+- `bus_publish_pause` — the A1-justified hook after the event row is
+  durably committed and immediately before its first `bus.Publish`, on
+  **both** `PublishAndMarkBusDispatched` and `DispatchOnce`. Releases are
+  reconciled against the holds activation recorded (`faults.ReconcileReleases`);
+  a vanished log is not "never entered"
+
+Limits: this is not a CI lane and not in `ci-ok`. Missing recorder data,
+missing hook-release evidence, or a destination API that degrades because
+the cut-off member lost Raft leadership, are classified rather than
+skipped. Duplicate task attempts remain legal. Clock skew, storage loss and
+quorum-loss rejection bounds are still unresolved. B3 registers these
+scenarios in `test/contracts/scenarios.json`.
+
+### Open-loop load driver and lifecycle measurements (distributed-testing W4/E2)
+
+E2 extends E1's containerized Go driver in place — no k6, no new toolchain,
+no `justfile` edit. Closed-loop `just load-test` still works as documented
+above. Open-loop traffic and the versioned catalog live in
+`test/performance/`, which the precompiled `./test` runner does **not**
+contain, so they are compiled and run explicitly against an already-running
+server:
+
+```sh
+just integration-up   # or any dedicated test server with metrics
+docker run --rm \
+  -v "$PWD":/bld/caesium -w /bld/caesium \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+  -e CAESIUM_PERF_SERVER_CONTAINER=caesium-server-test \
+  --network=container:caesium-server-test \
+  caesiumcloud/caesium-builder:latest-full \
+  sh -c 'go test -tags=integration -count=1 -timeout=30m -v ./test/performance'
+```
+
+`CAESIUM_PERF_WORKLOADS` is `smoke` (default), `all`, or a comma list.
+`mode=open` places arrivals on an absolute clock grid computed from
+`-rate`/`-arrival-window` before the first request, so the schedule never
+waits on a completion. Outcomes are deliberately not conflated:
+
+| Bucket | Meaning |
+| --- | --- |
+| `dropped` | driver's own in-flight cap / scheduler lag / deadline-before-offer |
+| `admitted` | DT-ADMIT-01: 202 **with** a run body carrying a UUID |
+| `queued_or_skipped` | a bare 202 — its own outcome, not an admission |
+| `rejected` | an application refusal |
+| `transport_uncertain` | DT-QUORUM-01: possibly committed, never a rejection |
+
+Every admitted run is polled to a terminal status. Arrivals carrying no run
+identity are reconciled against `GET /v1/jobs/:id/runs`; census-discovered
+runs are driven to terminal too. The reporter fails `accounting_mismatch`,
+`unreconciled_admission`, `census_unavailable`, `queue_unobserved` /
+`queue_not_drained` (when bare-202 arrivals exist), and — for
+`require-sustained` workloads — `backlog_growth` / `backlog_inconclusive`.
+Lifecycle intervals come from `/v1/events` and from the public run read;
+anything unobservable emits `"status":"unavailable"` with a counted reason
+— never 0, never an absent key.
+
+Hermetic scheduling/report tests stay in `test/load/harness_test.go` and run
+inside `just unit-test`. The live catalog at E2's merge: 10/10 workloads plus
+two extra tests, `ok` in 350.766s against the `integration-up` server;
+`open-tiny-sustained` offered 20 / admitted 20 / completed_ok 20; the
+overload case finished in 13.1s with driver drops plus bare-202 skips rather
+than hanging. Two catalog rows (`open-tiny-sustained`, `open-api-read-mix`)
+gate on the backlog verdict; four others report `backlog_growing` on a
+shared laptop-class host and pass only because they omit `require-sustained`
+(each carries a mandatory `sustained_rationale`, enforced by
+`TestWorkloadCatalogIsValid`).
+
+Limits: this is not a CI job, not a calibrated SLO, and not a substitute for
+E3's base/candidate comparison. Production per-task resource telemetry stays
+with resource right-sizing; E2's external observation reads the server
+container's stats from outside via the runtime API.
+
+### Native fuzzing and synctest concurrency (distributed-testing W4/C2)
+
+Eight fuzz targets across four packages, each asserting a property beyond
+"didn't panic" (schema-compat reflexivity, differential agreement between
+independent decode paths, descriptor round-trip, secret-ref merge
+idempotence, checkpoint/recovery agreement). There is no justfile recipe
+(G6 owns later lane recipes). The script re-execs itself inside the same
+`caesium-builder:latest-full` image `just unit-test` uses:
+
+```sh
+scripts/fuzz-tests.sh
+# longer campaigns (G4):
+CAESIUM_FUZZ_SECONDS=120s scripts/fuzz-tests.sh
+```
+
+It is POSIX `sh` on purpose — that image has no bash. It discovers targets
+via `go test -list '^Fuzz'` per declared package **and** a repo-wide sweep
+for any top-level `func FuzzX(` in a test file, fails on a declared /
+discovered mismatch, runs one target per `go test -run=^Name$ -fuzz=^Name$
+-fuzztime=<budget>` invocation, and rejects a seed-only or zero-exec run
+(`execs` must exceed Go's own completed-baseline denominator). Corpus
+artifacts land under `.fuzz-artifacts/` (override with
+`CAESIUM_FUZZ_ARTIFACT_DIR`). A selected `internal/worker` renewal set is
+then repeated under `-race -count=3` at `-cpu=1,2,4` (one `go test` per cpu
+value); each configuration must report `passed > 0` and `failed == 0`.
+
+`internal/worker/renewal_synctest_test.go` drives the real
+`runLeaseRenewal` / `runRunLeaseRenewal` goroutines through
+`testing/synctest` against the package's existing fakes — no production
+clock seam (A1 deferred that). Renewal fires exactly once per configured
+tick in fake time; cancellation stops the goroutine with no leaked ticker
+reader. Real dqlite `RenewLeases` SQL, wall-clock jitter and the HTTP
+dispatch path stay out of that claim; B-stream's live cluster remains the
+source for those.
+
+Measured at C2's merge with `CAESIUM_FUZZ_SECONDS=20s`: 8/8 targets
+explored (61k–358k execs, zero crashers) and 9/9 concurrency configurations
+passed. `just unit-test` already includes the non-fuzz `_test.go` neighbours.
+[#549](https://github.com/caesium-cloud/caesium/issues/549) is a minor
+product defect found while writing the secret-ref fuzzer and filed rather
+than fixed (out of file scope).
+
+### Single-node previous-release upgrade qualification (distributed-testing W4/F4)
+
+F4 qualifies the one supported adjacent pair `v0.1.0 → candidate` on **one
+node**, independently of B3 and of any cluster. It is not a CI job — G6
+wires it. The precompiled `./test` runner does not contain
+`test/lifecycle`, so the host controller compiles that package explicitly
+with `-tags=integration` inside the builder.
+
+```sh
+CANDIDATE_SHA=$(git rev-parse HEAD)
+CAESIUM_LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+CAESIUM_LIFECYCLE_ARTIFACTS="$(mktemp -d)" \
+CAESIUM_LIFECYCLE_PREV_IMAGE="caesiumcloud/caesium:v0.1.0" \
+CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  bash scripts/lifecycle-tests.sh
+```
+
+Leave the candidate image **unbuilt** if you want provenance: the harness
+builds it from this checkout (`just tag=$CANDIDATE_SHA build-release`) when
+that image is absent, which is what binds `candidate_sha` to the image
+actually qualified. A pre-existing or dirty-tree image is
+`supplied/unverified` and **blocks** the qualification unless
+`CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1` is also set and recorded.
+`:latest` is refused outright. `caesiumcloud/caesium:v0.1.0` is pulled and
+its repo digest is verified against the pinned index digest in
+`test/lifecycle/versions.json`
+(`sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917`)
+before anything runs.
+
+Volume and identity rules: a **fresh named volume** only (it inherits
+`10001:10001` from the release image); a host bind mount is forbidden. No
+fixed host port. Two instances were proven to coexist on separate networks
+and volumes. Teardown removes only names carrying this invocation's
+`CAESIUM_LIFECYCLE_ID`. Set `CAESIUM_LIFECYCLE_KEEP=1` to keep them.
+
+The qualification record
+(`$CAESIUM_LIFECYCLE_ARTIFACTS/qualification.json`) says `pass` only when
+every expected case recorded a pass or a recorded-outcome under **this**
+invocation's id **and** every phase returned 0. The run writes a
+`result: incomplete` placeholder first, so an aborted run can never leave a
+stale passing file behind. A case with no record is synthesized as
+`blocked`. Recorded-outcome cases are blocked when the observation itself
+failed (`status: unknown`, a sentinel exit, an uncaptured log).
+
+What a pass asserts on the candidate, after seeding through v0.1.0's own
+public surface and `docker stop -t 60`:
+
+- schema is a superset of the v0.1.0 snapshot plus the pinned table/column
+  additions in `versions.json` (additions beyond the pin are recorded, not
+  failed — F4 is not in CI until G6)
+- every recorded job/run/task-run UUID is readable with unchanged terminal
+  status; events replay as a **set** above an explicit resume cursor
+  (DT-EVENT-01; no gap-free or high-water-mark check)
+- the queued row is dequeued into a started run whose `started_at` is
+  after the previous release finished — asserting the row still exists is
+  not enough
+- candidate `job export` of each alias re-lints and `job diff`s clean
+  (v0.1.0 has no `job export`; that assertion is candidate-side only)
+- the serving build is the candidate (container image ID, plus
+  `data_assertions_enabled` in `GET /v1/system/features`)
+
+**Unsupported-transition re-grounding.** F1 required "restart the candidate
+at a different `CAESIUM_NODE_ADDRESS`, expect exit 1". PR #536 (`35bced63`,
+closes #493) later made the candidate reconcile `info.yaml` and recover a
+genuine sole member's raft configuration, so that case now **starts** on
+the candidate. F4 asserts #536's contract there and keeps the **pinned
+v0.1.0** image at a changed address, on a copy of the volume, as the
+deterministic failing transition (exit 1, `address … in info.yaml does not
+match`). Upgrade-then-readdress is the only supported order for this pair.
+
+**Recorded-outcome cases**, each on its own volume copy, with no pre-judged
+expectation: rollback (v0.1.0 on the migrated volume — a start is not a
+supported rollback guarantee); shard-count change (a silent success that
+strands no rows at this size is a finding, not a pass, and does not
+unfreeze the shard count); retained in-flight run (still `running` on the
+candidate and permanently holding a concurrency slot — filed as
+[#553](https://github.com/caesium-cloud/caesium/issues/553)).
+
+Limits: one node, one shard, local execution mode. This pair is purely
+additive, so it does **not** exercise `MigrateTaskRunUniquePartitionIndex`.
+Nothing here qualifies a cluster upgrade, a mixed-version window,
+restore-from-snapshot, or rollback as a product guarantee. The published
+amd64/arm64 CLI checksums are carried in `versions.json` but
+`scripts/ci-cli-smoke.sh` is not re-run by this lane.
 
 ## 5. Server env per lane, and the silent-drift rule
 
