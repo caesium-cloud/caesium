@@ -819,11 +819,26 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
         ])
         owner_crash = (ROOT / "test/robustness/owner_crash_test.go").read_text()
         runner = (ROOT / "scripts/robustness.sh").read_text()
-        self.assertIn('"-test.run", "^TestOwnerCrash$"', runner)
+        # B2 made the runner selection configurable (CAESIUM_ROBUSTNESS_RUN) so the
+        # targeted-fault tests can share the harness. The early-evidence lane must
+        # still run EXACTLY the registered selector: the script's default is the
+        # owner-crash pattern, that pattern is what reaches the runner, and neither
+        # the workflow nor the justfile overrides it.
+        self.assertIn('RUN_PATTERN="${CAESIUM_ROBUSTNESS_RUN:-^TestOwnerCrash\\$}"', runner)
+        self.assertIn('"-test.run", "${RUN_PATTERN}"', runner)
+        for path in (".github/workflows/ci.yml", "justfile"):
+            self.assertNotIn("CAESIUM_ROBUSTNESS_RUN", (ROOT / path).read_text(), path)
+        # Required subtests are declared per selection and enforced by one loop; a
+        # registered selector missing from the owner-crash branch, or a loop that no
+        # longer dies on a missing PASS line, would let the lane go green hollow.
+        branch = re.search(r"\*TestOwnerCrash\*\)\n\s+REQUIRED_SUBTESTS=\(([^)]*)\)", runner)
+        self.assertIsNotNone(branch, "owner-crash selection has no REQUIRED_SUBTESTS")
+        required = branch.group(1).split()
+        self.assertIn('pass_line "$name" || die "required subtest $name did not PASS"', runner)
         for sid in ("b1-owner-crash-leader", "b1-owner-crash-nonleader"):
             subtest = by_id[sid]["selector"].split("/", 1)[1]
             self.assertIn(f't.Run("{subtest}"', owner_crash)
-            self.assertIn(f"pass_line 'TestOwnerCrash/{subtest}'", runner)
+            self.assertIn(f"TestOwnerCrash/{subtest}", required)
         # Bare method names match nothing: the suite prefix is load-bearing.
         selector = by_id["e5-sql-work-budget"]["selector"]
         self.assertTrue(selector.startswith("TestIntegrationTestSuite/"), selector)
