@@ -169,11 +169,22 @@ def identities_match(expected: list[str], observed: str) -> tuple[bool, str]:
     return False, f"running {sorted(got)} not in expected {sorted(want)}"
 
 
-def records_ok(cm: dict) -> tuple[bool, str]:
+RUN_ID_KEYS = ("owner_is_leader", "owner_is_not_leader")
+EVENT_LIST_KEYS = ("events", "fault_events")
+
+
+def records_ok(cm: dict, required: tuple[str, ...] | None = None) -> tuple[bool, str]:
+    """Validate the exported recorder ConfigMap for the executed selection.
+
+    *required* comes from the host controller's test selection, so a run that
+    executed the fault suite cannot pass by exporting the owner-crash keys, and
+    a run that exported nothing cannot pass at all.
+    """
     data = cm.get("data") or {}
     if not isinstance(data, dict) or not data:
         return False, "robustness-records ConfigMap has no data"
-    required = ("events", "owner_is_leader", "owner_is_not_leader")
+    if not required:
+        required = ("events", "owner_is_leader", "owner_is_not_leader")
     parsed: dict[str, object] = {}
     for key in required:
         raw = data.get(key)
@@ -192,13 +203,16 @@ def records_ok(cm: dict) -> tuple[bool, str]:
             parsed[key] = json.loads(raw)
         except Exception as exc:
             return False, f"{key} is not JSON: {exc}"
-    events = parsed["events"]
-    if not isinstance(events, list) or not events:
-        return False, "events is not a non-empty JSON array"
-    for key in ("owner_is_leader", "owner_is_not_leader"):
-        obj = parsed[key]
-        if not isinstance(obj, dict) or not str(obj.get("run_id") or "").strip():
-            return False, f"{key} is missing run_id"
+    for key in required:
+        value = parsed[key]
+        if key in EVENT_LIST_KEYS:
+            if not isinstance(value, list) or not value:
+                return False, f"{key} is not a non-empty JSON array"
+        elif key in RUN_ID_KEYS:
+            if not isinstance(value, dict) or not str(value.get("run_id") or "").strip():
+                return False, f"{key} is missing run_id"
+        elif not isinstance(value, (dict, list)) or not value:
+            return False, f"{key} is not a non-empty JSON object"
     return True, "ok"
 
 
@@ -296,15 +310,34 @@ def _cmd_ctr_image_shas(argv: list[str]) -> int:
 
 def _cmd_records_ok(argv: list[str]) -> int:
     if not argv:
-        print("usage: records-ok <configmap.json>", file=sys.stderr)
+        print("usage: records-ok <configmap.json> [required-key ...]", file=sys.stderr)
         return 2
     with open(argv[0], encoding="utf-8") as fh:
         cm = json.load(fh)
-    ok, reason = records_ok(cm)
+    required = tuple(argv[1:]) or None
+    ok, reason = records_ok(cm, required)
     if not ok:
         print(reason, file=sys.stderr)
         return 1
     return 0
+
+
+def _cmd_open_chain(argv: list[str]) -> int:
+    """Mirror of faults.PartitionPlan.OpenChain and the shell's open_chain.
+
+    The install and heal paths must agree on the chain name or a run could
+    leave rules behind on a node it faulted.
+    """
+    if not argv:
+        print("usage: open-chain <tag>", file=sys.stderr)
+        return 2
+    print(open_chain(argv[0]))
+    return 0
+
+
+def open_chain(tag: str) -> str:
+    kept = "".join(ch for ch in (tag or "").upper() if ch.isalnum())
+    return "CS" + kept[:18]
 
 
 def _self_test() -> int:
@@ -403,6 +436,37 @@ def _self_test() -> int:
     ok, _ = records_ok({"data": {}})
     check("empty records fail", not ok)
 
+    # A fault-suite run must be validated against the keys IT exported; the
+    # owner-crash keys must not be able to satisfy it, and vice versa.
+    fault_keys = (
+        "fault_events",
+        "event_history_correlation",
+        "asymmetric_partition",
+    )
+    fault_cm = {
+        "data": {
+            "fault_events": json.dumps([{"kind": "start"}]),
+            "event_history_correlation": json.dumps({"run_id": "r1"}),
+            "asymmetric_partition": json.dumps({"plan": {"tag": "rbp-1"}}),
+        }
+    }
+    ok, _ = records_ok(fault_cm, fault_keys)
+    check("fault records ok", ok)
+    ok, _ = records_ok(cm, fault_keys)
+    check("owner-crash records do not satisfy the fault selection", not ok)
+    ok, _ = records_ok(fault_cm, ("events", "owner_is_leader", "owner_is_not_leader"))
+    check("fault records do not satisfy the owner-crash selection", not ok)
+    ok, _ = records_ok({"data": {"fault_events": json.dumps([])}}, ("fault_events",))
+    check("empty fault event array fails", not ok)
+    ok, _ = records_ok(
+        {"data": {"asymmetric_partition": json.dumps({})}}, ("asymmetric_partition",)
+    )
+    check("empty fault record fails", not ok)
+
+    check("open chain", open_chain("rb-tag") == "CSRBTAG")
+    check("open chain truncates", len(open_chain("a" * 40)) == 20)
+    check("open chain strips punctuation", open_chain("rbp-0a1b2c") == "CSRBP0A1B2C")
+
     inspect_doc = {
         "Id": "sha256:" + ("a" * 64),
         "RepoDigests": ["caesiumcloud/caesium@sha256:" + ("b" * 64)],
@@ -484,7 +548,7 @@ def main(argv: list[str]) -> int:
     if not argv:
         print(
             "usage: hostlogic.py task-dead|listing-valid|collect-identities|"
-            "image-match|ctr-image-shas|records-ok|self-test",
+            "image-match|ctr-image-shas|records-ok|open-chain|self-test",
             file=sys.stderr,
         )
         return 2
@@ -501,6 +565,8 @@ def main(argv: list[str]) -> int:
         return _cmd_ctr_image_shas(rest)
     if cmd == "records-ok":
         return _cmd_records_ok(rest)
+    if cmd == "open-chain":
+        return _cmd_open_chain(rest)
     if cmd == "self-test":
         return _self_test()
     print("unknown command: " + cmd, file=sys.stderr)
