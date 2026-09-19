@@ -1831,6 +1831,19 @@ func (r *report) judgeOpenLoop() (string, error) {
 			"the census discovered %d run(s) with no acknowledged admission but only %d settled inside the drain deadline",
 			r.censusExtra, r.censusTerminal)
 	}
+	// DT-QUORUM-01: a transport_uncertain offer is possibly committed. No
+	// finite number of empty censuses proves non-admission, so leftover
+	// uncertainty is inconclusive — never a pass and never a rejection.
+	// Identity-less arrivals are matched only when census-discovered extras
+	// cover ALL of them (queued_or_skipped + transport_uncertain).
+	if r.runsUncertain > 0 && r.censusStatus != "" {
+		identityLess := r.runsQueued + r.runsUncertain
+		if r.censusExtra < identityLess {
+			return "uncertain_admission_unresolved", fmt.Errorf(
+				"%d transport_uncertain arrival(s) were never matched to a census-discovered run (queued_or_skipped=%d transport_uncertain=%d census_extra=%d): possibly committed, not a rejection",
+				r.runsUncertain, r.runsQueued, r.runsUncertain, r.censusExtra)
+		}
+	}
 	if !r.cfg.allowRunFailures && r.censusFailed > 0 {
 		return "run_failure", fmt.Errorf("%d census-discovered run(s) ended non-succeeded", r.censusFailed)
 	}
@@ -2141,9 +2154,14 @@ type openLoopResult struct {
 	queueFinal     int
 	queueStatus    string
 	queueReason    string
-	// queueDrainVerified is true ONLY when a successful /queue read returned 0.
-	// Absent it, bare-202 arrivals cannot be treated as accounted for.
+	// queueDrainVerified is true ONLY when drainage was established: an
+	// in-drain /queue read returned 0, or a residual empty read was followed
+	// by a census inside the original drain deadline that found nothing
+	// unreconciled. A recovered empty residual read alone is not enough.
 	queueDrainVerified bool
+	// residualObservationBudget is the declared cap on the post-drain residual
+	// /queue read. It is not drain time: drainEnd is recorded before that read.
+	residualObservationBudget time.Duration
 	// queueObsStatus/queueObsReason/queueObsMissing carry in-window queue
 	// observation out of the ledger for the reporter.
 	queueObsStatus  string
@@ -2517,10 +2535,8 @@ func (h *harness) runOpenLoop(ctx context.Context, jobs []appliedJob, lg *ledger
 		drainCancel()
 		<-done
 	}
-	// The server admits on a background context (internal/run/store.go), so a
-	// disconnected transport_uncertain offer can still commit AFTER the first
-	// census. While any uncertain offer exists, take a FINAL census inside the
-	// same deadline and settle anything new it finds.
+	// One extra census for DT-QUORUM-01, not a loop: an empty re-read does not
+	// prove a transport_uncertain offer was rejected.
 	h.finalCensus(deadlineCtx, jobs, lg, res)
 	res.drainEnd = time.Now()
 
@@ -2532,7 +2548,7 @@ func (h *harness) runOpenLoop(ctx context.Context, jobs []appliedJob, lg *ledger
 	// to be applied for.
 	res.subscribers.mixNanos = int64(time.Since(mixStart))
 
-	h.collectQueueDepth(ctx, jobs, res, drainDeadline)
+	h.collectQueueDepth(ctx, deadlineCtx, jobs, lg, res, drainDeadline)
 	lg.mu.Lock()
 	res.queueObsStatus, res.queueObsReason = lg.queueObsStatus, lg.queueObsReason
 	lg.mu.Unlock()
@@ -2982,10 +2998,11 @@ func (h *harness) collectRunBaseline(ctx context.Context, jobs []appliedJob, lg 
 	lg.mu.Unlock()
 }
 
-// finalCensus closes DT-QUORUM-01's remaining window: the server admits on a
-// background context, so a transport_uncertain offer whose connection died can
-// still commit AFTER the first census. While any uncertain offer exists, look
-// once more and settle whatever is new, inside the same drain deadline.
+// finalCensus takes exactly one extra census for DT-QUORUM-01: the server
+// admits on a background context, so a transport_uncertain offer whose
+// connection died can still commit AFTER the first census. An empty re-read
+// does not settle leftover uncertainty — judgeOpenLoop treats unmatched
+// transport_uncertain arrivals as inconclusive rather than a pass.
 func (h *harness) finalCensus(ctx context.Context, jobs []appliedJob, lg *ledger, res *openLoopResult) {
 	uncertain := 0
 	for _, a := range lg.snapshotArrivals() {
@@ -2997,21 +3014,44 @@ func (h *harness) finalCensus(ctx context.Context, jobs []appliedJob, lg *ledger
 		res.finalCensusStatus = "not_required"
 		return
 	}
+	late, err := h.discoverUnseenRuns(ctx, jobs, lg)
+	if err != nil {
+		res.finalCensusStatus, res.finalCensusReason = "unavailable", err.Error()
+		lg.mu.Lock()
+		if errors.Is(err, errCensusBaseline) {
+			lg.censusStatus, lg.censusReason = "unavailable", "final census could not establish membership"
+		} else {
+			lg.censusStatus, lg.censusReason = "unavailable", "final census read failed: "+err.Error()
+		}
+		lg.mu.Unlock()
+		return
+	}
+	res.finalCensusStatus, res.finalCensusLate = "ok", len(late)
+	if len(late) == 0 {
+		return
+	}
+	// The reconciler pool has already been joined, so settle these here — still
+	// inside the drain deadline. Anything left unsettled leaves
+	// censusExtra != censusTerminal, which judgeOpenLoop already fails.
+	h.settleLateRuns(ctx, lg, late)
+}
+
+var errCensusBaseline = errors.New("run-identity baseline unavailable")
+
+// discoverUnseenRuns lists runs the first census (and any later sweep) has not
+// already accounted for. It does not retry: one read, then the caller decides.
+func (h *harness) discoverUnseenRuns(ctx context.Context, jobs []appliedJob, lg *ledger) ([]reconcileItem, error) {
 	lg.mu.Lock()
 	baseline, baselineOK := lg.runBaseline, lg.runBaselineOK
-	admitted := map[string]bool{}
 	seen := map[string]bool{}
 	for id := range lg.censusSeen {
 		seen[id] = true
 	}
 	lg.mu.Unlock()
 	if !baselineOK {
-		res.finalCensusStatus, res.finalCensusReason = "unavailable", "run-identity baseline unavailable"
-		lg.mu.Lock()
-		lg.censusStatus, lg.censusReason = "unavailable", "final census could not establish membership"
-		lg.mu.Unlock()
-		return
+		return nil, errCensusBaseline
 	}
+	admitted := map[string]bool{}
 	for _, a := range lg.snapshotArrivals() {
 		if a.outcome == outcomeAdmitted && a.runID != "" {
 			admitted[a.runID] = true
@@ -3021,11 +3061,7 @@ func (h *harness) finalCensus(ctx context.Context, jobs []appliedJob, lg *ledger
 	for _, job := range jobs {
 		runs, err := h.client.listRuns(ctx, job.id, 16)
 		if err != nil {
-			res.finalCensusStatus, res.finalCensusReason = "unavailable", err.Error()
-			lg.mu.Lock()
-			lg.censusStatus, lg.censusReason = "unavailable", "final census read failed: "+err.Error()
-			lg.mu.Unlock()
-			return
+			return nil, err
 		}
 		for _, r := range runs {
 			if baseline[job.id][r.ID] || admitted[r.ID] || seen[r.ID] {
@@ -3034,13 +3070,13 @@ func (h *harness) finalCensus(ctx context.Context, jobs []appliedJob, lg *ledger
 			late = append(late, reconcileItem{jobID: job.id, runID: r.ID, arrivalIndex: -1})
 		}
 	}
-	res.finalCensusStatus, res.finalCensusLate = "ok", len(late)
+	return late, nil
+}
+
+func (h *harness) settleLateRuns(ctx context.Context, lg *ledger, late []reconcileItem) {
 	if len(late) == 0 {
 		return
 	}
-	// The reconciler pool has already been joined, so settle these here — still
-	// inside the drain deadline. Anything left unsettled leaves
-	// censusExtra != censusTerminal, which judgeOpenLoop already fails.
 	lg.mu.Lock()
 	if lg.censusSeen == nil {
 		lg.censusSeen = map[string]bool{}
@@ -3057,6 +3093,20 @@ func (h *harness) finalCensus(ctx context.Context, jobs []appliedJob, lg *ledger
 		}
 		h.reconcileRun(ctx, item, lg)
 	}
+}
+
+// verifyDrainCensus is the census taken AFTER a residual empty /queue
+// observation. Drainage may be established only when it finds nothing
+// unreconciled, still inside the original drain deadline.
+func (h *harness) verifyDrainCensus(ctx context.Context, jobs []appliedJob, lg *ledger) bool {
+	late, err := h.discoverUnseenRuns(ctx, jobs, lg)
+	if err != nil {
+		return false
+	}
+	h.settleLateRuns(ctx, lg, late)
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	return lg.censusStatus == "ok" && lg.censusExtra == lg.censusTerminal
 }
 
 // waitForQueueDrain polls the concurrency queue until it is empty or the drain
@@ -3087,7 +3137,9 @@ func (h *harness) waitForQueueDrain(ctx context.Context, jobs []appliedJob, res 
 		}
 		res.queueDepths = append(res.queueDepths, total)
 		if total == 0 {
-			// The ONLY place drainage is verified rather than assumed.
+			// In-drain empty observation: the census that follows in runOpenLoop
+			// is taken AFTER this, still inside the drain deadline.
+			res.queueStatus, res.queueReason, res.queueFinal = "ok", "", 0
 			res.queueDrainVerified = true
 			return
 		}
@@ -3104,33 +3156,56 @@ func (h *harness) waitForQueueDrain(ctx context.Context, jobs []appliedJob, res 
 	}
 }
 
+// residualObservationBudget is the declared bound on the post-drain residual
+// /queue read. It is not drain time: drainEnd is recorded before that read.
+func residualObservationBudget(drainTimeout time.Duration) time.Duration {
+	return min(max(drainTimeout, time.Second), 30*time.Second)
+}
+
 // collectQueueDepth reports the concurrency queue's residual depth after the
-// drain. A drain that leaves work queued is reported, never rounded to zero.
-func (h *harness) collectQueueDepth(ctx context.Context, jobs []appliedJob, res *openLoopResult, deadline time.Time) {
+// drain. A residual read may confirm a still-occupied queue or stay neutral;
+// it may establish drainage only if a census taken after an empty observation
+// finds nothing unreconciled, still inside the original drain deadline.
+func (h *harness) collectQueueDepth(ctx, drainCtx context.Context, jobs []appliedJob, lg *ledger, res *openLoopResult, drainDeadline time.Time) {
 	if h.cfg.concurrencyStrategy != "queue" {
 		res.queueStatus, res.queueReason = "not_applicable", "workload does not use the queue concurrency strategy"
 		return
 	}
-	// The drain deadline has already expired by the time this runs, so this
-	// residual read needs its own bound. It is an ABSOLUTE cap anchored on that
-	// same deadline, so a late-starting or stalled read cannot extend the run:
-	// neither a hard-coded 30 s nor the overall run context.
-	bound := min(max(h.cfg.drainTimeout, time.Second), 30*time.Second)
-	queueCtx, cancel := context.WithDeadline(ctx, deadline.Add(bound))
+	budget := residualObservationBudget(h.cfg.drainTimeout)
+	res.residualObservationBudget = budget
+	queueCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	total := 0
 	for _, job := range jobs {
 		depth, err := h.client.queueDepth(queueCtx, job.id)
 		if err != nil {
-			res.queueStatus, res.queueReason = "unavailable", err.Error()
+			// Neutral on error: do not clear an earlier observation, and do
+			// not invent drainage. Record unavailability only if nothing else
+			// stands behind queueStatus.
+			if res.queueStatus == "" || res.queueStatus == "not_collected" {
+				res.queueStatus, res.queueReason = "unavailable", err.Error()
+			}
 			return
 		}
 		total += depth
 	}
-	// This read is later and authoritative, so it supersedes an earlier
-	// in-drain failure — including as the verification that the queue drained.
-	res.queueStatus, res.queueReason, res.queueFinal = "ok", "", total
-	if total == 0 {
+	res.queueFinal = total
+	if total > 0 {
+		// Confirm failure: the queue is still occupied.
+		res.queueDrainVerified = false
+		res.queueStatus, res.queueReason = "ok", ""
+		return
+	}
+	if res.queueDrainVerified {
+		return
+	}
+	// Empty residual is not drainage by itself. Establish it only with a
+	// census after this observation, inside the original drain deadline.
+	if drainCtx.Err() != nil || time.Now().After(drainDeadline) {
+		return
+	}
+	if h.verifyDrainCensus(drainCtx, jobs, lg) {
+		res.queueStatus, res.queueReason = "ok", ""
 		res.queueDrainVerified = true
 	}
 }
@@ -3674,10 +3749,13 @@ func (r *report) metricsValid() bool {
 }
 
 func (r *report) outcome() string {
-	if r.failure != "" {
-		return "failed"
+	if r.failure == "" {
+		return "passed"
 	}
-	return "passed"
+	if r.failure == "uncertain_admission_unresolved" {
+		return "inconclusive"
+	}
+	return "failed"
 }
 
 // MarshalJSON is the versioned evidence contract. Credentials are never included.
@@ -3875,10 +3953,11 @@ func (r *report) openLoopJSON() map[string]any {
 		"queue_drain_verified":     r.open.queueDrainVerified,
 		"queue_observation_status": r.open.queueObsStatus, "queue_observation_reason": r.open.queueObsReason,
 		"queue_observation_missing_in_window": r.open.queueObsMissing,
+		"residual_observation_budget_seconds": r.open.residualObservationBudget.Seconds(),
 		"final_census_status":                 r.open.finalCensusStatus, "final_census_reason": r.open.finalCensusReason,
 		"final_census_late_runs": r.open.finalCensusLate,
 		"window_truncated":       r.open.windowTruncated,
-		"note":                   "queue observation fails CLOSED: a bare-202 arrival is accounted for only once a successful queue read returned 0. The final census re-checks for runs the server committed after the first one (DT-QUORUM-01).",
+		"note":                   "queue observation fails CLOSED: a residual /queue read may confirm a still-occupied queue or stay neutral, and may establish drainage only if a census after that empty observation finds nothing unreconciled inside the original drain deadline. Unmatched transport_uncertain arrivals are inconclusive (DT-QUORUM-01), never a pass.",
 	}
 	cache := map[string]any{"mode": r.cfg.cacheMode, "warmup_runs": r.open.warmupRuns,
 		"hits": r.open.cacheHits, "executed_tasks": r.open.cacheExecuted, "total_tasks": r.open.cacheTotal}
@@ -4438,6 +4517,10 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if err != nil {
+		if rep != nil && rep.failure == "uncertain_admission_unresolved" {
+			fmt.Fprintf(stderr, "load harness inconclusive: %v\n", err)
+			return 2
+		}
 		fmt.Fprintf(stderr, "load harness failed: %v\n", err)
 		return 1
 	}

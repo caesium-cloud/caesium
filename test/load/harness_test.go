@@ -441,6 +441,23 @@ type openFixture struct {
 	lateCommitAfterListCalls int
 	pendingLate              []string
 	listCalls                int
+	// listCompleted is incremented after a run-list response is written, so a
+	// concurrent /queue read cannot observe "census started" before the list
+	// the census will actually see has been served.
+	listCompleted int
+	// admitLimit, when > 0, admits only the first N triggers with a run UUID;
+	// later triggers return a bare 202 (queued/skipped).
+	admitLimit int
+	// queueEmptyAfterLists, when > 0, reports a non-empty queue until this
+	// many run-list responses have been completed, then 0.
+	queueEmptyAfterLists int
+	// promoteAfterLists materializes a still-running extra run on the first
+	// /queue read after this many completed run-list responses — the dequeuer
+	// starting a previously queued arrival after the first census.
+	promoteAfterLists int
+	promoted          bool
+	// stickyRunning run IDs never reach a terminal status on the public read.
+	stickyRunning map[string]bool
 	// stallHeaders makes /v1/events accept the connection and never answer.
 	stallHeaders bool
 	// eventShape is the per-run landmark sequence the fixture persists when a
@@ -516,7 +533,29 @@ func (f *openFixture) serve(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		f.mu.Lock()
+		if f.promoteAfterLists > 0 && f.listCompleted >= f.promoteAfterLists && !f.promoted {
+			f.promoted = true
+			runID := fixtureRunID(f.triggers.Add(1000))
+			jobID := strings.Split(req.URL.Path, "/")[3]
+			if f.runs == nil {
+				f.runs, f.runJob = map[string]time.Time{}, map[string]string{}
+			}
+			f.runs[runID] = time.Now()
+			f.runJob[runID] = jobID
+			f.runOrder = append(f.runOrder, runID)
+			if f.stickyRunning == nil {
+				f.stickyRunning = map[string]bool{}
+			}
+			f.stickyRunning[runID] = true
+		}
 		depth := f.queueDepth
+		if f.queueEmptyAfterLists > 0 {
+			if f.listCompleted >= f.queueEmptyAfterLists {
+				depth = 0
+			} else {
+				depth = max(depth, 1)
+			}
+		}
 		f.mu.Unlock()
 		rows := make([]map[string]any, 0, max(depth, 0))
 		for i := 0; i < depth; i++ {
@@ -567,6 +606,11 @@ func (f *openFixture) serveTrigger(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprint(w, f.triggerBody)
 		return
 	}
+	if f.admitLimit > 0 && int(n) > f.admitLimit {
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{}`)
+		return
+	}
 	runID := fixtureRunID(n)
 	jobID := strings.Split(req.URL.Path, "/")[3]
 	f.mu.Lock()
@@ -610,7 +654,14 @@ func (f *openFixture) snapshotFor(runID string) runSnapshot {
 	f.mu.Lock()
 	admitted, ok := f.runs[runID]
 	jobID := f.runJob[runID]
+	sticky := f.stickyRunning[runID]
 	f.mu.Unlock()
+	if sticky {
+		if !ok {
+			admitted = time.Now()
+		}
+		return runSnapshot{ID: runID, JobID: jobID, Status: "running", CreatedAt: admitted, StartedAt: admitted, TotalTasks: 1}
+	}
 	if !ok {
 		return runSnapshot{ID: runID, Status: "running"}
 	}
@@ -676,6 +727,9 @@ func (f *openFixture) serveRunList(w http.ResponseWriter, req *http.Request) {
 		out = append(out, f.snapshotFor(id))
 	}
 	_ = json.NewEncoder(w).Encode(out)
+	f.mu.Lock()
+	f.listCompleted++
+	f.mu.Unlock()
 }
 
 // serveEvents replays the declared backlog past the cursor, then holds the
@@ -2221,13 +2275,19 @@ func TestDrainDeadlineBoundsQueuePollingAndReconcilers(t *testing.T) {
 	if r.failure != "unreconciled_admission" {
 		t.Fatalf("failure=%s detail=%s", r.failure, r.failureDetail)
 	}
-	// Arrival window + drain timeout + slack: a 20 s queue poll must not be
-	// able to extend the drain.
-	if budget := cfg.arrivalWindow + cfg.drainTimeout + 5*time.Second; elapsed > budget {
-		t.Fatalf("drive took %s, over the %s budget: the deadline did not bound queue polling", elapsed, budget)
+	residualCap := residualObservationBudget(cfg.drainTimeout)
+	if r.open.residualObservationBudget != residualCap {
+		t.Fatalf("residual budget=%s, want %s", r.open.residualObservationBudget, residualCap)
 	}
-	if drain := r.open.drainEnd.Sub(r.open.windowEnd); drain > cfg.drainTimeout+3*time.Second {
-		t.Fatalf("drain ran %s against a %s deadline", drain, cfg.drainTimeout)
+	// Drain time excludes the residual /queue read. A 20 s stall must cancel
+	// at the drain deadline, not run on into the residual budget.
+	if drain := r.open.drainEnd.Sub(r.open.windowEnd); drain > cfg.drainTimeout+time.Second {
+		t.Fatalf("drain ran %s against a %s deadline; residual must not count as drain time", drain, cfg.drainTimeout)
+	}
+	// Total elapsed may include the declared residual cap, not an undeclared
+	// extension of the drain deadline and not 5 s of slack that would hide it.
+	if budget := cfg.arrivalWindow + cfg.drainTimeout + residualCap + 2*time.Second; elapsed > budget {
+		t.Fatalf("drive took %s, over window+drain+residual-budget(%s)+2s: residual read exceeded its cap", elapsed, residualCap)
 	}
 }
 
@@ -2512,5 +2572,91 @@ func TestBacklogCountersAreSampledCoherently(t *testing.T) {
 	}
 	if reads < 1000 {
 		t.Fatalf("only %d samples taken; the race window was barely exercised", reads)
+	}
+}
+
+// ===========================================================================
+// Round-4 adversarial review regressions (PR #552)
+// ===========================================================================
+
+// TestResidualQueueRecoveryDoesNotPassPromotedRun: waitForQueueDrain fails
+// while the queue is occupied, the first census sees only the acknowledged
+// run, then the queue "recovers" to empty as a previously unseen run is
+// promoted. A residual empty /queue read must not pass that result.
+func TestResidualQueueRecoveryDoesNotPassPromotedRun(t *testing.T) {
+	f := &openFixture{
+		admitLimit:           1,
+		queueEmptyAfterLists: 2,
+		promoteAfterLists:    2,
+	}
+	srv := startOpenFixture(t, f)
+	cfg := queueConfig(srv.URL)
+	cfg.jobCount = 1
+	cfg.rate, cfg.arrivalWindow = 10, 200*time.Millisecond
+	cfg.drainTimeout = 400 * time.Millisecond
+	cfg.requireSustained = false
+	r, err := newHarness(cfg).run(context.Background())
+	if r.runsObserved == 0 || r.runsQueued == 0 {
+		t.Fatalf("fixture did not mix admitted and queued arrivals: admitted=%d queued=%d",
+			r.runsObserved, r.runsQueued)
+	}
+	if err == nil {
+		t.Fatal("residual empty /queue after an unseen promotion passed")
+	}
+	if r.open != nil && r.open.queueDrainVerified {
+		t.Fatal("residual empty read verified drainage by itself")
+	}
+	if r.outcome() == "passed" {
+		t.Fatalf("outcome=%s failure=%s detail=%s", r.outcome(), r.failure, r.failureDetail)
+	}
+}
+
+// TestUnresolvedTransportUncertainIsInconclusive: two empty censuses with a
+// leftover transport_uncertain arrival are DT-QUORUM-01 inconclusive (exit 2),
+// never a pass and never a rejection.
+func TestUnresolvedTransportUncertainIsInconclusive(t *testing.T) {
+	f := &openFixture{killConnection: true}
+	srv := startOpenFixture(t, f)
+	cfg := openConfig(srv.URL)
+	cfg.jobCount = 1
+	r, err := newHarness(cfg).run(context.Background())
+	if err == nil {
+		t.Fatal("unmatched transport_uncertain passed")
+	}
+	if r.failure != "uncertain_admission_unresolved" {
+		t.Fatalf("failure=%s detail=%s", r.failure, r.failureDetail)
+	}
+	if r.outcome() != "inconclusive" {
+		t.Fatalf("outcome=%s, want inconclusive", r.outcome())
+	}
+	if r.runsUncertain == 0 {
+		t.Fatal("fixture produced no transport_uncertain arrivals")
+	}
+	if r.censusExtra != 0 {
+		t.Fatalf("censuses were not empty: extra=%d terminal=%d", r.censusExtra, r.censusTerminal)
+	}
+	if r.runsRejected != 0 {
+		t.Fatal("possibly-committed uncertainty was reported as a rejection")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runMain([]string{
+		"-server", srv.URL, "-mode", "open", "-jobs", "1", "-fan-out", "1", "-depth", "1",
+		"-task-duration", "1ms", "-rate", "20", "-arrival-window", "500ms",
+		"-sample-rate", "50ms", "-drain-timeout", "10s", "-poll-interval", "20ms",
+		"-timeout", "60s", "-lifecycle=false", "-json-output", "-",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2; stderr=%s", code, stderr.String())
+	}
+	var decoded struct {
+		Outcome string `json:"outcome"`
+		Failure string `json:"failure_class"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not clean JSON: %q: %v", stdout.String(), err)
+	}
+	if decoded.Outcome != "inconclusive" || decoded.Failure != "uncertain_admission_unresolved" {
+		t.Fatalf("json outcome=%s failure=%s", decoded.Outcome, decoded.Failure)
 	}
 }
