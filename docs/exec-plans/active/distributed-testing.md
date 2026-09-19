@@ -1274,10 +1274,159 @@ below is mandatory, including append-only edits.
   Depends on: none.
   Verify: reject invalid/zero configuration, use an overall deadline, sample metrics concurrently with submission, and return failure when expected runs fail, time out, cannot be triggered, or required samples are missing. Emit versioned machine-readable results with exact expected/observed counts and a usable failure classification. A live successful workload exits zero; deliberate bad-image and unavailable-server workloads exit nonzero. A controlled slow workload proves samples cover early and middle execution, including concurrency=1. Validate the reporter with fixtures as well as the live runs. Preserve useful existing human reports and execute the recipe inside the repository's containerized toolchain.
 
-- [ ] E2. Extend the Go load driver with open-loop workloads and lifecycle measurements
+- [x] E2. Extend the Go load driver with open-loop workloads and lifecycle measurements
   Files: `test/load/harness.go`, `test/load/harness_test.go` (created by E1), new `test/performance/workloads.json`, new `test/performance/load_test.go`.
   Depends on: A1, E1.
   Verify: Extend the containerized Go harness E1 already owns instead of introducing k6 or an unowned toolchain dependency. Support arrival-rate scheduling independent of completion, with offered/dropped/admitted/rejected/completed/backlog counts and bounded overload handling. Cover tiny/realistic tasks, wide/deep DAGs, fan-out, queues, cache hit/miss, API reads, subscribers, and drain. Tag the live driver `//go:build integration`; keep pure scheduling/report tests hermetic. Measure actual lifecycle intervals from observed events, marking unavailable values explicitly. Collect existing metrics and external resource observations, separating statements from rows and timed background work. Reconcile every admitted run; faster admission with backlog growth is not improvement. Production per-task resource telemetry remains owned by right-sizing.
+
+  Note (W4-β): Extended E1's containerized Go driver in place — no k6, no new
+  toolchain, `go.mod`/`go.sum` byte-identical to master, no `justfile` edit.
+  `mode=open` places arrivals on an absolute clock grid computed from
+  `-rate`/`-arrival-window` before the first request, so the schedule never waits
+  on a completion or on the previous response. Outcomes are deliberately not
+  conflated: `dropped` (the driver's own `client_in_flight_cap` /
+  `client_scheduler_lag` / `deadline_before_offer`), `admitted` (DT-ADMIT-01:
+  202 **with** a run body carrying a UUID), `queued_or_skipped` (a bare 202 — its
+  own outcome), `rejected`, and `transport_uncertain` (DT-QUORUM-01: possibly
+  committed, never reported as a rejection). Overload is bounded by a hard
+  in-flight cap, a plan fixed and capped at 100000 up front, a bounded
+  reconciler pool and a drain deadline. Every admitted run is polled to a
+  terminal status; arrivals carrying no run identity are reconciled against the
+  server's own run census (`GET /v1/jobs/:id/runs`), and census-discovered runs
+  are driven to terminal too. The reporter fails `accounting_mismatch`,
+  `unreconciled_admission`, and (for `require-sustained` workloads)
+  `backlog_growth` / `backlog_inconclusive`. Lifecycle: four intervals from
+  `/v1/events` and four from the public run read's own server timestamps, deduped
+  by event identity per DT-EVENT-01 with a durable catch-up after the drain;
+  anything unobservable emits `"status":"unavailable"` with a counted reason
+  (`cache_hit_no_task_start`, …) — never 0, never an absent key. Report schema
+  bumped 1 -> 2 with every schema 1 field still meaningful; adds `arrival_plan`,
+  `accounting` (+`server_run_census`), `backlog`, `throughput`, `lifecycle`,
+  `resources`, `api_reads`, `subscribers`, `drain`, `cache`, and
+  `metric_work_split` (workload-driven vs the timer-driven `lease_renewal`, rows
+  kept separate from statements). External resource observation reads the server
+  container's stats from OUTSIDE via the runtime API using only the stdlib;
+  production per-task telemetry stays with resource right-sizing.
+  Commands (all figures below are from the FINAL head, after three adversarial
+  review rounds): `just lint` rc=0; `gofmt -l test/load test/performance` clean;
+  `just unit-test` rc=0 (108 packages, 0 FAIL, `test/load` 87.8% coverage,
+  `-race`);
+  `go test -tags=integration -count=1 -timeout=60m -v ./test/performance` inside
+  `caesiumcloud/caesium-builder:latest-full`, sharing the netns of the
+  `integration-up` server, `ok ... 350.766s` with 10/10 catalog workloads plus
+  `TestDriverRejectsUnknownCatalogWorkload` and
+  `TestCacheMissWorkloadRepeatsAgainstAWarmServer`;
+  `just integration-test` rc=0 (`ok .../test 689.041s`, 276 scenario PASS /
+  0 FAIL). Both live stages under one `lane.sh` hold; a second short hold
+  re-measured the queue workload after the synchronous-first-queue-read fix.
+  Measured: `open-tiny-sustained` offered 20 / dropped 0 / admitted 20 /
+  completed_ok 20 / unreconciled 0, verdict `sustained` (peak 1, slope 0.0075);
+  `open-overload-bounded` offered 200 with **110 driver drops + 82 bare-202
+  skips**, 8 admitted, 0 unreconciled, finished in 13.1 s (no hang);
+  `open-queue-concurrency` offered 30 → 9 admitted + 21 queued, and the census
+  found 30 runs in the window of which **21 were unaccounted, all 21 settled and
+  0 failed**, with the queue verifiably drained to 0;
+  `open-cache-hit` reported `read_task_execution` as `status=unavailable`,
+  p50/p99 null, `cache_hit_no_task_start` ×6, and its measured workload-driven
+  SQL is well below `open-cache-miss`'s for the same 6 arrivals, because
+  the warm-up's cold executions are no longer charged to the window;
+  `open-api-read-mix` verdict `sustained` (peak 4, slope 0.170) with 4
+  subscribers whose coverage cleared the enforced 0.9 floor.
+  Backlog verdict — recorded because a checker changed after a failure: round 1
+  of `open-tiny-sustained` at 2 runs/s failed `backlog_growth` and that was a
+  TRUE POSITIVE (offered 1.86/s vs completed 1.27/s, net +0.59/s matching the
+  measured 0.573 slope, backlog 0→15), so the catalog rate was lowered to one
+  this shared host sustains rather than the checker being weakened. The rule
+  itself was then changed for a separate dimensional defect: the old bound
+  `slope ≤ 0.2×rate` is per-second and window-independent, so at 0.5 runs/s it
+  was 0.1 backlog/s while ONE unit of integer jitter across a ten-sample
+  half-window already fits ≈±0.1/s — the threshold sat inside single-run
+  quantisation noise. It is now two arms sharing one window-scaled allowance
+  `max(1, 0.2×rate×halfSeconds)`: a level arm (second-half mean minus first-half
+  mean) and a trend arm (second-half slope projected across that half, because
+  the level arm alone halves late-onset growth). `TestBacklogVerdictSeries`
+  keeps the round-1 series as a fixture that must still read `backlog_growing`,
+  alongside slow steady growth, growth confined to the final quarter, noisy
+  stationary, cold-start ramp and draining series;
+  `TestBacklogVerdictArmsAreBothLoadBearing` proves neither arm is decoration.
+  Adversarial review, round 1 (PR #552, two P1 + five P2, all verified real):
+  `judgeOpenLoop` ignored the census entirely, so a workload could pass with
+  possibly-committed work unaccounted — it now fails `census_unavailable`
+  whenever identity-less arrivals exist and the census is not `ok`,
+  `unreconciled_census_run` when a discovered run never settles, and applies the
+  terminal-failure policy to discovered runs. `admitted` counted only UUID-202s
+  while `terminal` counted census runs too, which drove the live queue workload
+  to 7 − 30 = −23: the populations are now separate (`recordCensusTerminal` no
+  longer touches `lg.terminal`), any negative sample fails `accounting_mismatch`,
+  and queue depth is polled on the sampling cadence into the growth decision.
+  Also fixed: a per-invocation arrival nonce (a repeat inside the cache TTL used
+  to be all hits), ONE drain-deadline context bounding the reconcilers, queue
+  polling and the census, a deep copy of the run timeline under the observer lock
+  (`snapshotRun`), the measurement window fixed to `windowStart + arrivalWindow`
+  rather than the last response, and a body-read error after 202 headers filed as
+  `transport_uncertain` rather than a bare-202 queue/skip.
+  Round 2 (three more P2 from the repo owner, all three verified real): the
+  metrics baseline was taken before `warmCache`, so the cache-hit workload's
+  deltas and peak rates included its own cold warm-up — a fresh baseline is now
+  taken after the warm-up, warm-up-era periodic samples are discarded, and the
+  warm-up's own delta is reported separately under `cache.warmup`. End-to-end
+  latency paired the driver's `offeredAt` with the server's `completed_at`, so a
+  skewed server clock could produce negative latency — the driver's own terminal
+  observation (`arrival.reconciledAt`) is used instead, with server timestamps
+  kept for the `run_read` lifecycle intervals where both ends are server-side.
+  `streamEvents` returns nil on an ordinary EOF, so a subscriber that received
+  one frame and disconnected was never counted and `min_subscriber_events` could
+  be met with no fan-out for the rest of the window — any stream exit before the
+  mix interval closes is now a lost subscriber, the driver reconnects, and an
+  enforced `coverage_ratio >= 0.9` check (`subscriber_coverage` failure class,
+  plus a `min_subscriber_coverage` catalog expectation) replaces the honour
+  system. One defect found while fixing the drain deadline and not named by any
+  reviewer: the post-drain residual queue read carried a hard-coded 30 s timeout
+  that ran AFTER the deadline expired; it is now bounded by the drain timeout.
+  Every fix carries a regression test, and the observer race is covered under
+  `-race`.
+  Round 3 (1 P1 + 6 P2, all seven verified real against the code before any
+  edit). P1: queue observation failed OPEN — `waitForQueueDrain` returned
+  silently on a `/queue` read error, `pollQueueDepth` republished its last good
+  value, and `judgeOpenLoop` never consulted the queue, so with `/queue` erroring
+  and `/runs` healthy the driver could exit 0 with queue rows outstanding. Now:
+  failures are propagated, `queueDrainVerified` is set only where a successful
+  read returned 0, `judgeOpenLoop` fails `queue_unobserved`/`queue_not_drained`
+  when bare-202 arrivals exist, and an in-window sample with no queue observation
+  makes the verdict `inconclusive_queue_unobserved`. P2s: a FINAL census after
+  the reconcilers join catches runs the server commits after the first census
+  (it admits on `context.Background()`, `internal/run/store.go`); offers and the
+  residual queue read now run under the same absolute drain deadline (a timed-out
+  offer stays `transport_uncertain`); measurement WAITS for `plannedEnd` instead
+  of ending at the last scheduled arrival (which stopped sampling up to `1/rate`
+  early and could make the drain duration negative); subscriber coverage counts
+  from a confirmed SSE response via `streamEventsWithOpen`, so a stall before
+  headers no longer reads as full coverage; census membership is a set difference
+  against a pre-window run-identity baseline instead of `CreatedAt` vs the driver
+  clock, failing explicitly when the baseline is unavailable; and the
+  offered/admitted/terminal triple is sampled under one mutex — three independent
+  atomic loads could fabricate backlog = -1, which round 1 had made a hard
+  `accounting_mismatch`, i.e. a flake that FAILED healthy workloads (the new
+  stress test reproduces it in ~10 ms against the old code: `-3 after 43815
+  reads`). Two further defects found while fixing these and named by no reviewer:
+  a queue that never empties consumed the whole drain deadline and starved the
+  census, so the queue wait now takes 3/4 of it; and the first backlog sample
+  always preceded the polling goroutine, so a healthy queue read as unobserved
+  for the whole window — the first queue read is now synchronous.
+  Limits: two workloads now gate on the verdict (`open-tiny-sustained` and
+  `open-api-read-mix`); `open-realistic-drain`, `open-wide-dag`, `open-deep-dag`
+  and `open-queue-concurrency` report `backlog_growing` on this host and pass
+  because they do not set `require-sustained` — each carries a mandatory
+  `sustained_rationale` in the catalog saying why, enforced by
+  `TestWorkloadCatalogIsValid`. `read_admission_to_run_start` is a true 0 s
+  because the server stamps `created_at`/`started_at` in one transaction; the
+  event stream was sometimes `degraded` (`unexpected EOF`) with the durable
+  catch-up closing the gaps; no 429/503 was observed live, so the `rejected`
+  bucket is exercised only hermetically; the round-1 backlog fixture is
+  reconstructed from recorded summary statistics, not a raw per-sample capture;
+  and the live runner logs the subscriber coverage ratio only on failure, so the
+  passing runs prove the gate held without printing the number.
+  Nothing was found that required a product-code fix, so no issue was filed.
 
 - [ ] E3. Compare base and candidate across backend and browser workloads.
   Files: new `scripts/compare-performance.py`, new `scripts/test_compare_performance.py`, new `scripts/performance.sh`, new `internal/run/owner_benchmark_test.go`, new `internal/run/recovery_benchmark_test.go`, new `ui/e2e/performance.spec.ts`, `ui/scripts/check-bundle-size.mjs`.
