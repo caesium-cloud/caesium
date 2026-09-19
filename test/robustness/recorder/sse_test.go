@@ -136,3 +136,84 @@ func TestSubscriberURLFiltersByRun(t *testing.T) {
 		t.Fatalf("unexpected unfiltered URL %q", u)
 	}
 }
+
+// A mixed valid/malformed stream must not drop the bad frame silently: the
+// connection records a decode failure so history comparison can fail closed,
+// even though a later valid event would otherwise make the run look complete.
+func TestSubscriberRecordsPayloadDecodeFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			"id: 5\nevent: run_started\ndata: {\"sequence\":5,\"type\":\"run_started\",\"run_id\":\"r1\"}\n\n" +
+				"id: 6\nevent: task_started\ndata: not-json\n\n" +
+				"id: 9\nevent: run_completed\ndata: {\"sequence\":9,\"type\":\"run_completed\",\"run_id\":\"r1\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	sub := NewSSESubscriber(srv.URL, "r1", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := sub.Connect(ctx, ""); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	events := sub.Events()
+	if len(events) != 3 {
+		t.Fatalf("malformed frame was dropped silently: %+v", events)
+	}
+	if events[0].RunID != "r1" || events[2].RunID != "r1" {
+		t.Fatalf("valid payloads lost their run id: %+v", events)
+	}
+	if events[1].RunID != "" {
+		t.Fatalf("undecodable payload should not invent a run id: %+v", events[1])
+	}
+	conns := sub.Connections()
+	if len(conns) != 1 || conns[0].DecodeFailures != 1 || conns[0].Delivered != 3 {
+		t.Fatalf("decode failure was not recorded on the connection: %+v", conns)
+	}
+	if conns[0].Status != http.StatusOK {
+		t.Fatalf("a live 200 stream should record its status: %+v", conns)
+	}
+}
+
+// requireObservingSSE in the hook subtest inspects Status while Connect is
+// still blocked in the parse loop. Status used to be written only in finish(),
+// so a live stream looked unestablished.
+func TestSubscriberRecordsStatusWhileTheStreamIsOpen(t *testing.T) {
+	started := make(chan struct{})
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(started)
+		<-block
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	sub := NewSSESubscriber(srv.URL, "r1", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _, _ = sub.Connect(ctx, "") }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never accepted the subscription")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conns := sub.Connections()
+		if len(conns) == 1 && conns[0].Status == http.StatusOK && conns[0].EndedAt.IsZero() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("open stream did not record HTTP 200: %+v", conns)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

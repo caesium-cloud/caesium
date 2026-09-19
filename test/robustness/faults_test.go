@@ -167,21 +167,12 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 
 	sub := recorder.NewSSESubscriber(member.HTTPBase(), "", fe.env.ManualKey)
 	streamCtx, streamCancel := context.WithCancel(ctx)
-	streamDone := make(chan struct{})
 	// The FIRST subscription's outcome is evidence too. A recorder that
 	// delivers one event and then dies still leaves a non-empty delivery set,
 	// and every row it missed would read as legal at-least-once loss; B2 says
 	// recorder loss is inconclusive, so the connection is carried into the
 	// comparison exactly as the reconnect attempt is.
-	var firstErr error
-	var firstEndedEarly bool
-	go func() {
-		defer close(streamDone)
-		_, firstErr = sub.Connect(streamCtx, fmt.Sprint(tip))
-		if streamCtx.Err() == nil {
-			firstEndedEarly = true
-		}
-	}()
+	firstWatch := startSSE(sub, streamCtx, fmt.Sprint(tip))
 	// Give the subscription time to complete catch-up and go live before the
 	// run exists, so its events are LIVE deliveries rather than backlog.
 	time.Sleep(3 * time.Second)
@@ -203,7 +194,7 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 	// can arrive outside the scope the read covers.
 	time.Sleep(5 * time.Second)
 	streamCancel()
-	<-streamDone
+	firstWatch.wait()
 
 	readCtx, readCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer readCancel()
@@ -220,13 +211,8 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 	if len(delivered) == 0 {
 		t.Fatalf("inconclusive: SSE delivered nothing for run %s (connections=%s)", run.ID, jsonString(sub.Connections()))
 	}
-	firstConn := resumeConnection(sub.Connections(), firstErr)
-	if firstEndedEarly {
-		firstConn.Err = firstNonEmptyStr(firstConn.Err,
-			"the subscription ended before the test closed it") +
-			" (stream ended at its own initiative)"
-	}
-	t.Logf("first connection: %s (established=%t err=%q)", jsonString(sub.Connections()), firstConn.Established, firstConn.Err)
+	firstConn := firstWatch.result(sub)
+	t.Logf("first connection: %s (established=%t err=%q decode_failures=%d)", jsonString(sub.Connections()), firstConn.Established, firstConn.Err, firstConn.DecodeFailures)
 
 	rep := history.Compare(delivered, toHistoryPersisted(rows), scope, firstConn)
 	t.Logf("history: delivered=%d distinct=%d persisted=%d duplicates=%v missing_from_delivery=%v out_of_order=%d",
@@ -254,12 +240,7 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 
 	resumed := recorder.NewSSESubscriber(member.HTTPBase(), run.ID, fe.env.ManualKey)
 	resumeCtx, resumeCancel := context.WithTimeout(ctx, 90*time.Second)
-	resumeDone := make(chan struct{})
-	var resumeErr error
-	go func() {
-		defer close(resumeDone)
-		_, resumeErr = resumed.Connect(resumeCtx, fmt.Sprint(cursor))
-	}()
+	resumeWatch := startSSE(resumed, resumeCtx, fmt.Sprint(cursor))
 	// Wait for the catch-up to land instead of sleeping a fixed interval: a
 	// short sleep would turn a slow replay into a false "resumed nothing".
 	waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -270,13 +251,13 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 	// Settle briefly so a replay that overshoots is retained too, then close.
 	time.Sleep(2 * time.Second)
 	resumeCancel()
-	<-resumeDone
+	resumeWatch.wait()
 	if waitErr != nil {
 		t.Logf("resumed stream had not replayed %d rows before the wait elapsed: %v", len(expectedCatchUp), waitErr)
 	}
 
-	conn := resumeConnection(resumed.Connections(), resumeErr)
-	t.Logf("resumed connection: %s (err=%q)", jsonString(resumed.Connections()), conn.Err)
+	conn := resumeWatch.result(resumed)
+	t.Logf("resumed connection: %s (err=%q decode_failures=%d)", jsonString(resumed.Connections()), conn.Err, conn.DecodeFailures)
 	reconnect := history.CompareReconnect(delivered, deliveredForRun(resumed.Events(), run.ID), toHistoryPersisted(rows), cursor, scope, conn)
 	t.Logf("reconnect: cursor=%d established=%t status=%d first_distinct=%d resumed_distinct=%d catch_up_expected=%v replayed<=cursor=%v new>cursor=%v missing_from_resumed=%v never_delivered=%v",
 		reconnect.Cursor, conn.Established, conn.Status, reconnect.FirstDistinct, reconnect.ResumedDistinct,
@@ -341,23 +322,84 @@ func runEventHistory(t *testing.T, fe *faultEnv) {
 	})
 }
 
-// resumeConnection turns the subscriber's own record of the resumed attempt
-// into the evidence the comparison needs. A stream that never returned HTTP 200
-// is not "no events": it is no evidence. The caller's own cancellation is the
-// one expected ending and is not reported as a failure.
-func resumeConnection(conns []recorder.SSEConnection, connectErr error) history.Connection {
+// sseWatch is one Connect goroutine. Every subscriber in this file goes through
+// startSSE / sseConnection so a 500, reset, or premature EOF cannot be read as
+// "no events".
+type sseWatch struct {
+	err        error
+	endedEarly bool
+	done       chan struct{}
+}
+
+func startSSE(sub *recorder.SSESubscriber, ctx context.Context, lastEventID string) *sseWatch {
+	w := &sseWatch{done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		_, err := sub.Connect(ctx, lastEventID)
+		early := ctx.Err() == nil
+		w.err = err
+		w.endedEarly = early
+	}()
+	return w
+}
+
+func (w *sseWatch) wait() { <-w.done }
+
+func (w *sseWatch) result(sub *recorder.SSESubscriber) history.Connection {
+	return sseConnection(sub.Connections(), w.err, w.endedEarly)
+}
+
+// sseConnection turns the subscriber's own record of one attempt into the
+// evidence the comparison needs. A stream that never returned HTTP 200 is not
+// "no events": it is no evidence. The caller's own cancellation is the one
+// expected ending and is not reported as a failure. A stream that ended while
+// the caller's context was still live is premature termination.
+func sseConnection(conns []recorder.SSEConnection, connectErr error, endedEarly bool) history.Connection {
 	out := history.Connection{}
 	if len(conns) == 0 {
-		out.Err = "the resumed subscription was never attempted"
+		out.Err = "the subscription was never attempted"
 		return out
 	}
 	last := conns[len(conns)-1]
 	out.Status = last.Status
 	out.Established = last.Status == http.StatusOK
+	out.DecodeFailures = last.DecodeFailures
 	if connectErr != nil && !isOwnCancellation(connectErr) {
 		out.Err = connectErr.Error()
+	} else if last.Err != "" && !isOwnCancellation(errors.New(last.Err)) {
+		out.Err = last.Err
+	}
+	if endedEarly {
+		out.Err = firstNonEmptyStr(out.Err, "the subscription ended before the test closed it") +
+			" (stream ended at its own initiative)"
 	}
 	return out
+}
+
+// requireObservingSSE fails the test as inconclusive unless the subscription
+// is established, still open, and has not lost payloads to the decoder. The
+// hook subtest uses this before treating an empty event slice as "not
+// delivered".
+func requireObservingSSE(t *testing.T, sub *recorder.SSESubscriber, w *sseWatch) history.Connection {
+	t.Helper()
+	select {
+	case <-w.done:
+		conn := sseConnection(sub.Connections(), w.err, w.endedEarly)
+		t.Fatalf("inconclusive: SSE subscription did not survive the observation window (established=%t status=%d err=%q decode_failures=%d connections=%s)",
+			conn.Established, conn.Status, conn.Err, conn.DecodeFailures, jsonString(sub.Connections()))
+	default:
+	}
+	conns := sub.Connections()
+	conn := sseConnection(conns, nil, false)
+	if len(conns) == 0 || conns[len(conns)-1].Status != http.StatusOK || !conns[len(conns)-1].EndedAt.IsZero() {
+		t.Fatalf("inconclusive: SSE subscription is not an observing stream (established=%t status=%d err=%q decode_failures=%d connections=%s)",
+			conn.Established, conn.Status, conn.Err, conn.DecodeFailures, jsonString(conns))
+	}
+	if conn.DecodeFailures > 0 {
+		t.Fatalf("inconclusive: SSE payload decoding failed %d time(s) (connections=%s)",
+			conn.DecodeFailures, jsonString(conns))
+	}
+	return conn
 }
 
 // isOwnCancellation recognises the one ending the caller arranged: the test
@@ -1240,14 +1282,8 @@ func runBusPublishPause(t *testing.T, fe *faultEnv) {
 	}
 	sub := recorder.NewSSESubscriber(member.HTTPBase(), "", fe.env.ManualKey)
 	streamCtx, streamCancel := context.WithCancel(ctx)
-	streamDone := make(chan struct{})
-	go func() {
-		defer close(streamDone)
-		if _, err := sub.Connect(streamCtx, fmt.Sprint(tip)); err != nil && streamCtx.Err() == nil {
-			t.Logf("sse connection ended: %v", err)
-		}
-	}()
-	defer func() { streamCancel(); <-streamDone }()
+	streamWatch := startSSE(sub, streamCtx, fmt.Sprint(tip))
+	defer func() { streamCancel(); streamWatch.wait() }()
 	time.Sleep(3 * time.Second)
 
 	job, _ := applyFaultFixture(t, fe, member, "buspause", 2)
@@ -1312,6 +1348,12 @@ func runBusPublishPause(t *testing.T, fe *faultEnv) {
 			held, row.BusPending, row.DispatchedAt)
 	}
 	t.Logf("held event sequence=%d type=%s committed and still pending", row.Sequence, row.Type)
+
+	// Absence of a live delivery is only evidence if the recorder was actually
+	// observing. A 500, reset, or premature EOF used to pass via an empty slice.
+	sseConn := requireObservingSSE(t, sub, streamWatch)
+	t.Logf("hook SSE connection while held: established=%t status=%d err=%q decode_failures=%d",
+		sseConn.Established, sseConn.Status, sseConn.Err, sseConn.DecodeFailures)
 
 	// It must not have been delivered live while held.
 	for _, ev := range sub.Events() {
@@ -1407,6 +1449,8 @@ func runBusPublishPause(t *testing.T, fe *faultEnv) {
 		"delivered_live":   deliveredLive,
 		"final_status":     final.Status,
 		"members_armed":    len(live),
+		"sse_connection":   sseConn,
+		"sse_connections":  sub.Connections(),
 	})
 }
 

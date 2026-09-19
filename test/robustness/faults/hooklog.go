@@ -124,13 +124,13 @@ func (e HookEvidence) ReleasedByDisarm() error {
 // ReconcileReleases requires that every hold recorded at ACTIVATION time later
 // has a matching `disarmed` release on the same member.
 //
-// The weaker check this replaces walked the current logs and skipped any member
-// whose summary was empty, so a log that was truncated, emptied or lost between
-// the two reads was indistinguishable from a member that never entered the
-// hook — and the hold it was hiding would have gone unproven. Activation
-// already recorded which members, paths and sequences entered; that set is the
-// obligation, and anything that cannot be reconciled against it is an error,
-// never a skip.
+// Each activation enter is its own obligation, identified by
+// (member, path, sequence). Two paths holding the same sequence, or two enters
+// of the same path and sequence, are two holds: one path's `disarmed` release
+// cannot satisfy the other, and a `max_hold` is not overwritten by a later
+// `disarmed` on the same hold. The weaker check this replaces keyed releases
+// by sequence alone, so two paths holding one sequence collapsed to one
+// obligation.
 func ReconcileReleases(activation, current []HookEvidence) error {
 	byMember := map[string]HookEvidence{}
 	for _, ev := range current {
@@ -145,36 +145,57 @@ func ReconcileReleases(activation, current []HookEvidence) error {
 			return fmt.Errorf("member %s recorded %d hook entries at activation but has no hook evidence now: the record disappeared",
 				act.Member, len(act.Entered))
 		}
-		entered := map[uint64]struct{}{}
-		for _, seq := range cur.HeldSequences() {
-			entered[seq] = struct{}{}
+		if len(cur.Entered) == 0 && len(cur.Released) == 0 {
+			return fmt.Errorf("member %s recorded %d hook entries at activation but has no hook evidence now: the record disappeared",
+				act.Member, len(act.Entered))
 		}
-		released := map[uint64]string{}
 		for _, rel := range cur.Released {
 			if rel.Sequence == 0 {
 				return fmt.Errorf("member %s released a hold with no sequence, so it cannot be matched to an entry", act.Member)
 			}
-			released[rel.Sequence] = rel.Reason
 		}
-		for _, seq := range act.HeldSequences() {
-			if _, ok := entered[seq]; !ok {
-				return fmt.Errorf("member %s no longer records entering the hook for sequence %d: the hook log lost evidence it had already produced",
-					act.Member, seq)
+		enterUsed := make([]bool, len(cur.Entered))
+		releaseUsed := make([]bool, len(cur.Released))
+		for _, ent := range act.Entered {
+			if ent.Sequence == 0 {
+				return fmt.Errorf("member %s held an event with no sequence, so it cannot be matched to a release", act.Member)
 			}
-			reason, ok := released[seq]
+			if _, ok := consumeHold(cur.Entered, enterUsed, ent.Path, ent.Sequence); !ok {
+				return fmt.Errorf("member %s no longer records entering path %q for sequence %d: the hook log lost evidence it had already produced",
+					act.Member, ent.Path, ent.Sequence)
+			}
+			rel, ok := consumeHold(cur.Released, releaseUsed, ent.Path, ent.Sequence)
 			if !ok {
-				return fmt.Errorf("member %s never released its hold on sequence %d", act.Member, seq)
+				return fmt.Errorf("member %s never released its %q hold on sequence %d", act.Member, ent.Path, ent.Sequence)
 			}
-			if reason != "disarmed" {
-				return fmt.Errorf("member %s released sequence %d because of %q, not the test disarming it",
-					act.Member, seq, reason)
+			if rel.Reason != "disarmed" {
+				return fmt.Errorf("member %s released path %q sequence %d because of %q, not the test disarming it",
+					act.Member, ent.Path, ent.Sequence, rel.Reason)
 			}
 		}
 	}
 	return nil
 }
 
-// HeldSequences returns the event sequences this member held.
+// consumeHold marks the first unused entry with the given path and sequence.
+// Matching is ordered so a max_hold cannot be skipped in favour of a later
+// disarmed record for the same hold.
+func consumeHold(entries []HookEntry, used []bool, path string, seq uint64) (HookEntry, bool) {
+	for i, e := range entries {
+		if used[i] || e.Path != path || e.Sequence != seq {
+			continue
+		}
+		used[i] = true
+		return e, true
+	}
+	return HookEntry{}, false
+}
+
+// HeldSequences returns the distinct event sequences this member held.
+//
+// Distinctness is only for identifying the committed row the live subtest
+// checks; it is not a hold obligation. ReconcileReleases matches each enter
+// individually so two paths (or two enters) sharing a sequence stay two holds.
 func (e HookEvidence) HeldSequences() []uint64 {
 	seen := map[uint64]struct{}{}
 	var out []uint64

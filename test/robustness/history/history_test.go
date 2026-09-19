@@ -276,6 +276,40 @@ func TestReconnectParserFailureIsInconclusive(t *testing.T) {
 	}
 }
 
+// The P2 this closes: a mixed valid/malformed stream still delivers some
+// events, so the missing row looks like legal at-least-once loss unless the
+// decode-failure count on the connection makes the comparison inconclusive.
+func TestPayloadDecodeFailureIsInconclusiveEvenWhenOtherEventsDecode(t *testing.T) {
+	persisted := []Persisted{{Sequence: 1, Type: "run_started"}, {Sequence: 2, Type: "task_started"}}
+	delivered := []Delivered{{Sequence: 1, Type: "run_started"}}
+
+	healthy := Compare(delivered, persisted, scope(1, 2), open())
+	if !healthy.Conclusive() {
+		t.Fatalf("a live delivery gap on a healthy stream is legal: %v", healthy.Inconclusive)
+	}
+
+	broken := Compare(delivered, persisted, scope(1, 2),
+		Connection{Established: true, Status: 200, DecodeFailures: 1})
+	if broken.Conclusive() {
+		t.Fatalf("a stream that failed to decode a payload must be inconclusive: %+v", broken)
+	}
+	if len(broken.Defects()) != 0 {
+		t.Fatalf("recorder/parser loss is inconclusive, not a defect: %v", broken.Defects())
+	}
+	if len(broken.MissingFromDelivery) != 1 || broken.MissingFromDelivery[0] != 2 {
+		t.Fatalf("the undecoded row must still be recorded as missing: %+v", broken)
+	}
+
+	resumed := CompareReconnect(delivered, []Delivered{{Sequence: 2, Type: "task_started"}}, persisted, 1, scope(1, 2),
+		Connection{Established: true, Status: 200, DecodeFailures: 1})
+	if resumed.Conclusive() {
+		t.Fatalf("a reconnection that failed to decode a payload must be inconclusive: %+v", resumed)
+	}
+	if len(resumed.Defects()) != 0 {
+		t.Fatalf("reconnect decoder loss is inconclusive, not a defect: %v", resumed.Defects())
+	}
+}
+
 // The clause this exists for: SSE cannot reveal an external effect whose
 // completion event was lost, so a raw completion with no delivered event must
 // be reported and must not fail the run.

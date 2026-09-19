@@ -34,15 +34,18 @@ type SSEEvent struct {
 
 // SSEConnection records one subscription attempt, including its resume cursor
 // and how it ended. A stream that failed to open is evidence of nothing, so the
-// error is retained rather than collapsed into "no events".
+// error is retained rather than collapsed into "no events". DecodeFailures
+// counts frames whose JSON payload could not be decoded: those are recorder
+// loss, not legal at-least-once delivery gaps.
 type SSEConnection struct {
-	Gen         int       `json:"gen"`
-	StartedAt   time.Time `json:"started_at"`
-	EndedAt     time.Time `json:"ended_at,omitempty"`
-	LastEventID string    `json:"last_event_id,omitempty"`
-	Status      int       `json:"status,omitempty"`
-	Delivered   int       `json:"delivered"`
-	Err         string    `json:"error,omitempty"`
+	Gen            int       `json:"gen"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at,omitempty"`
+	LastEventID    string    `json:"last_event_id,omitempty"`
+	Status         int       `json:"status,omitempty"`
+	Delivered      int       `json:"delivered"`
+	DecodeFailures int       `json:"decode_failures,omitempty"`
+	Err            string    `json:"error,omitempty"`
 }
 
 // SSESubscriber subscribes to the existing public `/v1/events` surface. It adds
@@ -165,6 +168,11 @@ func (s *SSESubscriber) Connect(ctx context.Context, lastEventID string) (int, e
 		finish(resp.StatusCode, 0, err)
 		return gen, err
 	}
+	// Record that the stream is live before the parse loop so a still-open
+	// subscription can be distinguished from one that never reached HTTP 200.
+	s.mu.Lock()
+	s.conns[idx].Status = resp.StatusCode
+	s.mu.Unlock()
 
 	delivered := 0
 	perr := ParseSSE(resp.Body, func(f SSEFrame) {
@@ -183,6 +191,7 @@ func (s *SSESubscriber) Connect(ctx context.Context, lastEventID string) (int, e
 			JobID    string `json:"job_id"`
 			TaskID   string `json:"task_id"`
 		}
+		s.mu.Lock()
 		if err := json.Unmarshal([]byte(f.Data), &payload); err == nil {
 			if ev.Sequence == 0 {
 				ev.Sequence = payload.Sequence
@@ -193,8 +202,9 @@ func (s *SSESubscriber) Connect(ctx context.Context, lastEventID string) (int, e
 			ev.RunID = payload.RunID
 			ev.JobID = payload.JobID
 			ev.TaskID = payload.TaskID
+		} else {
+			s.conns[idx].DecodeFailures++
 		}
-		s.mu.Lock()
 		s.events = append(s.events, ev)
 		s.mu.Unlock()
 		delivered++

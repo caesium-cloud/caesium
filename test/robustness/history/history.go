@@ -102,8 +102,9 @@ type Report struct {
 // recorder that delivered one event and then broke still yields a non-empty
 // set, and every row it never saw would otherwise be classified as legal
 // at-least-once loss. Recorder loss is INCONCLUSIVE, not a pass: a stream that
-// never reached HTTP 200, ended before the caller closed it, or failed its
-// parser makes the whole comparison inconclusive.
+// never reached HTTP 200, ended before the caller closed it, failed its
+// parser, or failed to decode one or more payloads makes the whole comparison
+// inconclusive.
 func Compare(delivered []Delivered, persisted []Persisted, scope Scope, conn Connection) Report {
 	rep := Report{
 		Scope:          scope,
@@ -189,6 +190,11 @@ func Compare(delivered []Delivered, persisted []Persisted, scope Scope, conn Con
 			"the subscription did not survive the observation window: %s (recorder loss is inconclusive, never legal at-least-once loss)",
 			conn.Err))
 	}
+	if conn.DecodeFailures > 0 {
+		rep.Inconclusive = append(rep.Inconclusive, fmt.Sprintf(
+			"%d SSE payload(s) failed to decode (recorder/parser loss is inconclusive, never legal at-least-once loss)",
+			conn.DecodeFailures))
+	}
 
 	sortU64(rep.MissingFromDelivery)
 	sortU64(rep.DeliveredNotPersisted)
@@ -233,6 +239,10 @@ type Connection struct {
 	// Err is a connection or parser failure that was NOT the caller's own
 	// cancellation. Any value makes the comparison inconclusive.
 	Err string
+	// DecodeFailures is the number of SSE frames whose JSON payload the
+	// recorder could not decode. A non-zero count is recorder/parser loss and
+	// makes the comparison inconclusive even when other frames decoded.
+	DecodeFailures int
 }
 
 // ReconnectReport compares a resumed subscription with the first one.
@@ -272,8 +282,9 @@ type ReconnectReport struct {
 //
 // conn carries the subscription attempt, because an empty resumed set proves
 // nothing on its own — a 403, a transport error or a cancelled dial all produce
-// one. A reconnection that was not established, delivered nothing, or had no
-// persisted catch-up above the cursor is INCONCLUSIVE, never a pass.
+// one. A reconnection that was not established, delivered nothing, failed to
+// decode a payload, or had no persisted catch-up above the cursor is
+// INCONCLUSIVE, never a pass.
 func CompareReconnect(first, resumed []Delivered, persisted []Persisted, cursor uint64, scope Scope, conn Connection) ReconnectReport {
 	rep := ReconnectReport{Cursor: cursor, Conn: conn}
 
@@ -339,6 +350,11 @@ func CompareReconnect(first, resumed []Delivered, persisted []Persisted, cursor 
 	if conn.Err != "" {
 		rep.Inconclusive = append(rep.Inconclusive, fmt.Sprintf(
 			"the resumed stream failed: %s", conn.Err))
+	}
+	if conn.DecodeFailures > 0 {
+		rep.Inconclusive = append(rep.Inconclusive, fmt.Sprintf(
+			"%d resumed SSE payload(s) failed to decode (recorder/parser loss is inconclusive)",
+			conn.DecodeFailures))
 	}
 	if len(rep.PersistedAboveCursor) == 0 {
 		rep.Inconclusive = append(rep.Inconclusive,

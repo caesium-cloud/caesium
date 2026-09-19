@@ -162,3 +162,87 @@ func TestReconcileReleasesRejectsAnUnmatchedSequence(t *testing.T) {
 		t.Fatal("a release of another sequence must not reconcile the recorded hold")
 	}
 }
+
+func twoPathEntered(member string, seq uint64) HookEvidence {
+	return HookEvidence{
+		Member: member,
+		Entered: []HookEntry{
+			{Banner: HookBanner, Phase: "enter", Path: HookPathDispatchOnce, Sequence: seq, RunID: "r"},
+			{Banner: HookBanner, Phase: "enter", Path: HookPathPublishAndMark, Sequence: seq, RunID: "r"},
+		},
+		Paths: map[string]int{HookPathDispatchOnce: 1, HookPathPublishAndMark: 1},
+	}
+}
+
+func releaseOn(path string, seq uint64, reason string) HookEntry {
+	return HookEntry{Banner: HookBanner, Phase: "release", Path: path, Sequence: seq, RunID: "r", Reason: reason}
+}
+
+// The P2 this closes: both publication paths hold the same sequence on one
+// member. Releasing only one of them used to satisfy both obligations.
+func TestReconcileReleasesRejectsAMissingPathOnTheSameSequence(t *testing.T) {
+	act := []HookEvidence{twoPathEntered("caesium-0", 40)}
+	cur := twoPathEntered("caesium-0", 40)
+	cur.Released = []HookEntry{releaseOn(HookPathDispatchOnce, 40, "disarmed")}
+	err := ReconcileReleases(act, []HookEvidence{cur})
+	if err == nil {
+		t.Fatal("releasing only one of two paths holding the same sequence must not reconcile")
+	}
+	if !strings.Contains(err.Error(), HookPathPublishAndMark) {
+		t.Fatalf("the error must name the path that was not released: %v", err)
+	}
+}
+
+// A max_hold followed by a later disarmed on the SAME hold used to pass
+// because the sequence-keyed map kept only the last reason.
+func TestReconcileReleasesRejectsMaxHoldThenDisarmedOnTheSameHold(t *testing.T) {
+	act := []HookEvidence{enteredEv("caesium-0", 40)}
+	cur := enteredEv("caesium-0", 40)
+	cur.Released = []HookEntry{
+		releaseOn(HookPathDispatchOnce, 40, "max_hold"),
+		releaseOn(HookPathDispatchOnce, 40, "disarmed"),
+	}
+	err := ReconcileReleases(act, []HookEvidence{cur})
+	if err == nil {
+		t.Fatal("a max_hold followed by a later disarmed on the same hold must not reconcile")
+	}
+	if !strings.Contains(err.Error(), "max_hold") {
+		t.Fatalf("the error must carry the real release reason, not the later disarmed: %v", err)
+	}
+}
+
+func TestReconcileReleasesAcceptsBothPathsDisarmedOnTheSameSequence(t *testing.T) {
+	act := []HookEvidence{twoPathEntered("caesium-0", 40)}
+	cur := twoPathEntered("caesium-0", 40)
+	cur.Released = []HookEntry{
+		releaseOn(HookPathDispatchOnce, 40, "disarmed"),
+		releaseOn(HookPathPublishAndMark, 40, "disarmed"),
+	}
+	if err := ReconcileReleases(act, []HookEvidence{cur}); err != nil {
+		t.Fatalf("both paths disarmed on the same sequence must reconcile: %v", err)
+	}
+}
+
+// Two enters of the same path and sequence are two obligations.
+func TestReconcileReleasesPreservesMultiplicityOfTheSamePathAndSequence(t *testing.T) {
+	enter := HookEntry{Banner: HookBanner, Phase: "enter", Path: HookPathDispatchOnce, Sequence: 40, RunID: "r"}
+	act := []HookEvidence{{
+		Member:  "caesium-0",
+		Entered: []HookEntry{enter, enter},
+		Paths:   map[string]int{HookPathDispatchOnce: 2},
+	}}
+	one := []HookEvidence{{
+		Member:   "caesium-0",
+		Entered:  []HookEntry{enter, enter},
+		Released: []HookEntry{releaseOn(HookPathDispatchOnce, 40, "disarmed")},
+		Paths:    map[string]int{HookPathDispatchOnce: 2},
+	}}
+	if err := ReconcileReleases(act, one); err == nil {
+		t.Fatal("one release must not satisfy two enters of the same path and sequence")
+	}
+	two := one
+	two[0].Released = append(append([]HookEntry{}, one[0].Released...), releaseOn(HookPathDispatchOnce, 40, "disarmed"))
+	if err := ReconcileReleases(act, two); err != nil {
+		t.Fatalf("two disarmed releases must satisfy two enters: %v", err)
+	}
+}
