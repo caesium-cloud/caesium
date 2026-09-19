@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Version matrix for the lifecycle qualification harness (distributed-testing F1/F4).",
+    "F4 consumes the `standalone` section of each pair; F2 extends this file with a",
+    "`cluster` section per pair and may add further adjacent pairs. Never reference the",
+    "`latest` tag: it was last pushed in 2021, is amd64-only, and is not a release.",
+    "Supported old->new is the single adjacent pair v0.1.0 -> candidate (F1 Q4 decision).",
+    "Skip-version upgrades are unsupported until a test exercises them."
+  ],
+  "pairs": [
+    {
+      "id": "v0.1.0-to-candidate",
+      "supported": true,
+      "previous": {
+        "release": "v0.1.0",
+        "released_at": "2026-09-08",
+        "tag_commit": "16a4c8fcfd7580e4eec2c0c79a7a54e237c926c0",
+        "image": "caesiumcloud/caesium:v0.1.0",
+        "digests": {
+          "index": "sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917",
+          "linux/amd64": "sha256:d93d21e776665039bbf5cc3dc41be7a0b402ae9f2e83d446f2fb05a16d52288b",
+          "linux/arm64": "sha256:56569860e7bfc33ca84998648a0d0d72bb87c35194299cb02f54da52104d932d"
+        },
+        "release_assets_sha256": {
+          "caesium-linux-amd64": "b890ca8d1a76420ef04c81dbc20612da57cf415c9f465e6cb98b241475df552c",
+          "caesium-linux-arm64": "8b9b924288c9ae77ec8f167cc33cb77ecb05238abee92a95474f9ff810cea586"
+        },
+        "cli_platforms": ["linux/amd64", "linux/arm64"],
+        "cli_smoke": "scripts/ci-cli-smoke.sh <binary> <arch> (existing amd64/arm64 checksum + bare-host smoke gate; not re-run here)",
+        "internal_protocol_version": 2,
+        "schema": {
+          "dialect": "dqlite",
+          "sqlite_version": "3.53.4",
+          "table_count": 40
+        }
+      },
+      "candidate": {
+        "image_env": "CAESIUM_LIFECYCLE_CANDIDATE_IMAGE",
+        "build": "CAESIUM_SKIP_IMAGE_BUILD=false just tag=$CANDIDATE_SHA build-release",
+        "provenance": {
+          "_comment": [
+            "There is no product version surface yet (F1 prerequisite 3: the binary reports no",
+            "build SHA), so candidate_sha is bound to the image EXTERNALLY. Preferred: do NOT",
+            "pre-build — let scripts/lifecycle-tests.sh run the `build` command above itself,",
+            "from a clean checkout whose HEAD equals the tag; it records provenance",
+            "`built-by-this-run` with the resulting image id. A supplied or already-present",
+            "image is recorded `supplied/unverified` and BLOCKS the qualification unless",
+            "CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1 is set, which is itself recorded in",
+            "the qualification record (verified:false, override:true, result_qualifier)."
+          ],
+          "verified_when": "the harness built the image from a clean checkout at candidate_sha",
+          "override_env": "CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE"
+        },
+        "internal_protocol_version": 2,
+        "feature_discriminator": {
+          "endpoint": "/v1/system/features",
+          "key": "data_assertions_enabled",
+          "_comment": "Present on the candidate, absent on v0.1.0. A behavioural cross-check of image identity only; the authoritative check is the container's image ID."
+        }
+      },
+      "standalone": {
+        "database_shards": 1,
+        "_comment": [
+          "The shard count is frozen for the life of a data directory (F1): a run's rows",
+          "live in fnv32a(run_id) % len(hot) and raising CAESIUM_DATABASE_SHARDS does not",
+          "rebalance existing hot rows. Both sides of a supported transition must use the",
+          "value below; a changed count is an unsupported transition, exercised only as a",
+          "recorded-outcome case on a COPY of the volume."
+        ],
+        "data_directory": "/var/lib/caesium/dqlite",
+        "node_address": "127.0.0.1:9001",
+        "alternate_node_address": "127.0.0.2:9001",
+        "expected_table_additions": [
+          "dataset_holds",
+          "dataset_metrics"
+        ],
+        "expected_column_additions": [
+          { "table": "callback_runs", "column": "http_status" },
+          { "table": "callback_runs", "column": "response_body" },
+          { "table": "callback_runs", "column": "retry_count" },
+          { "table": "dataset_declarations", "column": "assertions_json" },
+          { "table": "dataset_declarations", "column": "on_violation" },
+          { "table": "dataset_declarations", "column": "release" },
+          { "table": "jobs", "column": "on_upstream_hold" },
+          { "table": "job_runs", "column": "skip_reason" },
+          { "table": "job_runs", "column": "timeout_started_at" },
+          { "table": "task_runs", "column": "data_violations" },
+          { "table": "task_runs", "column": "log_generation" },
+          { "table": "task_runs", "column": "log_scrubbed" }
+        ],
+        "_column_additions_comment": [
+          "skip_reason is a field of models.JobRun and data_violations a field of",
+          "models.TaskRun: there is no job_runs.data_violations column and never will be.",
+          "Each pinned addition is asserted on exactly the table named here.",
+          "This list is a REQUIRED MINIMUM, not an exhaustive delta: additions observed",
+          "beyond it are recorded in the qualification record rather than failed, because",
+          "an `exactly these' check would turn red on the next model addition while this",
+          "runner is not yet in CI (G6 wires it in).",
+          "AutoMigrate is additive and name-blind: it never drops a column and matches an",
+          "index by NAME only. The assertion that nothing from the v0.1.0 snapshot",
+          "disappeared is measured live, not pinned."
+        ],
+        "index_repair_exercised": false,
+        "_index_repair_comment": "TaskRun's composite index tag is byte-identical at v0.1.0 and at the candidate, so this pair does NOT exercise MigrateTaskRunUniquePartitionIndex. The first qualified upgrade is a purely additive case.",
+        "transitions": [
+          {
+            "id": "upgrade",
+            "kind": "supported",
+            "description": "previous release stopped with `docker stop -t 60`, candidate started on the same named volume"
+          },
+          {
+            "id": "candidate-readdress",
+            "kind": "supported",
+            "since": "PR #536 (35bced63), closes #493",
+            "description": "candidate restarted on the retained volume with a different CAESIUM_NODE_ADDRESS; it reconciles info.yaml and the discovery cache, recovers the sole member's raft configuration after checking for reachable peers, and goes ready",
+            "expect": "starts; info.yaml records the new address; every pre-upgrade identity still readable"
+          },
+          {
+            "id": "previous-release-readdress",
+            "kind": "unsupported",
+            "description": "the pinned v0.1.0 image started on its own copy of the volume with a different CAESIUM_NODE_ADDRESS",
+            "expect": "exit status 1, the `address ... in info.yaml does not match` fatal from pkg/db/db.go, and no healthy /health",
+            "_comment": "v0.1.0 has no address reconciliation, so this is why `upgrade first, re-address second' is the only supported order."
+          },
+          {
+            "id": "rollback",
+            "kind": "recorded-outcome",
+            "description": "v0.1.0 restarted on a COPY of the candidate-migrated volume",
+            "expect": null,
+            "_comment": "F1 records restore-from-snapshot as the intended recovery and binary rollback as NOT supported. The observed outcome is recorded; a passing attempt does not create a guarantee."
+          },
+          {
+            "id": "shard-count-change",
+            "kind": "recorded-outcome",
+            "description": "candidate restarted on a COPY of the volume with CAESIUM_DATABASE_SHARDS changed",
+            "shards": 2,
+            "expect": null,
+            "_comment": "A silently successful start that strands existing hot rows is a finding to file, not a pass."
+          }
+        ]
+      }
+    }
+  ]
+}
