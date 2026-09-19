@@ -2301,8 +2301,8 @@ const (
 
 // classifyIsolationProbe mirrors classify_isolation_probe in
 // scripts/lifecycle-tests.sh. docker run uses 125 when it cannot start the
-// container and 127 when the contained command is not found; busybox nc -z
-// returns 1 when the TCP connect fails. Keep the two in lockstep.
+// container and 127 when the contained command is not found; alpine:3.23's
+// nc -z returns 1 when the TCP connect fails. Keep the two in lockstep.
 func classifyIsolationProbe(exitCode int) string {
 	switch exitCode {
 	case 0:
@@ -2317,7 +2317,7 @@ func classifyIsolationProbe(exitCode int) string {
 func TestIsolationProbeClassification(t *testing.T) {
 	require.Equal(t, isolationReached, classifyIsolationProbe(0))
 	require.Equal(t, isolationConnectFail, classifyIsolationProbe(1),
-		"busybox nc -z connect-fail is the only allowed negative isolation result")
+		"nc -z connect-fail is the only allowed negative isolation result")
 	require.Equal(t, isolationBlocked, classifyIsolationProbe(125),
 		"docker could not run the helper must not pass isolation")
 	require.Equal(t, isolationBlocked, classifyIsolationProbe(126))

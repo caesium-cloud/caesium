@@ -647,7 +647,7 @@ PY
 # classify_isolation_probe prints exactly one of reached|connect-fail|blocked
 # for a `docker run ... nc -z` exit status. docker itself uses 125 (could not
 # run the container), 126 (contained command not executable) and 127
-# (contained command not found); busybox nc -z uses 1 when the TCP connect
+# (contained command not found); alpine:3.23 nc -z uses 1 when the TCP connect
 # fails. Anything other than 0 or 1 means the probe never executed and
 # cannot prove isolation. The Go twin is classifyIsolationProbe in
 # test/lifecycle/standalone_test.go; keep the two in lockstep
