@@ -90,12 +90,15 @@ condition as successful for branch protection. The aggregate gate checks
 whether each skip was expected. During migration, retain the existing
 `strict: false` policy; enable strict mode if desired when `ci-ok` becomes
 the sole required context. G7 (distributed-testing W4) reconfirmed these
-settings on 2026-09-16 and 2026-09-17 and did **not** change them. Flipping
-`strict: true` today would also need `allow_update_branch: true` (currently
-false) or manual rebases, because GitHub's "Update branch" button is
-disabled. A merge queue is the other Q6 option; `merge_group` is already
-wired and has never fired — see "Candidate identity and merge-group wiring"
-in §4. No settings command in this document was executed by W4.
+settings on 2026-09-16 and 2026-09-17 and did **not** change them.
+`allow_update_branch: true` is an optional convenience for *non-strict*
+protection: it lets a behind head be updated even when being up to date is
+not required. It is **not** a prerequisite for `strict: true` — once
+branches must be current, GitHub's own up-to-date requirement permits the
+update flow, subject to permissions and conflicts. A merge queue is the
+other Q6 option; `merge_group` is already wired and has never fired — see
+"Candidate identity and merge-group wiring" in §4. No settings command in
+this document was executed by W4.
 
 ### Command
 
@@ -1084,8 +1087,9 @@ including optional Helm shards is ~17.3 min. `strict: true` costs one extra
 ~13-minute required-set rerun each time master advances during review.
 A merge queue costs one extra ~13-minute run per merged PR (or per batch).
 G7's recommendation to the CODEOWNER, not applied: add `ci-ok` to required
-contexts first, then either `strict: true` (and `allow_update_branch: true`)
-or a `merge_queue` ruleset targeting `master`.
+contexts first, then either `strict: true` or a `merge_queue` ruleset
+targeting `master`. `allow_update_branch: true` is optional and only
+relevant while protection stays non-strict.
 
 ### Targeted cluster faults (distributed-testing W4/B2)
 
@@ -1158,19 +1162,32 @@ contain, so they are compiled and run explicitly against an already-running
 server:
 
 ```sh
-just integration-up   # or any dedicated test server with metrics
-docker run --rm \
+just builder-full     # produces caesium-builder:latest-full; integration-up does not
+just integration-up   # starts caesium-server-test via builder:latest / the -test image
+CAESIUM_PERF_WORKLOADS="${CAESIUM_PERF_WORKLOADS:-smoke}" docker run --rm \
   -v "$PWD":/bld/caesium -w /bld/caesium \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DOCKER_HOST=unix:///var/run/docker.sock \
   -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
   -e CAESIUM_PERF_SERVER_CONTAINER=caesium-server-test \
+  -e CAESIUM_PERF_WORKLOADS \
   --network=container:caesium-server-test \
   caesiumcloud/caesium-builder:latest-full \
   sh -c 'go test -tags=integration -count=1 -timeout=30m -v ./test/performance'
 ```
 
-`CAESIUM_PERF_WORKLOADS` is `smoke` (default), `all`, or a comma list.
+`CAESIUM_PERF_WORKLOADS` must be forwarded with `-e`; a host export alone is
+silently ignored and `selected()` then defaults to the four `smoke` catalog
+entries. The command above makes that default explicit. For the full
+ten-workload catalog:
+
+```sh
+CAESIUM_PERF_WORKLOADS=all docker run --rm \
+  # …same flags as above, including -e CAESIUM_PERF_WORKLOADS…
+```
+
+A comma list of workload names or tiers is also accepted.
+
 `mode=open` places arrivals on an absolute clock grid computed from
 `-rate`/`-arrival-window` before the first request, so the schedule never
 waits on a completion. Outcomes are deliberately not conflated:
