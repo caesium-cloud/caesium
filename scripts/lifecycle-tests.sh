@@ -325,7 +325,8 @@ log "ownership established: token $OWNER_TOKEN, resources named $ID-*"
 shell_case() {
   local name="$1" status="$2" duration="$3" detail="$4"
   CASE_NAME="$name" CASE_STATUS="$status" CASE_DURATION="$duration" CASE_DETAIL="$detail" \
-  CASE_ID="$ID" CASE_DIR="$ARTIFACTS/cases" python3 - <<'PY'
+  CASE_ID="$ID" CASE_DIR="$ARTIFACTS/cases" \
+  CASE_OBSERVATIONS_FILE="${CASE_OBSERVATIONS_FILE:-}" python3 - <<'PY'
 import json, os, pathlib, re
 name = os.environ["CASE_NAME"]
 rec = {
@@ -337,6 +338,9 @@ rec = {
     "duration_seconds": float(os.environ["CASE_DURATION"]),
     "detail": os.environ["CASE_DETAIL"],
 }
+obs_path = os.environ.get("CASE_OBSERVATIONS_FILE") or ""
+if obs_path:
+    rec["observations"] = json.loads(pathlib.Path(obs_path).read_text())
 path = pathlib.Path(os.environ["CASE_DIR"]) / (re.sub(r"[^A-Za-z0-9_-]", "-", name) + ".json")
 path.write_text(json.dumps(rec, indent=2) + "\n")
 PY
@@ -640,6 +644,31 @@ else:
 PY
 }
 
+# classify_isolation_probe prints exactly one of reached|connect-fail|blocked
+# for a `docker run ... nc -z` exit status. docker itself uses 125 (could not
+# run the container), 126 (contained command not executable) and 127
+# (contained command not found); busybox nc -z uses 1 when the TCP connect
+# fails. Anything other than 0 or 1 means the probe never executed and
+# cannot prove isolation. The Go twin is classifyIsolationProbe in
+# test/lifecycle/standalone_test.go; keep the two in lockstep
+# (TestIsolationProbeClassification).
+classify_isolation_probe() {
+  python3 -c '
+import sys
+try:
+    rc = int(sys.argv[1])
+except (IndexError, ValueError):
+    print("blocked")
+    raise SystemExit(0)
+if rc == 0:
+    print("reached")
+elif rc == 1:
+    print("connect-fail")
+else:
+    print("blocked")
+' "$1"
+}
+
 capture_logs() {
   local name="$1" dest="$2"
   docker logs "$name" >"$dest" 2>&1 || true
@@ -744,9 +773,6 @@ if ! run_phase "probe" "TestLifecycleProbe" "$PREV_IMAGE" "http://${CTR_PREV}:80
   die "the primary instance could not be probed"
 fi
 phase_rc probe-isolation-primary-instance 0
-if docker run --rm --network "$NET" "$TASK_IMAGE" sh -c "nc -z -w 3 $CTR_ISO 8080" >/dev/null 2>&1; then
-  die "isolation failed: a container on $NET reached $CTR_ISO"
-fi
 ISOLATION_OK="$(python3 - "$ARTIFACTS/observations/probe-isolation-primary-instance.json" \
                          "$ARTIFACTS/observations/probe-isolation-second-instance.json" <<'PY'
 import json, sys
@@ -754,9 +780,87 @@ ok = all(json.load(open(p)).get("healthy") for p in sys.argv[1:])
 print("yes" if ok else "no")
 PY
 )"
-[[ "$ISOLATION_OK" == "yes" ]] || die "isolation failed: the two concurrent instances were not both healthy"
-shell_case "two-instances-coexist" "pass" "$(( $(date -u +%s) - isolation_start ))" \
-  "$CTR_PREV on $NET/$VOL_DATA and $CTR_ISO on $ISO_NET/$VOL_ISO were healthy at the same time; $NET cannot resolve $CTR_ISO"
+
+# Positive control first: the same helper image must REACH $CTR_PREV on $NET.
+# Then the negative probe against $CTR_ISO must fail with nc's connect-fail
+# status (1). docker 125 (could not run) or 127 (nc missing) is not proof of
+# isolation — it used to look identical to "unreachable" and pass.
+ISO_POS_LOG="$ARTIFACTS/logs/isolation-positive-control.log"
+ISO_NEG_LOG="$ARTIFACTS/logs/isolation-negative-probe.log"
+ISO_OBS="$ARTIFACTS/observations/isolation-probe.json"
+ISO_POS_RC=0
+ISO_NEG_RC=0
+set +e
+docker run --rm --network "$NET" "$TASK_IMAGE" sh -c "nc -z -w 3 $CTR_PREV 8080" >"$ISO_POS_LOG" 2>&1
+ISO_POS_RC=$?
+set -e
+ISO_POS_CLASS="$(classify_isolation_probe "$ISO_POS_RC")"
+set +e
+docker run --rm --network "$NET" "$TASK_IMAGE" sh -c "nc -z -w 3 $CTR_ISO 8080" >"$ISO_NEG_LOG" 2>&1
+ISO_NEG_RC=$?
+set -e
+ISO_NEG_CLASS="$(classify_isolation_probe "$ISO_NEG_RC")"
+
+ISO_POS_RC="$ISO_POS_RC" ISO_NEG_RC="$ISO_NEG_RC" \
+ISO_POS_CLASS="$ISO_POS_CLASS" ISO_NEG_CLASS="$ISO_NEG_CLASS" \
+ISO_POS_LOG="$ISO_POS_LOG" ISO_NEG_LOG="$ISO_NEG_LOG" \
+ISO_POS_TARGET="$CTR_PREV" ISO_NEG_TARGET="$CTR_ISO" \
+ISO_NET_NAME="$NET" ISO_IMAGE="$TASK_IMAGE" ISO_OBS="$ISO_OBS" python3 - <<'PY'
+import json, os, pathlib
+
+def tail(path, n=4096):
+    try:
+        data = pathlib.Path(path).read_text(errors="replace")
+    except Exception as exc:
+        return f"<unreadable: {exc}>"
+    if len(data) > n:
+        return data[-n:]
+    return data
+
+rec = {
+    "positive_control": {
+        "target": os.environ["ISO_POS_TARGET"] + ":8080",
+        "network": os.environ["ISO_NET_NAME"],
+        "image": os.environ["ISO_IMAGE"],
+        "exit_code": int(os.environ["ISO_POS_RC"]),
+        "classification": os.environ["ISO_POS_CLASS"],
+        "log": tail(os.environ["ISO_POS_LOG"]),
+    },
+    "negative_probe": {
+        "target": os.environ["ISO_NEG_TARGET"] + ":8080",
+        "network": os.environ["ISO_NET_NAME"],
+        "image": os.environ["ISO_IMAGE"],
+        "exit_code": int(os.environ["ISO_NEG_RC"]),
+        "classification": os.environ["ISO_NEG_CLASS"],
+        "log": tail(os.environ["ISO_NEG_LOG"]),
+    },
+}
+pathlib.Path(os.environ["ISO_OBS"]).write_text(json.dumps(rec, indent=2) + "\n")
+PY
+
+iso_status="blocked"
+if [[ "$ISOLATION_OK" != "yes" ]]; then
+  iso_status="blocked"
+  iso_detail="the two concurrent instances were not both healthy; isolation was not proven"
+elif [[ "$ISO_POS_CLASS" != "reached" ]]; then
+  iso_status="blocked"
+  iso_detail="positive control did not reach ${CTR_PREV}:8080 on $NET (docker-run rc=$ISO_POS_RC classification=$ISO_POS_CLASS); the helper never demonstrated it can connect, so the negative probe cannot prove isolation"
+elif [[ "$ISO_NEG_CLASS" == "reached" ]]; then
+  iso_status="fail"
+  iso_detail="isolation failed: a container on $NET reached ${CTR_ISO}:8080 (docker-run rc=$ISO_NEG_RC)"
+elif [[ "$ISO_NEG_CLASS" != "connect-fail" ]]; then
+  iso_status="blocked"
+  iso_detail="negative probe against $CTR_ISO did not execute a connect-fail (docker-run rc=$ISO_NEG_RC classification=$ISO_NEG_CLASS); docker 125/127 is not proof of isolation"
+else
+  iso_status="pass"
+  iso_detail="$CTR_PREV on $NET/$VOL_DATA and $CTR_ISO on $ISO_NET/$VOL_ISO were healthy at the same time; positive control reached $CTR_PREV; $NET cannot connect to $CTR_ISO (nc -z rc=$ISO_NEG_RC)"
+fi
+CASE_OBSERVATIONS_FILE="$ISO_OBS" \
+  shell_case "two-instances-coexist" "$iso_status" "$(( $(date -u +%s) - isolation_start ))" \
+    "$iso_detail"
+if [[ "$iso_status" != "pass" ]]; then
+  die "isolation case $iso_status: $iso_detail"
+fi
 log "isolation proven; removing the second instance"
 docker rm -f "$CTR_ISO" >/dev/null 2>&1 || true
 docker volume rm -f "$VOL_ISO" >/dev/null 2>&1 || true

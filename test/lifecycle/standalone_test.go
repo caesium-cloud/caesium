@@ -440,26 +440,103 @@ func (c *client) getJSON(ctx context.Context, path string, into any) error {
 	return json.Unmarshal(raw, into)
 }
 
+const (
+	readKindHTTP      = "http"
+	readKindTransport = "transport"
+	readKindDecode    = "decode"
+)
+
+// observeJSON is one GET whose result is classified as an HTTP response
+// (any status, including 404), a transport/DNS failure (no status), or a
+// decode failure (status 200 whose body was not the expected JSON). A 404
+// is a product answer; a DNS failure is not.
+func (c *client) observeJSON(ctx context.Context, name, path string, into any) probeRead {
+	read := probeRead{Name: name, Path: path}
+	status, raw, err := c.do(ctx, http.MethodGet, path, nil)
+	if status == 0 {
+		read.Kind = readKindTransport
+		if err != nil {
+			read.Error = err.Error()
+		} else {
+			read.Error = "no HTTP response"
+		}
+		return read
+	}
+	read.HTTPResponse = true
+	read.HTTPStatus = status
+	if err != nil {
+		read.Kind = readKindDecode
+		read.Error = err.Error()
+		return read
+	}
+	if status != http.StatusOK {
+		read.Kind = readKindHTTP
+		read.Error = fmt.Sprintf("status %d: %s", status, truncate(raw, 256))
+		return read
+	}
+	if into != nil {
+		if err := json.Unmarshal(raw, into); err != nil {
+			read.Kind = readKindDecode
+			read.Error = err.Error()
+			return read
+		}
+	}
+	read.Kind = readKindHTTP
+	return read
+}
+
 // awaitHealthy is the only "wait" in this file that is allowed to be the start
 // of a case: reaching /health is itself assertion 1.
 func (c *client) awaitHealthy(ctx context.Context, deadline time.Duration) error {
+	ok, read := c.awaitHealthyObserved(ctx, deadline)
+	if ok {
+		return nil
+	}
+	msg := read.Error
+	if msg == "" {
+		msg = "no HTTP response"
+	}
+	return fmt.Errorf("server at %s never reported healthy within %s: %s", c.base, deadline, msg)
+}
+
+// awaitHealthyObserved is the probe's health wait: it records whether any
+// attempt produced an HTTP status (a product answer, even 404/503) or only
+// transport/DNS failures.
+func (c *client) awaitHealthyObserved(ctx context.Context, deadline time.Duration) (bool, probeRead) {
 	stop := time.Now().Add(deadline)
-	var last error
+	read := probeRead{Name: "health", Path: "/health", Kind: readKindTransport, Error: "no HTTP response"}
+	sawHTTP := false
 	for time.Now().Before(stop) {
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		status, _, err := c.do(reqCtx, http.MethodGet, "/health", nil)
 		cancel()
 		switch {
+		case status == http.StatusOK:
+			return true, probeRead{
+				Name: "health", Path: "/health",
+				HTTPStatus: http.StatusOK, HTTPResponse: true, Kind: readKindHTTP,
+			}
+		case status != 0:
+			sawHTTP = true
+			errMsg := fmt.Sprintf("status %d", status)
+			if err != nil {
+				errMsg = fmt.Sprintf("status %d: %s", status, err.Error())
+			}
+			read = probeRead{
+				Name: "health", Path: "/health",
+				HTTPStatus: status, HTTPResponse: true, Kind: readKindHTTP, Error: errMsg,
+			}
 		case err != nil:
-			last = err
-		case status != http.StatusOK:
-			last = fmt.Errorf("status %d", status)
-		default:
-			return nil
+			if !sawHTTP {
+				read = probeRead{
+					Name: "health", Path: "/health",
+					Kind: readKindTransport, Error: err.Error(),
+				}
+			}
 		}
 		time.Sleep(pollInterval)
 	}
-	return fmt.Errorf("server at %s never reported healthy within %s: %w", c.base, deadline, last)
+	return false, read
 }
 
 func (c *client) schema(ctx context.Context) (schemaSnapshot, error) {
@@ -1577,6 +1654,22 @@ func TestLifecycleCandidateAddressChange(t *testing.T) {
 // Phase: probe — record one server's observable state without judging it.
 // ---------------------------------------------------------------------------
 
+// probeRead is one HTTP attempt the probe made. Kind is "http" when the
+// server answered with a status (including 404), "transport" when no HTTP
+// response arrived, and "decode" when a 200 body could not be parsed.
+type probeRead struct {
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	HTTPResponse bool   `json:"http_response"`
+	Kind         string `json:"kind"`
+	Error        string `json:"error,omitempty"`
+}
+
+func (r probeRead) complete() bool {
+	return r.Kind == readKindHTTP && r.HTTPResponse
+}
+
 type probeRecord struct {
 	Name              string         `json:"name"`
 	BaseURL           string         `json:"base_url"`
@@ -1596,6 +1689,13 @@ type probeRecord struct {
 	// underneath an unsupported transition.
 	IdentitiesChanged []string `json:"identities_changed"`
 	ObservedAt        string   `json:"observed_at"`
+
+	// Observation completeness is derived from Reads: every attempted GET
+	// must have produced an HTTP status. A transport-only or decode-only
+	// probe of a RUNNING container is not an observation.
+	Reads               []probeRead `json:"reads"`
+	ObservationComplete bool        `json:"observation_complete"`
+	ObservationErrors   []string    `json:"observation_errors,omitempty"`
 }
 
 // sameIDSet reports whether got and want contain the same set of IDs,
@@ -1631,6 +1731,7 @@ func TestLifecycleProbe(t *testing.T) {
 		IdentitiesRead:    map[string]any{},
 		IdentitiesMissing: []string{},
 		IdentitiesChanged: []string{},
+		Reads:             []probeRead{},
 		ObservedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -1640,20 +1741,32 @@ func TestLifecycleProbe(t *testing.T) {
 		require.NoErrorf(t, err, "CAESIUM_LIFECYCLE_PROBE_DEADLINE_SECONDS=%q is not a number", raw)
 		deadline = time.Duration(seconds) * time.Second
 	}
-	if err := c.awaitHealthy(ctx, deadline); err != nil {
-		rec.HealthError = err.Error()
-	} else {
-		rec.Healthy = true
+	healthy, healthRead := c.awaitHealthyObserved(ctx, deadline)
+	rec.Reads = append(rec.Reads, healthRead)
+	rec.Healthy = healthy
+	if !healthy {
+		rec.HealthError = healthRead.Error
 	}
 
 	if rec.Healthy {
-		if features, err := c.features(ctx); err == nil {
+		var features map[string]any
+		featRead := c.observeJSON(ctx, "features", "/v1/system/features", &features)
+		rec.Reads = append(rec.Reads, featRead)
+		if featRead.complete() && featRead.HTTPStatus == http.StatusOK {
 			rec.Features = features
 		}
-		if snap, err := c.schema(ctx); err != nil {
-			rec.SchemaError = err.Error()
-		} else {
-			rec.SchemaTableCount = len(snap.Tables)
+
+		var schemaResp struct {
+			Tables []struct {
+				Name string `json:"name"`
+			} `json:"tables"`
+		}
+		schemaRead := c.observeJSON(ctx, "schema", "/v1/database/schema", &schemaResp)
+		rec.Reads = append(rec.Reads, schemaRead)
+		if schemaRead.complete() && schemaRead.HTTPStatus == http.StatusOK {
+			rec.SchemaTableCount = len(schemaResp.Tables)
+		} else if schemaRead.Error != "" {
+			rec.SchemaError = schemaRead.Error
 		}
 
 		var fx fixture
@@ -1675,9 +1788,16 @@ func TestLifecycleProbe(t *testing.T) {
 				case "in_flight_run":
 					recorded = fx.InFlightRun
 				}
-				got, err := c.run(ctx, recorded.JobID, recorded.ID)
-				if err != nil {
-					rec.IdentitiesMissing = append(rec.IdentitiesMissing, label+":"+recorded.ID+" ("+err.Error()+")")
+				path := "/v1/jobs/" + recorded.JobID + "/runs/" + recorded.ID
+				var got apiRun
+				read := c.observeJSON(ctx, label, path, &got)
+				rec.Reads = append(rec.Reads, read)
+				if !read.complete() || read.HTTPStatus != http.StatusOK {
+					msg := label + ":" + recorded.ID
+					if read.Error != "" {
+						msg += " (" + read.Error + ")"
+					}
+					rec.IdentitiesMissing = append(rec.IdentitiesMissing, msg)
 					continue
 				}
 				wantTaskIDs := make([]string, len(recorded.Tasks))
@@ -1709,15 +1829,40 @@ func TestLifecycleProbe(t *testing.T) {
 						fmt.Sprintf("%s: task identities %v -> %v", label, wantTaskIDs, gotTaskIDs))
 				}
 			}
-			for _, job := range fx.Jobs {
-				id, err := c.jobIDByAlias(ctx, job.Alias)
-				if err != nil {
-					rec.IdentitiesMissing = append(rec.IdentitiesMissing, "job:"+job.Alias+" ("+err.Error()+")")
-					continue
+			var jobs []struct {
+				ID    string `json:"id"`
+				Alias string `json:"alias"`
+			}
+			jobsRead := c.observeJSON(ctx, "jobs", "/v1/jobs", &jobs)
+			rec.Reads = append(rec.Reads, jobsRead)
+			if !jobsRead.complete() || jobsRead.HTTPStatus != http.StatusOK {
+				for _, job := range fx.Jobs {
+					msg := "job:" + job.Alias
+					if jobsRead.Error != "" {
+						msg += " (" + jobsRead.Error + ")"
+					}
+					rec.IdentitiesMissing = append(rec.IdentitiesMissing, msg)
 				}
-				if id != job.ID {
-					rec.IdentitiesChanged = append(rec.IdentitiesChanged,
-						fmt.Sprintf("job:%s id %s -> %s", job.Alias, job.ID, id))
+			} else {
+				byAlias := make(map[string]string, len(jobs))
+				for _, j := range jobs {
+					byAlias[j.Alias] = j.ID
+				}
+				for _, job := range fx.Jobs {
+					id, ok := byAlias[job.Alias]
+					if !ok {
+						rec.IdentitiesMissing = append(rec.IdentitiesMissing, "job:"+job.Alias+" (not listed)")
+						continue
+					}
+					if _, err := uuid.Parse(id); err != nil {
+						rec.IdentitiesMissing = append(rec.IdentitiesMissing,
+							fmt.Sprintf("job:%s (non-uuid id %q)", job.Alias, id))
+						continue
+					}
+					if id != job.ID {
+						rec.IdentitiesChanged = append(rec.IdentitiesChanged,
+							fmt.Sprintf("job:%s id %s -> %s", job.Alias, job.ID, id))
+					}
 				}
 			}
 		}
@@ -1725,9 +1870,10 @@ func TestLifecycleProbe(t *testing.T) {
 
 	sort.Strings(rec.IdentitiesMissing)
 	sort.Strings(rec.IdentitiesChanged)
+	finalizeProbeObservation(&rec)
 	writeJSON(t, filepath.Join("observations", "probe-"+sanitize(name)+".json"), rec)
-	t.Logf("probe %s: healthy=%v tables=%d missing=%v changed=%v",
-		name, rec.Healthy, rec.SchemaTableCount, rec.IdentitiesMissing, rec.IdentitiesChanged)
+	t.Logf("probe %s: healthy=%v tables=%d missing=%v changed=%v complete=%v",
+		name, rec.Healthy, rec.SchemaTableCount, rec.IdentitiesMissing, rec.IdentitiesChanged, rec.ObservationComplete)
 }
 
 // ---------------------------------------------------------------------------
@@ -1797,11 +1943,122 @@ func requireObservable(t *testing.T, name string, o containerOutcome) {
 	}
 }
 
+func containerExited(o containerOutcome) bool {
+	return strings.EqualFold(strings.TrimSpace(o.Status), "exited")
+}
+
+func finalizeProbeObservation(rec *probeRecord) {
+	problems := probeObservationProblems(*rec)
+	rec.ObservationErrors = problems
+	rec.ObservationComplete = len(problems) == 0
+}
+
+func probeObservationProblems(p probeRecord) []string {
+	var problems []string
+	if len(p.Reads) == 0 {
+		return []string{"the probe recorded no HTTP reads"}
+	}
+	for _, r := range p.Reads {
+		switch r.Kind {
+		case readKindHTTP:
+			if !r.HTTPResponse {
+				problems = append(problems, fmt.Sprintf("%s (%s): marked http but http_response is false", r.Name, r.Path))
+			}
+		case readKindTransport:
+			detail := r.Error
+			if detail == "" {
+				detail = "no HTTP response arrived"
+			}
+			problems = append(problems, fmt.Sprintf("%s (%s): transport failure (%s)", r.Name, r.Path, detail))
+		case readKindDecode:
+			detail := r.Error
+			if detail == "" {
+				detail = "response body was not decodable"
+			}
+			problems = append(problems, fmt.Sprintf("%s (%s): decode failure (%s)", r.Name, r.Path, detail))
+		default:
+			kind := r.Kind
+			if kind == "" {
+				kind = "missing"
+			}
+			problems = append(problems, fmt.Sprintf("%s (%s): unknown read kind %q", r.Name, r.Path, kind))
+		}
+	}
+	return problems
+}
+
+// validateProbeObservation reports why an HTTP probe cannot be believed.
+// An empty result means every attempted read produced an HTTP status.
+func validateProbeObservation(p probeRecord) []string {
+	var problems []string
+	if strings.TrimSpace(p.ObservedAt) == "" {
+		problems = append(problems, "the probe carries no timestamp")
+	}
+	if !p.ObservationComplete {
+		detail := strings.Join(p.ObservationErrors, "; ")
+		if detail == "" {
+			if len(p.Reads) == 0 {
+				detail = "the probe did not mark the observation complete (no per-read HTTP observations)"
+			} else {
+				detail = "the probe did not mark the observation complete"
+			}
+		}
+		problems = append(problems, "incomplete HTTP observation: "+detail)
+		return problems
+	}
+	if extra := probeObservationProblems(p); len(extra) > 0 {
+		problems = append(problems, extra...)
+	}
+	return problems
+}
+
+func requireProbeObservable(t *testing.T, name string, p probeRecord) {
+	t.Helper()
+	if problems := validateProbeObservation(p); len(problems) > 0 {
+		blockf(t, name, "the HTTP probe could not observe %q: %s",
+			p.Name, strings.Join(problems, "; "))
+	}
+}
+
+// recordedOutcomeDisposition is the recorded-outcome guard: a container the
+// host controller observed as EXITED is a genuine failed-start outcome even
+// if the HTTP probe got only transport errors; a RUNNING container whose
+// probe got only transport/DNS/decode failures was not observed.
+func recordedOutcomeDisposition(o containerOutcome, p probeRecord) (status string, problems []string) {
+	if problems := validateContainerOutcome(o); len(problems) > 0 {
+		return statusBlocked, problems
+	}
+	if containerExited(o) {
+		return statusRecorded, nil
+	}
+	if problems := validateProbeObservation(p); len(problems) > 0 {
+		return statusBlocked, problems
+	}
+	return statusRecorded, nil
+}
+
+func fixtureProbe(reads []probeRead) probeRecord {
+	p := probeRecord{
+		Name:              "fixture",
+		BaseURL:           "http://example.invalid:8080",
+		Reads:             reads,
+		ObservedAt:        "2026-09-18T00:00:00Z",
+		IdentitiesRead:    map[string]any{},
+		IdentitiesMissing: []string{},
+		IdentitiesChanged: []string{},
+	}
+	finalizeProbeObservation(&p)
+	return p
+}
+
 // TestLifecycleObservationValidation is the harness's own self-check: it proves
 // that an unobservable recorded outcome is rejected rather than reported. It
 // touches no container and no server, and the host controller runs it as its
 // own phase so the guard is exercised on every qualification.
 func TestLifecycleObservationValidation(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("CAESIUM_LIFECYCLE_ARTIFACTS")) == "" {
+		t.Setenv("CAESIUM_LIFECYCLE_ARTIFACTS", t.TempDir())
+	}
 	start := time.Now()
 	complete := containerOutcome{
 		Name: "fixture", Image: "caesiumcloud/caesium:v0.1.0", Volume: "vol",
@@ -1860,17 +2117,25 @@ func TestLifecycleObservationValidation(t *testing.T) {
 		}
 	}
 
+	if !t.Run("http probe completeness", func(t *testing.T) {
+		assertProbeCompleteness(t)
+	}) {
+		ok = false
+	}
+
 	status := statusPass
 	if !ok {
 		status = statusFail
 	}
+	n := len(cases) + 3
 	writeCase(t, caseRecord{
 		Name:            "observation-validation-self-check",
 		Status:          status,
 		DurationSeconds: time.Since(start).Seconds(),
-		Detail: fmt.Sprintf("%d fixtures: a complete observation is accepted; unknown status, sentinel exit code, "+
-			"a swallowed log capture, a missing completeness flag and a missing timestamp are each rejected, "+
-			"so a recorded-outcome case built on one is blocked", len(cases)),
+		Detail: fmt.Sprintf("%d fixtures: a complete container observation is accepted; unknown status, sentinel exit code, "+
+			"a swallowed log capture, a missing completeness flag and a missing timestamp are each rejected; "+
+			"RUNNING+transport-only HTTP is blocked, RUNNING+HTTP 404 is a recorded outcome, "+
+			"and an EXITED container is a recorded outcome even when the HTTP probe failed", n),
 	})
 }
 
@@ -1935,16 +2200,23 @@ func TestLifecycleTransitionOutcomes(t *testing.T) {
 		if !readJSON(t, filepath.Join("observations", spec.outcome), &outcome) {
 			blockf(t, name, "the host controller recorded no container outcome (%s); the case could not be run", spec.outcome)
 		}
-		// Ruling 5: no expectation is set for these, but an outcome that was
-		// not actually observed is inconclusive, not recorded.
-		requireObservable(t, name, outcome)
 		if !readJSON(t, filepath.Join("observations", spec.probe), &probe) {
 			blockf(t, name, "the host controller recorded no probe (%s); the case ran but could not be observed", spec.probe)
 		}
+		// Ruling 5: no expectation is set for these, but an outcome that was
+		// not actually observed is inconclusive, not recorded. An EXITED
+		// container is a failed start even if the HTTP probe got only
+		// transport errors; a RUNNING container is not observed unless the
+		// probe got HTTP responses (404 included). Same rule as
+		// recordedOutcomeDisposition, which the self-check exercises.
+		requireObservable(t, name, outcome)
+		if !containerExited(outcome) {
+			requireProbeObservable(t, name, probe)
+		}
 		detail := fmt.Sprintf(
-			"exit_code=%d status=%q healthy=%v schema_tables=%d identities_missing=%v identities_changed=%v",
+			"exit_code=%d status=%q healthy=%v schema_tables=%d identities_missing=%v identities_changed=%v observation_complete=%v",
 			outcome.ExitCode, outcome.Status, probe.Healthy, probe.SchemaTableCount,
-			probe.IdentitiesMissing, probe.IdentitiesChanged)
+			probe.IdentitiesMissing, probe.IdentitiesChanged, probe.ObservationComplete)
 		writeCase(t, caseRecord{
 			Name:            name,
 			Status:          statusRecorded,
@@ -1958,4 +2230,98 @@ func TestLifecycleTransitionOutcomes(t *testing.T) {
 		})
 		t.Logf("RECORDED OUTCOME %s: %s", name, detail)
 	}
+}
+
+func assertProbeCompleteness(t *testing.T) {
+	t.Helper()
+	exited := containerOutcome{
+		Name: "fixture", Image: "caesiumcloud/caesium:v0.1.0", Volume: "vol",
+		Status: "exited", ExitCode: 1, LogTail: "fatal: address in info.yaml does not match",
+		ObservedAt: "2026-09-18T00:00:00Z", ObservationComplete: true, LogCaptured: true,
+	}
+	running := exited
+	running.Status = "running"
+	running.ExitCode = 0
+	running.LogTail = "listening"
+
+	transportProbe := fixtureProbe([]probeRead{{
+		Name: "health", Path: "/health", Kind: readKindTransport,
+		Error: "dial tcp: lookup shards: no such host",
+	}})
+	http404Probe := fixtureProbe([]probeRead{{
+		Name: "health", Path: "/health", HTTPStatus: http.StatusNotFound,
+		HTTPResponse: true, Kind: readKindHTTP, Error: "status 404",
+	}})
+	decodeProbe := fixtureProbe([]probeRead{{
+		Name: "succeeded_run", Path: "/v1/jobs/x/runs/y",
+		HTTPStatus: http.StatusOK, HTTPResponse: true, Kind: readKindDecode,
+		Error: "unexpected end of JSON input",
+	}})
+	legacyProbe := probeRecord{Name: "fixture", ObservedAt: "2026-09-18T00:00:00Z"}
+
+	t.Run("RUNNING + transport-only probe is blocked", func(t *testing.T) {
+		status, problems := recordedOutcomeDisposition(running, transportProbe)
+		require.Equal(t, statusBlocked, status)
+		require.NotEmpty(t, problems)
+		require.Contains(t, strings.Join(problems, " | "), "transport")
+	})
+	t.Run("RUNNING + HTTP 404 is a recorded outcome", func(t *testing.T) {
+		status, problems := recordedOutcomeDisposition(running, http404Probe)
+		require.Equal(t, statusRecorded, status, "HTTP 404 is a product answer, not incompleteness: %v", problems)
+		require.Empty(t, problems)
+		require.Empty(t, validateProbeObservation(http404Probe))
+	})
+	t.Run("EXITED container is recorded even if probe HTTP failed", func(t *testing.T) {
+		status, problems := recordedOutcomeDisposition(exited, transportProbe)
+		require.Equal(t, statusRecorded, status, "failed start must stay recorded-outcome: %v", problems)
+		require.Empty(t, problems)
+	})
+	t.Run("decode failure of a 200 is incomplete", func(t *testing.T) {
+		require.NotEmpty(t, validateProbeObservation(decodeProbe))
+		require.Contains(t, strings.Join(validateProbeObservation(decodeProbe), " | "), "decode")
+		status, _ := recordedOutcomeDisposition(running, decodeProbe)
+		require.Equal(t, statusBlocked, status)
+	})
+	t.Run("legacy probe without per-read observations is incomplete", func(t *testing.T) {
+		problems := validateProbeObservation(legacyProbe)
+		require.NotEmpty(t, problems)
+		require.Contains(t, strings.Join(problems, " | "), "incomplete HTTP observation")
+	})
+}
+
+func TestLifecycleProbeCompleteness(t *testing.T) {
+	assertProbeCompleteness(t)
+}
+
+const (
+	isolationReached     = "reached"
+	isolationConnectFail = "connect-fail"
+	isolationBlocked     = "blocked"
+)
+
+// classifyIsolationProbe mirrors classify_isolation_probe in
+// scripts/lifecycle-tests.sh. docker run uses 125 when it cannot start the
+// container and 127 when the contained command is not found; busybox nc -z
+// returns 1 when the TCP connect fails. Keep the two in lockstep.
+func classifyIsolationProbe(exitCode int) string {
+	switch exitCode {
+	case 0:
+		return isolationReached
+	case 1:
+		return isolationConnectFail
+	default:
+		return isolationBlocked
+	}
+}
+
+func TestIsolationProbeClassification(t *testing.T) {
+	require.Equal(t, isolationReached, classifyIsolationProbe(0))
+	require.Equal(t, isolationConnectFail, classifyIsolationProbe(1),
+		"busybox nc -z connect-fail is the only allowed negative isolation result")
+	require.Equal(t, isolationBlocked, classifyIsolationProbe(125),
+		"docker could not run the helper must not pass isolation")
+	require.Equal(t, isolationBlocked, classifyIsolationProbe(126))
+	require.Equal(t, isolationBlocked, classifyIsolationProbe(127),
+		"nc missing from the helper image must not pass isolation")
+	require.Equal(t, isolationBlocked, classifyIsolationProbe(137))
 }
