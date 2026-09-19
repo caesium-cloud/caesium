@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testfault"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
@@ -89,8 +90,20 @@ func (d *BusDispatcher) DispatchOnce(ctx context.Context) error {
 	}
 
 	for _, evt := range events {
+		// distributed-testing B2 / A1 "Proxy and clock decision": the ONE
+		// approved product boundary. The rows above are already durably
+		// committed; this is the last point before their first publication,
+		// and covering this path as well as PublishAndMarkBusDispatched is
+		// what stops the background dispatcher bypassing an armed pause.
+		// Compiled out of release builds (testfault.Enabled is a false
+		// constant there), so nothing below exists in the release binary.
+		if testfault.Enabled {
+			testfault.BeforeBusPublish(ctx, testfault.PathDispatchOnce, string(evt.Type), evt.RunID.String(), evt.Sequence)
+		}
 		d.bus.Publish(evt)
 	}
+	// Marking stays AFTER publication: a held event's row remains
+	// bus_dispatch_pending so a survivor replays it durably.
 	return d.store.MarkBusDispatched(ctx, events...)
 }
 
@@ -108,6 +121,12 @@ func PublishAndMarkBusDispatched(ctx context.Context, bus Bus, store *Store, eve
 	}
 
 	for _, evt := range events {
+		// Same A1-approved boundary on the immediate-publication path: the
+		// event row is already written, and this is the last point before its
+		// first bus delivery. Removed entirely from release builds.
+		if testfault.Enabled {
+			testfault.BeforeBusPublish(ctx, testfault.PathPublishAndMark, string(evt.Type), evt.RunID.String(), evt.Sequence)
+		}
 		bus.Publish(evt)
 	}
 	if store == nil {
