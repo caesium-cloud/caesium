@@ -1,0 +1,160 @@
+# Coverage-instrumented CLI/server. This file is the only coverage/fault-adjacent
+# image definition owned by distributed-testing G2. It is not a parent of the
+# release, test (DinD), robustness, reagents-role, or performance artifacts, and
+# it must never be tagged as caesium-server-test or published as a release.
+#
+#   docker build -f build/Dockerfile.coverage \
+#     --build-arg BUILDER_IMAGE=caesiumcloud/caesium-builder:latest \
+#     -t caesiumcloud/caesium-coverage:latest .
+#
+# Targets:
+#   coverage-compile   instrumented caesium binary + explicit coverpkg audit
+#   reagents-coverage  instrumented reagents binaries (separate go.mod; never
+#                      linked into the caesium binary or mixed into its coverpkg)
+#   coverage           alpine runtime (default). No DinD, no host-port contract.
+#
+# Collection uses GOCOVERDIR. Graceful CLI exit and SIGTERM-on-server write
+# counters; SIGUSR2 is an explicit flush for a live process (see coverflush.go
+# generated below, coverage image only). SIGKILL / missing counter files are
+# incomplete evidence, not zero coverage.
+
+ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
+FROM ${BUILDER_IMAGE} AS coverage-compile
+
+WORKDIR /bld/caesium
+
+# Real UI bundle so a later browser journey can hit this same instrumented
+# server. Stubbing dist would make Console journeys hollow.
+COPY ui/package.json ui/package-lock.json ./ui/
+RUN --mount=type=cache,target=/root/.npm \
+    cd ui && npm ci
+COPY ui/ ./ui/
+RUN cd ui && npm run build
+
+COPY . .
+
+# Explicit package selection for the root module. `go list -deps` of the main
+# package is the set the binary can actually execute — not `./...` (which would
+# name test-only packages) and not a vanity `github.com/caesium-cloud/caesium/...`
+# wildcard that cannot prove what was instrumented.
+#
+# reagents/ is a nested module. `go list` from the root must not see it; a hit
+# means the modules were concatenated and the coverpkg would be invalid.
+RUN set -eu; \
+    mkdir -p /out/audit ui/dist; \
+    if grep -q 'github.com/caesium-cloud/caesium/reagents' go.mod; then \
+      echo "root go.mod must not require the reagents module" >&2; exit 1; \
+    fi; \
+    test -f reagents/go.mod; \
+    (cd reagents && go list -m && go list ./...) > /out/audit/reagents-packages.txt; \
+    go list -deps -f '{{if and (not .Standard) .Module}}{{if eq .Module.Path "github.com/caesium-cloud/caesium"}}{{.ImportPath}}{{end}}{{end}}' . \
+      | grep -v '^$' | sort -u > /out/audit/coverpkg-packages.txt; \
+    if grep -E '(^|/)reagents(/|$)' /out/audit/coverpkg-packages.txt; then \
+      echo "reagents packages leaked into the root coverpkg" >&2; exit 1; \
+    fi; \
+    if grep -E '/test/(performance|load|robustness)(/|$)' /out/audit/coverpkg-packages.txt; then \
+      echo "performance/fault test packages leaked into the root coverpkg" >&2; exit 1; \
+    fi; \
+    tr '\n' ',' < /out/audit/coverpkg-packages.txt | sed 's/,$/\n/' > /out/audit/coverpkg.txt; \
+    test -s /out/audit/coverpkg.txt
+
+# Coverage-image-only SIGUSR2 flush. Not present in the git tree, not compiled
+# into release/test/performance images. start.go already owns SIGUSR1 (stacks)
+# and SIGINT/SIGTERM (graceful shutdown, which also dumps GOCOVERDIR on return
+# from main). This is the explicit flush for a process that must keep running.
+RUN cat > /bld/caesium/coverflush.go <<'EOF'
+package main
+
+import (
+	"os"
+	"os/signal"
+	"runtime/coverage"
+	"strings"
+	"syscall"
+)
+
+func init() {
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGUSR2)
+		for range ch {
+			dir := strings.TrimSpace(os.Getenv("GOCOVERDIR"))
+			if dir == "" {
+				continue
+			}
+			_ = coverage.WriteMetaDir(dir)
+			_ = coverage.WriteCountersDir(dir)
+		}
+	}()
+}
+EOF
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; \
+    coverpkg=$(cat /out/audit/coverpkg.txt); \
+    go build -cover "-coverpkg=${coverpkg}" -trimpath -o /out/caesium ./
+
+# Fail the stage if -cover did not take or if B2's testfault control leaked in.
+# --help is a graceful CLI exit: GOCOVERDIR must receive both meta and counters.
+# A binary that only writes on SIGKILL, or that is not instrumented, is rejected
+# here rather than producing a 0% "success" later.
+RUN set -eu; \
+    if grep -q -- 'caesium-testfault-control' /out/caesium; then \
+      echo "fault instrumentation leaked into the coverage binary" >&2; exit 1; \
+    fi; \
+    if grep -q -- 'CAESIUM_TESTFAULT_DIR' /out/caesium; then \
+      echo "fault-control env name leaked into the coverage binary" >&2; exit 1; \
+    fi; \
+    mkdir -p /tmp/covcheck; \
+    GOCOVERDIR=/tmp/covcheck /out/caesium --help >/dev/null; \
+    ls /tmp/covcheck | grep -q '^covmeta\.'; \
+    ls /tmp/covcheck | grep -q '^covcounters\.'
+
+WORKDIR /dist
+RUN mkdir -p /dist/bin && cp /out/caesium /dist/bin/caesium && \
+    ldd /dist/bin/caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
+    xargs -I % sh -c 'mkdir -p $(dirname ./%); cp % ./%;' && \
+    mkdir -p /dist/usr/share/caesium-coverage && \
+    cp /out/audit/* /dist/usr/share/caesium-coverage/
+
+# ---------------------------------------------------------------------------
+# Separate-module reagents coverage. Built from reagents/go.mod only; the
+# resulting binaries are not copied into the caesium coverage runtime. A
+# collector that needs reagents evidence uses --target reagents-coverage.
+# ---------------------------------------------------------------------------
+FROM ${BUILDER_IMAGE} AS reagents-coverage
+WORKDIR /bld/caesium/reagents
+ENV CGO_ENABLED=0
+COPY reagents/go.mod reagents/go.sum ./
+RUN go mod download
+COPY reagents/ ./
+RUN set -eu; \
+    mkdir -p /out/audit /out/bin; \
+    go list -m > /out/audit/reagents-module.txt; \
+    test "$(cat /out/audit/reagents-module.txt)" = "github.com/caesium-cloud/caesium/reagents"; \
+    go list ./... | sort > /out/audit/reagents-packages.txt; \
+    if grep -v '^github.com/caesium-cloud/caesium/reagents' /out/audit/reagents-packages.txt; then \
+      echo "reagents go list escaped the reagents module" >&2; exit 1; \
+    fi; \
+    coverpkg=$(tr '\n' ',' < /out/audit/reagents-packages.txt | sed 's/,$//'); \
+    printf '%s\n' "$coverpkg" > /out/audit/coverpkg.txt; \
+    for role in git-source tf-discover tf-warm tf-runner; do \
+      go build -cover "-coverpkg=${coverpkg}" -trimpath -o "/out/bin/${role}" "./cmd/${role}"; \
+    done; \
+    mkdir -p /tmp/covcheck; \
+    GOCOVERDIR=/tmp/covcheck /out/bin/git-source --help >/dev/null 2>&1 || true; \
+    ls /tmp/covcheck | grep -q '^covmeta\.'
+
+# ---------------------------------------------------------------------------
+# Runtime: release-shaped alpine image with the instrumented binary. No dockerd,
+# no published port, no testfault tag, no performance driver.
+# ---------------------------------------------------------------------------
+FROM alpine:3.23 AS coverage
+RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs tzdata wget && \
+    adduser -D -H -u 10001 caesium && \
+    mkdir -p /var/lib/caesium/dqlite /var/lib/caesium/coverage && \
+    chown 10001:10001 /var/lib/caesium/dqlite /var/lib/caesium/coverage
+COPY --chown=0:0 --from=coverage-compile /dist/ /
+ENV GOCOVERDIR=/var/lib/caesium/coverage
+USER 10001:10001
+ENTRYPOINT ["/bin/caesium"]
