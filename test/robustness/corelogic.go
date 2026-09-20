@@ -208,11 +208,6 @@ func FanInStartedTooEarly(events []TimedStep, join string, predecessors []string
 			missing = append(missing, pred)
 			continue
 		}
-		if !done.At.Before(joinStart.At) && !done.At.Equal(joinStart.At) {
-			// completion after start is a defect; equal is tolerated only if
-			// clocks collapse, which we still reject: join must be strictly
-			// after the predecessor's recorded completion.
-		}
 		if !joinStart.At.After(done.At) {
 			return fmt.Errorf("join %q started at %s before predecessor %q completed at %s",
 				join, joinStart.At.UTC().Format(time.RFC3339Nano), pred, done.At.UTC().Format(time.RFC3339Nano))

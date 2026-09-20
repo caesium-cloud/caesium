@@ -311,15 +311,6 @@ func instrumented() bool {
 	return os.Getenv("CAESIUM_ROBUSTNESS_INSTRUMENTED") == "1"
 }
 
-func majorityMember(fe *faultEnv, not cluster.Member) cluster.Member {
-	for _, m := range fe.topo.Members {
-		if m.Name != not.Name {
-			return m
-		}
-	}
-	return not
-}
-
 func waitClaimedBy(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string, wantIP string) (cluster.Task, bool) {
 	t.Helper()
 	var found cluster.Task
