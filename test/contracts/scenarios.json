@@ -235,7 +235,7 @@
     {
       "id": "b2-event-sse-history",
       "name": "Public event stream versus persisted event history",
-      "selector": "TestFaults/sse_and_persisted",
+      "selector": "TestTargetedFaults/event_history_correlation",
       "contract_ids": [
         "DT-EVENT-01"
       ],
@@ -243,7 +243,7 @@
       "owner_item": "B2",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B2 recorder/SSE comparison. Sequence is store-lifetime scoped; not proven.",
+      "notes": "B2 TestTargetedFaults/event_history_correlation. Sequence is store-lifetime scoped; set comparison with an explicit resume cursor. Registered by B3; not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -300,7 +300,7 @@
     {
       "id": "b2-durable-event-before-publish",
       "name": "Kill after durable event commit and before first publish",
-      "selector": "TestFaults/durable_event_before_publish",
+      "selector": "TestTargetedFaults/bus_publish_pause",
       "contract_ids": [
         "DT-EVENT-01"
       ],
@@ -308,7 +308,7 @@
       "owner_item": "B2",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B2 instrumented crash; blocked without EX-HOOKS. Not proven.",
+      "notes": "B2 TestTargetedFaults/bus_publish_pause on the instrumented image. B3's TestCore/durable_event_before_delivery_crash composes the same hook with a publisher kill. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -369,7 +369,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 stale-generation case. Not proven.",
+      "notes": "TestCore/stale_generation_complete: owner pause past the 30s run lease, stale /internal/complete 409, survivor with higher generation finishes the same run. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -433,7 +433,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 within-run terminal fencing. Across-retry fencing remains unresolved. Not proven.",
+      "notes": "TestCore/terminal_no_regress: within-run terminal fencing. Across-retry fencing remains unresolved (DT-TERMINAL-01). Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -490,7 +490,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 retry compatibility case. Not proven.",
+      "notes": "TestCore/frozen_retry_recipe: 202 retry uses frozen task_runs image/command; rejected retry of a succeeded run does not alter state. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -551,7 +551,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 fan-out/fan-in fixture. Not proven.",
+      "notes": "TestCore/fan_in_predecessors: join cannot start after only one predecessor; testdata/fan-in.job.yaml. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -612,7 +612,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 cancel/completion race. This base has no standalone active-run cancel REST route. Not proven.",
+      "notes": "TestCore/cancel_completion_race: concurrency replace 202 is not process-death ack; distinct histories retained. This base has no standalone active-run cancel REST route. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -676,7 +676,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 cross-node negative auth. Valid-token stale generation is a separate scenario. Not proven.",
+      "notes": "TestCore/wrong_token_internal: valid cert, wrong bearer on /internal/dispatch and /internal/complete returns 401 with no mutation. Valid-token stale generation is TestCore/stale_generation_complete. Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -741,7 +741,7 @@
       "owner_item": "B3",
       "registered_by": "B3",
       "gates": [],
-      "notes": "Planned B3 quorum-loss case. No A1-verified bounded rejection contract; timeout is not rejection. Not proven.",
+      "notes": "TestCore/quorum_loss_uncertain_write: 2-1 split; timeout is possibly committed, never a rejection (DT-QUORUM-01 U). Not proven without live kind evidence in this PR.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -792,6 +792,401 @@
           "two_voters_unreachable",
           "identified_mutation_sent_during_fault",
           "fault_healed_before_final_read"
+        ]
+      }
+    },
+    {
+      "id": "b3-owner-pause-past-lease",
+      "name": "Owner pause past lease; stale completion refused; survivor finishes",
+      "selector": "TestCore/stale_generation_complete",
+      "contract_ids": [
+        "DT-COMPLETE-01",
+        "DT-OWNER-01",
+        "DT-RECOVER-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Same subtest as b3-stale-generation-complete. Pause must outlast CAESIUM_RUN_LEASE_TTL; missing activation cannot pass. Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "CAESIUM_RUN_LEASE_TTL": "30s"
+      },
+      "expected_observations": [
+        {
+          "id": "owner_held_past_lease",
+          "description": "The owner process freeze outlasts the configured run lease."
+        },
+        {
+          "id": "stale_generation_rejected_409",
+          "description": "POST /internal/complete with the pre-takeover generation returns 409."
+        },
+        {
+          "id": "survivor_completed_same_run",
+          "description": "A survivor with a higher generation finishes the same accepted run."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "owner-pause-past-lease",
+        "required_observations": [
+          "owner_kind_node_cordoned_before_fixture",
+          "runtime_paused",
+          "member_unreachable_during_pause",
+          "held_past_lease"
+        ]
+      }
+    },
+    {
+      "id": "b3-split-heal-2-1",
+      "name": "2-1 split: majority progresses; minority writes stay possibly committed",
+      "selector": "TestCore/quorum_loss_uncertain_write",
+      "contract_ids": [
+        "DT-QUORUM-01",
+        "DT-ADMIT-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "Same subtest as b3-quorum-loss-uncertain-write. Majority of two voters progresses; minority mutations are possibly committed and reconciled by identity after heal. Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "majority_progresses_during_split",
+          "description": "The two-voter majority admits and completes work while the minority is isolated."
+        },
+        {
+          "id": "minority_write_possibly_committed",
+          "description": "A mutation sent to the isolated minority is recorded as possibly committed."
+        },
+        {
+          "id": "quorum_restored_after_heal",
+          "description": "After heal, three dqlite voters and an agreed leader are observed again."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "2-1-split",
+        "required_observations": [
+          "minority_isolated_from_both_peers",
+          "majority_mutation_during_fault",
+          "fault_healed_before_final_read"
+        ]
+      }
+    },
+    {
+      "id": "b3-commit-before-response-loss",
+      "name": "Commit-before-response loss is possibly committed and reconciled by identity",
+      "selector": "TestCore/commit_before_response_loss",
+      "contract_ids": [
+        "DT-ADMIT-01",
+        "DT-QUORUM-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "TestCore/commit_before_response_loss composes B2's client-side interposer. A client timeout is never a rejection. Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "upstream_202_observed_before_client_loss",
+          "description": "The interposer observes a committed 202 before the client sees a transport error."
+        },
+        {
+          "id": "timeout_recorded_as_possibly_committed",
+          "description": "The lost response is recorded as possibly committed, not rejected."
+        },
+        {
+          "id": "reconciled_by_identity_on_another_member",
+          "description": "The acknowledged run UUID is readable on a different member."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "drop-response-after-commit",
+        "required_observations": [
+          "interposer_applied_drop",
+          "upstream_202_before_client_failure"
+        ]
+      }
+    },
+    {
+      "id": "b3-durable-event-before-delivery-crash",
+      "name": "Kill the publisher after durable event commit and before delivery",
+      "selector": "TestCore/durable_event_before_delivery_crash",
+      "contract_ids": [
+        "DT-EVENT-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "TestCore/durable_event_before_delivery_crash arms B2's bus-publish-pause hook, kills that publisher, disarms survivors, and asserts durable replay. Skip/inconclusive without the instrumented image; never a pass. Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "durable_event_committed_before_kill",
+          "description": "The event row is observed committed and still pending before the publisher is killed."
+        },
+        {
+          "id": "publisher_process_killed",
+          "description": "The member that entered the publication hook is SIGKILL'd with independent death evidence."
+        },
+        {
+          "id": "durable_replay_after_kill",
+          "description": "Survivors replay the durable event; delivery remains at-least-once."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "kill-after-durable-event-before-publish",
+        "required_observations": [
+          "hook_entered_before_publish",
+          "publisher_process_killed",
+          "committed_row_observed_before_kill"
+        ]
+      }
+    },
+    {
+      "id": "b3-worker-unreachable-bench",
+      "name": "Unreachable worker is benched; it receives work after cooldown",
+      "selector": "TestCore/worker_unreachable_bench",
+      "contract_ids": [
+        "DT-RECOVER-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "TestCore/worker_unreachable_bench: network-error rejection and peer benching via real dispatch progress and caesium_dispatch_rejected_total; stalled_total is scraped but not required to increment (progress deadline is 10m). Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "network_error_rejection_metric_rose",
+          "description": "caesium_dispatch_rejected_total{reason=\"network_error\"} increases on the owner during the fault."
+        },
+        {
+          "id": "dispatch_progress_on_reachable_peers",
+          "description": "Tasks are claimed by a reachable peer while the unreachable worker is benched."
+        },
+        {
+          "id": "worker_receives_work_after_cooldown",
+          "description": "After heal and the bench cooldown, the previously unreachable worker receives a new claim."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "worker-pause-unreachable",
+        "required_observations": [
+          "worker_runtime_paused",
+          "worker_unreachable_during_pause",
+          "rejected_network_error_rose"
+        ]
+      }
+    },
+    {
+      "id": "b3-invalid-mtls-peer",
+      "name": "Invalid peer certificate is refused at the TLS handshake",
+      "selector": "TestCore/invalid_mtls_peer",
+      "contract_ids": [
+        "DT-AUTH-01"
+      ],
+      "status": "absent",
+      "owner_item": "B3",
+      "registered_by": "B3",
+      "gates": [],
+      "notes": "TestCore/invalid_mtls_peer: self-signed client cert fails the dedicated mTLS listener handshake; no task/state/effect mutation. Secrets are not persisted. Not proven without live kind evidence in this PR.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "internal_tls": "provisioned"
+      },
+      "expected_observations": [
+        {
+          "id": "invalid_cert_handshake_failed",
+          "description": "A client certificate not signed by the cluster CA fails the TLS handshake before any handler runs."
+        },
+        {
+          "id": "denied_operation_no_mutation",
+          "description": "The denied complete attempt causes no task, run, or effect mutation."
+        },
+        {
+          "id": "principal_scope_recorded_without_secrets",
+          "description": "The denied principal/scope is recorded without secrets."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "invalid-mtls-peer",
+        "required_observations": [
+          "invalid_client_cert_presented",
+          "handshake_failed_before_handler"
         ]
       }
     },

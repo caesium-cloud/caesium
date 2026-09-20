@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: __ALIAS__
+  labels:
+    caesium-robustness: core-retry
+trigger:
+  type: http
+  configuration:
+    path: robustness-core-retry-__ALIAS__
+steps:
+  - name: keep
+    type: task
+    engine: kubernetes
+    image: __TASK_IMAGE__
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        RECORDER=http://robustness-recorder:8090
+        STEP=keep
+        NONCE="$(cat /proc/sys/kernel/random/uuid)"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"start\"}" "${RECORDER}/start"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"complete\"}" "${RECORDER}/effect"
+    next:
+      - boom
+  - name: boom
+    type: task
+    engine: kubernetes
+    image: __TASK_IMAGE__
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        RECORDER=http://robustness-recorder:8090
+        STEP=boom
+        NONCE="$(cat /proc/sys/kernel/random/uuid)"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"start\"}" "${RECORDER}/start"
+        echo boom-fail
+        exit 1
+    dependsOn:
+      - keep
