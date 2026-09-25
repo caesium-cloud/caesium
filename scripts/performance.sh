@@ -51,6 +51,7 @@ prepare_benchmark_harness() {
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -84,11 +85,17 @@ for label, root, expected in (("candidate", candidate_dir, candidate_sha), ("bas
 overlaid = []
 manifest = []
 digest = hashlib.sha256()
+benchmark_names = []
+benchmark_function = re.compile(r'^func\s+(Benchmark(?:Owner|Recover)[A-Za-z0-9_]*)\s*\(\s*[A-Za-z_][A-Za-z_0-9]*\s+\*testing\.B\s*\)', re.M)
 for path in files:
     candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
     candidate_file = pathlib.Path(candidate_dir, path)
     if not candidate_file.is_file() or candidate_file.read_bytes() != candidate_blob:
         raise SystemExit(f"benchmark harness: candidate file {path} differs from {candidate_sha}")
+    found = benchmark_function.findall(candidate_blob.decode())
+    if not found:
+        raise SystemExit(f"benchmark harness: {path} has no selected benchmark functions")
+    benchmark_names.extend(found)
     base_result = git(base_dir, "show", f"{base_sha}:{path}", check=False)
     base_blob = base_result.stdout if base_result.returncode == 0 else None
     changed = base_blob != candidate_blob
@@ -110,12 +117,15 @@ for path in files:
 dirty = status_paths(base_dir)
 if dirty != set(overlaid):
     raise SystemExit(f"benchmark harness: base changed outside the declared overlay: {sorted(dirty ^ set(overlaid))}")
+if len(benchmark_names) != len(set(benchmark_names)):
+    raise SystemExit("benchmark harness: duplicate benchmark function names")
 doc = {
     "schema_version": 1,
     "base_source_sha": base_sha,
     "candidate_source_sha": candidate_sha,
     "harness_source_sha": candidate_sha,
     "harness_sha256": digest.hexdigest(),
+    "benchmark_names": sorted(benchmark_names),
     "base_overlay_paths": overlaid,
     "base_release_image_id": base_image_id,
     "candidate_release_image_id": candidate_image_id,
@@ -697,7 +707,7 @@ export CATALOG_SHA SETTINGS_SHA BASE_BUILT CANDIDATE_BUILT
 export BASE_GO_VERSION CANDIDATE_GO_VERSION BASE_BUILDER_ID CANDIDATE_BUILDER_ID
 export BASE_TOOLCHAIN CANDIDATE_TOOLCHAIN
 export RUN_LOAD RUN_BENCH RUN_BROWSER RUN_BUNDLE
-export BENCH_HARNESS_MANIFEST
+export BENCH_HARNESS_MANIFEST REPEATS
 python3 - <<'PY'
 import json, os, pathlib, re
 
@@ -710,6 +720,7 @@ def load_json(path):
         return None
 
 bench_harness = None
+bench_sampling = None
 if os.environ.get("RUN_BENCH") == "1":
     bench_harness = load_json(os.environ["BENCH_HARNESS_MANIFEST"])
     if not isinstance(bench_harness, dict):
@@ -725,6 +736,71 @@ if os.environ.get("RUN_BENCH") == "1":
             raise SystemExit(f"benchmark harness {field} does not match the release comparison")
     if not bench_harness.get("harness_sha256") or len(bench_harness.get("files") or []) != 2:
         raise SystemExit("benchmark harness manifest lacks the two measured source files")
+    names_doc = load_json(art / "observations" / "benchmark-names.json")
+    source_files = [
+        {"path": entry["path"], "sha256": entry["sha256"]}
+        for entry in bench_harness["files"]
+    ]
+    if not isinstance(names_doc, dict) or names_doc.get("source_files") != source_files or \
+            names_doc.get("benchmark_names") != bench_harness.get("benchmark_names"):
+        raise SystemExit("benchmark names do not match the exact shared harness source files")
+    repeats = int(os.environ["REPEATS"])
+    if repeats < 1:
+        raise SystemExit("benchmark repeats must be positive")
+    repeat_exits = {}
+    aggregate_exits = {}
+    for label in ("base", "candidate"):
+        exit_path = art / label / "bench.txt.exit"
+        repeats_path = art / label / "bench.txt.repeats.tsv"
+        if not exit_path.is_file() or not repeats_path.is_file():
+            raise SystemExit(f"{label} benchmark exit or repeat evidence is missing")
+        aggregate = exit_path.read_text().strip()
+        if not aggregate.isdecimal():
+            raise SystemExit(f"{label} benchmark aggregate exit is malformed: {aggregate!r}")
+        aggregate_exits[label] = int(aggregate)
+        rows = [line.split("\t") for line in repeats_path.read_text().splitlines()]
+        if len(rows) != repeats:
+            raise SystemExit(f"{label} benchmark has {len(rows)} repeat exits, want {repeats}")
+        statuses = []
+        for repeat, row in enumerate(rows, 1):
+            if len(row) != 2 or row[0] != str(repeat) or not row[1].isdecimal():
+                raise SystemExit(f"{label} benchmark repeat {repeat} evidence is malformed: {row!r}")
+            if not (art / label / f"bench-repeat-{repeat}.txt").is_file():
+                raise SystemExit(f"{label} benchmark repeat {repeat} raw output is missing")
+            statuses.append(int(row[1]))
+        first_failure = next((status for status in statuses if status != 0), 0)
+        if aggregate_exits[label] != first_failure:
+            raise SystemExit(f"{label} aggregate benchmark exit disagrees with repeat exits")
+        if first_failure == 0:
+            raw = "".join((art / label / f"bench-repeat-{repeat}.txt").read_text()
+                          for repeat in range(1, repeats + 1))
+            aggregate_path = art / label / "bench.txt"
+            if not aggregate_path.is_file() or aggregate_path.read_text() != raw:
+                raise SystemExit(f"{label} aggregate benchmark text differs from its raw repeats")
+        repeat_exits[label] = statuses
+    order_path = art / "observations" / "benchmark-order.tsv"
+    if not order_path.is_file():
+        raise SystemExit("benchmark order evidence is missing")
+    order = [line.split("\t") for line in order_path.read_text().splitlines()]
+    expected_order = [
+        [str(repeat), label, str(repeat_exits[label][repeat - 1])]
+        for repeat in range(1, repeats + 1)
+        for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+    ]
+    if order != expected_order:
+        raise SystemExit("benchmark order differs from paired repeat exits")
+    bench_sampling = {
+        "schema_version": 1,
+        "repeats": repeats,
+        "expected_names": names_doc["benchmark_names"],
+        "source_files": source_files,
+        "settings_sha256": os.environ["SETTINGS_SHA"],
+        "order": [
+            {"repeat": int(repeat), "side": label, "exit_code": int(status)}
+            for repeat, label, status in order
+        ],
+        "aggregate_exit": aggregate_exits,
+    }
 
 def bench_text(path):
     p = pathlib.Path(path)
@@ -788,7 +864,9 @@ def correctness(label, workloads):
             if sample.get("outcome") != "passed":
                 failures.append(f"{name}[{i}] outcome={sample.get('outcome')}")
     bench_exit = art / label / "bench.txt.exit"
-    if bench_exit.is_file():
+    if os.environ.get("RUN_BENCH") == "1" and not bench_exit.is_file():
+        failures.append("benchmark exit marker missing")
+    elif bench_exit.is_file():
         rc = bench_exit.read_text().strip()
         if rc != "0":
             failures.append(f"benchmarks exited {rc}")
@@ -828,6 +906,7 @@ def side_doc(label, sha, image, image_id, cli_digest, built, go_version, builder
             "benchmark_harness_git_sha": bench_harness["harness_source_sha"],
             "benchmark_harness_sha256": bench_harness["harness_sha256"],
             "benchmark_overlay_paths": bench_harness["base_overlay_paths"] if label == "base" else [],
+            "benchmark_repeats": bench_sampling["repeats"],
         })
     return {
         "label": label,
@@ -854,6 +933,7 @@ doc = {
     "schema_version": 1,
     "required_families": families,
     "benchmark_harness": bench_harness,
+    "benchmark_sampling": bench_sampling,
     "required_browser_series": [
         "browser.route_readiness_ms./jobs.live",
         "browser.route_readiness_ms./triggers.live",

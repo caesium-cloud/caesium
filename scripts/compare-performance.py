@@ -650,6 +650,112 @@ def benchmark_harness_issues(doc, base, candidate):
         same(prov, "benchmark_harness_git_sha", manifest.get("harness_source_sha"), f"{label}.provenance")
         same(prov, "benchmark_harness_sha256", harness_sha, f"{label}.provenance")
         same(prov, "benchmark_overlay_paths", expected_overlay, f"{label}.provenance")
+    issues.extend(benchmark_sampling_issues(doc, base, candidate, manifest))
+    return issues
+
+
+def benchmark_sampling_issues(doc, base, candidate, manifest):
+    """Require every declared benchmark and metric in every paired repeat."""
+    sampling = doc.get("benchmark_sampling")
+    if not isinstance(sampling, dict):
+        return ["benchmark_sampling evidence is missing or malformed"]
+    issues = []
+    if sampling.get("schema_version") != 1:
+        issues.append("benchmark_sampling.schema_version must be 1")
+    names = manifest.get("benchmark_names")
+    if not isinstance(names, list) or not names or any(
+        not isinstance(name, str) or
+        re.fullmatch(r"Benchmark(?:Owner|Recover)[A-Za-z0-9_]*", name) is None
+        for name in names
+    ) or names != sorted(set(names)):
+        issues.append("benchmark_harness.benchmark_names is missing, malformed, or duplicated")
+        names = []
+    if sampling.get("expected_names") != names:
+        issues.append("benchmark_sampling.expected_names differs from the shared harness")
+    files = manifest.get("files")
+    if isinstance(files, list) and all(isinstance(entry, dict) for entry in files):
+        source_files = [
+            {"path": entry.get("path"), "sha256": entry.get("sha256")}
+            for entry in files
+        ]
+        if sampling.get("source_files") != source_files:
+            issues.append("benchmark_sampling.source_files differs from shared harness hashes")
+    repeats = sampling.get("repeats")
+    if type(repeats) is not int or repeats < 1:
+        issues.append("benchmark_sampling.repeats must be a positive integer")
+        repeats = None
+    settings = sampling.get("settings_sha256")
+    if not isinstance(settings, str) or not re.fullmatch(r"[0-9a-f]{64}", settings):
+        issues.append("benchmark_sampling.settings_sha256 is missing or malformed")
+    for label, side in (("base", base), ("candidate", candidate)):
+        prov = side.get("provenance") if isinstance(side.get("provenance"), dict) else {}
+        if prov.get("settings_sha256") != settings:
+            issues.append(f"{label}.provenance.settings_sha256 differs from benchmark sampling")
+        if prov.get("benchmark_repeats") != repeats:
+            issues.append(f"{label}.provenance.benchmark_repeats differs from benchmark sampling")
+
+    order = sampling.get("order")
+    repeat_exits = {"base": [], "candidate": []}
+    if repeats is not None:
+        expected_pairs = [
+            (repeat, label)
+            for repeat in range(1, repeats + 1)
+            for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+        ]
+        if not isinstance(order, list) or len(order) != len(expected_pairs):
+            issues.append("benchmark_sampling.order does not contain every paired repeat")
+        else:
+            for entry, (repeat, label) in zip(order, expected_pairs):
+                if not isinstance(entry, dict) or entry.get("repeat") != repeat or entry.get("side") != label or \
+                        type(entry.get("exit_code")) is not int or entry["exit_code"] < 0:
+                    issues.append(f"benchmark_sampling.order has invalid repeat {repeat} {label}")
+                    continue
+                repeat_exits[label].append(entry["exit_code"])
+            aggregate = sampling.get("aggregate_exit")
+            if not isinstance(aggregate, dict):
+                issues.append("benchmark_sampling.aggregate_exit is missing")
+            else:
+                for label in ("base", "candidate"):
+                    if len(repeat_exits[label]) != repeats:
+                        continue
+                    first_failure = next((code for code in repeat_exits[label] if code), 0)
+                    if aggregate.get(label) != first_failure:
+                        issues.append(f"benchmark_sampling.aggregate_exit.{label} differs from repeat exits")
+                    if first_failure:
+                        issues.append(f"benchmark_sampling.{label} has a failed repeat")
+
+    if not names or repeats is None:
+        return issues
+    expected_names = set(names)
+    for label, side in (("base", base), ("candidate", candidate)):
+        benchmarks = side.get("benchmarks")
+        if isinstance(benchmarks, str):
+            for line in benchmarks.splitlines():
+                line = line.strip()
+                if not line.startswith("Benchmark"):
+                    continue
+                match = GO_BENCH_RE.fullmatch(line)
+                if match is None or match.group(4) is None or match.group(5) is None:
+                    issues.append(f"{label}.benchmarks has a malformed or incomplete -benchmem row")
+            benchmarks = parse_go_bench_text(benchmarks)
+        if not isinstance(benchmarks, dict):
+            issues.append(f"{label}.benchmarks is missing or malformed")
+            continue
+        observed = set(benchmarks)
+        if observed != expected_names:
+            issues.append(f"{label}.benchmarks differs from shared harness: missing={sorted(expected_names - observed)} extra={sorted(observed - expected_names)}")
+        for name in names:
+            body = benchmarks.get(name)
+            if not isinstance(body, dict):
+                continue
+            for metric in ("ns_per_op", "bytes_per_op", "allocs_per_op"):
+                try:
+                    samples, _ = coerce_samples(body[metric])
+                except (KeyError, CompareError, TypeError, ValueError):
+                    issues.append(f"{label}.benchmarks.{name}.{metric} is missing or malformed")
+                    continue
+                if len(samples) != repeats:
+                    issues.append(f"{label}.benchmarks.{name}.{metric} has {len(samples)} samples, want {repeats}")
     return issues
 
 

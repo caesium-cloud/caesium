@@ -40,7 +40,8 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         git(self.base, "checkout", "-q", "--detach", self.base_sha)
         self.contents = {}
         for path in FILES:
-            data = f"package run\n// E3 measurement {path}\n".encode()
+            name = "BenchmarkOwnerFake" if "owner_" in path else "BenchmarkRecoverFake"
+            data = f"package run\nimport \"testing\"\nfunc {name}(b *testing.B) {{}}\n".encode()
             target = self.candidate / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
@@ -77,6 +78,7 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertEqual(doc["base_release_image_id"], "sha256:base-release")
         self.assertEqual(doc["candidate_release_image_id"], "sha256:candidate-release")
         self.assertEqual(doc["base_overlay_paths"], list(FILES))
+        self.assertEqual(doc["benchmark_names"], ["BenchmarkOwnerFake", "BenchmarkRecoverFake"])
         self.assertEqual(git(self.base, "rev-parse", "HEAD"), self.base_sha)
         self.assertEqual(git(self.candidate, "status", "--porcelain"), "")
         self.assertEqual(
