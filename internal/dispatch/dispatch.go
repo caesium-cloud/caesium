@@ -641,9 +641,23 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rules 1 & 2 in a single DB call: GetLease returns the row, we check
-	// ownership (owner_node, expiry) and generation in memory.
+	// ownership (owner_node, expiry) and generation in memory. A failed read
+	// does not prove that the lease is absent: retain the worker's completed
+	// result for retry rather than discarding it as an ownership fence.
 	lease, err := h.leaseStore.GetLease(ctx, req.RunID)
-	if err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Warn("complete: cannot read run lease; asking worker to retry",
+			"run_id", req.RunID, "error", err)
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "run lease could not be read; retry completion",
+		})
+		return
+	}
+	if err != nil || lease == nil {
 		recordRejected(ReasonMissingRun)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonMissingRun,

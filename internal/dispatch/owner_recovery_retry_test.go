@@ -240,3 +240,43 @@ func TestHandleCompleteMemoryOwnerStatusReadErrorRetries(t *testing.T) {
 	require.NoError(t, json.Unmarshal(again.Body.Bytes(), &againResponse))
 	require.Equal(t, ReasonTerminalRun, againResponse.Code)
 }
+
+func TestHandleCompleteLeaseReadErrorRetries(t *testing.T) {
+	store, ls, h := setupHandler(t)
+	runID, taskID := seedPendingTaskRun(t, store)
+	_, err := ls.AcquireLease(t.Context(), runID, ownerNodeAddr, time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, ownerNodeAddr, 1, time.Hour, true))
+	var claimed models.TaskRun
+	require.NoError(t, store.DB().Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&claimed).Error)
+	req := CompleteRequest{
+		RunID: runID, TaskID: taskID, TaskRunID: claimed.ID,
+		OwnerGeneration: 1, WorkerNode: ownerNodeAddr,
+		Status: "succeeded", Result: "completed-result",
+	}
+	const callback = "test:lease_read_error"
+	injectedReads := 0
+	require.NoError(t, store.DB().Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "run_leases" {
+			injectedReads++
+			tx.AddError(errors.New("injected lease read failure"))
+		}
+	}))
+	defer func() { require.NoError(t, store.DB().Callback().Query().Remove(callback)) }()
+	w := postJSON(t, h.HandleComplete, req)
+	require.Greater(t, injectedReads, 0, "the injected lease read must be exercised")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	var response ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, ReasonOwnerNotReady, response.Code)
+	server := httptest.NewServer(http.HandlerFunc(h.HandleComplete))
+	_, postErr := PostComplete(t.Context(), server.URL, testToken, req)
+	server.Close()
+	require.ErrorIs(t, postErr, ErrOwnerNotReady, "worker must retain a completed result after an unreadable lease")
+	var after models.TaskRun
+	require.NoError(t, store.DB().First(&after, "id = ?", claimed.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), after.Status)
+	require.Equal(t, claimed.ClaimedBy, after.ClaimedBy)
+	require.Empty(t, after.Result)
+	require.Zero(t, after.TerminalSequence)
+}
