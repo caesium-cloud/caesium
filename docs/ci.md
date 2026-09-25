@@ -14,14 +14,19 @@ runner, integration SQL-work budget and scenario evidence validator; the W3
 developer-journey CLI scenarios and browser accessibility/visual/scale/recovery
 coverage; the W4 targeted-fault harness, open-loop load driver, native fuzz
 campaigns, single-node previous-release upgrade qualification, and
-merge-candidate identity / `merge_group` wiring; plus the remaining distributed
-failure tests, Console fault journeys and performance gates, are tracked in
+merge-candidate identity / `merge_group` wiring; the W5 fenced core-failure
+suite, coverage-instrumented CLI/server collection, and fail-closed
+base/candidate performance comparator; plus the remaining Console fault
+journeys, cluster upgrades and calibrated budgets, are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
 dependencies**: G7 wired the `merge_group` trigger and candidate-identity
-checks on the existing aggregate. Neither wave changed repository settings:
+checks on the existing aggregate. W5 added **no jobs and no `ci-ok`
+dependencies** either: `TestCore`, the coverage collector and
+`scripts/performance.sh` are local commands. None of these waves changed
+repository settings:
 `ci-ok` is still absent from master's required status checks, so that
 promotion gates `v*` publication rather than PR merge, and `merge_group` is
 dormant until a ruleset exists. See §1 and "Early evidence lane and the
@@ -1352,6 +1357,82 @@ Nothing here qualifies a cluster upgrade, a mixed-version window,
 restore-from-snapshot, or rollback as a product guarantee. The published
 amd64/arm64 CLI checksums are carried in `versions.json` but
 `scripts/ci-cli-smoke.sh` is not re-run by this lane.
+
+### Fenced core failures (distributed-testing W5/B3)
+
+B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
+the `early-evidence` lane. That lane still runs `^TestOwnerCrash$`.
+
+```sh
+CAESIUM_ROBUSTNESS_RUN='^TestCore$' just tag="$CANDIDATE_SHA" robustness-test
+```
+
+`scripts/robustness.sh` gives that selection a 70-minute runner timeout and
+requires the declared subtests (terminal fence, frozen retry, fan-in, auth,
+cancel race, response loss, stale generation, benching, quorum loss). The
+durable-event crash subtest is required only when
+`CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE` is set; without it the case is
+inconclusive, not a pass. A 2–1 split must show nonzero iptables drop counters
+before any minority result counts. Catalog rows stay `status: absent` until a
+live run of this command is recorded. No such run is recorded for the merged
+candidate `9dbde3eb`.
+
+### Coverage collection with provenance (distributed-testing W5/G2)
+
+`build/Dockerfile.coverage` is a separate image from the release image and
+from the performance images. The command is `scripts/integration-coverage.sh`
+(no justfile recipe). It refuses a dirty tree, stamps
+`org.opencontainers.image.revision`, and deletes previous covdata under the
+artifact directory before measuring. `CAESIUM_COVERAGE_SKIP_BUILD=1` reuses an
+image and records it as supplied/unverified.
+
+```sh
+CAESIUM_COVERAGE_ID="cov-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+CAESIUM_COVERAGE_ARTIFACTS="$(mktemp -d)" \
+  bash scripts/integration-coverage.sh
+```
+
+`scripts/check-coverage.py` ignores `init()` coverage. A write-to-read pass
+needs the named apply/export functions and the server profile, not a merged
+profile that only imported those files. A missing provenance file is
+incomplete. A baseline is written only when the verdict is `pass`, and a
+baseline this script writes can be passed back with `--ratchet`. A killed
+server or a nonzero stop other than exit 143 is incomplete, not 0%. This is
+not a CI job. The collect that existed before review fix `7dcef7f0` is not
+evidence for that commit.
+
+### Base/candidate performance comparison (distributed-testing W5/E3)
+
+`scripts/performance.sh` builds both SHAs with `just build-release`, records
+each side's `caesium-builder:$sha` image ID and `go version`, and refuses a
+dirty tree. `log` goes to stderr so a captured build status cannot look
+successful when `just` failed. Warm repetitions alternate between the two
+servers. Release images must be uninstrumented.
+
+```sh
+CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+CAESIUM_PERF_ARTIFACTS="$(mktemp -d)" \
+CAESIUM_PERF_BASE_SHA="<base>" \
+CAESIUM_PERF_CANDIDATE_SHA="$(git rev-parse HEAD)" \
+  bash scripts/performance.sh
+```
+
+`scripts/compare-performance.py` exits 0 only when every metric is `faster` or
+`no_significant_difference`. Any inconclusive metric, undersampled series, or
+provenance mismatch (including a different `go version`) is inconclusive.
+Direction follows Mann-Whitney U and the Hodges–Lehmann shift, not the mean.
+`error_rate`, `failure_rate` and `drop_rate` are lower-is-better; an unknown
+metric name fails. Bundle bytes come from
+`node ui/scripts/check-bundle-size.mjs --json` (same `BUNDLE_*` limits as CI),
+not from a Python gzip of the files. Browser rows are keyed by metric, route
+and kind. Compare an already-written report without Docker:
+
+```sh
+CAESIUM_PERF_ARTIFACTS=/tmp/perf bash scripts/performance.sh compare comparison.json
+```
+
+No live two-image run is recorded for merged candidate `30250322`. This is not
+a CI job and not a calibrated SLO (E4 / Q2 / Q5).
 
 ## 5. Server env per lane, and the silent-drift rule
 
