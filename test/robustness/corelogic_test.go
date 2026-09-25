@@ -186,15 +186,15 @@ func TestClassifyCancelCompletionRaceRequiresDurableWinnerOrder(t *testing.T) {
 	started := CancelRaceEvent{Sequence: 1, Type: "task_started", RunID: runID, TaskID: blockID}
 	success := CancelRaceEvent{Sequence: 2, Type: "task_succeeded", RunID: runID, TaskID: blockID}
 	cancel := CancelRaceEvent{Sequence: 3, Type: "run_cancelled", RunID: runID}
-	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", false, "cancelled", "succeeded",
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", "cancelled", "succeeded",
 		[]CancelRaceEvent{started, success, cancel}); err != nil || got != "completion_won_then_cancelled" {
 		t.Fatalf("completion-first history = %q, %v", got, err)
 	}
-	if got, err := ClassifyCancelCompletionRace(runID, blockID, 409, RefusalMissingRun, true, "cancelled", "cancelled",
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 409, RefusalTerminalRun, "cancelled", "cancelled",
 		[]CancelRaceEvent{started, cancel}); err != nil || got != "cancellation_won" {
 		t.Fatalf("cancellation-first history = %q, %v", got, err)
 	}
-	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", false, "succeeded", "succeeded",
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", "succeeded", "succeeded",
 		[]CancelRaceEvent{started, success}); err != nil || got != "completion_won_before_replace" {
 		t.Fatalf("completion-before-replace history = %q, %v", got, err)
 	}
@@ -202,21 +202,24 @@ func TestClassifyCancelCompletionRaceRequiresDurableWinnerOrder(t *testing.T) {
 		name        string
 		status      int
 		code        string
-		leaseAbsent bool
 		runStatus   string
 		blockStatus string
 		events      []CancelRaceEvent
 	}{
-		{"success after cancellation", 200, "", false, "cancelled", "succeeded", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_succeeded", RunID: runID, TaskID: blockID}}},
-		{"successor started after cancellation", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_started", RunID: runID, TaskID: "successor"}}},
-		{"rejected but block succeeded", 409, RefusalTerminalRun, false, "cancelled", "succeeded", []CancelRaceEvent{started, success, cancel}},
-		{"missing run without SQL proof", 409, RefusalMissingRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
-		{"missing cancellation event", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started}},
-		{"wrong run scope", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 3, Type: "run_cancelled", RunID: "other-run"}}},
-		{"nonmonotonic order", 200, "", false, "cancelled", "succeeded", []CancelRaceEvent{started, cancel, success}},
+		{"success after cancellation", 200, "", "cancelled", "succeeded", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_succeeded", RunID: runID, TaskID: blockID}}},
+		{"successor started before cancellation", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "task_started", RunID: runID, TaskID: "successor"}, cancel}},
+		{"successor started after cancellation", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_started", RunID: runID, TaskID: "successor"}}},
+		{"rejected but block succeeded", 409, RefusalTerminalRun, "cancelled", "succeeded", []CancelRaceEvent{started, success, cancel}},
+		{"missing run after later cancellation", 409, RefusalMissingRun, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"stale generation before later cancellation", 409, RefusalStaleGeneration, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"not owner before later cancellation", 409, RefusalNotOwner, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"wrong worker before later cancellation", 409, RefusalWrongWorker, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"missing cancellation event", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started}},
+		{"wrong run scope", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 3, Type: "run_cancelled", RunID: "other-run"}}},
+		{"nonmonotonic order", 200, "", "cancelled", "succeeded", []CancelRaceEvent{started, cancel, success}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if outcome, err := ClassifyCancelCompletionRace(runID, blockID, tc.status, tc.code, tc.leaseAbsent,
+			if outcome, err := ClassifyCancelCompletionRace(runID, blockID, tc.status, tc.code,
 				tc.runStatus, tc.blockStatus, tc.events); err == nil {
 				t.Fatalf("bad history classified as %q", outcome)
 			}

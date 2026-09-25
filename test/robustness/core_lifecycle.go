@@ -514,6 +514,31 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		runCancel()
 		t.Fatalf("inconclusive: replacement and completion did not both enter the race: %v", err)
 	}
+	// The requests are still held locally. Recheck the exact durable claim and
+	// lease immediately before delivery so an intervening recovery is not
+	// mistaken for a cancellation/completion race on the prepared claim.
+	gateLease, err := fe.httpAPI.QueryLease(runCtx, c.member.HTTPBase(), c.first.ID)
+	if err != nil || gateLease.OwnerNode != c.firstLease.OwnerNode || gateLease.Generation != c.firstLease.Generation {
+		t.Fatalf("inconclusive: old lease changed before race release: initial=%+v gate=%+v err=%v", c.firstLease, gateLease, err)
+	}
+	gateRecipes, err := fe.httpAPI.QueryTaskRecipes(runCtx, c.member.HTTPBase(), c.first.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: old claim unavailable before race release: %v", err)
+	}
+	gateClaimCurrent := false
+	for _, recipe := range gateRecipes {
+		if recipe.ID == c.blockRecipe.ID && recipe.TaskID == c.blockRecipe.TaskID &&
+			strings.EqualFold(recipe.Status, "running") && recipe.ClaimedBy == c.blockRecipe.ClaimedBy &&
+			recipe.Attempt == c.blockRecipe.Attempt && recipe.ClaimAttempt == c.blockRecipe.ClaimAttempt &&
+			recipe.OwnerGeneration == gateLease.Generation &&
+			recipe.ResultDigest == c.blockRecipe.ResultDigest && recipe.OutputDigest == c.blockRecipe.OutputDigest {
+			gateClaimCurrent = true
+			break
+		}
+	}
+	if !gateClaimCurrent {
+		t.Fatalf("inconclusive: prepared block claim changed before race release: initial=%+v gate=%+v", c.blockRecipe, gateRecipes)
+	}
 	releasedAt := gate.releaseBoth()
 	for _, arrival := range arrivals {
 		if !arrival.At.Before(releasedAt) {
@@ -552,20 +577,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 			t.Fatalf("inconclusive: completion 200 lacks accepted=true: body=%s err=%v", RedactSecrets(contender.Body), err)
 		}
 	}
-	leaseAbsent := false
-	if contender.Status == http.StatusConflict && code == RefusalMissingRun {
-		var qerr error
-		leaseAbsent, qerr = fe.httpAPI.QueryLeaseAbsent(context.Background(), c.oldOwner.HTTPBase(), c.first.ID)
-		if qerr != nil {
-			t.Fatalf("inconclusive: missing_run without healthy SQL lease read: %v", qerr)
-		}
-		if !leaseAbsent {
-			t.Fatalf("missing_run refusal while old lease %s still exists", c.first.ID)
-		}
-	}
-	if contender.Status != http.StatusOK &&
-		!CancelledCompleteRefusalAllowed(contender.Status, code) &&
-		!(contender.Status == http.StatusConflict && code == RefusalMissingRun && leaseAbsent) {
+	if contender.Status != http.StatusOK && contender.Status != http.StatusConflict {
 		t.Fatalf("completion contender returned unsupported outcome %d/%q: %s", contender.Status, code, RedactSecrets(message))
 	}
 
@@ -610,10 +622,13 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		events = append(events, CancelRaceEvent{Sequence: row.Sequence, Type: row.Type, RunID: row.RunID, TaskID: row.TaskID})
 	}
 	outcome, err := ClassifyCancelCompletionRace(c.first.ID, c.firstTask.TaskID, contender.Status, code,
-		leaseAbsent, firstFinal.Status, block.Status, events)
+		firstFinal.Status, block.Status, events)
 	if err != nil {
 		t.Fatalf("cancel/completion race violated durable order: %v (status=%d/%q run=%s block=%s events=%+v)",
 			err, contender.Status, code, firstFinal.Status, block.Status, events)
+	}
+	if outcome == "cancellation_won" {
+		requireCancelledRaceSuccessor(t, fe, c, firstFinal, recipes, "at race settlement")
 	}
 	if contender.Status == http.StatusConflict {
 		// The old task was still blocked, so a rejected synthetic completion
@@ -654,6 +669,9 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if !lateBlockFound {
 		t.Fatalf("inconclusive: old task %s disappeared after barrier release", block.ID)
 	}
+	if outcome == "cancellation_won" {
+		requireCancelledRaceSuccessor(t, fe, c, still, lateRecipes, "after barrier release")
+	}
 	lateRows, lateScope, err := readPersistedEvents(context.Background(), fe.httpAPI, c.member.HTTPBase(), c.first.ID, 2000)
 	if err != nil || !lateScope.Complete {
 		t.Fatalf("inconclusive: old run's late durable event order unavailable: scope=%+v err=%v", lateScope, err)
@@ -663,7 +681,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		lateEvents = append(lateEvents, CancelRaceEvent{Sequence: row.Sequence, Type: row.Type, RunID: row.RunID, TaskID: row.TaskID})
 	}
 	lateOutcome, err := ClassifyCancelCompletionRace(c.first.ID, c.firstTask.TaskID, contender.Status, code,
-		leaseAbsent, still.Status, block.Status, lateEvents)
+		still.Status, block.Status, lateEvents)
 	if err != nil || lateOutcome != outcome {
 		t.Fatalf("old run's race outcome changed after barrier release: first=%s later=%s err=%v", outcome, lateOutcome, err)
 	}
@@ -672,10 +690,42 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		"first_status": still.Status, "second_status": secondFinal.Status,
 		"first_raw_admit": truncate(c.rawFirst, 200), "second_raw_admit": truncate(replacement.raw, 200),
 		"completion_status": contender.Status, "completion_code": code,
-		"outcome": outcome, "lease_absence_proven": leaseAbsent,
+		"outcome":       outcome,
 		"gate_arrivals": arrivals, "gate_released_at": releasedAt,
 		"persisted_scope": scope, "persisted_events": events,
 		"late_persisted_scope": lateScope, "late_persisted_events": lateEvents,
 		"histories": []string{c.first.ID, second.ID},
 	})
+}
+
+func requireCancelledRaceSuccessor(t *testing.T, fe *faultEnv, c cancelContender,
+	public cluster.Run, recipes []cluster.TaskRecipe, when string) {
+	t.Helper()
+	var durable cluster.TaskRecipe
+	durableCount := 0
+	for _, recipe := range recipes {
+		if c.names[recipe.TaskID] == "successor" {
+			durable = recipe
+			durableCount++
+		}
+	}
+	if durableCount != 1 || !strings.EqualFold(durable.Status, "cancelled") || strings.TrimSpace(durable.ClaimedBy) != "" {
+		t.Fatalf("%s: cancellation winner has invalid durable successor: count=%d row=%+v", when, durableCount, durable)
+	}
+	publicCount := 0
+	for _, task := range public.Tasks {
+		if c.names[task.TaskID] == "successor" {
+			publicCount++
+			if task.ID != durable.ID || task.TaskID != durable.TaskID ||
+				!strings.EqualFold(task.Status, "cancelled") || strings.TrimSpace(task.ClaimedBy) != "" {
+				t.Fatalf("%s: cancellation winner has invalid public successor: %+v", when, task)
+			}
+		}
+	}
+	if publicCount != 1 {
+		t.Fatalf("%s: cancelled successor has %d matching public rows, want 1", when, publicCount)
+	}
+	if starts := len(fe.sink.StartsFor(c.first.ID, "successor")); starts != 0 {
+		t.Fatalf("%s: cancelled old run started successor %d time(s)", when, starts)
+	}
 }

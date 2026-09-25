@@ -396,9 +396,10 @@ type CancelRaceEvent struct {
 
 // ClassifyCancelCompletionRace accepts either serial order of two overlapping
 // requests. It requires the old run's persisted events to explain the observed
-// completion response and terminal task/run rows. `missing_run` needs a separate
-// successful SQL proof of lease absence, supplied by the caller.
-func ClassifyCancelCompletionRace(runID, blockTaskID string, status int, code string, leaseAbsent bool,
+// completion response and terminal task/run rows. Only terminal_run proves a
+// refused completion saw the terminal state. A later cancellation cannot order
+// stale_generation, not_owner, wrong_worker, or missing_run at response time.
+func ClassifyCancelCompletionRace(runID, blockTaskID string, status int, code string,
 	runStatus, blockStatus string, events []CancelRaceEvent) (string, error) {
 	if runID == "" || blockTaskID == "" || len(events) == 0 {
 		return "", fmt.Errorf("inconclusive: missing race identity or persisted events")
@@ -436,12 +437,20 @@ func ClassifyCancelCompletionRace(runID, blockTaskID string, status int, code st
 		}
 	}
 	if status == 409 {
-		if !CancelledCompleteRefusalAllowed(status, code) && !(code == RefusalMissingRun && leaseAbsent) {
-			return "", fmt.Errorf("completion refusal %d/%s is not a proved cancellation fence", status, code)
+		if strings.TrimSpace(code) != RefusalTerminalRun {
+			return "", fmt.Errorf("inconclusive: completion refusal %d/%s could precede cancellation", status, code)
 		}
 		if !strings.EqualFold(runStatus, "cancelled") || !strings.EqualFold(blockStatus, "cancelled") ||
 			cancelledSeq == 0 || succeededSeq != 0 {
 			return "", fmt.Errorf("rejected completion contradicts durable cancellation: run=%s block=%s success_seq=%d cancel_seq=%d", runStatus, blockStatus, succeededSeq, cancelledSeq)
+		}
+		for _, ev := range events {
+			if ev.TaskID != blockTaskID {
+				switch ev.Type {
+				case "task_started", "task_succeeded", "task_failed":
+					return "", fmt.Errorf("successor task event %s persisted during cancellation winner: %+v", ev.Type, ev)
+				}
+			}
 		}
 		return "cancellation_won", nil
 	}
