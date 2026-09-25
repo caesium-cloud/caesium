@@ -73,6 +73,7 @@ require_cmd kubectl
 require_cmd helm
 require_cmd docker
 require_cmd python3
+require_cmd awk
 [[ -f "$HOSTLOGIC" ]] || die "missing $HOSTLOGIC"
 python3 "$HOSTLOGIC" self-test >/dev/null || die "hostlogic.py self-test failed"
 
@@ -144,6 +145,7 @@ case "$RUN_PATTERN" in
       TestCore/wrong_token_internal
       TestCore/invalid_mtls_peer
       TestCore/cancel_completion_race
+      TestCore/cancel_post_commit_fence
       TestCore/commit_before_response_loss
       TestCore/stale_generation_complete
       TestCore/worker_unreachable_bench
@@ -159,6 +161,7 @@ case "$RUN_PATTERN" in
       wrong_token_internal
       invalid_mtls_peer
       cancel_completion_race
+      cancel_post_commit_fence
       commit_before_response_loss
       stale_generation_complete
       worker_unreachable_bench
@@ -249,6 +252,36 @@ open_chain() {
   printf 'CS%s' "$(printf '%s' "$tag" | tr -cd '[:alnum:]' | tr '[:lower:]' '[:upper:]' | cut -c1-18)"
 }
 
+# Match the whole comment identity, including the known rule kind and port.
+# A sibling tag can extend this tag with "r" or "-extra" and must remain owned
+# by its own heal request.
+tagged_rule_lines() {
+  local tag="$1"
+  awk -v tag="$tag" '
+    {
+      for (i = 1; i < NF; i++) {
+        if ($i != "--comment") continue
+        comment = $(i + 1)
+        gsub(/"/, "", comment)
+        if (comment ~ ("^" tag "-(drop|open-count)-[0-9]+$")) print
+      }
+    }'
+}
+
+tagged_rule_lines_self_test() {
+  local own='-A FORWARD -m comment --comment rb-test-drop-9001 -j DROP'
+  local own_open='-A CSRBT -m comment --comment "rb-test-open-count-8443" -j RETURN'
+  local reverse='-A FORWARD -m comment --comment rb-testr-drop-9001 -j DROP'
+  local prefix='-A FORWARD -m comment --comment rb-test-extra-drop-9001 -j DROP'
+  local expected
+  expected="$(printf '%s\n%s' "$own" "$own_open")"
+  [[ "$(printf '%s\n%s\n%s\n%s\n' "$own" "$own_open" "$reverse" "$prefix" | tagged_rule_lines rb-test)" == "$expected" ]] \
+    || die "tagged rule matching selected a sibling or lost an owned rule"
+  [[ "$(printf '%s\n%s\n%s\n' 'node rb-test' 'node rb-testr' 'node rb-test-extra' | awk -v tag=rb-test '$2 != tag')" == "$(printf '%s\n%s' 'node rb-testr' 'node rb-test-extra')" ]] \
+    || die "partition journal removal also selected a sibling partition"
+}
+tagged_rule_lines_self_test
+
 # Remove exactly the rules carrying this tag, and nothing else: every delete is
 # built from the node's own `iptables -S` output.
 remove_tagged_rules() {
@@ -261,7 +294,7 @@ remove_tagged_rules() {
     # xargs (not eval) so the quoted --comment argument is split correctly and
     # no rule text is ever interpreted as shell.
     printf '%s\n' "$spec" | xargs docker exec "$node" iptables -D >/dev/null 2>&1 || true
-  done < <(docker exec "$node" iptables -S FORWARD 2>/dev/null | grep -F -- "$tag" || true)
+  done < <(docker exec "$node" iptables -S FORWARD 2>/dev/null | tagged_rule_lines "$tag" || true)
   while docker exec "$node" iptables -C FORWARD -j "$chain" >/dev/null 2>&1; do
     docker exec "$node" iptables -D FORWARD -j "$chain" >/dev/null 2>&1 || break
   done
@@ -1252,10 +1285,10 @@ PY
       remove_tagged_rules "$p_src_node" "$p_tag"
       remove_tagged_rules "$p_dst_node" "$p_tag"
       if [[ -f "$PARTITION_FILE" ]]; then
-        grep -v -F -- " $p_tag" "$PARTITION_FILE" >"$PARTITION_FILE.tmp" 2>/dev/null || true
+        awk -v tag="$p_tag" '$2 != tag' "$PARTITION_FILE" >"$PARTITION_FILE.tmp" 2>/dev/null || true
         mv "$PARTITION_FILE.tmp" "$PARTITION_FILE" 2>/dev/null || true
       fi
-      remaining="$( { docker exec "$p_src_node" iptables -S 2>/dev/null; docker exec "$p_dst_node" iptables -S 2>/dev/null; } | grep -F -- "$p_tag" || true)"
+      remaining="$( { docker exec "$p_src_node" iptables -S 2>/dev/null; docker exec "$p_dst_node" iptables -S 2>/dev/null; } | tagged_rule_lines "$p_tag" || true)"
       if [[ -n "$remaining" ]]; then
         fail_request "$request_id" "$action" "rules tagged $p_tag survived heal: $remaining"; return 0
       fi

@@ -19,6 +19,7 @@ func TestStateDiffsDetectsMutationAndEquality(t *testing.T) {
 		t.Fatalf("identical fingerprints reported diffs %v", diffs)
 	}
 	after := before
+	after.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
 	after.Tasks[0].Status = "succeeded"
 	after.EffectNonces = []string{"n1", "n2"}
 	diffs := StateDiffs(before, after)
@@ -28,6 +29,22 @@ func TestStateDiffsDetectsMutationAndEquality(t *testing.T) {
 	joined := strings.Join(diffs, ",")
 	if !strings.Contains(joined, "status") && !strings.Contains(joined, "effect") && !strings.Contains(joined, "tasks[0].status") {
 		t.Fatalf("diffs %v missed the planted mutation", diffs)
+	}
+	claimOnly := before
+	claimOnly.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
+	claimOnly.Tasks[0].ClaimAttempt++
+	claimOnly.Tasks[0].OwnerGeneration++
+	claimDiffs := strings.Join(StateDiffs(before, claimOnly), ",")
+	if !strings.Contains(claimDiffs, "claim_attempt") || !strings.Contains(claimDiffs, "owner_generation") {
+		t.Fatalf("durable claim mutation was not detected: %s", claimDiffs)
+	}
+	payloadOnly := before
+	payloadOnly.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
+	payloadOnly.Tasks[0].ResultDigest = "mutated-result"
+	payloadOnly.Tasks[0].OutputDigest = "mutated-output"
+	payloadDiffs := strings.Join(StateDiffs(before, payloadOnly), ",")
+	if !strings.Contains(payloadDiffs, "result_digest") || !strings.Contains(payloadDiffs, "output_digest") {
+		t.Fatalf("rejected completion payload mutation was not detected: %s", payloadDiffs)
 	}
 }
 
@@ -130,15 +147,83 @@ func TestParseRefusalUnauthorizedAndStaleGeneration(t *testing.T) {
 }
 
 func TestTerminalCompleteRefusalAllowed(t *testing.T) {
-	if !TerminalCompleteRefusalAllowed(409, RefusalTaskNotRunning) ||
+	if !TerminalCompleteRefusalAllowed(409, RefusalTerminalRun) ||
 		!TerminalCompleteRefusalAllowed(409, RefusalWrongWorker) {
 		t.Fatal("claim/terminal 409 must be allowed")
 	}
 	if TerminalCompleteRefusalAllowed(409, RefusalNotOwner) ||
 		TerminalCompleteRefusalAllowed(409, RefusalMissingRun) ||
+		TerminalCompleteRefusalAllowed(409, RefusalTaskNotRunning) ||
+		TerminalCompleteRefusalAllowed(409, RefusalCompletionRejected) ||
 		TerminalCompleteRefusalAllowed(503, RefusalTaskNotRunning) ||
 		TerminalCompleteRefusalAllowed(200, RefusalTaskNotRunning) {
 		t.Fatal("not_owner, missing_run, 5xx and 200 must not count as the terminal fence")
+	}
+}
+
+func TestCancelledCompleteRefusalAllowed(t *testing.T) {
+	for _, code := range []string{
+		RefusalTerminalRun, RefusalWrongWorker,
+		RefusalNotOwner, RefusalStaleGeneration,
+	} {
+		if !CancelledCompleteRefusalAllowed(409, code) {
+			t.Fatalf("409 %s must fence an old completion", code)
+		}
+	}
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{{200, ""}, {503, "owner_not_ready"}, {409, ""}, {409, RefusalMissingRun},
+		{409, RefusalCompletionRejected}, {409, RefusalTaskNotRunning}} {
+		if CancelledCompleteRefusalAllowed(tc.status, tc.code) {
+			t.Fatalf("%d %s must not prove a cancellation fence", tc.status, tc.code)
+		}
+	}
+}
+
+func TestClassifyCancelCompletionRaceRequiresDurableWinnerOrder(t *testing.T) {
+	const runID, blockID = "run-1", "block-1"
+	started := CancelRaceEvent{Sequence: 1, Type: "task_started", RunID: runID, TaskID: blockID}
+	success := CancelRaceEvent{Sequence: 2, Type: "task_succeeded", RunID: runID, TaskID: blockID}
+	cancel := CancelRaceEvent{Sequence: 3, Type: "run_cancelled", RunID: runID}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", "cancelled", "succeeded",
+		[]CancelRaceEvent{started, success, cancel}); err != nil || got != "completion_won_then_cancelled" {
+		t.Fatalf("completion-first history = %q, %v", got, err)
+	}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 409, RefusalTerminalRun, "cancelled", "cancelled",
+		[]CancelRaceEvent{started, cancel}); err != nil || got != "cancellation_won" {
+		t.Fatalf("cancellation-first history = %q, %v", got, err)
+	}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", "succeeded", "succeeded",
+		[]CancelRaceEvent{started, success}); err != nil || got != "completion_won_before_replace" {
+		t.Fatalf("completion-before-replace history = %q, %v", got, err)
+	}
+	for _, tc := range []struct {
+		name        string
+		status      int
+		code        string
+		runStatus   string
+		blockStatus string
+		events      []CancelRaceEvent
+	}{
+		{"success after cancellation", 200, "", "cancelled", "succeeded", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_succeeded", RunID: runID, TaskID: blockID}}},
+		{"successor started before cancellation", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "task_started", RunID: runID, TaskID: "successor"}, cancel}},
+		{"successor started after cancellation", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_started", RunID: runID, TaskID: "successor"}}},
+		{"rejected but block succeeded", 409, RefusalTerminalRun, "cancelled", "succeeded", []CancelRaceEvent{started, success, cancel}},
+		{"missing run after later cancellation", 409, RefusalMissingRun, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"stale generation before later cancellation", 409, RefusalStaleGeneration, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"not owner before later cancellation", 409, RefusalNotOwner, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"wrong worker before later cancellation", 409, RefusalWrongWorker, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"missing cancellation event", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started}},
+		{"wrong run scope", 409, RefusalTerminalRun, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 3, Type: "run_cancelled", RunID: "other-run"}}},
+		{"nonmonotonic order", 200, "", "cancelled", "succeeded", []CancelRaceEvent{started, cancel, success}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if outcome, err := ClassifyCancelCompletionRace(runID, blockID, tc.status, tc.code,
+				tc.runStatus, tc.blockStatus, tc.events); err == nil {
+				t.Fatalf("bad history classified as %q", outcome)
+			}
+		})
 	}
 }
 

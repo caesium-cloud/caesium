@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,6 +199,47 @@ func TestRuntimeExecutorRecoveryFenceDoesNotReplayFinishedAtom(t *testing.T) {
 	var row models.TaskRun
 	require.NoError(t, f.db.First(&row, "id = ?", f.taskRun.ID).Error)
 	require.NotEqual(t, "failed", row.Status)
+}
+
+func TestTerminalRunRefusalFencesOwnerSinkWithoutFailureCompletion(t *testing.T) {
+	f := seedProducerTaskRun(t, "terminal-owner-sink-fence")
+	const ownerNode = "terminal-owner:8080"
+	const token = "terminal-test-token"
+	leaseStore := run.NewLeaseStore(f.db)
+	generation, err := leaseStore.AcquireLease(t.Context(), f.jobRun.ID, ownerNode, time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", f.jobRun.ID).
+		Update("status", string(run.StatusSucceeded)).Error)
+	h := dispatch.NewHandler(f.store, leaseStore, ownerNode, token).
+		WithOwnerManager(run.NewOwnerManager(f.store, run.CheckpointConfig{}))
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		h.HandleComplete(w, r)
+	}))
+	defer server.Close()
+	meta := dispatchMeta{
+		OwnerBaseURL: server.URL, Token: token, WorkerNode: f.taskRun.ClaimedBy,
+		OwnerGeneration: generation, Attempt: f.taskRun.Attempt,
+	}
+	sink := newOwnerSink(meta, dispatch.PostComplete)
+	err = sink.Succeeded(t.Context(), f.taskRun, "success", nil, nil)
+	require.ErrorIs(t, err, run.ErrTaskClaimMismatch)
+	require.EqualValues(t, 1, posts.Load(), "terminal refusal must not trigger an extra failure completion")
+	engine := &reviewCountingEngine{captureCreateEngine: &captureCreateEngine{logs: "done\n", waitResult: atom.Success}}
+	(&runtimeExecutor{store: f.store, localSink: &fakeSink{},
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) { return engine, nil },
+		completePost:  dispatch.PostComplete,
+	}).Execute(withDispatchMeta(t.Context(), meta), f.taskRun)
+	require.Equal(t, 1, engine.creates)
+	require.EqualValues(t, 2, posts.Load(), "worker must send only its successful result, with no extra failure completion")
+	var taskRow models.TaskRun
+	require.NoError(t, f.db.First(&taskRow, "id = ?", f.taskRun.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), taskRow.Status)
+	require.Zero(t, taskRow.TerminalSequence)
+	var runRow models.JobRun
+	require.NoError(t, f.db.First(&runRow, "id = ?", f.jobRun.ID).Error)
+	require.Equal(t, string(run.StatusSucceeded), runRow.Status)
 }
 
 func TestRuntimeExecutorRecoveryReportStopsAtRunDeadline(t *testing.T) {

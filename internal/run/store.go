@@ -539,8 +539,12 @@ var (
 
 var (
 	ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
-	ErrRunSkipped        = errors.New("run: skipped by concurrency policy")
-	ErrRunQueued         = errors.New("run: queued by concurrency policy")
+	// ErrRunTerminal means the owner completion's guarded write observed a
+	// terminal JobRun in its own transaction. Unlike a claim mismatch on a
+	// running run, this proves the run-state fence preceded that write.
+	ErrRunTerminal = errors.New("run: terminal run fenced owner completion")
+	ErrRunSkipped  = errors.New("run: skipped by concurrency policy")
+	ErrRunQueued   = errors.New("run: queued by concurrency policy")
 	// ErrRunHeldUpstream is returned when the data circuit breaker's admission
 	// gate refuses a run because a dataset the job declares under
 	// datasets.consumes is held.
@@ -4333,6 +4337,23 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 	return skippedTaskIDs, expansion, err
 }
 
+// ownerCompletionClaimMismatchTx distinguishes cancellation or other terminal
+// run state from a wrong claim at the same serialization point as the guarded
+// owner write. A later read outside this transaction could see cancellation
+// after an unrelated claim mismatch and falsely certify a cancellation fence.
+func ownerCompletionClaimMismatchTx(tx *gorm.DB, runID uuid.UUID) error {
+	var row struct{ Status string }
+	if err := tx.Model(&models.JobRun{}).Select("status").Where("id = ?", runID).Take(&row).Error; err != nil {
+		return fmt.Errorf("run: read status after owner completion claim mismatch: %w", err)
+	}
+	for _, terminal := range terminalRunStatuses() {
+		if row.Status == terminal {
+			return ErrRunTerminal
+		}
+	}
+	return ErrTaskClaimMismatch
+}
+
 // CompleteTaskOwner is the run-owner in-memory path's durable terminal write.
 // The owner has already advanced the DAG in memory (run.RunState), so this only
 // persists terminal rows — it does NOT decrement predecessors, evaluate trigger
@@ -4410,7 +4431,9 @@ func (s *Store) CompleteTaskOwner(
 					}
 				}
 			} else if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrTaskClaimMismatch
+				return ownerCompletionClaimMismatchTx(tx, runID)
+			} else {
+				return err
 			}
 
 			updates := map[string]any{
@@ -4452,7 +4475,7 @@ func (s *Store) CompleteTaskOwner(
 				return res.Error
 			}
 			if res.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+				return ownerCompletionClaimMismatchTx(tx, runID)
 			}
 			counts.addTaskRunStatus(1)
 

@@ -21,7 +21,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
 
-	completeEx := cli.Complete(ctx, target, completePayload(run, lease, "succeeded", lease.Generation))
+	completeEx := cli.Complete(ctx, target, completePayload(t, fe, member.HTTPBase(), run, lease, "succeeded", lease.Generation))
 	if completeEx.Err != "" {
 		t.Fatalf("wrong-token complete transport: %v", completeEx.Err)
 	}
@@ -32,7 +32,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	}
 
 	peer := otherMember(fe.topo, owner)
-	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(run, lease, peer.NodeAddress))
+	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(t, fe, member.HTTPBase(), run, lease, peer.NodeAddress))
 	if dispatchEx.Err != "" {
 		t.Fatalf("wrong-token dispatch transport: %v", dispatchEx.Err)
 	}
@@ -62,7 +62,7 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
-	payload := completePayload(run, lease, "succeeded", lease.Generation)
+	payload := completePayload(t, fe, member.HTTPBase(), run, lease, "succeeded", lease.Generation)
 
 	mintCtx, mintCancel := context.WithTimeout(ctx, 30*time.Second)
 	cli, err := cluster.InvalidCertClient(mintCtx, fe.httpAPI, member.HTTPBase())
@@ -77,15 +77,15 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	if !IsTLSHandshakeAlert(ex.Err) {
 		t.Fatalf("invalid peer cert did not produce a TLS alert (err=%q status=%d)", ex.Err, ex.Status)
 	}
+	afterInvalid := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	requireNoMutation(t, before, afterInvalid, "invalid mTLS peer")
 
 	control := validInternalClient(t, fe, owner)
 	ctrl := control.Complete(ctx, target, payload)
-	if ctrl.Err != "" || ctrl.Status == 0 {
-		t.Fatalf("valid-leaf control did not reach the handler on %s: err=%q status=%d", owner.Name, ctrl.Err, ctrl.Status)
+	if ctrl.Err != "" || ctrl.Status != http.StatusOK {
+		t.Fatalf("valid-leaf control was not accepted on %s: err=%q status=%d body=%s",
+			owner.Name, ctrl.Err, ctrl.Status, truncate([]byte(ctrl.Body), 200))
 	}
-
-	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
-	requireNoMutation(t, before, after, "invalid mTLS peer")
 
 	writeCoreRecord(t, fe, "invalid_mtls_peer", map[string]any{
 		"run_id":          run.ID,
@@ -94,6 +94,6 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 		"error_class":     "tls",
 		"control_status":  ctrl.Status,
 		"control_reached": true,
-		"state_digest":    digestOf(after),
+		"state_digest":    digestOf(afterInvalid),
 	})
 }

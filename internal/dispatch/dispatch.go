@@ -47,9 +47,13 @@ const (
 	ReasonCompletionApplicationRejected = "completion_application_rejected"
 	ReasonCompletionApplyFailed         = "completion_apply_failed"
 	ReasonTaskNotRunning                = "task_not_running"
-	ReasonNotOwner                      = "not_owner"
-	ReasonMissingRun                    = "missing_run"
-	ReasonMalformed                     = "malformed"
+	// ReasonTerminalRun is a permanent run-state fence. Keep it distinct from
+	// legacy task_not_running, which PostComplete classifies as an application
+	// rejection so a worker can report a deterministic result failure.
+	ReasonTerminalRun = "terminal_run"
+	ReasonNotOwner    = "not_owner"
+	ReasonMissingRun  = "missing_run"
+	ReasonMalformed   = "malformed"
 	// ReasonContention labels caesium_complete_retryable_total when the owner
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
@@ -637,9 +641,64 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rules 1 & 2 in a single DB call: GetLease returns the row, we check
-	// ownership (owner_node, expiry) and generation in memory.
+	// ownership (owner_node, expiry) and generation in memory. A failed read
+	// does not prove that the lease is absent: retain the worker's completed
+	// result for retry rather than discarding it as an ownership fence.
 	lease, err := h.leaseStore.GetLease(ctx, req.RunID)
-	if err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Warn("complete: cannot read run lease; asking worker to retry",
+			"run_id", req.RunID, "error", err)
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "run lease could not be read; retry completion",
+		})
+		return
+	}
+	if err == nil && lease == nil {
+		log.Warn("complete: run lease read returned no row or error; asking worker to retry",
+			"run_id", req.RunID)
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "run lease could not be read; retry completion",
+		})
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A concurrency replacement cancels the run and deletes its lease in
+		// one transaction. When that wins before this read, the missing lease
+		// is a permanent run fence only if the durable run status proves it.
+		var persisted struct{ Status string }
+		readErr := h.store.DB().WithContext(ctx).Model(&models.JobRun{}).
+			Select("status").Where("id = ?", req.RunID).Take(&persisted).Error
+		if readErr != nil && !errors.Is(readErr, gorm.ErrRecordNotFound) {
+			log.Warn("complete: cannot read run status after missing lease; asking worker to retry",
+				"run_id", req.RunID, "error", readErr)
+			if !metricQuarantined() {
+				metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+			}
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+				Code:    ReasonOwnerNotReady,
+				Message: "run status could not be read; retry completion",
+			})
+			return
+		}
+		if readErr == nil {
+			switch run.Status(persisted.Status) {
+			case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled, run.StatusSkipped:
+				recordRejected(ReasonTerminalRun)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTerminalRun,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
+		}
 		recordRejected(ReasonMissingRun)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonMissingRun,
@@ -678,6 +737,14 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 				h.rejectRetryable(w, req, omErr, metricQuarantined())
 				return
 			}
+			if errors.Is(omErr, run.ErrRunTerminal) {
+				recordRejected(ReasonTerminalRun)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTerminalRun,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
 			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
 				recordRejected(ReasonWrongWorker)
 				writeJSON(w, http.StatusConflict, ErrorResponse{
@@ -694,6 +761,28 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		if res.Owned {
 			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 			return
+		}
+		// A completed memory owner drops its in-memory state but retains the
+		// lease. Distinguish that durable terminal state from a running owner
+		// that has not recovered yet. Read only the run status: a retry can
+		// reopen the same run ID, so a running or unreadable row must remain
+		// retryable rather than being mistaken for a terminal duplicate.
+		var persisted struct{ Status string }
+		readErr := h.store.DB().WithContext(ctx).Model(&models.JobRun{}).
+			Select("status").Where("id = ?", req.RunID).Take(&persisted).Error
+		if readErr == nil {
+			switch run.Status(persisted.Status) {
+			case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled, run.StatusSkipped:
+				recordRejected(ReasonTerminalRun)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTerminalRun,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
+		} else {
+			log.Warn("complete: cannot read run status for untracked memory owner; asking worker to retry",
+				"run_id", req.RunID, "error", readErr)
 		}
 		if !metricQuarantined() {
 			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()

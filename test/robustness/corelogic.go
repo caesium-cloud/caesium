@@ -18,6 +18,7 @@ const (
 	RefusalStaleGeneration     = "stale_generation"
 	RefusalUnauthorized        = "unauthorized"
 	RefusalTaskNotRunning      = "task_not_running"
+	RefusalTerminalRun         = "terminal_run"
 	RefusalWrongWorker         = "wrong_worker"
 	RefusalInvalidStatus       = "invalid_status"
 	RefusalCompletionRejected  = "completion_application_rejected"
@@ -32,14 +33,18 @@ const (
 // TaskFingerprint is the mutation-sensitive public/SQL view of one task-run.
 // Secrets never belong here.
 type TaskFingerprint struct {
-	ID        string `json:"id"`
-	TaskID    string `json:"task_id"`
-	Status    string `json:"status"`
-	Image     string `json:"image"`
-	Command   string `json:"command,omitempty"`
-	ClaimedBy string `json:"claimed_by,omitempty"`
-	Attempt   int    `json:"attempt"`
-	Error     string `json:"error,omitempty"`
+	ID              string `json:"id"`
+	TaskID          string `json:"task_id"`
+	Status          string `json:"status"`
+	Image           string `json:"image"`
+	Command         string `json:"command,omitempty"`
+	ClaimedBy       string `json:"claimed_by,omitempty"`
+	Attempt         int    `json:"attempt"`
+	ClaimAttempt    int    `json:"claim_attempt"`
+	OwnerGeneration int64  `json:"owner_generation"`
+	ResultDigest    string `json:"result_digest,omitempty"`
+	OutputDigest    string `json:"output_digest,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // StateFingerprint is compared before/after a denied operation. Equality is
@@ -110,6 +115,18 @@ func StateDiffs(before, after StateFingerprint) []string {
 		}
 		if a.Attempt != b.Attempt {
 			diffs = append(diffs, prefix+".attempt")
+		}
+		if a.ClaimAttempt != b.ClaimAttempt {
+			diffs = append(diffs, prefix+".claim_attempt")
+		}
+		if a.OwnerGeneration != b.OwnerGeneration {
+			diffs = append(diffs, prefix+".owner_generation")
+		}
+		if a.ResultDigest != b.ResultDigest {
+			diffs = append(diffs, prefix+".result_digest")
+		}
+		if a.OutputDigest != b.OutputDigest {
+			diffs = append(diffs, prefix+".output_digest")
 		}
 		if a.Error != b.Error {
 			diffs = append(diffs, prefix+".error")
@@ -343,10 +360,119 @@ func TerminalCompleteRefusalAllowed(status int, code string) bool {
 		return false
 	}
 	switch strings.TrimSpace(code) {
-	case RefusalTaskNotRunning, RefusalWrongWorker, RefusalInvalidStatus, RefusalCompletionRejected:
+	case RefusalTerminalRun, RefusalWrongWorker:
 		return true
 	default:
 		return false
+	}
+}
+
+// CancelledCompleteRefusalAllowed accepts explicit fences for an old claimed
+// completion after replacement was admitted. `missing_run` needs a separate
+// successful SQL read proving that cancellation deleted the old lease; the
+// handler also returns that code when its lease read fails. A retryable owner
+// error, transport failure, or success cannot prove this contender was fenced.
+func CancelledCompleteRefusalAllowed(status int, code string) bool {
+	if status != 409 {
+		return false
+	}
+	switch strings.TrimSpace(code) {
+	case RefusalTerminalRun, RefusalWrongWorker,
+		RefusalNotOwner, RefusalStaleGeneration:
+		return true
+	default:
+		return false
+	}
+}
+
+// CancelRaceEvent is a persisted event read from one selected store. Sequence
+// order is the durable transaction order for this run, not HTTP arrival order.
+type CancelRaceEvent struct {
+	Sequence uint64
+	Type     string
+	RunID    string
+	TaskID   string
+}
+
+// ClassifyCancelCompletionRace accepts either serial order of two overlapping
+// requests. It requires the old run's persisted events to explain the observed
+// completion response and terminal task/run rows. Only terminal_run proves a
+// refused completion saw the terminal state. A later cancellation cannot order
+// stale_generation, not_owner, wrong_worker, or missing_run at response time.
+func ClassifyCancelCompletionRace(runID, blockTaskID string, status int, code string,
+	runStatus, blockStatus string, events []CancelRaceEvent) (string, error) {
+	if runID == "" || blockTaskID == "" || len(events) == 0 {
+		return "", fmt.Errorf("inconclusive: missing race identity or persisted events")
+	}
+	var succeededSeq, cancelledSeq uint64
+	var previous uint64
+	for _, ev := range events {
+		if ev.RunID != runID || ev.Sequence == 0 || ev.Sequence <= previous {
+			return "", fmt.Errorf("inconclusive: wrong run or non-monotonic persisted event: %+v after %d", ev, previous)
+		}
+		previous = ev.Sequence
+		switch ev.Type {
+		case "task_succeeded":
+			if ev.TaskID == blockTaskID {
+				if succeededSeq != 0 {
+					return "", fmt.Errorf("duplicate block success event for %s", blockTaskID)
+				}
+				succeededSeq = ev.Sequence
+			}
+		case "run_cancelled":
+			if cancelledSeq != 0 {
+				return "", fmt.Errorf("duplicate run cancellation event for %s", runID)
+			}
+			cancelledSeq = ev.Sequence
+		}
+	}
+	if cancelledSeq != 0 {
+		for _, ev := range events {
+			if ev.Sequence > cancelledSeq {
+				switch ev.Type {
+				case "task_started", "task_succeeded", "task_failed":
+					return "", fmt.Errorf("task event %s at %d persisted after run cancellation at %d", ev.Type, ev.Sequence, cancelledSeq)
+				}
+			}
+		}
+	}
+	if status == 409 {
+		if strings.TrimSpace(code) != RefusalTerminalRun {
+			return "", fmt.Errorf("inconclusive: completion refusal %d/%s could precede cancellation", status, code)
+		}
+		if !strings.EqualFold(runStatus, "cancelled") || !strings.EqualFold(blockStatus, "cancelled") ||
+			cancelledSeq == 0 || succeededSeq != 0 {
+			return "", fmt.Errorf("rejected completion contradicts durable cancellation: run=%s block=%s success_seq=%d cancel_seq=%d", runStatus, blockStatus, succeededSeq, cancelledSeq)
+		}
+		for _, ev := range events {
+			if ev.TaskID != blockTaskID {
+				switch ev.Type {
+				case "task_started", "task_succeeded", "task_failed":
+					return "", fmt.Errorf("successor task event %s persisted during cancellation winner: %+v", ev.Type, ev)
+				}
+			}
+		}
+		return "cancellation_won", nil
+	}
+	if status != 200 {
+		return "", fmt.Errorf("completion result %d/%s is neither accepted nor a proved refusal", status, code)
+	}
+	if succeededSeq == 0 || !strings.EqualFold(blockStatus, "succeeded") {
+		return "", fmt.Errorf("accepted completion lacks durable block success: status=%s seq=%d", blockStatus, succeededSeq)
+	}
+	switch strings.ToLower(strings.TrimSpace(runStatus)) {
+	case "cancelled":
+		if cancelledSeq == 0 || succeededSeq >= cancelledSeq {
+			return "", fmt.Errorf("accepted block completion is not ordered before cancellation: success_seq=%d cancel_seq=%d", succeededSeq, cancelledSeq)
+		}
+		return "completion_won_then_cancelled", nil
+	case "succeeded":
+		if cancelledSeq != 0 {
+			return "", fmt.Errorf("succeeded run also has cancellation event at %d", cancelledSeq)
+		}
+		return "completion_won_before_replace", nil
+	default:
+		return "", fmt.Errorf("accepted completion left old run %q", runStatus)
 	}
 }
 

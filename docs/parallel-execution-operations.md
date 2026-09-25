@@ -98,6 +98,7 @@ Finished completion reports keep their worker claim registered for renewal and c
 
 **New metrics:**
 - `caesium_complete_rejected_total{reason}` — counts `/internal/complete` rejections by fence violation type.
+  `reason="terminal_run"` is a permanent refusal after a run reaches a terminal state, including a cancellation that beats a completion. It is distinct from `task_not_running`, which the worker treats as a completion application error. An unreadable lease or run status returns retryable `503 owner_not_ready` and increments `caesium_complete_retryable_total{reason="owner_not_ready"}` instead of a fence-rejection counter.
 - `caesium_dispatch_stalled_total{reason}` — counts tasks that passed the dispatch progress deadline without any worker ever accepting them.
 - `caesium_run_lease_renewals_total` — counts batched run-lease renewal statements.
 - `caesium_run_leases_owned` — current number of run leases held by this node.

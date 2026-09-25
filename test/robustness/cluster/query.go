@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -107,15 +108,19 @@ func (h *HTTP) WithTimeout(d time.Duration) *HTTP {
 	return &HTTP{Client: &http.Client{Timeout: d}, ManualKey: h.ManualKey}
 }
 
-// TaskRecipe is the frozen image/command on a task_runs row.
+// TaskRecipe contains frozen recipe fields and claim evidence on a task_runs row.
 type TaskRecipe struct {
-	ID        string
-	TaskID    string
-	Status    string
-	Image     string
-	Command   string
-	ClaimedBy string
-	Attempt   int
+	ID              string
+	TaskID          string
+	Status          string
+	Image           string
+	Command         string
+	ClaimedBy       string
+	Attempt         int
+	ClaimAttempt    int
+	OwnerGeneration int64
+	ResultDigest    string
+	OutputDigest    string
 }
 
 // QueryTaskRecipes reads frozen recipe fields for one run.
@@ -124,27 +129,156 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 	if err != nil {
 		return nil, fmt.Errorf("refusing to interpolate an unvalidated run id %q: %w", runID, err)
 	}
-	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
+	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation, result, output FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
 	resp, _, err := h.Query(ctx, base, sql, 200)
 	if err != nil {
 		return nil, err
 	}
+	if resp.Limit != 200 || resp.Truncated || resp.RowCount != len(resp.Rows) || len(resp.Rows) > resp.Limit {
+		return nil, fmt.Errorf("inconclusive: task_runs query page is incomplete or malformed: limit=%d rows=%d reported=%d truncated=%t",
+			resp.Limit, len(resp.Rows), resp.RowCount, resp.Truncated)
+	}
 	out := make([]TaskRecipe, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
-		if len(row) < 7 {
-			return nil, fmt.Errorf("task_runs row has %d columns, want 7", len(row))
+		if len(row) < 11 {
+			return nil, fmt.Errorf("task_runs row has %d columns, want 11", len(row))
+		}
+		rowID, err := queryUUID(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.id: %w", err)
+		}
+		taskID, err := queryUUID(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.task_id for %s: %w", rowID, err)
+		}
+		resultDigest, err := queryCellDigest(row[9])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.result for %s: %w", rowID, err)
+		}
+		outputDigest, err := queryCellDigest(row[10])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.output for %s: %w", rowID, err)
 		}
 		out = append(out, TaskRecipe{
-			ID:        fmt.Sprint(row[0]),
-			TaskID:    fmt.Sprint(row[1]),
-			Status:    fmt.Sprint(row[2]),
-			Image:     fmt.Sprint(row[3]),
-			Command:   fmt.Sprint(row[4]),
-			ClaimedBy: fmt.Sprint(row[5]),
-			Attempt:   int(int64From(row[6])),
+			ID:              rowID,
+			TaskID:          taskID,
+			Status:          fmt.Sprint(row[2]),
+			Image:           fmt.Sprint(row[3]),
+			Command:         fmt.Sprint(row[4]),
+			ClaimedBy:       fmt.Sprint(row[5]),
+			Attempt:         int(int64From(row[6])),
+			ClaimAttempt:    int(int64From(row[7])),
+			OwnerGeneration: int64From(row[8]),
+			ResultDigest:    resultDigest,
+			OutputDigest:    outputDigest,
 		})
 	}
 	return out, nil
+}
+
+// ResolveUnfannedTaskRecipe maps a public GET /runs/:id task projection to its
+// one durable task_runs row. The public projection uses the catalog task ID as
+// Task.ID even for an unfanned step; it is not the task_runs primary key.
+// Requiring exactly one row for TaskID prevents that projection from hiding a
+// duplicate instance, and all public fields must agree with the durable row.
+func ResolveUnfannedTaskRecipe(public Task, recipes []TaskRecipe) (TaskRecipe, error) {
+	if public.ID == "" || public.TaskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task has no identity: %+v", public)
+	}
+	match, err := UniqueTaskRecipeForTaskID(public.TaskID, recipes)
+	if err != nil {
+		return TaskRecipe{}, err
+	}
+	if public.ID != public.TaskID && public.ID != match.ID {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task ID %s is neither catalog ID nor durable instance ID %s", public.ID, match.ID)
+	}
+	if !strings.EqualFold(public.Status, match.Status) || public.ClaimedBy != match.ClaimedBy ||
+		public.Attempt != match.Attempt || public.Image != match.Image {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public/durable task disagree: public=%+v durable=%+v", public, match)
+	}
+	return match, nil
+}
+
+// UniqueTaskRecipeForTaskID is only suitable for a known unfanned fixture.
+// It fails closed if a duplicate task_run exists for the catalog task.
+func UniqueTaskRecipeForTaskID(taskID string, recipes []TaskRecipe) (TaskRecipe, error) {
+	if taskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: no catalog task identity")
+	}
+	var match TaskRecipe
+	count := 0
+	for _, recipe := range recipes {
+		if recipe.TaskID == taskID {
+			match = recipe
+			count++
+		}
+	}
+	if count != 1 || match.ID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: catalog task %s maps to %d durable instances", taskID, count)
+	}
+	return match, nil
+}
+
+// queryCellDigest keeps NULL distinct from an empty string and rejects a cell
+// shape the read-only SQL endpoint does not produce for text/JSON columns.
+func queryCellDigest(value any) (string, error) {
+	var raw []byte
+	switch v := value.(type) {
+	case nil:
+		raw = []byte{0}
+	case string:
+		raw = append([]byte{1}, v...)
+	default:
+		return "", fmt.Errorf("unexpected text cell %T", value)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// QueryLeaseAbsent proves absence through a successful SQL read. QueryLease's
+// error alone cannot distinguish a deleted row from an unavailable database.
+func (h *HTTP) QueryLeaseAbsent(ctx context.Context, base, runID string) (bool, error) {
+	id, err := uuid.Parse(runID)
+	if err != nil {
+		return false, fmt.Errorf("lease query refused unvalidated run id %q: %w", runID, err)
+	}
+	sql := fmt.Sprintf("SELECT run_id FROM run_leases WHERE run_id = '%s'", id.String())
+	resp, _, err := h.Query(ctx, base, sql, 1)
+	if err != nil {
+		return false, err
+	}
+	if resp.RowCount != len(resp.Rows) || len(resp.Rows) > 1 {
+		return false, fmt.Errorf("lease query returned inconsistent row count: reported=%d actual=%d", resp.RowCount, len(resp.Rows))
+	}
+	if len(resp.Rows) == 0 {
+		return true, nil
+	}
+	if len(resp.Rows[0]) != 1 {
+		return false, fmt.Errorf("lease query returned %d columns, want 1", len(resp.Rows[0]))
+	}
+	rowID, err := queryUUID(resp.Rows[0][0])
+	if err != nil {
+		return false, fmt.Errorf("lease row identity: %w", err)
+	}
+	if rowID != id.String() {
+		return false, fmt.Errorf("lease row identity %s != %s", rowID, id)
+	}
+	return false, nil
+}
+
+// The database query endpoint can return SQLite UUID bytes as a 32-character
+// hex string, while the public run API encodes the same UUID with hyphens.
+// Reject anything that cannot be mapped to one unambiguous UUID.
+func queryUUID(value any) (string, error) {
+	raw, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected UUID cell %T (%v)", value, value)
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid UUID cell %q: %w", raw, err)
+	}
+	return id.String(), nil
 }
 
 // DecodeBlob turns a database/query cell into bytes. Binary columns that are

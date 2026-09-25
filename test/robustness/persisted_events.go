@@ -32,8 +32,9 @@ type persistedEvent struct {
 //
 // DT-EVENT-01: a sequence identifies an event within the SELECTED store's
 // lifetime. The scope therefore records which member was read and the inclusive
-// sequence bounds the read returned, and marks itself incomplete when the row
-// count reached the limit — a truncated read can support no claim at all.
+// sequence bounds the read returned, and marks itself incomplete when the
+// query service reports truncation at its effective limit. A truncated read
+// can support no complete-history claim.
 func readPersistedEvents(ctx context.Context, h *cluster.HTTP, base, runID string, limit int) ([]persistedEvent, history.Scope, error) {
 	id, err := uuid.Parse(runID)
 	if err != nil {
@@ -60,7 +61,11 @@ func readPersistedEvents(ctx context.Context, h *cluster.HTTP, base, runID strin
 		return nil, history.Scope{}, fmt.Errorf("decode event query: %w", err)
 	}
 
-	scope := history.Scope{Store: base, Complete: len(resp.Rows) < limit}
+	complete, err := persistedPageComplete(resp, limit)
+	if err != nil {
+		return nil, history.Scope{}, err
+	}
+	scope := history.Scope{Store: base, Complete: complete}
 	out := make([]persistedEvent, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
 		if len(row) < 3 {
@@ -98,6 +103,17 @@ func readPersistedEvents(ctx context.Context, h *cluster.HTTP, base, runID strin
 		out = append(out, ev)
 	}
 	return out, scope, nil
+}
+
+// persistedPageComplete uses the query service's effective limit and explicit
+// truncation flag. The service can clamp a requested 2000 rows to 1000; row
+// count below the requested limit alone does not prove a complete history.
+func persistedPageComplete(resp cluster.QueryResponse, requestedLimit int) (bool, error) {
+	if resp.Limit < 1 || resp.Limit > requestedLimit || resp.RowCount != len(resp.Rows) || len(resp.Rows) > resp.Limit {
+		return false, fmt.Errorf("inconclusive: malformed event page: requested=%d effective=%d reported=%d actual=%d",
+			requestedLimit, resp.Limit, resp.RowCount, len(resp.Rows))
+	}
+	return !resp.Truncated, nil
 }
 
 func toHistoryPersisted(rows []persistedEvent) []history.Persisted {

@@ -58,9 +58,11 @@ type CatalogTask struct {
 }
 
 type QueryResponse struct {
-	RowCount int              `json:"row_count"`
-	Columns  []map[string]any `json:"columns"`
-	Rows     [][]any          `json:"rows"`
+	RowCount  int              `json:"row_count"`
+	Limit     int              `json:"limit"`
+	Truncated bool             `json:"truncated"`
+	Columns   []map[string]any `json:"columns"`
+	Rows      [][]any          `json:"rows"`
 }
 
 type Lease struct {
