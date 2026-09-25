@@ -9,6 +9,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,6 +33,17 @@ import (
 )
 
 const clusterRecorderURL = "http://lifecycle-recorder:8090"
+
+var errTaskProofUnavailable = errors.New("durable task proof query unavailable")
+
+// A demonstrated mismatch is a failed qualification case. Missing evidence
+// uses blockf so the report keeps those two outcomes distinct.
+func failClusterCase(t *testing.T, name, format string, args ...any) {
+	t.Helper()
+	detail := fmt.Sprintf(format, args...)
+	writeCase(t, caseRecord{Name: name, Status: statusFail, Detail: detail})
+	t.Fatalf("FAIL %s: %s", name, detail)
+}
 
 type clusterMemberEvidence struct {
 	Name     string `json:"name"`
@@ -114,7 +126,7 @@ func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, pub
 	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, claim_attempt, runtime_id, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
 	response, _, err := h.Query(ctx, base, sql, 2)
 	if err != nil {
-		return clusterTaskProof{}, err
+		return clusterTaskProof{}, fmt.Errorf("%w: %v", errTaskProofUnavailable, err)
 	}
 	return parseClusterTaskProof(response, rid.String(), tid.String())
 }
@@ -207,7 +219,7 @@ func verifyRetainedTaskIdentity(seed, current clusterTaskProof, runID, publicTas
 func readRetainedClusterTaskProof(ctx context.Context, h *cluster.HTTP, base string, seed map[string]clusterTaskProof, runID, publicTaskID string) (clusterTaskProof, error) {
 	before, ok := seed[runID]
 	if !ok {
-		return clusterTaskProof{}, fmt.Errorf("run %s has no pre-upgrade durable task proof", runID)
+		return clusterTaskProof{}, fmt.Errorf("%w: run %s has no pre-upgrade durable task proof", errTaskProofUnavailable, runID)
 	}
 	after, err := readClusterTaskProof(ctx, h, base, runID, publicTaskID)
 	if err != nil {
@@ -1048,6 +1060,35 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 }
 
 func TestLifecycleClusterAfterUpgrade(t *testing.T) {
+	caseName := "rolling-upgrade-three-voters"
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		caseDir := filepath.Join(artifactsDir(t), "cases")
+		path := filepath.Join(caseDir, sanitize(caseName)+".json")
+		// A prerequisite helper may have recorded its own blocked case (for
+		// example unavailable direct Raft membership or raw recorder data).
+		// That cannot turn into a failed product assertion here.
+		files, err := filepath.Glob(filepath.Join(caseDir, "*.json"))
+		if err != nil {
+			return
+		}
+		for _, file := range files {
+			raw, readErr := os.ReadFile(file)
+			if readErr != nil {
+				continue
+			}
+			var recorded caseRecord
+			if json.Unmarshal(raw, &recorded) == nil && recorded.Phase == "AfterUpgrade" && recorded.Status == statusBlocked {
+				return
+			}
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			writeCase(t, caseRecord{Name: caseName, Status: statusFail,
+				Detail: "runner assertion failed; see cluster-logs/AfterUpgrade.log for the observed mismatch"})
+		}
+	}()
 	clusterPair(t)
 	fx := clusterFixture{}
 	if !readJSON(t, "cluster-fixture.json", &fx) {
@@ -1124,12 +1165,16 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		Detail: fmt.Sprintf("three retained voters after rolling upgrade; Helm exit=%d; leader=%s", host.HelmExitCode, membership.Leader.Address),
 		Observations: map[string]any{"members": memberEvidence(topo, membership), "changed_pod_ips": changedIPs,
 			"helm_exit_code": host.HelmExitCode}})
+	caseName = "retained-history-and-raw-effects"
 	for _, want := range []runFixture{fx.Succeeded, fx.Failed} {
 		assertRunUnchanged(t, ctx, c, want, want.Status)
 		require.Len(t, want.Tasks, 1)
 		proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, want.ID, want.Tasks[0].ID)
 		if err != nil {
-			blockf(t, "retained-history-and-raw-effects", "terminal run %s lost its pre-upgrade durable task row: %v", want.ID, err)
+			if errors.Is(err, errTaskProofUnavailable) {
+				blockf(t, "retained-history-and-raw-effects", "terminal run %s durable task query unavailable: %v", want.ID, err)
+			}
+			failClusterCase(t, "retained-history-and-raw-effects", "terminal run %s lost its pre-upgrade durable task row: %v", want.ID, err)
 		}
 		require.Equal(t, want.Tasks[0].Status, proof.Status, "terminal durable task status changed")
 		got, err := readEventBacklog(ctx, c, want.ID, want.ResumeCursor)
@@ -1161,11 +1206,17 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		if current.Status != "running" || len(r.Tasks) != 1 || len(current.Tasks) != 1 ||
 			current.Tasks[0].ID != r.Tasks[0].ID || current.Tasks[0].Attempt < r.Tasks[0].Attempt ||
 			current.Tasks[0].Status != "running" {
-			blockf(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s", r.ID, current.Status)
+			failClusterCase(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s", r.ID, current.Status)
 		}
 		proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, r.ID, current.Tasks[0].ID)
-		if err != nil || proof.Status != "running" || proof.Attempt != current.Tasks[0].Attempt {
-			blockf(t, "retained-history-and-raw-effects", "in-flight run %s lost its pre-upgrade durable task row before release: proof=%+v error=%v", r.ID, proof, err)
+		if err != nil {
+			if errors.Is(err, errTaskProofUnavailable) {
+				blockf(t, "retained-history-and-raw-effects", "in-flight run %s durable task query unavailable before release: %v", r.ID, err)
+			}
+			failClusterCase(t, "retained-history-and-raw-effects", "in-flight run %s lost its pre-upgrade durable task row before release: %v", r.ID, err)
+		}
+		if proof.Status != "running" || proof.Attempt != current.Tasks[0].Attempt {
+			failClusterCase(t, "retained-history-and-raw-effects", "in-flight run %s durable attempt changed before release: proof=%+v", r.ID, proof)
 		}
 		preReleaseProofs[r.ID] = proof
 	}
@@ -1192,20 +1243,23 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		}
 		for _, event := range r.Events {
 			if event.Sequence > r.ResumeCursor && !retainedEvents[event.key()] {
-				blockf(t, "retained-history-and-raw-effects", "controlled release run %s lost pre-upgrade event %s", r.ID, event.key())
+				failClusterCase(t, "retained-history-and-raw-effects", "controlled release run %s lost pre-upgrade event %s", r.ID, event.key())
 			}
 		}
 		matchedAttempt := false
 		for _, task := range got.Tasks {
 			proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, got.ID, task.ID)
 			if err != nil {
-				blockf(t, "retained-history-and-raw-effects", "controlled release run %s lost its pre-upgrade durable task row: %v", got.ID, err)
+				if errors.Is(err, errTaskProofUnavailable) {
+					blockf(t, "retained-history-and-raw-effects", "controlled release run %s durable task query unavailable: %v", got.ID, err)
+				}
+				failClusterCase(t, "retained-history-and-raw-effects", "controlled release run %s lost its pre-upgrade durable task row: %v", got.ID, err)
 			}
 			if proof.Attempt < preReleaseProofs[r.ID].Attempt || proof.Attempt != task.Attempt {
-				blockf(t, "retained-history-and-raw-effects", "controlled release run %s task attempt regressed or disagreed with public projection: before=%d durable=%d public=%d", got.ID, preReleaseProofs[r.ID].Attempt, proof.Attempt, task.Attempt)
+				failClusterCase(t, "retained-history-and-raw-effects", "controlled release run %s task attempt regressed or disagreed with public projection: before=%d durable=%d public=%d", got.ID, preReleaseProofs[r.ID].Attempt, proof.Attempt, task.Attempt)
 			}
 			if err := reconcileRetainedAttemptEffects(fx.DurableTasks[r.ID], proof, fx.RawStartNonces[r.ID], events, taskEvents); err != nil {
-				blockf(t, "retained-history-and-raw-effects", "controlled release run %s raw attempts could not be reconciled: %v", got.ID, err)
+				failClusterCase(t, "retained-history-and-raw-effects", "controlled release run %s raw attempts could not be reconciled: %v", got.ID, err)
 			}
 			attemptProofs[r.ID] = append(attemptProofs[r.ID], proof)
 			if proof.TaskID == r.Tasks[0].ID && proof.Attempt >= r.Tasks[0].Attempt &&
@@ -1217,7 +1271,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 			"run": got, "seed_attempt": r.Tasks[0], "task_proofs": attemptProofs[r.ID],
 			"raw_events": events, "matched_seed_attempt": matchedAttempt})
 		if got.Status != "succeeded" || !matchedAttempt {
-			blockf(t, "retained-history-and-raw-effects", "controlled release did not complete the surviving task attempt for run %s: status=%s matched_seed_attempt=%t", r.ID, got.Status, matchedAttempt)
+			failClusterCase(t, "retained-history-and-raw-effects", "controlled release did not complete the surviving task attempt for run %s: status=%s matched_seed_attempt=%t", r.ID, got.Status, matchedAttempt)
 		}
 	}
 	var queued apiRun
@@ -1252,7 +1306,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		if err != nil {
 			lastQueuedErr = err
 		} else if isTerminal(live.Status) {
-			blockf(t, "retained-history-and-raw-effects", "queued run %s became terminal before its controlled release: %s", queued.ID, live.Status)
+			failClusterCase(t, "retained-history-and-raw-effects", "queued run %s became terminal before its controlled release: %s", queued.ID, live.Status)
 		} else if len(live.Tasks) != 1 {
 			lastQueuedErr = fmt.Errorf("queued run %s exposes %d public tasks, want one running task", queued.ID, len(live.Tasks))
 		} else {
@@ -1290,13 +1344,16 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	require.Len(t, queued.Tasks, 1, "queued run has no unique terminal task attempt")
 	proof, err := readClusterTaskProof(ctx, h, base, queued.ID, queued.Tasks[0].ID)
 	if err != nil {
-		blockf(t, "retained-history-and-raw-effects", "queued run %s terminal durable task missing: %v", queued.ID, err)
+		if errors.Is(err, errTaskProofUnavailable) {
+			blockf(t, "retained-history-and-raw-effects", "queued run %s terminal durable task query unavailable: %v", queued.ID, err)
+		}
+		failClusterCase(t, "retained-history-and-raw-effects", "queued run %s terminal durable task missing: %v", queued.ID, err)
 	}
 	if err := verifyRetainedTaskIdentity(queuedBeforeProof, proof, queued.ID, queuedBeforeProof.TaskID); err != nil {
-		blockf(t, "retained-history-and-raw-effects", "queued run %s changed its pre-release durable task identity: %v", queued.ID, err)
+		failClusterCase(t, "retained-history-and-raw-effects", "queued run %s changed its pre-release durable task identity: %v", queued.ID, err)
 	}
 	if queued.Tasks[0].Status != "succeeded" || proof.Status != "succeeded" || proof.Attempt != queued.Tasks[0].Attempt {
-		blockf(t, "retained-history-and-raw-effects", "queued run %s terminal public/durable task attempt disagrees: public=%+v durable=%+v", queued.ID, queued.Tasks[0], proof)
+		failClusterCase(t, "retained-history-and-raw-effects", "queued run %s terminal public/durable task attempt disagrees: public=%+v durable=%+v", queued.ID, queued.Tasks[0], proof)
 	}
 	queuedEvents, err := readEventBacklog(ctx, c, queued.ID, 0)
 	if err != nil {
@@ -1304,7 +1361,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	}
 	rawAfterQueued := recorderEvents(t)
 	if err := reconcileRetainedAttemptEffects(queuedBeforeProof, proof, queuedBeforeStarts, rawAfterQueued, queuedEvents); err != nil {
-		blockf(t, "retained-history-and-raw-effects", "queued run %s pre-release attempt did not reconcile with terminal effects: %v", queued.ID, err)
+		failClusterCase(t, "retained-history-and-raw-effects", "queued run %s pre-release attempt did not reconcile with terminal effects: %v", queued.ID, err)
 	}
 	attemptProofs[queued.ID] = []clusterTaskProof{proof}
 	writeJSON(t, "cluster-queued-after-release.json", map[string]any{

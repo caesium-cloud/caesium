@@ -311,8 +311,19 @@ PY
   LC_OWNED=0
   LC_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   LC_PAIR="${CAESIUM_LIFECYCLE_PAIR:-v0.1.0-to-candidate}"
+  lc_require_absent_cluster() {
+    local clusters nodes
+    clusters="$(kind get clusters 2>&1)" || cluster_die "kind get clusters failed: $clusters"
+    if printf '%s\n' "$clusters" | grep -qxF "$LC_ID"; then
+      cluster_die "kind cluster $LC_ID already exists; refusing to claim or delete it"
+    fi
+    nodes="$(docker ps -a --format '{{.Names}}' 2>&1)" || cluster_die "docker ps failed: $nodes"
+    if printf '%s\n' "$nodes" | grep -qxF "${LC_ID}-control-plane"; then
+      cluster_die "docker container ${LC_ID}-control-plane already exists; refusing to claim cluster $LC_ID"
+    fi
+  }
   [[ ! -e "$LC_KUBE" ]] || cluster_die "$LC_KUBE exists; refusing to adopt another cluster's kubeconfig"
-  [[ -z "$(kind get clusters | grep -Fx "$LC_ID" || true)" ]] || cluster_die "kind cluster $LC_ID already exists"
+  lc_require_absent_cluster
   # Artifacts may be reused deliberately; no prior case or observation can
   # count toward this invocation's complete expected-case manifest.
   rm -rf "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
@@ -337,10 +348,12 @@ pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json').write_text(json.
   'detail':'host controller has not completed all required F2 cases'},indent=2)+'\n')
 PY
   lc_ns() { kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_ID" "$@"; }
+  LC_SIGNALLED=0
   lc_cleanup() {
     local rc=$?
     trap - EXIT INT TERM
     set +e
+    if [[ "$LC_SIGNALLED" == 1 ]]; then rc=143; fi
     if [[ "$LC_OWNED" == 1 ]]; then
       lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
       lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-final.txt" 2>&1 || true
@@ -362,9 +375,22 @@ PY
         fi
       fi
     fi
+    # An interrupted or otherwise incomplete qualification cannot signal
+    # success merely because the last foreground command exited zero.
+    if [[ "$rc" == 0 && -f "$LC_ART/cluster-qualification.json" ]]; then
+      local outcome
+      outcome="$(LC_ART="$LC_ART" python3 - <<'PY'
+import json,os,pathlib
+print(json.loads(pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json').read_text()).get('result','incomplete'))
+PY
+)" || rc=1
+      [[ "$outcome" == pass ]] || rc=1
+    fi
     exit "$rc"
   }
-  trap lc_cleanup EXIT INT TERM
+  trap lc_cleanup EXIT
+  trap 'LC_SIGNALLED=1; exit 130' INT
+  trap 'LC_SIGNALLED=1; exit 143' TERM
   lc_case() {
     LC_CASE="$1" LC_STATUS="$2" LC_DETAIL="$3" LC_EVIDENCE="${4:-}" LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY'
 import json,os,pathlib,re
@@ -495,9 +521,17 @@ nodes:
   - role: worker
   - role: worker
 EOF
+  # Image builds may take minutes. Re-check immediately before claiming this
+  # cluster name; a failed kind/Docker inventory must never imply absence.
+  lc_require_absent_cluster
+  if ! kind create cluster --name "$LC_ID" --image "$LC_KIND" --config "$LC_ART/kind.yaml" \
+    --kubeconfig "$LC_KUBE" --wait 120s >"$LC_ART/cluster-logs/kind-create.log" 2>&1; then
+    # Any failed create might be a concurrent name conflict, including Docker's
+    # "already in use" wording. Without a successful create we cannot prove
+    # ownership and must leave any same-name cluster for explicit inspection.
+    cluster_die "kind create failed; ownership not claimed; inspect cluster-logs/kind-create.log"
+  fi
   LC_OWNED=1
-  kind create cluster --name "$LC_ID" --image "$LC_KIND" --config "$LC_ART/kind.yaml" \
-    --kubeconfig "$LC_KUBE" --wait 120s >"$LC_ART/cluster-logs/kind-create.log" 2>&1 || cluster_die "kind create failed"
   kind get nodes --name "$LC_ID" >"$LC_ART/cluster-logs/kind-nodes.txt" \
     2>"$LC_ART/cluster-logs/kind-nodes-error.log" || cluster_die "cannot enumerate owned kind nodes"
   [[ $(wc -l <"$LC_ART/cluster-logs/kind-nodes.txt") -eq 4 ]] \
@@ -915,7 +949,10 @@ PY
   elif [[ "$LC_HELM_RC" != 0 ]]; then
     lc_case rolling-upgrade-three-voters blocked "helm upgrade --wait failed; inspect cluster-logs/helm-upgrade.log"
   elif [[ "$LC_AFTER_RC" != 0 ]]; then
-    lc_case rolling-upgrade-three-voters fail "post-upgrade assertions failed; inspect pod status and logs"
+    # A recorded runner case identifies whether upgrade state was blocked or
+    # failed. A later retained-history failure must not overwrite its pass.
+    [[ -f "$LC_ART/cases/rolling-upgrade-three-voters.json" ]] || \
+      lc_case rolling-upgrade-three-voters blocked "runner produced no upgrade case; inspect AfterUpgrade.log and pod/Raft observations"
   fi
   # F2's destructive cases are reported individually. Their launch requires a
   # healthy upgraded quorum; an unhealthy upgrade leaves them blocked with the
@@ -1243,10 +1280,11 @@ def read_cases(directory):
     if r.get('lifecycle_id')!=os.environ['LC_ID']:r=dict(r,status='blocked',detail='foreign lifecycle_id')
     out[r['name']]=r
   return out
-# Host verdicts have explicit precedence after every runner artifact copy.
+# A runner assertion is the source of truth for its own case. Host-only fault
+# cases fill gaps, and missing runner evidence remains blocked by default.
 runner_cases=read_cases('cases')
 host_cases=read_cases('cluster-cases')
-by={**runner_cases,**host_cases}
+by={**host_cases,**runner_cases}
 for name in expected:
   by.setdefault(name,{'name':name,'status':'blocked','lifecycle_id':os.environ['LC_ID'],
     'detail':'required case produced no record'})
@@ -1260,9 +1298,10 @@ gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
 if gates['mixed_window_exit']!=0 and by['mixed-version-dispatch-and-completion']['status']=='pass':
   by['mixed-version-dispatch-and-completion']=dict(by['mixed-version-dispatch-and-completion'],status='blocked',
     detail='mixed-window process failed despite a runner pass record')
-if any(gates[k]!=0 for k in ('after_upgrade_exit','helm_upgrade_exit','live_manifest_exit','post_upgrade_info_exit','address_prerequisite_blocked')) and by['rolling-upgrade-three-voters']['status']=='pass':
-  by['rolling-upgrade-three-voters']=dict(by['rolling-upgrade-three-voters'],status='blocked',
-    detail='upgrade observation gate failed despite a runner pass record')
+# The runner verifies installed manifest, addresses, pod state and direct Raft
+# membership before writing an upgrade pass. A Helm timeout or a later
+# retained-history assertion does not erase that already-observed result;
+# nonzero process/host gates still fail the overall qualification below.
 cases=[by[n] for n in expected]
 failed=[r['name'] for r in cases if not (r['status']=='pass' or
   (r['name']=='rollback-recorded-outcome' and r['status']=='recorded-outcome' and r.get('observations')))]
