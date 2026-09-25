@@ -1,0 +1,80 @@
+# F2: persistent, three-voter lifecycle qualification on three kind workers.
+# The chart's RollingUpdate, OrderedReady and PVC Retain defaults are intentional.
+replicaCount: 3
+
+image:
+  repository: caesiumcloud/caesium
+  pullPolicy: IfNotPresent
+
+config:
+  logLevel: debug
+  extraEnv:
+    - name: CAESIUM_INTERNAL_WAKEUP_TOKEN
+      value: caesium-lifecycle-internal-token-not-for-production-use
+    - name: CAESIUM_EXECUTION_MODE
+      value: distributed
+    - name: CAESIUM_RUN_OWNER_ENABLED
+      value: "true"
+    - name: CAESIUM_RUN_OWNER_IN_MEMORY
+      value: "true"
+    - name: CAESIUM_DATABASE_SHARDS
+      value: "1"
+    - name: CAESIUM_DATABASE_VOTERS
+      value: "3"
+    - name: CAESIUM_DATABASE_STANDBYS
+      value: "0"
+    - name: CAESIUM_DATABASE_CONSOLE_ENABLED
+      value: "true"
+    - name: CAESIUM_MANUAL_TRIGGER_API_KEY
+      value: caesium-lifecycle-manual-key
+    # Keep both values byte-identical across the Helm transition. The queued
+    # row waits behind a recorder-held predecessor during the rolling upgrade.
+    - name: CAESIUM_RUN_QUEUE_ENABLED
+      value: "true"
+    - name: CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED
+      value: "true"
+    - name: CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL
+      value: "500ms"
+    - name: CAESIUM_WORKER_POOL_SIZE
+      value: "2"
+    - name: CAESIUM_RUN_LEASE_TTL
+      value: "30s"
+    - name: CAESIUM_RUN_OWNER_DISPATCH_INTERVAL
+      value: "1s"
+    - name: CAESIUM_WORKER_LEASE_TTL
+      value: "30s"
+    - name: CAESIUM_WORKER_RECLAIM_INTERVAL
+      value: "1s"
+
+kubernetes:
+  engine:
+    enabled: true
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: caesium
+            app.kubernetes.io/instance: caesium
+        topologyKey: kubernetes.io/hostname
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: false

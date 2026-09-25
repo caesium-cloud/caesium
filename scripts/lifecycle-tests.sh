@@ -18,6 +18,15 @@
 #   CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
 #     bash scripts/lifecycle-tests.sh
 #
+# F2 cluster lane (requires the exclusive Docker/kind/Helm lane):
+#   CANDIDATE_SHA=$(git rev-parse HEAD)
+#   CAESIUM_LIFECYCLE_MODE=cluster \
+#   CAESIUM_LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+#   CAESIUM_LIFECYCLE_ARTIFACTS="$(mktemp -d)" \
+#   CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+#   CAESIUM_LIFECYCLE_KIND_IMAGE=kindest/node:v1.33.1 \
+#     bash scripts/lifecycle-tests.sh
+#
 # Leave the candidate image unbuilt: the harness builds it itself (`just
 # tag="$CANDIDATE_SHA" build-release`) from this checkout when
 # CAESIUM_LIFECYCLE_CANDIDATE_IMAGE is absent, which is what binds
@@ -51,6 +60,670 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# F2's cluster lane is a separate mode. The F4 standalone path below is kept
+# byte-for-byte in its existing control flow and still defaults when unset.
+if [[ "${CAESIUM_LIFECYCLE_MODE:-standalone}" == "cluster" ]]; then
+  cluster_die() { printf 'cluster lifecycle: %s\n' "$*" >&2; exit 1; }
+  for cmd in docker kind kubectl helm python3 just; do
+    command -v "$cmd" >/dev/null 2>&1 || cluster_die "missing $cmd"
+  done
+  : "${CAESIUM_LIFECYCLE_ID:?set a unique DNS-1123 cluster name}"
+  : "${CAESIUM_LIFECYCLE_ARTIFACTS:?set an artifact directory}"
+  : "${CAESIUM_LIFECYCLE_CANDIDATE_IMAGE:?set caesiumcloud/caesium:<candidate SHA>}"
+  LC_ID="$CAESIUM_LIFECYCLE_ID"
+  LC_SHA="${CANDIDATE_SHA:-${CAESIUM_LIFECYCLE_CANDIDATE_IMAGE##*:}}"
+  [[ "$LC_ID" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || cluster_die "invalid lifecycle id $LC_ID"
+  [[ "$LC_SHA" =~ ^[0-9a-f]{40}$ ]] || cluster_die "candidate tag must name a full git SHA"
+  LC_PREV="${CAESIUM_LIFECYCLE_PREV_IMAGE:-caesiumcloud/caesium:v0.1.0}"
+  [[ "$LC_PREV" == "caesiumcloud/caesium:v0.1.0" ]] || cluster_die "previous release must be pinned v0.1.0"
+  [[ "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" == "caesiumcloud/caesium:$LC_SHA" ]] || cluster_die "candidate image/tag and SHA disagree"
+  LC_ART="$CAESIUM_LIFECYCLE_ARTIFACTS"
+  mkdir -p "$LC_ART"
+  LC_ART="$(cd "$LC_ART" && pwd)"
+  case "$LC_ART/" in "$ROOT/"*) cluster_die "cluster artifacts must be outside the candidate checkout" ;; esac
+  LC_KUBE="$LC_ART/kubeconfig"
+  LC_VALUES="$ROOT/helm/caesium/ci/test-values-lifecycle.yaml"
+  LC_TASK="${CAESIUM_LIFECYCLE_TASK_IMAGE:-alpine:3.23}"
+  LC_KIND="${CAESIUM_LIFECYCLE_KIND_IMAGE:-kindest/node:v1.33.1}"
+  LC_RUNNER="caesium-lifecycle-runner:$LC_ID"
+  LC_OWNED=0
+  LC_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  LC_PAIR="${CAESIUM_LIFECYCLE_PAIR:-v0.1.0-to-candidate}"
+  [[ ! -e "$LC_KUBE" ]] || cluster_die "$LC_KUBE exists; refusing to adopt another cluster's kubeconfig"
+  [[ -z "$(kind get clusters | grep -Fx "$LC_ID" || true)" ]] || cluster_die "kind cluster $LC_ID already exists"
+  # Artifacts may be reused deliberately; no prior case or observation can
+  # count toward this invocation's complete expected-case manifest.
+  rm -rf "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
+  rm -f "$LC_ART/cluster-qualification.json" "$LC_ART/cluster-fixture.json" \
+    "$LC_ART/cluster-mixed-window.json" "$LC_ART/cluster-mixed-crossing.json" \
+    "$LC_ART/cluster-host-observation.json" "$LC_ART/cluster-ordinal0-host.json" \
+    "$LC_ART/cluster-post-storage.json" "$LC_ART/cluster-raw-before.json" \
+    "$LC_ART/cluster-raw-after.json" "$LC_ART/cluster-snapshot-write-count.json" \
+    "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
+  mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
+  cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
+  LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" LC_ART="$LC_ART" python3 - <<'PY'
+import json,os,pathlib
+pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json').write_text(json.dumps({
+  'kind':'caesium-cluster-lifecycle-qualification','lifecycle_id':os.environ['LC_ID'],
+  'candidate_sha':os.environ['LC_SHA'],'pair':os.environ['LC_PAIR'],
+  'started_at':os.environ['LC_STARTED'],'result':'incomplete',
+  'detail':'host controller has not completed all required F2 cases'},indent=2)+'\n')
+PY
+  lc_ns() { kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_ID" "$@"; }
+  lc_cleanup() {
+    local rc=$?
+    trap - EXIT INT TERM
+    set +e
+    if [[ "$LC_OWNED" == 1 ]]; then
+      lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
+      lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-final.txt" 2>&1 || true
+      for n in 0 1 2; do lc_ns logs "caesium-$n" -c caesium --previous >"$LC_ART/cluster-logs/caesium-$n-previous.log" 2>&1 || true; done
+      if [[ "${CAESIUM_LIFECYCLE_KEEP:-0}" != 1 ]]; then kind delete cluster --name "$LC_ID" >/dev/null 2>&1 || true; fi
+    fi
+    exit "$rc"
+  }
+  trap lc_cleanup EXIT INT TERM
+  lc_case() {
+    LC_CASE="$1" LC_STATUS="$2" LC_DETAIL="$3" LC_EVIDENCE="${4:-}" LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY'
+import json,os,pathlib,re
+name=os.environ['LC_CASE']
+path=pathlib.Path(os.environ['LC_ART'],'cluster-cases',re.sub('[^A-Za-z0-9_-]','-',name)+'.json')
+rec={'name':name,'status':os.environ['LC_STATUS'],
+  'detail':os.environ['LC_DETAIL'],'lifecycle_id':os.environ['LC_ID']}
+if os.environ['LC_EVIDENCE']:
+  rec['observations']=json.loads(pathlib.Path(os.environ['LC_EVIDENCE']).read_text())
+path.write_text(json.dumps(rec,indent=2)+'\n')
+PY
+  }
+  lc_phase() {
+    local phase="$1" image_id="$2" base="$3"
+    lc_ns exec pod/lifecycle-runner -c runner -- env \
+      CAESIUM_LIFECYCLE_ID="$LC_ID" CAESIUM_LIFECYCLE_PAIR="$LC_PAIR" \
+      CAESIUM_LIFECYCLE_ARTIFACTS=/artifacts \
+      CAESIUM_LIFECYCLE_BASE_URL="$base" \
+      CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID="$image_id" \
+      CAESIUM_LIFECYCLE_PREVIOUS_IMAGE_ID="$LC_PREV_ID" \
+      CAESIUM_LIFECYCLE_CANDIDATE_IMAGE_ID="$LC_CAND_ID" \
+      CAESIUM_LIFECYCLE_TASK_IMAGE="$LC_TASK" \
+      CAESIUM_LIFECYCLE_INTERNAL_TOKEN=caesium-lifecycle-internal-token-not-for-production-use \
+      CAESIUM_MANUAL_TRIGGER_API_KEY=caesium-lifecycle-manual-key \
+      CAESIUM_LIFECYCLE_PHASE="$phase" \
+      /lifecycle.test -test.v -test.count=1 -test.run "^TestLifecycleCluster${phase}$" -test.timeout=12m \
+      >"$LC_ART/cluster-logs/$phase.log" 2>&1
+  }
+  lc_info() {
+    local pod="$1" file="$2"
+    lc_ns exec "$pod" -c caesium -- cat /var/lib/caesium/dqlite/info.yaml >"$file"
+  }
+  lc_base() {
+    local ip
+    ip="$(lc_ns get pod caesium-0 -o jsonpath='{.status.podIP}')"
+    [[ -n "$ip" ]] || cluster_die "caesium-0 has no pod IP"
+    printf 'http://%s:8080' "$ip"
+  }
+  lc_copy_runner_artifacts() {
+    lc_ns cp -c runner lifecycle-runner:/artifacts/. "$LC_ART/" >/dev/null
+  }
+  lc_collect_info() {
+    local stage="$1" n
+    for n in 0 1 2; do
+      lc_info "caesium-$n" "$LC_ART/cluster-logs/$stage-info-$n.yaml" || return 1
+      lc_ns get pod "caesium-$n" -o jsonpath='{.status.podIP}' \
+        >"$LC_ART/cluster-logs/$stage-ip-$n.txt" || return 1
+    done
+    LC_ART="$LC_ART" LC_STAGE="$stage" python3 - <<'PY'
+import json,os,pathlib,re
+art=pathlib.Path(os.environ['LC_ART']);stage=os.environ['LC_STAGE'];out=[]
+for n in range(3):
+  raw=(art/'cluster-logs'/f'{stage}-info-{n}.yaml').read_text()
+  ip=(art/'cluster-logs'/f'{stage}-ip-{n}.txt').read_text().strip()
+  vals={k:v for k,v in re.findall(r'(?m)^\s*(ID|Address):\s*[\'\"]?([^\'\"\s]+)',raw)}
+  if not all(k in vals for k in ('ID','Address')):raise SystemExit(f'info.yaml for caesium-{n} lacks ID/Address')
+  if not ip:raise SystemExit(f'caesium-{n} has no pod IP')
+  out.append({'name':f'caesium-{n}','id':int(vals['ID']),'address':vals['Address'],'pod_ip':ip})
+  if stage=='before' and vals['Address']!=f'{ip}:9001':
+    raise SystemExit(f'previous caesium-{n} info.yaml address {vals["Address"]} differs from pod IP {ip}')
+(art/f'{stage}-info.json').write_text(json.dumps(out,indent=2)+'\n')
+PY
+  }
+
+  [[ "$(git rev-parse HEAD)" == "$LC_SHA" ]] || cluster_die "candidate SHA differs from this checkout HEAD"
+  [[ -z "$(git status --porcelain)" ]] || cluster_die "refusing image build from dirty checkout"
+  docker pull "$LC_PREV" >"$LC_ART/cluster-logs/pull-previous.log" 2>&1 || cluster_die "pull previous release failed"
+  LC_PREV_ID="$(docker image inspect --format '{{.Id}}' "$LC_PREV")"
+  LC_PREV_DIGESTS="$(docker image inspect --format '{{join .RepoDigests ","}}' "$LC_PREV")"
+  LC_PREV_ID="$LC_PREV_ID" LC_PREV_DIGESTS="$LC_PREV_DIGESTS" LC_ART="$LC_ART" LC_PAIR="$LC_PAIR" python3 - <<'PY' || cluster_die 'previous release digest does not match versions.json'
+import json,os,pathlib
+doc=json.loads(pathlib.Path(os.environ['LC_ART'],'versions.json').read_text())
+p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR'])
+want=set(p['previous']['digests'].values())
+got={x.split('@',1)[1] for x in os.environ['LC_PREV_DIGESTS'].split(',') if '@' in x}
+if not want.intersection(got):raise SystemExit(f'old image has {got}, expected one of {want}')
+print('pinned previous digest:', sorted(want.intersection(got)))
+PY
+  lc_case previous-release-digest pass "pulled $LC_PREV; image ID $LC_PREV_ID; digest $LC_PREV_DIGESTS"
+  if docker image inspect "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" >/dev/null 2>&1; then
+    [[ "${CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE:-0}" == 1 ]] || cluster_die "candidate image pre-exists; cannot bind it to $LC_SHA without explicit unverified override"
+    LC_PROVENANCE=supplied-unverified
+  else
+    just "tag=$LC_SHA" build-release >"$LC_ART/cluster-logs/build-candidate.log" 2>&1 || cluster_die "candidate build failed"
+    LC_PROVENANCE=built-by-this-run
+  fi
+  LC_CAND_ID="$(docker image inspect --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")"
+  [[ -n "$LC_CAND_ID" && "$LC_CAND_ID" != "$LC_PREV_ID" ]] || cluster_die "candidate image ID absent or equals previous release"
+  docker pull "$LC_TASK" >"$LC_ART/cluster-logs/pull-task.log" 2>&1 || cluster_die "task image pull failed"
+  docker image inspect "$LC_KIND" >/dev/null 2>&1 || docker pull "$LC_KIND" >"$LC_ART/cluster-logs/pull-kind.log" 2>&1 || cluster_die "kind image unavailable"
+  LC_BUILDER="${CAESIUM_LIFECYCLE_BUILDER_IMAGE:-caesiumcloud/caesium-builder:latest}"
+  docker image inspect "$LC_BUILDER" >/dev/null 2>&1 || just builder >"$LC_ART/cluster-logs/builder.log" 2>&1 || cluster_die "builder unavailable"
+  docker run --rm -v "$ROOT":/bld/caesium -v "$LC_ART":/artifacts -w /bld/caesium \
+    -e CGO_ENABLED=0 -e GOFLAGS=-buildvcs=false "$LC_BUILDER" \
+    go test -tags=integration -c ./test/lifecycle -o /artifacts/lifecycle.test \
+    >"$LC_ART/cluster-logs/compile.log" 2>&1 || cluster_die "integration-tagged lifecycle runner did not compile"
+  [[ -x "$LC_ART/lifecycle.test" ]] || cluster_die "runner binary absent"
+  docker build -t "$LC_RUNNER" -f - "$LC_ART" >"$LC_ART/cluster-logs/build-runner.log" 2>&1 <<'DOCKERFILE' || cluster_die "runner image build failed"
+FROM alpine:3.23
+COPY lifecycle.test /lifecycle.test
+RUN chmod 0555 /lifecycle.test
+DOCKERFILE
+  cat >"$LC_ART/kind.yaml" <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: $LC_ID
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker
+EOF
+  LC_OWNED=1
+  kind create cluster --name "$LC_ID" --image "$LC_KIND" --config "$LC_ART/kind.yaml" \
+    --kubeconfig "$LC_KUBE" --wait 120s >"$LC_ART/cluster-logs/kind-create.log" 2>&1 || cluster_die "kind create failed"
+  kind load docker-image --name "$LC_ID" "$LC_PREV" "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" "$LC_TASK" \
+    >"$LC_ART/cluster-logs/kind-load.log" 2>&1 || cluster_die "kind image load failed"
+  helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
+    --set image.tag=v0.1.0 >"$LC_ART/manifest-before.yaml" || cluster_die "previous Helm render failed"
+  helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
+    --set "image.tag=$LC_SHA" >"$LC_ART/manifest-after.yaml" || cluster_die "candidate Helm render failed"
+  LC_PREV="$LC_PREV" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" LC_ART="$LC_ART" python3 - <<'PY' || cluster_die "rendered Helm resources changed beyond caesium image"
+import difflib,os,pathlib
+art=pathlib.Path(os.environ['LC_ART'])
+a=(art/'manifest-before.yaml').read_text();b=(art/'manifest-after.yaml').read_text()
+old='image: "'+os.environ['LC_PREV']+'"';new='image: "'+os.environ['LC_CAND']+'"'
+if a.count(old)!=1 or b.count(new)!=1:raise SystemExit('rendered manifest lacks exactly one pinned server image')
+na=a.replace(old,'image: "__LIFECYCLE_IMAGE__"');nb=b.replace(new,'image: "__LIFECYCLE_IMAGE__"')
+diff=list(difflib.unified_diff(na.splitlines(),nb.splitlines(),fromfile='before',tofile='after'))
+(art/'manifest-normalized.diff').write_text('\n'.join(diff)+'\n' if diff else '')
+if diff:raise SystemExit('\n'.join(diff[:60]))
+PY
+  helm install caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
+    --create-namespace --values "$LC_VALUES" --set image.tag=v0.1.0 --wait --timeout 300s \
+    >"$LC_ART/cluster-logs/helm-install.log" 2>&1 || cluster_die "previous-release Helm install failed"
+  helm get manifest caesium --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
+    >"$LC_ART/manifest-installed.yaml" || cluster_die "cannot read installed Helm manifest"
+  lc_ns wait --for=condition=Ready pod/caesium-0 pod/caesium-1 pod/caesium-2 --timeout=300s \
+    >"$LC_ART/cluster-logs/previous-ready.log" 2>&1 || cluster_die "previous pods not all Ready"
+  lc_collect_info before || cluster_die "cannot record all previous-release info.yaml IDs and addresses"
+  cat >"$LC_ART/runner.yaml" <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: lifecycle-runner, namespace: $LC_ID}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: lifecycle-runner, namespace: $LC_ID}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: lifecycle-runner, namespace: $LC_ID}
+subjects: [{kind: ServiceAccount, name: lifecycle-runner, namespace: $LC_ID}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: lifecycle-runner}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lifecycle-recorder, namespace: $LC_ID}
+spec:
+  selector: {app.kubernetes.io/name: lifecycle-runner}
+  ports: [{name: http, port: 8090, targetPort: 8090}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-runner
+  namespace: $LC_ID
+  labels: {app.kubernetes.io/name: lifecycle-runner}
+spec:
+  serviceAccountName: lifecycle-runner
+  restartPolicy: Never
+  tolerations:
+    - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+  nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+  volumes: [{name: artifacts, emptyDir: {}}]
+  containers:
+    - name: runner
+      image: $LC_RUNNER
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 86400"]
+      volumeMounts: [{name: artifacts, mountPath: /artifacts}]
+    - name: recorder
+      image: $LC_RUNNER
+      imagePullPolicy: IfNotPresent
+      command: ["/lifecycle.test"]
+      args: ["-test.v", "-test.run", "^TestLifecycleClusterRecorder$", "-test.timeout", "24h"]
+      env: [{name: CAESIUM_LIFECYCLE_CLUSTER_RECORDER, value: "1"}]
+      ports: [{containerPort: 8090, name: http}]
+EOF
+  lc_ns apply -f "$LC_ART/runner.yaml" >"$LC_ART/cluster-logs/runner-create.log" 2>&1 || cluster_die "runner create failed"
+  lc_ns wait --for=condition=Ready pod/lifecycle-runner --timeout=120s \
+    >"$LC_ART/cluster-logs/runner-ready.log" 2>&1 || cluster_die "runner not Ready"
+  lc_ns cp "$LC_ART/versions.json" lifecycle-runner:/artifacts/versions.json -c runner || cluster_die "cannot copy matrix to runner"
+  LC_OLD_BASE="$(lc_base)"
+  lc_phase Seed "$LC_PREV_ID" "$LC_OLD_BASE" || cluster_die "previous-release cluster seed failed (see cluster-logs/Seed.log)"
+  lc_copy_runner_artifacts
+  LC_MIXED_RC=0
+  lc_phase MixedWindow "$LC_PREV_ID" "$LC_OLD_BASE" &
+  LC_MIXED_PID=$!
+  LC_HELM_RC=0
+  helm upgrade caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
+    --values "$LC_VALUES" --set "image.tag=$LC_SHA" --wait --timeout 600s \
+    >"$LC_ART/cluster-logs/helm-upgrade.log" 2>&1 || LC_HELM_RC=$?
+  LC_GET_RC=0
+  helm get manifest caesium --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
+    >"$LC_ART/manifest-upgraded.yaml" || LC_GET_RC=$?
+  if [[ "$LC_GET_RC" == 0 ]]; then
+    LC_PREV="$LC_PREV" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" LC_ART="$LC_ART" python3 - <<'PY' || LC_GET_RC=$?
+import difflib,os,pathlib
+art=pathlib.Path(os.environ['LC_ART'])
+a=(art/'manifest-installed.yaml').read_text();b=(art/'manifest-upgraded.yaml').read_text()
+old='image: "'+os.environ['LC_PREV']+'"';new='image: "'+os.environ['LC_CAND']+'"'
+if a.count(old)!=1 or b.count(new)!=1:raise SystemExit('installed/upgraded manifest lacks exactly one expected image')
+a=a.replace(old,'image: "__LIFECYCLE_IMAGE__"');b=b.replace(new,'image: "__LIFECYCLE_IMAGE__"')
+diff=list(difflib.unified_diff(a.splitlines(),b.splitlines(),fromfile='installed',tofile='upgraded'))
+(art/'manifest-live-normalized.diff').write_text('\n'.join(diff)+'\n' if diff else '')
+if diff:raise SystemExit('\n'.join(diff[:60]))
+PY
+  fi
+  wait "$LC_MIXED_PID" || LC_MIXED_RC=$?
+  lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-after-upgrade.txt" 2>&1 || true
+  lc_ns get pods -o json >"$LC_ART/cluster-pods-after-upgrade.json" 2>&1 || true
+  for n in 0 1 2; do
+    lc_ns logs "caesium-$n" -c caesium --tail=-1 >"$LC_ART/cluster-logs/candidate-$n.log" 2>&1 || true
+    lc_ns logs "caesium-$n" -c caesium --previous --tail=-1 >"$LC_ART/cluster-logs/candidate-$n-previous.log" 2>&1 || true
+  done
+  # A retained-PVC node can be killed before info.yaml is readable. Classify
+  # the known address mismatch only from all three independent observations:
+  # persisted old address, newly assigned pod IP, and exit-1 process log.
+  LC_ADDRESS_BLOCKED=0
+  LC_ART="$LC_ART" python3 - <<'PY' && LC_ADDRESS_BLOCKED=1 || true
+import json,os,pathlib,re
+art=pathlib.Path(os.environ['LC_ART'])
+prior={row['name']:row for row in json.loads((art/'before-info.json').read_text())}
+pods=json.loads((art/'cluster-pods-after-upgrade.json').read_text())
+observations=[]
+for pod in pods.get('items',[]):
+  name=pod.get('metadata',{}).get('name','')
+  if name not in prior:continue
+  ip=pod.get('status',{}).get('podIP','')
+  statuses=[s for s in pod.get('status',{}).get('containerStatuses',[]) if s.get('name')=='caesium']
+  exits=[s.get(state,{}).get('terminated',{}).get('exitCode') for s in statuses for state in ('state','lastState')]
+  old=prior[name]['address']
+  current=(art/'cluster-logs'/f'candidate-{name.rsplit("-",1)[1]}.log').read_text()
+  previous=(art/'cluster-logs'/f'candidate-{name.rsplit("-",1)[1]}-previous.log').read_text()
+  evidence='\n'.join((current,previous))
+  mismatch=bool(ip and old!=f'{ip}:9001' and 1 in exits and
+    re.search(r'in info\.yaml does not match|address[^\n]*does not match',evidence,re.I))
+  observations.append({'pod':name,'persisted_address':old,'new_pod_ip':ip,
+    'expected_address':f'{ip}:9001' if ip else None,'observed_exit_codes':exits,
+    'address_mismatch_log':mismatch,'log_files':[
+      f'cluster-logs/candidate-{name.rsplit("-",1)[1]}.log',
+      f'cluster-logs/candidate-{name.rsplit("-",1)[1]}-previous.log']})
+record={'classification':'blocked-by-prerequisite' if any(o['address_mismatch_log'] for o in observations) else 'not-observed',
+  'observations':observations}
+(art/'cluster-address-classification.json').write_text(json.dumps(record,indent=2)+'\n')
+if record['classification']!='blocked-by-prerequisite':raise SystemExit(1)
+PY
+  LC_INFO_RC=0
+  lc_collect_info after || LC_INFO_RC=$?
+  LC_ART="$LC_ART" LC_HELM_RC="$LC_HELM_RC" LC_GET_RC="$LC_GET_RC" python3 - <<'PY'
+import json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART'])
+load=lambda name:json.loads((art/name).read_text()) if (art/name).exists() else []
+record={'before_info':load('before-info.json'),'after_info':load('after-info.json'),
+  'address_classification':load('cluster-address-classification.json'),
+  'manifest_diff':(art/'manifest-normalized.diff').read_text().splitlines(),
+  'manifest_live_captured':int(os.environ['LC_GET_RC'])==0,
+  'manifest_live_diff':(art/'manifest-live-normalized.diff').read_text().splitlines() if (art/'manifest-live-normalized.diff').exists() else [],
+  'helm_exit_code':int(os.environ['LC_HELM_RC']),
+  'pod_logs':{f'caesium-{n}':(art/'cluster-logs'/f'candidate-{n}.log').read_text() for n in range(3)}}
+(art/'cluster-host-observation.json').write_text(json.dumps(record,indent=2)+'\n')
+PY
+  lc_ns cp "$LC_ART/cluster-host-observation.json" lifecycle-runner:/artifacts/cluster-host-observation.json -c runner \
+    || cluster_die "cannot copy host observations into runner"
+  LC_AFTER_RC=0
+  lc_phase AfterUpgrade "$LC_CAND_ID" "$(lc_base)" || LC_AFTER_RC=$?
+  lc_copy_runner_artifacts || true
+  [[ "$LC_MIXED_RC" == 0 ]] || lc_case mixed-version-dispatch-and-completion blocked "mixed-window runner failed or could not observe protocol-2 peers"
+  if [[ "$LC_ADDRESS_BLOCKED" == 1 ]]; then
+    lc_case rolling-upgrade-three-voters blocked "blocked-by-prerequisite: retained-PVC address mismatch persisted after #536; old address, new pod IP, exit 1 and process logs recorded" "$LC_ART/cluster-address-classification.json"
+  elif [[ "$LC_INFO_RC" != 0 ]]; then
+    lc_case rolling-upgrade-three-voters blocked "post-upgrade info.yaml could not be captured on all members"
+  elif [[ "$LC_GET_RC" != 0 ]]; then
+    lc_case rolling-upgrade-three-voters blocked "installed/upgraded Helm manifest could not be compared as image-only"
+  elif [[ "$LC_AFTER_RC" != 0 ]]; then
+    lc_case rolling-upgrade-three-voters fail "post-upgrade assertions failed; inspect pod status and logs"
+  fi
+  # F2's destructive cases are reported individually. Their launch requires a
+  # healthy upgraded quorum; an unhealthy upgrade leaves them blocked with the
+  # exact dependency rather than allowing a test on a different fault state.
+  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 ]]; then
+    for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore rollback-recorded-outcome; do
+      lc_case "$name" blocked "cannot run after failed/unobservable three-member upgrade"
+    done
+  else
+    # A helper mounts the PVC only while ordinal 2 is scaled down. Its file
+    # reads come from that local volume: no HTTP/SQL request can be answered by
+    # a surviving leader. These are storage-level experiments, not a product
+    # backup or restore command.
+    lc_storage_helper_start() {
+      cat >"$LC_ART/storage-helper.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: lifecycle-storage, namespace: $LC_ID}
+spec:
+  restartPolicy: Never
+  securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+  containers:
+    - name: storage
+      image: $LC_TASK
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: data-caesium-2}
+EOF
+      lc_ns apply -f "$LC_ART/storage-helper.yaml" >/dev/null
+      lc_ns wait --for=condition=Ready pod/lifecycle-storage --timeout=120s >/dev/null
+      lc_ns exec pod/lifecycle-storage -c storage -- test -f /data/info.yaml
+    }
+    lc_storage_helper_stop() {
+      lc_ns delete pod lifecycle-storage --wait=true --timeout=120s >/dev/null 2>&1 || true
+    }
+    lc_scale_two() {
+      lc_ns scale statefulset/caesium --replicas=2 >/dev/null
+      lc_ns wait --for=delete pod/caesium-2 --timeout=120s >/dev/null
+    }
+    lc_scale_three() {
+      lc_storage_helper_stop
+      lc_ns scale statefulset/caesium --replicas=3 >/dev/null
+      lc_ns wait --for=condition=Ready pod/caesium-2 --timeout=300s >/dev/null
+    }
+    lc_manifest_local() {
+      lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
+        'cd /data && find . -type f -exec sha256sum {} \; | sort' >"$1"
+    }
+    lc_files() {
+      lc_ns exec "$1" -c caesium -- sh -c \
+        'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' >"$2"
+    }
+    lc_storage_files() {
+      lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
+        'cd /data && find . -type f -exec ls -ln {} \; | sort' >"$1"
+    }
+
+    # Snapshot catch-up: the stopped member misses acknowledged catalog
+    # writes. Record file-level snapshots/truncation instead of assuming the C
+    # library's unconfigured threshold. A missing measured index is BLOCKED.
+    LC_SNAP_RC=0
+    lc_files caesium-0 "$LC_ART/cluster-logs/leader-before-snapshot-files.txt" || LC_SNAP_RC=$?
+    lc_scale_two || LC_SNAP_RC=$?
+    if [[ "$LC_SNAP_RC" == 0 ]]; then
+      lc_storage_helper_start || LC_SNAP_RC=$?
+      lc_manifest_local "$LC_ART/cluster-logs/stopped-member-before-writes.sha256" || LC_SNAP_RC=$?
+      lc_storage_files "$LC_ART/cluster-logs/stopped-member-before-writes-files.txt" || LC_SNAP_RC=$?
+      lc_storage_helper_stop
+    fi
+    if [[ "$LC_SNAP_RC" == 0 ]]; then
+      lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+      lc_files caesium-0 "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+      lc_scale_three || LC_SNAP_RC=$?
+      lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+      lc_copy_runner_artifacts || true
+    fi
+    if [[ "$LC_SNAP_RC" == 0 ]]; then
+      lc_files caesium-2 "$LC_ART/cluster-logs/rejoined-member-files.txt" || LC_SNAP_RC=$?
+    fi
+    if [[ "$LC_SNAP_RC" != 0 ]]; then
+      lc_case snapshot-catch-up blocked "stopped member, acknowledged writes or rejoin failed; inspect cluster-logs/leader-*-snapshot-files.txt and GenerateSnapshotWrites.log"
+    else
+      LC_ART="$LC_ART" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
+import json,pathlib,re,os
+base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
+def paths(name):
+  return [line.split()[-1] for line in (base/name).read_text().splitlines() if line.split()]
+def snapshots(name):
+  out=[]
+  for p in paths(name):
+    m=re.search(r'(?:^|/)snapshot-(\d+)-(\d+)-(\d+)$',p)
+    if m:out.append(int(m.group(2)))
+  return out
+def segment_ends(name):
+  out=[]
+  for p in paths(name):
+    m=re.search(r'(?:^|/)(\d+)-(\d+)$',p)
+    if m:out.append(int(m.group(2)))
+  return out
+before=snapshots('leader-before-snapshot-files.txt')
+after=snapshots('leader-after-snapshot-files.txt')
+stopped=segment_ends('stopped-member-before-writes-files.txt')
+rejoined=snapshots('rejoined-member-files.txt')
+obs={'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
+     'stopped_segment_end_indexes':stopped,'rejoined_snapshot_indexes':rejoined}
+(base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
+if not after or not stopped or not rejoined:raise SystemExit('missing snapshot or segment index')
+if max(after)<=max(before or [0]) or max(after)<=max(stopped):
+  raise SystemExit('leader snapshot did not cross stopped member index')
+if max(rejoined)<max(after):raise SystemExit('rejoined member has not installed leader snapshot')
+PY
+      if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
+        lc_case snapshot-catch-up pass "leader snapshot index crossed stopped member segment end after 1400 acknowledged writes; rejoined member installed that snapshot" "$LC_ART/cluster-logs/snapshot-threshold.json"
+      else
+        lc_case snapshot-catch-up blocked "snapshot/segment filenames did not prove leader truncation past stopped member and local snapshot catch-up; inspect cluster-logs/snapshot-threshold.json"
+      fi
+    fi
+
+    # Storage-level restore: a stopped member's PVC is copied, erased,
+    # compared without the copy (negative control), restored and compared
+    # before the server restarts. Every digest comes from the local helper
+    # mount, so healthy peers cannot supply an answer.
+    if [[ "$LC_SNAP_RC" != 0 ]]; then
+      for name in storage-snapshot-restore joining-ordinal-1-replacement ordinal-0-disk-loss rollback-recorded-outcome; do
+        lc_case "$name" blocked "prior snapshot fault did not rejoin/reconcile; shared cluster is not a valid baseline for another destructive case"
+      done
+    else
+    LC_RESTORE_RC=0
+    lc_scale_two || LC_RESTORE_RC=$?
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then lc_storage_helper_start || LC_RESTORE_RC=$?; fi
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then
+      lc_manifest_local "$LC_ART/cluster-logs/snapshot-copy.sha256" || LC_RESTORE_RC=$?
+      lc_storage_files "$LC_ART/cluster-logs/snapshot-copy-files.txt" || LC_RESTORE_RC=$?
+      lc_ns exec pod/lifecycle-storage -c storage -- cat /data/info.yaml \
+        >"$LC_ART/cluster-logs/snapshot-copy-info.yaml" || LC_RESTORE_RC=$?
+      lc_ns exec pod/lifecycle-storage -c storage -- tar -cf - -C /data . \
+        >"$LC_ART/cluster-logs/snapshot-copy.tar" || LC_RESTORE_RC=$?
+      [[ -s "$LC_ART/cluster-logs/snapshot-copy.sha256" && -s "$LC_ART/cluster-logs/snapshot-copy.tar" ]] || LC_RESTORE_RC=1
+    fi
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then
+      lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
+        'test -f /data/info.yaml && cd /data && find . -mindepth 1 -maxdepth 1 -exec rm -rf {} \;' \
+        || LC_RESTORE_RC=$?
+      lc_manifest_local "$LC_ART/cluster-logs/negative-control.sha256" || LC_RESTORE_RC=$?
+      if cmp -s "$LC_ART/cluster-logs/snapshot-copy.sha256" "$LC_ART/cluster-logs/negative-control.sha256"; then
+        LC_RESTORE_RC=1
+      fi
+      lc_ns exec -i pod/lifecycle-storage -c storage -- tar -xpf - -C /data \
+        <"$LC_ART/cluster-logs/snapshot-copy.tar" || LC_RESTORE_RC=$?
+      lc_manifest_local "$LC_ART/cluster-logs/pre-start-restored.sha256" || LC_RESTORE_RC=$?
+      cmp -s "$LC_ART/cluster-logs/snapshot-copy.sha256" "$LC_ART/cluster-logs/pre-start-restored.sha256" || LC_RESTORE_RC=1
+      lc_storage_files "$LC_ART/cluster-logs/pre-start-restored-files.txt" || LC_RESTORE_RC=$?
+      cmp -s "$LC_ART/cluster-logs/snapshot-copy-files.txt" "$LC_ART/cluster-logs/pre-start-restored-files.txt" || LC_RESTORE_RC=1
+      lc_ns exec pod/lifecycle-storage -c storage -- cat /data/info.yaml \
+        >"$LC_ART/cluster-logs/pre-start-restored-info.yaml" || LC_RESTORE_RC=$?
+      cmp -s "$LC_ART/cluster-logs/snapshot-copy-info.yaml" "$LC_ART/cluster-logs/pre-start-restored-info.yaml" || LC_RESTORE_RC=1
+    fi
+    lc_scale_three || LC_RESTORE_RC=$?
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then
+      lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_RESTORE_RC=$?
+      lc_copy_runner_artifacts || true
+    fi
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then
+      LC_ART="$LC_ART" python3 - <<'PY'
+import hashlib,json,os,pathlib
+base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
+copy=(base/'snapshot-copy.sha256').read_text().splitlines()
+restored=(base/'pre-start-restored.sha256').read_text().splitlines()
+negative=(base/'negative-control.sha256').read_text().splitlines()
+copy_files=(base/'snapshot-copy-files.txt').read_text().splitlines()
+restored_files=(base/'pre-start-restored-files.txt').read_text().splitlines()
+info=(base/'pre-start-restored-info.yaml').read_text()
+copy_info=(base/'snapshot-copy-info.yaml').read_text()
+tar=(base/'snapshot-copy.tar').read_bytes()
+record={'stopped_member_copy_manifest':copy,'pre_start_restored_manifest':restored,
+  'stopped_member_file_sizes':copy_files,'pre_start_restored_file_sizes':restored_files,
+  'negative_control_manifest':negative,'negative_control_failed':negative!=copy,
+  'local_content_assertion':copy==restored and copy_files==restored_files and len(copy)>0,
+  'snapshot_tar_sha256':hashlib.sha256(tar).hexdigest(),
+  'copied_info_yaml':copy_info,'restored_info_yaml':info,
+  'info_identity_unchanged':copy_info==info,'member_stopped_during_checks':True}
+(base/'restore-evidence.json').write_text(json.dumps(record,indent=2)+'\n')
+PY
+      lc_case storage-snapshot-restore pass "stopped-member copy and restored per-file SHA-256 matched before startup; omitted-copy negative control differed; local PVC bytes inspected without peers" "$LC_ART/cluster-logs/restore-evidence.json"
+    else
+      lc_case storage-snapshot-restore blocked "consistent copy, pre-start SHA-256 comparison, local-only read, negative control or rejoin failed; inspect cluster-logs/*sha256 and pre-start-restored-info.yaml"
+    fi
+
+    # Fresh-PVC joining member: PVC deletion is requested while the old pod
+    # still holds it, then pod deletion releases the protection finalizer. The
+    # StatefulSet must create a new claim/PV; UID and PV identity are checked
+    # by the live runner before direct Cluster RPCs are accepted.
+    if [[ "$LC_RESTORE_RC" != 0 ]]; then
+      for name in joining-ordinal-1-replacement ordinal-0-disk-loss rollback-recorded-outcome; do
+        lc_case "$name" blocked "prior restore fault did not rejoin/reconcile; shared cluster is not a valid baseline for another destructive case"
+      done
+    else
+    LC_JOIN_RC=0
+    LC_OLD1_UID="$(lc_ns get pod caesium-1 -o jsonpath='{.metadata.uid}')"
+    lc_ns delete pvc data-caesium-1 --wait=false >/dev/null || LC_JOIN_RC=$?
+    lc_ns delete pod caesium-1 --wait=false >/dev/null || LC_JOIN_RC=$?
+    for _ in {1..120}; do
+      LC_NEW1_UID="$(lc_ns get pod caesium-1 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+      if [[ -n "$LC_NEW1_UID" && "$LC_NEW1_UID" != "$LC_OLD1_UID" ]]; then break; fi
+      sleep 2
+    done
+    [[ -n "${LC_NEW1_UID:-}" && "$LC_NEW1_UID" != "$LC_OLD1_UID" ]] || LC_JOIN_RC=1
+    lc_ns wait --for=condition=Ready pod/caesium-1 --timeout=300s >/dev/null 2>&1 || LC_JOIN_RC=$?
+    if [[ "$LC_JOIN_RC" == 0 ]]; then
+      lc_phase JoiningOrdinalOne "$LC_CAND_ID" "$(lc_base)" || LC_JOIN_RC=$?
+    fi
+    lc_copy_runner_artifacts || true
+    if [[ "$LC_JOIN_RC" != 0 ]]; then
+      lc_case joining-ordinal-1-replacement blocked "fresh-PVC ordinal-1 pod or direct membership proof failed; inspect JoiningOrdinalOne.log, PVC/PV and pod events"
+    fi
+
+    # Ordinal 0 is intentionally last: replacing its PVC can create an
+    # isolated self-bootstrap, so it must not contaminate the preceding cases.
+    if [[ "$LC_JOIN_RC" != 0 ]]; then
+      lc_case ordinal-0-disk-loss blocked "prior joining replacement did not reconcile; shared cluster is not a valid baseline for ordinal-0 disk loss"
+      lc_case rollback-recorded-outcome blocked "prior joining replacement did not reconcile; no isolated migrated volume copy exists for rollback"
+    else
+    LC_ZERO_RC=0
+    LC_OLD0_UID="$(lc_ns get pod caesium-0 -o jsonpath='{.metadata.uid}')"
+    lc_ns delete pvc data-caesium-0 --wait=false >/dev/null || LC_ZERO_RC=$?
+    lc_ns delete pod caesium-0 --wait=false >/dev/null || LC_ZERO_RC=$?
+    for _ in {1..120}; do
+      LC_NEW0_UID="$(lc_ns get pod caesium-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+      if [[ -n "$LC_NEW0_UID" && "$LC_NEW0_UID" != "$LC_OLD0_UID" ]]; then break; fi
+      sleep 2
+    done
+    lc_ns get pod caesium-0 -o json >"$LC_ART/cluster-logs/ordinal0-pod.json" 2>&1 || true
+    lc_ns get pvc data-caesium-0 -o json >"$LC_ART/cluster-logs/ordinal0-pvc.json" 2>&1 || true
+    lc_ns logs caesium-0 -c caesium --tail=-1 >"$LC_ART/cluster-logs/ordinal0.log" 2>&1 || true
+    lc_ns exec caesium-0 -c caesium -- cat /var/lib/caesium/dqlite/info.yaml \
+      >"$LC_ART/cluster-logs/ordinal0-info.yaml" 2>&1 || true
+    lc_ns exec caesium-0 -c caesium -- sh -c \
+      'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' \
+      >"$LC_ART/cluster-logs/ordinal0-node-store.txt" 2>&1 || true
+    LC_ART="$LC_ART" LC_OLD0_UID="$LC_OLD0_UID" LC_NEW0_UID="${LC_NEW0_UID:-}" python3 - <<'PY'
+import json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART']);out={
+ 'old_uid':os.environ['LC_OLD0_UID'],'new_uid':os.environ['LC_NEW0_UID'],
+ 'pod':(art/'cluster-logs/ordinal0-pod.json').read_text(),
+ 'pvc':(art/'cluster-logs/ordinal0-pvc.json').read_text(),
+ 'info_yaml':(art/'cluster-logs/ordinal0-info.yaml').read_text(),
+ 'node_store':(art/'cluster-logs/ordinal0-node-store.txt').read_text(),
+ 'logs':(art/'cluster-logs/ordinal0.log').read_text()}
+(art/'cluster-ordinal0-host.json').write_text(json.dumps(out,indent=2)+'\n')
+PY
+    lc_ns cp "$LC_ART/cluster-ordinal0-host.json" lifecycle-runner:/artifacts/cluster-ordinal0-host.json -c runner || LC_ZERO_RC=$?
+    lc_phase OrdinalZeroLoss "$LC_CAND_ID" "$(lc_base)" || LC_ZERO_RC=$?
+    lc_copy_runner_artifacts || true
+    if [[ "$LC_ZERO_RC" != 0 && ! -f "$LC_ART/cases/ordinal-0-disk-loss.json" ]]; then
+      lc_case ordinal-0-disk-loss blocked "surviving quorum, fresh node store or info.yaml was unobservable after ordinal-0 disk loss; see OrdinalZeroLoss.log"
+    fi
+    lc_case rollback-recorded-outcome blocked "exploratory helm rollback requires an isolated copy of the candidate-migrated three-member volume set; the ordinal-0 disk-loss cluster is not a valid rollback baseline"
+    fi
+    fi
+    fi
+  fi
+  lc_copy_runner_artifacts || true
+  LC_ART="$LC_ART" LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" \
+    LC_PREV="$LC_PREV" LC_PREV_ID="$LC_PREV_ID" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" \
+    LC_CAND_ID="$LC_CAND_ID" LC_PROVENANCE="$LC_PROVENANCE" LC_HELM_RC="$LC_HELM_RC" \
+    LC_MIXED_RC="$LC_MIXED_RC" LC_AFTER_RC="$LC_AFTER_RC" python3 - <<'PY'
+import datetime,json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART']);doc=json.loads((art/'versions.json').read_text())
+p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR']);expected=p['cluster']['required_cases']
+by={}
+for d in ('cases','cluster-cases'):
+  for path in sorted((art/d).glob('*.json')):
+    try:r=json.loads(path.read_text())
+    except Exception as e:r={'name':path.stem,'status':'blocked','detail':f'unreadable record: {e}'}
+    if r.get('lifecycle_id')!=os.environ['LC_ID']:r=dict(r,status='blocked',detail='foreign lifecycle_id')
+    by[r['name']]=r
+for name in expected:
+  by.setdefault(name,{'name':name,'status':'blocked','lifecycle_id':os.environ['LC_ID'],
+    'detail':'required case produced no record'})
+cases=[by[n] for n in expected]
+failed=[r['name'] for r in cases if r['status'] not in ('pass','recorded-outcome')]
+record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
+  'lifecycle_id':os.environ['LC_ID'],'pair':os.environ['LC_PAIR'],
+  'candidate_sha':os.environ['LC_SHA'],'started_at':os.environ['LC_STARTED'],
+  'finished_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  'topology':{'replicas':3,'persistent':True,'database_shards':1},
+  'previous_image':{'ref':os.environ['LC_PREV'],'image_id':os.environ['LC_PREV_ID']},
+  'candidate_image':{'ref':os.environ['LC_CAND'],'image_id':os.environ['LC_CAND_ID'],
+    'provenance':os.environ['LC_PROVENANCE']},
+  'helm_exit_code':int(os.environ['LC_HELM_RC']),
+  'phase_exit_codes':{'mixed':int(os.environ['LC_MIXED_RC']),'after_upgrade':int(os.environ['LC_AFTER_RC'])},
+  'expected_cases':expected,'cases':cases,'failed_cases':failed,
+  'result':'pass' if not failed and os.environ['LC_PROVENANCE']=='built-by-this-run' else 'fail'}
+(art/'cluster-qualification.json').write_text(json.dumps(record,indent=2)+'\n')
+print('cluster lifecycle:',record['result'],'failed/blocked:',failed)
+PY
+  if LC_ART="$LC_ART" python3 - <<'PY'; then
+import json,os,pathlib
+record=json.loads(pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json').read_text())
+raise SystemExit(0 if record['result']=='pass' else 1)
+PY
+    exit 0
+  fi
+  cluster_die "F2 qualification incomplete; inspect $LC_ART/cluster-qualification.json for per-case evidence"
+fi
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }

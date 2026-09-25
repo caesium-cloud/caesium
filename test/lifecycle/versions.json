@@ -2,8 +2,8 @@
   "schema_version": 1,
   "_comment": [
     "Version matrix for the lifecycle qualification harness (distributed-testing F1/F4).",
-    "F4 consumes the `standalone` section of each pair; F2 extends this file with a",
-    "`cluster` section per pair and may add further adjacent pairs. Never reference the",
+    "F4 consumes the `standalone` section of each pair; F2 consumes its own",
+    "`cluster` section per pair. Never reference the",
     "`latest` tag: it was last pushed in 2021, is amd64-only, and is not a release.",
     "Supported old->new is the single adjacent pair v0.1.0 -> candidate (F1 Q4 decision).",
     "Skip-version upgrades are unsupported until a test exercises them."
@@ -57,6 +57,34 @@
           "endpoint": "/v1/system/features",
           "key": "data_assertions_enabled",
           "_comment": "Present on the candidate, absent on v0.1.0. A behavioural cross-check of image identity only; the authoritative check is the container's image ID."
+        }
+      },
+      "cluster": {
+        "replicas": 3,
+        "database_shards": 1,
+        "database_voters": 3,
+        "database_standbys": 0,
+        "helm_values": "helm/caesium/ci/test-values-lifecycle.yaml",
+        "previous_image": "caesiumcloud/caesium:v0.1.0",
+        "expected_protocol_version": 2,
+        "transition": "rolling upgrade with identical rendered Helm resources except the caesium image; installed namespace, kubeconfig, values and overrides are reused",
+        "required_cases": [
+          "previous-release-digest",
+          "three-persistent-voters-before",
+          "retained-history-and-raw-effects",
+          "mixed-version-dispatch-and-completion",
+          "rolling-upgrade-three-voters",
+          "joining-ordinal-1-replacement",
+          "ordinal-0-disk-loss",
+          "snapshot-catch-up",
+          "storage-snapshot-restore",
+          "rollback-recorded-outcome"
+        ],
+        "prerequisites": {
+          "ordinal_0_rejoin": "blocked until a fresh caesium-0 can join the surviving quorum instead of self-bootstrapping",
+          "restore": "requires a stopped-member consistent copy, pre-startup per-file digest match, peer-independent local assertion and failing omitted-snapshot control",
+          "snapshot_catch_up": "measure leader truncation past the stopped member's index; no threshold is assumed",
+          "rollback": "record observed behavior only; no binary rollback guarantee"
         }
       },
       "standalone": {
