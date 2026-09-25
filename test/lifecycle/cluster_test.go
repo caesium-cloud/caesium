@@ -83,6 +83,8 @@ type clusterHostObservation struct {
 
 type clusterTaskProof struct {
 	ID              string `json:"id"`
+	RunID           string `json:"job_run_id"`
+	TaskID          string `json:"task_id"`
 	ClaimedBy       string `json:"claimed_by"`
 	OwnerGeneration int64  `json:"owner_generation"`
 	Attempt         int    `json:"attempt"`
@@ -90,35 +92,59 @@ type clusterTaskProof struct {
 	RecorderNonce   string `json:"recorder_nonce"`
 }
 
-func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, taskRunID string) (clusterTaskProof, error) {
-	if _, err := uuid.Parse(runID); err != nil {
-		return clusterTaskProof{}, err
+// The public run projection identifies an unfanned task by catalog task_id,
+// while task_runs.id identifies its durable attempt. Resolve the one row for
+// this run and catalog task before comparing its durable identity over time.
+func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, publicTaskID string) (clusterTaskProof, error) {
+	rid, err := uuid.Parse(runID)
+	if err != nil {
+		return clusterTaskProof{}, fmt.Errorf("run id %q: %w", runID, err)
 	}
-	if _, err := uuid.Parse(taskRunID); err != nil {
-		return clusterTaskProof{}, err
+	tid, err := uuid.Parse(publicTaskID)
+	if err != nil {
+		return clusterTaskProof{}, fmt.Errorf("public task id %q: %w", publicTaskID, err)
 	}
-	sql := fmt.Sprintf("SELECT id, claimed_by, owner_generation, attempt, status, output FROM task_runs WHERE job_run_id = '%s' AND id = '%s'", runID, taskRunID)
-	response, _, err := h.Query(ctx, base, sql, 1)
+	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
+	response, _, err := h.Query(ctx, base, sql, 2)
 	if err != nil {
 		return clusterTaskProof{}, err
 	}
-	if len(response.Rows) != 1 || len(response.Rows[0]) != 6 {
-		return clusterTaskProof{}, fmt.Errorf("task %s query returned %d rows", taskRunID, len(response.Rows))
+	return parseClusterTaskProof(response, rid.String(), tid.String())
+}
+
+func parseClusterTaskProof(response cluster.QueryResponse, runID, publicTaskID string) (clusterTaskProof, error) {
+	if len(response.Rows) != 1 || response.RowCount != 1 {
+		return clusterTaskProof{}, fmt.Errorf("run %s public task %s query returned %d rows (reported %d); require exactly one durable attempt", runID, publicTaskID, len(response.Rows), response.RowCount)
 	}
 	row := response.Rows[0]
-	generation, err := strconv.ParseInt(fmt.Sprint(row[2]), 10, 64)
+	if len(row) != 8 {
+		return clusterTaskProof{}, fmt.Errorf("run %s public task %s query returned %d columns, want 8", runID, publicTaskID, len(row))
+	}
+	durableID, err := uuid.Parse(fmt.Sprint(row[0]))
+	if err != nil {
+		return clusterTaskProof{}, fmt.Errorf("durable task id: %w", err)
+	}
+	gotRunID, err := uuid.Parse(fmt.Sprint(row[1]))
+	if err != nil || gotRunID.String() != runID {
+		return clusterTaskProof{}, fmt.Errorf("durable task %s belongs to run %v, want %s", durableID, row[1], runID)
+	}
+	gotTaskID, err := uuid.Parse(fmt.Sprint(row[2]))
+	if err != nil || gotTaskID.String() != publicTaskID {
+		return clusterTaskProof{}, fmt.Errorf("durable task %s maps to public task %v, want %s", durableID, row[2], publicTaskID)
+	}
+	generation, err := strconv.ParseInt(fmt.Sprint(row[4]), 10, 64)
 	if err != nil {
 		return clusterTaskProof{}, err
 	}
-	attempt, err := strconv.Atoi(fmt.Sprint(row[3]))
+	attempt, err := strconv.Atoi(fmt.Sprint(row[5]))
 	if err != nil {
 		return clusterTaskProof{}, err
 	}
-	proof := clusterTaskProof{ID: fmt.Sprint(row[0]), ClaimedBy: fmt.Sprint(row[1]),
-		OwnerGeneration: generation, Attempt: attempt, Status: fmt.Sprint(row[4])}
-	if row[5] != nil {
+	proof := clusterTaskProof{ID: durableID.String(), RunID: gotRunID.String(), TaskID: gotTaskID.String(),
+		ClaimedBy: fmt.Sprint(row[3]), OwnerGeneration: generation, Attempt: attempt, Status: fmt.Sprint(row[6])}
+	if row[7] != nil {
 		var raw []byte
-		switch v := row[5].(type) {
+		switch v := row[7].(type) {
 		case string:
 			raw = []byte(v)
 		default:
@@ -130,7 +156,7 @@ func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, tas
 		if len(raw) > 0 {
 			var output map[string]string
 			if err := json.Unmarshal(raw, &output); err != nil {
-				return clusterTaskProof{}, fmt.Errorf("task %s output: %w", taskRunID, err)
+				return clusterTaskProof{}, fmt.Errorf("durable task %s output: %w", durableID, err)
 			}
 			proof.RecorderNonce = output["recorder_nonce"]
 		}
@@ -561,7 +587,8 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 						continue
 					}
 					beforeTask, err := readClusterTaskProof(ctx, h, base, run.ID, live.Tasks[0].ID)
-					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.OwnerGeneration != lease.Generation || beforeTask.Status != "running" {
+					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.OwnerGeneration != lease.Generation ||
+						beforeTask.Attempt != live.Tasks[0].Attempt || beforeTask.Status != "running" {
 						releaseRecordedRun(t, run.ID)
 						continue
 					}
@@ -571,10 +598,12 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 					releaseRecordedRun(t, run.ID)
 					final, err := c.awaitRunStatus(ctx, run.JobID, run.ID,
 						func(r apiRun) bool { return isTerminal(r.Status) }, 40*time.Second)
-					if err != nil || final.Status != "succeeded" || ownerVersion == "" || workerVersion == "" || ownerVersion == workerVersion {
+					if err != nil || final.Status != "succeeded" || len(final.Tasks) != 1 ||
+						final.Tasks[0].ID != live.Tasks[0].ID || final.Tasks[0].Attempt != beforeTask.Attempt ||
+						ownerVersion == "" || workerVersion == "" || ownerVersion == workerVersion {
 						continue
 					}
-					afterTask, err := readClusterTaskProof(ctx, h, base, run.ID, beforeTask.ID)
+					afterTask, err := readClusterTaskProof(ctx, h, base, run.ID, beforeTask.TaskID)
 					if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
 						afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
 						afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
@@ -688,7 +717,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		require.NoError(t, h.Health(ctx, m.HTTPBase()))
 	}
 	writeCase(t, caseRecord{Name: "rolling-upgrade-three-voters", Status: statusPass,
-		Detail:       fmt.Sprintf("three retained voters after rolling upgrade; Helm exit=%d; leader=%s", host.HelmExitCode, membership.Leader.Address),
+		Detail: fmt.Sprintf("three retained voters after rolling upgrade; Helm exit=%d; leader=%s", host.HelmExitCode, membership.Leader.Address),
 		Observations: map[string]any{"members": memberEvidence(topo, membership), "changed_pod_ips": changedIPs,
 			"helm_exit_code": host.HelmExitCode}})
 	for _, want := range []runFixture{fx.Succeeded, fx.Failed} {
@@ -756,7 +785,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 			proof, err := readClusterTaskProof(ctx, h, base, got.ID, task.ID)
 			require.NoError(t, err)
 			attemptProofs[r.ID] = append(attemptProofs[r.ID], proof)
-			if proof.ID == r.Tasks[0].ID && proof.Attempt == r.Tasks[0].Attempt &&
+			if proof.TaskID == r.Tasks[0].ID && proof.Attempt == r.Tasks[0].Attempt &&
 				proof.Status == "succeeded" && rawCompletionMatchesTask(r.ID, proof, events) {
 				matchedAttempt = true
 			}
