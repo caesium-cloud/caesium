@@ -28,12 +28,10 @@
 #     bash scripts/lifecycle-tests.sh
 #
 # Leave the candidate image unbuilt: the harness builds it itself (`just
-# tag="$CANDIDATE_SHA" build-release`) from this checkout when
-# CAESIUM_LIFECYCLE_CANDIDATE_IMAGE is absent, which is what binds
-# candidate_sha to the image actually qualified (see candidate-image-provenance
-# below). Pre-building it yourself makes the image "supplied", not
-# "built-by-this-run", and the run is BLOCKED unless you also set
-# CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1.
+# tag="$CANDIDATE_SHA" build-release`) from this checkout. Cluster mode always
+# blocks a pre-existing candidate tag so its archive can be bound to this run's
+# clean commit. Standalone mode records a supplied image as unverified unless
+# its explicit override is set (see candidate-image-provenance below).
 #
 # Every resource this script creates carries CAESIUM_LIFECYCLE_ID in its name,
 # and teardown removes only those. It never touches a pre-existing container,
@@ -51,7 +49,7 @@
 # pass from an earlier invocation.
 #
 # Optional:
-#   CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1
+#   CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1 (standalone mode only)
 #       proceed (and record it) when the candidate image's provenance cannot be
 #       established — a pre-existing/supplied image, or a build from a dirty
 #       working tree. Without it such a run is BLOCKED, not qualified.
@@ -80,6 +78,214 @@ PY
     printf 'cluster lifecycle: %s\n' "$reason" >&2
     exit 1
   }
+  # Docker's image .Id can be a BuildKit index, while CRI reports the config
+  # digest. Verify the complete single-platform archive before either identity
+  # is allowed to identify a candidate pod. The expected platform manifest is
+  # obtained from the exact tag built from the clean checkout by this run.
+  lc_verify_candidate_archive() {
+    local archive="$1" tag="$2" platform="$3" manifest_digest="$4" source_id="$5" proof="$6" sha="$7"
+    LC_ARCHIVE="$archive" LC_ARCHIVE_TAG="$tag" LC_ARCHIVE_PLATFORM="$platform" \
+      LC_ARCHIVE_MANIFEST="$manifest_digest" LC_ARCHIVE_SOURCE_ID="$source_id" \
+      LC_ARCHIVE_PROOF="$proof" LC_ARCHIVE_SHA="$sha" python3 - <<'PY'
+import hashlib,json,os,pathlib,re,tarfile
+archive=pathlib.Path(os.environ['LC_ARCHIVE'])
+tag=os.environ['LC_ARCHIVE_TAG'];platform=os.environ['LC_ARCHIVE_PLATFORM']
+expected_manifest=os.environ['LC_ARCHIVE_MANIFEST'];source_id=os.environ['LC_ARCHIVE_SOURCE_ID']
+proof=pathlib.Path(os.environ['LC_ARCHIVE_PROOF']);sha=os.environ['LC_ARCHIVE_SHA']
+def require(ok,detail):
+  if not ok:raise SystemExit(detail)
+def valid_digest(value):
+  return isinstance(value,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',value) is not None
+require(re.fullmatch(r'[0-9a-f]{40}',sha) is not None,'candidate commit is not a full SHA')
+require(tag=='caesiumcloud/caesium:'+sha,'candidate archive tag differs from checkout SHA')
+require(valid_digest(source_id) and valid_digest(expected_manifest),'Docker image identities are malformed')
+require(platform in ('linux/amd64','linux/arm64'),'unsupported candidate platform')
+target_os,target_arch=platform.split('/',1)
+def read_blob(tar,digest):
+  require(valid_digest(digest),f'invalid blob digest {digest!r}')
+  path='blobs/sha256/'+digest.split(':',1)[1]
+  member=tar.getmember(path)
+  require(member.isfile(),f'blob {digest} is not a regular file')
+  data=tar.extractfile(member).read()
+  require(hashlib.sha256(data).hexdigest()==digest.split(':',1)[1],f'blob {digest} hash mismatch')
+  return data
+with tarfile.open(archive) as tar:
+  members=tar.getmembers()
+  require(len(members)==len({m.name for m in members}),'candidate archive has duplicate paths')
+  manifest=json.load(tar.extractfile('manifest.json'))
+  index_bytes=tar.extractfile('index.json').read()
+  index=json.loads(index_bytes)
+  require(len(manifest)==1 and manifest[0].get('RepoTags')==[tag],
+    f'candidate archive must contain exactly tag {tag}')
+  require(index.get('schemaVersion')==2 and len(index.get('manifests',[]))==1,
+    'candidate archive must contain one platform manifest')
+  descriptor=index['manifests'][0]
+  require(descriptor.get('platform',{}).get('os')==target_os and
+    descriptor.get('platform',{}).get('architecture')==target_arch,
+    f'candidate archive platform differs from {platform}')
+  require(descriptor.get('digest')==expected_manifest,
+    f'candidate archive manifest differs from Docker platform identity {expected_manifest}')
+  manifest_bytes=read_blob(tar,expected_manifest)
+  require(descriptor.get('size')==len(manifest_bytes),'candidate platform manifest size mismatch')
+  image_manifest=json.loads(manifest_bytes)
+  require(image_manifest.get('schemaVersion')==2,'invalid candidate platform manifest')
+  config_descriptor=image_manifest.get('config',{})
+  config_digest=config_descriptor.get('digest','')
+  require(valid_digest(config_digest),'candidate config digest missing or malformed')
+  require(manifest[0].get('Config')=='blobs/sha256/'+config_digest.split(':',1)[1],
+    'candidate Docker manifest Config differs from platform manifest')
+  config_bytes=read_blob(tar,config_digest)
+  require(config_descriptor.get('size')==len(config_bytes),'candidate config size mismatch')
+  config=json.loads(config_bytes)
+  require(config.get('os')==target_os and config.get('architecture')==target_arch,
+    f'candidate config platform differs from {platform}')
+  layers=image_manifest.get('layers',[])
+  require(bool(layers),'candidate platform manifest has no layers')
+  paths=[]
+  for layer in layers:
+    digest=layer.get('digest','')
+    data=read_blob(tar,digest)
+    require(layer.get('size')==len(data),f'candidate layer {digest} size mismatch')
+    paths.append('blobs/sha256/'+digest.split(':',1)[1])
+  require(manifest[0].get('Layers')==paths,
+    'candidate Docker manifest layers differ from platform manifest')
+  archive_index='sha256:'+hashlib.sha256(index_bytes).hexdigest()
+  record={'archive_ref':archive.name,'repo_tag':tag,'candidate_sha':sha,'platform':platform,
+    'source_docker_image_id':source_id,'source_platform_manifest_digest':expected_manifest,
+    'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),
+    'archive_index_digest':archive_index,'verified_platform_manifest_digest':expected_manifest,
+    'verified_config_digest':config_digest,
+    'verified_layer_digests':[layer['digest'] for layer in layers],
+    'verification':'built tag, platform manifest, config and all layer hashes matched'}
+  proof.write_text(json.dumps(record,indent=2)+'\n')
+  print(config_digest)
+PY
+  }
+  lc_verify_candidate_imports() {
+    local archive="$1" proof="$2" node_list="$3" log_dir="$4" output="$5" tag="$6"
+    LC_ARCHIVE="$archive" LC_ARCHIVE_PROOF="$proof" LC_ARCHIVE_NODES="$node_list" \
+      LC_ARCHIVE_LOG_DIR="$log_dir" LC_ARCHIVE_IMPORT_PROOF="$output" LC_ARCHIVE_TAG="$tag" python3 - <<'PY'
+import hashlib,json,os,pathlib,re
+archive=pathlib.Path(os.environ['LC_ARCHIVE']);proof_path=pathlib.Path(os.environ['LC_ARCHIVE_PROOF'])
+proof=json.loads(proof_path.read_text());tag=os.environ['LC_ARCHIVE_TAG']
+if proof['repo_tag']!=tag or hashlib.sha256(archive.read_bytes()).hexdigest()!=proof['archive_sha256']:
+  raise SystemExit('candidate archive changed or tag differs after verification')
+expected={proof['archive_index_digest'],proof['verified_platform_manifest_digest']}
+nodes=pathlib.Path(os.environ['LC_ARCHIVE_NODES']).read_text().splitlines()
+if len(nodes)!=4 or len(set(nodes))!=4 or any(not n for n in nodes):
+  raise SystemExit(f'candidate import expects four distinct owned nodes, got {nodes!r}')
+refs={tag,'docker.io/'+tag};observed=[]
+for node in nodes:
+  path=pathlib.Path(os.environ['LC_ARCHIVE_LOG_DIR'])/f'candidate-import-{node}.txt'
+  lines=path.read_text().splitlines()
+  rows=[line.split() for line in lines if line.split() and line.split()[0] in refs]
+  if not rows:raise SystemExit(f'{node}: no imported candidate tag {tag}')
+  for row in rows:
+    digests=[field for field in row[1:] if re.fullmatch(r'sha256:[0-9a-f]{64}',field)]
+    if len(digests)!=1 or digests[0] not in expected:
+      raise SystemExit(f'{node}: candidate tag target {digests!r} differs from verified archive {sorted(expected)}')
+    observed.append({'node':node,'repo_tag':row[0],'imported_target_digest':digests[0]})
+pathlib.Path(os.environ['LC_ARCHIVE_IMPORT_PROOF']).write_text(json.dumps({
+  'archive_proof':proof_path.name,'node_imports':observed},indent=2)+'\n')
+PY
+  }
+  # Host-only controls exercise the exact Python verifiers used by the live
+  # cluster path. They need neither Docker nor a Kubernetes context.
+  if [[ "${CAESIUM_LIFECYCLE_ARCHIVE_VERIFY_ONLY:-0}" == 1 ]]; then
+    lc_verify_candidate_archive "$LC_TEST_ARCHIVE" "$LC_TEST_TAG" "$LC_TEST_PLATFORM" \
+      "$LC_TEST_MANIFEST" "$LC_TEST_SOURCE" "$LC_TEST_PROOF" "$LC_TEST_SHA"
+    exit
+  fi
+  if [[ "${CAESIUM_LIFECYCLE_IMPORT_VERIFY_ONLY:-0}" == 1 ]]; then
+    lc_verify_candidate_imports "$LC_TEST_ARCHIVE" "$LC_TEST_PROOF" "$LC_TEST_NODES" \
+      "$LC_TEST_LOG_DIR" "$LC_TEST_IMPORT_PROOF" "$LC_TEST_TAG"
+    exit
+  fi
+  if [[ "${CAESIUM_LIFECYCLE_ARCHIVE_SELFTEST:-0}" == 1 ]]; then
+    python3 - "$ROOT/scripts/lifecycle-tests.sh" <<'PY'
+import hashlib,io,json,os,pathlib,shutil,subprocess,sys,tarfile,tempfile
+script=sys.argv[1];sha='a'*40;tag='caesiumcloud/caesium:'+sha
+source='sha256:'+'b'*64;platform='linux/arm64'
+def encoded(value):return json.dumps(value,separators=(',',':')).encode()
+def digest(data):return 'sha256:'+hashlib.sha256(data).hexdigest()
+config=encoded({'os':'linux','architecture':'arm64'})
+layer=b'candidate-layer-negative-control'
+config_id=digest(config);layer_id=digest(layer)
+manifest=encoded({'schemaVersion':2,'config':{'digest':config_id,'size':len(config)},
+  'layers':[{'digest':layer_id,'size':len(layer)}]})
+manifest_id=digest(manifest)
+index=encoded({'schemaVersion':2,'manifests':[{'digest':manifest_id,'size':len(manifest),
+  'platform':{'os':'linux','architecture':'arm64'}}]})
+docker_manifest=encoded([{'Config':'blobs/sha256/'+config_id[7:],'RepoTags':[tag],
+  'Layers':['blobs/sha256/'+layer_id[7:]]}])
+blobs={'manifest.json':docker_manifest,'index.json':index,
+  'blobs/sha256/'+config_id[7:]:config,'blobs/sha256/'+layer_id[7:]:layer,
+  'blobs/sha256/'+manifest_id[7:]:manifest}
+def archive(path,contents):
+  with tarfile.open(path,'w') as tar:
+    for name,data in contents.items():
+      info=tarfile.TarInfo(name);info.size=len(data)
+      tar.addfile(info,io.BytesIO(data))
+def run(mode,path,proof,nodes=None,logs=None,import_proof=None,expected=manifest_id):
+  env=os.environ.copy();env.pop('CAESIUM_LIFECYCLE_ARCHIVE_SELFTEST',None)
+  env.update({'CAESIUM_LIFECYCLE_MODE':'cluster',mode:'1','LC_TEST_ARCHIVE':str(path),
+    'LC_TEST_TAG':tag,'LC_TEST_PLATFORM':platform,'LC_TEST_MANIFEST':expected,
+    'LC_TEST_SOURCE':source,'LC_TEST_PROOF':str(proof),'LC_TEST_SHA':sha,
+    'LC_TEST_NODES':str(nodes or ''),'LC_TEST_LOG_DIR':str(logs or ''),
+    'LC_TEST_IMPORT_PROOF':str(import_proof or '')})
+  return subprocess.run(['bash',script],env=env,text=True,capture_output=True)
+def expect_reject(name,result):
+  if result.returncode==0:raise SystemExit(f'{name} unexpectedly passed')
+with tempfile.TemporaryDirectory(prefix='caesium-f2-image-selftest-') as tmp:
+  root=pathlib.Path(tmp);good=root/'candidate.tar';proof=root/'candidate.json'
+  archive(good,blobs)
+  result=run('CAESIUM_LIFECYCLE_ARCHIVE_VERIFY_ONLY',good,proof)
+  if result.returncode or result.stdout.strip()!=config_id:
+    raise SystemExit(f'valid candidate archive rejected: {result.stderr}')
+  if json.loads(proof.read_text())['verified_config_digest']!=config_id:
+    raise SystemExit('valid archive proof omitted config identity')
+  variants={
+    'wrong tag':{'manifest.json':encoded([{'Config':'blobs/sha256/'+config_id[7:],
+      'RepoTags':['caesiumcloud/caesium:wrong'],'Layers':['blobs/sha256/'+layer_id[7:]]}])},
+    'wrong platform':{'index.json':encoded({'schemaVersion':2,'manifests':[
+      {'digest':manifest_id,'size':len(manifest),'platform':{'os':'linux','architecture':'amd64'}}]})},
+    'corrupt config':{'blobs/sha256/'+config_id[7:]:config+b'x'},
+    'corrupt layer':{'blobs/sha256/'+layer_id[7:]:layer+b'x'},
+    'wrong layer list':{'manifest.json':encoded([{'Config':'blobs/sha256/'+config_id[7:],
+      'RepoTags':[tag],'Layers':[]}])},
+  }
+  for name,changes in variants.items():
+    bad=root/(name.replace(' ','-')+'.tar');archive(bad,{**blobs,**changes})
+    expect_reject(name,run('CAESIUM_LIFECYCLE_ARCHIVE_VERIFY_ONLY',bad,root/(bad.stem+'.json')))
+  expect_reject('wrong Docker platform identity',run('CAESIUM_LIFECYCLE_ARCHIVE_VERIFY_ONLY',
+    good,root/'wrong-manifest.json',expected='sha256:'+'c'*64))
+  logs=root/'logs';logs.mkdir();names=[f'owned-node-{n}' for n in range(4)]
+  nodes=root/'nodes.txt';nodes.write_text('\n'.join(names)+'\n')
+  imported='sha256:'+hashlib.sha256(index).hexdigest()
+  for node in names:
+    (logs/f'candidate-import-{node}.txt').write_text(f'REF TYPE DIGEST SIZE PLATFORMS LABELS\n'
+      f'docker.io/{tag} application/vnd.oci.image.index.v1+json {imported} 100 linux/arm64 -\n')
+  import_proof=root/'imports.json'
+  result=run('CAESIUM_LIFECYCLE_IMPORT_VERIFY_ONLY',good,proof,nodes,logs,import_proof)
+  if result.returncode or len(json.loads(import_proof.read_text())['node_imports'])!=4:
+    raise SystemExit(f'valid four-node import rejected: {result.stderr}')
+  bad_log=logs/f'candidate-import-{names[-1]}.txt'
+  good_log=bad_log.read_text()
+  bad_log.write_text(good_log.replace(imported,'sha256:'+'d'*64))
+  expect_reject('foreign node target',run('CAESIUM_LIFECYCLE_IMPORT_VERIFY_ONLY',
+    good,proof,nodes,logs,import_proof))
+  bad_log.write_text('REF TYPE DIGEST SIZE PLATFORMS LABELS\n')
+  expect_reject('missing node import',run('CAESIUM_LIFECYCLE_IMPORT_VERIFY_ONLY',
+    good,proof,nodes,logs,import_proof))
+  bad_log.write_text(good_log)
+  changed=root/'changed.tar';shutil.copyfile(good,changed)
+  with changed.open('ab') as out:out.write(b'changed-after-verification')
+  expect_reject('archive changed after verification',run('CAESIUM_LIFECYCLE_IMPORT_VERIFY_ONLY',
+    changed,proof,nodes,logs,import_proof))
+print('candidate archive selftest: valid archive/import passed; 9 negative controls rejected')
+PY
+    exit
+  fi
   for cmd in docker kind kubectl helm python3 just; do
     command -v "$cmd" >/dev/null 2>&1 || cluster_die "missing $cmd"
   done
@@ -117,6 +323,8 @@ PY
     "$LC_ART/cluster-raw-after.json" "$LC_ART/cluster-attempt-proofs.json" \
     "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-address-classification.json" \
     "$LC_ART/cluster-snapshot-write-count.json" \
+    "$LC_ART/candidate-platform.tar" "$LC_ART/candidate-image-archive.json" \
+    "$LC_ART/candidate-image-node-imports.json" \
     "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
   mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
   cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
@@ -250,15 +458,19 @@ p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR'])
 print(p['previous']['digests'][os.environ['LC_PLATFORM']])
 PY
 )"
+  # A pre-existing tag cannot establish which checkout produced its bytes.
+  # Cluster qualification therefore always builds this exact tag itself.
   if docker image inspect "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" >/dev/null 2>&1; then
-    [[ "${CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE:-0}" == 1 ]] || cluster_die "candidate image pre-exists; cannot bind it to $LC_SHA without explicit unverified override"
-    LC_PROVENANCE=supplied-unverified
-  else
-    just "tag=$LC_SHA" build-release >"$LC_ART/cluster-logs/build-candidate.log" 2>&1 || cluster_die "candidate build failed"
-    LC_PROVENANCE=built-by-this-run
+    cluster_die "candidate image pre-exists; remove the tag so this clean checkout can build it"
   fi
-  LC_CAND_ID="$(docker image inspect --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")"
-  [[ -n "$LC_CAND_ID" && "$LC_CAND_ID" != "$LC_PREV_ID" ]] || cluster_die "candidate image ID absent or equals previous release"
+  just "tag=$LC_SHA" build-release >"$LC_ART/cluster-logs/build-candidate.log" 2>&1 || cluster_die "candidate build failed"
+  LC_PROVENANCE=built-by-this-run
+  LC_CAND_SOURCE_ID="$(docker image inspect --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")"
+  LC_CAND_PLATFORM_DIGEST="$(docker image inspect --platform "$LC_PLATFORM" --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")"
+  [[ "$LC_CAND_SOURCE_ID" =~ ^sha256:[0-9a-f]{64}$ && "$LC_CAND_SOURCE_ID" != "$LC_PREV_ID" ]] \
+    || cluster_die "candidate build did not produce a distinct image index"
+  [[ "$LC_CAND_PLATFORM_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || cluster_die "candidate build did not expose a platform manifest for $LC_PLATFORM"
   docker pull "$LC_TASK" >"$LC_ART/cluster-logs/pull-task.log" 2>&1 || cluster_die "task image pull failed"
   docker image inspect "$LC_KIND" >/dev/null 2>&1 || docker pull "$LC_KIND" >"$LC_ART/cluster-logs/pull-kind.log" 2>&1 || cluster_die "kind image unavailable"
   LC_BUILDER="${CAESIUM_LIFECYCLE_BUILDER_IMAGE:-caesiumcloud/caesium-builder:latest}"
@@ -376,6 +588,17 @@ PY
   # children; export one verified platform without retagging the release.
   docker image save --platform "$LC_PLATFORM" --output "$LC_ART/previous-platform.tar" "$LC_PREV" \
     >"$LC_ART/cluster-logs/save-previous.log" 2>&1 || cluster_die "cannot export pinned previous platform $LC_PLATFORM"
+  docker image save --platform "$LC_PLATFORM" --output "$LC_ART/candidate-platform.tar" "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" \
+    >"$LC_ART/cluster-logs/save-candidate.log" 2>&1 || cluster_die "cannot export built candidate platform $LC_PLATFORM"
+  [[ "$(docker image inspect --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")" == "$LC_CAND_SOURCE_ID" ]] \
+    || cluster_die "candidate tag changed between build and archive export"
+  [[ "$(docker image inspect --platform "$LC_PLATFORM" --format '{{.Id}}' "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE")" == "$LC_CAND_PLATFORM_DIGEST" ]] \
+    || cluster_die "candidate platform changed between build and archive export"
+  LC_CAND_CONFIG_ID="$(lc_verify_candidate_archive "$LC_ART/candidate-platform.tar" \
+    "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_PLATFORM" "$LC_CAND_PLATFORM_DIGEST" \
+    "$LC_CAND_SOURCE_ID" "$LC_ART/candidate-image-archive.json" "$LC_SHA" \
+    2>"$LC_ART/cluster-logs/candidate-archive-verification.log")" \
+    || cluster_die "candidate archive does not bind the built tag to its platform config"
   docker image save --platform "$LC_PLATFORM" --output "$LC_ART/task-platform.tar" "$LC_TASK" \
     >"$LC_ART/cluster-logs/save-task.log" 2>&1 || cluster_die "cannot export task platform $LC_PLATFORM"
   LC_PREV_CONFIG_ID="$(LC_ART="$LC_ART" LC_PREV="$LC_PREV" LC_PLATFORM="$LC_PLATFORM" \
@@ -477,8 +700,28 @@ PY
   lc_case previous-release-digest pass "pulled $LC_PREV for $LC_PLATFORM; repo digest $LC_PREV_ID; platform manifest $LC_PREV_PLATFORM_DIGEST; verified config $LC_PREV_CONFIG_ID; Docker platform inspect $LC_PREV_INSPECT_PLATFORM_ID; all owned nodes imported the verified archive" "$LC_ART/previous-image-node-imports.json"
   lc_kind_load task image-archive "$LC_ART/task-platform.tar" \
     || cluster_die "kind task platform import failed after bounded containerd retries"
-  lc_kind_load built docker-image "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" \
-    || cluster_die "kind built-image import failed after bounded containerd retries"
+  lc_kind_load candidate image-archive "$LC_ART/candidate-platform.tar" \
+    || cluster_die "kind candidate platform import failed after bounded containerd retries"
+  while IFS= read -r node; do
+    lc_run_timed 20 "$LC_ART/cluster-logs/candidate-import-$node.txt" \
+      docker exec --privileged "$node" ctr --namespace=k8s.io images ls \
+      || cluster_die "cannot inspect candidate image import on owned node $node"
+  done <"$LC_ART/cluster-logs/kind-nodes.txt"
+  lc_verify_candidate_imports "$LC_ART/candidate-platform.tar" \
+    "$LC_ART/candidate-image-archive.json" "$LC_ART/cluster-logs/kind-nodes.txt" \
+    "$LC_ART/cluster-logs" "$LC_ART/candidate-image-node-imports.json" \
+    "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" \
+    2>"$LC_ART/cluster-logs/candidate-import-verification.log" \
+    || cluster_die "owned kind nodes did not import the verified candidate image"
+  LC_CAND_ARCHIVE_INDEX="$(LC_ART="$LC_ART" python3 - <<'PY'
+import json,os,pathlib
+print(json.loads(pathlib.Path(os.environ['LC_ART'],'candidate-image-archive.json').read_text())['archive_index_digest'])
+PY
+)"
+  LC_CAND_ID="$LC_CAND_ARCHIVE_INDEX,$LC_CAND_PLATFORM_DIGEST,$LC_CAND_CONFIG_ID"
+  lc_case candidate-image-identity pass "clean checkout $LC_SHA built $CAESIUM_LIFECYCLE_CANDIDATE_IMAGE; all owned nodes imported its verified $LC_PLATFORM archive; allowed pod IDs $LC_CAND_ID" "$LC_ART/candidate-image-node-imports.json"
+  lc_kind_load runner docker-image "$LC_RUNNER" \
+    || cluster_die "kind runner image import failed after bounded containerd retries"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
     --set image.tag=v0.1.0 >"$LC_ART/manifest-before.yaml" || cluster_die "previous Helm render failed"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
@@ -980,7 +1223,8 @@ PY
   lc_copy_runner_artifacts || LC_COPY_RC=$?
   LC_ART="$LC_ART" LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" \
     LC_PREV="$LC_PREV" LC_PREV_ID="$LC_PREV_ID" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" \
-    LC_CAND_ID="$LC_CAND_ID" LC_PROVENANCE="$LC_PROVENANCE" LC_HELM_RC="$LC_HELM_RC" \
+    LC_CAND_ID="$LC_CAND_ID" LC_CAND_SOURCE_ID="$LC_CAND_SOURCE_ID" \
+    LC_PROVENANCE="$LC_PROVENANCE" LC_HELM_RC="$LC_HELM_RC" \
     LC_MIXED_RC="$LC_MIXED_RC" LC_AFTER_RC="$LC_AFTER_RC" LC_GET_RC="$LC_GET_RC" \
     LC_INFO_RC="$LC_INFO_RC" LC_ADDRESS_BLOCKED="$LC_ADDRESS_BLOCKED" LC_COPY_RC="$LC_COPY_RC" python3 - <<'PY'
 import datetime,json,os,pathlib
@@ -1024,7 +1268,12 @@ record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'finished_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
   'topology':{'replicas':3,'persistent':True,'database_shards':1},
   'previous_image':{'ref':os.environ['LC_PREV'],'image_id':os.environ['LC_PREV_ID']},
-  'candidate_image':{'ref':os.environ['LC_CAND'],'image_id':os.environ['LC_CAND_ID'],
+  'candidate_image':{'ref':os.environ['LC_CAND'],
+    'image_id':os.environ['LC_CAND_SOURCE_ID'],
+    'source_docker_image_id':os.environ['LC_CAND_SOURCE_ID'],
+    'verified_pod_image_ids':os.environ['LC_CAND_ID'].split(','),
+    'archive_proof':'candidate-image-archive.json',
+    'owned_node_imports':'candidate-image-node-imports.json',
     'provenance':os.environ['LC_PROVENANCE']},
   'helm_exit_code':int(os.environ['LC_HELM_RC']),
   'phase_exit_codes':gates,
