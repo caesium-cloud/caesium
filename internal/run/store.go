@@ -25,6 +25,7 @@ import (
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -406,6 +407,10 @@ type RegisterTaskInput struct {
 type StartOptions struct {
 	Params   map[string]string
 	Priority string
+	// IdempotencyKey, when set, makes the start idempotent: a later start of
+	// the same job with the same key returns this start's outcome instead of
+	// admitting again. See start_idempotency.go.
+	IdempotencyKey string
 }
 
 type StartOption func(*StartOptions)
@@ -664,6 +669,8 @@ type admissionResult struct {
 	// transaction appended, for publication after commit.
 	heldBy     *models.DatasetHold
 	heldEvents []event.Event
+	// queueID is the run_queue row an admissionQueued decision wrote.
+	queueID uuid.UUID
 }
 
 type startRunRequest struct {
@@ -675,6 +682,16 @@ type startRunRequest struct {
 	priorityOverride string
 	fromQueue        bool
 	policyOnly       bool
+	// queueID is the run_queue row a fromQueue start is promoting, so the
+	// admission can resolve an idempotent start that was waiting on it.
+	queueID *uuid.UUID
+	// idempotencyKey makes this start idempotent (see start_idempotency.go);
+	// requestParams are the params as the caller sent them, before
+	// enrichment, which is what the key's request hash covers.
+	idempotencyKey string
+	requestParams  map[string]string
+	// result, when non-nil, receives the admission outcome.
+	result *StartResult
 }
 
 // storeBusyRetryBackoffs aliases the shared contention-retry schedule so
@@ -1293,10 +1310,12 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
-		if err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth); err != nil {
+		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth)
+		if err != nil {
 			return result, err
 		}
 		result.decision = admissionQueued
+		result.queueID = queueID
 		return result, nil
 	case jobdefschema.ConcurrencyStrategyReplace:
 		cancelled, cancelEvents, err := s.cancelOldestActiveRunTx(tx, model.JobID)
@@ -1389,6 +1408,19 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	}
 	conn := s.db.WithContext(ctx)
 
+	// An idempotent start fingerprints the params as the caller sent them, so
+	// capture them before the enricher adds its own.
+	req.requestParams = req.params
+	if req.idempotencyKey != "" {
+		existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey)
+		if err == nil {
+			return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+
 	// Enrich before the model is built so the added params are marshalled into
 	// models.JobRun.Params and land with the INSERT (and with the run_queue row
 	// on the queued path), rather than being observed after the run is live.
@@ -1440,11 +1472,17 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				// the others and are published after commit; there is no
 				// run_started, because nothing started.
 				attemptEvents = append(attemptEvents, result.heldEvents...)
-				return nil
-			case admissionSkipped, admissionFailed, admissionQueued:
+				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+			case admissionSkipped, admissionQueued:
+				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+			case admissionFailed:
 				return nil
 			default:
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
+			}
+
+			if err := recordStartOutcomeTx(tx, req, model.ID, attemptAdmission); err != nil {
+				return err
 			}
 
 			evt, err := s.appendRunStartedEventTx(tx, model)
@@ -1468,7 +1506,22 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return err
 	}); err != nil {
+		if req.idempotencyKey != "" && sqlerr.IsUniqueConstraint(err) {
+			// A concurrent start with the same key committed first; this
+			// transaction (including anything admission did) rolled back.
+			// Answer with the winner's outcome.
+			if existing, loadErr := findStartIdempotency(conn, req.jobID, req.idempotencyKey); loadErr == nil {
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+			}
+		}
 		return nil, err
+	}
+
+	if req.result != nil {
+		outcome, reason, runID, queueID, ok := startOutcomeOf(model.ID, admission)
+		if ok {
+			*req.result = StartResult{Outcome: outcome, Reason: reason, RunID: runID, QueueID: queueID}
+		}
 	}
 
 	switch admission.decision {
@@ -1503,6 +1556,16 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		metrics.RunSkippedTotal.WithLabelValues(metricJobAlias(req.jobID, admission.jobAlias), reason).Inc()
 		return nil, ErrRunSkipped
 	case admissionFailed:
+		if req.idempotencyKey != "" {
+			// The run holding the slot may be this key's own: a concurrent
+			// start with the same key committed it (and its record, in the same
+			// transaction) after the up-front lookup. Every other outcome
+			// collides with that record on insert; a refusal inserts nothing,
+			// so look again before refusing.
+			if existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey); err == nil {
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+			}
+		}
 		return nil, ErrMaxConcurrentRunsReached
 	case admissionQueued:
 		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
@@ -1692,6 +1755,7 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 		params:           decodeRunParams(queued.Params),
 		priorityOverride: PriorityLabel(queued.Priority),
 		fromQueue:        true,
+		queueID:          &queued.ID,
 	})
 }
 
@@ -5510,7 +5574,7 @@ func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
 	return count, err
 }
 
-func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) error {
+func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) (uuid.UUID, error) {
 	if priority <= 0 {
 		priority = PriorityNormalValue
 	}
@@ -5527,13 +5591,13 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON
 		CreatedAt: now,
 	}
 	if err := tx.Create(row).Error; err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	var depth int64
 	if err := tx.Model(&models.RunQueue{}).
 		Where("job_id = ? AND claimed_by = ''", jobID).
 		Count(&depth).Error; err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	if overflow := int(depth) - maxDepth; overflow > 0 {
 		if err := tx.Exec(`
@@ -5545,10 +5609,10 @@ WHERE id IN (
 	ORDER BY created_at ASC
 	LIMIT ?
 )`, jobID, overflow).Error; err != nil {
-			return err
+			return uuid.Nil, err
 		}
 	}
-	return nil
+	return row.ID, nil
 }
 
 func (s *Store) DequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {

@@ -15,11 +15,12 @@ import (
 )
 
 var (
-	startJobID    string
-	startServer   string
-	startAPIKey   string
-	startParams   []string
-	startPriority string
+	startJobID          string
+	startServer         string
+	startAPIKey         string
+	startParams         []string
+	startPriority       string
+	startIdempotencyKey string
 
 	startHTTPClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
 )
@@ -29,15 +30,28 @@ type startRequest struct {
 	Priority string            `json:"priority,omitempty"`
 }
 
+// startResponse is the 202 body of POST /v1/jobs/:id/run: the run itself when
+// one was created (outcome "created"), otherwise the outcome of the start.
 type startResponse struct {
-	ID string `json:"id"`
+	ID      string `json:"id"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason"`
+	RunID   string `json:"run_id"`
+	QueueID string `json:"queue_id"`
+
+	replayed bool
 }
 
 var startCmd = &cobra.Command{
-	Use:   "start --job-id <job-id> [--params k=v] [--priority high|normal|low]",
+	Use:   "start --job-id <job-id> [--params k=v] [--priority high|normal|low] [--idempotency-key <key>]",
 	Short: "Start a job run",
-	Args:  cobra.NoArgs,
-	RunE:  runStart,
+	Long: "Start a job run and print its run ID on stdout.\n\n" +
+		"With --idempotency-key, retrying the same command returns the original start's outcome " +
+		"instead of starting another run. A start the job's concurrency policy queues prints nothing " +
+		"on stdout; rerun with the same key to get its run ID once it starts. A start that is skipped " +
+		"(concurrency policy or a held upstream dataset) exits non-zero.",
+	Args: cobra.NoArgs,
+	RunE: runStart,
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -58,15 +72,54 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resp, err := postStart(cmd, jobID, startRequest{
+	key := strings.TrimSpace(startIdempotencyKey)
+	resp, err := postStart(cmd, jobID, key, startRequest{
 		Params:   params,
 		Priority: priority,
 	})
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), resp.ID)
-	return nil
+	return reportStart(cmd, key, resp)
+}
+
+// reportStart keeps stdout to the run ID alone, so `RUN=$(caesium run start
+// ...)` stays scriptable; everything else is guidance on stderr.
+func reportStart(cmd *cobra.Command, key string, resp *startResponse) error {
+	stderr := cmd.ErrOrStderr()
+	if resp.replayed {
+		_, _ = fmt.Fprintf(stderr, "idempotency key %q matched an earlier start; reporting its outcome\n", key)
+	}
+	switch resp.Outcome {
+	case "", "created":
+		if strings.TrimSpace(resp.ID) == "" {
+			if resp.Outcome == "" {
+				// A server that predates start outcomes answers a queued or
+				// skipped start with an empty 202.
+				_, _ = fmt.Fprintln(stderr, "run start accepted without creating a run (queued or skipped by the job's concurrency policy)")
+				return nil
+			}
+			return fmt.Errorf("run start response did not include id")
+		}
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), resp.ID)
+		return nil
+	case "queued":
+		msg := fmt.Sprintf("run queued by the job's concurrency policy (queue id %s)", resp.QueueID)
+		if key != "" {
+			msg += "; rerun with the same --idempotency-key to get its run ID once it starts"
+		}
+		_, _ = fmt.Fprintln(stderr, msg)
+		return nil
+	case "skipped":
+		if resp.RunID != "" {
+			return fmt.Errorf("run start skipped (%s); recorded as skipped run %s", resp.Reason, resp.RunID)
+		}
+		return fmt.Errorf("run start skipped (%s)", resp.Reason)
+	case "dropped":
+		return fmt.Errorf("run start was queued (queue id %s) but its queue entry was removed before it ran", resp.QueueID)
+	default:
+		return fmt.Errorf("run start returned unknown outcome %q", resp.Outcome)
+	}
 }
 
 func parseRunStartParams(values []string) (map[string]string, error) {
@@ -84,7 +137,7 @@ func parseRunStartParams(values []string) (map[string]string, error) {
 	return params, nil
 }
 
-func postStart(cmd *cobra.Command, jobID string, payload startRequest) (*startResponse, error) {
+func postStart(cmd *cobra.Command, jobID, idempotencyKey string, payload startRequest) (*startResponse, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -97,6 +150,9 @@ func postStart(cmd *cobra.Command, jobID string, payload startRequest) (*startRe
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	if apiKey := resolveRunDiffAPIKey(cmd, startAPIKey); apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -116,12 +172,12 @@ func postStart(cmd *cobra.Command, jobID string, payload startRequest) (*startRe
 	}
 
 	var decoded startResponse
-	if err := json.Unmarshal(respBody, &decoded); err != nil {
-		return nil, fmt.Errorf("run start response was not valid JSON (status %d): %w", resp.StatusCode, err)
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		if err := json.Unmarshal(respBody, &decoded); err != nil {
+			return nil, fmt.Errorf("run start response was not valid JSON (status %d): %w", resp.StatusCode, err)
+		}
 	}
-	if strings.TrimSpace(decoded.ID) == "" {
-		return nil, fmt.Errorf("run start response did not include id")
-	}
+	decoded.replayed = strings.EqualFold(resp.Header.Get("Idempotent-Replayed"), "true")
 	return &decoded, nil
 }
 
@@ -131,6 +187,7 @@ func init() {
 	startCmd.Flags().StringVar(&startAPIKey, "api-key", "", "API key for authentication (prefer "+runDiffAPIKeyEnvVar+"; --api-key is visible in process listings)")
 	startCmd.Flags().StringArrayVar(&startParams, "params", nil, "Run parameter as k=v (repeatable)")
 	startCmd.Flags().StringVar(&startPriority, "priority", "", "Run priority override: high, normal, or low")
+	startCmd.Flags().StringVar(&startIdempotencyKey, "idempotency-key", "", "Make the start idempotent: a retry with the same key returns the original start instead of starting another run")
 	startCmd.MarkFlagRequired("job-id") //nolint:errcheck
 
 	Cmd.AddCommand(startCmd)
