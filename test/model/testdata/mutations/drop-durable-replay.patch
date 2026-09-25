@@ -1,0 +1,6 @@
+diff --git a/test/model/run.go b/test/model/run.go
+--- a/test/model/run.go
++++ b/test/model/run.go
+@@ -411 +411 @@
+-	prev.Applied = false
++	prev.Sequence = 0; prev.Applied = false

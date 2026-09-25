@@ -1,0 +1,6 @@
+diff --git a/test/model/oracle.go b/test/model/oracle.go
+--- a/test/model/oracle.go
++++ b/test/model/oracle.go
+@@ -188 +188 @@
+-	if after.Ack != before.Ack {
++	if before.Epoch == after.Epoch && after.Ack != before.Ack {
