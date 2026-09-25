@@ -296,7 +296,7 @@ func parseRawAttemptEffect(event recorder.Event) (rawAttemptEffect, error) {
 	if err := json.Unmarshal([]byte(event.Raw), &raw); err != nil {
 		return rawAttemptEffect{}, fmt.Errorf("raw %s nonce %s payload: %w", event.Kind, event.Nonce, err)
 	}
-	if raw.RunID != event.RunID || raw.Step != event.Step || raw.Nonce != event.Nonce ||
+	if raw.RunID != event.RunID || raw.Step != event.Step || raw.Nonce == "" || raw.Nonce != event.Nonce ||
 		raw.Event != event.Kind || raw.PodName == "" {
 		return rawAttemptEffect{}, fmt.Errorf("raw %s nonce %s lacks matching run/step/nonce/kind/pod identity", event.Kind, event.Nonce)
 	}
@@ -335,6 +335,44 @@ func verifySeedHeldAttempt(proof clusterTaskProof, rawEvents []recorder.Event, t
 		return fmt.Errorf("seed held task %s current runtime %s has no raw start", proof.ID, proof.RuntimeID)
 	}
 	return nil
+}
+
+func verifyQueuedHeldAttempt(run apiRun, wantRunID, wantJobID, wantToken string, proof clusterTaskProof,
+	rawEvents []recorder.Event, taskEvents []eventTuple) ([]string, error) {
+	if run.ID != wantRunID || run.JobID != wantJobID || run.Params["TOKEN"] != wantToken ||
+		run.Status != "running" || len(run.Tasks) != 1 {
+		return nil, fmt.Errorf("queued run has no unique current running public task: run=%s job=%s status=%s tasks=%d", run.ID, run.JobID, run.Status, len(run.Tasks))
+	}
+	task := run.Tasks[0]
+	if task.ID == "" || task.Status != "running" || task.Attempt < 1 ||
+		proof.RunID != run.ID || proof.TaskID != task.ID || proof.Status != "running" || proof.Attempt != task.Attempt {
+		return nil, fmt.Errorf("queued run %s public task and durable running attempt disagree: public=%+v durable=%+v", run.ID, task, proof)
+	}
+	if err := verifySeedHeldAttempt(proof, rawEvents, taskEvents); err != nil {
+		return nil, err
+	}
+	starts := map[string]bool{}
+	for _, event := range rawEvents {
+		if event.RunID != run.ID || event.Step != "hold" || event.Kind != "start" {
+			continue
+		}
+		raw, err := parseRawAttemptEffect(event)
+		if err != nil {
+			return nil, err
+		}
+		if raw.PodName == proof.RuntimeID {
+			starts[raw.Nonce] = true
+		}
+	}
+	nonces := make([]string, 0, len(starts))
+	for nonce := range starts {
+		nonces = append(nonces, nonce)
+	}
+	sort.Strings(nonces)
+	if len(nonces) == 0 {
+		return nil, fmt.Errorf("queued run %s current durable runtime has no raw start nonce", run.ID)
+	}
+	return nonces, nil
 }
 
 func reconcileRetainedAttemptEffects(seed, terminal clusterTaskProof, seedStarts []string, rawEvents []recorder.Event, taskEvents []eventTuple) error {
@@ -1201,24 +1239,76 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	require.NotEmpty(t, queued.ID, "queued row never became a run")
 	// The queued job uses the same held manifest as its predecessor. Admission
 	// only starts its task; release the new run's own recorder barrier after
-	// observing that run's raw start, never the predecessor's barrier again.
+	// joining its current running durable attempt to task_started and raw start.
 	waitRecorderStart(t, "retained-history-and-raw-effects", queued.ID)
+	var queuedBefore apiRun
+	var queuedBeforeProof clusterTaskProof
+	var queuedBeforeStarts []string
+	var queuedBeforeEvents []eventTuple
+	var queuedBeforeRaw []recorder.Event
+	var lastQueuedErr error
+	for deadline := time.Now().Add(2 * time.Minute); time.Now().Before(deadline); {
+		live, err := c.run(ctx, queued.JobID, queued.ID)
+		if err != nil {
+			lastQueuedErr = err
+		} else if isTerminal(live.Status) {
+			blockf(t, "retained-history-and-raw-effects", "queued run %s became terminal before its controlled release: %s", queued.ID, live.Status)
+		} else if len(live.Tasks) != 1 {
+			lastQueuedErr = fmt.Errorf("queued run %s exposes %d public tasks, want one running task", queued.ID, len(live.Tasks))
+		} else {
+			proof, proofErr := readClusterTaskProof(ctx, h, base, queued.ID, live.Tasks[0].ID)
+			if proofErr != nil {
+				lastQueuedErr = proofErr
+			} else {
+				taskEvents, eventErr := readEventBacklog(ctx, c, queued.ID, 0)
+				if eventErr != nil {
+					lastQueuedErr = eventErr
+				} else {
+					rawEvents := recorderEvents(t)
+					starts, proofErr := verifyQueuedHeldAttempt(live, queued.ID, queued.JobID, fx.QueueToken, proof, rawEvents, taskEvents)
+					if proofErr == nil {
+						queuedBefore, queuedBeforeProof, queuedBeforeStarts = live, proof, starts
+						queuedBeforeEvents, queuedBeforeRaw = taskEvents, rawEvents
+						break
+					}
+					lastQueuedErr = proofErr
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	if queuedBefore.ID == "" {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s has no current running durable task/start before release: %v", queued.ID, lastQueuedErr)
+	}
 	writeJSON(t, "cluster-queued-before-release.json", map[string]any{
-		"run": queued, "raw_events": recorderEvents(t)})
+		"run": queuedBefore, "durable_task": queuedBeforeProof, "current_start_nonces": queuedBeforeStarts,
+		"task_events": queuedBeforeEvents, "raw_events": queuedBeforeRaw})
 	releaseRecordedRun(t, queued.ID)
 	queued, err := c.awaitRunStatus(ctx, queued.JobID, queued.ID, func(r apiRun) bool { return isTerminal(r.Status) }, 5*time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, "succeeded", queued.Status)
-	require.NotEmpty(t, queued.Tasks, "queued run has no task attempt")
-	assertRawCompletion(t, queued.ID, recorderEvents(t))
-	queuedMatched := false
-	for _, task := range queued.Tasks {
-		proof, err := readClusterTaskProof(ctx, h, base, queued.ID, task.ID)
-		require.NoError(t, err)
-		attemptProofs[queued.ID] = append(attemptProofs[queued.ID], proof)
-		queuedMatched = queuedMatched || proof.Status == "succeeded" && rawCompletionMatchesTask(queued.ID, proof, recorderEvents(t))
+	require.Len(t, queued.Tasks, 1, "queued run has no unique terminal task attempt")
+	proof, err := readClusterTaskProof(ctx, h, base, queued.ID, queued.Tasks[0].ID)
+	if err != nil {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s terminal durable task missing: %v", queued.ID, err)
 	}
-	require.True(t, queuedMatched, "queued run has no raw effect tied to its terminal task attempt")
+	if err := verifyRetainedTaskIdentity(queuedBeforeProof, proof, queued.ID, queuedBeforeProof.TaskID); err != nil {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s changed its pre-release durable task identity: %v", queued.ID, err)
+	}
+	if queued.Tasks[0].Status != "succeeded" || proof.Status != "succeeded" || proof.Attempt != queued.Tasks[0].Attempt {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s terminal public/durable task attempt disagrees: public=%+v durable=%+v", queued.ID, queued.Tasks[0], proof)
+	}
+	queuedEvents, err := readEventBacklog(ctx, c, queued.ID, 0)
+	if err != nil {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s terminal event backlog unavailable: %v", queued.ID, err)
+	}
+	rawAfterQueued := recorderEvents(t)
+	if err := reconcileRetainedAttemptEffects(queuedBeforeProof, proof, queuedBeforeStarts, rawAfterQueued, queuedEvents); err != nil {
+		blockf(t, "retained-history-and-raw-effects", "queued run %s pre-release attempt did not reconcile with terminal effects: %v", queued.ID, err)
+	}
+	attemptProofs[queued.ID] = []clusterTaskProof{proof}
+	writeJSON(t, "cluster-queued-after-release.json", map[string]any{
+		"run": queued, "durable_task": proof, "task_events": queuedEvents, "raw_events": rawAfterQueued})
 	rows, err := c.queue(ctx, fx.Jobs["queue"].ID)
 	require.NoError(t, err)
 	for _, row := range rows {

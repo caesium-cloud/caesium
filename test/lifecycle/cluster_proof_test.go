@@ -75,6 +75,53 @@ func TestHeldRecorderStartRequiresQueuedRunIdentity(t *testing.T) {
 	}
 }
 
+func TestQueuedPreReleaseRequiresCurrentDurableAttempt(t *testing.T) {
+	const (
+		runID     = "689add98-8ea4-46c4-aa6b-faa12169f45c"
+		jobID     = "9aa0a5d2-1095-4e47-9d78-b6307c13f763"
+		publicID  = "148d4542-8df5-4bf2-8ff4-d542af055498"
+		durableID = "45b15c10-f7ea-4987-9fcd-d05e0522bbd9"
+		token     = "queued-test"
+	)
+	stalePod := publicID + "-" + runID + "-attempt1-bd606dbc-2d65-4ef4-a0d2-d795606e2673"
+	currentPod := publicID + "-" + runID + "-attempt2-97675795-84e0-4aea-a36f-cc97ac70663b"
+	var run apiRun
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"`+runID+`","job_id":"`+jobID+`","status":"running","params":{"TOKEN":"`+token+`"},"tasks":[{"id":"`+publicID+`","status":"running","attempt":2}]}`), &run))
+	proof := clusterTaskProof{ID: durableID, RunID: runID, TaskID: publicID,
+		Status: "running", Attempt: 2, ClaimAttempt: 2, RuntimeID: currentPod}
+	rawStart := func(nonce, podName string) recorder.Event {
+		body, err := json.Marshal(rawAttemptEffect{RunID: runID, Step: "hold", Event: "start", Nonce: nonce, PodName: podName})
+		require.NoError(t, err)
+		return recorder.Event{RunID: runID, Step: "hold", Kind: "start", Nonce: nonce, Raw: string(body)}
+	}
+	started := func(attempt, claim int, podName string) eventTuple {
+		payload, err := json.Marshal(taskStartedAttempt{DurableID: durableID, RunID: runID, TaskID: publicID,
+			RuntimeID: podName, Attempt: attempt, ClaimAttempt: claim})
+		require.NoError(t, err)
+		return eventTuple{Type: "task_started", TaskID: publicID, Payload: string(payload)}
+	}
+	staleRaw := rawStart("stale-start", stalePod)
+	currentRaw := rawStart("current-start", currentPod)
+	taskEvents := []eventTuple{started(1, 1, stalePod), started(2, 2, currentPod)}
+	require.True(t, hasHeldRecorderStart(runID, []recorder.Event{staleRaw}),
+		"the old start reaches the coarse run-level barrier")
+	_, err := verifyQueuedHeldAttempt(run, runID, jobID, token, proof, []recorder.Event{staleRaw}, taskEvents)
+	require.ErrorContains(t, err, "current runtime", "a stale attempt-1 start cannot release running attempt 2")
+	nonces, err := verifyQueuedHeldAttempt(run, runID, jobID, token, proof,
+		[]recorder.Event{staleRaw, currentRaw}, taskEvents)
+	require.NoError(t, err)
+	require.Equal(t, []string{"current-start"}, nonces, "snapshot only the current durable runtime's nonce")
+	_, err = verifyQueuedHeldAttempt(run, runID, jobID, token, proof,
+		[]recorder.Event{staleRaw, currentRaw}, taskEvents[:1])
+	require.Error(t, err, "a raw start without the current persisted task_started event cannot release")
+	wrongPublic := run
+	wrongPublic.Tasks = append(wrongPublic.Tasks[:0:0], run.Tasks...)
+	wrongPublic.Tasks[0].Attempt = 1
+	_, err = verifyQueuedHeldAttempt(wrongPublic, runID, jobID, token, proof,
+		[]recorder.Event{staleRaw, currentRaw}, taskEvents)
+	require.Error(t, err, "the public and durable current attempts must agree")
+}
+
 func TestReadClusterTaskProofQueriesPublicIdentity(t *testing.T) {
 	const (
 		runID     = "7c39392d-d1bf-43fc-b803-fce7d606141f"
