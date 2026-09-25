@@ -949,18 +949,29 @@ PY
     lc_case rolling-upgrade-three-voters blocked "post-upgrade info.yaml could not be captured on all members"
   elif [[ "$LC_GET_RC" != 0 ]]; then
     lc_case rolling-upgrade-three-voters blocked "installed/upgraded Helm manifest could not be compared as image-only"
-  elif [[ "$LC_HELM_RC" != 0 ]]; then
-    lc_case rolling-upgrade-three-voters blocked "helm upgrade --wait failed; inspect cluster-logs/helm-upgrade.log"
   elif [[ "$LC_AFTER_RC" != 0 ]]; then
     # A recorded runner case identifies whether upgrade state was blocked or
     # failed. A later retained-history failure must not overwrite its pass.
     [[ -f "$LC_ART/cases/rolling-upgrade-three-voters.json" ]] || \
       lc_case rolling-upgrade-three-voters blocked "runner produced no upgrade case; inspect AfterUpgrade.log and pod/Raft observations"
   fi
+  LC_ROLLING_PASS=0
+  if LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY'; then
+import json,os,pathlib
+path=pathlib.Path(os.environ['LC_ART'],'cases','rolling-upgrade-three-voters.json')
+try:
+  record=json.loads(path.read_text())
+except (OSError,ValueError):
+  raise SystemExit(1)
+raise SystemExit(0 if record.get('lifecycle_id')==os.environ['LC_ID'] and record.get('status')=='pass' else 1)
+PY
+    LC_ROLLING_PASS=1
+  fi
   # F2's destructive cases are reported individually. Their launch requires a
-  # healthy upgraded quorum; an unhealthy upgrade leaves them blocked with the
-  # exact dependency rather than allowing a test on a different fault state.
-  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_HELM_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
+  # healthy upgraded quorum. The runner proves that state from pods, the live
+  # manifest and direct Raft membership; Helm --wait can time out after that
+  # proof, and a later retained-history assertion can make AfterUpgrade fail.
+  if [[ "$LC_ROLLING_PASS" != 1 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
     for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore rollback-recorded-outcome; do
       lc_case "$name" blocked "cannot run after failed/unobservable three-member upgrade"
     done
@@ -1618,12 +1629,14 @@ if gates['mixed_window_exit']!=0 and by['mixed-version-dispatch-and-completion']
     detail='mixed-window process failed despite a runner pass record')
 # The runner verifies installed manifest, addresses, pod state and direct Raft
 # membership before writing an upgrade pass. A Helm timeout or a later
-# retained-history assertion does not erase that already-observed result;
-# nonzero process/host gates still fail the overall qualification below.
+# retained-history assertion does not erase that already-observed result.
+# Preserve Helm's exit code as an observation; a wait timeout alone is not a
+# failed gate once the runner has proved the upgraded three-voter state.
 cases=[by[n] for n in expected]
 failed=[r['name'] for r in cases if not (r['status']=='pass' or
   (r['name']=='rollback-recorded-outcome' and r['status']=='recorded-outcome' and r.get('observations')))]
-failed_gates=[name for name,rc in gates.items() if rc!=0]
+failed_gates=[name for name,rc in gates.items() if rc!=0 and not (
+  name=='helm_upgrade_exit' and by['rolling-upgrade-three-voters']['status']=='pass')]
 record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'lifecycle_id':os.environ['LC_ID'],'pair':os.environ['LC_PAIR'],
   'candidate_sha':os.environ['LC_SHA'],'started_at':os.environ['LC_STARTED'],
