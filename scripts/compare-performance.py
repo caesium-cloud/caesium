@@ -23,6 +23,7 @@ Stdout is the JSON report. Human summary goes to stderr.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -72,6 +73,12 @@ PROVENANCE_MUST_MATCH = (
     "catalog_sha256",
     "settings_sha256",
 )
+
+BENCHMARK_HARNESS_FILES = (
+    "internal/run/owner_benchmark_test.go",
+    "internal/run/recovery_benchmark_test.go",
+)
+BENCHMARK_REQUIRED_HELPERS = ("internal/run/owner_state_test.go",)
 
 # Exact last-component / whole-token names. Substring matches are forbidden:
 # "rate" must not make error_rate/generate/migrate higher-is-better.
@@ -577,7 +584,220 @@ def provenance_issues(base, candidate):
             mismatched.append(
                 f"provenance.{field} differs: base={base_p.get(field)!r} candidate={cand_p.get(field)!r}"
             )
-    return {"missing": missing, "mismatched": mismatched, "instrumented": instrumented}
+    return {"missing": missing, "mismatched": mismatched, "instrumented": instrumented, "invalid": []}
+
+
+def benchmark_harness_issues(doc, base, candidate):
+    """Check that measured benchmarks share one declared harness and image pair."""
+    manifest = doc.get("benchmark_harness")
+    if not isinstance(manifest, dict):
+        return ["benchmark_harness manifest is missing or malformed"]
+
+    issues = []
+    base_p = base.get("provenance") if isinstance(base.get("provenance"), dict) else {}
+    cand_p = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+
+    def same(body, field, expected, prefix):
+        actual = body.get(field)
+        if actual is None or actual == "":
+            issues.append(f"{prefix}.{field} is missing")
+        elif actual != expected:
+            issues.append(f"{prefix}.{field} differs from the benchmark source or release image")
+
+    if manifest.get("schema_version") != 1:
+        issues.append("benchmark_harness.schema_version must be 1")
+    same(manifest, "base_source_sha", base_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "candidate_source_sha", cand_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "harness_source_sha", cand_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "base_release_image_id", base_p.get("image_id"), "benchmark_harness")
+    same(manifest, "candidate_release_image_id", cand_p.get("image_id"), "benchmark_harness")
+    harness_sha = manifest.get("harness_sha256")
+    if not isinstance(harness_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", harness_sha):
+        issues.append("benchmark_harness.harness_sha256 must be a SHA-256 digest")
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) != len(BENCHMARK_HARNESS_FILES):
+        issues.append("benchmark_harness.files must contain both benchmark source files")
+        files = []
+    paths = []
+    overlaid = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            issues.append("benchmark_harness.files contains a malformed entry")
+            continue
+        path = entry.get("path")
+        paths.append(path)
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            issues.append(f"benchmark_harness.files[{path!r}].sha256 is missing or malformed")
+        original = entry.get("base_original_sha256")
+        if original is not None and (not isinstance(original, str) or not re.fullmatch(r"[0-9a-f]{64}", original)):
+            issues.append(f"benchmark_harness.files[{path!r}].base_original_sha256 is malformed")
+        if not isinstance(entry.get("overlaid"), bool):
+            issues.append(f"benchmark_harness.files[{path!r}].overlaid is missing or malformed")
+        elif entry["overlaid"]:
+            overlaid.append(path)
+        elif original != entry.get("sha256"):
+            issues.append(f"benchmark_harness.files[{path!r}] claims no overlay but base content differs")
+    if paths != list(BENCHMARK_HARNESS_FILES):
+        issues.append("benchmark_harness.files paths are missing, duplicated, or out of order")
+    helper_files = manifest.get("helper_files")
+    if not isinstance(helper_files, list):
+        issues.append("benchmark_harness.helper_files is missing or malformed")
+        helper_files = []
+    helper_paths = []
+    for entry in helper_files:
+        if not isinstance(entry, dict):
+            issues.append("benchmark_harness.helper_files contains a malformed entry")
+            continue
+        path = entry.get("path")
+        helper_paths.append(path)
+        if not isinstance(path, str) or not path.startswith("internal/run/") or \
+                not path.endswith("_test.go") or path in BENCHMARK_HARNESS_FILES:
+            issues.append(f"benchmark_harness.helper_files has an invalid path: {path!r}")
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            issues.append(f"benchmark_harness.helper_files[{path!r}].sha256 is missing or malformed")
+    if not all(isinstance(path, str) for path in helper_paths) or \
+            helper_paths != sorted(set(helper_paths)):
+        issues.append("benchmark_harness.helper_files paths are duplicated or out of order")
+    for path in BENCHMARK_REQUIRED_HELPERS:
+        if path not in helper_paths:
+            issues.append(f"benchmark_harness.helper_files lacks required helper {path}")
+    digest_files = files + helper_files
+    if all(isinstance(entry, dict) and isinstance(entry.get("path"), str) and
+           isinstance(entry.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+           for entry in digest_files):
+        digest = hashlib.sha256()
+        for entry in digest_files:
+            digest.update(entry["path"].encode() + b"\0" + entry["sha256"].encode() + b"\0")
+        if digest.hexdigest() != harness_sha:
+            issues.append("benchmark_harness.harness_sha256 differs from source and helper hashes")
+    overlays = manifest.get("base_overlay_paths")
+    if not isinstance(overlays, list) or overlays != overlaid:
+        issues.append("benchmark_harness.base_overlay_paths differs from file overlay accounting")
+
+    for label, prov, source_sha, expected_overlay in (
+        ("base", base_p, base_p.get("git_sha"), overlays),
+        ("candidate", cand_p, cand_p.get("git_sha"), []),
+    ):
+        same(prov, "benchmark_source_git_sha", source_sha, f"{label}.provenance")
+        same(prov, "benchmark_harness_git_sha", manifest.get("harness_source_sha"), f"{label}.provenance")
+        same(prov, "benchmark_harness_sha256", harness_sha, f"{label}.provenance")
+        same(prov, "benchmark_overlay_paths", expected_overlay, f"{label}.provenance")
+    issues.extend(benchmark_sampling_issues(doc, base, candidate, manifest))
+    return issues
+
+
+def benchmark_sampling_issues(doc, base, candidate, manifest):
+    """Require every declared benchmark and metric in every paired repeat."""
+    sampling = doc.get("benchmark_sampling")
+    if not isinstance(sampling, dict):
+        return ["benchmark_sampling evidence is missing or malformed"]
+    issues = []
+    if sampling.get("schema_version") != 1:
+        issues.append("benchmark_sampling.schema_version must be 1")
+    names = manifest.get("benchmark_names")
+    if not isinstance(names, list) or not names or any(
+        not isinstance(name, str) or
+        re.fullmatch(r"Benchmark(?:Owner|Recover)[A-Za-z0-9_]*", name) is None
+        for name in names
+    ) or names != sorted(set(names)):
+        issues.append("benchmark_harness.benchmark_names is missing, malformed, or duplicated")
+        names = []
+    if sampling.get("expected_names") != names:
+        issues.append("benchmark_sampling.expected_names differs from the shared harness")
+    base_compile = sampling.get("base_compile")
+    if not isinstance(base_compile, dict) or type(base_compile.get("exit_code")) is not int or \
+            base_compile["exit_code"] < 0 or base_compile.get("output_path") != "observations/benchmark-base-compile.txt":
+        issues.append("benchmark_sampling.base_compile preflight evidence is missing or malformed")
+    elif base_compile["exit_code"] != 0:
+        issues.append(
+            f"benchmark harness incompatible with base (compile exited {base_compile['exit_code']})"
+        )
+    files = manifest.get("files")
+    if isinstance(files, list) and all(isinstance(entry, dict) for entry in files):
+        source_files = [
+            {"path": entry.get("path"), "sha256": entry.get("sha256")}
+            for entry in files
+        ]
+        if sampling.get("source_files") != source_files:
+            issues.append("benchmark_sampling.source_files differs from shared harness hashes")
+    repeats = sampling.get("repeats")
+    if type(repeats) is not int or repeats < 1:
+        issues.append("benchmark_sampling.repeats must be a positive integer")
+        repeats = None
+    settings = sampling.get("settings_sha256")
+    if not isinstance(settings, str) or not re.fullmatch(r"[0-9a-f]{64}", settings):
+        issues.append("benchmark_sampling.settings_sha256 is missing or malformed")
+    for label, side in (("base", base), ("candidate", candidate)):
+        prov = side.get("provenance") if isinstance(side.get("provenance"), dict) else {}
+        if prov.get("settings_sha256") != settings:
+            issues.append(f"{label}.provenance.settings_sha256 differs from benchmark sampling")
+        if prov.get("benchmark_repeats") != repeats:
+            issues.append(f"{label}.provenance.benchmark_repeats differs from benchmark sampling")
+
+    order = sampling.get("order")
+    repeat_exits = {"base": [], "candidate": []}
+    if repeats is not None:
+        expected_pairs = [
+            (repeat, label)
+            for repeat in range(1, repeats + 1)
+            for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+        ]
+        if not isinstance(order, list) or len(order) != len(expected_pairs):
+            issues.append("benchmark_sampling.order does not contain every paired repeat")
+        else:
+            for entry, (repeat, label) in zip(order, expected_pairs):
+                if not isinstance(entry, dict) or entry.get("repeat") != repeat or entry.get("side") != label or \
+                        type(entry.get("exit_code")) is not int or entry["exit_code"] < 0:
+                    issues.append(f"benchmark_sampling.order has invalid repeat {repeat} {label}")
+                    continue
+                repeat_exits[label].append(entry["exit_code"])
+            aggregate = sampling.get("aggregate_exit")
+            if not isinstance(aggregate, dict):
+                issues.append("benchmark_sampling.aggregate_exit is missing")
+            else:
+                for label in ("base", "candidate"):
+                    if len(repeat_exits[label]) != repeats:
+                        continue
+                    first_failure = next((code for code in repeat_exits[label] if code), 0)
+                    if aggregate.get(label) != first_failure:
+                        issues.append(f"benchmark_sampling.aggregate_exit.{label} differs from repeat exits")
+                    if first_failure:
+                        issues.append(f"benchmark_sampling.{label} has a failed repeat")
+
+    if not names or repeats is None:
+        return issues
+    expected_names = set(names)
+    for label, side in (("base", base), ("candidate", candidate)):
+        benchmarks = side.get("benchmarks")
+        if isinstance(benchmarks, str):
+            for line in benchmarks.splitlines():
+                line = line.strip()
+                if not line.startswith("Benchmark"):
+                    continue
+                match = GO_BENCH_RE.fullmatch(line)
+                if match is None or match.group(4) is None or match.group(5) is None:
+                    issues.append(f"{label}.benchmarks has a malformed or incomplete -benchmem row")
+            benchmarks = parse_go_bench_text(benchmarks)
+        if not isinstance(benchmarks, dict):
+            issues.append(f"{label}.benchmarks is missing or malformed")
+            continue
+        observed = set(benchmarks)
+        if observed != expected_names:
+            issues.append(f"{label}.benchmarks differs from shared harness: missing={sorted(expected_names - observed)} extra={sorted(observed - expected_names)}")
+        for name in names:
+            body = benchmarks.get(name)
+            if not isinstance(body, dict):
+                continue
+            for metric in ("ns_per_op", "bytes_per_op", "allocs_per_op"):
+                try:
+                    samples, _ = coerce_samples(body[metric])
+                except (KeyError, CompareError, TypeError, ValueError):
+                    issues.append(f"{label}.benchmarks.{name}.{metric} is missing or malformed")
+                    continue
+                if len(samples) != repeats:
+                    issues.append(f"{label}.benchmarks.{name}.{metric} has {len(samples)} samples, want {repeats}")
+    return issues
 
 
 def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
@@ -769,15 +989,19 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
     fail_reasons = []
     inconclusive_reasons = []
 
+    required_families = list(doc.get("required_families") or [])
     prov = provenance_issues(base, candidate)
+    if "benchmark" in required_families or base.get("benchmarks") or candidate.get("benchmarks"):
+        prov["invalid"].extend(benchmark_harness_issues(doc, base, candidate))
     if prov["missing"]:
         fail_reasons.extend(prov["missing"])
+    if prov["invalid"]:
+        fail_reasons.extend(prov["invalid"])
     if prov["instrumented"]:
         fail_reasons.extend(prov["instrumented"])
     if prov["mismatched"]:
         inconclusive_reasons.extend(prov["mismatched"])
 
-    required_families = list(doc.get("required_families") or [])
     required_browser = list(doc.get("required_browser_series") or [])
     if "browser" in required_families and not required_browser:
         required_browser = list(REQUIRED_BROWSER_SERIES)
@@ -911,7 +1135,7 @@ EXIT_BY_OVERALL = {
 }
 
 
-def merge_sides(base_path, candidate_path):
+def merge_sides(base_path, candidate_path, benchmark_evidence_path=None):
     base = load_json(base_path)
     candidate = load_json(candidate_path)
     if "base" in base and "candidate" not in base:
@@ -926,7 +1150,18 @@ def merge_sides(base_path, candidate_path):
         cand_side = candidate
     else:
         raise CompareError(f"{candidate_path} does not look like a side or comparison document")
-    return {"schema_version": SCHEMA_VERSION, "base": base_side, "candidate": cand_side}
+    doc = {"schema_version": SCHEMA_VERSION, "base": base_side, "candidate": cand_side}
+    if benchmark_evidence_path:
+        evidence = load_json(benchmark_evidence_path)
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("benchmark_harness"), dict) or \
+                not isinstance(evidence.get("benchmark_sampling"), dict):
+            raise CompareError("--benchmark-evidence must contain benchmark_harness and benchmark_sampling")
+        for key in ("benchmark_harness", "benchmark_sampling", "required_families", "required_browser_series"):
+            if key in evidence:
+                doc[key] = evidence[key]
+    elif base_side.get("benchmarks") or cand_side.get("benchmarks"):
+        raise CompareError("--base/--candidate with benchmarks requires --benchmark-evidence PATH")
+    return doc
 
 
 def main(argv=None):
@@ -935,6 +1170,7 @@ def main(argv=None):
     parser.add_argument("--input", dest="input_flag", help="comparison document JSON")
     parser.add_argument("--base", help="base side JSON (used with --candidate)")
     parser.add_argument("--candidate", help="candidate side JSON (used with --base)")
+    parser.add_argument("--benchmark-evidence", help="comparison JSON carrying the shared benchmark harness and sampling manifest for --base/--candidate")
     parser.add_argument("--output", "-o", help="write the JSON report to this path as well as stdout")
     parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
     parser.add_argument("--max-cv", type=float, default=DEFAULT_MAX_CV)
@@ -955,8 +1191,10 @@ def main(argv=None):
         if args.base or args.candidate:
             if not (args.base and args.candidate):
                 raise CompareError("--base and --candidate must be supplied together")
-            doc = merge_sides(args.base, args.candidate)
+            doc = merge_sides(args.base, args.candidate, args.benchmark_evidence)
         else:
+            if args.benchmark_evidence:
+                raise CompareError("--benchmark-evidence requires --base and --candidate")
             path = args.input_flag or args.input
             if not path:
                 raise CompareError("supply a comparison document or --base and --candidate")

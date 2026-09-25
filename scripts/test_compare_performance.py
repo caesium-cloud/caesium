@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,15 @@ SCRIPT = ROOT / "scripts/compare-performance.py"
 SH = ROOT / "scripts/performance.sh"
 MJS = ROOT / "ui/scripts/check-bundle-size.mjs"
 COMPARE = runpy.run_path(str(SCRIPT))
+BENCH_FILES = (
+    "internal/run/owner_benchmark_test.go",
+    "internal/run/recovery_benchmark_test.go",
+)
+BENCH_HELPERS = (("internal/run/owner_state_test.go", "3" * 64),)
+_bench_digest = hashlib.sha256()
+for _path, _sha in [(path, str(i) * 64) for i, path in enumerate(BENCH_FILES, start=1)] + list(BENCH_HELPERS):
+    _bench_digest.update(_path.encode() + b"\0" + _sha.encode() + b"\0")
+BENCH_DIGEST = _bench_digest.hexdigest()
 
 
 def provenance(label="base", **overrides):
@@ -36,6 +46,11 @@ def provenance(label="base", **overrides):
         "instrumented": False,
         "cli_digest": "sha256:" + "ee" * 32,
         "toolchain_id": "caesiumcloud/caesium-builder:latest@sha256:abcd",
+        "benchmark_source_git_sha": sha,
+        "benchmark_harness_git_sha": "b" * 40,
+        "benchmark_harness_sha256": BENCH_DIGEST,
+        "benchmark_overlay_paths": list(BENCH_FILES) if label == "base" else [],
+        "benchmark_repeats": 10,
     }
     body.update(overrides)
     return body
@@ -59,7 +74,9 @@ def side(label, **overrides):
         },
         "benchmarks": {
             "BenchmarkOwnerApplyCompletionLinear64": {
-                "ns_per_op": around(10_000.0 if label == "base" else 10_000.0)
+                "ns_per_op": around(10_000.0 if label == "base" else 10_000.0),
+                "bytes_per_op": around(400.0),
+                "allocs_per_op": around(12.0, spread=0),
             }
         },
         "browser": {
@@ -78,10 +95,56 @@ def side(label, **overrides):
 
 
 def document(base=None, candidate=None):
+    base = base if base is not None else side("base")
+    candidate = candidate if candidate is not None else side("candidate")
+    benches = base.get("benchmarks") or {}
+    if isinstance(benches, str):
+        benches = COMPARE["parse_go_bench_text"](benches)
+    names = sorted(benches)
+    files = [
+        {"path": path, "sha256": str(i) * 64}
+        for i, path in enumerate(BENCH_FILES, start=1)
+    ]
     return {
         "schema_version": 1,
-        "base": base if base is not None else side("base"),
-        "candidate": candidate if candidate is not None else side("candidate"),
+        "base": base,
+        "candidate": candidate,
+        "benchmark_harness": {
+            "schema_version": 1,
+            "base_source_sha": base["provenance"].get("git_sha"),
+            "candidate_source_sha": candidate["provenance"].get("git_sha"),
+            "harness_source_sha": candidate["provenance"].get("git_sha"),
+            "harness_sha256": BENCH_DIGEST,
+            "benchmark_names": names,
+            "base_overlay_paths": list(BENCH_FILES),
+            "base_release_image_id": base["provenance"].get("image_id"),
+            "candidate_release_image_id": candidate["provenance"].get("image_id"),
+            "files": [
+                {"path": path, "sha256": str(i) * 64,
+                 "base_original_sha256": None, "overlaid": True}
+                for i, path in enumerate(BENCH_FILES, start=1)
+            ],
+            "helper_files": [
+                {"path": path, "sha256": sha} for path, sha in BENCH_HELPERS
+            ],
+        },
+        "benchmark_sampling": {
+            "schema_version": 1,
+            "repeats": 10,
+            "base_compile": {
+                "exit_code": 0,
+                "output_path": "observations/benchmark-base-compile.txt",
+            },
+            "expected_names": names,
+            "source_files": files,
+            "settings_sha256": "d" * 64,
+            "order": [
+                {"repeat": repeat, "side": label, "exit_code": 0}
+                for repeat in range(1, 11)
+                for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+            ],
+            "aggregate_exit": {"base": 0, "candidate": 0},
+        },
     }
 
 
@@ -186,6 +249,137 @@ class KnownFixturesTests(unittest.TestCase):
         self.assertNotEqual(report["overall"], "equivalent")
         proc = run_cli(input_doc=doc)
         self.assertEqual(proc.returncode, 3, proc.stderr)
+
+
+class BenchmarkHarnessProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def bench_document():
+        doc = document()
+        doc["required_families"] = ["benchmark"]
+        for label in ("base", "candidate"):
+            for family in ("workloads", "browser", "bundle", "system"):
+                doc[label][family] = {}
+        return doc
+
+    def assert_rejected(self, doc, reason):
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail", report)
+        self.assertFalse(report["speed_compared"])
+        self.assertTrue(any(reason in item for item in report["reasons"]), report["reasons"])
+        proc = run_cli(input_doc=doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+
+    def test_matching_harness_allows_benchmark_comparison(self):
+        doc = self.bench_document()
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "no_significant_difference")
+        self.assertTrue(report["speed_compared"])
+        self.assertEqual(run_cli(input_doc=doc).returncode, 0)
+
+    def test_missing_manifest_fails_closed(self):
+        doc = self.bench_document()
+        del doc["benchmark_harness"]
+        self.assert_rejected(doc, "benchmark_harness")
+
+    def test_missing_sampling_evidence_fails_closed(self):
+        doc = self.bench_document()
+        del doc["benchmark_sampling"]
+        self.assert_rejected(doc, "benchmark_sampling")
+
+    def test_one_of_eleven_declared_benchmarks_cannot_pass_compare_only(self):
+        doc = self.bench_document()
+        present = "BenchmarkOwnerApplyCompletionLinear64"
+        names = sorted([present] + [f"BenchmarkRecoverMissing{i}" for i in range(10)])
+        doc["benchmark_harness"]["benchmark_names"] = names
+        doc["benchmark_sampling"]["expected_names"] = names
+        # Both sides still contain ten ns/op, B/op, and allocs/op samples for
+        # the one surviving benchmark. The other ten functions disappeared.
+        self.assert_rejected(doc, "missing=")
+
+    def test_one_missing_metric_repeat_cannot_pass(self):
+        doc = self.bench_document()
+        doc["candidate"]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["bytes_per_op"].pop()
+        self.assert_rejected(doc, "bytes_per_op has 9 samples, want 10")
+
+    def test_benchmark_repeat_provenance_and_order_must_agree(self):
+        for mutation, reason in (
+            (lambda doc: doc["candidate"]["provenance"].update(benchmark_repeats=9), "benchmark_repeats"),
+            (lambda doc: doc["benchmark_sampling"]["order"].pop(), "order"),
+            (lambda doc: doc["benchmark_sampling"]["aggregate_exit"].update(candidate=17), "aggregate_exit"),
+        ):
+            with self.subTest(reason=reason):
+                doc = self.bench_document()
+                mutation(doc)
+                self.assert_rejected(doc, reason)
+
+    def test_different_side_harness_digest_fails_closed(self):
+        doc = self.bench_document()
+        doc["base"]["provenance"]["benchmark_harness_sha256"] = "0" * 64
+        self.assert_rejected(doc, "base.provenance.benchmark_harness_sha256")
+
+    def test_helper_hash_is_part_of_shared_harness_identity(self):
+        doc = self.bench_document()
+        doc["benchmark_harness"]["helper_files"][0]["sha256"] = "4" * 64
+        self.assert_rejected(doc, "harness_sha256 differs")
+
+    def test_base_compile_failure_is_classified_as_harness_incompatibility(self):
+        doc = self.bench_document()
+        doc["benchmark_sampling"]["base_compile"]["exit_code"] = 1
+        doc["benchmark_sampling"]["order"][0]["exit_code"] = 1
+        doc["benchmark_sampling"]["aggregate_exit"]["base"] = 1
+        doc["base"]["correctness"]["failures"] = ["workload failed"]
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertFalse(report["speed_compared"])
+        self.assertTrue(any("benchmark harness incompatible with base" in x for x in report["reasons"]))
+        self.assertTrue(any("base correctness: workload failed" in x for x in report["reasons"]))
+
+    def test_side_file_mode_requires_and_accepts_benchmark_evidence(self):
+        doc = self.bench_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp) / "base.json"
+            candidate_path = Path(tmp) / "candidate.json"
+            evidence_path = Path(tmp) / "evidence.json"
+            base_path.write_text(json.dumps(doc["base"]))
+            candidate_path.write_text(json.dumps(doc["candidate"]))
+            evidence_path.write_text(json.dumps(doc))
+            command = [sys.executable, str(SCRIPT), "--base", str(base_path), "--candidate", str(candidate_path)]
+            missing = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(missing.returncode, 1, missing.stderr)
+            self.assertIn("requires --benchmark-evidence", missing.stderr)
+            with_evidence = subprocess.run(
+                command + ["--benchmark-evidence", str(evidence_path)], capture_output=True, text=True
+            )
+            self.assertEqual(with_evidence.returncode, 0, with_evidence.stderr)
+            self.assertEqual(json.loads(with_evidence.stdout)["overall"], "no_significant_difference")
+
+    def test_wrong_harness_source_and_image_identity_fail_closed(self):
+        for field, reason in (
+            ("harness_source_sha", "harness_source_sha"),
+            ("base_release_image_id", "base_release_image_id"),
+        ):
+            with self.subTest(field=field):
+                doc = self.bench_document()
+                doc["benchmark_harness"][field] = "wrong"
+                self.assert_rejected(doc, reason)
+
+    def test_missing_file_or_false_overlay_accounting_fails_closed(self):
+        for mutation, reason in (
+            (lambda doc: doc["benchmark_harness"]["files"].pop(), "files"),
+            (lambda doc: doc["benchmark_harness"]["base_overlay_paths"].clear(), "base_overlay_paths"),
+        ):
+            with self.subTest(reason=reason):
+                doc = self.bench_document()
+                mutation(doc)
+                self.assert_rejected(doc, reason)
+
+    def test_valid_partial_overlay_keeps_same_harness(self):
+        doc = self.bench_document()
+        doc["benchmark_harness"]["base_overlay_paths"] = [BENCH_FILES[0]]
+        doc["benchmark_harness"]["files"][1]["overlaid"] = False
+        doc["benchmark_harness"]["files"][1]["base_original_sha256"] = "2" * 64
+        doc["base"]["provenance"]["benchmark_overlay_paths"] = [BENCH_FILES[0]]
+        self.assertEqual(compare_doc(doc)["overall"], "no_significant_difference")
 
 
 class FailClosedTests(unittest.TestCase):
@@ -342,7 +536,11 @@ class BenchstatAndBrowserTests(unittest.TestCase):
         doc = document(
             side(
                 "base",
-                benchmarks={"BenchmarkOwnerApplyCompletionLinear64": {"ns_per_op": around(10_000, 10, 50)}},
+                benchmarks={"BenchmarkOwnerApplyCompletionLinear64": {
+                    "ns_per_op": around(10_000, 10, 50),
+                    "bytes_per_op": around(400, 10, 0),
+                    "allocs_per_op": around(12, 10, 0),
+                }},
                 workloads={},
                 browser={},
                 bundle={},
@@ -350,7 +548,11 @@ class BenchstatAndBrowserTests(unittest.TestCase):
             ),
             side(
                 "candidate",
-                benchmarks={"BenchmarkOwnerApplyCompletionLinear64": {"ns_per_op": around(7_000, 10, 50)}},
+                benchmarks={"BenchmarkOwnerApplyCompletionLinear64": {
+                    "ns_per_op": around(7_000, 10, 50),
+                    "bytes_per_op": around(400, 10, 0),
+                    "allocs_per_op": around(12, 10, 0),
+                }},
                 workloads={},
                 browser={},
                 bundle={},
@@ -552,6 +754,143 @@ class PerformanceShWiringTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             report = json.loads((Path(tmp) / "report.json").read_text())
             self.assertEqual(report["overall"], "faster")
+
+    def test_compare_subcommand_rejects_benchmark_without_harness(self):
+        doc = BenchmarkHarnessProvenanceTests.bench_document()
+        del doc["benchmark_harness"]
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = Path(tmp) / "comparison.json"
+            inp.write_text(json.dumps(doc))
+            env = os.environ.copy()
+            env["CAESIUM_PERF_ARTIFACTS"] = tmp
+            proc = subprocess.run(
+                ["bash", str(SH), "compare", str(inp)],
+                capture_output=True, text=True, env=env, cwd=str(ROOT),
+            )
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            report = json.loads((Path(tmp) / "report.json").read_text())
+            self.assertEqual(report["overall"], "fail")
+            self.assertFalse(report["speed_compared"])
+
+    def test_live_assembly_refuses_missing_benchmark_exit_marker(self):
+        source = SH.read_text()
+        marker = "python3 - <<'PY'\nimport json, os, pathlib, re\n"
+        code = "import json, os, pathlib, re\n" + source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp)
+            (art / "observations").mkdir()
+            for label in ("base", "candidate"):
+                (art / label).mkdir()
+            doc = document()
+            (art / "observations" / "benchmark-harness.json").write_text(
+                json.dumps(doc["benchmark_harness"])
+            )
+            (art / "observations" / "benchmark-base-compile.txt").write_text("")
+            (art / "observations" / "benchmark-base-compile.exit").write_text("0\n")
+            (art / "observations" / "benchmark-names.json").write_text(json.dumps({
+                "source_files": doc["benchmark_sampling"]["source_files"],
+                "benchmark_names": doc["benchmark_sampling"]["expected_names"],
+            }))
+            env = os.environ.copy()
+            env.update({
+                "ARTIFACTS": str(art), "RUN_BENCH": "1", "REPEATS": "10",
+                "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40,
+                "BASE_IMAGE_ID": doc["base"]["provenance"]["image_id"],
+                "CANDIDATE_IMAGE_ID": doc["candidate"]["provenance"]["image_id"],
+                "BENCH_HARNESS_MANIFEST": str(art / "observations" / "benchmark-harness.json"),
+            })
+            result = subprocess.run(
+                [sys.executable, "-c", code], env=env, capture_output=True, text=True
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("benchmark exit or repeat evidence is missing", result.stderr)
+            self.assertFalse((art / "comparison.json").exists())
+
+    def test_live_assembly_records_complete_benchmark_sampling(self):
+        source = SH.read_text()
+        marker = "python3 - <<'PY'\nimport json, os, pathlib, re\n"
+        code = "import json, os, pathlib, re\n" + source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp)
+            (art / "observations").mkdir()
+            doc = document()
+            manifest = doc["benchmark_harness"]
+            (art / "observations" / "benchmark-harness.json").write_text(json.dumps(manifest))
+            (art / "observations" / "benchmark-base-compile.txt").write_text("")
+            (art / "observations" / "benchmark-base-compile.exit").write_text("0\n")
+            (art / "observations" / "benchmark-names.json").write_text(json.dumps({
+                "source_files": doc["benchmark_sampling"]["source_files"],
+                "benchmark_names": doc["benchmark_sampling"]["expected_names"],
+            }))
+            order = []
+            for label in ("base", "candidate"):
+                directory = art / label
+                directory.mkdir()
+                rows = []
+                for repeat in range(1, 11):
+                    row = f"BenchmarkOwnerApplyCompletionLinear64-12  1  {10000 + repeat} ns/op  400 B/op  12 allocs/op\n"
+                    (directory / f"bench-repeat-{repeat}.txt").write_text(row)
+                    rows.append(row)
+                (directory / "bench.txt").write_text("".join(rows))
+                (directory / "bench.txt.exit").write_text("0\n")
+                (directory / "bench.txt.repeats.tsv").write_text(
+                    "".join(f"{repeat}\t0\n" for repeat in range(1, 11))
+                )
+            for repeat in range(1, 11):
+                for label in (("base", "candidate") if repeat % 2 else ("candidate", "base")):
+                    order.append(f"{repeat}\t{label}\t0\n")
+            (art / "observations" / "benchmark-order.tsv").write_text("".join(order))
+            env = os.environ.copy()
+            env.update({
+                "ARTIFACTS": str(art), "RUN_BENCH": "1", "REPEATS": "10",
+                "RUN_LOAD": "0", "RUN_BROWSER": "0", "RUN_BUNDLE": "0",
+                "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40,
+                "BASE_IMAGE": "base:synthetic", "CANDIDATE_IMAGE": "candidate:synthetic",
+                "BASE_IMAGE_ID": doc["base"]["provenance"]["image_id"],
+                "CANDIDATE_IMAGE_ID": doc["candidate"]["provenance"]["image_id"],
+                "BASE_CLI_DIGEST": "sha256:base-cli", "CANDIDATE_CLI_DIGEST": "sha256:candidate-cli",
+                "BASE_BUILT": "built", "CANDIDATE_BUILT": "built",
+                "BASE_GO_VERSION": "go1.27.1", "CANDIDATE_GO_VERSION": "go1.27.1",
+                "BASE_BUILDER_ID": "sha256:builder", "CANDIDATE_BUILDER_ID": "sha256:builder",
+                "BASE_TOOLCHAIN": "builder:synthetic", "CANDIDATE_TOOLCHAIN": "builder:synthetic",
+                "DOCKER_PLATFORM": "linux/arm64", "HOST_ID": "synthetic-host",
+                "CATALOG_SHA": "c" * 64, "SETTINGS_SHA": "d" * 64,
+                "BENCH_HARNESS_MANIFEST": str(art / "observations" / "benchmark-harness.json"),
+            })
+            result = subprocess.run(
+                [sys.executable, "-c", code], env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            self.assertEqual(assembled["benchmark_sampling"], doc["benchmark_sampling"])
+            self.assertEqual(assembled["base"]["provenance"]["benchmark_repeats"], 10)
+            self.assertEqual(assembled["candidate"]["provenance"]["benchmark_repeats"], 10)
+            self.assertTrue(assembled["base"]["correctness"]["ok"])
+            self.assertTrue(assembled["candidate"]["correctness"]["ok"])
+
+            # A base compile failure remains a conclusive failure, with an
+            # explicit harness reason instead of blaming base correctness.
+            (art / "observations" / "benchmark-base-compile.exit").write_text("23\n")
+            (art / "base" / "bench.txt.exit").write_text("23\n")
+            (art / "base" / "bench.txt.repeats.tsv").write_text(
+                "".join(f"{repeat}\t23\n" for repeat in range(1, 11))
+            )
+            failed_order = [
+                f"{repeat}\t{label}\t{23 if label == 'base' else 0}\n"
+                for repeat in range(1, 11)
+                for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+            ]
+            (art / "observations" / "benchmark-order.tsv").write_text("".join(failed_order))
+            result = subprocess.run(
+                [sys.executable, "-c", code], env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            self.assertTrue(assembled["base"]["correctness"]["ok"])
+            report = compare_doc(assembled)
+            self.assertEqual(report["overall"], "fail")
+            self.assertTrue(any("benchmark harness incompatible with base" in x for x in report["reasons"]))
+            self.assertFalse(any("base correctness: benchmarks exited" in x for x in report["reasons"]))
 
     def test_script_refuses_instrumented_env_in_source(self):
         src = SH.read_text()
