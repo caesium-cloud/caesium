@@ -17,6 +17,12 @@ const (
 	OutcomePossiblyCommitted   = "possibly_committed"
 	RefusalStaleGeneration     = "stale_generation"
 	RefusalUnauthorized        = "unauthorized"
+	RefusalTaskNotRunning      = "task_not_running"
+	RefusalWrongWorker         = "wrong_worker"
+	RefusalInvalidStatus       = "invalid_status"
+	RefusalCompletionRejected  = "completion_application_rejected"
+	RefusalNotOwner            = "not_owner"
+	RefusalMissingRun          = "missing_run"
 	MetricDispatchRejected     = "caesium_dispatch_rejected_total"
 	MetricDispatchStalled      = "caesium_dispatch_stalled_total"
 	MetricDispatchSent         = "caesium_dispatch_sent_total"
@@ -327,6 +333,59 @@ func redactPEM(s string) string {
 		b.WriteString("[redacted-pem]")
 		rest = rest[endIdx+nl:]
 	}
+}
+
+// TerminalCompleteRefusalAllowed is the DT-TERMINAL-01 fence: a duplicate
+// complete sent to the current owner must be a 409 claim/terminal refusal,
+// not an ownership miss or a 5xx.
+func TerminalCompleteRefusalAllowed(status int, code string) bool {
+	if status != 409 {
+		return false
+	}
+	switch strings.TrimSpace(code) {
+	case RefusalTaskNotRunning, RefusalWrongWorker, RefusalInvalidStatus, RefusalCompletionRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTLSHandshakeAlert reports whether err looks like a TLS alert from the
+// peer (bad/required certificate), not a dial timeout or connection refused.
+func IsTLSHandshakeAlert(err string) bool {
+	lower := strings.ToLower(err)
+	if lower == "" {
+		return false
+	}
+	for _, n := range []string{
+		"remote error: tls",
+		"tls: bad certificate",
+		"bad certificate",
+		"certificate required",
+		"certificate signed by unknown authority",
+		"x509: certificate",
+	} {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxBenchedNetworkErrors is the most caesium_dispatch_rejected_total
+// {reason=network_error} may rise during window if the dead peer is actually
+// benched for cooldown. One hit per cooldown plus the opening miss.
+func MaxBenchedNetworkErrors(window, cooldown time.Duration) int {
+	if window <= 0 || cooldown <= 0 {
+		return 1
+	}
+	return int(window/cooldown) + 1
+}
+
+// SplitDropActive reports whether a partition plan's blocked raft or internal
+// rule has matched any packets.
+func SplitDropActive(raftPackets, internalPackets uint64) bool {
+	return raftPackets > 0 || internalPackets > 0
 }
 
 // FrozenRecipeChanged reports whether a retried task's persisted image/command

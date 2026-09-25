@@ -5,7 +5,6 @@ package robustness
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,23 +15,13 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	refreshTopo(t, fe)
 	ctx := context.Background()
 	member := fe.leader
-	job, alias := applyFaultFixture(t, fe, member, "auth-wrong", 8)
-	run, _, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), job.ID)
-	if err != nil {
-		t.Fatalf("trigger %s: %v", alias, err)
-	}
-	leaseCtx, leaseCancel := context.WithTimeout(ctx, 90*time.Second)
-	lease, err := cluster.WaitLease(leaseCtx, fe.httpAPI, member.HTTPBase(), run.ID, "")
-	leaseCancel()
-	if err != nil {
-		t.Fatalf("lease: %v", err)
-	}
-	detail := waitRunHasTask(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	job, run, lease := applyBlockedRun(t, fe, member, "auth-wrong")
 	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	cli := wrongTokenClient(t, fe, member)
-	target := cluster.InternalBase(member.IP)
+	owner := memberByNode(t, fe, lease.OwnerNode)
+	target := cluster.InternalBase(owner.IP)
 
-	completeEx := cli.Complete(ctx, target, completePayload(detail, lease, "succeeded", lease.Generation))
+	completeEx := cli.Complete(ctx, target, completePayload(run, lease, "succeeded", lease.Generation))
 	if completeEx.Err != "" {
 		t.Fatalf("wrong-token complete transport: %v", completeEx.Err)
 	}
@@ -42,8 +31,8 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 		t.Fatalf("wrong-token complete code %q, want unauthorized", code)
 	}
 
-	peer := otherMember(fe.topo, member)
-	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(detail, lease, peer.NodeAddress))
+	peer := otherMember(fe.topo, owner)
+	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(run, lease, peer.NodeAddress))
 	if dispatchEx.Err != "" {
 		t.Fatalf("wrong-token dispatch transport: %v", dispatchEx.Err)
 	}
@@ -59,7 +48,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 		"principal":       "bearer",
 		"token_class":     "wrong",
 		"kind":            cli.Kind,
-		"target_complete": member.Name,
+		"target_complete": owner.Name,
 		"target_dispatch": peer.Name,
 		"state_digest":    digestOf(after),
 	})
@@ -69,19 +58,11 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	refreshTopo(t, fe)
 	ctx := context.Background()
 	member := fe.leader
-	job, alias := applyFaultFixture(t, fe, member, "auth-mtls", 8)
-	run, _, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), job.ID)
-	if err != nil {
-		t.Fatalf("trigger %s: %v", alias, err)
-	}
-	leaseCtx, leaseCancel := context.WithTimeout(ctx, 90*time.Second)
-	lease, err := cluster.WaitLease(leaseCtx, fe.httpAPI, member.HTTPBase(), run.ID, "")
-	leaseCancel()
-	if err != nil {
-		t.Fatalf("lease: %v", err)
-	}
-	detail := waitRunHasTask(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	job, run, lease := applyBlockedRun(t, fe, member, "auth-mtls")
 	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	owner := memberByNode(t, fe, lease.OwnerNode)
+	target := cluster.InternalBase(owner.IP)
+	payload := completePayload(run, lease, "succeeded", lease.Generation)
 
 	mintCtx, mintCancel := context.WithTimeout(ctx, 30*time.Second)
 	cli, err := cluster.InvalidCertClient(mintCtx, fe.httpAPI, member.HTTPBase())
@@ -89,24 +70,30 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("invalid-cert client: %v", err)
 	}
-	ex := cli.Complete(ctx, cluster.InternalBase(member.IP), completePayload(detail, lease, "succeeded", lease.Generation))
+	ex := cli.Complete(ctx, target, payload)
 	if ex.Err == "" && ex.Status != 0 {
 		t.Fatalf("invalid peer cert reached the handler (status %d body %s); handshake must fail first", ex.Status, truncate([]byte(ex.Body), 200))
 	}
-	if ex.Err == "" {
-		t.Fatal("invalid peer cert produced no TLS error and no status")
+	if !IsTLSHandshakeAlert(ex.Err) {
+		t.Fatalf("invalid peer cert did not produce a TLS alert (err=%q status=%d)", ex.Err, ex.Status)
 	}
-	if strings.Contains(strings.ToLower(ex.Err), "401") {
-		t.Fatalf("invalid cert was treated as a token failure: %s", ex.Err)
+
+	control := validInternalClient(t, fe, owner)
+	ctrl := control.Complete(ctx, target, payload)
+	if ctrl.Err != "" || ctrl.Status == 0 {
+		t.Fatalf("valid-leaf control did not reach the handler on %s: err=%q status=%d", owner.Name, ctrl.Err, ctrl.Status)
 	}
+
 	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	requireNoMutation(t, before, after, "invalid mTLS peer")
 
 	writeCoreRecord(t, fe, "invalid_mtls_peer", map[string]any{
-		"run_id":       run.ID,
-		"kind":         cli.Kind,
-		"handshake":    "failed",
-		"error_class":  "tls",
-		"state_digest": digestOf(after),
+		"run_id":          run.ID,
+		"kind":            cli.Kind,
+		"handshake":       "failed",
+		"error_class":     "tls",
+		"control_status":  ctrl.Status,
+		"control_reached": true,
+		"state_digest":    digestOf(after),
 	})
 }

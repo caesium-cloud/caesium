@@ -43,6 +43,16 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		t.Fatalf("cordon %s: %v", owner.Node, err)
 	}
 	cordonCancel()
+	t.Cleanup(func() {
+		restartCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if _, err := cluster.RequestHost(restartCtx, fe.kube, fe.env.Namespace, cluster.HostRequest{
+			RequestID: uuid.NewString(), Action: cluster.ActionRestart,
+			OwnerPod: owner.Name, OwnerKindNode: owner.Node,
+		}); err != nil {
+			t.Logf("cleanup restart/uncordon %s: %v", owner.Node, err)
+		}
+	})
 
 	run, _, err := fe.httpAPI.TriggerRun(ctx, owner.HTTPBase(), job.ID)
 	if err != nil {
@@ -258,16 +268,12 @@ func runCommitBeforeResponseLoss(t *testing.T, fe *faultEnv) {
 	if !op.PossiblyCommitted || op.UpstreamStatus != http.StatusAccepted {
 		t.Fatalf("lost response was not a committed 202: %+v", op)
 	}
-	if ClassifyLostResponse(clientErr, op.UpstreamStatus, "") != OutcomePossiblyCommitted &&
-		ClassifyLostResponse(clientErr, op.UpstreamStatus, "x") != OutcomePossiblyCommitted {
-		t.Fatal("client timeout classified as something other than possibly committed")
-	}
 	var acked cluster.Run
 	if err := json.Unmarshal([]byte(op.UpstreamBody), &acked); err != nil {
 		t.Fatalf("upstream body: %v", err)
 	}
-	if ClassifyLostResponse(clientErr, op.UpstreamStatus, acked.ID) != OutcomePossiblyCommitted {
-		t.Fatal("lost 202 must be possibly committed")
+	if _, err := uuid.Parse(acked.ID); err != nil {
+		t.Fatalf("upstream 202 run id is not a uuid: %q", acked.ID)
 	}
 	reconCtx, reconCancel := context.WithTimeout(ctx, 2*time.Minute)
 	var reconciled cluster.Run
@@ -310,7 +316,6 @@ func runQuorumLoss(t *testing.T, fe *faultEnv) {
 	ctx := context.Background()
 	minority := otherMember(fe.topo, fe.leader)
 	iso := isolateMember(t, fe, minority)
-	requireFaultActivated(t, len(iso.plans) > 0, "2-1 split")
 
 	majority := iso.majority[0]
 	job, alias := applyFaultFixture(t, fe, majority, "quorum-maj", 2)
@@ -318,6 +323,7 @@ func runQuorumLoss(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("majority trigger: %v", err)
 	}
+	requireSplitActive(t, fe, iso)
 
 	type attempt struct {
 		Deadline time.Duration
@@ -339,36 +345,32 @@ func runQuorumLoss(t *testing.T, fe *faultEnv) {
 			a.Err = terr.Error()
 		}
 		a.Outcome = ClassifyQuorumLossMutation(status, raw, terr)
-		if a.Outcome == OutcomeRejected {
-			t.Fatalf("quorum-loss mutation classified as rejected (deadline %s): status=%d err=%s", d, status, a.Err)
-		}
 		if a.Outcome == OutcomeAccepted {
-			a.RunID = runIDFromBody(raw)
+			t.Fatalf("minority mutation was accepted while the 2-1 split was proven active (deadline %s run %s)",
+				d, runIDFromBody(raw))
 		}
+		a.RunID = runIDFromBody(raw)
 		attempts = append(attempts, a)
 		t.Logf("minority mutation deadline=%s outcome=%s status=%d err=%q", d, a.Outcome, status, a.Err)
 	}
 
-	heldUntil := time.Now().Add(30 * time.Second)
-	for time.Now().Before(heldUntil) {
-		time.Sleep(time.Second)
-	}
+	majCtx, majCancel := context.WithTimeout(ctx, 5*time.Minute)
+	majFinal := waitRunStatus(t, majCtx, fe.httpAPI, majority.HTTPBase(), job.ID, majRun.ID, "succeeded")
+	majCancel()
+
 	iso.heal(t, fe)
 	waitMembership(t, fe, 3*time.Minute)
-
-	majCtx, majCancel := context.WithTimeout(ctx, 5*time.Minute)
-	majFinal := waitRunTerminal(t, majCtx, fe.httpAPI, majority.HTTPBase(), job.ID, majRun.ID)
-	majCancel()
 
 	var reconciled []map[string]any
 	for _, a := range attempts {
 		entry := map[string]any{"deadline": a.Deadline.String(), "outcome": a.Outcome, "status": a.Status}
 		if a.RunID != "" {
 			got, gerr := fe.httpAPI.GetRun(ctx, majority.HTTPBase(), minJob.ID, a.RunID)
-			entry["present"] = gerr == nil
-			if gerr == nil {
-				entry["status_after_heal"] = got.Status
+			if gerr != nil {
+				t.Fatalf("accepted/identified minority run %s missing after heal: %v", a.RunID, gerr)
 			}
+			entry["present"] = true
+			entry["status_after_heal"] = got.Status
 		} else {
 			entry["identity"] = "unknown_possibly_committed"
 		}

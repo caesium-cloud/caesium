@@ -33,17 +33,18 @@ func runTerminalNoRegress(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("lease after success: %v", err)
 	}
-	cli := validInternalClient(t, fe, member)
+	owner := memberByNode(t, fe, lease.OwnerNode)
+	cli := validInternalClient(t, fe, owner)
 	payload := completePayload(final, lease, "failed", lease.Generation)
-	ex := cli.Complete(ctx, cluster.InternalBase(member.IP), payload)
+	ex := cli.Complete(ctx, cluster.InternalBase(owner.IP), payload)
 	if ex.Err != "" {
 		t.Fatalf("stale terminal complete transport: %v", ex.Err)
 	}
-	if ex.Status == http.StatusOK {
-		t.Fatalf("a second terminal complete was accepted on a succeeded run: %s", truncate([]byte(ex.Body), 400))
-	}
-	if ex.Status != http.StatusConflict && ex.Status != http.StatusUnauthorized {
-		t.Logf("second complete status=%d body=%s", ex.Status, truncate([]byte(ex.Body), 400))
+	requireHTTPStatus(t, ex.Status, http.StatusConflict, ex.Body)
+	code, msg := ParseRefusal(ex.Status, []byte(ex.Body))
+	if !TerminalCompleteRefusalAllowed(ex.Status, code) {
+		t.Fatalf("duplicate complete did not hit the terminal/claim fence: status=%d code=%q msg=%s",
+			ex.Status, code, RedactSecrets(msg))
 	}
 	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	if !strings.EqualFold(after.Status, "succeeded") {
@@ -52,8 +53,10 @@ func runTerminalNoRegress(t *testing.T, fe *faultEnv) {
 	requireNoMutation(t, before, after, "second terminal complete")
 	writeCoreRecord(t, fe, "terminal_no_regress", map[string]any{
 		"run_id":          run.ID,
+		"owner":           owner.Name,
 		"public_status":   after.Status,
 		"complete_status": ex.Status,
+		"refusal_code":    code,
 		"complete_body":   RedactSecrets(ex.Body),
 		"fingerprint":     digestOf(after),
 	})
@@ -120,6 +123,12 @@ func runFrozenRetry(t *testing.T, fe *faultEnv) {
 	retryCtx, retryCancel := context.WithTimeout(ctx, 5*time.Minute)
 	afterRetry := waitRunTerminal(t, retryCtx, fe.httpAPI, member.HTTPBase(), job.ID, run.ID)
 	retryCancel()
+	if !strings.EqualFold(afterRetry.Status, "failed") {
+		t.Fatalf("retried frozen boom recipe ended %s, want failed", afterRetry.Status)
+	}
+	if n := len(fe.sink.StartsFor(run.ID, retryBoomStep)); n < 2 {
+		t.Fatalf("boom step started %d time(s), want >= 2 so the 202 retry actually re-ran", n)
+	}
 
 	frozen, err := fe.httpAPI.QueryTaskRecipes(ctx, member.HTTPBase(), run.ID)
 	if err != nil {
@@ -159,14 +168,14 @@ func runFrozenRetry(t *testing.T, fe *faultEnv) {
 	}
 	afterOK := fingerprintRun(t, ctx, fe, member.HTTPBase(), okJob.ID, okFinal.ID)
 	requireNoMutation(t, beforeOK, afterOK, "retry of succeeded run")
-	afterReject := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
-	_ = beforeReject
-	_ = afterReject
+	afterFailed := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	requireNoMutation(t, beforeReject, afterFailed, "retry of a different run")
 
 	writeCoreRecord(t, fe, "frozen_retry_recipe", map[string]any{
 		"failed_run":      run.ID,
 		"retry_status":    status,
 		"after_retry":     afterRetry.Status,
+		"boom_starts":     len(fe.sink.StartsFor(run.ID, retryBoomStep)),
 		"original_boom":   boom,
 		"succeeded_run":   okFinal.ID,
 		"rejected_status": rejStatus,
@@ -186,19 +195,39 @@ func runFanIn(t *testing.T, fe *faultEnv) {
 		t.Fatalf("trigger: %v", err)
 	}
 
+	names, err := taskStepNames(ctx, fe.httpAPI, member.HTTPBase(), job.ID)
+	if err != nil {
+		t.Fatalf("catalog tasks: %v", err)
+	}
 	leftCtx, leftCancel := context.WithTimeout(ctx, 3*time.Minute)
-	if err := cluster.Poll(leftCtx, 500*time.Millisecond, func() (bool, error) {
-		return len(fe.sink.CompletionsFor(run.ID, fanInLeftStep)) > 0, nil
+	if err := cluster.Poll(leftCtx, time.Second, func() (bool, error) {
+		got, gerr := fe.httpAPI.GetRun(leftCtx, member.HTTPBase(), job.ID, run.ID)
+		if gerr != nil {
+			return false, nil
+		}
+		return strings.EqualFold(taskStatusByName(got, names, fanInLeftStep), "succeeded"), nil
 	}); err != nil {
 		leftCancel()
-		t.Fatalf("left predecessor never completed: %v", err)
+		t.Fatalf("left predecessor never reached succeeded: %v", err)
 	}
 	leftCancel()
-	if n := len(fe.sink.StartsFor(run.ID, fanInJoinStep)); n != 0 {
-		t.Fatalf("join started after only left completed (%d starts); fan-in cannot be inferred from one predecessor", n)
-	}
-	if n := len(fe.sink.CompletionsFor(run.ID, fanInRightStep)); n != 0 {
-		t.Fatalf("right completed before the barrier was released")
+
+	holdUntil := time.Now().Add(25 * time.Second)
+	for time.Now().Before(holdUntil) {
+		if n := len(fe.sink.StartsFor(run.ID, fanInJoinStep)); n != 0 {
+			t.Fatalf("join started after only left succeeded (%d starts); fan-in cannot be inferred from one predecessor", n)
+		}
+		got, gerr := fe.httpAPI.GetRun(ctx, member.HTTPBase(), job.ID, run.ID)
+		if gerr == nil {
+			st := taskStatusByName(got, names, fanInJoinStep)
+			if st != "" && !strings.EqualFold(st, "pending") {
+				t.Fatalf("join task status %q after only left succeeded, want pending", st)
+			}
+		}
+		if n := len(fe.sink.CompletionsFor(run.ID, fanInRightStep)); n != 0 {
+			t.Fatalf("right completed before the barrier was released")
+		}
+		time.Sleep(2 * time.Second)
 	}
 
 	fe.sink.Release(run.ID)
@@ -249,6 +278,11 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	}
 	t.Logf("replacement 202 run %s (first %s); 202 is not process-death ack", second.ID, first.ID)
 
+	// Release the first barrier while cancel is in flight so a completion can
+	// race. The second run has its own wait key and is released so it can finish.
+	fe.sink.Release(first.ID)
+	fe.sink.Release(second.ID)
+
 	cancelCtx, cancelDone := context.WithTimeout(ctx, 2*time.Minute)
 	var firstAfter cluster.Run
 	if err := cluster.Poll(cancelCtx, time.Second, func() (bool, error) {
@@ -257,39 +291,42 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 			return false, nil
 		}
 		firstAfter = got
-		switch strings.ToLower(strings.TrimSpace(got.Status)) {
-		case "cancelled", "succeeded", "failed":
-			return true, nil
-		}
-		return false, nil
+		return strings.EqualFold(got.Status, "cancelled"), nil
 	}); err != nil {
 		cancelDone()
-		t.Fatalf("first run %s stayed non-terminal after replace: %v (status=%s)", first.ID, err, firstAfter.Status)
+		t.Fatalf("first run %s did not stay/become cancelled after replace (status=%s): %v", first.ID, firstAfter.Status, err)
 	}
 	cancelDone()
+	if !strings.EqualFold(firstAfter.Status, "cancelled") {
+		t.Fatalf("first run status %s, want cancelled", firstAfter.Status)
+	}
 
-	// A 202 for the replacement is not an acknowledgement that the old
-	// external process is already dead. Retain whatever the sink observed.
-	firstEffects := effectsForRun(fe.sink.Events(), first.ID)
-	fe.sink.Release(first.ID)
-	fe.sink.Release(second.ID)
+	completesAtCancel := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep))
+	time.Sleep(15 * time.Second)
+	if n := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep)); n > completesAtCancel {
+		t.Fatalf("cancelled run %s produced further block completions (%d -> %d)", first.ID, completesAtCancel, n)
+	}
+	still, err := fe.httpAPI.GetRun(ctx, member.HTTPBase(), job.ID, first.ID)
+	if err != nil {
+		t.Fatalf("re-read cancelled run: %v", err)
+	}
+	if !strings.EqualFold(still.Status, "cancelled") {
+		t.Fatalf("cancelled run regressed to %s after the completion race", still.Status)
+	}
 
 	secCtx, secCancel := context.WithTimeout(ctx, 5*time.Minute)
-	secondFinal := waitRunTerminal(t, secCtx, fe.httpAPI, member.HTTPBase(), job.ID, second.ID)
+	secondFinal := waitRunStatus(t, secCtx, fe.httpAPI, member.HTTPBase(), job.ID, second.ID, "succeeded")
 	secCancel()
 
 	writeCoreRecord(t, fe, "cancel_completion_race", map[string]any{
 		"first_run":           first.ID,
 		"second_run":          second.ID,
-		"first_status":        firstAfter.Status,
+		"first_status":        still.Status,
 		"second_status":       secondFinal.Status,
 		"first_raw_admit":     truncate(rawFirst, 200),
 		"second_raw_admit":    truncate(rawSecond, 200),
-		"first_effect_count":  len(firstEffects),
+		"completes_at_cancel": completesAtCancel,
 		"replacement_202_ack": "not_process_death",
 		"histories":           []string{first.ID, second.ID},
 	})
-	if firstAfter.Status != "" && !strings.EqualFold(firstAfter.Status, "cancelled") {
-		t.Logf("first run status after replace=%s (completion race retained)", firstAfter.Status)
-	}
 }

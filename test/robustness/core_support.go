@@ -269,15 +269,79 @@ func isolateMember(t *testing.T, fe *faultEnv, minority cluster.Member) *isolati
 		iso.plans = append(iso.plans, fwd, rev)
 	}
 	t.Cleanup(func() { iso.heal(t, fe) })
-	for _, p := range iso.plans {
+	for i, p := range iso.plans {
 		partCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		if _, err := fe.host.Partition(partCtx, p); err != nil {
-			cancel()
-			t.Fatalf("install partition %s: %v", p.Tag, err)
-		}
+		evidence, err := fe.host.Partition(partCtx, p)
 		cancel()
+		if err != nil {
+			t.Fatalf("install partition %s: %v (%s)", p.Tag, err, truncate([]byte(evidence), 400))
+		}
+		iso.plans[i] = p
 	}
 	return iso
+}
+
+// requireSplitActive fails unless every plan's blocked raft or internal rule
+// has matched packets and the minority no longer reports a dqlite leader.
+func requireSplitActive(t *testing.T, fe *faultEnv, iso *isolation) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	for _, p := range iso.plans {
+		plan := p
+		var blocked map[string]faults.Counter
+		var raw string
+		if err := cluster.Poll(ctx, 2*time.Second, func() (bool, error) {
+			b, _, r, err := fe.host.Counters(ctx, plan)
+			if err != nil {
+				return false, nil
+			}
+			blocked, raw = b, r
+			return SplitDropActive(b[plan.DropRuleComment(faults.PortRaft)].Packets, b[plan.DropRuleComment(faults.PortInternal)].Packets), nil
+		}); err != nil {
+			t.Fatalf("2-1 split unproven: plan %s never dropped raft/internal traffic (counters=%v raw=%s)",
+				plan.Tag, blocked, truncate([]byte(raw), 800))
+		}
+		t.Logf("split plan %s drop raft=%d internal=%d", plan.Tag,
+			blocked[plan.DropRuleComment(faults.PortRaft)].Packets,
+			blocked[plan.DropRuleComment(faults.PortInternal)].Packets)
+	}
+
+	leader := iso.majority[0]
+	if fe.leader.Name != iso.minority.Name {
+		leader = fe.leader
+	}
+	target := fmt.Sprintf("http://%s:%d/health", leader.IP, faults.PortAPI)
+	minLive, err := cluster.RefreshMember(ctx, fe.kube, fe.env.Namespace, iso.minority.Name)
+	if err != nil {
+		t.Fatalf("refresh minority: %v", err)
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, 60*time.Second)
+	fwd, err := fe.host.Probe(probeCtx, minLive.Node, minLive.ContainerID, iso.minority.Name, target, 4)
+	probeCancel()
+	if err != nil {
+		t.Fatalf("inconclusive: minority probe failed to run: %v", err)
+	}
+	if fwd.Success {
+		t.Fatalf("minority %s still reached majority %s; 2-1 split is not active", iso.minority.Name, leader.Name)
+	}
+
+	qctx, qcancel := context.WithTimeout(ctx, 30*time.Second)
+	defer qcancel()
+	if err := cluster.Poll(qctx, 2*time.Second, func() (bool, error) {
+		call, cancel := context.WithTimeout(qctx, 4*time.Second)
+		defer cancel()
+		leaderInfo, _, qerr := cluster.QueryNode(call, iso.minority.DqliteAddr())
+		if qerr != nil {
+			return true, nil
+		}
+		if leaderInfo == nil || strings.TrimSpace(leaderInfo.Address) == "" {
+			return true, nil
+		}
+		return false, nil
+	}); err != nil {
+		t.Fatalf("minority %s still reports a dqlite leader; 2-1 split is unproven", iso.minority.Name)
+	}
 }
 
 func (iso *isolation) heal(t *testing.T, fe *faultEnv) {
@@ -387,4 +451,78 @@ func waitRunHasTask(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID
 		t.Fatalf("run %s never exposed a task: %v", runID, err)
 	}
 	return got
+}
+
+func memberByNode(t *testing.T, fe *faultEnv, addr string) cluster.Member {
+	t.Helper()
+	if m, ok := fe.topo.ByNodeAddress(addr); ok {
+		return m
+	}
+	if m, ok := fe.topo.ByIP(cluster.HostIP(addr)); ok {
+		return m
+	}
+	t.Fatalf("no member for node address %s", addr)
+	return cluster.Member{}
+}
+
+func applyBlockedRun(t *testing.T, fe *faultEnv, member cluster.Member, kind string) (cluster.Job, cluster.Run, cluster.Lease) {
+	t.Helper()
+	ctx := context.Background()
+	alias := uniqueAlias(kind)
+	def := cluster.FixtureDefinition(alias, fe.env.TaskImage)
+	if err := fe.httpAPI.Apply(ctx, member.HTTPBase(), []jobdef.Definition{def}); err != nil {
+		t.Fatalf("apply blocked fixture: %v", err)
+	}
+	job, err := fe.httpAPI.JobByAlias(ctx, member.HTTPBase(), alias)
+	if err != nil {
+		t.Fatalf("read blocked job: %v", err)
+	}
+	run, _, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), job.ID)
+	if err != nil {
+		t.Fatalf("trigger blocked fixture: %v", err)
+	}
+	leaseCtx, leaseCancel := context.WithTimeout(ctx, 90*time.Second)
+	lease, err := cluster.WaitLease(leaseCtx, fe.httpAPI, member.HTTPBase(), run.ID, "")
+	leaseCancel()
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	startCtx, startCancel := context.WithTimeout(ctx, 90*time.Second)
+	if err := cluster.Poll(startCtx, 500*time.Millisecond, func() (bool, error) {
+		return len(fe.sink.StartsFor(run.ID, cluster.BlockStep)) > 0, nil
+	}); err != nil {
+		startCancel()
+		t.Fatalf("block start missing: %v", err)
+	}
+	startCancel()
+	runCtx, runCancel := context.WithTimeout(ctx, 90*time.Second)
+	var detail cluster.Run
+	if err := cluster.Poll(runCtx, time.Second, func() (bool, error) {
+		got, gerr := fe.httpAPI.GetRun(runCtx, member.HTTPBase(), job.ID, run.ID)
+		if gerr != nil {
+			return false, nil
+		}
+		detail = got
+		for _, tr := range got.Tasks {
+			if strings.EqualFold(tr.Status, "running") {
+				return true, nil
+			}
+		}
+		return false, nil
+	}); err != nil {
+		runCancel()
+		t.Fatalf("block task never running: %v", err)
+	}
+	runCancel()
+	t.Cleanup(func() { fe.sink.Release(run.ID) })
+	return job, detail, lease
+}
+
+func taskStatusByName(run cluster.Run, names map[string]string, step string) string {
+	for _, tr := range run.Tasks {
+		if names[tr.TaskID] == step {
+			return tr.Status
+		}
+	}
+	return ""
 }

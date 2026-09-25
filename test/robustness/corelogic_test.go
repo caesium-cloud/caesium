@@ -129,6 +129,54 @@ func TestParseRefusalUnauthorizedAndStaleGeneration(t *testing.T) {
 	}
 }
 
+func TestTerminalCompleteRefusalAllowed(t *testing.T) {
+	if !TerminalCompleteRefusalAllowed(409, RefusalTaskNotRunning) ||
+		!TerminalCompleteRefusalAllowed(409, RefusalWrongWorker) {
+		t.Fatal("claim/terminal 409 must be allowed")
+	}
+	if TerminalCompleteRefusalAllowed(409, RefusalNotOwner) ||
+		TerminalCompleteRefusalAllowed(409, RefusalMissingRun) ||
+		TerminalCompleteRefusalAllowed(503, RefusalTaskNotRunning) ||
+		TerminalCompleteRefusalAllowed(200, RefusalTaskNotRunning) {
+		t.Fatal("not_owner, missing_run, 5xx and 200 must not count as the terminal fence")
+	}
+}
+
+func TestIsTLSHandshakeAlert(t *testing.T) {
+	if !IsTLSHandshakeAlert("remote error: tls: bad certificate") {
+		t.Fatal("server alert must match")
+	}
+	if !IsTLSHandshakeAlert("tls: certificate required") {
+		t.Fatal("certificate required must match")
+	}
+	for _, n := range []string{"dial tcp i/o timeout", "connection refused", "401 unauthorized", ""} {
+		if IsTLSHandshakeAlert(n) {
+			t.Fatalf("%q must not count as a TLS alert", n)
+		}
+	}
+}
+
+func TestMaxBenchedNetworkErrors(t *testing.T) {
+	if got := MaxBenchedNetworkErrors(20*time.Second, 10*time.Second); got != 3 {
+		t.Fatalf("20s/10s: got %d want 3", got)
+	}
+	if got := MaxBenchedNetworkErrors(5*time.Second, 10*time.Second); got != 1 {
+		t.Fatalf("window shorter than cooldown: got %d want 1", got)
+	}
+	if MaxBenchedNetworkErrors(20*time.Second, 10*time.Second) >= 8 {
+		t.Fatal("the cap must be well below an unbenched 1s-tick burst")
+	}
+}
+
+func TestSplitDropActive(t *testing.T) {
+	if SplitDropActive(0, 0) {
+		t.Fatal("zero counters are not activation")
+	}
+	if !SplitDropActive(3, 0) || !SplitDropActive(0, 2) {
+		t.Fatal("raft or internal packets must activate the drop")
+	}
+}
+
 func TestLoadCoreFixtureYAML(t *testing.T) {
 	for _, name := range []string{"fan-in.job.yaml", "fail-then-retry.job.yaml", "replace-concurrency.job.yaml"} {
 		def, err := LoadCoreFixture(name, "alias-"+name[:4], "example.net/task:test")

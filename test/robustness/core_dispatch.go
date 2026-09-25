@@ -5,7 +5,6 @@ package robustness
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -72,8 +71,7 @@ func runWorkerUnreachable(t *testing.T, fe *faultEnv) {
 
 	job, alias := applyFaultFixture(t, fe, owner, "bench", 4)
 	var runIDs []string
-	var progressClaims []string
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 8; i++ {
 		run, _, err := fe.httpAPI.TriggerRun(ctx, owner.HTTPBase(), job.ID)
 		if err != nil {
 			t.Fatalf("trigger %s #%d: %v", alias, i+1, err)
@@ -82,43 +80,31 @@ func runWorkerUnreachable(t *testing.T, fe *faultEnv) {
 	}
 
 	metricCtx, metricCancel := context.WithTimeout(ctx, 2*time.Minute)
-	var afterRejected float64
+	var firstRejected float64
 	if err := cluster.Poll(metricCtx, 2*time.Second, func() (bool, error) {
-		afterRejected = scrapeCounter(t, fe, owner, MetricDispatchRejected, map[string]string{"reason": DispatchReasonNetworkError})
-		return afterRejected > beforeRejected, nil
+		firstRejected = scrapeCounter(t, fe, owner, MetricDispatchRejected, map[string]string{"reason": DispatchReasonNetworkError})
+		return firstRejected > beforeRejected, nil
 	}); err != nil {
 		metricCancel()
-		t.Fatalf("caesium_dispatch_rejected_total{reason=network_error} did not rise on %s (before=%.0f after=%.0f); dispatch progress against the unreachable worker is unproven",
-			owner.Name, beforeRejected, afterRejected)
+		t.Fatalf("caesium_dispatch_rejected_total{reason=network_error} did not rise on %s (before=%.0f after=%.0f); dispatch never hit the paused worker",
+			owner.Name, beforeRejected, firstRejected)
 	}
 	metricCancel()
+
+	observe := 20 * time.Second
+	cooldown := 10 * time.Second
+	time.Sleep(observe)
+	afterRejected := scrapeCounter(t, fe, owner, MetricDispatchRejected, map[string]string{"reason": DispatchReasonNetworkError})
+	rise := afterRejected - beforeRejected
+	maxRise := float64(MaxBenchedNetworkErrors(observe, cooldown))
+	if rise > maxRise {
+		t.Fatalf("paused worker was not benched: network_error rose by %.0f over %s (cap %.0f = one hit per %s cooldown)",
+			rise, observe, maxRise, cooldown)
+	}
 	afterSent := scrapeCounter(t, fe, owner, MetricDispatchSent, nil)
 	afterStalled := scrapeCounter(t, fe, owner, MetricDispatchStalled, map[string]string{"reason": "no_capacity"})
-
-	claimCtx, claimCancel := context.WithTimeout(ctx, 2*time.Minute)
-	_ = cluster.Poll(claimCtx, time.Second, func() (bool, error) {
-		progressClaims = nil
-		for _, id := range runIDs {
-			got, gerr := fe.httpAPI.GetRun(claimCtx, owner.HTTPBase(), job.ID, id)
-			if gerr != nil {
-				return false, nil
-			}
-			for _, tr := range got.Tasks {
-				if strings.TrimSpace(tr.ClaimedBy) == "" {
-					continue
-				}
-				if cluster.HostIP(tr.ClaimedBy) == live.IP {
-					continue
-				}
-				progressClaims = append(progressClaims, tr.ClaimedBy)
-			}
-		}
-		return len(progressClaims) > 0, nil
-	})
-	claimCancel()
-	if len(progressClaims) == 0 {
-		t.Fatalf("no task was claimed by a reachable peer while %s was unreachable; benching is unproven (rejected Δ=%.0f sent %.0f→%.0f)",
-			worker.Name, afterRejected-beforeRejected, beforeSent, afterSent)
+	if afterSent <= beforeSent {
+		t.Fatalf("no dispatch progress on reachable peers while %s was benched (sent %.0f→%.0f)", worker.Name, beforeSent, afterSent)
 	}
 
 	resumeCtx, resumeCancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -172,7 +158,8 @@ func runWorkerUnreachable(t *testing.T, fe *faultEnv) {
 		"stalled_after":       afterStalled,
 		"sent_before":         beforeSent,
 		"sent_after":          afterSent,
-		"progress_claims":     progressClaims,
+		"network_error_rise":  rise,
+		"network_error_cap":   maxRise,
 		"recovered_claim":     recoveredClaim,
 		"run_ids":             runIDs,
 		"pause_state_paused":  pausedState,
