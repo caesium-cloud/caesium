@@ -48,6 +48,33 @@ func TestResolvePodNameBySourceIP(t *testing.T) {
 	}
 }
 
+func TestHeldRecorderStartRequiresQueuedRunIdentity(t *testing.T) {
+	const queuedID = "689add98-8ea4-46c4-aa6b-faa12169f45c"
+	makeEvent := func(runID, step, kind, nonce, pod string) recorder.Event {
+		body, err := json.Marshal(rawAttemptEffect{RunID: runID, Step: step, Event: kind, Nonce: nonce, PodName: pod})
+		require.NoError(t, err)
+		return recorder.Event{RunID: runID, Step: step, Kind: kind, Nonce: nonce, Raw: string(body)}
+	}
+	start := makeEvent(queuedID, "hold", "start", "queued-start", "full-queued-pod-name")
+	require.True(t, hasHeldRecorderStart(queuedID, []recorder.Event{start}))
+	for _, tc := range []struct {
+		name   string
+		events []recorder.Event
+	}{
+		{"predecessor start", []recorder.Event{makeEvent("dc37ca3b-12a1-4917-ab2f-01685a1df2b4", "hold", "start", "predecessor-start", "predecessor-pod")}},
+		{"completion only", []recorder.Event{makeEvent(queuedID, "hold", "complete", "queued-start", "full-queued-pod-name")}},
+		{"different step", []recorder.Event{makeEvent(queuedID, "history", "start", "queued-start", "full-queued-pod-name")}},
+		{"no pod identity", []recorder.Event{makeEvent(queuedID, "hold", "start", "queued-start", "")}},
+		{"raw identity disagrees", []recorder.Event{{RunID: queuedID, Step: "hold", Kind: "start", Nonce: "other", Raw: start.Raw}}},
+		{"no start", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, hasHeldRecorderStart(queuedID, tc.events),
+				"the queued barrier must not be released from unrelated raw evidence")
+		})
+	}
+}
+
 func TestReadClusterTaskProofQueriesPublicIdentity(t *testing.T) {
 	const (
 		runID     = "7c39392d-d1bf-43fc-b803-fce7d606141f"

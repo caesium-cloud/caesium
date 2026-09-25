@@ -554,18 +554,28 @@ func recorderEvents(t *testing.T) []recorder.Event {
 	return events
 }
 
-func waitRecorderStart(t *testing.T, runID string) {
+func hasHeldRecorderStart(runID string, events []recorder.Event) bool {
+	for _, event := range events {
+		if event.RunID != runID || event.Step != "hold" || event.Kind != "start" || event.Nonce == "" {
+			continue
+		}
+		if _, err := parseRawAttemptEffect(event); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func waitRecorderStart(t *testing.T, caseName, runID string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		for _, e := range recorderEvents(t) {
-			if e.RunID == runID && e.Kind == "start" {
-				return
-			}
+		if hasHeldRecorderStart(runID, recorderEvents(t)) {
+			return
 		}
 		time.Sleep(time.Second)
 	}
-	blockf(t, "raw-effect-ledger", "recorder never saw start for run %s; full pod-name lookup or task start may have failed", runID)
+	blockf(t, caseName, "recorder never saw held-task start for run %s; full pod-name lookup or task start may have failed", runID)
 }
 
 func releaseRecordedRun(t *testing.T, runID string) {
@@ -750,7 +760,7 @@ func TestLifecycleClusterSeed(t *testing.T) {
 	inflight, started, err := c.triggerRun(ctx, jobs["inflight"].ID, nil)
 	require.NoError(t, err)
 	require.True(t, started)
-	waitRecorderStart(t, inflight.ID)
+	waitRecorderStart(t, "raw-effect-ledger", inflight.ID)
 	inflight, err = c.run(ctx, inflight.JobID, inflight.ID)
 	require.NoError(t, err)
 	require.Equal(t, "running", inflight.Status)
@@ -758,7 +768,7 @@ func TestLifecycleClusterSeed(t *testing.T) {
 	predecessor, started, err := c.triggerRun(ctx, jobs["queue"].ID, nil)
 	require.NoError(t, err)
 	require.True(t, started)
-	waitRecorderStart(t, predecessor.ID)
+	waitRecorderStart(t, "raw-effect-ledger", predecessor.ID)
 	predecessor, err = c.run(ctx, predecessor.JobID, predecessor.ID)
 	require.NoError(t, err)
 	require.Equal(t, "running", predecessor.Status)
@@ -1189,6 +1199,13 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		time.Sleep(time.Second)
 	}
 	require.NotEmpty(t, queued.ID, "queued row never became a run")
+	// The queued job uses the same held manifest as its predecessor. Admission
+	// only starts its task; release the new run's own recorder barrier after
+	// observing that run's raw start, never the predecessor's barrier again.
+	waitRecorderStart(t, "retained-history-and-raw-effects", queued.ID)
+	writeJSON(t, "cluster-queued-before-release.json", map[string]any{
+		"run": queued, "raw_events": recorderEvents(t)})
+	releaseRecordedRun(t, queued.ID)
 	queued, err := c.awaitRunStatus(ctx, queued.JobID, queued.ID, func(r apiRun) bool { return isTerminal(r.Status) }, 5*time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, "succeeded", queued.Status)
