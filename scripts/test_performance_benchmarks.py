@@ -42,6 +42,12 @@ class BenchmarkOrderTests(unittest.TestCase):
             "args = sys.argv[1:]\n"
             "source = args[args.index('-v') + 1].split(':/bld/caesium')[0]\n"
             "side = 'candidate' if source == os.environ['FAKE_CANDIDATE'] else 'base'\n"
+            "if 'go test -c' in args[-1]:\n"
+            "    if os.environ.get('FAKE_DOCKER_PREFLIGHT_FAIL') == '1':\n"
+            "        print('candidate benchmark references a missing base API')\n"
+            "        sys.exit(23)\n"
+            "    print('base benchmark harness compiles')\n"
+            "    sys.exit(0)\n"
             "log = pathlib.Path(os.environ['FAKE_DOCKER_LOG'])\n"
             "prior = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []\n"
             "repeat = 1 + sum(row['side'] == side for row in prior)\n"
@@ -69,13 +75,15 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.env["FAKE_CANDIDATE"] = str(self.candidate)
         self.env["FAKE_DOCKER_LOG"] = str(self.log)
 
-    def run_pair(self, *, fail=None, bad=None, bad_kind=None):
+    def run_pair(self, *, fail=None, bad=None, bad_kind=None, preflight_fail=False):
         env = self.env.copy()
         if fail:
             env["FAKE_DOCKER_FAIL"] = fail
         if bad:
             env["FAKE_DOCKER_BAD"] = bad
             env["FAKE_DOCKER_BAD_KIND"] = bad_kind
+        if preflight_fail:
+            env["FAKE_DOCKER_PREFLIGHT_FAIL"] = "1"
         return subprocess.run(
             ["bash", str(SCRIPT), "4", "linux/arm64", str(self.candidate),
              str(self.base), "builder:candidate", "builder:base", str(self.artifacts)],
@@ -134,6 +142,14 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.assertIn("synthetic benchmark failure", candidate.read_text())
         for benchmark in PARSE_BENCH(candidate.read_text()).values():
             self.assertEqual(len(benchmark["ns_per_op"]), 3)
+
+    def test_base_compile_failure_is_recorded_before_paired_samples(self):
+        result = self.run_pair(preflight_fail=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("benchmark harness incompatible with base", result.stderr)
+        self.assertEqual((self.artifacts / "observations/benchmark-base-compile.exit").read_text(), "23\n")
+        self.assertIn("missing base API", (self.artifacts / "observations/benchmark-base-compile.txt").read_text())
+        self.assertEqual(len(self.calls()), 8)
 
     def test_zero_exit_missing_benchmark_row_fails_closed(self):
         result = self.run_pair(bad="candidate:2", bad_kind="missing")

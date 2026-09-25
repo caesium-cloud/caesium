@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,11 @@ BENCH_FILES = (
     "internal/run/owner_benchmark_test.go",
     "internal/run/recovery_benchmark_test.go",
 )
-BENCH_DIGEST = "f" * 64
+BENCH_HELPERS = (("internal/run/owner_state_test.go", "3" * 64),)
+_bench_digest = hashlib.sha256()
+for _path, _sha in [(path, str(i) * 64) for i, path in enumerate(BENCH_FILES, start=1)] + list(BENCH_HELPERS):
+    _bench_digest.update(_path.encode() + b"\0" + _sha.encode() + b"\0")
+BENCH_DIGEST = _bench_digest.hexdigest()
 
 
 def provenance(label="base", **overrides):
@@ -119,10 +124,17 @@ def document(base=None, candidate=None):
                  "base_original_sha256": None, "overlaid": True}
                 for i, path in enumerate(BENCH_FILES, start=1)
             ],
+            "helper_files": [
+                {"path": path, "sha256": sha} for path, sha in BENCH_HELPERS
+            ],
         },
         "benchmark_sampling": {
             "schema_version": 1,
             "repeats": 10,
+            "base_compile": {
+                "exit_code": 0,
+                "output_path": "observations/benchmark-base-compile.txt",
+            },
             "expected_names": names,
             "source_files": files,
             "settings_sha256": "d" * 64,
@@ -304,6 +316,42 @@ class BenchmarkHarnessProvenanceTests(unittest.TestCase):
         doc = self.bench_document()
         doc["base"]["provenance"]["benchmark_harness_sha256"] = "0" * 64
         self.assert_rejected(doc, "base.provenance.benchmark_harness_sha256")
+
+    def test_helper_hash_is_part_of_shared_harness_identity(self):
+        doc = self.bench_document()
+        doc["benchmark_harness"]["helper_files"][0]["sha256"] = "4" * 64
+        self.assert_rejected(doc, "harness_sha256 differs")
+
+    def test_base_compile_failure_is_classified_as_harness_incompatibility(self):
+        doc = self.bench_document()
+        doc["benchmark_sampling"]["base_compile"]["exit_code"] = 1
+        doc["benchmark_sampling"]["order"][0]["exit_code"] = 1
+        doc["benchmark_sampling"]["aggregate_exit"]["base"] = 1
+        doc["base"]["correctness"]["failures"] = ["workload failed"]
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertFalse(report["speed_compared"])
+        self.assertTrue(any("benchmark harness incompatible with base" in x for x in report["reasons"]))
+        self.assertTrue(any("base correctness: workload failed" in x for x in report["reasons"]))
+
+    def test_side_file_mode_requires_and_accepts_benchmark_evidence(self):
+        doc = self.bench_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp) / "base.json"
+            candidate_path = Path(tmp) / "candidate.json"
+            evidence_path = Path(tmp) / "evidence.json"
+            base_path.write_text(json.dumps(doc["base"]))
+            candidate_path.write_text(json.dumps(doc["candidate"]))
+            evidence_path.write_text(json.dumps(doc))
+            command = [sys.executable, str(SCRIPT), "--base", str(base_path), "--candidate", str(candidate_path)]
+            missing = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(missing.returncode, 1, missing.stderr)
+            self.assertIn("requires --benchmark-evidence", missing.stderr)
+            with_evidence = subprocess.run(
+                command + ["--benchmark-evidence", str(evidence_path)], capture_output=True, text=True
+            )
+            self.assertEqual(with_evidence.returncode, 0, with_evidence.stderr)
+            self.assertEqual(json.loads(with_evidence.stdout)["overall"], "no_significant_difference")
 
     def test_wrong_harness_source_and_image_identity_fail_closed(self):
         for field, reason in (
@@ -737,6 +785,8 @@ class PerformanceShWiringTests(unittest.TestCase):
             (art / "observations" / "benchmark-harness.json").write_text(
                 json.dumps(doc["benchmark_harness"])
             )
+            (art / "observations" / "benchmark-base-compile.txt").write_text("")
+            (art / "observations" / "benchmark-base-compile.exit").write_text("0\n")
             (art / "observations" / "benchmark-names.json").write_text(json.dumps({
                 "source_files": doc["benchmark_sampling"]["source_files"],
                 "benchmark_names": doc["benchmark_sampling"]["expected_names"],
@@ -766,6 +816,8 @@ class PerformanceShWiringTests(unittest.TestCase):
             doc = document()
             manifest = doc["benchmark_harness"]
             (art / "observations" / "benchmark-harness.json").write_text(json.dumps(manifest))
+            (art / "observations" / "benchmark-base-compile.txt").write_text("")
+            (art / "observations" / "benchmark-base-compile.exit").write_text("0\n")
             (art / "observations" / "benchmark-names.json").write_text(json.dumps({
                 "source_files": doc["benchmark_sampling"]["source_files"],
                 "benchmark_names": doc["benchmark_sampling"]["expected_names"],
@@ -815,6 +867,30 @@ class PerformanceShWiringTests(unittest.TestCase):
             self.assertEqual(assembled["candidate"]["provenance"]["benchmark_repeats"], 10)
             self.assertTrue(assembled["base"]["correctness"]["ok"])
             self.assertTrue(assembled["candidate"]["correctness"]["ok"])
+
+            # A base compile failure remains a conclusive failure, with an
+            # explicit harness reason instead of blaming base correctness.
+            (art / "observations" / "benchmark-base-compile.exit").write_text("23\n")
+            (art / "base" / "bench.txt.exit").write_text("23\n")
+            (art / "base" / "bench.txt.repeats.tsv").write_text(
+                "".join(f"{repeat}\t23\n" for repeat in range(1, 11))
+            )
+            failed_order = [
+                f"{repeat}\t{label}\t{23 if label == 'base' else 0}\n"
+                for repeat in range(1, 11)
+                for label in (("base", "candidate") if repeat % 2 else ("candidate", "base"))
+            ]
+            (art / "observations" / "benchmark-order.tsv").write_text("".join(failed_order))
+            result = subprocess.run(
+                [sys.executable, "-c", code], env=env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            self.assertTrue(assembled["base"]["correctness"]["ok"])
+            report = compare_doc(assembled)
+            self.assertEqual(report["overall"], "fail")
+            self.assertTrue(any("benchmark harness incompatible with base" in x for x in report["reasons"]))
+            self.assertFalse(any("base correctness: benchmarks exited" in x for x in report["reasons"]))
 
     def test_script_refuses_instrumented_env_in_source(self):
         src = SH.read_text()

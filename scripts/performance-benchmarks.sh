@@ -37,6 +37,22 @@ if len(names)!=len(set(names)):
   raise SystemExit('benchmark harness contains duplicate function names')
 output.write_text(json.dumps({'source_files':sources,'benchmark_names':sorted(names)},indent=2)+'\n')
 PY
+# Compile the candidate benchmark overlay against the base before sampling.
+# A failure here identifies harness incompatibility, distinct from a base
+# benchmark that compiles and then fails while running. Keep the raw output and
+# continue recording every paired sample so the comparison remains auditable.
+BASE_COMPILE="$ARTIFACTS/observations/benchmark-base-compile.txt"
+if docker run --rm --platform "$DOCKER_PLATFORM" \
+  -v "$BASE_SRC:/bld/caesium" -w /bld/caesium \
+  "$BASE_BUILDER" \
+  sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -c -o /tmp/caesium-benchmark-base.test ./internal/run' \
+  >"$BASE_COMPILE" 2>&1; then
+  printf '0\n' >"$ARTIFACTS/observations/benchmark-base-compile.exit"
+else
+  rc=$?
+  printf '%s\n' "$rc" >"$ARTIFACTS/observations/benchmark-base-compile.exit"
+  printf 'benchmark harness incompatible with base: compile exited %s (recorded in %s)\n' "$rc" "$BASE_COMPILE" >&2
+fi
 : >"$ARTIFACTS/observations/benchmark-order.tsv"
 for side in base candidate; do
   mkdir -p "$ARTIFACTS/$side"

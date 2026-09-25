@@ -84,9 +84,27 @@ for label, root, expected in (("candidate", candidate_dir, candidate_sha), ("bas
 
 overlaid = []
 manifest = []
-digest = hashlib.sha256()
 benchmark_names = []
 benchmark_function = re.compile(r'^func\s+(Benchmark(?:Owner|Recover)[A-Za-z0-9_]*)\s*\(\s*[A-Za-z_][A-Za-z_0-9]*\s+\*testing\.B\s*\)', re.M)
+
+# Check helper identity before creating any overlay. Benchmarks call helpers
+# from other internal/run test files, including owner_state_test.go.
+def other_test_files(root, sha):
+    paths = git(root, "ls-tree", "-r", "--name-only", sha, "--", "internal/run").stdout.decode().splitlines()
+    return sorted(path for path in paths if path.endswith("_test.go") and path not in files)
+
+candidate_helpers = other_test_files(candidate_dir, candidate_sha)
+base_helpers = other_test_files(base_dir, base_sha)
+if candidate_helpers != base_helpers:
+    raise SystemExit("benchmark harness: internal/run test helper path sets differ between base and candidate")
+helper_manifest = []
+for path in candidate_helpers:
+    candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
+    base_blob = git(base_dir, "show", f"{base_sha}:{path}").stdout
+    if candidate_blob != base_blob:
+        raise SystemExit(f"benchmark harness: test helper differs between base and candidate: {path}")
+    helper_manifest.append({"path": path, "sha256": sha256(candidate_blob)})
+
 for path in files:
     candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
     candidate_file = pathlib.Path(candidate_dir, path)
@@ -106,13 +124,17 @@ for path in files:
         overlaid.append(path)
     if pathlib.Path(base_dir, path).read_bytes() != candidate_blob:
         raise SystemExit(f"benchmark harness: base did not receive the exact {candidate_sha}:{path} blob")
-    digest.update(path.encode() + b"\0" + candidate_blob + b"\0")
     manifest.append({
         "path": path,
         "sha256": sha256(candidate_blob),
         "base_original_sha256": sha256(base_blob) if base_blob is not None else None,
         "overlaid": changed,
     })
+
+# Keep the digest order fixed: benchmark files first, then sorted helper files.
+digest = hashlib.sha256()
+for entry in manifest + helper_manifest:
+    digest.update(entry["path"].encode() + b"\0" + entry["sha256"].encode() + b"\0")
 
 dirty = status_paths(base_dir)
 if dirty != set(overlaid):
@@ -130,26 +152,78 @@ doc = {
     "base_release_image_id": base_image_id,
     "candidate_release_image_id": candidate_image_id,
     "files": manifest,
+    "helper_files": helper_manifest,
 }
 output = pathlib.Path(dest)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(doc, indent=2) + "\n")
-print(f"benchmark harness: {len(files)} exact blobs from {candidate_sha}; base overlay {overlaid}; manifest {dest}", file=sys.stderr)
+print(f"benchmark harness: {len(files)} benchmark files and {len(helper_manifest)} matched test helpers from {candidate_sha}; base overlay {overlaid}; manifest {dest}", file=sys.stderr)
 PY
 }
 
 cleanup_benchmark_harness() {
-  local base="$1" path status
-  for path in internal/run/owner_benchmark_test.go internal/run/recovery_benchmark_test.go; do
-    if git -C "$base" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
-      git -C "$base" restore -- "$path" || die "could not restore base benchmark $path"
-    else
-      rm -f "$base/$path" || die "could not remove base benchmark overlay $path"
-    fi
-  done
-  status="$(git -C "$base" status --porcelain --untracked-files=all)" \
-    || die "could not verify base checkout after benchmark overlay cleanup"
-  [[ -z "$status" ]] || die "base checkout is dirty after benchmark overlay cleanup"
+  python3 - "$@" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+candidate_arg, base_arg, expected_base_sha, expected_candidate_sha = sys.argv[1:]
+if not all((candidate_arg, base_arg, expected_base_sha, expected_candidate_sha)):
+    raise SystemExit("benchmark cleanup: candidate, base, and both source SHAs must be nonempty")
+candidate = pathlib.Path(candidate_arg).resolve(strict=True)
+base = pathlib.Path(base_arg).resolve(strict=True)
+if candidate == base:
+    raise SystemExit("benchmark cleanup: base path resolves to the candidate checkout")
+
+def git(root, *args, check=True):
+    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=False)
+    if check and result.returncode:
+        raise SystemExit(f"benchmark cleanup: git {' '.join(args)} failed in {root}: {result.stderr.decode(errors='replace').strip()}")
+    return result
+
+for label, root, expected in (("candidate", candidate, expected_candidate_sha), ("base", base, expected_base_sha)):
+    top = pathlib.Path(git(root, "rev-parse", "--show-toplevel").stdout.decode().strip()).resolve()
+    if top != root:
+        raise SystemExit(f"benchmark cleanup: {label} path is not its Git worktree root")
+    head = git(root, "rev-parse", "HEAD").stdout.decode().strip()
+    if head != expected:
+        raise SystemExit(f"benchmark cleanup: {label} checkout HEAD {head} != declared SHA {expected}")
+
+candidate_common = pathlib.Path(git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()).resolve()
+base_common = pathlib.Path(git(base, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()).resolve()
+base_git_dir = pathlib.Path(git(base, "rev-parse", "--path-format=absolute", "--git-dir").stdout.decode().strip()).resolve()
+if candidate_common != base_common or base_git_dir == base_common:
+    raise SystemExit("benchmark cleanup: base is not a linked worktree of the candidate repository")
+registered = {
+    pathlib.Path(line.removeprefix("worktree ")).resolve()
+    for line in git(candidate, "worktree", "list", "--porcelain").stdout.decode().splitlines()
+    if line.startswith("worktree ")
+}
+if base not in registered:
+    raise SystemExit("benchmark cleanup: base is not a registered linked worktree")
+
+paths = ("internal/run/owner_benchmark_test.go", "internal/run/recovery_benchmark_test.go")
+status = git(base, "status", "--porcelain", "--untracked-files=all", "-z").stdout
+dirty = {entry[3:].decode() for entry in status.split(b"\0") if entry}
+if dirty - set(paths):
+    raise SystemExit(f"benchmark cleanup: base has changes outside the overlay: {sorted(dirty - set(paths))}")
+if git(base, "diff", "--cached", "--quiet", check=False).returncode != 0:
+    raise SystemExit("benchmark cleanup: base has staged changes")
+for path in paths:
+    target = base / path
+    expected = git(candidate, "show", f"{expected_candidate_sha}:{path}").stdout
+    if not target.is_file() or target.read_bytes() != expected:
+        raise SystemExit(f"benchmark cleanup: overlay {path} differs from the candidate commit")
+
+for path in paths:
+    tracked = git(base, "ls-files", "--error-unmatch", "--", path, check=False).returncode == 0
+    if tracked:
+        git(base, "restore", "--", path)
+    else:
+        (base / path).unlink()
+if git(base, "status", "--porcelain", "--untracked-files=all").stdout:
+    raise SystemExit("benchmark cleanup: base checkout is dirty after overlay cleanup")
+PY
 }
 
 if [[ "${1:-}" == "prepare-bench-harness" ]]; then
@@ -163,9 +237,10 @@ fi
 
 if [[ "${1:-}" == "cleanup-bench-harness" ]]; then
   shift
-  [[ "$#" -eq 1 ]] || die "cleanup-bench-harness needs the base checkout directory"
+  [[ "$#" -eq 4 ]] || die "cleanup-bench-harness needs candidate dir, base dir, base SHA, candidate SHA"
   require_cmd git
-  cleanup_benchmark_harness "$1"
+  require_cmd python3
+  cleanup_benchmark_harness "$@"
   exit $?
 fi
 
@@ -204,9 +279,14 @@ fi
 ARTIFACTS="$(mkdir -p "$CAESIUM_PERF_ARTIFACTS" && cd "$CAESIUM_PERF_ARTIFACTS" && pwd)"
 CAESIUM_PERF_ARTIFACTS="$ARTIFACTS"
 
-CANDIDATE_SHA="${CAESIUM_PERF_CANDIDATE_SHA:-$(git -C "$ROOT" rev-parse HEAD)}"
-BASE_SHA="${CAESIUM_PERF_BASE_SHA:-}"
-[[ -n "$BASE_SHA" ]] || die "CAESIUM_PERF_BASE_SHA is required for a live comparison"
+CANDIDATE_REF="${CAESIUM_PERF_CANDIDATE_SHA:-HEAD}"
+BASE_REF="${CAESIUM_PERF_BASE_SHA:-}"
+[[ -n "$BASE_REF" ]] || die "CAESIUM_PERF_BASE_SHA is required for a live comparison"
+# Resolve references before image tags, builds, and provenance are created.
+CANDIDATE_SHA="$(git -C "$ROOT" rev-parse --verify --end-of-options "${CANDIDATE_REF}^{commit}" 2>/dev/null)" \
+  || die "CAESIUM_PERF_CANDIDATE_SHA is not a commit: $CANDIDATE_REF"
+BASE_SHA="$(git -C "$ROOT" rev-parse --verify --end-of-options "${BASE_REF}^{commit}" 2>/dev/null)" \
+  || die "CAESIUM_PERF_BASE_SHA is not a commit: $BASE_REF"
 
 IMAGE_REPO="caesiumcloud/caesium"
 BASE_IMAGE="${CAESIUM_PERF_BASE_IMAGE:-$IMAGE_REPO:$BASE_SHA}"
@@ -483,7 +563,7 @@ if [[ "$RUN_BENCH" == "1" ]]; then
     || die "benchmark scheduling failed"
   # Remove only the measurement overlay before bundle/browser work uses the
   # base checkout. The manifest retains the exact benchmark provenance.
-  cleanup_benchmark_harness "$BASE_WORKTREE"
+  cleanup_benchmark_harness "$ROOT" "$BASE_WORKTREE" "$BASE_SHA" "$CANDIDATE_SHA"
 fi
 
 # ---------------------------------------------------------------------------
@@ -721,6 +801,7 @@ def load_json(path):
 
 bench_harness = None
 bench_sampling = None
+base_compile_exit = None
 if os.environ.get("RUN_BENCH") == "1":
     bench_harness = load_json(os.environ["BENCH_HARNESS_MANIFEST"])
     if not isinstance(bench_harness, dict):
@@ -747,6 +828,14 @@ if os.environ.get("RUN_BENCH") == "1":
     repeats = int(os.environ["REPEATS"])
     if repeats < 1:
         raise SystemExit("benchmark repeats must be positive")
+    compile_output = art / "observations" / "benchmark-base-compile.txt"
+    compile_exit = art / "observations" / "benchmark-base-compile.exit"
+    if not compile_output.is_file() or not compile_exit.is_file():
+        raise SystemExit("base benchmark harness compile preflight evidence is missing")
+    raw_exit = compile_exit.read_text().strip()
+    if not raw_exit.isdecimal():
+        raise SystemExit(f"base benchmark harness compile exit is malformed: {raw_exit!r}")
+    base_compile_exit = int(raw_exit)
     repeat_exits = {}
     aggregate_exits = {}
     for label in ("base", "candidate"):
@@ -792,6 +881,10 @@ if os.environ.get("RUN_BENCH") == "1":
     bench_sampling = {
         "schema_version": 1,
         "repeats": repeats,
+        "base_compile": {
+            "exit_code": base_compile_exit,
+            "output_path": "observations/benchmark-base-compile.txt",
+        },
         "expected_names": names_doc["benchmark_names"],
         "source_files": source_files,
         "settings_sha256": os.environ["SETTINGS_SHA"],
@@ -868,7 +961,7 @@ def correctness(label, workloads):
         failures.append("benchmark exit marker missing")
     elif bench_exit.is_file():
         rc = bench_exit.read_text().strip()
-        if rc != "0":
+        if rc != "0" and not (label == "base" and base_compile_exit not in (None, 0)):
             failures.append(f"benchmarks exited {rc}")
     browser_exit = art / label / "browser.exit"
     if browser_exit.is_file():

@@ -33,11 +33,18 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         git(self.candidate, "config", "user.name", "E3 Test")
         git(self.candidate, "config", "user.email", "e3@example.invalid")
         (self.candidate / "README").write_text("product source at base\n")
-        git(self.candidate, "add", "--", "README")
+        helper = self.candidate / "internal/run/owner_state_test.go"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("package run\nfunc newTopoBuilder() {}\n")
+        git(self.candidate, "add", "--", "README", "internal/run/owner_state_test.go")
         git(self.candidate, "commit", "-qm", "base product")
         self.base_sha = git(self.candidate, "rev-parse", "HEAD")
-        subprocess.run(["git", "clone", "-q", str(self.candidate), str(self.base)], check=True)
-        git(self.base, "checkout", "-q", "--detach", self.base_sha)
+        subprocess.run(["git", "-C", str(self.candidate), "worktree", "add", "-q", "--detach",
+                        str(self.base), self.base_sha], check=True)
+        self.addCleanup(lambda: subprocess.run(
+            ["git", "-C", str(self.candidate), "worktree", "remove", "--force", str(self.base)],
+            check=False, capture_output=True,
+        ))
         self.contents = {}
         for path in FILES:
             name = "BenchmarkOwnerFake" if "owner_" in path else "BenchmarkRecoverFake"
@@ -62,9 +69,11 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
 
-    def cleanup_overlay(self, *, env=None):
+    def cleanup_overlay(self, *, base=None, base_sha=None, env=None):
         return subprocess.run(
-            ["bash", str(SCRIPT), "cleanup-bench-harness", str(self.base)],
+            ["bash", str(SCRIPT), "cleanup-bench-harness", str(self.candidate),
+             str(self.base) if base is None else base, base_sha or self.base_sha,
+             self.candidate_sha],
             capture_output=True, text=True, check=False, env=env,
         )
 
@@ -79,6 +88,9 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertEqual(doc["candidate_release_image_id"], "sha256:candidate-release")
         self.assertEqual(doc["base_overlay_paths"], list(FILES))
         self.assertEqual(doc["benchmark_names"], ["BenchmarkOwnerFake", "BenchmarkRecoverFake"])
+        self.assertEqual(doc["helper_files"][0]["path"], "internal/run/owner_state_test.go")
+        self.assertEqual(doc["helper_files"][0]["sha256"], hashlib.sha256(
+            (self.candidate / "internal/run/owner_state_test.go").read_bytes()).hexdigest())
         self.assertEqual(git(self.base, "rev-parse", "HEAD"), self.base_sha)
         self.assertEqual(git(self.candidate, "status", "--porcelain"), "")
         self.assertEqual(
@@ -111,6 +123,41 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertEqual(git(self.base, "status", "--porcelain", "--untracked-files=all"), "")
         self.assertTrue(all(not (self.base / path).exists() for path in FILES))
 
+    def test_cleanup_rejects_candidate_or_empty_base_before_mutation(self):
+        uncommitted = self.candidate / FILES[0]
+        uncommitted.write_bytes(uncommitted.read_bytes() + b"// unsaved edit\n")
+        original = uncommitted.read_bytes()
+        for base in ("", str(self.candidate), str(self.base)):
+            with self.subTest(base=base):
+                result = self.cleanup_overlay(base=base, base_sha="0" * 40)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(uncommitted.read_bytes(), original)
+
+    def test_cleanup_rejects_wrong_base_sha_and_foreign_checkout_before_mutation(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        overlay = self.base / FILES[0]
+        original = overlay.read_bytes()
+        result = self.cleanup_overlay(base_sha="0" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(overlay.read_bytes(), original)
+        foreign = self.root / "foreign"
+        subprocess.run(["git", "clone", "-q", str(self.candidate), str(foreign)], check=True)
+        result = self.cleanup_overlay(base=str(foreign), base_sha=self.candidate_sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a linked worktree", result.stderr)
+        self.assertEqual(overlay.read_bytes(), original)
+
+    def test_different_test_helper_fails_before_overlay(self):
+        helper = self.candidate / "internal/run/owner_state_test.go"
+        helper.write_text(helper.read_text() + "// candidate helper drift\n")
+        git(self.candidate, "add", "--", "internal/run/owner_state_test.go")
+        git(self.candidate, "commit", "-qm", "change benchmark helper")
+        self.candidate_sha = git(self.candidate, "rev-parse", "HEAD")
+        result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test helper differs", result.stderr)
+        self.assertFalse((self.base / FILES[0]).exists())
+
     def test_failed_git_status_cannot_validate_overlay_cleanup(self):
         self.assertEqual(self.prepare().returncode, 0)
         real_git = shutil.which("git")
@@ -130,7 +177,8 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         result = self.cleanup_overlay(env=env)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("could not verify base checkout", result.stderr)
+        self.assertIn("git status", result.stderr)
+        self.assertTrue(all((self.base / path).exists() for path in FILES))
 
 
 if __name__ == "__main__":

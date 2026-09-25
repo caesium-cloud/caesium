@@ -23,6 +23,7 @@ Stdout is the JSON report. Human summary goes to stderr.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -77,6 +78,7 @@ BENCHMARK_HARNESS_FILES = (
     "internal/run/owner_benchmark_test.go",
     "internal/run/recovery_benchmark_test.go",
 )
+BENCHMARK_REQUIRED_HELPERS = ("internal/run/owner_state_test.go",)
 
 # Exact last-component / whole-token names. Substring matches are forbidden:
 # "rate" must not make error_rate/generate/migrate higher-is-better.
@@ -638,6 +640,37 @@ def benchmark_harness_issues(doc, base, candidate):
             issues.append(f"benchmark_harness.files[{path!r}] claims no overlay but base content differs")
     if paths != list(BENCHMARK_HARNESS_FILES):
         issues.append("benchmark_harness.files paths are missing, duplicated, or out of order")
+    helper_files = manifest.get("helper_files")
+    if not isinstance(helper_files, list):
+        issues.append("benchmark_harness.helper_files is missing or malformed")
+        helper_files = []
+    helper_paths = []
+    for entry in helper_files:
+        if not isinstance(entry, dict):
+            issues.append("benchmark_harness.helper_files contains a malformed entry")
+            continue
+        path = entry.get("path")
+        helper_paths.append(path)
+        if not isinstance(path, str) or not path.startswith("internal/run/") or \
+                not path.endswith("_test.go") or path in BENCHMARK_HARNESS_FILES:
+            issues.append(f"benchmark_harness.helper_files has an invalid path: {path!r}")
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            issues.append(f"benchmark_harness.helper_files[{path!r}].sha256 is missing or malformed")
+    if not all(isinstance(path, str) for path in helper_paths) or \
+            helper_paths != sorted(set(helper_paths)):
+        issues.append("benchmark_harness.helper_files paths are duplicated or out of order")
+    for path in BENCHMARK_REQUIRED_HELPERS:
+        if path not in helper_paths:
+            issues.append(f"benchmark_harness.helper_files lacks required helper {path}")
+    digest_files = files + helper_files
+    if all(isinstance(entry, dict) and isinstance(entry.get("path"), str) and
+           isinstance(entry.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+           for entry in digest_files):
+        digest = hashlib.sha256()
+        for entry in digest_files:
+            digest.update(entry["path"].encode() + b"\0" + entry["sha256"].encode() + b"\0")
+        if digest.hexdigest() != harness_sha:
+            issues.append("benchmark_harness.harness_sha256 differs from source and helper hashes")
     overlays = manifest.get("base_overlay_paths")
     if not isinstance(overlays, list) or overlays != overlaid:
         issues.append("benchmark_harness.base_overlay_paths differs from file overlay accounting")
@@ -672,6 +705,14 @@ def benchmark_sampling_issues(doc, base, candidate, manifest):
         names = []
     if sampling.get("expected_names") != names:
         issues.append("benchmark_sampling.expected_names differs from the shared harness")
+    base_compile = sampling.get("base_compile")
+    if not isinstance(base_compile, dict) or type(base_compile.get("exit_code")) is not int or \
+            base_compile["exit_code"] < 0 or base_compile.get("output_path") != "observations/benchmark-base-compile.txt":
+        issues.append("benchmark_sampling.base_compile preflight evidence is missing or malformed")
+    elif base_compile["exit_code"] != 0:
+        issues.append(
+            f"benchmark harness incompatible with base (compile exited {base_compile['exit_code']})"
+        )
     files = manifest.get("files")
     if isinstance(files, list) and all(isinstance(entry, dict) for entry in files):
         source_files = [
@@ -1094,7 +1135,7 @@ EXIT_BY_OVERALL = {
 }
 
 
-def merge_sides(base_path, candidate_path):
+def merge_sides(base_path, candidate_path, benchmark_evidence_path=None):
     base = load_json(base_path)
     candidate = load_json(candidate_path)
     if "base" in base and "candidate" not in base:
@@ -1109,7 +1150,18 @@ def merge_sides(base_path, candidate_path):
         cand_side = candidate
     else:
         raise CompareError(f"{candidate_path} does not look like a side or comparison document")
-    return {"schema_version": SCHEMA_VERSION, "base": base_side, "candidate": cand_side}
+    doc = {"schema_version": SCHEMA_VERSION, "base": base_side, "candidate": cand_side}
+    if benchmark_evidence_path:
+        evidence = load_json(benchmark_evidence_path)
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("benchmark_harness"), dict) or \
+                not isinstance(evidence.get("benchmark_sampling"), dict):
+            raise CompareError("--benchmark-evidence must contain benchmark_harness and benchmark_sampling")
+        for key in ("benchmark_harness", "benchmark_sampling", "required_families", "required_browser_series"):
+            if key in evidence:
+                doc[key] = evidence[key]
+    elif base_side.get("benchmarks") or cand_side.get("benchmarks"):
+        raise CompareError("--base/--candidate with benchmarks requires --benchmark-evidence PATH")
+    return doc
 
 
 def main(argv=None):
@@ -1118,6 +1170,7 @@ def main(argv=None):
     parser.add_argument("--input", dest="input_flag", help="comparison document JSON")
     parser.add_argument("--base", help="base side JSON (used with --candidate)")
     parser.add_argument("--candidate", help="candidate side JSON (used with --base)")
+    parser.add_argument("--benchmark-evidence", help="comparison JSON carrying the shared benchmark harness and sampling manifest for --base/--candidate")
     parser.add_argument("--output", "-o", help="write the JSON report to this path as well as stdout")
     parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
     parser.add_argument("--max-cv", type=float, default=DEFAULT_MAX_CV)
@@ -1138,8 +1191,10 @@ def main(argv=None):
         if args.base or args.candidate:
             if not (args.base and args.candidate):
                 raise CompareError("--base and --candidate must be supplied together")
-            doc = merge_sides(args.base, args.candidate)
+            doc = merge_sides(args.base, args.candidate, args.benchmark_evidence)
         else:
+            if args.benchmark_evidence:
+                raise CompareError("--benchmark-evidence requires --base and --candidate")
             path = args.input_flag or args.input
             if not path:
                 raise CompareError("supply a comparison document or --base and --candidate")
