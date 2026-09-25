@@ -37,7 +37,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 require_env() { [[ -n "${!1:-}" ]] || die "$1 is required"; }
@@ -187,40 +187,43 @@ SETTINGS_SHA="$(printf '%s\n' \
 log "id=$ID base=$BASE_SHA candidate=$CANDIDATE_SHA artifacts=$ARTIFACTS workloads=$WORKLOADS repeats=$REPEATS"
 
 # ---------------------------------------------------------------------------
-# Toolchain: same builder for both images
+# Per-SHA builders. just tag=$sha build-release depends on builder with that
+# tag, so each release is built by caesium-builder:$sha, not :latest.
 # ---------------------------------------------------------------------------
-log "ensuring containerized builder (just builder)"
-just builder
 BUILDER_IMAGE="caesiumcloud/caesium-builder:latest"
-BUILDER_ID="$(docker image inspect --format '{{.Id}}' "$BUILDER_IMAGE")"
-GO_VERSION="$(docker run --rm --platform "$DOCKER_PLATFORM" "$BUILDER_IMAGE" go version | awk '{print $3}')"
-TOOLCHAIN_ID="${BUILDER_IMAGE}@${BUILDER_ID}"
 
-if [[ "$RUN_BENCH" == "1" ]]; then
-  log "ensuring builder-full for hermetic Go benchmarks"
-  just builder-full
-fi
+record_builder() {
+  local sha="$1" dest="$2"
+  local img="caesiumcloud/caesium-builder:${sha}"
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    log "WARNING: $img is not present; cannot record the builder that produced this SHA"
+    printf '%s\n' '{"image_ref":"'"$img"'","image_id":"","go_version":""}' >"$dest"
+    return 1
+  fi
+  local id go
+  id="$(docker image inspect --format '{{.Id}}' "$img")"
+  go="$(docker run --rm --platform "$DOCKER_PLATFORM" "$img" go version | awk '{print $3}')"
+  printf '{"image_ref":"%s","image_id":"%s","go_version":"%s","toolchain_id":"%s@%s"}\n' \
+    "$img" "$id" "$go" "$img" "$id" >"$dest"
+}
 
 # ---------------------------------------------------------------------------
 # Build release-equivalent images (uninstrumented)
 # ---------------------------------------------------------------------------
 build_release() {
   local sha="$1" dest="$2" src="$3"
-  if docker image inspect "$dest" >/dev/null 2>&1; then
-    log "image $dest already present; recording as supplied"
-    echo "supplied"
-    return 0
-  fi
   log "building release image $dest from $src at $sha (just tag=$sha build-release)"
   (
     cd "$src"
     CAESIUM_SKIP_IMAGE_BUILD=false just tag="$sha" build-release
-  )
-  echo "built"
+  ) >&2 || return 1
+  return 0
 }
 
 CANDIDATE_BUILT="supplied"
-if ! docker image inspect "$CANDIDATE_IMAGE" >/dev/null 2>&1; then
+if docker image inspect "$CANDIDATE_IMAGE" >/dev/null 2>&1; then
+  log "image $CANDIDATE_IMAGE already present; recording as supplied"
+else
   GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
   if [[ -n "$(git -C "$ROOT" status --porcelain)" && "$ALLOW_UNVERIFIED" != "1" ]]; then
     die "refusing to build $CANDIDATE_IMAGE from a dirty working tree; commit or set CAESIUM_PERF_ALLOW_UNVERIFIED_IMAGE=1"
@@ -228,20 +231,32 @@ if ! docker image inspect "$CANDIDATE_IMAGE" >/dev/null 2>&1; then
   if [[ "$CANDIDATE_SHA" != "$GIT_HEAD" && "$ALLOW_UNVERIFIED" != "1" ]]; then
     die "CAESIUM_PERF_CANDIDATE_SHA=$CANDIDATE_SHA but HEAD is $GIT_HEAD"
   fi
-  CANDIDATE_BUILT="$(build_release "$CANDIDATE_SHA" "$CANDIDATE_IMAGE" "$ROOT")"
+  if build_release "$CANDIDATE_SHA" "$CANDIDATE_IMAGE" "$ROOT"; then
+    CANDIDATE_BUILT=built
+  else
+    die "candidate build-release failed for $CANDIDATE_SHA"
+  fi
 fi
 
 BASE_BUILT="supplied"
-if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+if docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+  log "image $BASE_IMAGE already present; recording as supplied"
+else
   BASE_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/caesium-perf-base.XXXXXX")"
   git -C "$ROOT" worktree add --detach "$BASE_WORKTREE" "$BASE_SHA"
-  BASE_BUILT="$(build_release "$BASE_SHA" "$BASE_IMAGE" "$BASE_WORKTREE")"
+  if build_release "$BASE_SHA" "$BASE_IMAGE" "$BASE_WORKTREE"; then
+    BASE_BUILT=built
+  else
+    die "base build-release failed for $BASE_SHA"
+  fi
+fi
+
+if [[ -z "$BASE_WORKTREE" ]]; then
+  BASE_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/caesium-perf-base.XXXXXX")"
+  git -C "$ROOT" worktree add --detach "$BASE_WORKTREE" "$BASE_SHA"
 fi
 
 if [[ "$CANDIDATE_BUILT" != "built" || "$BASE_BUILT" != "built" ]]; then
-  if [[ "$ALLOW_UNVERIFIED" != "1" && ( "$CANDIDATE_BUILT" != "built" && "$BASE_BUILT" != "built" ) ]]; then
-    log "WARNING: one or both images were supplied rather than built by this run"
-  fi
   if [[ "$ALLOW_UNVERIFIED" != "1" ]]; then
     if [[ "$CANDIDATE_BUILT" != "built" ]]; then
       die "candidate image $CANDIDATE_IMAGE was not built by this run; delete it and rerun, or set CAESIUM_PERF_ALLOW_UNVERIFIED_IMAGE=1"
@@ -250,6 +265,26 @@ if [[ "$CANDIDATE_BUILT" != "built" || "$BASE_BUILT" != "built" ]]; then
       die "base image $BASE_IMAGE was not built by this run; delete it and rerun, or set CAESIUM_PERF_ALLOW_UNVERIFIED_IMAGE=1"
     fi
   fi
+  log "WARNING: one or both images were supplied rather than built by this run"
+fi
+
+record_builder "$CANDIDATE_SHA" "$ARTIFACTS/candidate/builder.json" || true
+record_builder "$BASE_SHA" "$ARTIFACTS/base/builder.json" || true
+CANDIDATE_GO_VERSION="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/candidate/builder.json').read_text()).get('go_version',''))")"
+BASE_GO_VERSION="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/base/builder.json').read_text()).get('go_version',''))")"
+CANDIDATE_BUILDER_ID="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/candidate/builder.json').read_text()).get('image_id',''))")"
+BASE_BUILDER_ID="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/base/builder.json').read_text()).get('image_id',''))")"
+CANDIDATE_TOOLCHAIN="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/candidate/builder.json').read_text()).get('toolchain_id',''))")"
+BASE_TOOLCHAIN="$(python3 -c "import json,pathlib; print(json.loads(pathlib.Path('$ARTIFACTS/base/builder.json').read_text()).get('toolchain_id',''))")"
+
+if docker image inspect "caesiumcloud/caesium-builder:${CANDIDATE_SHA}" >/dev/null 2>&1; then
+  BUILDER_IMAGE="caesiumcloud/caesium-builder:${CANDIDATE_SHA}"
+fi
+
+if [[ "$RUN_BENCH" == "1" || "$RUN_BUNDLE" == "1" ]]; then
+  log "ensuring builder-full for hermetic Go benchmarks / UI build"
+  just tag="$CANDIDATE_SHA" builder-full >&2
+  (cd "$BASE_WORKTREE" && just tag="$BASE_SHA" builder-full) >&2 || die "base builder-full failed"
 fi
 
 docker image inspect "$BASE_IMAGE" >/dev/null || die "base image $BASE_IMAGE is not present"
@@ -307,42 +342,57 @@ fi
 # Hermetic Go benchmarks (no server)
 # ---------------------------------------------------------------------------
 run_benches() {
-  local src="$1" dest="$2"
+  local src="$1" dest="$2" builder="$3"
   mkdir -p "$(dirname "$dest")"
+  set +e
   docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$src:/bld/caesium" -w /bld/caesium \
-    "caesiumcloud/caesium-builder:latest-full" \
+    "$builder" \
     sh -c "mkdir -p ui/dist && touch ui/dist/index.html && go test -bench='^Benchmark(Owner|Recover)' -benchmem -count=${REPEATS} -run '^$' ./internal/run" \
-    >"$dest" 2>&1 || {
-      log "WARNING: benchmarks in $src failed; recording the log, not treating it as a speed pass"
-      return 1
-    }
+    >"$dest" 2>&1
+  local rc=$?
+  set -e
+  printf '%s\n' "$rc" >"${dest}.exit"
+  if [[ "$rc" -ne 0 ]]; then
+    log "benchmarks in $src exited $rc (recorded in ${dest}.exit; not swallowed)"
+  fi
+  return 0
 }
 
 if [[ "$RUN_BENCH" == "1" ]]; then
-  run_benches "$ROOT" "$ARTIFACTS/candidate/bench.txt" || true
-  if [[ -n "$BASE_WORKTREE" && -d "$BASE_WORKTREE" ]]; then
-    run_benches "$BASE_WORKTREE" "$ARTIFACTS/base/bench.txt" || true
-  else
-    log "base worktree absent; skipping base benches (comparator fails closed if only one side has them)"
-  fi
+  run_benches "$ROOT" "$ARTIFACTS/candidate/bench.txt" "caesiumcloud/caesium-builder:${CANDIDATE_SHA}-full"
+  run_benches "$BASE_WORKTREE" "$ARTIFACTS/base/bench.txt" "caesiumcloud/caesium-builder:${BASE_SHA}-full"
 fi
 
 # ---------------------------------------------------------------------------
-# Bundle size
+# Bundle size: build UI at each SHA, then the node check (same gzip as ui-ci).
 # ---------------------------------------------------------------------------
+build_ui_bundle() {
+  local src="$1" dest="$2" builder="$3" sha="$4"
+  log "building UI at $sha through $builder"
+  set +e
+  docker run --rm --platform "$DOCKER_PLATFORM" \
+    -v "$src:/bld/caesium" -w /bld/caesium/ui \
+    "$builder" \
+    sh -c 'npm ci --prefer-offline && npm run build' >&2
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || ! -d "$src/ui/dist/assets" ]]; then
+    printf '%s\n' "{\"ok\":false,\"errors\":[\"ui/dist/assets missing after UI build at ${sha} (exit ${rc})\"]}" >"$dest"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    printf '%s\n' '{"ok":false,"errors":["node is required to run check-bundle-size.mjs"]}' >"$dest"
+    return 0
+  fi
+  set +e
+  node "$ROOT/ui/scripts/check-bundle-size.mjs" --dist "$src/ui/dist/assets" --json >"$dest"
+  set -e
+}
+
 if [[ "$RUN_BUNDLE" == "1" ]]; then
-  if [[ -d "$ROOT/ui/dist/assets" ]]; then
-    python3 "$ROOT/scripts/compare-performance.py" --bundle-dir "$ROOT/ui/dist/assets" \
-      >"$ARTIFACTS/candidate/bundle.json" || true
-  else
-    printf '%s\n' '{"ok":false,"errors":["ui/dist/assets missing; run npm run build"],"note":"bundle not collected"}' \
-      >"$ARTIFACTS/candidate/bundle.json"
-  fi
-  if [[ -n "$BASE_WORKTREE" && -d "$BASE_WORKTREE/ui/dist/assets" ]]; then
-    python3 "$ROOT/scripts/compare-performance.py" --bundle-dir "$BASE_WORKTREE/ui/dist/assets" \
-      >"$ARTIFACTS/base/bundle.json" || true
-  fi
+  build_ui_bundle "$ROOT" "$ARTIFACTS/candidate/bundle.json" "caesiumcloud/caesium-builder:${CANDIDATE_SHA}-full" "$CANDIDATE_SHA"
+  build_ui_bundle "$BASE_WORKTREE" "$ARTIFACTS/base/bundle.json" "caesiumcloud/caesium-builder:${BASE_SHA}-full" "$BASE_SHA"
 fi
 
 # ---------------------------------------------------------------------------
@@ -454,36 +504,75 @@ if [[ "$RUN_LOAD" == "1" ]]; then
     r=$((r + 1))
   done
 
-  if (( REPEATS % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
-  for side in "${order[@]}"; do
-    image="$BASE_IMAGE"
-    [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
-    start_server "$side" "$image"
-    for workload in "${WORKLOAD_LIST[@]}"; do
-      workload="${workload// /}"
-      log "warm-up (discarded) $side $workload"
-      run_workload "$side" "warmup" "$workload" "0" || true
-    done
-    r=1
-    while [[ "$r" -le "$REPEATS" ]]; do
+  # Warm repetitions are interleaved the same way as cold: neither side
+  # runs all of its warm samples before the other starts. Each iteration
+  # starts a server, discards a warmup, takes one warm sample, optionally
+  # runs Playwright, then stops — so host drift is shared.
+  r=1
+  while [[ "$r" -le "$REPEATS" ]]; do
+    if (( r % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
+    for side in "${order[@]}"; do
+      image="$BASE_IMAGE"
+      [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
+      start_server "$side" "$image"
+      for workload in "${WORKLOAD_LIST[@]}"; do
+        workload="${workload// /}"
+        log "warm-up (discarded) $side $workload #$r"
+        run_workload "$side" "warmup" "$workload" "$r"
+      done
       for workload in "${WORKLOAD_LIST[@]}"; do
         workload="${workload// /}"
         log "warm $side $workload #$r"
         run_workload "$side" "warm" "$workload" "$r"
       done
-      r=$((r + 1))
+      if [[ "$RUN_BROWSER" == "1" ]]; then
+        log "browser performance.spec.ts against $side repeat #$r"
+        mkdir -p "$ARTIFACTS/$side"
+        set +e
+        (
+          cd "$ROOT/ui"
+          PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
+          CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
+          CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
+          npx playwright test e2e/performance.spec.ts --project=default
+        )
+        brc=$?
+        set -e
+        printf '%s\n' "$brc" >>"$ARTIFACTS/$side/browser.exit"
+        if [[ "$brc" -ne 0 ]]; then
+          log "browser spec failed for $side repeat #$r exit=$brc (recorded)"
+        fi
+      fi
+      stop_server "$side"
     done
-    if [[ "$RUN_BROWSER" == "1" ]]; then
-      log "browser performance.spec.ts against $side (live)"
+    r=$((r + 1))
+  done
+fi
+
+if [[ "$RUN_LOAD" != "1" && "$RUN_BROWSER" == "1" ]]; then
+  r=1
+  while [[ "$r" -le "$REPEATS" ]]; do
+    if (( r % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
+    for side in "${order[@]}"; do
+      image="$BASE_IMAGE"
+      [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
+      start_server "$side" "$image"
+      log "browser performance.spec.ts against $side repeat #$r"
+      mkdir -p "$ARTIFACTS/$side"
+      set +e
       (
         cd "$ROOT/ui"
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
         CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
         CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
         npx playwright test e2e/performance.spec.ts --project=default
-      ) || log "WARNING: browser spec failed for $side; correctness will fail closed"
-    fi
-    stop_server "$side"
+      )
+      brc=$?
+      set -e
+      printf '%s\n' "$brc" >>"$ARTIFACTS/$side/browser.exit"
+      stop_server "$side"
+    done
+    r=$((r + 1))
   done
 fi
 
@@ -492,8 +581,10 @@ fi
 # ---------------------------------------------------------------------------
 export BASE_SHA CANDIDATE_SHA BASE_IMAGE CANDIDATE_IMAGE
 export BASE_IMAGE_ID CANDIDATE_IMAGE_ID BASE_CLI_DIGEST CANDIDATE_CLI_DIGEST
-export GO_VERSION TOOLCHAIN_ID CATALOG_SHA SETTINGS_SHA
-export BASE_BUILT CANDIDATE_BUILT BUILDER_ID
+export CATALOG_SHA SETTINGS_SHA BASE_BUILT CANDIDATE_BUILT
+export BASE_GO_VERSION CANDIDATE_GO_VERSION BASE_BUILDER_ID CANDIDATE_BUILDER_ID
+export BASE_TOOLCHAIN CANDIDATE_TOOLCHAIN
+export RUN_LOAD RUN_BENCH RUN_BROWSER RUN_BUNDLE
 python3 - <<'PY'
 import json, os, pathlib, re
 
@@ -540,37 +631,52 @@ def workload_samples(side, phase):
     return out
 
 def bundle(side):
-    doc = load_json(art / side / "bundle.json") or {}
-    keep = {}
-    for key in ("largest_js_raw_bytes", "largest_js_gzip_bytes", "total_raw_bytes", "total_gzip_bytes"):
-        if key in doc:
-            keep[key] = doc[key]
-    return keep
+    return load_json(art / side / "bundle.json") or {}
 
-def correctness(workloads):
+def browser_series(side):
+    browser = {}
+    browser_path = art / side / "browser.jsonl"
+    if not browser_path.is_file():
+        return browser
+    for line in browser_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        metric = row.get("metric")
+        if not metric:
+            continue
+        route = row.get("route") or ""
+        kind = row.get("kind") or "live"
+        series_key = f"{route}|{kind}" if route else kind
+        browser.setdefault(metric, {}).setdefault(series_key, []).append(row.get("value"))
+    return browser
+
+def correctness(label, workloads):
     failures = []
     for name, body in workloads.items():
         for i, sample in enumerate(body.get("samples") or []):
             if sample.get("outcome") != "passed":
                 failures.append(f"{name}[{i}] outcome={sample.get('outcome')}")
+    bench_exit = art / label / "bench.txt.exit"
+    if bench_exit.is_file():
+        rc = bench_exit.read_text().strip()
+        if rc != "0":
+            failures.append(f"benchmarks exited {rc}")
+    browser_exit = art / label / "browser.exit"
+    if browser_exit.is_file():
+        codes = [c.strip() for c in browser_exit.read_text().splitlines() if c.strip()]
+        bad = [c for c in codes if c != "0"]
+        if bad:
+            failures.append(f"playwright exited {','.join(bad)}")
+    bundle_doc = bundle(label)
+    if bundle_doc.get("ok") is False:
+        failures.extend(str(x) for x in (bundle_doc.get("errors") or ["bundle.ok is false"]))
     return {"ok": not failures, "failures": failures}
 
-def side_doc(label, sha, image, image_id, cli_digest, built):
+def side_doc(label, sha, image, image_id, cli_digest, built, go_version, builder_id, toolchain):
     workloads = {}
     workloads.update(workload_samples(label, "cold"))
     workloads.update(workload_samples(label, "warm"))
-    benches = bench_text(art / label / "bench.txt")
-    browser = {}
-    browser_path = art / label / "browser.jsonl"
-    if browser_path.is_file():
-        for line in browser_path.read_text().splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            metric = row.get("metric")
-            if not metric:
-                continue
-            browser.setdefault(metric, []).append(row.get("value"))
     return {
         "label": label,
         "provenance": {
@@ -578,32 +684,53 @@ def side_doc(label, sha, image, image_id, cli_digest, built):
             "image_id": image_id,
             "image_ref": image,
             "platform": os.environ["DOCKER_PLATFORM"],
-            "go_version": os.environ["GO_VERSION"],
-            "builder_image_id": os.environ["BUILDER_ID"],
+            "go_version": go_version,
+            "builder_image_id": builder_id,
             "host_id": os.environ["HOST_ID"],
             "catalog_sha256": os.environ["CATALOG_SHA"],
             "settings_sha256": os.environ["SETTINGS_SHA"],
             "instrumented": False,
             "cli_digest": cli_digest,
-            "toolchain_id": os.environ["TOOLCHAIN_ID"],
+            "toolchain_id": toolchain,
             "built_by_this_run": built == "built",
         },
-        "correctness": correctness(workloads),
+        "correctness": correctness(label, workloads),
         "workloads": workloads,
-        "benchmarks": benches,
-        "browser": browser,
+        "benchmarks": bench_text(art / label / "bench.txt"),
+        "browser": browser_series(label),
         "bundle": bundle(label),
         "system": {},
     }
 
+families = []
+if os.environ.get("RUN_LOAD") == "1":
+    families.append("workload")
+if os.environ.get("RUN_BENCH") == "1":
+    families.append("benchmark")
+if os.environ.get("RUN_BROWSER") == "1":
+    families.append("browser")
+if os.environ.get("RUN_BUNDLE") == "1":
+    families.append("bundle")
+
 doc = {
     "schema_version": 1,
+    "required_families": families,
+    "required_browser_series": [
+        "browser.route_readiness_ms./jobs.live",
+        "browser.route_readiness_ms./triggers.live",
+        "browser.route_readiness_ms./system.live",
+        "browser.route_readiness_ms./jobdefs.live",
+        "browser.action_to_render_ms.live",
+        "browser.long_session_heap_bytes.live",
+    ] if os.environ.get("RUN_BROWSER") == "1" else [],
     "base": side_doc("base", os.environ["BASE_SHA"], os.environ["BASE_IMAGE"],
                      os.environ["BASE_IMAGE_ID"], os.environ["BASE_CLI_DIGEST"],
-                     os.environ["BASE_BUILT"]),
+                     os.environ["BASE_BUILT"], os.environ["BASE_GO_VERSION"],
+                     os.environ["BASE_BUILDER_ID"], os.environ["BASE_TOOLCHAIN"]),
     "candidate": side_doc("candidate", os.environ["CANDIDATE_SHA"], os.environ["CANDIDATE_IMAGE"],
                           os.environ["CANDIDATE_IMAGE_ID"], os.environ["CANDIDATE_CLI_DIGEST"],
-                          os.environ["CANDIDATE_BUILT"]),
+                          os.environ["CANDIDATE_BUILT"], os.environ["CANDIDATE_GO_VERSION"],
+                          os.environ["CANDIDATE_BUILDER_ID"], os.environ["CANDIDATE_TOOLCHAIN"]),
 }
 (art / "comparison.json").write_text(json.dumps(doc, indent=2) + "\n")
 PY

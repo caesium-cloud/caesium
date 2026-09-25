@@ -403,9 +403,9 @@ class BenchstatAndBrowserTests(unittest.TestCase):
         )
         report = compare_doc(document(base, cand))
         ids = {m["id"] for m in report["metrics"]}
-        self.assertIn("browser.route_readiness_ms./jobs", ids)
-        self.assertIn("browser.action_to_render_ms", ids)
-        self.assertIn("browser.long_session_heap_bytes", ids)
+        self.assertIn("browser.route_readiness_ms./jobs.live", ids)
+        self.assertIn("browser.action_to_render_ms.live", ids)
+        self.assertIn("browser.long_session_heap_bytes.live", ids)
         self.assertEqual(report["overall"], "faster")
 
     def test_system_metrics_include_distributions(self):
@@ -457,8 +457,10 @@ class BundleBudgetTests(unittest.TestCase):
         """Negative case: each JS file is under the largest-chunk budget, the sum is not.
 
         This is the documented evasion the total-route-assets check exists to
-        catch. The Python twin of ui/scripts/check-bundle-size.mjs must fail.
+        catch. Budgets are evaluated by node ui/scripts/check-bundle-size.mjs.
         """
+        if not shutil.which("node"):
+            self.skipTest("node is required so gzip matches check-bundle-size.mjs")
         with tempfile.TemporaryDirectory() as tmp:
             assets = Path(tmp) / "dist" / "assets"
             assets.mkdir(parents=True)
@@ -483,6 +485,8 @@ class BundleBudgetTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
 
     def test_under_both_budgets_passes(self):
+        if not shutil.which("node"):
+            self.skipTest("node is required so gzip matches check-bundle-size.mjs")
         with tempfile.TemporaryDirectory() as tmp:
             assets = Path(tmp) / "assets"
             assets.mkdir()
@@ -559,6 +563,255 @@ class PerformanceShWiringTests(unittest.TestCase):
         self.assertIn("warm", src)
         self.assertNotIn("just load-test", src)
         self.assertNotIn("just integration-up", src)
+        self.assertIn(">&2", src)
+        self.assertIn("|| return 1", src)
+        self.assertIn("if build_release", src)
+        self.assertNotIn('CANDIDATE_BUILT="$(build_release', src)
+        self.assertNotIn("BASE_BUILT=\"$(build_release", src)
+        self.assertNotIn('run_benches "$ROOT" "$ARTIFACTS/candidate/bench.txt" || true', src)
+        self.assertIn("required_families", src)
+        self.assertIn("browser.exit", src)
+        self.assertIn("check-bundle-size.mjs", src)
+        self.assertIn("caesiumcloud/caesium-builder:${sha}", src)
+        self.assertIn("Warm repetitions are interleaved", src)
+
+
+class ReviewFixTests(unittest.TestCase):
+    def _speed_sides(self, base_samples, cand_samples, **cand_prov):
+        base = side(
+            "base",
+            workloads={"closed-baseline": {"phase": "warm", "samples": base_samples}},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={},
+        )
+        cand = side(
+            "candidate",
+            provenance=provenance("candidate", **cand_prov),
+            workloads={"closed-baseline": {"phase": "warm", "samples": cand_samples}},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={},
+        )
+        return document(base, cand)
+
+    def test_faster_does_not_hide_inconclusive_metrics_or_host_mismatch(self):
+        base = side(
+            "base",
+            provenance=provenance("base", host_id="hostA"),
+            workloads={
+                "fast": {"phase": "warm", "samples": around(100, 10, 2)},
+                "tiny": {"phase": "warm", "samples": [100, 101]},
+                "noisy": {"phase": "warm", "samples": [10, 400, 12, 380, 11, 390, 13, 410, 9, 420]},
+            },
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={},
+        )
+        cand = side(
+            "candidate",
+            provenance=provenance("candidate", host_id="hostB"),
+            workloads={
+                "fast": {"phase": "warm", "samples": around(50, 10, 2)},
+                "tiny": {"phase": "warm", "samples": [40, 41]},
+                "noisy": {"phase": "warm", "samples": [12, 390, 15, 370, 14, 400, 11, 405, 10, 415]},
+            },
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={},
+        )
+        doc = document(base, cand)
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "inconclusive")
+        proc = run_cli(input_doc=doc)
+        self.assertNotEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+
+    def test_outlier_mean_does_not_report_faster(self):
+        doc = self._speed_sides([10] * 7 + [1000], [20] * 8)
+        report = compare_doc(doc)
+        self.assertNotEqual(report["overall"], "faster")
+        self.assertNotEqual(report["metrics"][0]["verdict"], "faster")
+        proc = run_cli(input_doc=doc)
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_significant_equal_means_are_not_nsd(self):
+        # Identical values except a rank-visible swap that keeps the mean equal
+        # is hard; equal samples that are significant cannot happen, but equal
+        # means with a significant rank shift must not fall through to nsd.
+        base_s = [1, 1, 1, 1, 1, 1, 1, 1001]
+        cand_s = [2, 2, 2, 2, 2, 2, 2, 994]
+        self.assertAlmostEqual(sum(base_s) / 8, sum(cand_s) / 8)
+        doc = self._speed_sides(base_s, cand_s)
+        report = compare_doc(doc)
+        self.assertNotEqual(report["metrics"][0]["verdict"], "no_significant_difference")
+        self.assertNotEqual(report["overall"], "no_significant_difference")
+
+    def test_required_benchmark_family_with_failed_text_is_not_faster(self):
+        base = side(
+            "base",
+            workloads={"closed-baseline": {"phase": "warm", "samples": around(100, 10, 2)}},
+            benchmarks="",
+            browser={},
+            bundle={},
+            system={},
+        )
+        cand = side(
+            "candidate",
+            workloads={"closed-baseline": {"phase": "warm", "samples": around(50, 10, 2)}},
+            benchmarks="FAIL build failed",
+            browser={},
+            bundle={},
+            system={},
+        )
+        doc = document(base, cand)
+        doc["required_families"] = ["workload", "benchmark"]
+        report = compare_doc(doc)
+        self.assertNotEqual(report["overall"], "faster")
+        self.assertEqual(report["overall"], "fail")
+        proc = run_cli(input_doc=doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+
+    def test_mismatched_go_versions_are_inconclusive(self):
+        doc = self._speed_sides(around(100), around(50), go_version="go1.26.0")
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "inconclusive")
+        self.assertTrue(any("go_version" in r for r in report["reasons"]))
+        proc = run_cli(input_doc=doc)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+
+    def test_missing_required_bundle_does_not_drop_the_family(self):
+        base = side("base", workloads={}, benchmarks={}, browser={}, bundle={}, system={})
+        cand = side("candidate", workloads={}, benchmarks={}, browser={}, bundle={}, system={})
+        doc = document(base, cand)
+        doc["required_families"] = ["bundle"]
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertTrue(any("bundle" in r for r in report["reasons"]))
+
+    def test_bundle_budget_errors_are_correctness_failures(self):
+        base = side(
+            "base",
+            workloads={},
+            benchmarks={},
+            browser={},
+            system={},
+            bundle={"ok": True, "errors": [], "largest_js_raw_bytes": 100, "total_raw_bytes": 100},
+        )
+        cand = side(
+            "candidate",
+            workloads={},
+            benchmarks={},
+            browser={},
+            system={},
+            bundle={
+                "ok": False,
+                "errors": ["Total route-asset raw budget exceeded"],
+                "largest_js_raw_bytes": 100,
+                "total_raw_bytes": 9_000_000,
+            },
+        )
+        doc = document(base, cand)
+        doc["required_families"] = ["bundle"]
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertFalse(report["speed_compared"])
+        self.assertTrue(any("budget" in r.lower() or "bundle" in r.lower() for r in report["reasons"]))
+
+    def test_partial_browser_routes_do_not_pass(self):
+        base = side(
+            "base",
+            workloads={},
+            benchmarks={},
+            bundle={},
+            system={},
+            browser={"route_readiness_ms": {"/jobs|live": around(80), "/triggers|live": around(90)}},
+        )
+        cand = side(
+            "candidate",
+            workloads={},
+            benchmarks={},
+            bundle={},
+            system={},
+            browser={"route_readiness_ms": {"/jobs|live": around(40), "/triggers|live": around(45)}},
+        )
+        doc = document(base, cand)
+        doc["required_families"] = ["browser"]
+        report = compare_doc(doc)
+        self.assertNotEqual(report["overall"], "faster")
+        self.assertEqual(report["overall"], "fail")
+        self.assertTrue(any("required browser series missing" in r for r in report["reasons"]))
+
+    def test_error_rate_is_lower_is_better(self):
+        base = side(
+            "base",
+            workloads={},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={"error_rate": around(0.10, 10, 0.01)},
+        )
+        cand = side(
+            "candidate",
+            workloads={},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={"error_rate": around(0.40, 10, 0.01)},
+        )
+        report = compare_doc(document(base, cand))
+        self.assertEqual(report["metrics"][0]["verdict"], "slower")
+        self.assertTrue(report["metrics"][0]["lower_is_better"])
+
+    def test_unknown_metric_name_fails_not_higher_is_better(self):
+        base = side(
+            "base",
+            workloads={},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={"generate": around(10)},
+        )
+        cand = side(
+            "candidate",
+            workloads={},
+            benchmarks={},
+            browser={},
+            bundle={},
+            system={"generate": around(5)},
+        )
+        report = compare_doc(document(base, cand))
+        self.assertEqual(report["overall"], "fail")
+        self.assertEqual(report["metrics"][0]["verdict"], "fail")
+        self.assertTrue(any("unknown metric direction" in r for r in report["metrics"][0]["reasons"]))
+
+    def test_build_release_failed_just_does_not_echo_built(self):
+        script = r"""
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+build_release() {
+  local sha="$1" dest="$2" src="$3"
+  log "building release image $dest from $src at $sha (just tag=$sha build-release)"
+  (
+    cd "$src"
+    CAESIUM_SKIP_IMAGE_BUILD=false just tag="$sha" build-release
+  ) >&2 || return 1
+  return 0
+}
+if build_release a b .; then echo built; else echo failed-status; fi
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_just = Path(tmp) / "just"
+            fake_just.write_text("#!/bin/sh\necho boom >&2\nexit 1\n")
+            fake_just.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = tmp + os.pathsep + env.get("PATH", "")
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, cwd=tmp)
+            self.assertIn("failed-status", proc.stdout)
+            self.assertNotIn("built", proc.stdout.split())
 
 
 if __name__ == "__main__":

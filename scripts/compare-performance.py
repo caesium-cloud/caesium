@@ -25,8 +25,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
+import shutil
 import statistics
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,24 +45,7 @@ DEFAULT_LARGEST_JS_GZIP = 430_000
 DEFAULT_TOTAL_RAW = 5_000_000
 DEFAULT_TOTAL_GZIP = 1_600_000
 
-ROUTE_ASSET_EXT = {
-    ".js",
-    ".css",
-    ".wasm",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".otf",
-    ".eot",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".svg",
-    ".webp",
-    ".avif",
-    ".ico",
-}
+MJS = Path(__file__).resolve().parents[1] / "ui/scripts/check-bundle-size.mjs"
 
 REQUIRED_PROVENANCE = (
     "git_sha",
@@ -77,34 +63,61 @@ REQUIRED_PROVENANCE = (
 )
 
 # Fields that must be identical for a comparison to be meaningful. git_sha
-# and image_id are expected to differ (that is the comparison).
+# and image_id are expected to differ (that is the comparison). Per-SHA
+# builder image IDs also differ; go_version is what proves the toolchain.
 PROVENANCE_MUST_MATCH = (
     "platform",
     "go_version",
-    "builder_image_id",
     "host_id",
     "catalog_sha256",
     "settings_sha256",
-    "toolchain_id",
 )
 
-LOWER_IS_BETTER_HINTS = (
+# Exact last-component / whole-token names. Substring matches are forbidden:
+# "rate" must not make error_rate/generate/migrate higher-is-better.
+LOWER_IS_BETTER_NAMES = {
     "ns_per_op",
     "bytes_per_op",
     "allocs_per_op",
-    "duration",
-    "latency",
-    "p50",
-    "p99",
-    "seconds",
+    "duration_seconds",
+    "p50_seconds",
+    "p99_seconds",
+    "route_readiness_ms",
+    "action_to_render_ms",
+    "long_session_heap_bytes",
+    "largest_js_raw_bytes",
+    "largest_js_gzip_bytes",
+    "total_raw_bytes",
+    "total_gzip_bytes",
+    "cpu_pct",
+    "error_rate",
+    "failure_rate",
+    "drop_rate",
     "ms",
-    "heap",
-    "memory",
+    "seconds",
     "bytes",
-    "readiness",
-    "render",
+}
+HIGHER_IS_BETTER_NAMES = {
+    "throughput",
+    "ops_per_sec",
+    "succeeded_per_second",
+}
+
+REQUIRED_BROWSER_SERIES = (
+    "browser.route_readiness_ms./jobs.live",
+    "browser.route_readiness_ms./triggers.live",
+    "browser.route_readiness_ms./system.live",
+    "browser.route_readiness_ms./jobdefs.live",
+    "browser.action_to_render_ms.live",
+    "browser.long_session_heap_bytes.live",
 )
-HIGHER_IS_BETTER_HINTS = ("throughput", "rate", "ops_per_sec", "succeeded_per_second")
+
+BUNDLE_KEYS = (
+    "largest_js_raw_bytes",
+    "largest_js_gzip_bytes",
+    "total_raw_bytes",
+    "total_gzip_bytes",
+)
 
 GO_BENCH_RE = re.compile(
     r"^(Benchmark\S+?)(?:-\d+)?\s+(\d+)\s+(\d+(?:\.\d+)?)\s+ns/op"
@@ -176,14 +189,16 @@ def _phi(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-def mann_whitney_p(a, b):
-    """Two-sided Mann-Whitney U p-value (normal approximation, tie-corrected).
+def mann_whitney(a, b):
+    """Two-sided Mann-Whitney U (normal approximation, tie-corrected).
 
-    Returns (u, p_value). For n1=n2=0 this is undefined.
+    Returns (u1, u2, p). u1 is the base-sample statistic (large when base
+    values tend to exceed candidate values). Direction of a change must be
+    taken from u1 vs u2, not from the means.
     """
     n1, n2 = len(a), len(b)
     if n1 == 0 or n2 == 0:
-        return None, None
+        return None, None, None
     combined = [(float(x), 0) for x in a] + [(float(y), 1) for y in b]
     combined.sort(key=lambda t: t[0])
     ranks = [0.0] * len(combined)
@@ -203,30 +218,40 @@ def mann_whitney_p(a, b):
     r1 = sum(rank for rank, (_, group) in zip(ranks, combined) if group == 0)
     u1 = r1 - n1 * (n1 + 1) / 2.0
     u2 = n1 * n2 - u1
-    u = min(u1, u2)
     n = n1 + n2
     mean_u = n1 * n2 / 2.0
     var = n1 * n2 * (n + 1) / 12.0
     if n > 1 and ties_term:
         var -= n1 * n2 * ties_term / (12.0 * n * (n - 1))
     if var <= 0:
-        # All values identical across both samples.
-        return u, 1.0
+        return u1, u2, 1.0
     sigma = math.sqrt(var)
+    u = min(u1, u2)
     z = (abs(u - mean_u) - 0.5) / sigma
     p = 2.0 * (1.0 - _phi(z))
-    return u, min(1.0, max(0.0, p))
+    return u1, u2, min(1.0, max(0.0, p))
+
+
+def hodges_lehmann(a, b):
+    """Median of all pairwise (candidate - base) differences."""
+    diffs = [float(y) - float(x) for x in a for y in b]
+    return percentile(diffs, 50) if diffs else math.nan
 
 
 def lower_is_better(metric_id, explicit=None):
+    """Whole-token direction. Unknown names raise CompareError (never guess)."""
     if explicit is not None:
         return bool(explicit)
-    name = metric_id.lower()
-    if any(h in name for h in HIGHER_IS_BETTER_HINTS):
-        return False
-    if any(h in name for h in LOWER_IS_BETTER_HINTS):
-        return True
-    return True
+    for part in reversed(str(metric_id).lower().split(".")):
+        token = part.strip("/")
+        if token in LOWER_IS_BETTER_NAMES:
+            return True
+        if token in HIGHER_IS_BETTER_NAMES:
+            return False
+    raise CompareError(
+        f"unknown metric direction for {metric_id!r}: set lower_is_better explicitly "
+        "(substring hints such as 'rate' are forbidden)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,18 +320,53 @@ def parse_go_bench_text(text):
     return benches
 
 
+def browser_metric_id(metric, route="", kind=""):
+    parts = ["browser", metric]
+    if route:
+        parts.append(route)
+    if kind:
+        parts.append(kind)
+    return ".".join(parts)
+
+
+def parse_browser_series_key(key):
+    raw = str(key)
+    if "|" in raw:
+        route, kind = raw.split("|", 1)
+        return route, kind
+    if raw in {"live", "synthetic"}:
+        return "", raw
+    return raw, "live"
+
+
 def expand_side_metrics(side):
-    """Flatten a side's families into {metric_id: {samples, outcomes, lower_is_better, phase, family}}."""
+    """Flatten a side's families into {metric_id: {samples, outcomes, lower_is_better, phase, family}}.
+
+    Bundle byte counts are NOT expanded: they are a deterministic budget/delta,
+    never a Mann-Whitney series of n=1.
+    """
     metrics = {}
 
     def add(metric_id, samples_value, family, phase=None, hib=None):
         samples, outcomes = coerce_samples(samples_value)
+        try:
+            direction = lower_is_better(metric_id, hib)
+        except CompareError as err:
+            metrics[metric_id] = {
+                "samples": samples,
+                "outcomes": outcomes,
+                "family": family,
+                "phase": phase,
+                "lower_is_better": None,
+                "direction_error": str(err),
+            }
+            return
         metrics[metric_id] = {
             "samples": samples,
             "outcomes": outcomes,
             "family": family,
             "phase": phase,
-            "lower_is_better": lower_is_better(metric_id, hib),
+            "lower_is_better": direction,
         }
 
     workloads = side.get("workloads") or {}
@@ -316,13 +376,19 @@ def expand_side_metrics(side):
         if not isinstance(body, dict):
             raise CompareError(f"workload {name} must be an object")
         phase = body.get("phase")
+        hib = body.get("lower_is_better")
         if "samples" in body:
-            add(f"workload.{name}.duration_seconds", body["samples"], "workload", phase)
+            add(f"workload.{name}.duration_seconds", body["samples"], "workload", phase, hib)
         for key in ("duration_seconds", "p50_seconds", "p99_seconds"):
             if key in body and key != "samples":
-                add(f"workload.{name}.{key}", body[key], "workload", phase)
+                add(f"workload.{name}.{key}", body[key], "workload", phase, hib)
         for metric_name, series in (body.get("metrics") or {}).items():
-            add(f"workload.{name}.{metric_name}", series, "workload", phase)
+            series_hib = hib
+            series_val = series
+            if isinstance(series, dict) and "samples" in series:
+                series_hib = series.get("lower_is_better", hib)
+                series_val = series["samples"]
+            add(f"workload.{name}.{metric_name}", series_val, "workload", phase, series_hib)
 
     benches = side.get("benchmarks") or {}
     if isinstance(benches, str):
@@ -353,129 +419,117 @@ def expand_side_metrics(side):
             and body
             and all(isinstance(v, (list, int, float)) for v in body.values())
         ):
-            for route, series in body.items():
-                add(f"browser.{key}.{route}", series if isinstance(series, list) else [series], "browser")
+            for series_key, series in body.items():
+                route, kind = parse_browser_series_key(series_key)
+                add(
+                    browser_metric_id(key, route, kind),
+                    series if isinstance(series, list) else [series],
+                    "browser",
+                )
             continue
-        add(
-            f"browser.{key}",
-            body if not isinstance(body, dict) else body.get("samples", body),
-            "browser",
-        )
-
-    bundle = side.get("bundle") or {}
-    if bundle:
-        if not isinstance(bundle, dict):
-            raise CompareError("bundle must be an object")
-        for key in (
-            "largest_js_raw_bytes",
-            "largest_js_gzip_bytes",
-            "total_raw_bytes",
-            "total_gzip_bytes",
-        ):
-            if key in bundle:
-                raw = bundle[key]
-                add(f"bundle.{key}", raw if isinstance(raw, list) else [raw], "bundle")
+        kind = "live"
+        if isinstance(body, dict):
+            kind = body.get("kind") or "live"
+            samples_value = body.get("samples", body)
+            route = body.get("route") or ""
+            add(browser_metric_id(key, route, kind), samples_value, "browser")
+        else:
+            add(browser_metric_id(key, "", "live"), body, "browser")
 
     system = side.get("system") or {}
     if not isinstance(system, dict):
         raise CompareError("system must be an object")
     for name, series in system.items():
-        add(f"system.{name}", series if not isinstance(series, dict) else series.get("samples", series), "system")
+        hib = None
+        samples_value = series
+        if isinstance(series, dict):
+            hib = series.get("lower_is_better")
+            samples_value = series.get("samples", series)
+        add(f"system.{name}", samples_value, "system", hib=hib)
 
     return metrics
 
 
 # ---------------------------------------------------------------------------
-# Bundle directory check (Python twin of check-bundle-size.mjs)
+# Bundle directory check — always the node script so gzip matches CI.
 # ---------------------------------------------------------------------------
 
 
-def iter_route_assets(dist_assets_dir):
-    root = Path(dist_assets_dir)
-    if not root.is_dir():
-        raise CompareError(f"bundle assets dir is not a directory: {root}")
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if path.name.endswith(".map"):
-            continue
-        if path.suffix.lower() not in ROUTE_ASSET_EXT:
-            continue
-        yield path
-
-
-def gzip_size(path):
-    import gzip as gzip_mod
-
-    # compresslevel=6 matches zlib's default (what node:zlib gzipSync uses).
-    data = Path(path).read_bytes()
-    return len(gzip_mod.compress(data, compresslevel=6))
-
-
-def evaluate_bundle_dir(
-    dist_assets_dir,
-    max_raw=DEFAULT_LARGEST_JS_RAW,
-    max_gzip=DEFAULT_LARGEST_JS_GZIP,
-    total_raw=DEFAULT_TOTAL_RAW,
-    total_gzip=DEFAULT_TOTAL_GZIP,
-):
-    """Apply largest-chunk AND total-route-asset budgets. Fail closed."""
-    files = list(iter_route_assets(dist_assets_dir))
-    js_files = [p for p in files if p.suffix.lower() == ".js"]
-    errors = []
-    if not js_files:
-        return {
-            "ok": False,
-            "errors": [f"No JS assets found in {dist_assets_dir}."],
-            "largest_js_raw_bytes": 0,
-            "largest_js_gzip_bytes": 0,
-            "total_raw_bytes": 0,
-            "total_gzip_bytes": 0,
-            "file_count": 0,
-        }
-    js_stats = []
-    for path in js_files:
-        js_stats.append((path, path.stat().st_size, gzip_size(path)))
-    largest_raw = max(js_stats, key=lambda t: t[1])
-    largest_gzip = max(js_stats, key=lambda t: t[2])
-    total_raw_bytes = 0
-    total_gzip_bytes = 0
-    for path in files:
-        total_raw_bytes += path.stat().st_size
-        total_gzip_bytes += gzip_size(path)
-    if largest_raw[1] > max_raw:
-        errors.append(
-            f"Raw chunk budget exceeded: {largest_raw[0].name} is {largest_raw[1]} bytes (limit {max_raw})."
+def evaluate_bundle_dir(dist_assets_dir, env=None):
+    """Run ui/scripts/check-bundle-size.mjs --json. No Python gzip twin."""
+    node = shutil.which("node")
+    if not node:
+        raise CompareError("node is required to evaluate bundle budgets (must match check-bundle-size.mjs)")
+    if not MJS.is_file():
+        raise CompareError(f"missing {MJS}")
+    merged = os.environ.copy()
+    if env:
+        merged.update(env)
+    proc = subprocess.run(
+        [node, str(MJS), "--dist", str(dist_assets_dir), "--json"],
+        capture_output=True,
+        text=True,
+        env=merged,
+    )
+    if not proc.stdout.strip():
+        raise CompareError(
+            f"check-bundle-size.mjs produced no JSON (exit {proc.returncode}): {proc.stderr.strip()}"
         )
-    if largest_gzip[2] > max_gzip:
-        errors.append(
-            f"Gzip chunk budget exceeded: {largest_gzip[0].name} is {largest_gzip[2]} bytes (limit {max_gzip})."
-        )
-    if total_raw_bytes > total_raw:
-        errors.append(
-            f"Total route-asset raw budget exceeded: {total_raw_bytes} bytes across {len(files)} files "
-            f"(limit {total_raw}). Splitting a large chunk cannot evade this."
-        )
-    if total_gzip_bytes > total_gzip:
-        errors.append(
-            f"Total route-asset gzip budget exceeded: {total_gzip_bytes} bytes across {len(files)} files "
-            f"(limit {total_gzip}). Splitting a large chunk cannot evade this."
-        )
-    return {
-        "ok": not errors,
-        "errors": errors,
-        "largest_js_raw_bytes": largest_raw[1],
-        "largest_js_gzip_bytes": largest_gzip[2],
-        "total_raw_bytes": total_raw_bytes,
-        "total_gzip_bytes": total_gzip_bytes,
-        "file_count": len(files),
-        "budgets": {
-            "largest_js_raw_bytes": max_raw,
-            "largest_js_gzip_bytes": max_gzip,
-            "total_raw_bytes": total_raw,
-            "total_gzip_bytes": total_gzip,
-        },
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as err:
+        raise CompareError(f"check-bundle-size.mjs stdout is not JSON: {err}") from err
+    payload.setdefault("ok", proc.returncode == 0)
+    payload.setdefault("errors", [])
+    return payload
+
+
+def bundle_failures(bundle, label):
+    if not isinstance(bundle, dict) or not bundle:
+        return [f"{label} bundle evidence is missing"]
+    failures = []
+    if bundle.get("ok") is False:
+        failures.extend(str(x) for x in (bundle.get("errors") or ["bundle.ok is false"]))
+    elif bundle.get("errors"):
+        failures.extend(str(x) for x in bundle["errors"])
+    return failures
+
+
+def compare_bundle(base_bundle, candidate_bundle):
+    """Deterministic budget/delta. Never Mann-Whitney on n=1 byte counts."""
+    result = {
+        "family": "bundle",
+        "verdict": "fail",
+        "reasons": [],
+        "base": {},
+        "candidate": {},
+        "delta_pct": {},
     }
+    if not isinstance(base_bundle, dict) or not base_bundle:
+        result["reasons"].append("missing data: base bundle")
+        return result
+    if not isinstance(candidate_bundle, dict) or not candidate_bundle:
+        result["reasons"].append("missing data: candidate bundle")
+        return result
+    for key in BUNDLE_KEYS:
+        if key in base_bundle:
+            result["base"][key] = base_bundle[key]
+        if key in candidate_bundle:
+            result["candidate"][key] = candidate_bundle[key]
+        if key in base_bundle and key in candidate_bundle:
+            old, new = base_bundle[key], candidate_bundle[key]
+            if isinstance(old, (int, float)) and isinstance(new, (int, float)) and old:
+                result["delta_pct"][key] = (new - old) / abs(old) * 100.0
+    reasons = []
+    reasons.extend(f"base: {e}" for e in (base_bundle.get("errors") or []))
+    reasons.extend(f"candidate: {e}" for e in (candidate_bundle.get("errors") or []))
+    if base_bundle.get("ok") is False or candidate_bundle.get("ok") is False or reasons:
+        result["reasons"] = reasons or ["bundle over budget"]
+        result["verdict"] = "fail"
+        return result
+    result["verdict"] = "no_significant_difference"
+    result["reasons"] = ["bundle is a deterministic budget/delta, not a sampled equivalence claim"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +592,18 @@ def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
         "delta_pct": None,
         "p_value": None,
         "u_statistic": None,
-        "lower_is_better": left.get("lower_is_better", True),
+        "u1": None,
+        "u2": None,
+        "lower_is_better": left.get("lower_is_better"),
     }
+    if left.get("direction_error") or right.get("direction_error"):
+        result["verdict"] = "fail"
+        result["reasons"].append(left.get("direction_error") or right.get("direction_error"))
+        return result
+    if left.get("lower_is_better") is None or right.get("lower_is_better") is None:
+        result["verdict"] = "fail"
+        result["reasons"].append(f"unknown metric direction for {metric_id}")
+        return result
     a = list(left.get("samples") or [])
     b = list(right.get("samples") or [])
     if not a or not b:
@@ -553,39 +617,56 @@ def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
         result["verdict"] = "inconclusive"
         return result
 
-    u, p = mann_whitney_p(a, b)
-    result["u_statistic"] = u
+    u1, u2, p = mann_whitney(a, b)
+    result["u1"] = u1
+    result["u2"] = u2
+    result["u_statistic"] = None if u1 is None or u2 is None else min(u1, u2)
     result["p_value"] = p
     base_mean = mean(a)
     cand_mean = mean(b)
+    hl = hodges_lehmann(a, b)
+    result["hodges_lehmann"] = hl
     if base_mean == 0:
         result["delta_pct"] = None if cand_mean == 0 else math.inf
     else:
         result["delta_pct"] = (cand_mean - base_mean) / abs(base_mean) * 100.0
 
     hib = result["lower_is_better"]
-    # Direction from means; MWU only decides significance.
+    # Rank direction: U1 large means base tends larger than candidate.
+    if u1 is None or u2 is None:
+        result["verdict"] = "fail"
+        result["reasons"].append("mann-whitney is undefined")
+        return result
     if hib:
-        faster = cand_mean < base_mean
-        slower = cand_mean > base_mean
+        rank_faster, rank_slower = u1 > u2, u1 < u2
+        hl_faster, hl_slower = hl < 0, hl > 0
     else:
-        faster = cand_mean > base_mean
-        slower = cand_mean < base_mean
+        rank_faster, rank_slower = u2 > u1, u2 < u1
+        hl_faster, hl_slower = hl > 0, hl < 0
 
     noisy = cv(a) > max_cv or cv(b) > max_cv
     significant = p is not None and p < alpha
 
-    if significant and faster:
-        result["verdict"] = "faster"
-        result["reasons"].append(f"candidate mean is lower-is-better={hib} with p={p:.4g} < {alpha}")
-        return result
-    if significant and slower:
-        result["verdict"] = "slower"
-        result["reasons"].append(f"candidate mean is worse with p={p:.4g} < {alpha}")
+    if significant:
+        if rank_faster and (hl_faster or hl == 0):
+            result["verdict"] = "faster"
+            result["reasons"].append(
+                f"U1={u1:.4g} U2={u2:.4g} (lower_is_better={hib}) with p={p:.4g} < {alpha}"
+            )
+            return result
+        if rank_slower and (hl_slower or hl == 0):
+            result["verdict"] = "slower"
+            result["reasons"].append(
+                f"U1={u1:.4g} U2={u2:.4g} (lower_is_better={hib}) with p={p:.4g} < {alpha}"
+            )
+            return result
+        result["verdict"] = "inconclusive"
+        result["reasons"].append(
+            f"significant (p={p:.4g}) but rank and Hodges-Lehmann directions disagree "
+            f"(U1={u1:.4g} U2={u2:.4g} HL={hl:.4g}); not faster, not equivalent"
+        )
         return result
 
-    # Not significant. Never call this equivalent: insignificance is not
-    # proof the two distributions match within a bound (that is E4).
     if noisy:
         result["verdict"] = "inconclusive"
         result["reasons"].append(
@@ -601,32 +682,37 @@ def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
 
 
 def rollup(metric_results, fail_reasons, inconclusive_reasons):
+    """Exit 0 only when every metric is faster or no_significant_difference.
+
+    Any inconclusive metric or provenance mismatch makes the overall result
+    inconclusive, even if some other metric is faster.
+    """
     if fail_reasons:
         return "fail", fail_reasons
     verdicts = [m["verdict"] for m in metric_results]
     if "fail" in verdicts:
         return "fail", [m["id"] + ": " + "; ".join(m["reasons"]) for m in metric_results if m["verdict"] == "fail"]
+    if "inconclusive" in verdicts or inconclusive_reasons:
+        reasons = list(inconclusive_reasons)
+        reasons.extend(
+            m["id"] + ": " + "; ".join(m["reasons"])
+            for m in metric_results
+            if m["verdict"] == "inconclusive"
+        )
+        if not reasons:
+            reasons = ["inconclusive evidence"]
+        return "inconclusive", reasons
     if "slower" in verdicts:
         return "slower", [m["id"] for m in metric_results if m["verdict"] == "slower"]
-    if inconclusive_reasons and not metric_results:
-        return "inconclusive", inconclusive_reasons
-    if "faster" in verdicts:
-        extra = inconclusive_reasons[:]
-        extra.extend(m["id"] for m in metric_results if m["verdict"] == "faster")
-        return "faster", extra
-    if all(v == "no_significant_difference" for v in verdicts) and verdicts and not inconclusive_reasons:
+    if not verdicts:
+        return "inconclusive", ["no comparable metrics"]
+    if all(v in {"faster", "no_significant_difference"} for v in verdicts):
+        if "faster" in verdicts:
+            return "faster", [m["id"] for m in metric_results if m["verdict"] == "faster"]
         return "no_significant_difference", [
             "every comparable metric is insignificant; this is not equivalence"
         ]
-    reasons = list(inconclusive_reasons)
-    reasons.extend(
-        m["id"] + ": " + "; ".join(m["reasons"])
-        for m in metric_results
-        if m["verdict"] == "inconclusive"
-    )
-    if not reasons:
-        reasons = ["no comparable metrics"]
-    return "inconclusive", reasons
+    return "inconclusive", ["unrecognized metric verdicts"]
 
 
 def benchstat_text(metric_results):
@@ -691,19 +777,48 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
     if prov["mismatched"]:
         inconclusive_reasons.extend(prov["mismatched"])
 
+    required_families = list(doc.get("required_families") or [])
+    required_browser = list(doc.get("required_browser_series") or [])
+    if "browser" in required_families and not required_browser:
+        required_browser = list(REQUIRED_BROWSER_SERIES)
+
     base_metrics = expand_side_metrics(base)
     cand_metrics = expand_side_metrics(candidate)
 
     base_fail = side_correctness(base, base_metrics)
     cand_fail = side_correctness(candidate, cand_metrics)
+    if base.get("bundle"):
+        base_fail.extend(bundle_failures(base.get("bundle"), "base"))
+    elif "bundle" in required_families:
+        base_fail.append("required family bundle has no evidence")
+    if candidate.get("bundle"):
+        cand_fail.extend(bundle_failures(candidate.get("bundle"), "candidate"))
+    elif "bundle" in required_families:
+        cand_fail.append("required family bundle has no evidence")
     if base_fail:
         fail_reasons.extend(f"base correctness: {x}" for x in base_fail)
     if cand_fail:
         fail_reasons.extend(f"candidate correctness: {x}" for x in cand_fail)
 
+    for family in required_families:
+        if family == "bundle":
+            continue
+        has = any(m.get("family") == family for m in list(base_metrics.values()) + list(cand_metrics.values()))
+        if not has:
+            fail_reasons.append(f"required family {family} has zero metrics")
+
+    for key in required_browser:
+        if key not in base_metrics or key not in cand_metrics:
+            fail_reasons.append(f"required browser series missing: {key}")
+
     ids = sorted(set(base_metrics) | set(cand_metrics))
     metric_results = []
     speed_compared = False
+    bundle_result = None
+    if base.get("bundle") or candidate.get("bundle") or "bundle" in required_families:
+        bundle_result = compare_bundle(base.get("bundle") or {}, candidate.get("bundle") or {})
+        if bundle_result["verdict"] == "fail":
+            fail_reasons.extend(bundle_result["reasons"])
 
     if fail_reasons:
         overall, reasons = rollup([], fail_reasons, inconclusive_reasons)
@@ -713,8 +828,10 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
             "reasons": reasons,
             "speed_compared": False,
             "metrics": [],
+            "bundle": bundle_result,
             "benchstat": "speed not compared: correctness/provenance failed closed\n",
             "provenance": prov,
+            "required_families": required_families,
             "min_samples": min_samples,
             "max_cv": max_cv,
             "alpha": alpha,
@@ -774,8 +891,10 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
         "reasons": reasons,
         "speed_compared": speed_compared,
         "metrics": metric_results,
+        "bundle": bundle_result,
         "benchstat": benchstat_text(metric_results),
         "provenance": prov,
+        "required_families": required_families,
         "min_samples": min_samples,
         "max_cv": max_cv,
         "alpha": alpha,
