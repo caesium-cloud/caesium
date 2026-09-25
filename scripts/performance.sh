@@ -458,24 +458,6 @@ fi
 # ---------------------------------------------------------------------------
 # Hermetic Go benchmarks (no server)
 # ---------------------------------------------------------------------------
-run_benches() {
-  local src="$1" dest="$2" builder="$3"
-  mkdir -p "$(dirname "$dest")"
-  set +e
-  docker run --rm --platform "$DOCKER_PLATFORM" \
-    -v "$src:/bld/caesium" -w /bld/caesium \
-    "$builder" \
-    sh -c "mkdir -p ui/dist && touch ui/dist/index.html && go test -bench='^Benchmark(Owner|Recover)' -benchmem -count=${REPEATS} -run '^$' ./internal/run" \
-    >"$dest" 2>&1
-  local rc=$?
-  set -e
-  printf '%s\n' "$rc" >"${dest}.exit"
-  if [[ "$rc" -ne 0 ]]; then
-    log "benchmarks in $src exited $rc (recorded in ${dest}.exit; not swallowed)"
-  fi
-  return 0
-}
-
 BENCH_HARNESS_MANIFEST="$ARTIFACTS/observations/benchmark-harness.json"
 if [[ "$RUN_BENCH" == "1" ]]; then
   # Build/inspect both release images before the temporary base checkout is
@@ -484,8 +466,11 @@ if [[ "$RUN_BENCH" == "1" ]]; then
   prepare_benchmark_harness "$ROOT" "$BASE_WORKTREE" "$CANDIDATE_SHA" "$BASE_SHA" \
     "$BENCH_HARNESS_MANIFEST" "$BASE_IMAGE_ID" "$CANDIDATE_IMAGE_ID" \
     || die "benchmark harness preparation failed"
-  run_benches "$ROOT" "$ARTIFACTS/candidate/bench.txt" "caesiumcloud/caesium-builder:${CANDIDATE_SHA}-full"
-  run_benches "$BASE_WORKTREE" "$ARTIFACTS/base/bench.txt" "caesiumcloud/caesium-builder:${BASE_SHA}-full"
+  bash "$ROOT/scripts/performance-benchmarks.sh" "$REPEATS" "$DOCKER_PLATFORM" \
+    "$ROOT" "$BASE_WORKTREE" \
+    "caesiumcloud/caesium-builder:${CANDIDATE_SHA}-full" \
+    "caesiumcloud/caesium-builder:${BASE_SHA}-full" "$ARTIFACTS" \
+    || die "benchmark scheduling failed"
   # Remove only the measurement overlay before bundle/browser work uses the
   # base checkout. The manifest retains the exact benchmark provenance.
   cleanup_benchmark_harness "$BASE_WORKTREE"
