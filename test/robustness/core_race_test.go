@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 )
 
 type raceRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -66,5 +68,59 @@ func TestRequestRaceGateCannotCertifyOneMissingContender(t *testing.T) {
 	defer cancel()
 	if arrivals, err := gate.awaitBoth(ctx); err == nil || len(arrivals) != 0 {
 		t.Fatalf("missing contenders were certified: arrivals=%+v err=%v", arrivals, err)
+	}
+}
+
+func TestCancelledRaceTaskSetRejectsExtraAndMismatchedRows(t *testing.T) {
+	fixture := func() (cluster.Run, []cluster.TaskRecipe, map[string]string, cluster.Task) {
+		block := cluster.Task{ID: "block-run", TaskID: "block-catalog", Status: "cancelled", Attempt: 1, Image: "task:v1"}
+		successor := cluster.Task{ID: "successor-run", TaskID: "successor-catalog", Status: "cancelled", Attempt: 0, Image: "task:v1"}
+		public := cluster.Run{ID: "old-run", Tasks: []cluster.Task{block, successor}}
+		durable := []cluster.TaskRecipe{
+			{ID: block.ID, TaskID: block.TaskID, Status: block.Status, Attempt: block.Attempt, Image: block.Image},
+			{ID: successor.ID, TaskID: successor.TaskID, Status: successor.Status, Attempt: successor.Attempt, Image: successor.Image},
+		}
+		names := map[string]string{block.TaskID: cluster.BlockStep, successor.TaskID: cluster.SuccessorStep}
+		return public, durable, names, block
+	}
+	public, durable, names, block := fixture()
+	if err := checkCancelledRaceTaskSet(public, durable, names, public.ID, block); err != nil {
+		t.Fatalf("legal two-step cancellation rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cluster.Run, *[]cluster.TaskRecipe, map[string]string)
+	}{
+		{"extra running block without start event", func(run *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
+			run.Tasks = append(run.Tasks, cluster.Task{ID: "extra-block", TaskID: "block-catalog", Status: "running", Image: "task:v1"})
+			*recipes = append(*recipes, cluster.TaskRecipe{ID: "extra-block", TaskID: "block-catalog", Status: "running", Image: "task:v1"})
+		}},
+		{"extra unknown queued row without start event", func(run *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
+			run.Tasks = append(run.Tasks, cluster.Task{ID: "unknown-run", TaskID: "unknown-catalog", Status: "pending", Image: "task:v1"})
+			*recipes = append(*recipes, cluster.TaskRecipe{ID: "unknown-run", TaskID: "unknown-catalog", Status: "pending", Image: "task:v1"})
+		}},
+		{"unknown durable row replaces block", func(_ *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
+			(*recipes)[0] = cluster.TaskRecipe{ID: "unknown-run", TaskID: "unknown-catalog", Status: "cancelled", Image: "task:v1"}
+		}},
+		{"public row mismatches durable identity", func(run *cluster.Run, _ *[]cluster.TaskRecipe, _ map[string]string) {
+			run.Tasks[0].TaskID = "successor-catalog"
+		}},
+		{"public row mismatches durable attempt", func(run *cluster.Run, _ *[]cluster.TaskRecipe, _ map[string]string) {
+			run.Tasks[0].Attempt++
+		}},
+		{"durable successor remains claimed", func(_ *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
+			(*recipes)[1].ClaimedBy = "worker-a"
+		}},
+		{"catalog has extra step", func(_ *cluster.Run, _ *[]cluster.TaskRecipe, names map[string]string) {
+			names["unknown-catalog"] = "unknown"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run, recipes, names, block := fixture()
+			tc.mutate(&run, &recipes, names)
+			if err := checkCancelledRaceTaskSet(run, recipes, names, run.ID, block); err == nil {
+				t.Fatalf("invalid cancellation task set passed: public=%+v durable=%+v catalog=%v", run.Tasks, recipes, names)
+			}
+		})
 	}
 }

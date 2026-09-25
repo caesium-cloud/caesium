@@ -6,8 +6,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 )
 
 // requestRaceGate holds both client RoundTrips before either reaches a server.
@@ -80,4 +83,60 @@ func (g *requestRaceGate) releaseBoth() time.Time {
 	at := time.Now().UTC()
 	g.once.Do(func() { close(g.release) })
 	return at
+}
+
+// checkCancelledRaceTaskSet proves the two-step fixture has exactly one old
+// block and one successor row, both cancelled and unclaimed, with every public
+// row matched to its durable identity and attempt. A valid successor cannot
+// mask an extra queued/running block or unknown task row.
+func checkCancelledRaceTaskSet(public cluster.Run, recipes []cluster.TaskRecipe,
+	names map[string]string, runID string, block cluster.Task) error {
+	if public.ID != runID || len(names) != 2 || len(public.Tasks) != 2 || len(recipes) != 2 {
+		return fmt.Errorf("unexpected cancellation fixture cardinality: run=%s want=%s catalog=%d public=%d durable=%d",
+			public.ID, runID, len(names), len(public.Tasks), len(recipes))
+	}
+	seenCatalog := map[string]bool{}
+	for taskID, step := range names {
+		if taskID == "" || (step != cluster.BlockStep && step != cluster.SuccessorStep) || seenCatalog[step] {
+			return fmt.Errorf("unexpected or duplicate catalog step %q for task %q", step, taskID)
+		}
+		seenCatalog[step] = true
+	}
+	if !seenCatalog[cluster.BlockStep] || !seenCatalog[cluster.SuccessorStep] ||
+		block.ID == "" || names[block.TaskID] != cluster.BlockStep {
+		return fmt.Errorf("cancelled fixture lacks the prepared block and successor: block=%+v catalog=%v", block, names)
+	}
+	durableByID := make(map[string]cluster.TaskRecipe, 2)
+	seenDurableStep := map[string]bool{}
+	for _, recipe := range recipes {
+		step, known := names[recipe.TaskID]
+		if recipe.ID == "" || !known || seenDurableStep[step] || durableByID[recipe.ID].ID != "" {
+			return fmt.Errorf("extra, unknown, or duplicate durable task: %+v", recipe)
+		}
+		if step == cluster.BlockStep && (recipe.ID != block.ID || recipe.TaskID != block.TaskID) {
+			return fmt.Errorf("durable block changed identity: prepared=%+v durable=%+v", block, recipe)
+		}
+		if !strings.EqualFold(recipe.Status, "cancelled") || strings.TrimSpace(recipe.ClaimedBy) != "" {
+			return fmt.Errorf("durable %s task is not cancelled and unclaimed: %+v", step, recipe)
+		}
+		seenDurableStep[step] = true
+		durableByID[recipe.ID] = recipe
+	}
+	if !seenDurableStep[cluster.BlockStep] || !seenDurableStep[cluster.SuccessorStep] {
+		return fmt.Errorf("durable cancellation task set is missing a fixture step: %v", seenDurableStep)
+	}
+	seenPublicID := map[string]bool{}
+	for _, task := range public.Tasks {
+		recipe, known := durableByID[task.ID]
+		if !known || seenPublicID[task.ID] || task.TaskID != recipe.TaskID ||
+			!strings.EqualFold(task.Status, recipe.Status) || task.ClaimedBy != recipe.ClaimedBy ||
+			task.Attempt != recipe.Attempt || task.Image != recipe.Image {
+			return fmt.Errorf("public task does not match one durable row: public=%+v durable=%+v found=%t", task, recipe, known)
+		}
+		seenPublicID[task.ID] = true
+	}
+	if len(seenPublicID) != len(durableByID) {
+		return fmt.Errorf("public cancellation task set omitted durable rows: public=%d durable=%d", len(seenPublicID), len(durableByID))
+	}
+	return nil
 }

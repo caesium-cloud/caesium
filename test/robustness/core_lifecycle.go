@@ -628,7 +628,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 			err, contender.Status, code, firstFinal.Status, block.Status, events)
 	}
 	if outcome == "cancellation_won" {
-		requireCancelledRaceSuccessor(t, fe, c, firstFinal, recipes, "at race settlement")
+		requireCancelledRaceTaskSet(t, fe, c, firstFinal, recipes, "at race settlement")
 	}
 	if contender.Status == http.StatusConflict {
 		// The old task was still blocked, so a rejected synthetic completion
@@ -670,7 +670,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		t.Fatalf("inconclusive: old task %s disappeared after barrier release", block.ID)
 	}
 	if outcome == "cancellation_won" {
-		requireCancelledRaceSuccessor(t, fe, c, still, lateRecipes, "after barrier release")
+		requireCancelledRaceTaskSet(t, fe, c, still, lateRecipes, "after barrier release")
 	}
 	lateRows, lateScope, err := readPersistedEvents(context.Background(), fe.httpAPI, c.member.HTTPBase(), c.first.ID, 2000)
 	if err != nil || !lateScope.Complete {
@@ -698,32 +698,11 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	})
 }
 
-func requireCancelledRaceSuccessor(t *testing.T, fe *faultEnv, c cancelContender,
+func requireCancelledRaceTaskSet(t *testing.T, fe *faultEnv, c cancelContender,
 	public cluster.Run, recipes []cluster.TaskRecipe, when string) {
 	t.Helper()
-	var durable cluster.TaskRecipe
-	durableCount := 0
-	for _, recipe := range recipes {
-		if c.names[recipe.TaskID] == "successor" {
-			durable = recipe
-			durableCount++
-		}
-	}
-	if durableCount != 1 || !strings.EqualFold(durable.Status, "cancelled") || strings.TrimSpace(durable.ClaimedBy) != "" {
-		t.Fatalf("%s: cancellation winner has invalid durable successor: count=%d row=%+v", when, durableCount, durable)
-	}
-	publicCount := 0
-	for _, task := range public.Tasks {
-		if c.names[task.TaskID] == "successor" {
-			publicCount++
-			if task.ID != durable.ID || task.TaskID != durable.TaskID ||
-				!strings.EqualFold(task.Status, "cancelled") || strings.TrimSpace(task.ClaimedBy) != "" {
-				t.Fatalf("%s: cancellation winner has invalid public successor: %+v", when, task)
-			}
-		}
-	}
-	if publicCount != 1 {
-		t.Fatalf("%s: cancelled successor has %d matching public rows, want 1", when, publicCount)
+	if err := checkCancelledRaceTaskSet(public, recipes, c.names, c.first.ID, c.firstTask); err != nil {
+		t.Fatalf("%s: cancellation winner task set: %v", when, err)
 	}
 	if starts := len(fe.sink.StartsFor(c.first.ID, "successor")); starts != 0 {
 		t.Fatalf("%s: cancelled old run started successor %d time(s)", when, starts)
