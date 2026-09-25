@@ -295,13 +295,48 @@ EOF
   while IFS= read -r node; do
     [[ "$node" == "$LC_ID-"* ]] || cluster_die "kind returned a node outside owned cluster: $node"
   done <"$LC_ART/cluster-logs/kind-nodes.txt"
+  lc_run_timed() {
+    local seconds="$1" log="$2"
+    shift 2
+    python3 - "$seconds" "$log" "$@" <<'PY'
+import os,signal,subprocess,sys
+seconds=int(sys.argv[1]);log=sys.argv[2];command=sys.argv[3:]
+with open(log,'a') as out:
+  try:process=subprocess.Popen(command,stdout=out,stderr=subprocess.STDOUT,start_new_session=True)
+  except OSError as error:
+    out.write(f'command could not start: {command!r}: {error}\n')
+    raise SystemExit(127)
+  try:
+    code=process.wait(timeout=seconds)
+  except subprocess.TimeoutExpired:
+    out.write(f'command timed out after {seconds}s: {command!r}\n')
+    out.flush()
+    try:os.killpg(process.pid,signal.SIGTERM)
+    except ProcessLookupError:pass
+    try:process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+      try:os.killpg(process.pid,signal.SIGKILL)
+      except ProcessLookupError:pass
+      process.wait()
+    raise SystemExit(124)
+raise SystemExit(code)
+PY
+  }
   lc_wait_containerd() {
-    local deadline=$((SECONDS + 120)) node ready detail
+    local deadline=$((SECONDS + 120)) node ready remaining
     while (( SECONDS < deadline )); do
       ready=1
       while IFS= read -r node; do
-        if ! detail="$(docker exec --privileged "$node" ctr --namespace=k8s.io images ls 2>&1)"; then
-          printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$node" "$detail" \
+        remaining=$((deadline - SECONDS))
+        if (( remaining <= 0 )); then
+          printf '%s owned kind node containerd readiness timed out after 120s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LC_ART/cluster-logs/containerd-readiness.log"
+          return 1
+        fi
+        if (( remaining > 8 )); then remaining=8; fi
+        if ! lc_run_timed "$remaining" "$LC_ART/cluster-logs/containerd-readiness.log" \
+            docker exec --privileged "$node" ctr --namespace=k8s.io images ls; then
+          printf '%s %s containerd probe failed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$node" \
             >>"$LC_ART/cluster-logs/containerd-readiness.log"
           ready=0
         fi
@@ -313,6 +348,8 @@ EOF
       fi
       sleep 2
     done
+    printf '%s owned kind node containerd readiness timed out after 120s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$LC_ART/cluster-logs/containerd-readiness.log"
     return 1
   }
   lc_kind_load() {
@@ -321,7 +358,8 @@ EOF
     for attempt in 1 2 3; do
       lc_wait_containerd || return 1
       printf 'attempt %s: kind load %s\n' "$attempt" "$label" >>"$LC_ART/cluster-logs/kind-load-$label.log"
-      if kind load "$subcommand" --name "$LC_ID" "$@" >>"$LC_ART/cluster-logs/kind-load-$label.log" 2>&1; then
+      if lc_run_timed 180 "$LC_ART/cluster-logs/kind-load-$label.log" \
+          kind load "$subcommand" --name "$LC_ID" "$@"; then
         return 0
       fi
       if [[ "$attempt" != 3 ]]; then sleep 3; fi
