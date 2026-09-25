@@ -107,15 +107,17 @@ func (h *HTTP) WithTimeout(d time.Duration) *HTTP {
 	return &HTTP{Client: &http.Client{Timeout: d}, ManualKey: h.ManualKey}
 }
 
-// TaskRecipe is the frozen image/command on a task_runs row.
+// TaskRecipe contains frozen recipe fields and claim evidence on a task_runs row.
 type TaskRecipe struct {
-	ID        string
-	TaskID    string
-	Status    string
-	Image     string
-	Command   string
-	ClaimedBy string
-	Attempt   int
+	ID              string
+	TaskID          string
+	Status          string
+	Image           string
+	Command         string
+	ClaimedBy       string
+	Attempt         int
+	ClaimAttempt    int
+	OwnerGeneration int64
 }
 
 // QueryTaskRecipes reads frozen recipe fields for one run.
@@ -124,15 +126,15 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 	if err != nil {
 		return nil, fmt.Errorf("refusing to interpolate an unvalidated run id %q: %w", runID, err)
 	}
-	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
+	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
 	resp, _, err := h.Query(ctx, base, sql, 200)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]TaskRecipe, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
-		if len(row) < 7 {
-			return nil, fmt.Errorf("task_runs row has %d columns, want 7", len(row))
+		if len(row) < 9 {
+			return nil, fmt.Errorf("task_runs row has %d columns, want 9", len(row))
 		}
 		rowID, err := queryUUID(row[0])
 		if err != nil {
@@ -143,16 +145,49 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 			return nil, fmt.Errorf("task_runs.task_id for %s: %w", rowID, err)
 		}
 		out = append(out, TaskRecipe{
-			ID:        rowID,
-			TaskID:    taskID,
-			Status:    fmt.Sprint(row[2]),
-			Image:     fmt.Sprint(row[3]),
-			Command:   fmt.Sprint(row[4]),
-			ClaimedBy: fmt.Sprint(row[5]),
-			Attempt:   int(int64From(row[6])),
+			ID:              rowID,
+			TaskID:          taskID,
+			Status:          fmt.Sprint(row[2]),
+			Image:           fmt.Sprint(row[3]),
+			Command:         fmt.Sprint(row[4]),
+			ClaimedBy:       fmt.Sprint(row[5]),
+			Attempt:         int(int64From(row[6])),
+			ClaimAttempt:    int(int64From(row[7])),
+			OwnerGeneration: int64From(row[8]),
 		})
 	}
 	return out, nil
+}
+
+// QueryLeaseAbsent proves absence through a successful SQL read. QueryLease's
+// error alone cannot distinguish a deleted row from an unavailable database.
+func (h *HTTP) QueryLeaseAbsent(ctx context.Context, base, runID string) (bool, error) {
+	id, err := uuid.Parse(runID)
+	if err != nil {
+		return false, fmt.Errorf("lease query refused unvalidated run id %q: %w", runID, err)
+	}
+	sql := fmt.Sprintf("SELECT run_id FROM run_leases WHERE run_id = '%s'", id.String())
+	resp, _, err := h.Query(ctx, base, sql, 1)
+	if err != nil {
+		return false, err
+	}
+	if resp.RowCount != len(resp.Rows) || len(resp.Rows) > 1 {
+		return false, fmt.Errorf("lease query returned inconsistent row count: reported=%d actual=%d", resp.RowCount, len(resp.Rows))
+	}
+	if len(resp.Rows) == 0 {
+		return true, nil
+	}
+	if len(resp.Rows[0]) != 1 {
+		return false, fmt.Errorf("lease query returned %d columns, want 1", len(resp.Rows[0]))
+	}
+	rowID, err := queryUUID(resp.Rows[0][0])
+	if err != nil {
+		return false, fmt.Errorf("lease row identity: %w", err)
+	}
+	if rowID != id.String() {
+		return false, fmt.Errorf("lease row identity %s != %s", rowID, id)
+	}
+	return false, nil
 }
 
 // The database query endpoint can return SQLite UUID bytes as a 32-character

@@ -78,6 +78,39 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		t.Fatalf("blocked start missing: %v", err)
 	}
 	startCancel()
+	initialBlockStarts := len(fe.sink.StartsFor(run.ID, cluster.BlockStep))
+	names, err := taskStepNames(ctx, fe.httpAPI, leaseBase, job.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: catalog task identities before takeover: %v", err)
+	}
+	var originalBlock cluster.TaskRecipe
+	var lastInitialClaimError string
+	initialClaimCtx, initialClaimCancel := context.WithTimeout(ctx, 60*time.Second)
+	if err := cluster.Poll(initialClaimCtx, time.Second, func() (bool, error) {
+		recipes, rerr := fe.httpAPI.QueryTaskRecipes(initialClaimCtx, leaseBase, run.ID)
+		if rerr != nil {
+			lastInitialClaimError = rerr.Error()
+			return false, nil
+		}
+		originalBlock = cluster.TaskRecipe{}
+		for _, recipe := range recipes {
+			if names[recipe.TaskID] == cluster.BlockStep {
+				originalBlock = recipe
+				break
+			}
+		}
+		if originalBlock.ID == "" || !strings.EqualFold(originalBlock.Status, "running") ||
+			strings.TrimSpace(originalBlock.ClaimedBy) == "" || originalBlock.ClaimAttempt < 1 ||
+			originalBlock.OwnerGeneration != lease.Generation {
+			lastInitialClaimError = fmt.Sprintf("initial block lacks a durable owner claim: %+v lease=%+v", originalBlock, lease)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		initialClaimCancel()
+		t.Fatalf("inconclusive: initial block claim was not observed: %v (last=%s)", err, lastInitialClaimError)
+	}
+	initialClaimCancel()
 
 	live, err := cluster.RefreshMember(ctx, fe.kube, fe.env.Namespace, owner.Name)
 	if err != nil || live.ContainerID == "" {
@@ -139,7 +172,7 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	lastLease := lease
 	lastLeaseAt := leaseObservedAt
 	var lastProbes []staleSurvivorProbe
-	queries, queryErrors, healthySQLProbes := 0, 0, 0
+	queries, queryErrors, successfulSQLProbes, identifiedSQLProbes, healthySQLProbes := 0, 0, 0, 0, 0
 	takeCtx, takeCancel := context.WithTimeout(ctx, 90*time.Second)
 	if err := cluster.Poll(takeCtx, time.Second, func() (bool, error) {
 		lastProbes = lastProbes[:0]
@@ -152,12 +185,22 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 				queryErrors++
 				continue
 			}
-			if probeResult.HealthError != "" || probeResult.RefreshError != "" {
-				continue
+			successfulSQLProbes++
+			if probeResult.RefreshError == "" {
+				identifiedSQLProbes++
 			}
-			healthySQLProbes++
+			if probeResult.HealthError == "" && probeResult.RefreshError == "" {
+				healthySQLProbes++
+			}
 			lastLease = probeResult.Lease
 			lastLeaseAt = time.Now().UTC()
+			// /health has a separate DB check and can transiently report 503
+			// even though this member returned an authoritative lease row.
+			// A failed pod refresh, however, leaves the queried IP's pod identity
+			// unverified, so it cannot select the owner for the completion probe.
+			if probeResult.RefreshError != "" {
+				continue
+			}
 			if probeResult.Lease.Generation <= lease.Generation || probeResult.Lease.OwnerNode == owner.NodeAddress {
 				continue
 			}
@@ -192,13 +235,15 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 				leaderProbe = &last
 			}
 		}
-		failure := "no lease takeover on healthy survivor SQL path"
-		if healthySQLProbes == 0 {
-			failure = "product availability failure: no healthy survivor SQL path"
+		failure := "no lease takeover on identified survivor SQL path"
+		if successfulSQLProbes == 0 {
+			failure = "product availability failure: no successful survivor SQL path"
+		} else if identifiedSQLProbes == 0 {
+			failure = "inconclusive: survivor SQL succeeded but pod identity was unavailable"
 		}
-		t.Fatalf("%s: %v; initial=%+v last=%+v last_at=%s now=%s queries=%d query_errors=%d healthy_sql_probes=%d survivor_probes=%+v dqlite_leader=%s dqlite_error=%v leader_probe=%+v paused_state=%s held=%.1fs",
+		t.Fatalf("%s: %v; initial=%+v last=%+v last_at=%s now=%s queries=%d query_errors=%d successful_sql_probes=%d identified_sql_probes=%d healthy_sql_probes=%d survivor_probes=%+v dqlite_leader=%s dqlite_error=%v leader_probe=%+v paused_state=%s held=%.1fs",
 			failure, err, lease, lastLease, lastLeaseAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
-			queries, queryErrors, healthySQLProbes, lastProbes, leaderAddress, leaderError, leaderProbe, pausedState, ev.HeldSeconds)
+			queries, queryErrors, successfulSQLProbes, identifiedSQLProbes, healthySQLProbes, lastProbes, leaderAddress, leaderError, leaderProbe, pausedState, ev.HeldSeconds)
 	}
 	takeCancel()
 	newOwner, ok := fe.topo.ByNodeAddress(recovered.OwnerNode)
@@ -208,12 +253,79 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if !ok {
 		t.Fatalf("new owner %s is not a member", recovered.OwnerNode)
 	}
+	// Lease takeover precedes in-memory recovery and the replacement claim.
+	// Wait until the new owner has re-claimed the block and its second external
+	// start has reached the held sink, then observe that claim twice before
+	// comparing the rejected completion's before/after state. `attempt` is a
+	// logical retry counter; ClaimTaskForDispatch increments claim_attempt.
+	claimCtx, claimCancel := context.WithTimeout(ctx, 120*time.Second)
+	var recoveredBlock cluster.TaskRecipe
+	var lastClaimError string
+	stableClaimReads := 0
+	if err := cluster.Poll(claimCtx, time.Second, func() (bool, error) {
+		if len(fe.sink.StartsFor(run.ID, cluster.BlockStep)) <= initialBlockStarts {
+			lastClaimError = "second block start not observed"
+			stableClaimReads = 0
+			return false, nil
+		}
+		currentLease, lerr := fe.httpAPI.QueryLease(claimCtx, leaseBase, run.ID)
+		if lerr != nil {
+			lastClaimError = fmt.Sprintf("lease read: %v", lerr)
+			stableClaimReads = 0
+			return false, nil
+		}
+		if currentLease.OwnerNode != recovered.OwnerNode || currentLease.Generation != recovered.Generation {
+			lastClaimError = fmt.Sprintf("lease changed during recovery: %+v", currentLease)
+			stableClaimReads = 0
+			return false, nil
+		}
+		recipes, rerr := fe.httpAPI.QueryTaskRecipes(claimCtx, leaseBase, run.ID)
+		if rerr != nil {
+			lastClaimError = fmt.Sprintf("task read: %v", rerr)
+			stableClaimReads = 0
+			return false, nil
+		}
+		var block cluster.TaskRecipe
+		for _, recipe := range recipes {
+			if recipe.ID == originalBlock.ID && recipe.TaskID == originalBlock.TaskID {
+				block = recipe
+				break
+			}
+		}
+		if block.ID == "" || !strings.EqualFold(block.Status, "running") ||
+			strings.TrimSpace(block.ClaimedBy) == "" || block.ClaimAttempt <= originalBlock.ClaimAttempt ||
+			block.OwnerGeneration != recovered.Generation {
+			lastClaimError = fmt.Sprintf("new owner has not re-claimed original block: %+v", block)
+			stableClaimReads = 0
+			return false, nil
+		}
+		if block.ID == recoveredBlock.ID && block.Status == recoveredBlock.Status &&
+			block.ClaimedBy == recoveredBlock.ClaimedBy && block.ClaimAttempt == recoveredBlock.ClaimAttempt &&
+			block.OwnerGeneration == recoveredBlock.OwnerGeneration {
+			stableClaimReads++
+		} else {
+			recoveredBlock = block
+			stableClaimReads = 1
+		}
+		return stableClaimReads >= 2, nil
+	}); err != nil {
+		claimCancel()
+		t.Fatalf("inconclusive: recovered block did not settle behind barrier: %v (last=%s, initial=%+v recovered=%+v starts=%d)",
+			err, lastClaimError, originalBlock, recoveredBlock, len(fe.sink.StartsFor(run.ID, cluster.BlockStep)))
+	}
+	claimCancel()
+	if n := len(fe.sink.CompletionsFor(run.ID, cluster.BlockStep)); n != 0 {
+		t.Fatalf("block completed %d time(s) before the barrier was released", n)
+	}
+	if n := len(fe.sink.StartsFor(run.ID, cluster.SuccessorStep)); n != 0 {
+		t.Fatalf("successor started %d time(s) before the block barrier was released", n)
+	}
 
 	detail, err := fe.httpAPI.GetRun(ctx, leaseBase, job.ID, run.ID)
 	if err != nil {
 		t.Fatalf("run before stale complete: %v", err)
 	}
-	before := fingerprintRun(t, ctx, fe, leaseBase, job.ID, run.ID)
+	before := fingerprintDurableRun(t, ctx, fe, leaseBase, job.ID, run.ID)
 	cli := validInternalClient(t, fe, newOwner)
 	payload := completePayload(detail, lease, "succeeded", lease.Generation)
 	ex := cli.Complete(ctx, cluster.InternalBase(newOwner.IP), payload)
@@ -222,10 +334,10 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	}
 	requireHTTPStatus(t, ex.Status, http.StatusConflict, ex.Body)
 	code, msg := ParseRefusal(ex.Status, []byte(ex.Body))
-	if code != RefusalStaleGeneration && !strings.Contains(strings.ToLower(msg+code), "generation") {
+	if code != RefusalStaleGeneration {
 		t.Fatalf("stale complete code=%q msg=%q, want stale_generation", code, msg)
 	}
-	after := fingerprintRun(t, ctx, fe, leaseBase, job.ID, run.ID)
+	after := fingerprintDurableRun(t, ctx, fe, leaseBase, job.ID, run.ID)
 	requireNoMutation(t, before, after, "stale-generation complete")
 
 	fe.sink.Release(run.ID)
@@ -256,21 +368,24 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	waitMembership(t, fe, 3*time.Minute)
 
 	writeCoreRecord(t, fe, "stale_generation_complete", map[string]any{
-		"run_id":             run.ID,
-		"owner_paused":       owner.Name,
-		"lease_before":       lease,
-		"lease_after":        recovered,
-		"lease_queries":      queries,
-		"lease_query_errors": queryErrors,
-		"healthy_sql_probes": healthySQLProbes,
-		"survivor_probes":    lastProbes,
-		"held_seconds":       ev.HeldSeconds,
-		"past_lease":         ev.HeldPastLease(),
-		"refusal_code":       code,
-		"complete_status":    ex.Status,
-		"public_status":      final.Status,
-		"pause_state_before": beforeState,
-		"pause_state_paused": pausedState,
+		"run_id":                run.ID,
+		"owner_paused":          owner.Name,
+		"lease_before":          lease,
+		"lease_after":           recovered,
+		"lease_queries":         queries,
+		"lease_query_errors":    queryErrors,
+		"successful_sql_probes": successfulSQLProbes,
+		"identified_sql_probes": identifiedSQLProbes,
+		"healthy_sql_probes":    healthySQLProbes,
+		"recovered_block_claim": recoveredBlock,
+		"survivor_probes":       lastProbes,
+		"held_seconds":          ev.HeldSeconds,
+		"past_lease":            ev.HeldPastLease(),
+		"refusal_code":          code,
+		"complete_status":       ex.Status,
+		"public_status":         final.Status,
+		"pause_state_before":    beforeState,
+		"pause_state_paused":    pausedState,
 	})
 }
 

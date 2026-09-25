@@ -3,6 +3,10 @@
 package cluster
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -21,3 +25,58 @@ func TestQueryUUIDCanonicalizesSQLCellsAndRejectsInvalidIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryLeaseAbsentRequiresSuccessfulUnambiguousSQLRead(t *testing.T) {
+	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		wantAbsent bool
+		wantErr    bool
+	}{
+		{name: "deleted lease", status: 200, body: `{"row_count":0,"rows":[]}`, wantAbsent: true},
+		{name: "live lease", status: 200, body: fmt.Sprintf(`{"row_count":1,"rows":[[%q]]}`, id)},
+		{name: "database unavailable", status: 503, body: `{"code":"database_unavailable"}`, wantErr: true},
+		{name: "inconsistent row count", status: 200, body: fmt.Sprintf(`{"row_count":0,"rows":[[%q]]}`, id), wantErr: true},
+		{name: "invalid row identity", status: 200, body: `{"row_count":1,"rows":[["wrong-run"]]}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &HTTP{Client: &http.Client{Transport: queryRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/v1/database/query" {
+					t.Fatalf("unexpected query path %q", r.URL.Path)
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})}}
+			absent, err := h.QueryLeaseAbsent(context.Background(), "http://query.test", id)
+			if (err != nil) != tc.wantErr || absent != tc.wantAbsent {
+				t.Fatalf("QueryLeaseAbsent = (%t, %v), want absent=%t err=%t", absent, err, tc.wantAbsent, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestQueryTaskRecipesKeepsClaimAttemptSeparateFromRetryAttempt(t *testing.T) {
+	const runID = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	const taskID = "c829d927-22ef-4d57-a250-5137c9257001"
+	const instanceID = "af152a84-b713-4583-a944-65bf49a3580f"
+	h := &HTTP{Client: &http.Client{Transport: queryRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/database/query" {
+			t.Fatalf("unexpected query path %q", r.URL.Path)
+		}
+		body := fmt.Sprintf(`{"row_count":1,"rows":[[%q,%q,"running","image:v1","[\"sh\"]","node-b",1,2,3]]}`, instanceID, taskID)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}}
+	recipes, err := h.QueryTaskRecipes(context.Background(), "http://query.test", runID)
+	if err != nil || len(recipes) != 1 {
+		t.Fatalf("QueryTaskRecipes = %+v, %v", recipes, err)
+	}
+	got := recipes[0]
+	if got.ID != instanceID || got.TaskID != taskID || got.Attempt != 1 || got.ClaimAttempt != 2 || got.OwnerGeneration != 3 {
+		t.Fatalf("retry and claim identity conflated: %+v", got)
+	}
+}
+
+type queryRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f queryRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

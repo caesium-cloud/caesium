@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,16 @@ func uniqueAlias(kind string) string {
 }
 
 func fingerprintRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) StateFingerprint {
+	return fingerprintRunWithDurable(t, ctx, fe, base, jobID, runID, false)
+}
+
+// fingerprintDurableRun requires the lease and every task recipe to be readable.
+// A missing SQL view cannot certify that a rejected completion was state-inert.
+func fingerprintDurableRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) StateFingerprint {
+	return fingerprintRunWithDurable(t, ctx, fe, base, jobID, runID, true)
+}
+
+func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string, requireDurable bool) StateFingerprint {
 	t.Helper()
 	got, err := fe.httpAPI.GetRun(ctx, base, jobID, runID)
 	if err != nil {
@@ -68,8 +79,16 @@ func fingerprintRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID
 	if lease, lerr := fe.httpAPI.QueryLease(ctx, base, runID); lerr == nil {
 		fp.LeaseOwner = lease.OwnerNode
 		fp.LeaseGeneration = lease.Generation
+	} else if requireDurable {
+		t.Fatalf("inconclusive: snapshot lease for run %s: %v", runID, lerr)
 	}
 	recipes, rerr := fe.httpAPI.QueryTaskRecipes(ctx, base, runID)
+	if rerr != nil && requireDurable {
+		t.Fatalf("inconclusive: snapshot durable task recipes for run %s: %v", runID, rerr)
+	}
+	if requireDurable && len(recipes) != len(got.Tasks) {
+		t.Fatalf("inconclusive: run %s has %d public tasks but %d durable recipes", runID, len(got.Tasks), len(recipes))
+	}
 	recipeByID := map[string]cluster.TaskRecipe{}
 	if rerr == nil {
 		for _, r := range recipes {
@@ -77,19 +96,32 @@ func fingerprintRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID
 		}
 	}
 	for _, tr := range got.Tasks {
+		r, ok := recipeByID[tr.ID]
+		if requireDurable && !ok {
+			t.Fatalf("inconclusive: public task %s has no matching durable recipe in run %s", tr.ID, runID)
+		}
+		if requireDurable && (r.TaskID != tr.TaskID || !strings.EqualFold(r.Status, tr.Status) ||
+			r.ClaimedBy != tr.ClaimedBy || r.Attempt != tr.Attempt) {
+			t.Fatalf("inconclusive: public/durable task %s disagree during snapshot: public=%+v durable=%+v", tr.ID, tr, r)
+		}
 		tf := TaskFingerprint{
 			ID: tr.ID, TaskID: tr.TaskID, Status: tr.Status,
 			Image: tr.Image, ClaimedBy: tr.ClaimedBy, Attempt: tr.Attempt, Error: tr.Error,
 		}
-		if r, ok := recipeByID[tr.ID]; ok {
+		if ok {
 			tf.Image = r.Image
 			tf.Command = r.Command
+			if requireDurable {
+				tf.ClaimAttempt = r.ClaimAttempt
+				tf.OwnerGeneration = r.OwnerGeneration
+			}
 			if tf.ClaimedBy == "" {
 				tf.ClaimedBy = r.ClaimedBy
 			}
 		}
 		fp.Tasks = append(fp.Tasks, tf)
 	}
+	sort.Slice(fp.Tasks, func(i, j int) bool { return fp.Tasks[i].ID < fp.Tasks[j].ID })
 	for _, ev := range fe.sink.Events() {
 		if ev.RunID == runID && strings.TrimSpace(ev.Nonce) != "" {
 			fp.EffectNonces = append(fp.EffectNonces, ev.Nonce)

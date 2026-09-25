@@ -19,6 +19,7 @@ func TestStateDiffsDetectsMutationAndEquality(t *testing.T) {
 		t.Fatalf("identical fingerprints reported diffs %v", diffs)
 	}
 	after := before
+	after.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
 	after.Tasks[0].Status = "succeeded"
 	after.EffectNonces = []string{"n1", "n2"}
 	diffs := StateDiffs(before, after)
@@ -28,6 +29,14 @@ func TestStateDiffsDetectsMutationAndEquality(t *testing.T) {
 	joined := strings.Join(diffs, ",")
 	if !strings.Contains(joined, "status") && !strings.Contains(joined, "effect") && !strings.Contains(joined, "tasks[0].status") {
 		t.Fatalf("diffs %v missed the planted mutation", diffs)
+	}
+	claimOnly := before
+	claimOnly.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
+	claimOnly.Tasks[0].ClaimAttempt++
+	claimOnly.Tasks[0].OwnerGeneration++
+	claimDiffs := strings.Join(StateDiffs(before, claimOnly), ",")
+	if !strings.Contains(claimDiffs, "claim_attempt") || !strings.Contains(claimDiffs, "owner_generation") {
+		t.Fatalf("durable claim mutation was not detected: %s", claimDiffs)
 	}
 }
 
@@ -147,7 +156,7 @@ func TestTerminalCompleteRefusalAllowed(t *testing.T) {
 func TestCancelledCompleteRefusalAllowed(t *testing.T) {
 	for _, code := range []string{
 		RefusalTerminalRun, RefusalWrongWorker,
-		RefusalNotOwner, RefusalMissingRun, RefusalStaleGeneration,
+		RefusalNotOwner, RefusalStaleGeneration,
 	} {
 		if !CancelledCompleteRefusalAllowed(409, code) {
 			t.Fatalf("409 %s must fence an old completion", code)
@@ -156,7 +165,7 @@ func TestCancelledCompleteRefusalAllowed(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		code   string
-	}{{200, ""}, {503, "owner_not_ready"}, {409, ""},
+	}{{200, ""}, {503, "owner_not_ready"}, {409, ""}, {409, RefusalMissingRun},
 		{409, RefusalCompletionRejected}, {409, RefusalTaskNotRunning}} {
 		if CancelledCompleteRefusalAllowed(tc.status, tc.code) {
 			t.Fatalf("%d %s must not prove a cancellation fence", tc.status, tc.code)

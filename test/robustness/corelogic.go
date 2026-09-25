@@ -33,14 +33,16 @@ const (
 // TaskFingerprint is the mutation-sensitive public/SQL view of one task-run.
 // Secrets never belong here.
 type TaskFingerprint struct {
-	ID        string `json:"id"`
-	TaskID    string `json:"task_id"`
-	Status    string `json:"status"`
-	Image     string `json:"image"`
-	Command   string `json:"command,omitempty"`
-	ClaimedBy string `json:"claimed_by,omitempty"`
-	Attempt   int    `json:"attempt"`
-	Error     string `json:"error,omitempty"`
+	ID              string `json:"id"`
+	TaskID          string `json:"task_id"`
+	Status          string `json:"status"`
+	Image           string `json:"image"`
+	Command         string `json:"command,omitempty"`
+	ClaimedBy       string `json:"claimed_by,omitempty"`
+	Attempt         int    `json:"attempt"`
+	ClaimAttempt    int    `json:"claim_attempt"`
+	OwnerGeneration int64  `json:"owner_generation"`
+	Error           string `json:"error,omitempty"`
 }
 
 // StateFingerprint is compared before/after a denied operation. Equality is
@@ -111,6 +113,12 @@ func StateDiffs(before, after StateFingerprint) []string {
 		}
 		if a.Attempt != b.Attempt {
 			diffs = append(diffs, prefix+".attempt")
+		}
+		if a.ClaimAttempt != b.ClaimAttempt {
+			diffs = append(diffs, prefix+".claim_attempt")
+		}
+		if a.OwnerGeneration != b.OwnerGeneration {
+			diffs = append(diffs, prefix+".owner_generation")
 		}
 		if a.Error != b.Error {
 			diffs = append(diffs, prefix+".error")
@@ -351,16 +359,18 @@ func TerminalCompleteRefusalAllowed(status int, code string) bool {
 	}
 }
 
-// CancelledCompleteRefusalAllowed accepts only explicit fences for an old
-// claimed completion after replacement was admitted. A retryable owner error,
-// transport failure, or success cannot prove this contender was fenced.
+// CancelledCompleteRefusalAllowed accepts explicit fences for an old claimed
+// completion after replacement was admitted. `missing_run` needs a separate
+// successful SQL read proving that cancellation deleted the old lease; the
+// handler also returns that code when its lease read fails. A retryable owner
+// error, transport failure, or success cannot prove this contender was fenced.
 func CancelledCompleteRefusalAllowed(status int, code string) bool {
 	if status != 409 {
 		return false
 	}
 	switch strings.TrimSpace(code) {
 	case RefusalTerminalRun, RefusalWrongWorker,
-		RefusalNotOwner, RefusalMissingRun, RefusalStaleGeneration:
+		RefusalNotOwner, RefusalStaleGeneration:
 		return true
 	default:
 		return false

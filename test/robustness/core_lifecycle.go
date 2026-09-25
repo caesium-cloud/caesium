@@ -305,7 +305,21 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		t.Fatalf("inconclusive: old completion contender did not reach owner: %s", completionRace.Err)
 	}
 	refusalCode, refusalMessage := ParseRefusal(completionRace.Status, []byte(completionRace.Body))
-	if !CancelledCompleteRefusalAllowed(completionRace.Status, refusalCode) {
+	leaseAbsenceProven := false
+	if completionRace.Status == http.StatusConflict && refusalCode == RefusalMissingRun {
+		// Concurrency replacement deletes the old lease in the same transaction
+		// as cancellation. The handler also maps an unavailable lease read to
+		// missing_run, so corroborate this response on the responding node.
+		absent, qerr := fe.httpAPI.QueryLeaseAbsent(ctx, oldOwner.HTTPBase(), first.ID)
+		if qerr != nil {
+			t.Fatalf("inconclusive: missing_run without healthy SQL lease read: %v", qerr)
+		}
+		if !absent {
+			t.Fatalf("old completion returned missing_run while lease %s still exists", first.ID)
+		}
+		leaseAbsenceProven = true
+	}
+	if !CancelledCompleteRefusalAllowed(completionRace.Status, refusalCode) && !leaseAbsenceProven {
 		t.Fatalf("old completion contender was not fenced after replacement: status=%d code=%q body=%s",
 			completionRace.Status, refusalCode, RedactSecrets(refusalMessage))
 	}
@@ -391,18 +405,19 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	secCancel()
 
 	writeCoreRecord(t, fe, "cancel_completion_race", map[string]any{
-		"first_run":           first.ID,
-		"second_run":          second.ID,
-		"first_status":        still.Status,
-		"second_status":       secondFinal.Status,
-		"first_raw_admit":     truncate(rawFirst, 200),
-		"second_raw_admit":    truncate(rawSecond, 200),
-		"completes_at_cancel": completesAtCancel,
-		"completes_after":     completesAfterCancel,
-		"old_complete_status": completionRace.Status,
-		"old_complete_code":   refusalCode,
-		"successor_starts":    len(fe.sink.StartsFor(first.ID, "successor")),
-		"replacement_202_ack": "not_process_death",
-		"histories":           []string{first.ID, second.ID},
+		"first_run":                first.ID,
+		"second_run":               second.ID,
+		"first_status":             still.Status,
+		"second_status":            secondFinal.Status,
+		"first_raw_admit":          truncate(rawFirst, 200),
+		"second_raw_admit":         truncate(rawSecond, 200),
+		"completes_at_cancel":      completesAtCancel,
+		"completes_after":          completesAfterCancel,
+		"old_complete_status":      completionRace.Status,
+		"old_complete_code":        refusalCode,
+		"old_lease_absence_proven": leaseAbsenceProven,
+		"successor_starts":         len(fe.sink.StartsFor(first.ID, "successor")),
+		"replacement_202_ack":      "not_process_death",
+		"histories":                []string{first.ID, second.ID},
 	})
 }
