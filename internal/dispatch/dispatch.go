@@ -657,7 +657,48 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err != nil || lease == nil {
+	if err == nil && lease == nil {
+		log.Warn("complete: run lease read returned no row or error; asking worker to retry",
+			"run_id", req.RunID)
+		if !metricQuarantined() {
+			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    ReasonOwnerNotReady,
+			Message: "run lease could not be read; retry completion",
+		})
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// A concurrency replacement cancels the run and deletes its lease in
+		// one transaction. When that wins before this read, the missing lease
+		// is a permanent run fence only if the durable run status proves it.
+		var persisted struct{ Status string }
+		readErr := h.store.DB().WithContext(ctx).Model(&models.JobRun{}).
+			Select("status").Where("id = ?", req.RunID).Take(&persisted).Error
+		if readErr != nil && !errors.Is(readErr, gorm.ErrRecordNotFound) {
+			log.Warn("complete: cannot read run status after missing lease; asking worker to retry",
+				"run_id", req.RunID, "error", readErr)
+			if !metricQuarantined() {
+				metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
+			}
+			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+				Code:    ReasonOwnerNotReady,
+				Message: "run status could not be read; retry completion",
+			})
+			return
+		}
+		if readErr == nil {
+			switch run.Status(persisted.Status) {
+			case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled, run.StatusSkipped:
+				recordRejected(ReasonTerminalRun)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTerminalRun,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
+		}
 		recordRejected(ReasonMissingRun)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonMissingRun,
