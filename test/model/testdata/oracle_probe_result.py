@@ -9,7 +9,8 @@ import sys
 RUNTIME_FAILURE = re.compile(
     r"fatal error:|runtime:|panic:|newosproc|failed to create new OS thread|"
     r"resource temporarily unavailable|cannot allocate memory|out of memory|"
-    r"no space left on device|signal:|SIGSEGV|SIGABRT|unexpected fault address|"
+    r"no space left on device|too many open files|disk quota exceeded|"
+    r"signal:|SIGSEGV|SIGABRT|unexpected fault address|"
     r"stack overflow|fork/exec|error obtaining buildID|test timed out",
     re.IGNORECASE,
 )

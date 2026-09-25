@@ -51,6 +51,18 @@ class OracleProbeResultTests(unittest.TestCase):
         broken = mutant_stream([event("output", output="fatal error: newosproc\n")])
         self.assertTrue(validate(broken, 1, "mutant", [TEST], MARKER))
 
+    def test_file_descriptor_exhaustion_after_assertion_is_inconclusive(self):
+        broken = mutant_stream([
+            event("output", test=TEST, output="open /tmp/checker: too many open files\n")
+        ])
+        self.assertTrue(validate(broken, 1, "mutant", [TEST], MARKER))
+
+    def test_disk_quota_exhaustion_after_assertion_is_inconclusive(self):
+        broken = mutant_stream([
+            event("output", test=TEST, output="write /tmp/checker: disk quota exceeded\n")
+        ])
+        self.assertTrue(validate(broken, 1, "mutant", [TEST], MARKER))
+
     def test_other_resource_diagnostics_are_inconclusive(self):
         for diagnostic in (
             "runtime: failed to create new OS thread\n",
