@@ -682,6 +682,14 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 				h.rejectRetryable(w, req, omErr, metricQuarantined())
 				return
 			}
+			if errors.Is(omErr, run.ErrRunTerminal) {
+				recordRejected(ReasonTerminalRun)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTerminalRun,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
 			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
 				recordRejected(ReasonWrongWorker)
 				writeJSON(w, http.StatusConflict, ErrorResponse{

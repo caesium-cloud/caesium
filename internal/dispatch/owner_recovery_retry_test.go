@@ -128,6 +128,73 @@ func TestHandleCompleteMemoryOwnerTerminalDuplicate(t *testing.T) {
 	}
 }
 
+// A replacement can commit cancellation after HandleComplete's lease read but
+// before the owner's guarded task write. Keep the lease in this fixture to
+// model that already-validated read, then drive the real HTTP handler and
+// owner-manager path against terminal rows. A wrong claim on a running run
+// remains distinguishable from this durable terminal fence.
+func TestHandleCompleteMemoryOwnerTerminalClaimMismatch(t *testing.T) {
+	store, ls, h := setupHandler(t)
+	runID, taskID := seedPendingTaskRun(t, store)
+	_, err := ls.AcquireLease(t.Context(), runID, ownerNodeAddr, time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, ownerNodeAddr, 1, time.Hour, true))
+	manager := run.NewOwnerManager(store, run.CheckpointConfig{})
+	_, err = manager.Recover(runID, 1)
+	require.NoError(t, err)
+	require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, ownerNodeAddr, 1, time.Hour, true))
+	var claimed models.TaskRun
+	require.NoError(t, store.DB().Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&claimed).Error)
+	manager.MarkDispatched(runID, taskID, ownerNodeAddr, 1, time.Now().Add(time.Hour).UnixMilli())
+	h.WithOwnerManager(manager)
+	req := CompleteRequest{
+		RunID: runID, TaskID: taskID, TaskRunID: claimed.ID,
+		OwnerGeneration: 1, WorkerNode: "wrong-worker",
+		Status: "succeeded", Result: "stale-result",
+		Outputs: map[string]string{"stale_output": "must-not-persist"},
+	}
+	wrong := postJSON(t, h.HandleComplete, req)
+	require.Equal(t, http.StatusConflict, wrong.Code, wrong.Body.String())
+	var refusal ErrorResponse
+	require.NoError(t, json.Unmarshal(wrong.Body.Bytes(), &refusal))
+	require.Equal(t, ReasonWrongWorker, refusal.Code)
+	var stillRunning models.TaskRun
+	require.NoError(t, store.DB().First(&stillRunning, "id = ?", claimed.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), stillRunning.Status)
+	require.Equal(t, ownerNodeAddr, stillRunning.ClaimedBy)
+	require.Empty(t, stillRunning.Result)
+	require.Empty(t, stillRunning.Output)
+	require.Zero(t, stillRunning.TerminalSequence)
+
+	require.NoError(t, store.DB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.JobRun{}).Where("id = ?", runID).
+			Update("status", string(run.StatusCancelled)).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.TaskRun{}).Where("id = ?", claimed.ID).
+			Updates(map[string]any{"status": string(run.TaskStatusCancelled), "claimed_by": ""}).Error
+	}))
+	var beforeTask models.TaskRun
+	require.NoError(t, store.DB().First(&beforeTask, "id = ?", claimed.ID).Error)
+	var beforeEvents int64
+	require.NoError(t, store.DB().Model(&models.ExecutionEvent{}).Where("run_id = ?", runID).Count(&beforeEvents).Error)
+	req.WorkerNode = ownerNodeAddr
+	terminal := postJSON(t, h.HandleComplete, req)
+	require.Equal(t, http.StatusConflict, terminal.Code, terminal.Body.String())
+	require.NoError(t, json.Unmarshal(terminal.Body.Bytes(), &refusal))
+	require.Equal(t, ReasonTerminalRun, refusal.Code)
+	var afterTask models.TaskRun
+	require.NoError(t, store.DB().First(&afterTask, "id = ?", claimed.ID).Error)
+	require.Equal(t, beforeTask.Status, afterTask.Status)
+	require.Equal(t, beforeTask.ClaimedBy, afterTask.ClaimedBy)
+	require.Equal(t, beforeTask.Result, afterTask.Result)
+	require.Equal(t, beforeTask.Output, afterTask.Output)
+	require.Equal(t, beforeTask.TerminalSequence, afterTask.TerminalSequence)
+	var afterEvents int64
+	require.NoError(t, store.DB().Model(&models.ExecutionEvent{}).Where("run_id = ?", runID).Count(&afterEvents).Error)
+	require.Equal(t, beforeEvents, afterEvents)
+}
+
 func TestHandleCompleteMemoryOwnerStatusReadErrorRetries(t *testing.T) {
 	store, ls, h := setupHandler(t)
 	runID, taskID := seedPendingTaskRun(t, store)
