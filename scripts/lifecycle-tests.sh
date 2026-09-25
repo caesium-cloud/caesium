@@ -288,6 +288,46 @@ EOF
   LC_OWNED=1
   kind create cluster --name "$LC_ID" --image "$LC_KIND" --config "$LC_ART/kind.yaml" \
     --kubeconfig "$LC_KUBE" --wait 120s >"$LC_ART/cluster-logs/kind-create.log" 2>&1 || cluster_die "kind create failed"
+  kind get nodes --name "$LC_ID" >"$LC_ART/cluster-logs/kind-nodes.txt" \
+    2>"$LC_ART/cluster-logs/kind-nodes-error.log" || cluster_die "cannot enumerate owned kind nodes"
+  [[ $(wc -l <"$LC_ART/cluster-logs/kind-nodes.txt") -eq 4 ]] \
+    || cluster_die "owned kind cluster does not have four nodes"
+  while IFS= read -r node; do
+    [[ "$node" == "$LC_ID-"* ]] || cluster_die "kind returned a node outside owned cluster: $node"
+  done <"$LC_ART/cluster-logs/kind-nodes.txt"
+  lc_wait_containerd() {
+    local deadline=$((SECONDS + 120)) node ready detail
+    while (( SECONDS < deadline )); do
+      ready=1
+      while IFS= read -r node; do
+        if ! detail="$(docker exec --privileged "$node" ctr --namespace=k8s.io images ls 2>&1)"; then
+          printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$node" "$detail" \
+            >>"$LC_ART/cluster-logs/containerd-readiness.log"
+          ready=0
+        fi
+      done <"$LC_ART/cluster-logs/kind-nodes.txt"
+      if [[ "$ready" == 1 ]]; then
+        printf '%s all owned kind node containerd sockets ready\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          >>"$LC_ART/cluster-logs/containerd-readiness.log"
+        return 0
+      fi
+      sleep 2
+    done
+    return 1
+  }
+  lc_kind_load() {
+    local label="$1" subcommand="$2" attempt
+    shift 2
+    for attempt in 1 2 3; do
+      lc_wait_containerd || return 1
+      printf 'attempt %s: kind load %s\n' "$attempt" "$label" >>"$LC_ART/cluster-logs/kind-load-$label.log"
+      if kind load "$subcommand" --name "$LC_ID" "$@" >>"$LC_ART/cluster-logs/kind-load-$label.log" 2>&1; then
+        return 0
+      fi
+      if [[ "$attempt" != 3 ]]; then sleep 3; fi
+    done
+    return 1
+  }
   # Docker Desktop keeps a multi-platform index while storing only the local
   # platform's child. kind's default --all-platforms import asks for missing
   # children; export one verified platform without retagging the release.
@@ -295,12 +335,12 @@ EOF
     >"$LC_ART/cluster-logs/save-previous.log" 2>&1 || cluster_die "cannot export pinned previous platform $LC_PLATFORM"
   docker image save --platform "$LC_PLATFORM" --output "$LC_ART/task-platform.tar" "$LC_TASK" \
     >"$LC_ART/cluster-logs/save-task.log" 2>&1 || cluster_die "cannot export task platform $LC_PLATFORM"
-  kind load image-archive --name "$LC_ID" "$LC_ART/previous-platform.tar" \
-    >"$LC_ART/cluster-logs/kind-load-previous.log" 2>&1 || cluster_die "kind previous platform import failed"
-  kind load image-archive --name "$LC_ID" "$LC_ART/task-platform.tar" \
-    >"$LC_ART/cluster-logs/kind-load-task.log" 2>&1 || cluster_die "kind task platform import failed"
-  kind load docker-image --name "$LC_ID" "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" \
-    >"$LC_ART/cluster-logs/kind-load-built.log" 2>&1 || cluster_die "kind built-image import failed"
+  lc_kind_load previous image-archive "$LC_ART/previous-platform.tar" \
+    || cluster_die "kind previous platform import failed after bounded containerd retries"
+  lc_kind_load task image-archive "$LC_ART/task-platform.tar" \
+    || cluster_die "kind task platform import failed after bounded containerd retries"
+  lc_kind_load built docker-image "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" \
+    || cluster_die "kind built-image import failed after bounded containerd retries"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
     --set image.tag=v0.1.0 >"$LC_ART/manifest-before.yaml" || cluster_die "previous Helm render failed"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
@@ -486,13 +526,15 @@ PY
     lc_case rolling-upgrade-three-voters blocked "post-upgrade info.yaml could not be captured on all members"
   elif [[ "$LC_GET_RC" != 0 ]]; then
     lc_case rolling-upgrade-three-voters blocked "installed/upgraded Helm manifest could not be compared as image-only"
+  elif [[ "$LC_HELM_RC" != 0 ]]; then
+    lc_case rolling-upgrade-three-voters blocked "helm upgrade --wait failed; inspect cluster-logs/helm-upgrade.log"
   elif [[ "$LC_AFTER_RC" != 0 ]]; then
     lc_case rolling-upgrade-three-voters fail "post-upgrade assertions failed; inspect pod status and logs"
   fi
   # F2's destructive cases are reported individually. Their launch requires a
   # healthy upgraded quorum; an unhealthy upgrade leaves them blocked with the
   # exact dependency rather than allowing a test on a different fault state.
-  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
+  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_HELM_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
     for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore rollback-recorded-outcome; do
       lc_case "$name" blocked "cannot run after failed/unobservable three-member upgrade"
     done
@@ -823,6 +865,7 @@ for name in expected:
     'detail':'required case produced no record'})
 gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
   'after_upgrade_exit':int(os.environ['LC_AFTER_RC']),
+  'helm_upgrade_exit':int(os.environ['LC_HELM_RC']),
   'live_manifest_exit':int(os.environ['LC_GET_RC']),
   'post_upgrade_info_exit':int(os.environ['LC_INFO_RC']),
   'address_prerequisite_blocked':int(os.environ['LC_ADDRESS_BLOCKED']),
@@ -830,7 +873,7 @@ gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
 if gates['mixed_window_exit']!=0 and by['mixed-version-dispatch-and-completion']['status']=='pass':
   by['mixed-version-dispatch-and-completion']=dict(by['mixed-version-dispatch-and-completion'],status='blocked',
     detail='mixed-window process failed despite a runner pass record')
-if any(gates[k]!=0 for k in ('after_upgrade_exit','live_manifest_exit','post_upgrade_info_exit','address_prerequisite_blocked')) and by['rolling-upgrade-three-voters']['status']=='pass':
+if any(gates[k]!=0 for k in ('after_upgrade_exit','helm_upgrade_exit','live_manifest_exit','post_upgrade_info_exit','address_prerequisite_blocked')) and by['rolling-upgrade-three-voters']['status']=='pass':
   by['rolling-upgrade-three-voters']=dict(by['rolling-upgrade-three-voters'],status='blocked',
     detail='upgrade observation gate failed despite a runner pass record')
 cases=[by[n] for n in expected]
