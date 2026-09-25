@@ -695,6 +695,28 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 			return
 		}
+		// A completed memory owner drops its in-memory state but retains the
+		// lease. Distinguish that durable terminal state from a running owner
+		// that has not recovered yet. Read only the run status: a retry can
+		// reopen the same run ID, so a running or unreadable row must remain
+		// retryable rather than being mistaken for a terminal duplicate.
+		var persisted struct{ Status string }
+		readErr := h.store.DB().WithContext(ctx).Model(&models.JobRun{}).
+			Select("status").Where("id = ?", req.RunID).Take(&persisted).Error
+		if readErr == nil {
+			switch run.Status(persisted.Status) {
+			case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled, run.StatusSkipped:
+				recordRejected(ReasonTaskNotRunning)
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonTaskNotRunning,
+					Message: "run has already reached a terminal state",
+				})
+				return
+			}
+		} else {
+			log.Warn("complete: cannot read run status for untracked memory owner; asking worker to retry",
+				"run_id", req.RunID, "error", readErr)
+		}
 		if !metricQuarantined() {
 			metrics.CompleteRetryableTotal.WithLabelValues(ReasonOwnerNotReady).Inc()
 		}
