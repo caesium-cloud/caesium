@@ -65,13 +65,15 @@ affinity:
             app.kubernetes.io/instance: caesium
         topologyKey: kubernetes.io/hostname
 
+# The 1,400 acknowledged snapshot writes OOMKilled two voters at 512Mi.
+# Keep this limit identical for the previous and candidate images during upgrade.
 resources:
   requests:
     cpu: 50m
     memory: 128Mi
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
 
 podDisruptionBudget:
   enabled: false
