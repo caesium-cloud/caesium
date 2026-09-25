@@ -256,7 +256,11 @@ func clusterBase(topo cluster.Topology) string {
 
 func recorderEvents(t *testing.T) []recorder.Event {
 	t.Helper()
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(clusterRecorderURL + "/records")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, clusterRecorderURL+"/records", nil)
+	if err != nil {
+		blockf(t, "raw-effect-ledger", "build GET /records: %v", err)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
 		blockf(t, "raw-effect-ledger", "GET /records: %v", err)
 	}
@@ -287,7 +291,9 @@ func waitRecorderStart(t *testing.T, runID string) {
 
 func releaseRecordedRun(t *testing.T, runID string) {
 	t.Helper()
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(clusterRecorderURL + "/release?run_id=" + runID)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, clusterRecorderURL+"/release?run_id="+runID, nil)
+	require.NoError(t, err)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -397,10 +403,18 @@ func TestLifecycleClusterSeed(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, started)
 	waitRecorderStart(t, inflight.ID)
+	inflight, err = c.run(ctx, inflight.JobID, inflight.ID)
+	require.NoError(t, err)
+	require.Equal(t, "running", inflight.Status)
+	require.Len(t, inflight.Tasks, 1, "in-flight task attempt identity missing before upgrade")
 	predecessor, started, err := c.triggerRun(ctx, jobs["queue"].ID, nil)
 	require.NoError(t, err)
 	require.True(t, started)
 	waitRecorderStart(t, predecessor.ID)
+	predecessor, err = c.run(ctx, predecessor.JobID, predecessor.ID)
+	require.NoError(t, err)
+	require.Equal(t, "running", predecessor.Status)
+	require.Len(t, predecessor.Tasks, 1, "queue predecessor task attempt identity missing before upgrade")
 	queueToken := "queued-" + alias
 	_, started, err = c.triggerRun(ctx, jobs["queue"].ID, map[string]string{"TOKEN": queueToken})
 	require.NoError(t, err)
@@ -616,6 +630,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	for _, m := range fx.Members {
 		before[m.Name] = m
 	}
+	changedIPs := map[string]map[string]string{}
 	for _, m := range memberEvidence(topo, membership) {
 		prev, ok := before[m.Name]
 		require.True(t, ok)
@@ -623,6 +638,12 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		require.Equal(t, prev.PVC, m.PVC)
 		require.Equal(t, prev.Volume, m.Volume)
 		require.Equal(t, prev.DqliteID, m.DqliteID, "retained member changed ID")
+		if m.IP != prev.IP {
+			changedIPs[m.Name] = map[string]string{"before": prev.IP, "after": m.IP}
+		}
+	}
+	if len(changedIPs) == 0 {
+		blockf(t, "rolling-upgrade-three-voters", "all recreated pods reused their IPs; retained-PVC address reconciliation from #536 was not exercised")
 	}
 	var host clusterHostObservation
 	if !readJSON(t, "cluster-host-observation.json", &host) {
@@ -668,7 +689,8 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	}
 	writeCase(t, caseRecord{Name: "rolling-upgrade-three-voters", Status: statusPass,
 		Detail:       fmt.Sprintf("three retained voters after rolling upgrade; Helm exit=%d; leader=%s", host.HelmExitCode, membership.Leader.Address),
-		Observations: map[string]any{"members": memberEvidence(topo, membership), "helm_exit_code": host.HelmExitCode}})
+		Observations: map[string]any{"members": memberEvidence(topo, membership), "changed_pod_ips": changedIPs,
+			"helm_exit_code": host.HelmExitCode}})
 	for _, want := range []runFixture{fx.Succeeded, fx.Failed} {
 		assertRunUnchanged(t, ctx, c, want, want.Status)
 		got, err := readEventBacklog(ctx, c, want.ID, want.ResumeCursor)
@@ -688,6 +710,20 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, j.ID, id)
 	}
+	preRelease := map[string]apiRun{}
+	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
+		current, err := c.run(ctx, r.JobID, r.ID)
+		if err != nil {
+			blockf(t, "retained-history-and-raw-effects", "in-flight run %s unobservable before controlled release: %v", r.ID, err)
+		}
+		preRelease[r.ID] = current
+		writeJSON(t, "cluster-inflight-before-release.json", preRelease)
+		if current.Status != "running" || len(r.Tasks) != 1 || len(current.Tasks) != 1 ||
+			current.Tasks[0].ID != r.Tasks[0].ID || current.Tasks[0].Attempt != r.Tasks[0].Attempt ||
+			current.Tasks[0].Status != "running" {
+			blockf(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s", r.ID, current.Status)
+		}
+	}
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		releaseRecordedRun(t, r.ID)
 	}
@@ -695,7 +731,6 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		got, err := c.awaitRunStatus(ctx, r.JobID, r.ID, func(x apiRun) bool { return isTerminal(x.Status) }, 5*time.Minute)
 		require.NoError(t, err)
-		require.Contains(t, []string{"succeeded", "failed", "cancelled"}, got.Status, "illegal in-flight terminal outcome")
 		require.NotEmpty(t, got.Tasks, "in-flight run %s lost its task attempt rows", r.ID)
 		// Duplicate attempts remain in the raw ledger; only a missing or
 		// unpaired visible effect is rejected.
@@ -721,14 +756,16 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 			proof, err := readClusterTaskProof(ctx, h, base, got.ID, task.ID)
 			require.NoError(t, err)
 			attemptProofs[r.ID] = append(attemptProofs[r.ID], proof)
-			if proof.Status == "succeeded" && rawCompletionMatchesTask(r.ID, proof, events) {
+			if proof.ID == r.Tasks[0].ID && proof.Attempt == r.Tasks[0].Attempt &&
+				proof.Status == "succeeded" && rawCompletionMatchesTask(r.ID, proof, events) {
 				matchedAttempt = true
 			}
 		}
-		if got.Status == "succeeded" {
-			require.Truef(t, matchedAttempt, "succeeded run %s has no raw effect tied to its terminal task attempt", r.ID)
-		} else if len(effects) > 0 && !matchedAttempt {
-			blockf(t, "retained-history-and-raw-effects", "run %s has raw completion effects but no matching persisted task-attempt nonce", r.ID)
+		writeJSON(t, "cluster-inflight-outcome-"+r.ID+".json", map[string]any{
+			"run": got, "seed_attempt": r.Tasks[0], "task_proofs": attemptProofs[r.ID],
+			"raw_events": events, "matched_seed_attempt": matchedAttempt})
+		if got.Status != "succeeded" || !matchedAttempt {
+			blockf(t, "retained-history-and-raw-effects", "controlled release did not complete the surviving task attempt for run %s: status=%s matched_seed_attempt=%t", r.ID, got.Status, matchedAttempt)
 		}
 	}
 	var queued apiRun
@@ -926,25 +963,48 @@ func TestLifecycleClusterSnapshotLeader(t *testing.T) {
 	}
 	kube, err := cluster.InClusterClient()
 	require.NoError(t, err)
-	topo, err := cluster.DiscoverTopology(t.Context(), kube, fx.LifecycleID)
-	require.NoError(t, err)
-	require.Len(t, topo.Members, 2, "ordinal 2 must be stopped for leader snapshot measurement")
-	leaders := map[string]bool{}
-	for _, member := range topo.Members {
-		require.NotEqual(t, "caesium-2", member.Name)
-		leader, _, err := cluster.QueryNode(t.Context(), member.DqliteAddr())
-		require.NoErrorf(t, err, "direct dqlite Leader RPC to %s", member.Name)
-		require.NotNil(t, leader)
-		leaders[leader.Address] = true
-	}
-	require.Len(t, leaders, 1, "survivors disagree on Raft leader")
 	var leaderMember cluster.Member
-	for _, member := range topo.Members {
-		if leaders[member.DqliteAddr()] {
-			leaderMember = member
+	lastReason := "no stable surviving leader"
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	for ctx.Err() == nil && leaderMember.Name == "" {
+		topo, err := cluster.DiscoverTopology(ctx, kube, fx.LifecycleID)
+		if err != nil {
+			lastReason = err.Error()
+		} else if len(topo.Members) != 2 {
+			lastReason = fmt.Sprintf("expected two surviving members, got %d", len(topo.Members))
+		} else {
+			leaders := map[string]bool{}
+			for _, member := range topo.Members {
+				if member.Name == "caesium-2" {
+					lastReason = "stopped ordinal 2 is still present"
+					break
+				}
+				leader, _, err := cluster.QueryNode(ctx, member.DqliteAddr())
+				if err != nil || leader == nil {
+					lastReason = fmt.Sprintf("direct Leader RPC on %s: %v", member.Name, err)
+					break
+				}
+				leaders[leader.Address] = true
+			}
+			if len(leaders) == 1 {
+				for _, member := range topo.Members {
+					if leaders[member.DqliteAddr()] {
+						leaderMember = member
+					}
+				}
+			}
+			if leaderMember.Name == "" {
+				lastReason = "survivors do not agree on a live Raft leader"
+			}
+		}
+		if leaderMember.Name == "" {
+			time.Sleep(time.Second)
 		}
 	}
-	require.NotEmpty(t, leaderMember.Name, "surviving leader is not a live member")
+	if leaderMember.Name == "" {
+		blockf(t, "snapshot-catch-up", "surviving Raft leader unobservable: %s", lastReason)
+	}
 	writeJSON(t, "cluster-snapshot-leader.json", map[string]any{
 		"name": leaderMember.Name, "uid": leaderMember.UID,
 		"ip": leaderMember.IP, "address": leaderMember.DqliteAddr(),

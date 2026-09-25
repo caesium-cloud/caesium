@@ -477,7 +477,7 @@ PY
   # F2's destructive cases are reported individually. Their launch requires a
   # healthy upgraded quorum; an unhealthy upgrade leaves them blocked with the
   # exact dependency rather than allowing a test on a different fault state.
-  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 ]]; then
+  if [[ "$LC_AFTER_RC" != 0 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
     for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore rollback-recorded-outcome; do
       lc_case "$name" blocked "cannot run after failed/unobservable three-member upgrade"
     done
@@ -781,27 +781,47 @@ PY
     fi
     fi
   fi
-  lc_copy_runner_artifacts || true
+  LC_COPY_RC=0
+  lc_copy_runner_artifacts || LC_COPY_RC=$?
   LC_ART="$LC_ART" LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" \
     LC_PREV="$LC_PREV" LC_PREV_ID="$LC_PREV_ID" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" \
     LC_CAND_ID="$LC_CAND_ID" LC_PROVENANCE="$LC_PROVENANCE" LC_HELM_RC="$LC_HELM_RC" \
-    LC_MIXED_RC="$LC_MIXED_RC" LC_AFTER_RC="$LC_AFTER_RC" python3 - <<'PY'
+    LC_MIXED_RC="$LC_MIXED_RC" LC_AFTER_RC="$LC_AFTER_RC" LC_GET_RC="$LC_GET_RC" \
+    LC_INFO_RC="$LC_INFO_RC" LC_ADDRESS_BLOCKED="$LC_ADDRESS_BLOCKED" LC_COPY_RC="$LC_COPY_RC" python3 - <<'PY'
 import datetime,json,os,pathlib
 art=pathlib.Path(os.environ['LC_ART']);doc=json.loads((art/'versions.json').read_text())
 p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR']);expected=p['cluster']['required_cases']
-by={}
-for d in ('cases','cluster-cases'):
-  for path in sorted((art/d).glob('*.json')):
+def read_cases(directory):
+  out={}
+  for path in sorted((art/directory).glob('*.json')):
     try:r=json.loads(path.read_text())
     except Exception as e:r={'name':path.stem,'status':'blocked','detail':f'unreadable record: {e}'}
     if r.get('lifecycle_id')!=os.environ['LC_ID']:r=dict(r,status='blocked',detail='foreign lifecycle_id')
-    by[r['name']]=r
+    out[r['name']]=r
+  return out
+# Host verdicts have explicit precedence after every runner artifact copy.
+runner_cases=read_cases('cases')
+host_cases=read_cases('cluster-cases')
+by={**runner_cases,**host_cases}
 for name in expected:
   by.setdefault(name,{'name':name,'status':'blocked','lifecycle_id':os.environ['LC_ID'],
     'detail':'required case produced no record'})
+gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
+  'after_upgrade_exit':int(os.environ['LC_AFTER_RC']),
+  'live_manifest_exit':int(os.environ['LC_GET_RC']),
+  'post_upgrade_info_exit':int(os.environ['LC_INFO_RC']),
+  'address_prerequisite_blocked':int(os.environ['LC_ADDRESS_BLOCKED']),
+  'final_artifact_copy_exit':int(os.environ['LC_COPY_RC'])}
+if gates['mixed_window_exit']!=0 and by['mixed-version-dispatch-and-completion']['status']=='pass':
+  by['mixed-version-dispatch-and-completion']=dict(by['mixed-version-dispatch-and-completion'],status='blocked',
+    detail='mixed-window process failed despite a runner pass record')
+if any(gates[k]!=0 for k in ('after_upgrade_exit','live_manifest_exit','post_upgrade_info_exit','address_prerequisite_blocked')) and by['rolling-upgrade-three-voters']['status']=='pass':
+  by['rolling-upgrade-three-voters']=dict(by['rolling-upgrade-three-voters'],status='blocked',
+    detail='upgrade observation gate failed despite a runner pass record')
 cases=[by[n] for n in expected]
 failed=[r['name'] for r in cases if not (r['status']=='pass' or
   (r['name']=='rollback-recorded-outcome' and r['status']=='recorded-outcome' and r.get('observations')))]
+failed_gates=[name for name,rc in gates.items() if rc!=0]
 record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'lifecycle_id':os.environ['LC_ID'],'pair':os.environ['LC_PAIR'],
   'candidate_sha':os.environ['LC_SHA'],'started_at':os.environ['LC_STARTED'],
@@ -811,9 +831,9 @@ record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'candidate_image':{'ref':os.environ['LC_CAND'],'image_id':os.environ['LC_CAND_ID'],
     'provenance':os.environ['LC_PROVENANCE']},
   'helm_exit_code':int(os.environ['LC_HELM_RC']),
-  'phase_exit_codes':{'mixed':int(os.environ['LC_MIXED_RC']),'after_upgrade':int(os.environ['LC_AFTER_RC'])},
-  'expected_cases':expected,'cases':cases,'failed_cases':failed,
-  'result':'pass' if not failed and os.environ['LC_PROVENANCE']=='built-by-this-run' else 'fail'}
+  'phase_exit_codes':gates,
+  'expected_cases':expected,'cases':cases,'failed_cases':failed,'failed_gates':failed_gates,
+  'result':'pass' if not failed and not failed_gates and os.environ['LC_PROVENANCE']=='built-by-this-run' else 'fail'}
 (art/'cluster-qualification.json').write_text(json.dumps(record,indent=2)+'\n')
 print('cluster lifecycle:',record['result'],'failed/blocked:',failed)
 PY
