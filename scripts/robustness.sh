@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Robustness host controller (B1 owner crash, B2 targeted faults).
+# Robustness host controller (B1 owner crash, B2 targeted faults, B3 core suite).
 # Unique kind cluster + namespace from CAESIUM_ROBUSTNESS_ID. Every kubectl/helm
 # call uses the explicit kubeconfig. The in-cluster test never docker-execs nodes.
 #
@@ -134,6 +134,39 @@ case "$RUN_PATTERN" in
       # it here means a skip can never stand in for the instrumented result.
       REQUIRED_SUBTESTS+=(TestTargetedFaults/bus_publish_pause)
       REQUIRED_RECORD_KEYS+=(bus_publish_pause)
+    fi
+    ;;
+  *TestCore*)
+    REQUIRED_SUBTESTS=(
+      TestCore/terminal_no_regress
+      TestCore/frozen_retry_recipe
+      TestCore/fan_in_predecessors
+      TestCore/wrong_token_internal
+      TestCore/invalid_mtls_peer
+      TestCore/cancel_completion_race
+      TestCore/commit_before_response_loss
+      TestCore/stale_generation_complete
+      TestCore/worker_unreachable_bench
+      TestCore/quorum_loss_uncertain_write
+    )
+    REQUIRED_PARENTS=(TestCore)
+    REQUIRED_RECORD_KEYS=(
+      core_events
+      core_topology
+      terminal_no_regress
+      frozen_retry_recipe
+      fan_in_predecessors
+      wrong_token_internal
+      invalid_mtls_peer
+      cancel_completion_race
+      commit_before_response_loss
+      stale_generation_complete
+      worker_unreachable_bench
+      quorum_loss_uncertain_write
+    )
+    if [[ -n "$INSTRUMENTED_IMAGE" ]]; then
+      REQUIRED_SUBTESTS+=(TestCore/durable_event_before_delivery_crash)
+      REQUIRED_RECORD_KEYS+=(durable_event_before_delivery_crash)
     fi
     ;;
   *)
@@ -832,6 +865,9 @@ case "$RUN_PATTERN" in
   # The fault suite freezes a member past a 30s lease and holds a partition, so
   # it needs more wall clock than the owner-crash regression.
   *TestTargetedFaults*) RUNNER_TIMEOUT=35m ;;
+  # B3 composes those controls into recovery/auth/dispatch cases, including a
+  # pause past the 30s lease and a 2-1 split, so it needs a longer budget.
+  *TestCore*) RUNNER_TIMEOUT=70m ;;
 esac
 log "runner selection: -test.run '$RUN_PATTERN' -test.timeout $RUNNER_TIMEOUT instrumented=$RUNNER_INSTRUMENTED"
 cat >"$ARTIFACTS/runner.yaml" <<EOF
@@ -1274,6 +1310,7 @@ PY
 CONTROLLER_BUDGET=1080
 case "$RUNNER_TIMEOUT" in
   35m) CONTROLLER_BUDGET=2400 ;;
+  70m) CONTROLLER_BUDGET=4800 ;;
 esac
 log "host controller waiting for runner ($RUNNER_TIMEOUT test + margin, budget ${CONTROLLER_BUDGET}s)"
 DEADLINE=$((SECONDS + CONTROLLER_BUDGET))
