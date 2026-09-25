@@ -297,7 +297,7 @@ EOF
     local seconds="$1" log="$2"
     shift 2
     python3 - "$seconds" "$log" "$@" <<'PY'
-import os,signal,subprocess,sys
+import os,signal,subprocess,sys,time
 seconds=int(sys.argv[1]);log=sys.argv[2];command=sys.argv[3:]
 with open(log,'a') as out:
   try:process=subprocess.Popen(command,stdout=out,stderr=subprocess.STDOUT,start_new_session=True)
@@ -309,13 +309,20 @@ with open(log,'a') as out:
   except subprocess.TimeoutExpired:
     out.write(f'command timed out after {seconds}s: {command!r}\n')
     out.flush()
-    try:os.killpg(process.pid,signal.SIGTERM)
+    group=process.pid
+    try:os.killpg(group,signal.SIGTERM)
+    except ProcessLookupError:pass
+    # The direct child can exit on TERM while its descendants ignore it.
+    # Keep the original group ID and kill that group after the grace period
+    # even when process.wait() would already report the parent as finished.
+    time.sleep(3)
+    try:
+      os.killpg(group,signal.SIGKILL)
+      out.write(f'sent SIGKILL to timed-out process group {group}\n')
     except ProcessLookupError:pass
     try:process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-      try:os.killpg(process.pid,signal.SIGKILL)
-      except ProcessLookupError:pass
-      process.wait()
+      out.write(f'direct child did not reap after group SIGKILL: {command!r}\n')
     raise SystemExit(124)
 raise SystemExit(code)
 PY
