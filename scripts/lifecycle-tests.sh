@@ -769,7 +769,9 @@ kind: Service
 metadata: {name: lifecycle-recorder, namespace: $LC_ID}
 spec:
   selector: {app.kubernetes.io/name: lifecycle-runner}
-  ports: [{name: http, port: 8090, targetPort: 8090}]
+  ports:
+    - {name: http, port: 8090, targetPort: 8090}
+    - {name: pod-name, port: 8091, targetPort: 8091}
 ---
 apiVersion: v1
 kind: Pod
@@ -796,7 +798,10 @@ spec:
       command: ["/lifecycle.test"]
       args: ["-test.v", "-test.run", "^TestLifecycleClusterRecorder$", "-test.timeout", "24h"]
       env: [{name: CAESIUM_LIFECYCLE_CLUSTER_RECORDER, value: "1"}]
-      ports: [{containerPort: 8090, name: http}]
+      ports: [{containerPort: 8090, name: http}, {containerPort: 8091, name: pod-name}]
+      readinessProbe:
+        httpGet: {path: /health, port: pod-name}
+        periodSeconds: 1
 EOF
   lc_ns apply -f "$LC_ART/runner.yaml" >"$LC_ART/cluster-logs/runner-create.log" 2>&1 || cluster_die "runner create failed"
   lc_ns wait --for=condition=Ready pod/lifecycle-runner --timeout=120s \

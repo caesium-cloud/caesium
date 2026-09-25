@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -45,15 +47,17 @@ type clusterMemberEvidence struct {
 }
 
 type clusterFixture struct {
-	LifecycleID string                  `json:"lifecycle_id"`
-	Members     []clusterMemberEvidence `json:"members"`
-	Jobs        map[string]jobFixture   `json:"jobs"`
-	Succeeded   runFixture              `json:"succeeded"`
-	Failed      runFixture              `json:"failed"`
-	InFlight    runFixture              `json:"in_flight"`
-	Predecessor runFixture              `json:"predecessor"`
-	QueuedRow   queueRowFixture         `json:"queued_row"`
-	QueueToken  string                  `json:"queue_token"`
+	LifecycleID    string                      `json:"lifecycle_id"`
+	Members        []clusterMemberEvidence     `json:"members"`
+	Jobs           map[string]jobFixture       `json:"jobs"`
+	DurableTasks   map[string]clusterTaskProof `json:"durable_tasks"`
+	RawStartNonces map[string][]string         `json:"raw_start_nonces"`
+	Succeeded      runFixture                  `json:"succeeded"`
+	Failed         runFixture                  `json:"failed"`
+	InFlight       runFixture                  `json:"in_flight"`
+	Predecessor    runFixture                  `json:"predecessor"`
+	QueuedRow      queueRowFixture             `json:"queued_row"`
+	QueueToken     string                      `json:"queue_token"`
 }
 
 type clusterInfo struct {
@@ -88,8 +92,11 @@ type clusterTaskProof struct {
 	ClaimedBy       string `json:"claimed_by"`
 	OwnerGeneration int64  `json:"owner_generation"`
 	Attempt         int    `json:"attempt"`
+	ClaimAttempt    int    `json:"claim_attempt"`
+	RuntimeID       string `json:"runtime_id"`
 	Status          string `json:"status"`
 	RecorderNonce   string `json:"recorder_nonce"`
+	RecorderPod     string `json:"recorder_pod"`
 }
 
 // The public run projection identifies an unfanned task by catalog task_id,
@@ -104,7 +111,7 @@ func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, pub
 	if err != nil {
 		return clusterTaskProof{}, fmt.Errorf("public task id %q: %w", publicTaskID, err)
 	}
-	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
+	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, claim_attempt, runtime_id, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
 	response, _, err := h.Query(ctx, base, sql, 2)
 	if err != nil {
 		return clusterTaskProof{}, err
@@ -117,8 +124,8 @@ func parseClusterTaskProof(response cluster.QueryResponse, runID, publicTaskID s
 		return clusterTaskProof{}, fmt.Errorf("run %s public task %s query returned %d rows (reported %d); require exactly one durable attempt", runID, publicTaskID, len(response.Rows), response.RowCount)
 	}
 	row := response.Rows[0]
-	if len(row) != 8 {
-		return clusterTaskProof{}, fmt.Errorf("run %s public task %s query returned %d columns, want 8", runID, publicTaskID, len(row))
+	if len(row) != 10 {
+		return clusterTaskProof{}, fmt.Errorf("run %s public task %s query returned %d columns, want 10", runID, publicTaskID, len(row))
 	}
 	durableID, err := uuid.Parse(fmt.Sprint(row[0]))
 	if err != nil {
@@ -140,11 +147,20 @@ func parseClusterTaskProof(response cluster.QueryResponse, runID, publicTaskID s
 	if err != nil {
 		return clusterTaskProof{}, err
 	}
-	proof := clusterTaskProof{ID: durableID.String(), RunID: gotRunID.String(), TaskID: gotTaskID.String(),
-		ClaimedBy: fmt.Sprint(row[3]), OwnerGeneration: generation, Attempt: attempt, Status: fmt.Sprint(row[6])}
+	claimAttempt, err := strconv.Atoi(fmt.Sprint(row[6]))
+	if err != nil {
+		return clusterTaskProof{}, err
+	}
+	runtimeID := ""
 	if row[7] != nil {
+		runtimeID = fmt.Sprint(row[7])
+	}
+	proof := clusterTaskProof{ID: durableID.String(), RunID: gotRunID.String(), TaskID: gotTaskID.String(),
+		ClaimedBy: fmt.Sprint(row[3]), OwnerGeneration: generation, Attempt: attempt,
+		ClaimAttempt: claimAttempt, RuntimeID: runtimeID, Status: fmt.Sprint(row[8])}
+	if row[9] != nil {
 		var raw []byte
-		switch v := row[7].(type) {
+		switch v := row[9].(type) {
 		case string:
 			raw = []byte(v)
 		default:
@@ -159,19 +175,256 @@ func parseClusterTaskProof(response cluster.QueryResponse, runID, publicTaskID s
 				return clusterTaskProof{}, fmt.Errorf("durable task %s output: %w", durableID, err)
 			}
 			proof.RecorderNonce = output["recorder_nonce"]
+			proof.RecorderPod = output["recorder_pod"]
 		}
 	}
 	return proof, nil
 }
 
+func verifyRetainedTaskIdentity(seed, current clusterTaskProof, runID, publicTaskID string) error {
+	if _, err := uuid.Parse(seed.ID); err != nil {
+		return fmt.Errorf("run %s has no valid pre-upgrade durable task id: %w", runID, err)
+	}
+	if seed.RunID != runID || seed.TaskID != publicTaskID || seed.Attempt < 1 {
+		return fmt.Errorf("run %s public task %s has mismatched pre-upgrade durable proof: %+v", runID, publicTaskID, seed)
+	}
+	if current.RunID != runID || current.TaskID != publicTaskID {
+		return fmt.Errorf("durable task %s maps to run %s public task %s, want run %s public task %s", current.ID, current.RunID, current.TaskID, runID, publicTaskID)
+	}
+	if current.ID != seed.ID {
+		return fmt.Errorf("run %s public task %s replaced durable row %s with %s", runID, publicTaskID, seed.ID, current.ID)
+	}
+	if seed.Status == "running" {
+		if current.Attempt < seed.Attempt {
+			return fmt.Errorf("run %s public task %s regressed attempt from %d to %d", runID, publicTaskID, seed.Attempt, current.Attempt)
+		}
+	} else if current.Attempt != seed.Attempt {
+		return fmt.Errorf("terminal run %s public task %s changed attempt from %d to %d", runID, publicTaskID, seed.Attempt, current.Attempt)
+	}
+	return nil
+}
+
+func readRetainedClusterTaskProof(ctx context.Context, h *cluster.HTTP, base string, seed map[string]clusterTaskProof, runID, publicTaskID string) (clusterTaskProof, error) {
+	before, ok := seed[runID]
+	if !ok {
+		return clusterTaskProof{}, fmt.Errorf("run %s has no pre-upgrade durable task proof", runID)
+	}
+	after, err := readClusterTaskProof(ctx, h, base, runID, publicTaskID)
+	if err != nil {
+		return clusterTaskProof{}, err
+	}
+	if err := verifyRetainedTaskIdentity(before, after, runID, publicTaskID); err != nil {
+		return clusterTaskProof{}, err
+	}
+	return after, nil
+}
+
+func rawStartNonceSet(runID string, events []recorder.Event) map[string]bool {
+	starts := map[string]bool{}
+	for _, event := range events {
+		if event.RunID == runID && event.Step == "hold" && event.Kind == "start" && event.Nonce != "" {
+			starts[event.Nonce] = true
+		}
+	}
+	return starts
+}
+
+type taskStartedAttempt struct {
+	DurableID    string `json:"id"`
+	RunID        string `json:"job_run_id"`
+	TaskID       string `json:"task_id"`
+	RuntimeID    string `json:"runtime_id"`
+	Attempt      int    `json:"attempt"`
+	ClaimAttempt int    `json:"claim_attempt"`
+}
+
+func parseTaskStartedAttempts(runID, taskID, durableID string, maxAttempt int, events []eventTuple) (map[string]taskStartedAttempt, error) {
+	byRuntime := map[string]taskStartedAttempt{}
+	for _, event := range events {
+		if event.Type != "task_started" || event.TaskID != taskID {
+			continue
+		}
+		payload := []byte(event.Payload)
+		var quoted string
+		if err := json.Unmarshal(payload, &quoted); err == nil {
+			payload = []byte(quoted)
+		}
+		var started taskStartedAttempt
+		if err := json.Unmarshal(payload, &started); err != nil {
+			return nil, fmt.Errorf("task_started sequence %d payload: %w", event.Sequence, err)
+		}
+		if started.DurableID != durableID || started.RunID != runID || started.TaskID != taskID {
+			return nil, fmt.Errorf("task_started sequence %d has wrong durable/run/task identity: %+v", event.Sequence, started)
+		}
+		if started.Attempt > maxAttempt {
+			return nil, fmt.Errorf("task_started sequence %d advances beyond terminal durable attempt %d to %d", event.Sequence, maxAttempt, started.Attempt)
+		}
+		if started.RuntimeID == "" {
+			continue // A claim can emit a pre-container task_started event.
+		}
+		if started.Attempt < 1 || started.ClaimAttempt < 1 {
+			return nil, fmt.Errorf("task_started sequence %d lacks positive attempt/claim identity", event.Sequence)
+		}
+		prefix := fmt.Sprintf("%s-%s-attempt%d-", taskID, runID, started.ClaimAttempt)
+		if !strings.HasPrefix(started.RuntimeID, prefix) {
+			return nil, fmt.Errorf("task_started sequence %d runtime %s does not match task/run/claim", event.Sequence, started.RuntimeID)
+		}
+		if _, err := uuid.Parse(strings.TrimPrefix(started.RuntimeID, prefix)); err != nil {
+			return nil, fmt.Errorf("task_started sequence %d runtime %s has no pod UUID: %w", event.Sequence, started.RuntimeID, err)
+		}
+		if _, exists := byRuntime[started.RuntimeID]; exists {
+			return nil, fmt.Errorf("runtime %s has more than one persisted task_started event", started.RuntimeID)
+		}
+		byRuntime[started.RuntimeID] = started
+	}
+	if len(byRuntime) == 0 {
+		return nil, fmt.Errorf("run %s task %s has no persisted task_started runtime identity", runID, taskID)
+	}
+	return byRuntime, nil
+}
+
+type rawAttemptEffect struct {
+	RunID   string `json:"run_id"`
+	Step    string `json:"step"`
+	Nonce   string `json:"nonce"`
+	PodName string `json:"pod_name"`
+	Event   string `json:"event"`
+}
+
+func parseRawAttemptEffect(event recorder.Event) (rawAttemptEffect, error) {
+	var raw rawAttemptEffect
+	if err := json.Unmarshal([]byte(event.Raw), &raw); err != nil {
+		return rawAttemptEffect{}, fmt.Errorf("raw %s nonce %s payload: %w", event.Kind, event.Nonce, err)
+	}
+	if raw.RunID != event.RunID || raw.Step != event.Step || raw.Nonce != event.Nonce ||
+		raw.Event != event.Kind || raw.PodName == "" {
+		return rawAttemptEffect{}, fmt.Errorf("raw %s nonce %s lacks matching run/step/nonce/kind/pod identity", event.Kind, event.Nonce)
+	}
+	return raw, nil
+}
+
+func verifySeedHeldAttempt(proof clusterTaskProof, rawEvents []recorder.Event, taskEvents []eventTuple) error {
+	if proof.Status != "running" || proof.RuntimeID == "" || proof.Attempt < 1 || proof.ClaimAttempt < 1 {
+		return fmt.Errorf("seed held task has no current running durable runtime/attempt/claim: %+v", proof)
+	}
+	startedByRuntime, err := parseTaskStartedAttempts(proof.RunID, proof.TaskID, proof.ID, proof.Attempt, taskEvents)
+	if err != nil {
+		return err
+	}
+	started, ok := startedByRuntime[proof.RuntimeID]
+	if !ok || started.Attempt != proof.Attempt || started.ClaimAttempt != proof.ClaimAttempt {
+		return fmt.Errorf("seed held task %s current runtime %s has no matching persisted task_started attempt/claim", proof.ID, proof.RuntimeID)
+	}
+	currentStart := false
+	for _, event := range rawEvents {
+		if event.RunID != proof.RunID || event.Step != "hold" || (event.Kind != "start" && event.Kind != "complete") {
+			continue
+		}
+		raw, err := parseRawAttemptEffect(event)
+		if err != nil {
+			return err
+		}
+		if raw.PodName == proof.RuntimeID {
+			if event.Kind == "complete" {
+				return fmt.Errorf("seed held task %s current runtime already emitted a completion", proof.ID)
+			}
+			currentStart = true
+		}
+	}
+	if !currentStart {
+		return fmt.Errorf("seed held task %s current runtime %s has no raw start", proof.ID, proof.RuntimeID)
+	}
+	return nil
+}
+
+func reconcileRetainedAttemptEffects(seed, terminal clusterTaskProof, seedStarts []string, rawEvents []recorder.Event, taskEvents []eventTuple) error {
+	if terminal.Attempt < seed.Attempt {
+		return fmt.Errorf("run %s task attempt regressed from %d to %d", seed.RunID, seed.Attempt, terminal.Attempt)
+	}
+	if len(seedStarts) == 0 {
+		return fmt.Errorf("run %s has no pre-upgrade raw start nonce", seed.RunID)
+	}
+	startedByRuntime, err := parseTaskStartedAttempts(seed.RunID, seed.TaskID, seed.ID, terminal.Attempt, taskEvents)
+	if err != nil {
+		return err
+	}
+	type nonceProof struct {
+		pod      string
+		started  bool
+		complete bool
+		attempt  int
+	}
+	byNonce := map[string]*nonceProof{}
+	witnessedAttempts := map[int]bool{}
+	for _, event := range rawEvents {
+		if event.RunID != seed.RunID || event.Step != "hold" || (event.Kind != "start" && event.Kind != "complete") {
+			continue
+		}
+		raw, err := parseRawAttemptEffect(event)
+		if err != nil {
+			return err
+		}
+		started, ok := startedByRuntime[raw.PodName]
+		if !ok {
+			return fmt.Errorf("raw %s nonce %s pod %s has no persisted task_started runtime", event.Kind, event.Nonce, raw.PodName)
+		}
+		proof := byNonce[event.Nonce]
+		if proof == nil {
+			proof = &nonceProof{pod: raw.PodName, attempt: started.Attempt}
+			byNonce[event.Nonce] = proof
+		} else if proof.pod != raw.PodName || proof.attempt != started.Attempt {
+			return fmt.Errorf("raw nonce %s spans different pod or durable attempts", event.Nonce)
+		}
+		if event.Kind == "start" {
+			proof.started = true
+			witnessedAttempts[started.Attempt] = true
+		} else {
+			proof.complete = true
+		}
+	}
+	baseline := map[string]bool{}
+	for _, nonce := range seedStarts {
+		proof := byNonce[nonce]
+		if nonce == "" || baseline[nonce] || proof == nil || !proof.started || proof.attempt > seed.Attempt {
+			return fmt.Errorf("run %s has missing, duplicate, or post-seed baseline nonce %s", seed.RunID, nonce)
+		}
+		baseline[nonce] = true
+	}
+	for nonce, proof := range byNonce {
+		if proof.complete && !proof.started {
+			return fmt.Errorf("run %s raw completion nonce %s has no matching start", seed.RunID, nonce)
+		}
+	}
+	for attempt := seed.Attempt; attempt <= terminal.Attempt; attempt++ {
+		if !witnessedAttempts[attempt] {
+			return fmt.Errorf("run %s durable attempt %d has no task_started/pod/raw-start witness", seed.RunID, attempt)
+		}
+	}
+	final := byNonce[terminal.RecorderNonce]
+	if final == nil || !final.started || !final.complete || terminal.RecorderPod == "" ||
+		final.pod != terminal.RecorderPod || final.pod != terminal.RuntimeID {
+		return fmt.Errorf("run %s terminal output nonce/pod does not match raw start, completion, and durable runtime_id", seed.RunID)
+	}
+	started := startedByRuntime[terminal.RuntimeID]
+	if started.Attempt != terminal.Attempt || started.ClaimAttempt != terminal.ClaimAttempt ||
+		started.DurableID != terminal.ID || final.attempt != terminal.Attempt {
+		return fmt.Errorf("run %s terminal runtime does not match durable attempt/claim identity", seed.RunID)
+	}
+	return nil
+}
+
 func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []recorder.Event) bool {
-	if proof.RecorderNonce == "" {
+	if proof.RecorderNonce == "" || proof.RecorderPod == "" || proof.RuntimeID != proof.RecorderPod {
 		return false
 	}
 	started, completed := false, false
 	for _, e := range events {
 		if e.RunID != runID || e.Nonce != proof.RecorderNonce || e.Step != "hold" {
 			continue
+		}
+		raw, err := parseRawAttemptEffect(e)
+		if err != nil || raw.PodName != proof.RuntimeID {
+			return false
 		}
 		started = started || e.Kind == "start"
 		completed = completed || e.Kind == "complete"
@@ -312,7 +565,7 @@ func waitRecorderStart(t *testing.T, runID string) {
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("raw effect recorder never saw start for run %s", runID)
+	blockf(t, "raw-effect-ledger", "recorder never saw start for run %s; full pod-name lookup or task start may have failed", runID)
 }
 
 func releaseRecordedRun(t *testing.T, runID string) {
@@ -354,7 +607,7 @@ func clusterManifest(t *testing.T, kind, alias, taskImage string) jobdef.Definit
 	case "history":
 		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"history\",\"nonce\":\"$N\",\"event\":\"start\"}" "$R/start"; sleep 2; echo "##caesium::output {\"token\": \"$CAESIUM_PARAM_TOKEN\"}"; if [ "$CAESIUM_PARAM_EXIT" = 0 ]; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"history\",\"nonce\":\"$N\",\"event\":\"complete\"}" "$R/effect"; else exit "$CAESIUM_PARAM_EXIT"; fi`
 	case "held":
-		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"start\"}" "$R/start"; i=0; while [ "$i" -lt 900 ]; do if wget -qO- "$R/wait?run_id=$CAESIUM_RUN_ID" | grep -q released; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"complete\"}" "$R/effect"; echo "##caesium::output {\"recorder_nonce\":\"$N\"}"; exit 0; fi; i=$((i+1)); sleep 1; done; exit 1`
+		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; P=""; i=0; while [ "$i" -lt 30 ]; do if P="$(wget -qO- http://lifecycle-recorder:8091/pod-name 2>/dev/null)" && test -n "$P"; then break; fi; P=""; i=$((i+1)); sleep 1; done; test -n "$P"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"pod_name\":\"$P\",\"event\":\"start\"}" "$R/start"; i=0; while [ "$i" -lt 900 ]; do if wget -qO- "$R/wait?run_id=$CAESIUM_RUN_ID" | grep -q released; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"pod_name\":\"$P\",\"event\":\"complete\"}" "$R/effect"; echo "##caesium::output {\"recorder_nonce\":\"$N\",\"recorder_pod\":\"$P\"}"; exit 0; fi; i=$((i+1)); sleep 1; done; exit 1`
 	default:
 		t.Fatalf("unknown fixture kind %q", kind)
 	}
@@ -379,10 +632,79 @@ func TestLifecycleClusterRecorder(t *testing.T) {
 	if os.Getenv("CAESIUM_LIFECYCLE_CLUSTER_RECORDER") != "1" {
 		t.Skip("recorder sidecar only")
 	}
+	// Kubelet shortens long pod names in /etc/hostname to 63 characters.
+	// The recorder's service account can instead resolve the caller's pod IP
+	// to the full Kubernetes metadata.name before the task writes any effect.
+	kube, err := cluster.InClusterClient()
+	require.NoError(t, err)
+	namespaceBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	require.NoError(t, err)
+	namespace := strings.TrimSpace(string(namespaceBytes))
+	require.NotEmpty(t, namespace)
+	podLookup := &http.Server{Addr: ":8091", ReadHeaderTimeout: 10 * time.Second}
+	podLookup.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/pod-name" {
+			http.NotFound(w, r)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pod-name lookup from %s: list failed: %v\n", r.RemoteAddr, err)
+			http.Error(w, fmt.Sprintf("list caller pods: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		name, err := resolvePodNameBySourceIP(r.RemoteAddr, pods.Items)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pod-name lookup from %s: %v\n", r.RemoteAddr, err)
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, name)
+	})
 	sink := recorder.New()
 	require.NoError(t, sink.Start())
 	defer sink.Close(context.Background())
-	<-t.Context().Done()
+	podListener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", podLookup.Addr)
+	require.NoError(t, err)
+	defer func() { _ = podLookup.Close() }()
+	podLookupDone := make(chan error, 1)
+	go func() { podLookupDone <- podLookup.Serve(podListener) }()
+	select {
+	case err := <-podLookupDone:
+		require.ErrorIs(t, err, http.ErrServerClosed)
+	case <-t.Context().Done():
+	}
+}
+
+func resolvePodNameBySourceIP(remoteAddr string, pods []corev1.Pod) (string, error) {
+	address, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil || net.ParseIP(address) == nil {
+		return "", fmt.Errorf("invalid recorder caller address %q", remoteAddr)
+	}
+	name := ""
+	for _, pod := range pods {
+		if pod.Status.PodIP != address {
+			continue
+		}
+		if pod.Name == "" || name != "" {
+			return "", fmt.Errorf("caller IP %s maps to ambiguous live pods", address)
+		}
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			return "", fmt.Errorf("caller IP %s maps to a pod that is not running", address)
+		}
+		name = pod.Name
+	}
+	if name == "" {
+		return "", fmt.Errorf("caller IP %s has no unique live pod", address)
+	}
+	return name, nil
 }
 
 func TestLifecycleClusterSeed(t *testing.T) {
@@ -452,8 +774,29 @@ func TestLifecycleClusterSeed(t *testing.T) {
 	require.Empty(t, queued[0].ClaimedBy)
 	fx := clusterFixture{LifecycleID: ns, Members: memberEvidence(topo, membership), Jobs: jobs,
 		Succeeded: ok.fixture(), Failed: bad.fixture(), InFlight: inflight.fixture(),
-		Predecessor: predecessor.fixture(), QueuedRow: queued[0], QueueToken: queueToken}
-	for _, run := range []*runFixture{&fx.Succeeded, &fx.Failed} {
+		Predecessor: predecessor.fixture(), QueuedRow: queued[0], QueueToken: queueToken,
+		DurableTasks: make(map[string]clusterTaskProof, 4), RawStartNonces: make(map[string][]string, 2)}
+	for _, run := range []runFixture{fx.Succeeded, fx.Failed, fx.InFlight, fx.Predecessor} {
+		require.Len(t, run.Tasks, 1, "seed run %s must have one public task", run.ID)
+		var proof clusterTaskProof
+		var err error
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+			proof, err = readClusterTaskProof(ctx, h, base, run.ID, run.Tasks[0].ID)
+			if err == nil && (run.Status != "running" || proof.RuntimeID != "") {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		require.NoErrorf(t, err, "seed run %s durable task proof missing", run.ID)
+		if run.Status == "running" {
+			require.NotEmptyf(t, proof.RuntimeID, "seed run %s has no current durable runtime", run.ID)
+		}
+		require.Equal(t, run.Tasks[0].Attempt, proof.Attempt, "seed public and durable attempts disagree")
+		require.Equal(t, run.Tasks[0].Status, proof.Status, "seed public and durable statuses disagree")
+		fx.DurableTasks[run.ID] = proof
+	}
+	require.Len(t, fx.DurableTasks, 4)
+	for _, run := range []*runFixture{&fx.Succeeded, &fx.Failed, &fx.InFlight, &fx.Predecessor} {
 		run.Events, err = readEventBacklog(ctx, c, run.ID, 0)
 		require.NoError(t, err)
 		require.NotEmpty(t, run.Events)
@@ -461,8 +804,19 @@ func TestLifecycleClusterSeed(t *testing.T) {
 		require.Positive(t, low)
 		run.ResumeCursor = low - 1
 	}
+	rawBefore := recorderEvents(t)
+	for _, run := range []runFixture{fx.InFlight, fx.Predecessor} {
+		if err := verifySeedHeldAttempt(fx.DurableTasks[run.ID], rawBefore, run.Events); err != nil {
+			blockf(t, "retained-history-and-raw-effects", "seed held run %s lacks current durable attempt proof: %v", run.ID, err)
+		}
+		for nonce := range rawStartNonceSet(run.ID, rawBefore) {
+			fx.RawStartNonces[run.ID] = append(fx.RawStartNonces[run.ID], nonce)
+		}
+		require.NotEmptyf(t, fx.RawStartNonces[run.ID], "seed run %s has no raw start nonce", run.ID)
+		sort.Strings(fx.RawStartNonces[run.ID])
+	}
 	writeJSON(t, "cluster-fixture.json", fx)
-	writeJSON(t, "cluster-raw-before.json", recorderEvents(t))
+	writeJSON(t, "cluster-raw-before.json", rawBefore)
 	writeCase(t, caseRecord{Name: "three-persistent-voters-before", Status: statusPass,
 		Detail:       fmt.Sprintf("three bound PVCs, distinct worker nodes, three direct dqlite voters, leader %s", membership.Leader.Address),
 		Observations: map[string]any{"members": fx.Members, "leader": membership.Leader}})
@@ -587,7 +941,8 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 						continue
 					}
 					beforeTask, err := readClusterTaskProof(ctx, h, base, run.ID, live.Tasks[0].ID)
-					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.OwnerGeneration != lease.Generation ||
+					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.RuntimeID == "" || beforeTask.ClaimAttempt < 1 ||
+						beforeTask.OwnerGeneration != lease.Generation ||
 						beforeTask.Attempt != live.Tasks[0].Attempt || beforeTask.Status != "running" {
 						releaseRecordedRun(t, run.ID)
 						continue
@@ -605,6 +960,7 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 					}
 					afterTask, err := readClusterTaskProof(ctx, h, base, run.ID, beforeTask.TaskID)
 					if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
+						afterTask.ClaimAttempt != beforeTask.ClaimAttempt || afterTask.RuntimeID != beforeTask.RuntimeID ||
 						afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
 						afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
 						continue
@@ -722,6 +1078,12 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 			"helm_exit_code": host.HelmExitCode}})
 	for _, want := range []runFixture{fx.Succeeded, fx.Failed} {
 		assertRunUnchanged(t, ctx, c, want, want.Status)
+		require.Len(t, want.Tasks, 1)
+		proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, want.ID, want.Tasks[0].ID)
+		if err != nil {
+			blockf(t, "retained-history-and-raw-effects", "terminal run %s lost its pre-upgrade durable task row: %v", want.ID, err)
+		}
+		require.Equal(t, want.Tasks[0].Status, proof.Status, "terminal durable task status changed")
 		got, err := readEventBacklog(ctx, c, want.ID, want.ResumeCursor)
 		require.NoError(t, err)
 		set := map[string]bool{}
@@ -740,6 +1102,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		require.Equal(t, j.ID, id)
 	}
 	preRelease := map[string]apiRun{}
+	preReleaseProofs := map[string]clusterTaskProof{}
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		current, err := c.run(ctx, r.JobID, r.ID)
 		if err != nil {
@@ -748,11 +1111,17 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		preRelease[r.ID] = current
 		writeJSON(t, "cluster-inflight-before-release.json", preRelease)
 		if current.Status != "running" || len(r.Tasks) != 1 || len(current.Tasks) != 1 ||
-			current.Tasks[0].ID != r.Tasks[0].ID || current.Tasks[0].Attempt != r.Tasks[0].Attempt ||
+			current.Tasks[0].ID != r.Tasks[0].ID || current.Tasks[0].Attempt < r.Tasks[0].Attempt ||
 			current.Tasks[0].Status != "running" {
 			blockf(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s", r.ID, current.Status)
 		}
+		proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, r.ID, current.Tasks[0].ID)
+		if err != nil || proof.Status != "running" || proof.Attempt != current.Tasks[0].Attempt {
+			blockf(t, "retained-history-and-raw-effects", "in-flight run %s lost its pre-upgrade durable task row before release: proof=%+v error=%v", r.ID, proof, err)
+		}
+		preReleaseProofs[r.ID] = proof
 	}
+	writeJSON(t, "cluster-inflight-durable-before-release.json", preReleaseProofs)
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		releaseRecordedRun(t, r.ID)
 	}
@@ -760,32 +1129,38 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		got, err := c.awaitRunStatus(ctx, r.JobID, r.ID, func(x apiRun) bool { return isTerminal(x.Status) }, 5*time.Minute)
 		require.NoError(t, err)
-		require.NotEmpty(t, got.Tasks, "in-flight run %s lost its task attempt rows", r.ID)
-		// Duplicate attempts remain in the raw ledger; only a missing or
-		// unpaired visible effect is rejected.
+		require.Len(t, got.Tasks, 1, "in-flight run %s changed its public task count", r.ID)
+		// Preserve the pre-upgrade event tuples and join every raw pod effect
+		// to the persisted task_started payload for that durable attempt.
 		events := recorderEvents(t)
-		starts := map[string]bool{}
-		effects := map[string]bool{}
-		for _, e := range events {
-			if e.RunID == r.ID {
-				if e.Kind == "start" {
-					starts[e.Nonce] = true
-				}
-				if e.Kind == "complete" {
-					effects[e.Nonce] = true
-				}
-			}
+		taskEvents, err := readEventBacklog(ctx, c, r.ID, r.ResumeCursor)
+		if err != nil {
+			blockf(t, "retained-history-and-raw-effects", "controlled release run %s event backlog unavailable: %v", r.ID, err)
 		}
-		require.NotEmpty(t, starts, "no raw start effect for %s", r.ID)
-		for nonce := range effects {
-			require.Truef(t, starts[nonce], "raw completion nonce %s has no start", nonce)
+		writeJSON(t, "cluster-inflight-events-"+r.ID+".json", taskEvents)
+		retainedEvents := map[string]bool{}
+		for _, event := range taskEvents {
+			retainedEvents[event.key()] = true
+		}
+		for _, event := range r.Events {
+			if event.Sequence > r.ResumeCursor && !retainedEvents[event.key()] {
+				blockf(t, "retained-history-and-raw-effects", "controlled release run %s lost pre-upgrade event %s", r.ID, event.key())
+			}
 		}
 		matchedAttempt := false
 		for _, task := range got.Tasks {
-			proof, err := readClusterTaskProof(ctx, h, base, got.ID, task.ID)
-			require.NoError(t, err)
+			proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, got.ID, task.ID)
+			if err != nil {
+				blockf(t, "retained-history-and-raw-effects", "controlled release run %s lost its pre-upgrade durable task row: %v", got.ID, err)
+			}
+			if proof.Attempt < preReleaseProofs[r.ID].Attempt || proof.Attempt != task.Attempt {
+				blockf(t, "retained-history-and-raw-effects", "controlled release run %s task attempt regressed or disagreed with public projection: before=%d durable=%d public=%d", got.ID, preReleaseProofs[r.ID].Attempt, proof.Attempt, task.Attempt)
+			}
+			if err := reconcileRetainedAttemptEffects(fx.DurableTasks[r.ID], proof, fx.RawStartNonces[r.ID], events, taskEvents); err != nil {
+				blockf(t, "retained-history-and-raw-effects", "controlled release run %s raw attempts could not be reconciled: %v", got.ID, err)
+			}
 			attemptProofs[r.ID] = append(attemptProofs[r.ID], proof)
-			if proof.TaskID == r.Tasks[0].ID && proof.Attempt == r.Tasks[0].Attempt &&
+			if proof.TaskID == r.Tasks[0].ID && proof.Attempt >= r.Tasks[0].Attempt &&
 				proof.Status == "succeeded" && rawCompletionMatchesTask(r.ID, proof, events) {
 				matchedAttempt = true
 			}
@@ -1071,7 +1446,7 @@ func TestLifecycleClusterPostStorage(t *testing.T) {
 	if !readJSON(t, "cluster-fixture.json", &fx) {
 		blockf(t, "storage-rejoin", "seed fixture missing")
 	}
-	_, _, topo := clusterKube(t)
+	_, h, topo := clusterKube(t)
 	membership := clusterMembership(t, topo)
 	old := map[string]clusterMemberEvidence{}
 	for _, m := range fx.Members {
@@ -1085,6 +1460,29 @@ func TestLifecycleClusterPostStorage(t *testing.T) {
 	c.base = clusterBase(topo)
 	assertRunUnchanged(t, t.Context(), c, fx.Succeeded, "succeeded")
 	assertRunUnchanged(t, t.Context(), c, fx.Failed, "failed")
+	var completedProofs map[string][]clusterTaskProof
+	if !readJSON(t, "cluster-attempt-proofs.json", &completedProofs) {
+		blockf(t, "storage-rejoin", "controlled-release durable task proofs missing")
+	}
+	for _, run := range []runFixture{fx.Succeeded, fx.Failed, fx.InFlight, fx.Predecessor} {
+		require.Len(t, run.Tasks, 1)
+		proof, err := readRetainedClusterTaskProof(t.Context(), h, c.base, fx.DurableTasks, run.ID, run.Tasks[0].ID)
+		require.NoErrorf(t, err, "pre-upgrade durable task row for run %s changed after storage recovery", run.ID)
+		if run.Status == "running" {
+			require.Lenf(t, completedProofs[run.ID], 1, "released run %s has no terminal durable proof", run.ID)
+			require.NoErrorf(t, verifyRetainedTaskIdentity(completedProofs[run.ID][0], proof, run.ID, run.Tasks[0].ID),
+				"released run %s changed terminal durable attempt after storage recovery", run.ID)
+			require.Equal(t, "succeeded", proof.Status, "released task did not remain terminal after storage recovery")
+			require.Equal(t, completedProofs[run.ID][0].RecorderNonce, proof.RecorderNonce,
+				"released task output nonce changed after storage recovery")
+			require.Equal(t, completedProofs[run.ID][0].RecorderPod, proof.RecorderPod,
+				"released task output pod changed after storage recovery")
+			require.Equal(t, completedProofs[run.ID][0].RuntimeID, proof.RuntimeID,
+				"released task runtime changed after storage recovery")
+		} else {
+			require.Equal(t, run.Tasks[0].Status, proof.Status, "terminal task status changed after storage recovery")
+		}
+	}
 	writeJSON(t, "cluster-post-storage.json", map[string]any{"members": memberEvidence(topo, membership),
-		"leader": membership.Leader, "retained_run_ids": []string{fx.Succeeded.ID, fx.Failed.ID}})
+		"leader": membership.Leader, "retained_run_ids": []string{fx.Succeeded.ID, fx.Failed.ID, fx.InFlight.ID, fx.Predecessor.ID}})
 }
