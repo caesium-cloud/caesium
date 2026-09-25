@@ -133,6 +133,30 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(uncommitted.read_bytes(), original)
 
+    def test_cleanup_rejects_its_own_linked_checkout_before_mutation(self):
+        # A controller can itself run from a linked worktree. Swapping the
+        # arguments must not make its own checkout a cleanup target, even when
+        # its HEAD and overlaid files pass every other identity check.
+        controller = self.base / "scripts/performance.sh"
+        controller.parent.mkdir(parents=True)
+        shutil.copy2(SCRIPT, controller)
+        git(self.base, "add", "--", "scripts/performance.sh")
+        git(self.base, "commit", "-qm", "add controller to linked checkout")
+        base_sha = git(self.base, "rev-parse", "HEAD")
+        prepared = self.prepare(base_sha=base_sha)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        overlay = self.base / FILES[0]
+        original = overlay.read_bytes()
+
+        result = subprocess.run(
+            ["bash", str(controller), "cleanup-bench-harness", str(self.candidate),
+             str(self.base), base_sha, self.candidate_sha],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("base path resolves to the script checkout root", result.stderr)
+        self.assertEqual(overlay.read_bytes(), original)
+
     def test_cleanup_rejects_wrong_base_sha_and_foreign_checkout_before_mutation(self):
         self.assertEqual(self.prepare().returncode, 0)
         overlay = self.base / FILES[0]

@@ -174,6 +174,8 @@ candidate = pathlib.Path(candidate_arg).resolve(strict=True)
 base = pathlib.Path(base_arg).resolve(strict=True)
 if candidate == base:
     raise SystemExit("benchmark cleanup: base path resolves to the candidate checkout")
+if base == pathlib.Path.cwd().resolve():
+    raise SystemExit("benchmark cleanup: base path resolves to the script checkout root")
 
 def git(root, *args, check=True):
     result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=False)
