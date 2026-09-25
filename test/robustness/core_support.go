@@ -435,24 +435,6 @@ func requireFaultActivated(t *testing.T, ok bool, what string) {
 	}
 }
 
-func waitRunHasTask(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) cluster.Run {
-	t.Helper()
-	wait, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	var got cluster.Run
-	if err := cluster.Poll(wait, time.Second, func() (bool, error) {
-		run, err := fe.httpAPI.GetRun(wait, base, jobID, runID)
-		if err != nil {
-			return false, nil
-		}
-		got = run
-		return len(run.Tasks) > 0, nil
-	}); err != nil {
-		t.Fatalf("run %s never exposed a task: %v", runID, err)
-	}
-	return got
-}
-
 func memberByNode(t *testing.T, fe *faultEnv, addr string) cluster.Member {
 	t.Helper()
 	if m, ok := fe.topo.ByNodeAddress(addr); ok {
