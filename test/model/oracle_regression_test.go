@@ -69,6 +69,36 @@ func TestOracleRegressionCrossEpochAcknowledgedState(t *testing.T) {
 	}
 }
 
+func TestOracleRegressionRetryRetainsAcknowledgedState(t *testing.T) {
+	r := oracleRun(t, model.DAG{Order: []model.TaskID{"kept", "retried"}})
+	kept, retried := model.Step("kept"), model.Step("retried")
+	for _, id := range []model.InstanceID{kept, retried} {
+		if !r.Dispatch(id, "worker", 1000) {
+			t.Fatalf("fixture task %s was not dispatchable", id)
+		}
+	}
+	if got := r.Complete(kept, model.StatusSucceeded, r.Generation()); !got.Applied {
+		t.Fatalf("fixture success did not apply: %+v", got)
+	}
+	if got := r.Complete(retried, model.StatusFailed, r.Generation()); !got.Applied {
+		t.Fatalf("fixture failure did not apply: %+v", got)
+	}
+	before := r.Checkpoint()
+	if !r.Retry() {
+		t.Fatal("fixture retry was rejected")
+	}
+	after := r.Checkpoint()
+	if before.Epoch == after.Epoch || after.Status[kept] != model.StatusSucceeded || after.Status[retried] != model.StatusPending {
+		t.Fatalf("fixture did not retain success and reopen failure: before=%+v after=%+v", before, after)
+	}
+	if err := model.CheckNoTerminalRegression(before, after); err != nil {
+		t.Fatalf("retry lost acknowledged identity: %v", err)
+	}
+	if after.Ack != before.Ack {
+		t.Fatalf("retry lost acknowledged identity: before=%+v after=%+v", before.Ack, after.Ack)
+	}
+}
+
 func TestOracleRegressionStaleGeneration(t *testing.T) {
 	r := oracleRun(t, model.DAG{Order: []model.TaskID{"task"}})
 	id := model.Step("task")
@@ -87,6 +117,46 @@ func TestOracleRegressionStaleGeneration(t *testing.T) {
 	}
 	if status, _ := r.StatusOf(id); status != model.StatusRunning {
 		t.Fatalf("old owner changed task to %s", status)
+	}
+}
+
+// The real stale-operation test above checks the model's fence. This fixture
+// checks that the refusal oracle rejects the state a bad fence would produce.
+func staleRefusalSnapshot(t *testing.T) (*model.Run, model.Snapshot, model.InstanceID) {
+	t.Helper()
+	r := oracleRun(t, model.DAG{Order: []model.TaskID{"task"}})
+	id := model.Step("task")
+	if !r.Dispatch(id, "old-owner", 1000) {
+		t.Fatal("fixture task was not dispatchable")
+	}
+	r.AdoptGeneration(2)
+	before := r.Checkpoint()
+	if before.Status[id] != model.StatusRunning {
+		t.Fatalf("fixture has unexpected status %s", before.Status[id])
+	}
+	return r, before, id
+}
+
+func TestOracleRegressionAcceptedStaleGenerationStateDiff(t *testing.T) {
+	r, before, id := staleRefusalSnapshot(t)
+	after := r.Checkpoint()
+	after.Status[id] = model.StatusSucceeded
+	if err := model.CheckRefusalInert(before, after); err == nil || !strings.Contains(err.Error(), "DT-COMPLETE-01") {
+		t.Fatalf("accepted stale completion escaped refusal checker: %v", err)
+	}
+	if err := model.CheckRefusalInert(before, r.Checkpoint()); err != nil {
+		t.Fatalf("unchanged state rejected by refusal checker: %v", err)
+	}
+}
+
+// A stale completion could also move only the durable cursor. Keep this
+// independent of the outcome check so neither clause masks the other.
+func TestOracleRegressionStaleGenerationSequenceDiff(t *testing.T) {
+	r, before, _ := staleRefusalSnapshot(t)
+	after := r.Checkpoint()
+	after.SequenceHigh++
+	if err := model.CheckRefusalInert(before, after); err == nil || !strings.Contains(err.Error(), "DT-COMPLETE-01") {
+		t.Fatalf("persisted stale completion escaped refusal checker: %v", err)
 	}
 }
 

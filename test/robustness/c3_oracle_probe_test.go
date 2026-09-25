@@ -1,6 +1,5 @@
-// This file is copied into test/robustness in an isolated checkout by
-// scripts/validate-test-oracles.sh. It drives the actual B3 request and
-// ordering classifiers without starting a cluster.
+// C3 tests the actual B3 request and ordering classifiers without starting a
+// cluster. Ordinary package placement keeps these controls in the unit lane.
 package robustness
 
 import (

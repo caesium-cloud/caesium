@@ -32,6 +32,7 @@ func TestRunLifecycleProperties(t *testing.T) {
 			t.Fatalf("first acquisition must create the lease")
 		}
 		owner := "node-a"
+		admitted := run.Checkpoint()
 		epochStart := run.Checkpoint()
 
 		invariants := func(t *rapid.T) {
@@ -42,6 +43,12 @@ func TestRunLifecycleProperties(t *testing.T) {
 				t.Fatalf("%v", err)
 			}
 			if err := leases.CheckLeaseSafety(); err != nil {
+				t.Fatalf("%v", err)
+			}
+			// A retry may reopen terminal work, but it must never replace the
+			// identity acknowledged at admission. Keep that original baseline
+			// even when epochStart moves after a legal retry.
+			if err := model.CheckNoTerminalRegression(admitted, run.Checkpoint()); err != nil {
 				t.Fatalf("%v", err)
 			}
 			if err := model.CheckNoTerminalRegression(epochStart, run.Checkpoint()); err != nil {
@@ -264,6 +271,9 @@ func TestRunLifecycleProperties(t *testing.T) {
 				}
 				if !run.Retry() {
 					return
+				}
+				if err := model.CheckNoTerminalRegression(admitted, run.Checkpoint()); err != nil {
+					t.Fatalf("retry changed admission identity: %v", err)
 				}
 				for id, want := range retained {
 					if got, _ := run.StatusOf(id); got != want {

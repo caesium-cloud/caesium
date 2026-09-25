@@ -1,7 +1,5 @@
-// This file is copied into test/robustness/history in an isolated checkout by
-// scripts/validate-test-oracles.sh. Keeping it under model/testdata preserves
-// the pure reference model's import boundary while exercising the real B3
-// history and raw-effect checkers.
+// C3 tests the real B3 history and raw-effect checkers as an ordinary package
+// test, preserving the independent reference model's import boundary.
 package history
 
 import "testing"
