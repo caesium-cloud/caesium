@@ -1,0 +1,6 @@
+diff --git a/test/model/run.go b/test/model/run.go
+--- a/test/model/run.go
++++ b/test/model/run.go
+@@ -361 +361 @@
+-	if generation < r.generation {
++	if generation > r.generation {

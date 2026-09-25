@@ -1,0 +1,6 @@
+diff --git a/test/robustness/history/history.go b/test/robustness/history/history.go
+--- a/test/robustness/history/history.go
++++ b/test/robustness/history/history.go
+@@ -571 +571 @@
+-		if s.PersistedCompletionEvents > s.RawCompletions {
++		if s.PersistedCompletionEvents < s.RawCompletions {
