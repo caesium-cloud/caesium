@@ -73,6 +73,11 @@ PROVENANCE_MUST_MATCH = (
     "settings_sha256",
 )
 
+BENCHMARK_HARNESS_FILES = (
+    "internal/run/owner_benchmark_test.go",
+    "internal/run/recovery_benchmark_test.go",
+)
+
 # Exact last-component / whole-token names. Substring matches are forbidden:
 # "rate" must not make error_rate/generate/migrate higher-is-better.
 LOWER_IS_BETTER_NAMES = {
@@ -577,7 +582,75 @@ def provenance_issues(base, candidate):
             mismatched.append(
                 f"provenance.{field} differs: base={base_p.get(field)!r} candidate={cand_p.get(field)!r}"
             )
-    return {"missing": missing, "mismatched": mismatched, "instrumented": instrumented}
+    return {"missing": missing, "mismatched": mismatched, "instrumented": instrumented, "invalid": []}
+
+
+def benchmark_harness_issues(doc, base, candidate):
+    """Check that measured benchmarks share one declared harness and image pair."""
+    manifest = doc.get("benchmark_harness")
+    if not isinstance(manifest, dict):
+        return ["benchmark_harness manifest is missing or malformed"]
+
+    issues = []
+    base_p = base.get("provenance") if isinstance(base.get("provenance"), dict) else {}
+    cand_p = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+
+    def same(body, field, expected, prefix):
+        actual = body.get(field)
+        if actual is None or actual == "":
+            issues.append(f"{prefix}.{field} is missing")
+        elif actual != expected:
+            issues.append(f"{prefix}.{field} differs from the benchmark source or release image")
+
+    if manifest.get("schema_version") != 1:
+        issues.append("benchmark_harness.schema_version must be 1")
+    same(manifest, "base_source_sha", base_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "candidate_source_sha", cand_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "harness_source_sha", cand_p.get("git_sha"), "benchmark_harness")
+    same(manifest, "base_release_image_id", base_p.get("image_id"), "benchmark_harness")
+    same(manifest, "candidate_release_image_id", cand_p.get("image_id"), "benchmark_harness")
+    harness_sha = manifest.get("harness_sha256")
+    if not isinstance(harness_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", harness_sha):
+        issues.append("benchmark_harness.harness_sha256 must be a SHA-256 digest")
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) != len(BENCHMARK_HARNESS_FILES):
+        issues.append("benchmark_harness.files must contain both benchmark source files")
+        files = []
+    paths = []
+    overlaid = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            issues.append("benchmark_harness.files contains a malformed entry")
+            continue
+        path = entry.get("path")
+        paths.append(path)
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            issues.append(f"benchmark_harness.files[{path!r}].sha256 is missing or malformed")
+        original = entry.get("base_original_sha256")
+        if original is not None and (not isinstance(original, str) or not re.fullmatch(r"[0-9a-f]{64}", original)):
+            issues.append(f"benchmark_harness.files[{path!r}].base_original_sha256 is malformed")
+        if not isinstance(entry.get("overlaid"), bool):
+            issues.append(f"benchmark_harness.files[{path!r}].overlaid is missing or malformed")
+        elif entry["overlaid"]:
+            overlaid.append(path)
+        elif original != entry.get("sha256"):
+            issues.append(f"benchmark_harness.files[{path!r}] claims no overlay but base content differs")
+    if paths != list(BENCHMARK_HARNESS_FILES):
+        issues.append("benchmark_harness.files paths are missing, duplicated, or out of order")
+    overlays = manifest.get("base_overlay_paths")
+    if not isinstance(overlays, list) or overlays != overlaid:
+        issues.append("benchmark_harness.base_overlay_paths differs from file overlay accounting")
+
+    for label, prov, source_sha, expected_overlay in (
+        ("base", base_p, base_p.get("git_sha"), overlays),
+        ("candidate", cand_p, cand_p.get("git_sha"), []),
+    ):
+        same(prov, "benchmark_source_git_sha", source_sha, f"{label}.provenance")
+        same(prov, "benchmark_harness_git_sha", manifest.get("harness_source_sha"), f"{label}.provenance")
+        same(prov, "benchmark_harness_sha256", harness_sha, f"{label}.provenance")
+        same(prov, "benchmark_overlay_paths", expected_overlay, f"{label}.provenance")
+    return issues
 
 
 def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
@@ -769,15 +842,19 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
     fail_reasons = []
     inconclusive_reasons = []
 
+    required_families = list(doc.get("required_families") or [])
     prov = provenance_issues(base, candidate)
+    if "benchmark" in required_families or base.get("benchmarks") or candidate.get("benchmarks"):
+        prov["invalid"].extend(benchmark_harness_issues(doc, base, candidate))
     if prov["missing"]:
         fail_reasons.extend(prov["missing"])
+    if prov["invalid"]:
+        fail_reasons.extend(prov["invalid"])
     if prov["instrumented"]:
         fail_reasons.extend(prov["instrumented"])
     if prov["mismatched"]:
         inconclusive_reasons.extend(prov["mismatched"])
 
-    required_families = list(doc.get("required_families") or [])
     required_browser = list(doc.get("required_browser_series") or [])
     if "browser" in required_families and not required_browser:
         required_browser = list(REQUIRED_BROWSER_SERIES)

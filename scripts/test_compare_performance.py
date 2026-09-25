@@ -18,6 +18,11 @@ SCRIPT = ROOT / "scripts/compare-performance.py"
 SH = ROOT / "scripts/performance.sh"
 MJS = ROOT / "ui/scripts/check-bundle-size.mjs"
 COMPARE = runpy.run_path(str(SCRIPT))
+BENCH_FILES = (
+    "internal/run/owner_benchmark_test.go",
+    "internal/run/recovery_benchmark_test.go",
+)
+BENCH_DIGEST = "f" * 64
 
 
 def provenance(label="base", **overrides):
@@ -36,6 +41,10 @@ def provenance(label="base", **overrides):
         "instrumented": False,
         "cli_digest": "sha256:" + "ee" * 32,
         "toolchain_id": "caesiumcloud/caesium-builder:latest@sha256:abcd",
+        "benchmark_source_git_sha": sha,
+        "benchmark_harness_git_sha": "b" * 40,
+        "benchmark_harness_sha256": BENCH_DIGEST,
+        "benchmark_overlay_paths": list(BENCH_FILES) if label == "base" else [],
     }
     body.update(overrides)
     return body
@@ -78,10 +87,27 @@ def side(label, **overrides):
 
 
 def document(base=None, candidate=None):
+    base = base if base is not None else side("base")
+    candidate = candidate if candidate is not None else side("candidate")
     return {
         "schema_version": 1,
-        "base": base if base is not None else side("base"),
-        "candidate": candidate if candidate is not None else side("candidate"),
+        "base": base,
+        "candidate": candidate,
+        "benchmark_harness": {
+            "schema_version": 1,
+            "base_source_sha": base["provenance"].get("git_sha"),
+            "candidate_source_sha": candidate["provenance"].get("git_sha"),
+            "harness_source_sha": candidate["provenance"].get("git_sha"),
+            "harness_sha256": BENCH_DIGEST,
+            "base_overlay_paths": list(BENCH_FILES),
+            "base_release_image_id": base["provenance"].get("image_id"),
+            "candidate_release_image_id": candidate["provenance"].get("image_id"),
+            "files": [
+                {"path": path, "sha256": str(i) * 64,
+                 "base_original_sha256": None, "overlaid": True}
+                for i, path in enumerate(BENCH_FILES, start=1)
+            ],
+        },
     }
 
 
@@ -186,6 +212,70 @@ class KnownFixturesTests(unittest.TestCase):
         self.assertNotEqual(report["overall"], "equivalent")
         proc = run_cli(input_doc=doc)
         self.assertEqual(proc.returncode, 3, proc.stderr)
+
+
+class BenchmarkHarnessProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def bench_document():
+        doc = document()
+        doc["required_families"] = ["benchmark"]
+        for label in ("base", "candidate"):
+            for family in ("workloads", "browser", "bundle", "system"):
+                doc[label][family] = {}
+        return doc
+
+    def assert_rejected(self, doc, reason):
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail", report)
+        self.assertFalse(report["speed_compared"])
+        self.assertTrue(any(reason in item for item in report["reasons"]), report["reasons"])
+        proc = run_cli(input_doc=doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+
+    def test_matching_harness_allows_benchmark_comparison(self):
+        doc = self.bench_document()
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "no_significant_difference")
+        self.assertTrue(report["speed_compared"])
+        self.assertEqual(run_cli(input_doc=doc).returncode, 0)
+
+    def test_missing_manifest_fails_closed(self):
+        doc = self.bench_document()
+        del doc["benchmark_harness"]
+        self.assert_rejected(doc, "benchmark_harness")
+
+    def test_different_side_harness_digest_fails_closed(self):
+        doc = self.bench_document()
+        doc["base"]["provenance"]["benchmark_harness_sha256"] = "0" * 64
+        self.assert_rejected(doc, "base.provenance.benchmark_harness_sha256")
+
+    def test_wrong_harness_source_and_image_identity_fail_closed(self):
+        for field, reason in (
+            ("harness_source_sha", "harness_source_sha"),
+            ("base_release_image_id", "base_release_image_id"),
+        ):
+            with self.subTest(field=field):
+                doc = self.bench_document()
+                doc["benchmark_harness"][field] = "wrong"
+                self.assert_rejected(doc, reason)
+
+    def test_missing_file_or_false_overlay_accounting_fails_closed(self):
+        for mutation, reason in (
+            (lambda doc: doc["benchmark_harness"]["files"].pop(), "files"),
+            (lambda doc: doc["benchmark_harness"]["base_overlay_paths"].clear(), "base_overlay_paths"),
+        ):
+            with self.subTest(reason=reason):
+                doc = self.bench_document()
+                mutation(doc)
+                self.assert_rejected(doc, reason)
+
+    def test_valid_partial_overlay_keeps_same_harness(self):
+        doc = self.bench_document()
+        doc["benchmark_harness"]["base_overlay_paths"] = [BENCH_FILES[0]]
+        doc["benchmark_harness"]["files"][1]["overlaid"] = False
+        doc["benchmark_harness"]["files"][1]["base_original_sha256"] = "2" * 64
+        doc["base"]["provenance"]["benchmark_overlay_paths"] = [BENCH_FILES[0]]
+        self.assertEqual(compare_doc(doc)["overall"], "no_significant_difference")
 
 
 class FailClosedTests(unittest.TestCase):
@@ -552,6 +642,23 @@ class PerformanceShWiringTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             report = json.loads((Path(tmp) / "report.json").read_text())
             self.assertEqual(report["overall"], "faster")
+
+    def test_compare_subcommand_rejects_benchmark_without_harness(self):
+        doc = BenchmarkHarnessProvenanceTests.bench_document()
+        del doc["benchmark_harness"]
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = Path(tmp) / "comparison.json"
+            inp.write_text(json.dumps(doc))
+            env = os.environ.copy()
+            env["CAESIUM_PERF_ARTIFACTS"] = tmp
+            proc = subprocess.run(
+                ["bash", str(SH), "compare", str(inp)],
+                capture_output=True, text=True, env=env, cwd=str(ROOT),
+            )
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            report = json.loads((Path(tmp) / "report.json").read_text())
+            self.assertEqual(report["overall"], "fail")
+            self.assertFalse(report["speed_compared"])
 
     def test_script_refuses_instrumented_env_in_source(self):
         src = SH.read_text()

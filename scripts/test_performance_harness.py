@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -59,6 +61,12 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
 
+    def cleanup_overlay(self, *, env=None):
+        return subprocess.run(
+            ["bash", str(SCRIPT), "cleanup-bench-harness", str(self.base)],
+            capture_output=True, text=True, check=False, env=env,
+        )
+
     def test_base_gets_exact_candidate_harness_after_release_identity_is_pinned(self):
         result = self.prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -93,6 +101,34 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("candidate checkout HEAD", result.stderr)
         self.assertFalse(self.manifest.exists())
+
+    def test_overlay_cleanup_restores_a_clean_base_checkout(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        result = self.cleanup_overlay()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(self.base, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assertTrue(all(not (self.base / path).exists() for path in FILES))
+
+    def test_failed_git_status_cannot_validate_overlay_cleanup(self):
+        self.assertEqual(self.prepare().returncode, 0)
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do\n"
+            "  if [ \"$arg\" = status ]; then echo status-unavailable >&2; exit 1; fi\n"
+            "done\n"
+            f'exec "{real_git}" "$@"\n'
+        )
+        fake_git.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        result = self.cleanup_overlay(env=env)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("could not verify base checkout", result.stderr)
 
 
 if __name__ == "__main__":

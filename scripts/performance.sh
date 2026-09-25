@@ -128,12 +128,34 @@ print(f"benchmark harness: {len(files)} exact blobs from {candidate_sha}; base o
 PY
 }
 
+cleanup_benchmark_harness() {
+  local base="$1" path status
+  for path in internal/run/owner_benchmark_test.go internal/run/recovery_benchmark_test.go; do
+    if git -C "$base" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      git -C "$base" restore -- "$path" || die "could not restore base benchmark $path"
+    else
+      rm -f "$base/$path" || die "could not remove base benchmark overlay $path"
+    fi
+  done
+  status="$(git -C "$base" status --porcelain --untracked-files=all)" \
+    || die "could not verify base checkout after benchmark overlay cleanup"
+  [[ -z "$status" ]] || die "base checkout is dirty after benchmark overlay cleanup"
+}
+
 if [[ "${1:-}" == "prepare-bench-harness" ]]; then
   shift
   [[ "$#" -eq 7 ]] || die "prepare-bench-harness needs candidate dir, base dir, candidate SHA, base SHA, manifest path, base image ID, candidate image ID"
   require_cmd git
   require_cmd python3
   prepare_benchmark_harness "$@"
+  exit $?
+fi
+
+if [[ "${1:-}" == "cleanup-bench-harness" ]]; then
+  shift
+  [[ "$#" -eq 1 ]] || die "cleanup-bench-harness needs the base checkout directory"
+  require_cmd git
+  cleanup_benchmark_harness "$1"
   exit $?
 fi
 
@@ -466,15 +488,7 @@ if [[ "$RUN_BENCH" == "1" ]]; then
   run_benches "$BASE_WORKTREE" "$ARTIFACTS/base/bench.txt" "caesiumcloud/caesium-builder:${BASE_SHA}-full"
   # Remove only the measurement overlay before bundle/browser work uses the
   # base checkout. The manifest retains the exact benchmark provenance.
-  for path in internal/run/owner_benchmark_test.go internal/run/recovery_benchmark_test.go; do
-    if git -C "$BASE_WORKTREE" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
-      git -C "$BASE_WORKTREE" restore -- "$path" || die "could not restore base benchmark $path"
-    else
-      rm -f "$BASE_WORKTREE/$path"
-    fi
-  done
-  [[ -z "$(git -C "$BASE_WORKTREE" status --porcelain --untracked-files=all)" ]] \
-    || die "base checkout is dirty after benchmark overlay cleanup"
+  cleanup_benchmark_harness "$BASE_WORKTREE"
 fi
 
 # ---------------------------------------------------------------------------
