@@ -233,7 +233,7 @@ PY
     *) cluster_die "unsupported previous-release platform architecture $LC_ARCH" ;;
   esac
   LC_PLATFORM="linux/$LC_ARCH"
-  LC_PREV_CONFIG_ID="$(docker image inspect --platform "$LC_PLATFORM" --format '{{.Id}}' "$LC_PREV")"
+  LC_PREV_INSPECT_PLATFORM_ID="$(docker image inspect --platform "$LC_PLATFORM" --format '{{.Id}}' "$LC_PREV")"
   LC_PREV_ID="$LC_PREV_ID" LC_PREV_DIGESTS="$LC_PREV_DIGESTS" LC_ART="$LC_ART" LC_PAIR="$LC_PAIR" python3 - <<'PY' || cluster_die 'previous release digest does not match versions.json'
 import json,os,pathlib
 doc=json.loads(pathlib.Path(os.environ['LC_ART'],'versions.json').read_text())
@@ -250,8 +250,6 @@ p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR'])
 print(p['previous']['digests'][os.environ['LC_PLATFORM']])
 PY
 )"
-  LC_PREV_IDS="$LC_PREV_ID,$LC_PREV_PLATFORM_DIGEST,$LC_PREV_CONFIG_ID"
-  lc_case previous-release-digest pass "pulled $LC_PREV for $LC_PLATFORM; release index $LC_PREV_ID; platform manifest $LC_PREV_PLATFORM_DIGEST; config $LC_PREV_CONFIG_ID; repo digests $LC_PREV_DIGESTS"
   if docker image inspect "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" >/dev/null 2>&1; then
     [[ "${CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE:-0}" == 1 ]] || cluster_die "candidate image pre-exists; cannot bind it to $LC_SHA without explicit unverified override"
     LC_PROVENANCE=supplied-unverified
@@ -373,8 +371,103 @@ PY
     >"$LC_ART/cluster-logs/save-previous.log" 2>&1 || cluster_die "cannot export pinned previous platform $LC_PLATFORM"
   docker image save --platform "$LC_PLATFORM" --output "$LC_ART/task-platform.tar" "$LC_TASK" \
     >"$LC_ART/cluster-logs/save-task.log" 2>&1 || cluster_die "cannot export task platform $LC_PLATFORM"
+  LC_PREV_CONFIG_ID="$(LC_ART="$LC_ART" LC_PREV="$LC_PREV" LC_PLATFORM="$LC_PLATFORM" \
+    LC_PREV_PLATFORM_DIGEST="$LC_PREV_PLATFORM_DIGEST" python3 - \
+    2>"$LC_ART/cluster-logs/previous-archive-verification.log" <<'PY'
+import hashlib,json,os,pathlib,re,tarfile
+art=pathlib.Path(os.environ['LC_ART']);archive=art/'previous-platform.tar'
+tag=os.environ['LC_PREV'];platform=os.environ['LC_PLATFORM']
+pinned=os.environ['LC_PREV_PLATFORM_DIGEST']
+def require(condition,detail):
+  if not condition:raise SystemExit(detail)
+def digest_blob(tar,digest):
+  require(re.fullmatch(r'sha256:[0-9a-f]{64}',digest),f'invalid archive digest {digest!r}')
+  member=tar.getmember('blobs/sha256/'+digest.split(':',1)[1])
+  require(member.isfile(),f'archive blob {digest} is not a file')
+  data=tar.extractfile(member).read()
+  require(hashlib.sha256(data).hexdigest()==digest.split(':',1)[1],f'archive blob {digest} hash mismatch')
+  return data
+with tarfile.open(archive) as tar:
+  names=tar.getnames()
+  require(len(names)==len(set(names)),'archive contains duplicate paths')
+  manifest=json.load(tar.extractfile('manifest.json'))
+  index=json.load(tar.extractfile('index.json'))
+  require(len(manifest)==1 and manifest[0].get('RepoTags')==[tag],
+    f'archive does not contain exactly the pinned repo tag {tag}')
+  require(index.get('schemaVersion')==2 and len(index.get('manifests',[]))==1,
+    'archive index must contain one platform manifest')
+  descriptor=index['manifests'][0]
+  target_os,target_arch=platform.split('/',1)
+  require(descriptor.get('platform',{}).get('os')==target_os and
+    descriptor.get('platform',{}).get('architecture')==target_arch,
+    f'archive platform differs from {platform}')
+  require(descriptor.get('digest')==pinned,f'archive manifest differs from pinned {pinned}')
+  manifest_bytes=digest_blob(tar,pinned)
+  require(descriptor.get('size')==len(manifest_bytes),'platform manifest size mismatch')
+  image_manifest=json.loads(manifest_bytes)
+  require(image_manifest.get('schemaVersion')==2,'invalid platform image manifest')
+  config_descriptor=image_manifest.get('config',{})
+  config_digest=config_descriptor.get('digest','')
+  require(manifest[0].get('Config')=='blobs/sha256/'+config_digest.removeprefix('sha256:'),
+    'archive Config path differs from pinned platform manifest')
+  config_bytes=digest_blob(tar,config_digest)
+  require(config_descriptor.get('size')==len(config_bytes),'image config size mismatch')
+  config=json.loads(config_bytes)
+  require(config.get('os')==target_os and config.get('architecture')==target_arch,
+    f'image config platform differs from {platform}')
+  layers=image_manifest.get('layers',[])
+  require(bool(layers),'platform manifest has no layers')
+  paths=['blobs/sha256/'+layer['digest'].removeprefix('sha256:') for layer in layers]
+  require(manifest[0].get('Layers')==paths,'archive layer list differs from pinned platform manifest')
+  for layer in layers:
+    data=digest_blob(tar,layer['digest'])
+    require(layer.get('size')==len(data),f'layer {layer["digest"]} size mismatch')
+  index_bytes=tar.extractfile('index.json').read()
+  record={'archive_ref':'previous-platform.tar','repo_tag':tag,'platform':platform,
+    'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),
+    'archive_index_digest':'sha256:'+hashlib.sha256(index_bytes).hexdigest(),
+    'pinned_platform_manifest_digest':pinned,'verified_config_digest':config_digest,
+    'verified_layer_digests':[layer['digest'] for layer in layers],
+    'verification':'archive tag, platform, manifest, config and layer hashes matched'}
+  (art/'previous-image-archive.json').write_text(json.dumps(record,indent=2)+'\n')
+  print(config_digest)
+PY
+)" || cluster_die "previous platform archive does not bind the pinned release to a verified config digest"
+  LC_PREV_IDS="$LC_PREV_ID,$LC_PREV_PLATFORM_DIGEST,$LC_PREV_CONFIG_ID"
   lc_kind_load previous image-archive "$LC_ART/previous-platform.tar" \
     || cluster_die "kind previous platform import failed after bounded containerd retries"
+  while IFS= read -r node; do
+    lc_run_timed 20 "$LC_ART/cluster-logs/previous-import-$node.txt" \
+      docker exec --privileged "$node" ctr --namespace=k8s.io images ls \
+      || cluster_die "cannot inspect previous image import on owned node $node"
+  done <"$LC_ART/cluster-logs/kind-nodes.txt"
+  LC_ART="$LC_ART" LC_PREV="$LC_PREV" python3 - \
+    2>"$LC_ART/cluster-logs/previous-import-verification.log" <<'PY' \
+    || cluster_die "owned kind nodes did not import the verified previous image"
+import hashlib,json,os,pathlib,re
+art=pathlib.Path(os.environ['LC_ART']);tag=os.environ['LC_PREV']
+proof=json.loads((art/'previous-image-archive.json').read_text())
+if hashlib.sha256((art/'previous-platform.tar').read_bytes()).hexdigest()!=proof['archive_sha256']:
+  raise SystemExit('previous image archive changed during kind import')
+expected={proof['archive_index_digest'],proof['pinned_platform_manifest_digest']}
+refs={tag,'docker.io/'+tag}
+nodes=(art/'cluster-logs/kind-nodes.txt').read_text().splitlines()
+observed=[]
+for node in nodes:
+  lines=(art/'cluster-logs'/f'previous-import-{node}.txt').read_text().splitlines()
+  rows=[line.split() for line in lines if line.split() and line.split()[0] in refs]
+  if not rows:raise SystemExit(f'{node}: no imported row for {tag}')
+  for row in rows:
+    digests=[field for field in row[1:] if re.fullmatch(r'sha256:[0-9a-f]{64}',field)]
+    if len(digests)!=1 or digests[0] not in expected:
+      raise SystemExit(f'{node}: imported tag digest {digests!r} differs from verified archive {sorted(expected)}')
+    observed.append({'node':node,'repo_tag':row[0],'imported_target_digest':digests[0]})
+if len({entry['node'] for entry in observed})!=4:
+  raise SystemExit(f'expected four owned node imports, got {len({entry["node"] for entry in observed})}')
+(art/'previous-image-node-imports.json').write_text(json.dumps({
+  'archive_proof':'previous-image-archive.json','node_imports':observed},indent=2)+'\n')
+PY
+  lc_case previous-release-digest pass "pulled $LC_PREV for $LC_PLATFORM; repo digest $LC_PREV_ID; platform manifest $LC_PREV_PLATFORM_DIGEST; verified config $LC_PREV_CONFIG_ID; Docker platform inspect $LC_PREV_INSPECT_PLATFORM_ID; all owned nodes imported the verified archive" "$LC_ART/previous-image-node-imports.json"
   lc_kind_load task image-archive "$LC_ART/task-platform.tar" \
     || cluster_die "kind task platform import failed after bounded containerd retries"
   lc_kind_load built docker-image "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" \
