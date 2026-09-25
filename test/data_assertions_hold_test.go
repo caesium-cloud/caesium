@@ -96,9 +96,9 @@ func (s *IntegrationTestSuite) runProducer(job *jobSummary) *runResponse {
 // triggerHeldRun starts a run the admission gate is expected to refuse and
 // returns the terminal `skipped` run it recorded.
 //
-// The POST answers 202 with no body (the gate returns ErrRunSkipped, so the
-// controller has no run to hand back), which is exactly why the run has to be
-// findable in history: an invisible non-run would be silent poison's evil twin.
+// The POST answers 202 with outcome "skipped", reason "dataset_hold", and the
+// id of the terminal run the gate wrote. The run must also be findable in
+// history: an invisible non-run would be silent poison's evil twin.
 func (s *IntegrationTestSuite) triggerHeldRun(jobID string) runResponse {
 	s.T().Helper()
 
@@ -107,6 +107,15 @@ func (s *IntegrationTestSuite) triggerHeldRun(jobID string) runResponse {
 	s.Require().NoError(err)
 	defer resp.Body.Close()
 	s.Require().Equal(http.StatusAccepted, resp.StatusCode)
+	var started struct {
+		Outcome string `json:"outcome"`
+		Reason  string `json:"reason"`
+		RunID   string `json:"run_id"`
+	}
+	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&started))
+	s.Require().Equal("skipped", started.Outcome, "a held start must say it was skipped")
+	s.Require().Equal("dataset_hold", started.Reason)
+	s.Require().NotEmpty(started.RunID, "a held start must name the skipped run it recorded")
 
 	var latestID string
 	s.Require().Eventually(func() bool {
@@ -121,6 +130,7 @@ func (s *IntegrationTestSuite) triggerHeldRun(jobID string) runResponse {
 		return latest.Status != "running"
 	}, 60*time.Second, 250*time.Millisecond,
 		"a hold-gated run must appear in run history as a terminal row, not as an absence")
+	s.Require().Equal(started.RunID, latestID, "the start response must name the run history shows")
 
 	// Re-read the run by id: the run LIST projection carries no task rows, and
 	// the whole point of this path is that the skipped run has them.

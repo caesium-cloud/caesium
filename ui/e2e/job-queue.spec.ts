@@ -6,8 +6,12 @@ type E2EJob = {
   alias: string;
 };
 
-type E2ERun = {
-  id: string;
+// POST /v1/jobs/:id/run answers every accepted start with an outcome: the run
+// itself for "created", or {outcome, job_id, queue_id} for a queued start.
+type RunStart = {
+  outcome: "created" | "queued" | "skipped";
+  id?: string;
+  queue_id?: string;
 };
 
 type QueueRow = {
@@ -24,10 +28,13 @@ test("job detail shows pending queued runs", async ({ page, request }) => {
   const job = await findJobByAlias(request, alias);
 
   const activeRun = await triggerRun(request, job.id, "low", { lane: "active" });
-  expect(activeRun?.id).toBeTruthy();
+  expect(activeRun.outcome).toBe("created");
+  expect(activeRun.id).toBeTruthy();
 
   const queuedRun = await triggerRun(request, job.id, "high", { lane: "queued" });
-  expect(queuedRun).toBeNull();
+  expect(queuedRun.outcome).toBe("queued");
+  expect(queuedRun.id, "a queued start has no run yet").toBeUndefined();
+  expect(queuedRun.queue_id).toBeTruthy();
 
   await expect
     .poll(async () => {
@@ -40,7 +47,7 @@ test("job detail shows pending queued runs", async ({ page, request }) => {
   if (!queuedRow) {
     throw new Error("queued row was not returned after polling");
   }
-  expect(queuedRow.id).toBeTruthy();
+  expect(queuedRow.id).toBe(queuedRun.queue_id);
 
   await page.route(`**/v1/jobs/${job.id}/queue/${queuedRow.id}`, async (route) => {
     await route.fulfill({
@@ -110,18 +117,14 @@ async function triggerRun(
   jobId: string,
   priority: "low" | "normal" | "high",
   params: Record<string, string>,
-): Promise<E2ERun | null> {
+): Promise<RunStart> {
   const response = await request.post(`/v1/jobs/${jobId}/run`, {
     data: { priority, params },
   });
   if (!response.ok()) {
     throw new Error(`failed to trigger run: ${response.status()} ${await response.text()}`);
   }
-  const text = (await response.text()).trim();
-  if (!text) {
-    return null;
-  }
-  return JSON.parse(text) as E2ERun;
+  return (await response.json()) as RunStart;
 }
 
 async function getQueue(request: APIRequestContext, jobId: string): Promise<QueueRow[]> {

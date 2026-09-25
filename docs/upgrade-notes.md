@@ -1,5 +1,24 @@
 # Upgrade notes
 
+## Unreleased: run start outcomes and idempotency keys
+
+`POST /v1/jobs/:id/run` still answers every accepted start with `202`, but the
+body is never empty now. A start that created a run returns the run as before,
+plus `"outcome": "created"`. A start the concurrency policy queued or skipped,
+or a dataset hold refused, previously returned an empty `202`. It now returns
+`{"outcome": "queued" | "skipped", "job_id", "queue_id" | "reason", "run_id"?}`.
+Clients that only check for an `id` keep working: the new body has none.
+
+The endpoint also accepts an optional `Idempotency-Key` header. Retries with the
+same key return the original outcome instead of starting another run. See
+[job-definitions.md](job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency).
+The records live in a new `run_start_idempotency` table, created by the normal
+startup migration.
+
+`caesium run start` used to fail with "response was not valid JSON" on a queued
+or skipped start. A queued start now exits `0` with a note on stderr and nothing
+on stdout. A skipped start exits non-zero and names the reason.
+
 ## Unreleased: dataset paths and operator reads
 
 Dataset REST paths now decode escaped path segments exactly once. A name such

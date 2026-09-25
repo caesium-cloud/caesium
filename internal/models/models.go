@@ -8,6 +8,7 @@ var All = []any{
 	&Trigger{},
 	&Job{},
 	&RunQueue{},
+	&RunStartIdempotency{},
 	&IngestedEvent{},
 	&WebhookEvent{},
 	&Task{},
