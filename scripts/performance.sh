@@ -42,6 +42,101 @@ die() { log "ERROR: $*"; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 require_env() { [[ -n "${!1:-}" ]] || die "$1 is required"; }
 
+# Overlay only E3's measurement code on the temporary base checkout. The
+# release images are built before this is called; changing their source would
+# invalidate the image identity. The two exact candidate-commit blobs define
+# one common harness, while each side still measures its own implementation.
+prepare_benchmark_harness() {
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+candidate_dir, base_dir, candidate_sha, base_sha, dest, base_image_id, candidate_image_id = sys.argv[1:]
+files = (
+    "internal/run/owner_benchmark_test.go",
+    "internal/run/recovery_benchmark_test.go",
+)
+
+def git(root, *args, check=True):
+    result = subprocess.run(["git", "-C", root, *args], capture_output=True, check=False)
+    if check and result.returncode:
+        raise SystemExit(f"benchmark harness: git {' '.join(args)} failed in {root}: {result.stderr.decode(errors='replace').strip()}")
+    return result
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+def status_paths(root):
+    raw = git(root, "status", "--porcelain", "--untracked-files=all", "-z").stdout
+    return {entry[3:].decode() for entry in raw.split(b"\0") if entry}
+
+for label, root, expected in (("candidate", candidate_dir, candidate_sha), ("base", base_dir, base_sha)):
+    head = git(root, "rev-parse", "HEAD").stdout.decode().strip()
+    if head != expected:
+        raise SystemExit(f"benchmark harness: {label} checkout HEAD {head} != declared SHA {expected}")
+    dirty = status_paths(root)
+    if dirty:
+        raise SystemExit(f"benchmark harness: {label} checkout is dirty before overlay: {sorted(dirty)}")
+
+overlaid = []
+manifest = []
+digest = hashlib.sha256()
+for path in files:
+    candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
+    candidate_file = pathlib.Path(candidate_dir, path)
+    if not candidate_file.is_file() or candidate_file.read_bytes() != candidate_blob:
+        raise SystemExit(f"benchmark harness: candidate file {path} differs from {candidate_sha}")
+    base_result = git(base_dir, "show", f"{base_sha}:{path}", check=False)
+    base_blob = base_result.stdout if base_result.returncode == 0 else None
+    changed = base_blob != candidate_blob
+    if changed:
+        target = pathlib.Path(base_dir, path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(candidate_blob)
+        overlaid.append(path)
+    if pathlib.Path(base_dir, path).read_bytes() != candidate_blob:
+        raise SystemExit(f"benchmark harness: base did not receive the exact {candidate_sha}:{path} blob")
+    digest.update(path.encode() + b"\0" + candidate_blob + b"\0")
+    manifest.append({
+        "path": path,
+        "sha256": sha256(candidate_blob),
+        "base_original_sha256": sha256(base_blob) if base_blob is not None else None,
+        "overlaid": changed,
+    })
+
+dirty = status_paths(base_dir)
+if dirty != set(overlaid):
+    raise SystemExit(f"benchmark harness: base changed outside the declared overlay: {sorted(dirty ^ set(overlaid))}")
+doc = {
+    "schema_version": 1,
+    "base_source_sha": base_sha,
+    "candidate_source_sha": candidate_sha,
+    "harness_source_sha": candidate_sha,
+    "harness_sha256": digest.hexdigest(),
+    "base_overlay_paths": overlaid,
+    "base_release_image_id": base_image_id,
+    "candidate_release_image_id": candidate_image_id,
+    "files": manifest,
+}
+output = pathlib.Path(dest)
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(doc, indent=2) + "\n")
+print(f"benchmark harness: {len(files)} exact blobs from {candidate_sha}; base overlay {overlaid}; manifest {dest}", file=sys.stderr)
+PY
+}
+
+if [[ "${1:-}" == "prepare-bench-harness" ]]; then
+  shift
+  [[ "$#" -eq 7 ]] || die "prepare-bench-harness needs candidate dir, base dir, candidate SHA, base SHA, manifest path, base image ID, candidate image ID"
+  require_cmd git
+  require_cmd python3
+  prepare_benchmark_harness "$@"
+  exit $?
+fi
+
 # ---------------------------------------------------------------------------
 # compare-only: no Docker, feed an existing document to the comparator.
 # ---------------------------------------------------------------------------
@@ -359,9 +454,27 @@ run_benches() {
   return 0
 }
 
+BENCH_HARNESS_MANIFEST="$ARTIFACTS/observations/benchmark-harness.json"
 if [[ "$RUN_BENCH" == "1" ]]; then
+  # Build/inspect both release images before the temporary base checkout is
+  # overlaid. The benchmark output then measures the two source SHAs with the
+  # same test code; the overlay is recorded separately from image provenance.
+  prepare_benchmark_harness "$ROOT" "$BASE_WORKTREE" "$CANDIDATE_SHA" "$BASE_SHA" \
+    "$BENCH_HARNESS_MANIFEST" "$BASE_IMAGE_ID" "$CANDIDATE_IMAGE_ID" \
+    || die "benchmark harness preparation failed"
   run_benches "$ROOT" "$ARTIFACTS/candidate/bench.txt" "caesiumcloud/caesium-builder:${CANDIDATE_SHA}-full"
   run_benches "$BASE_WORKTREE" "$ARTIFACTS/base/bench.txt" "caesiumcloud/caesium-builder:${BASE_SHA}-full"
+  # Remove only the measurement overlay before bundle/browser work uses the
+  # base checkout. The manifest retains the exact benchmark provenance.
+  for path in internal/run/owner_benchmark_test.go internal/run/recovery_benchmark_test.go; do
+    if git -C "$BASE_WORKTREE" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      git -C "$BASE_WORKTREE" restore -- "$path" || die "could not restore base benchmark $path"
+    else
+      rm -f "$BASE_WORKTREE/$path"
+    fi
+  done
+  [[ -z "$(git -C "$BASE_WORKTREE" status --porcelain --untracked-files=all)" ]] \
+    || die "base checkout is dirty after benchmark overlay cleanup"
 fi
 
 # ---------------------------------------------------------------------------
@@ -585,6 +698,7 @@ export CATALOG_SHA SETTINGS_SHA BASE_BUILT CANDIDATE_BUILT
 export BASE_GO_VERSION CANDIDATE_GO_VERSION BASE_BUILDER_ID CANDIDATE_BUILDER_ID
 export BASE_TOOLCHAIN CANDIDATE_TOOLCHAIN
 export RUN_LOAD RUN_BENCH RUN_BROWSER RUN_BUNDLE
+export BENCH_HARNESS_MANIFEST
 python3 - <<'PY'
 import json, os, pathlib, re
 
@@ -595,6 +709,23 @@ def load_json(path):
         return json.loads(pathlib.Path(path).read_text())
     except Exception:
         return None
+
+bench_harness = None
+if os.environ.get("RUN_BENCH") == "1":
+    bench_harness = load_json(os.environ["BENCH_HARNESS_MANIFEST"])
+    if not isinstance(bench_harness, dict):
+        raise SystemExit("benchmark harness manifest is missing or malformed")
+    for field, expected in (
+        ("base_source_sha", os.environ["BASE_SHA"]),
+        ("candidate_source_sha", os.environ["CANDIDATE_SHA"]),
+        ("harness_source_sha", os.environ["CANDIDATE_SHA"]),
+        ("base_release_image_id", os.environ["BASE_IMAGE_ID"]),
+        ("candidate_release_image_id", os.environ["CANDIDATE_IMAGE_ID"]),
+    ):
+        if bench_harness.get(field) != expected:
+            raise SystemExit(f"benchmark harness {field} does not match the release comparison")
+    if not bench_harness.get("harness_sha256") or len(bench_harness.get("files") or []) != 2:
+        raise SystemExit("benchmark harness manifest lacks the two measured source files")
 
 def bench_text(path):
     p = pathlib.Path(path)
@@ -677,23 +808,31 @@ def side_doc(label, sha, image, image_id, cli_digest, built, go_version, builder
     workloads = {}
     workloads.update(workload_samples(label, "cold"))
     workloads.update(workload_samples(label, "warm"))
+    provenance = {
+        "git_sha": sha,
+        "image_id": image_id,
+        "image_ref": image,
+        "platform": os.environ["DOCKER_PLATFORM"],
+        "go_version": go_version,
+        "builder_image_id": builder_id,
+        "host_id": os.environ["HOST_ID"],
+        "catalog_sha256": os.environ["CATALOG_SHA"],
+        "settings_sha256": os.environ["SETTINGS_SHA"],
+        "instrumented": False,
+        "cli_digest": cli_digest,
+        "toolchain_id": toolchain,
+        "built_by_this_run": built == "built",
+    }
+    if bench_harness is not None:
+        provenance.update({
+            "benchmark_source_git_sha": sha,
+            "benchmark_harness_git_sha": bench_harness["harness_source_sha"],
+            "benchmark_harness_sha256": bench_harness["harness_sha256"],
+            "benchmark_overlay_paths": bench_harness["base_overlay_paths"] if label == "base" else [],
+        })
     return {
         "label": label,
-        "provenance": {
-            "git_sha": sha,
-            "image_id": image_id,
-            "image_ref": image,
-            "platform": os.environ["DOCKER_PLATFORM"],
-            "go_version": go_version,
-            "builder_image_id": builder_id,
-            "host_id": os.environ["HOST_ID"],
-            "catalog_sha256": os.environ["CATALOG_SHA"],
-            "settings_sha256": os.environ["SETTINGS_SHA"],
-            "instrumented": False,
-            "cli_digest": cli_digest,
-            "toolchain_id": toolchain,
-            "built_by_this_run": built == "built",
-        },
+        "provenance": provenance,
         "correctness": correctness(label, workloads),
         "workloads": workloads,
         "benchmarks": bench_text(art / label / "bench.txt"),
@@ -715,6 +854,7 @@ if os.environ.get("RUN_BUNDLE") == "1":
 doc = {
     "schema_version": 1,
     "required_families": families,
+    "benchmark_harness": bench_harness,
     "required_browser_series": [
         "browser.route_readiness_ms./jobs.live",
         "browser.route_readiness_ms./triggers.live",
