@@ -28,46 +28,13 @@ if [[ ! $test_timeout =~ ^[1-9][0-9]*$ ]]; then
   echo 'ORACLE_TEST_TIMEOUT_SECONDS must be a positive integer' >&2
   exit 2
 fi
+python3 "$checkout/test/model/testdata/test_oracle_probe_result.py" -v
 
 run_probe() {
   local mode=$1 package=$2 selector=$3 expected=$4 label=$5 marker=${6:-}
   local log="$scratch/${label}.jsonl"
-  python3 - "$checkout" "$mode" "$package" "$selector" "$expected" "$label" "$log" "$test_timeout" "$marker" <<'PY'
-import json
-import re
-import subprocess
-import sys
-
-checkout, mode, package, selector, expected_csv, label, log, deadline, marker = sys.argv[1:]
-expected = set(expected_csv.split(','))
-cmd = ['go', 'test', '-json', '-count=1', '-timeout=45s', '-run', selector, package]
-try:
-    result = subprocess.run(cmd, cwd=checkout, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, timeout=int(deadline), check=False)
-except subprocess.TimeoutExpired as exc:
-    print(f'{label}: checker exceeded {deadline}s; inconclusive, refusing green', file=sys.stderr)
-    sys.exit(1)
-with open(log, 'w', encoding='utf-8') as stream:
-    stream.write(result.stdout)
-actions = {}
-for line in result.stdout.splitlines():
-    try:
-        event = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    name = event.get('Test')
-    if name in expected and event.get('Action') in ('pass', 'fail', 'skip'):
-        actions[name] = event['Action']
-want = 'pass' if mode == 'candidate' else 'fail'
-bad = {name: actions.get(name, 'missing') for name in expected if actions.get(name) != want}
-exit_ok = result.returncode == (0 if mode == 'candidate' else 1)
-resource_failure = re.search(r'panic: test timed out|out of memory|signal: killed', result.stdout, re.IGNORECASE)
-if bad or not exit_ok or resource_failure or (mode == 'mutant' and marker not in result.stdout):
-    print(f'{label}: expected {want} for {sorted(expected)}, observed {actions}, go exit {result.returncode}; log={log}', file=sys.stderr)
-    print(result.stdout[-6000:], file=sys.stderr)
-    sys.exit(1)
-print(f'{label}: {want} {sorted(expected)} (go exit {result.returncode})')
-PY
+  python3 "$checkout/test/model/testdata/oracle_probe_result.py" \
+    "$checkout" "$mode" "$package" "$selector" "$expected" "$label" "$log" "$test_timeout" "$marker"
 }
 
 echo "oracle candidate=$candidate"
