@@ -314,7 +314,7 @@ The server exposes REST on port `8080`. When API-key auth is enabled, authentica
 | `GET /v1/jobs/:id` | Get one job |
 | `GET /v1/jobs/:id/tasks` | List persisted task definitions for a job |
 | `GET /v1/jobs/:id/dag` | Retrieve DAG nodes and edges |
-| `POST /v1/jobs/:id/run` | Trigger a new run |
+| `POST /v1/jobs/:id/run` | Trigger a new run; the `202` body's `outcome` is `created`, `queued`, or `skipped`, and an `Idempotency-Key` header makes retries safe (see [docs/job-definitions.md](docs/job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency)) |
 | `PUT /v1/jobs/:id/pause` | Pause a job |
 | `PUT /v1/jobs/:id/unpause` | Unpause a job |
 | `GET /v1/jobs/:id/runs` | List runs for a job |

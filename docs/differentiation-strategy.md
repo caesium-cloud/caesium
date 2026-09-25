@@ -62,6 +62,36 @@ The pivot is **invert the ranking**, not discard the data work. All three differ
 
 The self-hosting platform/data engineer who refuses a control plane. Sovereignty is their *acquisition* reason; data-engineering-first DAG semantics are *what they are sovereign about*. This sharpens — rather than contradicts — the roadmap's "data engineering first" principle. Critically, **reframe REPRODUCE** from compliance-attestation (a buyer the no-vendor charter forbids — an auditor cannot cite a community Discord in a 21 CFR Part 11 binding) to **developer-grade "trust my own re-run"** for that same engineer. That collapses three incompatible buyers into one.
 
+### Temporal: a layer above, not a rival
+
+Temporal was in the competitive deep-dive but belongs in neither camp. It is a
+durable-execution engine for *code*: its unit of work is a function in an
+SDK-built worker, its workflows must be deterministic so they can be replayed,
+and it treats data as opaque payloads capped in the low megabytes. It is very
+good at what Caesium deliberately does not do (roadmap principle 5): long-lived
+business processes, durable waits for signals and human approval, compensation,
+and millions of small per-entity workflows. Caesium already borrows its
+durability core; the run-owner design adapts Temporal's history-shard pattern
+at container grain ([`design-scaling-job-execution.md`](design-scaling-job-execution.md)).
+
+Where they do collide is teams that already run Temporal and write their ETL as
+activities because it is the platform they have. Two things follow:
+
+- **Don't chase it.** Durable timers, mid-run signals, and SDK-defined
+  workflows would make Caesium a worse Temporal and break principle 1 (no SDK,
+  no resident worker). The sovereignty argument is also weaker here than
+  against Camp 2: Temporal's server is MIT-licensed rather than open-core. It
+  still needs an external database in production, so "one binary, nothing
+  external" holds, but "they paywall the good parts" does not.
+- **Be the data plane Temporal calls.** Temporal owns *when* and *whether*;
+  Caesium owns the data work and its memory, and the run ID in the workflow's
+  history is the link to lineage, receipts, and `caesium why`. That requires
+  Caesium to be a safe callee for an at-least-once client, which it now is:
+  `POST /v1/jobs/:id/run` accepts an `Idempotency-Key` and reports queued and
+  skipped starts instead of an empty `202`. The operator recipe is
+  [`temporal.md`](temporal.md). It is documentation and REST contract only;
+  Caesium takes no dependency on Temporal.
+
 ## Positioning statement
 
 > *Kubernetes + Kueue + Argo schedule your containers but understand nothing about your data, and every serious data-aware orchestrator makes you stand up Postgres, Redis, or Kafka — or pay for the parts that matter. Caesium is the data-pipeline orchestrator that ships as a **single zero-dependency self-hosted binary**: it runs where Dagster, Airflow, and Flyte architecturally cannot — air-gapped, edge, regulated on-prem, sovereign — with HA, RBAC, SSO, and lineage free. And once you're inside, it remembers what data flowed and why each task ran, so it can explain, reproduce, and provably skip work — the data-plane memory that separates it from the other zero-dependency schedulers.*

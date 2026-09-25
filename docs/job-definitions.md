@@ -304,6 +304,47 @@ The lease is `CAESIUM_RUN_QUEUE_CLAIM_STALE_AFTER` (default `2m`); the reaper
 and the queue view share it, so a row shown as `stale` is exactly a row the
 reaper is about to release.
 
+### Starting runs from other systems: outcomes and idempotency
+
+`POST /v1/jobs/:id/run` answers every accepted start with `202` and a JSON body
+whose `outcome` field says what the concurrency policy and data circuit breaker
+decided:
+
+| `outcome` | Body | Meaning |
+|-----------|------|---------|
+| `created` | The run itself (`id`, `status`, `tasks`, …) plus `outcome` | A run was created and is executing. |
+| `queued` | `{outcome, job_id, queue_id}` | `strategy: queue` parked the start; the dequeuer creates the run when a slot frees. |
+| `skipped` | `{outcome, job_id, reason, run_id?}` | Nothing will execute. `reason` is `max_concurrency` (`strategy: skip`) or `dataset_hold` (a consumed dataset is held; `run_id` names the terminal `skipped` run the hold recorded). |
+| `dropped` | `{outcome, job_id, queue_id}` | Only on an idempotent retry: the start was queued, but its queue entry was cancelled or evicted before it ran. |
+
+`strategy: fail` still refuses with `409`, and a paused job with `409`.
+
+A caller that retries (an orchestrator activity, a CI job, anything
+at-least-once) should send an `Idempotency-Key` header, up to 255 bytes, scoped
+to the job. The first request with a key is admitted normally and its outcome
+recorded in the same transaction as the run. A later request with the same key
+and the same `params`/`priority` returns that outcome instead of starting
+another run, with the header `Idempotent-Replayed: true`:
+
+- a `created` start returns the run as it is now, so a retry after it finished
+  sees its terminal status;
+- a `queued` start returns `queued` until the dequeuer promotes it, and then the
+  promoted run (`created`), so re-posting the same key is how a caller resolves a
+  queued start to its run ID;
+- a `skipped` start stays `skipped`: one key is one admission decision, and
+  freeing the slot later does not turn a retry into a run.
+
+Concurrent requests with the same key resolve to one admission. The same key
+with different `params` or `priority` is refused with `422`. A refusal (`409`)
+records nothing, so retrying it with the same key re-attempts admission. A paused
+job still answers a retry of a start admitted before the pause.
+
+The CLI exposes the same contract. `caesium run start --idempotency-key <key>`
+prints the run ID on stdout, including when the key matched an earlier start.
+A queued start prints nothing on stdout and exits `0`; a skipped or dropped start
+exits non-zero. See [temporal.md](temporal.md) for driving runs from a Temporal
+workflow.
+
 ## Freshness-Driven Scheduling
 
 A cron expression is a guess about when data will have arrived. Freshness-driven scheduling inverts that: steps declare the datasets they produce and consume plus a freshness SLO on each output, and Caesium derives execution from data arrival and staleness — run when upstream data has arrived and my output is stale against its SLO, skip when nothing changed, and surface `stale-upstream` (an observable state with a reason) instead of a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. Enable it with `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed via the `GET /v1/datasets*` REST surface and the Console freshness view.
