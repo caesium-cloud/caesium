@@ -35,9 +35,10 @@ func TestPostgresRunTimeoutSerializesEveryTerminalTaskWriter(t *testing.T) {
 	db := openDeadlinePostgres(t)
 
 	type completionCase struct {
-		name     string
-		claimed  bool
-		complete func(*Store, postgresDeadlineFixture) error
+		name            string
+		claimed         bool
+		ownerCompletion bool
+		complete        func(*Store, postgresDeadlineFixture) error
 	}
 	parts := []pkgtask.Partition{{Key: "late-a"}, {Key: "late-b"}}
 	cases := []completionCase{
@@ -64,8 +65,9 @@ func TestPostgresRunTimeoutSerializesEveryTerminalTaskWriter(t *testing.T) {
 			},
 		},
 		{
-			name:    "owner completion",
-			claimed: true,
+			name:            "owner completion",
+			claimed:         true,
+			ownerCompletion: true,
 			complete: func(store *Store, f postgresDeadlineFixture) error {
 				expansion := &FanOutExpansion{
 					ProducerTaskID: f.producer.ID,
@@ -186,7 +188,9 @@ func TestPostgresRunTimeoutSerializesEveryTerminalTaskWriter(t *testing.T) {
 			}
 			require.NoError(t, timeoutResultValue.err)
 			require.True(t, timeoutResultValue.finalized)
-			if tc.claimed {
+			if tc.ownerCompletion {
+				require.ErrorIs(t, completionErr, ErrRunTerminal)
+			} else if tc.claimed {
 				require.ErrorIs(t, completionErr, ErrTaskClaimMismatch)
 			} else {
 				require.NoError(t, completionErr)

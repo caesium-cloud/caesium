@@ -132,15 +132,16 @@ func TestRunTimeoutTerminalizesAllUnfinishedTasksAndFencesLateResults(t *testing
 
 	require.ErrorIs(t, store.CompleteTaskClaimed(runRecord.ID, rows[0].ID, "success", "worker-a", nil, nil), ErrTaskClaimMismatch)
 	require.ErrorIs(t, store.CacheHitTaskClaimed(runRecord.ID, rows[1].ID, CacheHitSource{}, "cached", "worker-b", nil, nil), ErrTaskClaimMismatch)
-	require.ErrorIs(t, store.CompleteTaskOwner(runRecord.ID, rows[0].ID, TaskStatusSucceeded, "success", "", "worker-a", nil, nil, 1, 1, nil, nil), ErrTaskClaimMismatch)
+	require.ErrorIs(t, store.CompleteTaskOwner(runRecord.ID, rows[0].ID, TaskStatusSucceeded, "success", "", "worker-a", nil, nil, 1, 1, nil, nil), ErrRunTerminal)
 }
 
 func TestConcurrentRunTimeoutSerializesTerminalTaskWrites(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		terminalTask TaskStatus
-		terminalErr  string
-		complete     func(*Store, models.TaskRun) error
+		name            string
+		terminalTask    TaskStatus
+		terminalErr     string
+		ownerCompletion bool
+		complete        func(*Store, models.TaskRun) error
 	}{
 		{
 			name:         "local success",
@@ -172,8 +173,9 @@ func TestConcurrentRunTimeoutSerializesTerminalTaskWrites(t *testing.T) {
 			},
 		},
 		{
-			name:         "owner completion",
-			terminalTask: TaskStatusSucceeded,
+			name:            "owner completion",
+			terminalTask:    TaskStatusSucceeded,
+			ownerCompletion: true,
 			complete: func(store *Store, taskRun models.TaskRun) error {
 				return store.CompleteTaskOwner(taskRun.JobRunID, taskRun.ID, TaskStatusSucceeded, "success", "", taskRun.ClaimedBy, nil, nil, 1, 1, nil, nil)
 			},
@@ -245,7 +247,12 @@ func TestConcurrentRunTimeoutSerializesTerminalTaskWrites(t *testing.T) {
 			close(releaseWrite)
 			select {
 			case err := <-completionDone:
-				require.True(t, errors.Is(err, ErrTaskClaimMismatch) || err == nil, "unexpected completion result: %v", err)
+				if tc.ownerCompletion {
+					require.ErrorIs(t, err, ErrRunTerminal,
+						"owner completion must report the timeout's durable terminal fence")
+				} else {
+					require.True(t, errors.Is(err, ErrTaskClaimMismatch) || err == nil, "unexpected completion result: %v", err)
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("terminal task writer did not finish after timeout")
 			}
