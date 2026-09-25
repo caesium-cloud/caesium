@@ -137,7 +137,22 @@ PY
       lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
       lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-final.txt" 2>&1 || true
       for n in 0 1 2; do lc_ns logs "caesium-$n" -c caesium --previous >"$LC_ART/cluster-logs/caesium-$n-previous.log" 2>&1 || true; done
-      if [[ "${CAESIUM_LIFECYCLE_KEEP:-0}" != 1 ]]; then kind delete cluster --name "$LC_ID" >/dev/null 2>&1 || true; fi
+      if [[ "${CAESIUM_LIFECYCLE_KEEP:-0}" != 1 ]]; then
+        if ! kind delete cluster --name "$LC_ID" >"$LC_ART/cluster-logs/kind-delete.log" 2>&1; then
+          rc=1
+          LC_ART="$LC_ART" python3 - <<'PY' || true
+import json,os,pathlib
+p=pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json')
+if p.exists():
+  record=json.loads(p.read_text())
+  record['result']='fail'
+  record.setdefault('failed_gates',[]).append('owned_cluster_cleanup')
+  record['cleanup_detail']='kind delete cluster failed; see cluster-logs/kind-delete.log'
+  p.write_text(json.dumps(record,indent=2)+'\n')
+PY
+          printf 'cluster lifecycle: owned kind cluster %s could not be deleted; see %s\n' "$LC_ID" "$LC_ART/cluster-logs/kind-delete.log" >&2
+        fi
+      fi
     fi
     exit "$rc"
   }
