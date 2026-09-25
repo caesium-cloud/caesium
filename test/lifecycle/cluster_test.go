@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,6 +70,87 @@ type clusterHostObservation struct {
 	ManifestLiveDiff     []string          `json:"manifest_live_diff"`
 	HelmExitCode         int               `json:"helm_exit_code"`
 	PodLogs              map[string]string `json:"pod_logs"`
+	PreviousPodLogs      map[string]string `json:"previous_pod_logs"`
+	PodStatuses          map[string]struct {
+		Phase        string                     `json:"phase"`
+		PodIP        string                     `json:"pod_ip"`
+		Ready        bool                       `json:"ready"`
+		RestartCount int                        `json:"restart_count"`
+		State        map[string]json.RawMessage `json:"state"`
+		LastState    map[string]json.RawMessage `json:"last_state"`
+	} `json:"pod_statuses"`
+}
+
+type clusterTaskProof struct {
+	ID              string `json:"id"`
+	ClaimedBy       string `json:"claimed_by"`
+	OwnerGeneration int64  `json:"owner_generation"`
+	Attempt         int    `json:"attempt"`
+	Status          string `json:"status"`
+	RecorderNonce   string `json:"recorder_nonce"`
+}
+
+func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, taskRunID string) (clusterTaskProof, error) {
+	if _, err := uuid.Parse(runID); err != nil {
+		return clusterTaskProof{}, err
+	}
+	if _, err := uuid.Parse(taskRunID); err != nil {
+		return clusterTaskProof{}, err
+	}
+	sql := fmt.Sprintf("SELECT id, claimed_by, owner_generation, attempt, status, output FROM task_runs WHERE job_run_id = '%s' AND id = '%s'", runID, taskRunID)
+	response, _, err := h.Query(ctx, base, sql, 1)
+	if err != nil {
+		return clusterTaskProof{}, err
+	}
+	if len(response.Rows) != 1 || len(response.Rows[0]) != 6 {
+		return clusterTaskProof{}, fmt.Errorf("task %s query returned %d rows", taskRunID, len(response.Rows))
+	}
+	row := response.Rows[0]
+	generation, err := strconv.ParseInt(fmt.Sprint(row[2]), 10, 64)
+	if err != nil {
+		return clusterTaskProof{}, err
+	}
+	attempt, err := strconv.Atoi(fmt.Sprint(row[3]))
+	if err != nil {
+		return clusterTaskProof{}, err
+	}
+	proof := clusterTaskProof{ID: fmt.Sprint(row[0]), ClaimedBy: fmt.Sprint(row[1]),
+		OwnerGeneration: generation, Attempt: attempt, Status: fmt.Sprint(row[4])}
+	if row[5] != nil {
+		var raw []byte
+		switch v := row[5].(type) {
+		case string:
+			raw = []byte(v)
+		default:
+			raw, err = json.Marshal(v)
+			if err != nil {
+				return clusterTaskProof{}, err
+			}
+		}
+		if len(raw) > 0 {
+			var output map[string]string
+			if err := json.Unmarshal(raw, &output); err != nil {
+				return clusterTaskProof{}, fmt.Errorf("task %s output: %w", taskRunID, err)
+			}
+			proof.RecorderNonce = output["recorder_nonce"]
+		}
+	}
+	return proof, nil
+}
+
+func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []recorder.Event) bool {
+	if proof.RecorderNonce == "" {
+		return false
+	}
+	started, completed := false, false
+	for _, e := range events {
+		if e.RunID != runID || e.Nonce != proof.RecorderNonce || e.Step != "hold" {
+			continue
+		}
+		started = started || e.Kind == "start"
+		completed = completed || e.Kind == "complete"
+	}
+	return started && completed
 }
 
 func clusterPair(t *testing.T) pairMatrix {
@@ -239,7 +322,7 @@ func clusterManifest(t *testing.T, kind, alias, taskImage string) jobdef.Definit
 	case "history":
 		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"history\",\"nonce\":\"$N\",\"event\":\"start\"}" "$R/start"; sleep 2; echo "##caesium::output {\"token\": \"$CAESIUM_PARAM_TOKEN\"}"; if [ "$CAESIUM_PARAM_EXIT" = 0 ]; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"history\",\"nonce\":\"$N\",\"event\":\"complete\"}" "$R/effect"; else exit "$CAESIUM_PARAM_EXIT"; fi`
 	case "held":
-		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"start\"}" "$R/start"; i=0; while [ "$i" -lt 900 ]; do if wget -qO- "$R/wait?run_id=$CAESIUM_RUN_ID" | grep -q released; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"complete\"}" "$R/effect"; exit 0; fi; i=$((i+1)); sleep 1; done; exit 1`
+		step = `set -eu; N="$(cat /proc/sys/kernel/random/uuid)"; R="http://lifecycle-recorder:8090"; wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"start\"}" "$R/start"; i=0; while [ "$i" -lt 900 ]; do if wget -qO- "$R/wait?run_id=$CAESIUM_RUN_ID" | grep -q released; then wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"$CAESIUM_RUN_ID\",\"step\":\"hold\",\"nonce\":\"$N\",\"event\":\"complete\"}" "$R/effect"; echo "##caesium::output {\"recorder_nonce\":\"$N\"}"; exit 0; fi; i=$((i+1)); sleep 1; done; exit 1`
 	default:
 		t.Fatalf("unknown fixture kind %q", kind)
 	}
@@ -420,62 +503,92 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 				observed = append(observed, map[string]any{"old": oldMembers, "new": newMembers, "protocol": caps, "at": time.Now().UTC()})
 				writeJSON(t, "cluster-mixed-window.json", observed)
 				versionByIP := map[string]string{}
+				memberByIP := map[string]cluster.Member{}
 				for _, m := range oldMembers {
 					versionByIP[m.IP] = "previous"
+					memberByIP[m.IP] = m
 				}
 				for _, m := range newMembers {
 					versionByIP[m.IP] = "candidate"
+					memberByIP[m.IP] = m
 				}
 				c := newClient(t)
 				c.base = base
 				for attempt := 0; attempt < 12 && ctx.Err() == nil; attempt++ {
-					run, started, err := c.triggerRun(ctx, fx.Jobs["history"].ID,
-						map[string]string{"EXIT": "0", "TOKEN": fmt.Sprintf("mixed-%d", attempt)})
+					// Hold one task so the specific dispatch attempt can be read
+					// before its raw effect and fenced owner completion.
+					run, started, err := c.triggerRun(ctx, fx.Jobs["inflight"].ID, nil)
 					if err != nil || !started {
+						continue
+					}
+					startSeen := false
+					for until := time.Now().Add(10 * time.Second); time.Now().Before(until) && !startSeen; {
+						for _, event := range recorderEvents(t) {
+							startSeen = startSeen || event.RunID == run.ID && event.Kind == "start"
+						}
+						if !startSeen {
+							time.Sleep(300 * time.Millisecond)
+						}
+					}
+					if !startSeen {
+						releaseRecordedRun(t, run.ID)
 						continue
 					}
 					leaseCtx, cancelLease := context.WithTimeout(ctx, 10*time.Second)
 					lease, err := cluster.WaitLease(leaseCtx, h, base, run.ID, "")
 					cancelLease()
 					if err != nil {
+						releaseRecordedRun(t, run.ID)
 						continue
 					}
+					live, err := h.GetRun(ctx, base, run.JobID, run.ID)
+					if err != nil || len(live.Tasks) != 1 {
+						releaseRecordedRun(t, run.ID)
+						continue
+					}
+					beforeTask, err := readClusterTaskProof(ctx, h, base, run.ID, live.Tasks[0].ID)
+					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.OwnerGeneration != lease.Generation || beforeTask.Status != "running" {
+						releaseRecordedRun(t, run.ID)
+						continue
+					}
+					ownerIP := cluster.HostIP(lease.OwnerNode)
+					workerIP := cluster.HostIP(beforeTask.ClaimedBy)
+					ownerVersion, workerVersion := versionByIP[ownerIP], versionByIP[workerIP]
+					releaseRecordedRun(t, run.ID)
 					final, err := c.awaitRunStatus(ctx, run.JobID, run.ID,
 						func(r apiRun) bool { return isTerminal(r.Status) }, 40*time.Second)
-					if err != nil || final.Status != "succeeded" {
+					if err != nil || final.Status != "succeeded" || ownerVersion == "" || workerVersion == "" || ownerVersion == workerVersion {
 						continue
 					}
-					full, err := h.GetRun(ctx, base, run.JobID, run.ID)
-					if err != nil || len(full.Tasks) == 0 {
+					afterTask, err := readClusterTaskProof(ctx, h, base, run.ID, beforeTask.ID)
+					if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
+						afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
+						afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
 						continue
 					}
-					ownerVersion := versionByIP[cluster.HostIP(lease.OwnerNode)]
-					for _, task := range full.Tasks {
-						workerVersion := versionByIP[cluster.HostIP(task.ClaimedBy)]
-						if ownerVersion == "" || workerVersion == "" || ownerVersion == workerVersion {
-							continue
-						}
-						// The worker recorded an external completion effect and the
-						// opposite-version owner durably terminalized the same run.
-						var complete bool
-						for _, e := range recorderEvents(t) {
-							if e.RunID == run.ID && e.Kind == "complete" {
-								complete = true
-							}
-						}
-						if !complete {
-							continue
-						}
-						cross := map[string]any{"run_id": run.ID, "owner_node": lease.OwnerNode,
-							"owner_version": ownerVersion, "worker_node": task.ClaimedBy,
-							"worker_version": workerVersion, "task_run_id": task.ID,
-							"terminal_status": final.Status, "raw_effect_complete": true}
-						writeJSON(t, "cluster-mixed-crossing.json", cross)
-						writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusPass,
-							Detail:       "protocol-2 members exchanged a task dispatch and completion across different image IDs",
-							Observations: cross})
-						return
+					postTopo, err := cluster.DiscoverTopology(ctx, kube, fx.LifecycleID)
+					if err != nil {
+						continue
 					}
+					stable := true
+					for _, original := range []cluster.Member{memberByIP[ownerIP], memberByIP[workerIP]} {
+						post, ok := postTopo.ByName(original.Name)
+						stable = stable && ok && post.UID == original.UID && post.ImageID == original.ImageID
+					}
+					if !stable {
+						continue
+					}
+					cross := map[string]any{"run_id": run.ID, "owner_node": lease.OwnerNode,
+						"owner_version": ownerVersion, "owner_generation": lease.Generation,
+						"worker_node": beforeTask.ClaimedBy, "worker_version": workerVersion,
+						"task_before_release": beforeTask, "task_after_completion": afterTask,
+						"owner_member": memberByIP[ownerIP], "worker_member": memberByIP[workerIP],
+						"terminal_status": final.Status, "raw_effect_nonce": afterTask.RecorderNonce}
+					writeJSON(t, "cluster-mixed-crossing.json", cross)
+					writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusPass,
+						Detail:       "same task attempt and fenced owner generation dispatched and completed across protocol-2 image IDs; raw nonce persisted in terminal task output",
+						Observations: cross})
+					return
 				}
 				writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusBlocked,
 					Detail: "both protocol-2 images were observed, but no opposite-version lease owner, claimed worker and raw completion were jointly observed"})
@@ -529,10 +642,24 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, m.DqliteID, i.ID)
 		require.Equal(t, m.IP+":9001", i.Address, "#536 address reconciliation did not follow the recreated pod")
+		status, ok := host.PodStatuses[m.Name]
+		require.True(t, ok, "missing container status for %s", m.Name)
+		require.Equal(t, "Running", status.Phase)
+		require.Equal(t, m.IP, status.PodIP)
+		require.True(t, status.Ready, "%s container not Ready", m.Name)
+		require.Zero(t, status.RestartCount, "%s restarted during the candidate rollout; inspect previous log and exit state", m.Name)
+		_, running := status.State["running"]
+		require.True(t, running, "%s container is not running; state=%v", m.Name, status.State)
+		_, terminated := status.LastState["terminated"]
+		require.False(t, terminated, "%s has a prior terminated container: %v", m.Name, status.LastState)
 		log, ok := host.PodLogs[m.Name]
 		require.True(t, ok, "missing migration log for %s", m.Name)
 		require.Contains(t, log, "migrating database")
 		require.NotContains(t, log, "failed to connect to database")
+		previousLog, ok := host.PreviousPodLogs[m.Name]
+		require.True(t, ok, "missing previous-log probe for %s", m.Name)
+		require.NotContains(t, previousLog, "failed to connect to database")
+		require.NotContains(t, previousLog, "in info.yaml does not match")
 	}
 	// A nonzero Helm exit is not itself the verdict; all pod and Raft facts
 	// above and below are gathered even after a --wait timeout.
@@ -564,10 +691,12 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		releaseRecordedRun(t, r.ID)
 	}
+	attemptProofs := map[string][]clusterTaskProof{}
 	for _, r := range []runFixture{fx.InFlight, fx.Predecessor} {
 		got, err := c.awaitRunStatus(ctx, r.JobID, r.ID, func(x apiRun) bool { return isTerminal(x.Status) }, 5*time.Minute)
 		require.NoError(t, err)
 		require.Contains(t, []string{"succeeded", "failed", "cancelled"}, got.Status, "illegal in-flight terminal outcome")
+		require.NotEmpty(t, got.Tasks, "in-flight run %s lost its task attempt rows", r.ID)
 		// Duplicate attempts remain in the raw ledger; only a missing or
 		// unpaired visible effect is rejected.
 		events := recorderEvents(t)
@@ -584,11 +713,22 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 			}
 		}
 		require.NotEmpty(t, starts, "no raw start effect for %s", r.ID)
-		if got.Status == "succeeded" {
-			require.NotEmpty(t, effects, "succeeded run %s has no raw completion effect", r.ID)
-		}
 		for nonce := range effects {
 			require.Truef(t, starts[nonce], "raw completion nonce %s has no start", nonce)
+		}
+		matchedAttempt := false
+		for _, task := range got.Tasks {
+			proof, err := readClusterTaskProof(ctx, h, base, got.ID, task.ID)
+			require.NoError(t, err)
+			attemptProofs[r.ID] = append(attemptProofs[r.ID], proof)
+			if proof.Status == "succeeded" && rawCompletionMatchesTask(r.ID, proof, events) {
+				matchedAttempt = true
+			}
+		}
+		if got.Status == "succeeded" {
+			require.Truef(t, matchedAttempt, "succeeded run %s has no raw effect tied to its terminal task attempt", r.ID)
+		} else if len(effects) > 0 && !matchedAttempt {
+			blockf(t, "retained-history-and-raw-effects", "run %s has raw completion effects but no matching persisted task-attempt nonce", r.ID)
 		}
 	}
 	var queued apiRun
@@ -613,12 +753,21 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 	require.Equal(t, "succeeded", queued.Status)
 	require.NotEmpty(t, queued.Tasks, "queued run has no task attempt")
 	assertRawCompletion(t, queued.ID, recorderEvents(t))
+	queuedMatched := false
+	for _, task := range queued.Tasks {
+		proof, err := readClusterTaskProof(ctx, h, base, queued.ID, task.ID)
+		require.NoError(t, err)
+		attemptProofs[queued.ID] = append(attemptProofs[queued.ID], proof)
+		queuedMatched = queuedMatched || proof.Status == "succeeded" && rawCompletionMatchesTask(queued.ID, proof, recorderEvents(t))
+	}
+	require.True(t, queuedMatched, "queued run has no raw effect tied to its terminal task attempt")
 	rows, err := c.queue(ctx, fx.Jobs["queue"].ID)
 	require.NoError(t, err)
 	for _, row := range rows {
 		require.NotEqual(t, fx.QueuedRow.ID, row.ID)
 	}
 	writeJSON(t, "cluster-raw-after.json", recorderEvents(t))
+	writeJSON(t, "cluster-attempt-proofs.json", attemptProofs)
 	writeCase(t, caseRecord{Name: "retained-history-and-raw-effects", Status: statusPass,
 		Detail: "pre-upgrade job/run/task IDs and event tuple sets retained; in-flight raw ledger reconciled; queued row drained",
 		Observations: map[string]any{"queued_run_id": queued.ID, "queued_row_id": fx.QueuedRow.ID,
@@ -766,6 +915,41 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	writeCase(t, caseRecord{Name: "ordinal-0-disk-loss", Status: statusBlocked,
 		Detail:       "fresh ordinal-0 evidence and surviving membership recorded; no product rejoin/re-bootstrap procedure is qualified",
 		Observations: evidence})
+}
+
+// The stopped-member snapshot experiment must inspect the actual surviving
+// Raft leader, not assume that StatefulSet ordinal 0 owns the write stream.
+func TestLifecycleClusterSnapshotLeader(t *testing.T) {
+	fx := clusterFixture{}
+	if !readJSON(t, "cluster-fixture.json", &fx) {
+		blockf(t, "snapshot-catch-up", "seed fixture missing")
+	}
+	kube, err := cluster.InClusterClient()
+	require.NoError(t, err)
+	topo, err := cluster.DiscoverTopology(t.Context(), kube, fx.LifecycleID)
+	require.NoError(t, err)
+	require.Len(t, topo.Members, 2, "ordinal 2 must be stopped for leader snapshot measurement")
+	leaders := map[string]bool{}
+	for _, member := range topo.Members {
+		require.NotEqual(t, "caesium-2", member.Name)
+		leader, _, err := cluster.QueryNode(t.Context(), member.DqliteAddr())
+		require.NoErrorf(t, err, "direct dqlite Leader RPC to %s", member.Name)
+		require.NotNil(t, leader)
+		leaders[leader.Address] = true
+	}
+	require.Len(t, leaders, 1, "survivors disagree on Raft leader")
+	var leaderMember cluster.Member
+	for _, member := range topo.Members {
+		if leaders[member.DqliteAddr()] {
+			leaderMember = member
+		}
+	}
+	require.NotEmpty(t, leaderMember.Name, "surviving leader is not a live member")
+	writeJSON(t, "cluster-snapshot-leader.json", map[string]any{
+		"name": leaderMember.Name, "uid": leaderMember.UID,
+		"ip": leaderMember.IP, "address": leaderMember.DqliteAddr(),
+		"image_id": leaderMember.ImageID, "observed_at": time.Now().UTC(),
+	})
 }
 
 // Applying many distinct definitions drives real catalog writes while one

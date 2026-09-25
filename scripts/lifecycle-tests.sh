@@ -64,7 +64,22 @@ cd "$ROOT"
 # F2's cluster lane is a separate mode. The F4 standalone path below is kept
 # byte-for-byte in its existing control flow and still defaults when unset.
 if [[ "${CAESIUM_LIFECYCLE_MODE:-standalone}" == "cluster" ]]; then
-  cluster_die() { printf 'cluster lifecycle: %s\n' "$*" >&2; exit 1; }
+  cluster_die() {
+    local reason="$*"
+    if [[ -n "${LC_ART:-}" && -f "$LC_ART/cluster-qualification.json" ]] && command -v python3 >/dev/null 2>&1; then
+      LC_ART="$LC_ART" LC_REASON="$reason" python3 - <<'PY' || true
+import json,os,pathlib
+p=pathlib.Path(os.environ['LC_ART'],'cluster-qualification.json')
+record=json.loads(p.read_text())
+if record.get('result')=='incomplete':
+  record['result']='blocked'
+  record['detail']=os.environ['LC_REASON']
+  p.write_text(json.dumps(record,indent=2)+'\n')
+PY
+    fi
+    printf 'cluster lifecycle: %s\n' "$reason" >&2
+    exit 1
+  }
   for cmd in docker kind kubectl helm python3 just; do
     command -v "$cmd" >/dev/null 2>&1 || cluster_die "missing $cmd"
   done
@@ -99,7 +114,9 @@ if [[ "${CAESIUM_LIFECYCLE_MODE:-standalone}" == "cluster" ]]; then
     "$LC_ART/cluster-mixed-window.json" "$LC_ART/cluster-mixed-crossing.json" \
     "$LC_ART/cluster-host-observation.json" "$LC_ART/cluster-ordinal0-host.json" \
     "$LC_ART/cluster-post-storage.json" "$LC_ART/cluster-raw-before.json" \
-    "$LC_ART/cluster-raw-after.json" "$LC_ART/cluster-snapshot-write-count.json" \
+    "$LC_ART/cluster-raw-after.json" "$LC_ART/cluster-attempt-proofs.json" \
+    "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-address-classification.json" \
+    "$LC_ART/cluster-snapshot-write-count.json" \
     "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
   mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
   cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
@@ -144,7 +161,7 @@ PY
       CAESIUM_LIFECYCLE_ARTIFACTS=/artifacts \
       CAESIUM_LIFECYCLE_BASE_URL="$base" \
       CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID="$image_id" \
-      CAESIUM_LIFECYCLE_PREVIOUS_IMAGE_ID="$LC_PREV_ID" \
+      CAESIUM_LIFECYCLE_PREVIOUS_IMAGE_ID="$LC_PREV_IDS" \
       CAESIUM_LIFECYCLE_CANDIDATE_IMAGE_ID="$LC_CAND_ID" \
       CAESIUM_LIFECYCLE_TASK_IMAGE="$LC_TASK" \
       CAESIUM_LIFECYCLE_INTERNAL_TOKEN=caesium-lifecycle-internal-token-not-for-production-use \
@@ -194,6 +211,14 @@ PY
   docker pull "$LC_PREV" >"$LC_ART/cluster-logs/pull-previous.log" 2>&1 || cluster_die "pull previous release failed"
   LC_PREV_ID="$(docker image inspect --format '{{.Id}}' "$LC_PREV")"
   LC_PREV_DIGESTS="$(docker image inspect --format '{{join .RepoDigests ","}}' "$LC_PREV")"
+  LC_ARCH="$(docker image inspect --format '{{.Architecture}}' "$LC_PREV")"
+  case "$LC_ARCH" in
+    arm64|amd64) ;;
+    aarch64) LC_ARCH=arm64 ;;
+    *) cluster_die "unsupported previous-release platform architecture $LC_ARCH" ;;
+  esac
+  LC_PLATFORM="linux/$LC_ARCH"
+  LC_PREV_CONFIG_ID="$(docker image inspect --platform "$LC_PLATFORM" --format '{{.Id}}' "$LC_PREV")"
   LC_PREV_ID="$LC_PREV_ID" LC_PREV_DIGESTS="$LC_PREV_DIGESTS" LC_ART="$LC_ART" LC_PAIR="$LC_PAIR" python3 - <<'PY' || cluster_die 'previous release digest does not match versions.json'
 import json,os,pathlib
 doc=json.loads(pathlib.Path(os.environ['LC_ART'],'versions.json').read_text())
@@ -203,7 +228,15 @@ got={x.split('@',1)[1] for x in os.environ['LC_PREV_DIGESTS'].split(',') if '@' 
 if not want.intersection(got):raise SystemExit(f'old image has {got}, expected one of {want}')
 print('pinned previous digest:', sorted(want.intersection(got)))
 PY
-  lc_case previous-release-digest pass "pulled $LC_PREV; image ID $LC_PREV_ID; digest $LC_PREV_DIGESTS"
+  LC_PREV_PLATFORM_DIGEST="$(LC_ART="$LC_ART" LC_PAIR="$LC_PAIR" LC_PLATFORM="$LC_PLATFORM" python3 - <<'PY'
+import json,os,pathlib
+doc=json.loads(pathlib.Path(os.environ['LC_ART'],'versions.json').read_text())
+p=next(x for x in doc['pairs'] if x['id']==os.environ['LC_PAIR'])
+print(p['previous']['digests'][os.environ['LC_PLATFORM']])
+PY
+)"
+  LC_PREV_IDS="$LC_PREV_ID,$LC_PREV_PLATFORM_DIGEST,$LC_PREV_CONFIG_ID"
+  lc_case previous-release-digest pass "pulled $LC_PREV for $LC_PLATFORM; release index $LC_PREV_ID; platform manifest $LC_PREV_PLATFORM_DIGEST; config $LC_PREV_CONFIG_ID; repo digests $LC_PREV_DIGESTS"
   if docker image inspect "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" >/dev/null 2>&1; then
     [[ "${CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE:-0}" == 1 ]] || cluster_die "candidate image pre-exists; cannot bind it to $LC_SHA without explicit unverified override"
     LC_PROVENANCE=supplied-unverified
@@ -240,8 +273,19 @@ EOF
   LC_OWNED=1
   kind create cluster --name "$LC_ID" --image "$LC_KIND" --config "$LC_ART/kind.yaml" \
     --kubeconfig "$LC_KUBE" --wait 120s >"$LC_ART/cluster-logs/kind-create.log" 2>&1 || cluster_die "kind create failed"
-  kind load docker-image --name "$LC_ID" "$LC_PREV" "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" "$LC_TASK" \
-    >"$LC_ART/cluster-logs/kind-load.log" 2>&1 || cluster_die "kind image load failed"
+  # Docker Desktop keeps a multi-platform index while storing only the local
+  # platform's child. kind's default --all-platforms import asks for missing
+  # children; export one verified platform without retagging the release.
+  docker image save --platform "$LC_PLATFORM" --output "$LC_ART/previous-platform.tar" "$LC_PREV" \
+    >"$LC_ART/cluster-logs/save-previous.log" 2>&1 || cluster_die "cannot export pinned previous platform $LC_PLATFORM"
+  docker image save --platform "$LC_PLATFORM" --output "$LC_ART/task-platform.tar" "$LC_TASK" \
+    >"$LC_ART/cluster-logs/save-task.log" 2>&1 || cluster_die "cannot export task platform $LC_PLATFORM"
+  kind load image-archive --name "$LC_ID" "$LC_ART/previous-platform.tar" \
+    >"$LC_ART/cluster-logs/kind-load-previous.log" 2>&1 || cluster_die "kind previous platform import failed"
+  kind load image-archive --name "$LC_ID" "$LC_ART/task-platform.tar" \
+    >"$LC_ART/cluster-logs/kind-load-task.log" 2>&1 || cluster_die "kind task platform import failed"
+  kind load docker-image --name "$LC_ID" "$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" "$LC_RUNNER" \
+    >"$LC_ART/cluster-logs/kind-load-built.log" 2>&1 || cluster_die "kind built-image import failed"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
     --set image.tag=v0.1.0 >"$LC_ART/manifest-before.yaml" || cluster_die "previous Helm render failed"
   helm template caesium "$ROOT/helm/caesium" --namespace "$LC_ID" --values "$LC_VALUES" \
@@ -323,10 +367,10 @@ EOF
     >"$LC_ART/cluster-logs/runner-ready.log" 2>&1 || cluster_die "runner not Ready"
   lc_ns cp "$LC_ART/versions.json" lifecycle-runner:/artifacts/versions.json -c runner || cluster_die "cannot copy matrix to runner"
   LC_OLD_BASE="$(lc_base)"
-  lc_phase Seed "$LC_PREV_ID" "$LC_OLD_BASE" || cluster_die "previous-release cluster seed failed (see cluster-logs/Seed.log)"
+  lc_phase Seed "$LC_PREV_IDS" "$LC_OLD_BASE" || cluster_die "previous-release cluster seed failed (see cluster-logs/Seed.log)"
   lc_copy_runner_artifacts
   LC_MIXED_RC=0
-  lc_phase MixedWindow "$LC_PREV_ID" "$LC_OLD_BASE" &
+  lc_phase MixedWindow "$LC_PREV_IDS" "$LC_OLD_BASE" &
   LC_MIXED_PID=$!
   LC_HELM_RC=0
   helm upgrade caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
@@ -393,13 +437,26 @@ PY
 import json,os,pathlib
 art=pathlib.Path(os.environ['LC_ART'])
 load=lambda name:json.loads((art/name).read_text()) if (art/name).exists() else []
+pods=load('cluster-pods-after-upgrade.json')
+pod_statuses={}
+for pod in pods.get('items',[]):
+  name=pod.get('metadata',{}).get('name','')
+  if name not in [f'caesium-{n}' for n in range(3)]:continue
+  status=pod.get('status',{})
+  containers=[c for c in status.get('containerStatuses',[]) if c.get('name')=='caesium']
+  c=containers[0] if containers else {}
+  pod_statuses[name]={'phase':status.get('phase',''),'pod_ip':status.get('podIP',''),
+    'ready':c.get('ready',False),'restart_count':c.get('restartCount',-1),
+    'state':c.get('state',{}),'last_state':c.get('lastState',{})}
 record={'before_info':load('before-info.json'),'after_info':load('after-info.json'),
   'address_classification':load('cluster-address-classification.json'),
+  'pod_statuses':pod_statuses,
   'manifest_diff':(art/'manifest-normalized.diff').read_text().splitlines(),
   'manifest_live_captured':int(os.environ['LC_GET_RC'])==0,
   'manifest_live_diff':(art/'manifest-live-normalized.diff').read_text().splitlines() if (art/'manifest-live-normalized.diff').exists() else [],
   'helm_exit_code':int(os.environ['LC_HELM_RC']),
-  'pod_logs':{f'caesium-{n}':(art/'cluster-logs'/f'candidate-{n}.log').read_text() for n in range(3)}}
+  'pod_logs':{f'caesium-{n}':(art/'cluster-logs'/f'candidate-{n}.log').read_text() for n in range(3)},
+  'previous_pod_logs':{f'caesium-{n}':(art/'cluster-logs'/f'candidate-{n}-previous.log').read_text() for n in range(3)}}
 (art/'cluster-host-observation.json').write_text(json.dumps(record,indent=2)+'\n')
 PY
   lc_ns cp "$LC_ART/cluster-host-observation.json" lifecycle-runner:/artifacts/cluster-host-observation.json -c runner \
@@ -452,14 +509,15 @@ EOF
       lc_ns exec pod/lifecycle-storage -c storage -- test -f /data/info.yaml
     }
     lc_storage_helper_stop() {
-      lc_ns delete pod lifecycle-storage --wait=true --timeout=120s >/dev/null 2>&1 || true
+      lc_ns delete pod lifecycle-storage --ignore-not-found=true --wait=true --timeout=120s \
+        >>"$LC_ART/cluster-logs/storage-helper-delete.log" 2>&1
     }
     lc_scale_two() {
       lc_ns scale statefulset/caesium --replicas=2 >/dev/null
       lc_ns wait --for=delete pod/caesium-2 --timeout=120s >/dev/null
     }
     lc_scale_three() {
-      lc_storage_helper_stop
+      lc_storage_helper_stop || return 1
       lc_ns scale statefulset/caesium --replicas=3 >/dev/null
       lc_ns wait --for=condition=Ready pod/caesium-2 --timeout=300s >/dev/null
     }
@@ -480,17 +538,44 @@ EOF
     # writes. Record file-level snapshots/truncation instead of assuming the C
     # library's unconfigured threshold. A missing measured index is BLOCKED.
     LC_SNAP_RC=0
-    lc_files caesium-0 "$LC_ART/cluster-logs/leader-before-snapshot-files.txt" || LC_SNAP_RC=$?
     lc_scale_two || LC_SNAP_RC=$?
+    if [[ "$LC_SNAP_RC" == 0 ]]; then
+      lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+      lc_copy_runner_artifacts || LC_SNAP_RC=$?
+      cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-before.json" || LC_SNAP_RC=$?
+      LC_LEADER="$(LC_ART="$LC_ART" python3 - <<'PY'
+import json,os,pathlib
+record=json.loads(pathlib.Path(os.environ['LC_ART'],'cluster-logs/leader-before.json').read_text())
+assert record['name'] in ('caesium-0','caesium-1')
+print(record['name'])
+PY
+)" || LC_SNAP_RC=$?
+      if [[ "$LC_SNAP_RC" == 0 ]]; then
+        lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-before-snapshot-files.txt" || LC_SNAP_RC=$?
+      fi
+    fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_storage_helper_start || LC_SNAP_RC=$?
       lc_manifest_local "$LC_ART/cluster-logs/stopped-member-before-writes.sha256" || LC_SNAP_RC=$?
       lc_storage_files "$LC_ART/cluster-logs/stopped-member-before-writes-files.txt" || LC_SNAP_RC=$?
-      lc_storage_helper_stop
+      lc_storage_helper_stop || LC_SNAP_RC=$?
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-      lc_files caesium-0 "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+      lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+      lc_copy_runner_artifacts || LC_SNAP_RC=$?
+      cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-after.json" || LC_SNAP_RC=$?
+      if [[ "$LC_SNAP_RC" == 0 ]]; then
+        LC_ART="$LC_ART" python3 - <<'PY' || LC_SNAP_RC=$?
+import json,os,pathlib
+base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
+a=json.loads((base/'leader-before.json').read_text())
+b=json.loads((base/'leader-after.json').read_text())
+for key in ('name','uid','ip','address','image_id'):
+  if a[key]!=b[key]:raise SystemExit(f'Raft leader changed during writes: {key}: {a[key]} -> {b[key]}')
+PY
+        lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+      fi
       lc_scale_three || LC_SNAP_RC=$?
       lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
       lc_copy_runner_artifacts || true
@@ -512,23 +597,33 @@ def snapshots(name):
     m=re.search(r'(?:^|/)snapshot-(\d+)-(\d+)-(\d+)$',p)
     if m:out.append(int(m.group(2)))
   return out
-def segment_ends(name):
+def segments(name):
   out=[]
   for p in paths(name):
     m=re.search(r'(?:^|/)(\d+)-(\d+)$',p)
-    if m:out.append(int(m.group(2)))
+    if m:out.append((int(m.group(1)),int(m.group(2))))
   return out
 before=snapshots('leader-before-snapshot-files.txt')
 after=snapshots('leader-after-snapshot-files.txt')
-stopped=segment_ends('stopped-member-before-writes-files.txt')
+stopped=segments('stopped-member-before-writes-files.txt')
+stopped_snapshots=snapshots('stopped-member-before-writes-files.txt')
+leader_after_segments=segments('leader-after-snapshot-files.txt')
 rejoined=snapshots('rejoined-member-files.txt')
-obs={'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
-     'stopped_segment_end_indexes':stopped,'rejoined_snapshot_indexes':rejoined}
+obs={'leader_before':json.loads((base/'leader-before.json').read_text()),
+     'leader_after':json.loads((base/'leader-after.json').read_text()),
+     'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
+     'stopped_segment_ranges':stopped,'stopped_snapshot_indexes':stopped_snapshots,
+     'leader_after_segment_ranges':leader_after_segments,'rejoined_snapshot_indexes':rejoined}
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
-if not after or not stopped or not rejoined:raise SystemExit('missing snapshot or segment index')
-if max(after)<=max(before or [0]) or max(after)<=max(stopped):
+if not after or not stopped or not leader_after_segments or not rejoined:
+  raise SystemExit('missing snapshot or segment index')
+stopped_end=max(end for _,end in stopped)
+if max(after)<=max(before or [0]) or max(after)<=stopped_end:
   raise SystemExit('leader snapshot did not cross stopped member index')
-if max(rejoined)<max(after):raise SystemExit('rejoined member has not installed leader snapshot')
+if min(start for start,_ in leader_after_segments)<=stopped_end+1:
+  raise SystemExit('leader still has log segments that could serve stopped member without snapshot')
+if max(rejoined)<max(after) or max(rejoined)<=max(stopped_snapshots or [0]):
+  raise SystemExit('rejoined member has no new local snapshot at the leader index')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
         lc_case snapshot-catch-up pass "leader snapshot index crossed stopped member segment end after 1400 acknowledged writes; rejoined member installed that snapshot" "$LC_ART/cluster-logs/snapshot-threshold.json"
@@ -576,7 +671,13 @@ PY
         >"$LC_ART/cluster-logs/pre-start-restored-info.yaml" || LC_RESTORE_RC=$?
       cmp -s "$LC_ART/cluster-logs/snapshot-copy-info.yaml" "$LC_ART/cluster-logs/pre-start-restored-info.yaml" || LC_RESTORE_RC=1
     fi
-    lc_scale_three || LC_RESTORE_RC=$?
+    if [[ "$LC_RESTORE_RC" == 0 ]]; then
+      lc_scale_three || LC_RESTORE_RC=$?
+    else
+      # A failed erase/extract/checksum leaves the member stopped. Starting it
+      # could silently repair from healthy peers and falsely certify a copy.
+      lc_storage_helper_stop || LC_RESTORE_RC=1
+    fi
     if [[ "$LC_RESTORE_RC" == 0 ]]; then
       lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_RESTORE_RC=$?
       lc_copy_runner_artifacts || true
@@ -699,7 +800,8 @@ for name in expected:
   by.setdefault(name,{'name':name,'status':'blocked','lifecycle_id':os.environ['LC_ID'],
     'detail':'required case produced no record'})
 cases=[by[n] for n in expected]
-failed=[r['name'] for r in cases if r['status'] not in ('pass','recorded-outcome')]
+failed=[r['name'] for r in cases if not (r['status']=='pass' or
+  (r['name']=='rollback-recorded-outcome' and r['status']=='recorded-outcome' and r.get('observations')))]
 record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'lifecycle_id':os.environ['LC_ID'],'pair':os.environ['LC_PAIR'],
   'candidate_sha':os.environ['LC_SHA'],'started_at':os.environ['LC_STARTED'],
