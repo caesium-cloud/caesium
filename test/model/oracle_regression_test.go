@@ -33,6 +33,42 @@ func TestOracleRegressionLostAcknowledgedState(t *testing.T) {
 	}
 }
 
+func TestOracleRegressionCrossEpochAcknowledgedState(t *testing.T) {
+	r := oracleRun(t, model.DAG{Order: []model.TaskID{"task"}})
+	id := model.Step("task")
+	if !r.Dispatch(id, "worker", 1000) {
+		t.Fatal("fixture task was not dispatchable")
+	}
+	if got := r.Complete(id, model.StatusFailed, r.Generation()); !got.Applied {
+		t.Fatalf("fixture failure did not apply: %+v", got)
+	}
+	before := r.Checkpoint()
+	if !r.Retry() {
+		t.Fatal("fixture retry was rejected")
+	}
+	after := r.Checkpoint()
+	if before.Epoch == after.Epoch || before.Status[id] != model.StatusFailed || after.Status[id] != model.StatusPending {
+		t.Fatalf("fixture did not reopen failed work across an epoch: before=%+v after=%+v", before, after)
+	}
+	if err := model.CheckNoTerminalRegression(before, after); err != nil {
+		t.Fatalf("legal retry with unchanged acknowledgement rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		ack  model.Ack
+	}{
+		{"lost", model.Ack{}},
+		{"changed run", model.Ack{RunID: "other-run", JobID: before.Ack.JobID}},
+		{"changed job", model.Ack{RunID: before.Ack.RunID, JobID: "other-job"}},
+	} {
+		changed := after
+		changed.Ack = tc.ack
+		if err := model.CheckNoTerminalRegression(before, changed); err == nil || !strings.Contains(err.Error(), "DT-ADMIT-01") {
+			t.Fatalf("%s: cross-epoch acknowledged identity change escaped DT-ADMIT-01: %v", tc.name, err)
+		}
+	}
+}
+
 func TestOracleRegressionStaleGeneration(t *testing.T) {
 	r := oracleRun(t, model.DAG{Order: []model.TaskID{"task"}})
 	id := model.Step("task")

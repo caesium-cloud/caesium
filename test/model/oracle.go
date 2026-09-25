@@ -176,15 +176,19 @@ func CheckRefusalInert(before, after Snapshot) error {
 	return nil
 }
 
-// CheckNoTerminalRegression verifies DT-TERMINAL-01 across two observations of
-// the same run WITHIN one execution epoch: an identity that was terminal stays
-// terminal with the same outcome.
+// CheckNoTerminalRegression verifies DT-ADMIT-01 across every observation of
+// an acknowledged run, including retries. It also verifies DT-TERMINAL-01
+// WITHIN one execution epoch: a terminal identity keeps the same outcome.
 //
 // Scoping to an epoch is not a convenience. A1 records that the product has no
 // durable run-execution epoch on its completion fence, so a retry legitimately
-// moves a failed task back to pending. Asserting non-regression across a retry
-// would be asserting a guarantee that was never made.
+// moves a failed task back to pending. Only terminal-status non-regression is
+// epoch-scoped; an acknowledged run UUID and job identity remain durable.
 func CheckNoTerminalRegression(before, after Snapshot) error {
+	if after.Ack != before.Ack {
+		return fmt.Errorf("safety: the acknowledged run identity changed from %+v to %+v (DT-ADMIT-01)",
+			before.Ack, after.Ack)
+	}
 	if before.Epoch != after.Epoch {
 		return nil
 	}
@@ -199,10 +203,6 @@ func CheckNoTerminalRegression(before, after Snapshot) error {
 		if got != s {
 			return fmt.Errorf("safety: %s regressed from terminal %s to %s (DT-TERMINAL-01)", id, s, got)
 		}
-	}
-	if after.Ack != before.Ack {
-		return fmt.Errorf("safety: the acknowledged run identity changed from %+v to %+v (DT-ADMIT-01)",
-			before.Ack, after.Ack)
 	}
 	return nil
 }

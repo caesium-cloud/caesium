@@ -39,7 +39,7 @@ run_probe() {
 
 echo "oracle candidate=$candidate"
 run_probe candidate ./test/model '^TestOracleRegression' \
-  'TestOracleRegressionLostAcknowledgedState,TestOracleRegressionStaleGeneration,TestOracleRegressionWholeGroupFanIn,TestOracleRegressionDurableCompletionReplay,TestOracleRegressionLegalDuplicateDelivery' model-candidate
+  'TestOracleRegressionLostAcknowledgedState,TestOracleRegressionCrossEpochAcknowledgedState,TestOracleRegressionStaleGeneration,TestOracleRegressionWholeGroupFanIn,TestOracleRegressionDurableCompletionReplay,TestOracleRegressionLegalDuplicateDelivery' model-candidate
 run_probe candidate ./test/robustness/history '^TestC3' \
   'TestC3MissingReplay,TestC3UnaccountedExternalEffect,TestC3LegalDuplicateDelivery,TestC3MissingEvidenceFailsClosed' history-candidate
 run_probe candidate ./test/robustness '^TestC3' \
@@ -60,7 +60,7 @@ run_mutation() {
   run_probe mutant "$package" "^${test_name}$" "$test_name" "$name" "$marker"
 }
 
-run_mutation lost-ack test/model/testdata/mutations/lost-ack.patch test/model/oracle.go ./test/model TestOracleRegressionLostAcknowledgedState 'lost acknowledged identity escaped'
+run_mutation lost-ack test/model/testdata/mutations/lost-ack.patch test/model/oracle.go ./test/model TestOracleRegressionCrossEpochAcknowledgedState 'cross-epoch acknowledged identity change escaped'
 run_mutation accept-stale-generation test/model/testdata/mutations/accept-stale-generation.patch test/model/run.go ./test/model TestOracleRegressionStaleGeneration 'old owner completion was accepted or persisted'
 run_mutation drop-durable-replay test/model/testdata/mutations/drop-durable-replay.patch test/model/run.go ./test/model TestOracleRegressionDurableCompletionReplay 'duplicate delivery failed to replay'
 run_mutation partial-fan-in test/model/testdata/mutations/partial-fan-in.patch test/robustness/corelogic.go ./test/robustness TestC3FanInStartedTooEarly 'join started before all predecessor partitions completed'
