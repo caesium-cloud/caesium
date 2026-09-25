@@ -90,7 +90,7 @@ func (g *requestRaceGate) releaseBoth() time.Time {
 // row matched to its durable identity and attempt. A valid successor cannot
 // mask an extra queued/running block or unknown task row.
 func checkCancelledRaceTaskSet(public cluster.Run, recipes []cluster.TaskRecipe,
-	names map[string]string, runID string, block cluster.Task) error {
+	names map[string]string, runID string, block cluster.Task, preparedBlock cluster.TaskRecipe) error {
 	if public.ID != runID || len(names) != 2 || len(public.Tasks) != 2 || len(recipes) != 2 {
 		return fmt.Errorf("unexpected cancellation fixture cardinality: run=%s want=%s catalog=%d public=%d durable=%d",
 			public.ID, runID, len(names), len(public.Tasks), len(recipes))
@@ -103,7 +103,8 @@ func checkCancelledRaceTaskSet(public cluster.Run, recipes []cluster.TaskRecipe,
 		seenCatalog[step] = true
 	}
 	if !seenCatalog[cluster.BlockStep] || !seenCatalog[cluster.SuccessorStep] ||
-		block.ID == "" || names[block.TaskID] != cluster.BlockStep {
+		block.ID == "" || block.TaskID == "" || preparedBlock.ID == "" ||
+		block.TaskID != preparedBlock.TaskID || names[block.TaskID] != cluster.BlockStep {
 		return fmt.Errorf("cancelled fixture lacks the prepared block and successor: block=%+v catalog=%v", block, names)
 	}
 	durableByID := make(map[string]cluster.TaskRecipe, 2)
@@ -113,8 +114,8 @@ func checkCancelledRaceTaskSet(public cluster.Run, recipes []cluster.TaskRecipe,
 		if recipe.ID == "" || !known || seenDurableStep[step] || durableByID[recipe.ID].ID != "" {
 			return fmt.Errorf("extra, unknown, or duplicate durable task: %+v", recipe)
 		}
-		if step == cluster.BlockStep && (recipe.ID != block.ID || recipe.TaskID != block.TaskID) {
-			return fmt.Errorf("durable block changed identity: prepared=%+v durable=%+v", block, recipe)
+		if step == cluster.BlockStep && recipe.ID != preparedBlock.ID {
+			return fmt.Errorf("durable block changed identity: prepared=%+v durable=%+v", preparedBlock, recipe)
 		}
 		if !strings.EqualFold(recipe.Status, "cancelled") || strings.TrimSpace(recipe.ClaimedBy) != "" {
 			return fmt.Errorf("durable %s task is not cancelled and unclaimed: %+v", step, recipe)
@@ -127,13 +128,11 @@ func checkCancelledRaceTaskSet(public cluster.Run, recipes []cluster.TaskRecipe,
 	}
 	seenPublicID := map[string]bool{}
 	for _, task := range public.Tasks {
-		recipe, known := durableByID[task.ID]
-		if !known || seenPublicID[task.ID] || task.TaskID != recipe.TaskID ||
-			!strings.EqualFold(task.Status, recipe.Status) || task.ClaimedBy != recipe.ClaimedBy ||
-			task.Attempt != recipe.Attempt || task.Image != recipe.Image {
-			return fmt.Errorf("public task does not match one durable row: public=%+v durable=%+v found=%t", task, recipe, known)
+		recipe, err := cluster.ResolveUnfannedTaskRecipe(task, recipes)
+		if err != nil || durableByID[recipe.ID].ID == "" || seenPublicID[recipe.ID] {
+			return fmt.Errorf("public task does not match one durable row: public=%+v durable=%+v err=%v", task, recipe, err)
 		}
-		seenPublicID[task.ID] = true
+		seenPublicID[recipe.ID] = true
 	}
 	if len(seenPublicID) != len(durableByID) {
 		return fmt.Errorf("public cancellation task set omitted durable rows: public=%d durable=%d", len(seenPublicID), len(durableByID))

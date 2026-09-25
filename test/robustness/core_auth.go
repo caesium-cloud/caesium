@@ -21,7 +21,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
 
-	completeEx := cli.Complete(ctx, target, completePayload(run, lease, "succeeded", lease.Generation))
+	completeEx := cli.Complete(ctx, target, completePayload(t, fe, member.HTTPBase(), run, lease, "succeeded", lease.Generation))
 	if completeEx.Err != "" {
 		t.Fatalf("wrong-token complete transport: %v", completeEx.Err)
 	}
@@ -32,7 +32,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	}
 
 	peer := otherMember(fe.topo, owner)
-	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(run, lease, peer.NodeAddress))
+	dispatchEx := cli.Dispatch(ctx, cluster.InternalBase(peer.IP), dispatchPayload(t, fe, member.HTTPBase(), run, lease, peer.NodeAddress))
 	if dispatchEx.Err != "" {
 		t.Fatalf("wrong-token dispatch transport: %v", dispatchEx.Err)
 	}
@@ -62,7 +62,7 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
-	payload := completePayload(run, lease, "succeeded", lease.Generation)
+	payload := completePayload(t, fe, member.HTTPBase(), run, lease, "succeeded", lease.Generation)
 
 	mintCtx, mintCancel := context.WithTimeout(ctx, 30*time.Second)
 	cli, err := cluster.InvalidCertClient(mintCtx, fe.httpAPI, member.HTTPBase())

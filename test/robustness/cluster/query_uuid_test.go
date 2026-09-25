@@ -64,7 +64,7 @@ func TestQueryTaskRecipesKeepsClaimAttemptSeparateFromRetryAttempt(t *testing.T)
 		if r.URL.Path != "/v1/database/query" {
 			t.Fatalf("unexpected query path %q", r.URL.Path)
 		}
-		body := fmt.Sprintf(`{"row_count":1,"rows":[[%q,%q,"running","image:v1","[\"sh\"]","node-b",1,2,3,"",null]]}`, instanceID, taskID)
+		body := fmt.Sprintf(`{"limit":200,"row_count":1,"rows":[[%q,%q,"running","image:v1","[\"sh\"]","node-b",1,2,3,"",null]]}`, instanceID, taskID)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}}
 	recipes, err := h.QueryTaskRecipes(context.Background(), "http://query.test", runID)
@@ -77,6 +77,54 @@ func TestQueryTaskRecipesKeepsClaimAttemptSeparateFromRetryAttempt(t *testing.T)
 	}
 	if got.ResultDigest == "" || got.OutputDigest == "" {
 		t.Fatalf("result/output evidence missing: %+v", got)
+	}
+}
+
+func TestQueryTaskRecipesRequiresCompletePage(t *testing.T) {
+	const runID = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"truncated", `{"limit":200,"row_count":0,"truncated":true,"rows":[]}`},
+		{"missing limit", `{"row_count":0,"rows":[]}`},
+		{"unexpected limit", `{"limit":100,"row_count":0,"rows":[]}`},
+		{"inconsistent count", `{"limit":200,"row_count":1,"rows":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &HTTP{Client: &http.Client{Transport: queryRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})}}
+			if recipes, err := h.QueryTaskRecipes(context.Background(), "http://query.test", runID); err == nil {
+				t.Fatalf("incomplete task page accepted: %+v", recipes)
+			}
+		})
+	}
+}
+
+func TestResolveUnfannedTaskRecipeRequiresUniqueDurableInstance(t *testing.T) {
+	public := Task{ID: "catalog", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 1, Image: "image:v1"}
+	recipe := TaskRecipe{ID: "instance", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 1, Image: "image:v1"}
+	if got, err := ResolveUnfannedTaskRecipe(public, []TaskRecipe{recipe}); err != nil || got.ID != recipe.ID {
+		t.Fatalf("projected public identity failed to resolve actual row: got=%+v err=%v", got, err)
+	}
+	for _, tc := range []struct {
+		name    string
+		public  Task
+		recipes []TaskRecipe
+	}{
+		{"missing row", public, nil},
+		{"duplicate instances", public, []TaskRecipe{recipe, {ID: "second-instance", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 1, Image: "image:v1"}}},
+		{"unrelated projected ID", Task{ID: "wrong", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 1, Image: "image:v1"}, []TaskRecipe{recipe}},
+		{"changed claim", public, []TaskRecipe{{ID: "instance", TaskID: "catalog", Status: "running", ClaimedBy: "other", Attempt: 1, Image: "image:v1"}}},
+		{"changed attempt", public, []TaskRecipe{{ID: "instance", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 2, Image: "image:v1"}}},
+		{"changed image", public, []TaskRecipe{{ID: "instance", TaskID: "catalog", Status: "running", ClaimedBy: "owner", Attempt: 1, Image: "image:v2"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := ResolveUnfannedTaskRecipe(tc.public, tc.recipes); err == nil {
+				t.Fatalf("ambiguous/mismatched task resolved as %+v", got)
+			}
+		})
 	}
 }
 

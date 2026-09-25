@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,10 +21,20 @@ import (
 func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	refreshTopo(t, fe)
 	ctx := context.Background()
-	owner := fe.leader
-	if cluster.IsControlPlaneNode(owner.Node) {
-		t.Fatalf("owner %s is on control-plane node %s", owner.Name, owner.Node)
+	// Keep the dqlite leader in the survivor majority. Pausing that leader
+	// conflates owner recovery with database leader failover and can leave all
+	// survivor SQL reads unavailable before the stale-generation probe begins.
+	var eligible []cluster.Member
+	for _, member := range fe.topo.Members {
+		if member.Name != fe.leader.Name && cluster.IsWorkerNode(member.Node) {
+			eligible = append(eligible, member)
+		}
 	}
+	if len(eligible) == 0 {
+		t.Fatalf("inconclusive: no worker run owner outside dqlite leader %s", fe.leader.Name)
+	}
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
+	owner := eligible[0]
 	alias := uniqueAlias("stale")
 	def := cluster.FixtureDefinition(alias, fe.env.TaskImage)
 	if err := fe.httpAPI.Apply(ctx, owner.HTTPBase(), []jobdef.Definition{def}); err != nil {
@@ -69,6 +80,9 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("lease before pause: %v", err)
 	}
+	if lease.OwnerNode != owner.NodeAddress {
+		t.Fatalf("inconclusive: durable run owner %s differs from selected nonleader %s", lease.OwnerNode, owner.NodeAddress)
+	}
 	leaseObservedAt := time.Now().UTC()
 	startCtx, startCancel := context.WithTimeout(ctx, 90*time.Second)
 	if err := cluster.Poll(startCtx, 500*time.Millisecond, func() (bool, error) {
@@ -83,6 +97,18 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("inconclusive: catalog task identities before takeover: %v", err)
 	}
+	blockTaskID := ""
+	for taskID, step := range names {
+		if step == cluster.BlockStep {
+			if blockTaskID != "" {
+				t.Fatalf("inconclusive: stale fixture has multiple block catalog tasks: %v", names)
+			}
+			blockTaskID = taskID
+		}
+	}
+	if blockTaskID == "" {
+		t.Fatalf("inconclusive: stale fixture has no block catalog task: %v", names)
+	}
 	var originalBlock cluster.TaskRecipe
 	var lastInitialClaimError string
 	initialClaimCtx, initialClaimCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -92,12 +118,10 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 			lastInitialClaimError = rerr.Error()
 			return false, nil
 		}
-		originalBlock = cluster.TaskRecipe{}
-		for _, recipe := range recipes {
-			if names[recipe.TaskID] == cluster.BlockStep {
-				originalBlock = recipe
-				break
-			}
+		originalBlock, rerr = cluster.UniqueTaskRecipeForTaskID(blockTaskID, recipes)
+		if rerr != nil {
+			lastInitialClaimError = rerr.Error()
+			return false, nil
 		}
 		if originalBlock.ID == "" || !strings.EqualFold(originalBlock.Status, "running") ||
 			strings.TrimSpace(originalBlock.ClaimedBy) == "" || originalBlock.ClaimAttempt < 1 ||
@@ -115,6 +139,10 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	live, err := cluster.RefreshMember(ctx, fe.kube, fe.env.Namespace, owner.Name)
 	if err != nil || live.ContainerID == "" {
 		t.Fatalf("refresh owner: %v", err)
+	}
+	membership := waitMembership(t, fe, 30*time.Second)
+	if cluster.HostIP(membership.Leader.Address) == live.IP {
+		t.Fatalf("inconclusive: selected run owner %s became dqlite leader before pause", live.Name)
 	}
 	beforeState, beforeRaw, err := fe.host.TaskState(ctx, live.Node, live.ContainerID)
 	if err != nil {
@@ -285,14 +313,14 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 			stableClaimReads = 0
 			return false, nil
 		}
-		var block cluster.TaskRecipe
-		for _, recipe := range recipes {
-			if recipe.ID == originalBlock.ID && recipe.TaskID == originalBlock.TaskID {
-				block = recipe
-				break
-			}
+		block, rerr := cluster.UniqueTaskRecipeForTaskID(originalBlock.TaskID, recipes)
+		if rerr != nil {
+			lastClaimError = rerr.Error()
+			stableClaimReads = 0
+			return false, nil
 		}
 		if block.ID == "" || !strings.EqualFold(block.Status, "running") ||
+			block.ID != originalBlock.ID ||
 			strings.TrimSpace(block.ClaimedBy) == "" || block.ClaimAttempt <= originalBlock.ClaimAttempt ||
 			block.OwnerGeneration != recovered.Generation {
 			lastClaimError = fmt.Sprintf("new owner has not re-claimed original block: %+v", block)
@@ -326,15 +354,21 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		t.Fatalf("run before stale complete: %v", err)
 	}
 	activeBlock := false
+	activeBlockCount := 0
+	latestRecipes, err := fe.httpAPI.QueryTaskRecipes(ctx, leaseBase, run.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: active recovered block durable rows: %v", err)
+	}
 	for _, task := range detail.Tasks {
-		if task.ID == recoveredBlock.ID && task.TaskID == recoveredBlock.TaskID &&
-			strings.EqualFold(task.Status, "running") && task.ClaimedBy == recoveredBlock.ClaimedBy &&
-			task.Attempt == recoveredBlock.Attempt {
-			activeBlock = true
-			break
+		if task.TaskID == recoveredBlock.TaskID {
+			activeBlockCount++
+			matched, merr := cluster.ResolveUnfannedTaskRecipe(task, latestRecipes)
+			activeBlock = merr == nil && matched.ID == recoveredBlock.ID &&
+				strings.EqualFold(task.Status, "running") && task.ClaimedBy == recoveredBlock.ClaimedBy &&
+				task.Attempt == recoveredBlock.Attempt
 		}
 	}
-	if !activeBlock {
+	if !activeBlock || activeBlockCount != 1 {
 		t.Fatalf("inconclusive: recovered block claim has no matching active public task: %+v run=%+v", recoveredBlock, detail)
 	}
 	before := fingerprintDurableRun(t, ctx, fe, leaseBase, job.ID, run.ID)
@@ -387,24 +421,25 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	waitMembership(t, fe, 3*time.Minute)
 
 	writeCoreRecord(t, fe, "stale_generation_complete", map[string]any{
-		"run_id":                run.ID,
-		"owner_paused":          owner.Name,
-		"lease_before":          lease,
-		"lease_after":           recovered,
-		"lease_queries":         queries,
-		"lease_query_errors":    queryErrors,
-		"successful_sql_probes": successfulSQLProbes,
-		"identified_sql_probes": identifiedSQLProbes,
-		"healthy_sql_probes":    healthySQLProbes,
-		"recovered_block_claim": recoveredBlock,
-		"survivor_probes":       lastProbes,
-		"held_seconds":          ev.HeldSeconds,
-		"past_lease":            ev.HeldPastLease(),
-		"refusal_code":          code,
-		"complete_status":       ex.Status,
-		"public_status":         final.Status,
-		"pause_state_before":    beforeState,
-		"pause_state_paused":    pausedState,
+		"run_id":                     run.ID,
+		"owner_paused":               owner.Name,
+		"dqlite_leader_before_pause": membership.Leader.Address,
+		"lease_before":               lease,
+		"lease_after":                recovered,
+		"lease_queries":              queries,
+		"lease_query_errors":         queryErrors,
+		"successful_sql_probes":      successfulSQLProbes,
+		"identified_sql_probes":      identifiedSQLProbes,
+		"healthy_sql_probes":         healthySQLProbes,
+		"recovered_block_claim":      recoveredBlock,
+		"survivor_probes":            lastProbes,
+		"held_seconds":               ev.HeldSeconds,
+		"past_lease":                 ev.HeldPastLease(),
+		"refusal_code":               code,
+		"complete_status":            ex.Status,
+		"public_status":              final.Status,
+		"pause_state_before":         beforeState,
+		"pause_state_paused":         pausedState,
 	})
 }
 

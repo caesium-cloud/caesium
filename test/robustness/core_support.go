@@ -89,20 +89,24 @@ func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, 
 	if requireDurable && len(recipes) != len(got.Tasks) {
 		t.Fatalf("inconclusive: run %s has %d public tasks but %d durable recipes", runID, len(got.Tasks), len(recipes))
 	}
-	recipeByID := map[string]cluster.TaskRecipe{}
-	if rerr == nil {
-		for _, r := range recipes {
-			recipeByID[r.ID] = r
-		}
-	}
+	usedDurableIDs := map[string]bool{}
 	for _, tr := range got.Tasks {
-		r, ok := recipeByID[tr.ID]
-		if requireDurable && !ok {
-			t.Fatalf("inconclusive: public task %s has no matching durable recipe in run %s", tr.ID, runID)
+		var r cluster.TaskRecipe
+		ok := false
+		if rerr == nil {
+			matched, matchErr := cluster.ResolveUnfannedTaskRecipe(tr, recipes)
+			if matchErr != nil && requireDurable {
+				t.Fatalf("inconclusive: public task %s has no unique durable recipe in run %s: %v", tr.TaskID, runID, matchErr)
+			}
+			if matchErr == nil {
+				r, ok = matched, true
+			}
 		}
-		if requireDurable && (r.TaskID != tr.TaskID || !strings.EqualFold(r.Status, tr.Status) ||
-			r.ClaimedBy != tr.ClaimedBy || r.Attempt != tr.Attempt) {
-			t.Fatalf("inconclusive: public/durable task %s disagree during snapshot: public=%+v durable=%+v", tr.ID, tr, r)
+		if requireDurable {
+			if usedDurableIDs[r.ID] {
+				t.Fatalf("inconclusive: two public tasks map to durable instance %s", r.ID)
+			}
+			usedDurableIDs[r.ID] = true
 		}
 		tf := TaskFingerprint{
 			ID: tr.ID, TaskID: tr.TaskID, Status: tr.Status,
@@ -112,6 +116,7 @@ func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, 
 			tf.Image = r.Image
 			tf.Command = r.Command
 			if requireDurable {
+				tf.ID = r.ID
 				tf.ClaimAttempt = r.ClaimAttempt
 				tf.OwnerGeneration = r.OwnerGeneration
 				tf.ResultDigest = r.ResultDigest
@@ -188,40 +193,63 @@ func wrongTokenClient(t *testing.T, fe *faultEnv, member cluster.Member) *cluste
 	return cli
 }
 
-func completePayload(run cluster.Run, lease cluster.Lease, status string, generation int64) map[string]any {
+func payloadTaskRecipe(t *testing.T, fe *faultEnv, base string, run cluster.Run) (cluster.Task, cluster.TaskRecipe) {
+	t.Helper()
+	if len(run.Tasks) == 0 {
+		t.Fatalf("inconclusive: run %s has no public task for internal payload", run.ID)
+	}
+	selected := run.Tasks[0]
+	runningCount := 0
+	for _, task := range run.Tasks {
+		if strings.EqualFold(task.Status, "running") && strings.TrimSpace(task.ClaimedBy) != "" {
+			selected = task
+			runningCount++
+		}
+	}
+	if runningCount > 1 {
+		t.Fatalf("inconclusive: run %s has %d running claimed tasks; payload target is ambiguous", run.ID, runningCount)
+	}
+	recipes, err := fe.httpAPI.QueryTaskRecipes(context.Background(), base, run.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: durable payload task rows for run %s: %v", run.ID, err)
+	}
+	recipe, err := cluster.ResolveUnfannedTaskRecipe(selected, recipes)
+	if err != nil {
+		t.Fatalf("inconclusive: payload task identity for run %s: %v", run.ID, err)
+	}
+	return selected, recipe
+}
+
+func completePayload(t *testing.T, fe *faultEnv, base string, run cluster.Run, lease cluster.Lease, status string, generation int64) map[string]any {
+	t.Helper()
+	tr, recipe := payloadTaskRecipe(t, fe, base, run)
 	payload := map[string]any{
 		"run_id":           run.ID,
 		"owner_generation": generation,
-		"attempt":          1,
+		"attempt":          tr.Attempt,
 		"worker_node":      lease.OwnerNode,
 		"status":           status,
+		"task_id":          tr.TaskID,
+		"task_run_id":      recipe.ID,
 	}
-	if len(run.Tasks) > 0 {
-		tr := run.Tasks[0]
-		payload["task_id"] = tr.TaskID
-		payload["task_run_id"] = tr.ID
-		payload["attempt"] = tr.Attempt
-		if strings.TrimSpace(tr.ClaimedBy) != "" {
-			payload["worker_node"] = tr.ClaimedBy
-		}
+	if strings.TrimSpace(tr.ClaimedBy) != "" {
+		payload["worker_node"] = tr.ClaimedBy
 	}
 	return payload
 }
 
-func dispatchPayload(run cluster.Run, lease cluster.Lease, worker string) map[string]any {
+func dispatchPayload(t *testing.T, fe *faultEnv, base string, run cluster.Run, lease cluster.Lease, worker string) map[string]any {
+	t.Helper()
+	tr, recipe := payloadTaskRecipe(t, fe, base, run)
 	payload := map[string]any{
 		"run_id":           run.ID,
 		"owner_generation": lease.Generation,
-		"attempt":          1,
+		"attempt":          tr.Attempt,
 		"worker_node":      worker,
 		"owner_base_url":   cluster.InternalBase(cluster.HostIP(lease.OwnerNode)),
 		"deadline":         time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339Nano),
-	}
-	if len(run.Tasks) > 0 {
-		tr := run.Tasks[0]
-		payload["task_id"] = tr.TaskID
-		payload["task_run_id"] = tr.ID
-		payload["attempt"] = tr.Attempt
+		"task_id":          tr.TaskID,
+		"task_run_id":      recipe.ID,
 	}
 	return payload
 }

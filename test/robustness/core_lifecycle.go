@@ -36,7 +36,7 @@ func runTerminalNoRegress(t *testing.T, fe *faultEnv) {
 	}
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	cli := validInternalClient(t, fe, owner)
-	payload := completePayload(final, lease, "failed", lease.Generation)
+	payload := completePayload(t, fe, member.HTTPBase(), final, lease, "failed", lease.Generation)
 	ex := cli.Complete(ctx, cluster.InternalBase(owner.IP), payload)
 	if ex.Err != "" {
 		t.Fatalf("stale terminal complete transport: %v", ex.Err)
@@ -300,23 +300,16 @@ func prepareCancelContender(t *testing.T, fe *faultEnv) cancelContender {
 	if err != nil {
 		t.Fatalf("inconclusive: old block durable claim unavailable: %v", err)
 	}
-	var block cluster.TaskRecipe
-	for _, recipe := range recipes {
-		if recipe.ID == firstTask.ID && recipe.TaskID == firstTask.TaskID {
-			block = recipe
-			break
-		}
-	}
-	if block.ID == "" || !strings.EqualFold(block.Status, "running") ||
-		block.ClaimedBy != firstTask.ClaimedBy || block.Attempt != firstTask.Attempt ||
+	block, err := cluster.ResolveUnfannedTaskRecipe(firstTask, recipes)
+	if err != nil || !strings.EqualFold(block.Status, "running") ||
 		block.ClaimAttempt < 1 || block.OwnerGeneration != firstLease.Generation {
-		t.Fatalf("inconclusive: old block claim is not authoritative for current lease: public=%+v durable=%+v lease=%+v", firstTask, block, firstLease)
+		t.Fatalf("inconclusive: old block claim is not authoritative for current lease: public=%+v durable=%+v lease=%+v err=%v", firstTask, block, firstLease, err)
 	}
 	oldOwner := memberByNode(t, fe, firstLease.OwnerNode)
 	oldClient := validInternalClient(t, fe, oldOwner)
 	completionNonce := uniqueAlias("complete")
 	oldComplete := map[string]any{
-		"run_id": first.ID, "task_id": firstTask.TaskID, "task_run_id": firstTask.ID,
+		"run_id": first.ID, "task_id": firstTask.TaskID, "task_run_id": block.ID,
 		"owner_generation": firstLease.Generation, "attempt": firstTask.Attempt,
 		"worker_node": firstTask.ClaimedBy, "status": "succeeded", "result": "success",
 		"outputs": map[string]string{"cancel_race_nonce": completionNonce},
@@ -401,41 +394,8 @@ func runCancelPostCommitFence(t *testing.T, fe *faultEnv) {
 		if rerr != nil {
 			t.Fatalf("%s: durable task rows unavailable: %v", when, rerr)
 		}
-		byID := make(map[string]cluster.TaskRecipe, len(recipes))
-		durableIDs := make([]string, 0, len(recipes))
-		for _, r := range recipes {
-			byID[r.ID] = r
-			durableIDs = append(durableIDs, r.ID+"/"+r.TaskID+"/"+r.Status)
-		}
-		if len(got.Tasks) != 2 {
-			t.Fatalf("%s: cancelled run has %d task rows, want 2", when, len(got.Tasks))
-		}
-		if len(byID) != 2 || len(recipes) != 2 {
-			t.Fatalf("%s: cancelled run has %d durable task rows (%d distinct), want 2", when, len(recipes), len(byID))
-		}
-		seen := map[string]bool{}
-		for _, tr := range got.Tasks {
-			step := names[tr.TaskID]
-			if step != cluster.BlockStep && step != "successor" {
-				t.Fatalf("%s: unexpected task %s (%s)", when, tr.TaskID, step)
-			}
-			if seen[step] {
-				t.Fatalf("%s: duplicate %s task row", when, step)
-			}
-			seen[step] = true
-			durable, ok := byID[tr.ID]
-			if !ok || durable.TaskID != tr.TaskID {
-				t.Fatalf("%s: public %s task id=%s task_id=%s has no matching durable row (id_found=%t matched_task_id=%s durable_ids=%v)",
-					when, step, tr.ID, tr.TaskID, ok, durable.TaskID, durableIDs)
-			}
-			if !strings.EqualFold(tr.Status, "cancelled") || !strings.EqualFold(durable.Status, "cancelled") ||
-				strings.TrimSpace(tr.ClaimedBy) != "" || strings.TrimSpace(durable.ClaimedBy) != "" {
-				t.Fatalf("%s: old %s task public=%s/%q durable=%s/%q, want cancelled and unclaimed",
-					when, step, tr.Status, tr.ClaimedBy, durable.Status, durable.ClaimedBy)
-			}
-		}
-		if !seen[cluster.BlockStep] || !seen["successor"] {
-			t.Fatalf("%s: cancelled run is missing a block or successor task: %v", when, seen)
+		if err := checkCancelledRaceTaskSet(got, recipes, names, first.ID, c.firstTask, c.blockRecipe); err != nil {
+			t.Fatalf("%s: cancelled run task set: %v", when, err)
 		}
 		if n := len(fe.sink.StartsFor(first.ID, "successor")); n != 0 {
 			t.Fatalf("%s: old run started successor %d time(s) after replace", when, n)
@@ -525,19 +485,11 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("inconclusive: old claim unavailable before race release: %v", err)
 	}
-	gateClaimCurrent := false
-	for _, recipe := range gateRecipes {
-		if recipe.ID == c.blockRecipe.ID && recipe.TaskID == c.blockRecipe.TaskID &&
-			strings.EqualFold(recipe.Status, "running") && recipe.ClaimedBy == c.blockRecipe.ClaimedBy &&
-			recipe.Attempt == c.blockRecipe.Attempt && recipe.ClaimAttempt == c.blockRecipe.ClaimAttempt &&
-			recipe.OwnerGeneration == gateLease.Generation &&
-			recipe.ResultDigest == c.blockRecipe.ResultDigest && recipe.OutputDigest == c.blockRecipe.OutputDigest {
-			gateClaimCurrent = true
-			break
-		}
-	}
-	if !gateClaimCurrent {
-		t.Fatalf("inconclusive: prepared block claim changed before race release: initial=%+v gate=%+v", c.blockRecipe, gateRecipes)
+	gateBlock, err := cluster.ResolveUnfannedTaskRecipe(c.firstTask, gateRecipes)
+	if err != nil || gateBlock.ID != c.blockRecipe.ID || gateBlock.ClaimAttempt != c.blockRecipe.ClaimAttempt ||
+		gateBlock.OwnerGeneration != gateLease.Generation || gateBlock.ResultDigest != c.blockRecipe.ResultDigest ||
+		gateBlock.OutputDigest != c.blockRecipe.OutputDigest {
+		t.Fatalf("inconclusive: prepared block claim changed before race release: initial=%+v gate=%+v err=%v", c.blockRecipe, gateBlock, err)
 	}
 	releasedAt := gate.releaseBoth()
 	for _, arrival := range arrivals {
@@ -588,28 +540,20 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("inconclusive: durable old task rows after race: %v", err)
 	}
-	var block cluster.TaskRecipe
-	for _, recipe := range recipes {
-		if recipe.ID == c.blockRecipe.ID && recipe.TaskID == c.blockRecipe.TaskID {
-			block = recipe
-			break
-		}
-	}
-	if block.ID == "" {
-		t.Fatalf("inconclusive: raced block instance %s disappeared", c.blockRecipe.ID)
-	}
-	publicBlockFound := false
+	var publicBlock cluster.Task
+	publicBlockCount := 0
 	for _, task := range firstFinal.Tasks {
-		if task.ID == block.ID && task.TaskID == block.TaskID {
-			publicBlockFound = true
-			if !strings.EqualFold(task.Status, block.Status) || task.ClaimedBy != block.ClaimedBy {
-				t.Fatalf("inconclusive: public/durable raced block disagree: public=%+v durable=%+v", task, block)
-			}
-			break
+		if task.TaskID == c.firstTask.TaskID {
+			publicBlock = task
+			publicBlockCount++
 		}
 	}
-	if !publicBlockFound {
-		t.Fatalf("inconclusive: raced block instance %s missing from public run", block.ID)
+	if publicBlockCount != 1 {
+		t.Fatalf("inconclusive: raced block has %d public rows, want one", publicBlockCount)
+	}
+	block, err := cluster.ResolveUnfannedTaskRecipe(publicBlock, recipes)
+	if err != nil || block.ID != c.blockRecipe.ID {
+		t.Fatalf("inconclusive: raced block instance changed: prepared=%+v public=%+v durable=%+v err=%v", c.blockRecipe, publicBlock, block, err)
 	}
 	eventCtx, eventCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	rows, scope, err := readPersistedEvents(eventCtx, fe.httpAPI, c.member.HTTPBase(), c.first.ID, 2000)
@@ -655,19 +599,24 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("inconclusive: old task rows unavailable after barrier release: %v", err)
 	}
-	lateBlockFound := false
-	for _, recipe := range lateRecipes {
-		if recipe.ID != block.ID || recipe.TaskID != block.TaskID {
-			continue
-		}
-		lateBlockFound = true
-		if recipe.Status != block.Status || recipe.ClaimedBy != block.ClaimedBy ||
-			recipe.ResultDigest != block.ResultDigest || recipe.OutputDigest != block.OutputDigest {
-			t.Fatalf("old task changed after releasing blocked worker: before=%+v after=%+v", block, recipe)
+	latePublicBlockCount := 0
+	var latePublicBlock cluster.Task
+	for _, task := range still.Tasks {
+		if task.TaskID == block.TaskID {
+			latePublicBlock = task
+			latePublicBlockCount++
 		}
 	}
-	if !lateBlockFound {
-		t.Fatalf("inconclusive: old task %s disappeared after barrier release", block.ID)
+	if latePublicBlockCount != 1 {
+		t.Fatalf("inconclusive: old block has %d public rows after barrier release, want one", latePublicBlockCount)
+	}
+	lateBlock, err := cluster.ResolveUnfannedTaskRecipe(latePublicBlock, lateRecipes)
+	if err != nil || lateBlock.ID != block.ID {
+		t.Fatalf("inconclusive: old block identity changed after barrier release: before=%+v after=%+v err=%v", block, lateBlock, err)
+	}
+	if lateBlock.Status != block.Status || lateBlock.ClaimedBy != block.ClaimedBy ||
+		lateBlock.ResultDigest != block.ResultDigest || lateBlock.OutputDigest != block.OutputDigest {
+		t.Fatalf("old task changed after releasing blocked worker: before=%+v after=%+v", block, lateBlock)
 	}
 	if outcome == "cancellation_won" {
 		requireCancelledRaceTaskSet(t, fe, c, still, lateRecipes, "after barrier release")
@@ -701,7 +650,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 func requireCancelledRaceTaskSet(t *testing.T, fe *faultEnv, c cancelContender,
 	public cluster.Run, recipes []cluster.TaskRecipe, when string) {
 	t.Helper()
-	if err := checkCancelledRaceTaskSet(public, recipes, c.names, c.first.ID, c.firstTask); err != nil {
+	if err := checkCancelledRaceTaskSet(public, recipes, c.names, c.first.ID, c.firstTask, c.blockRecipe); err != nil {
 		t.Fatalf("%s: cancellation winner task set: %v", when, err)
 	}
 	if starts := len(fe.sink.StartsFor(c.first.ID, "successor")); starts != 0 {

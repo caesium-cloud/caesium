@@ -134,6 +134,10 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 	if err != nil {
 		return nil, err
 	}
+	if resp.Limit != 200 || resp.Truncated || resp.RowCount != len(resp.Rows) || len(resp.Rows) > resp.Limit {
+		return nil, fmt.Errorf("inconclusive: task_runs query page is incomplete or malformed: limit=%d rows=%d reported=%d truncated=%t",
+			resp.Limit, len(resp.Rows), resp.RowCount, resp.Truncated)
+	}
 	out := make([]TaskRecipe, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
 		if len(row) < 11 {
@@ -170,6 +174,49 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		})
 	}
 	return out, nil
+}
+
+// ResolveUnfannedTaskRecipe maps a public GET /runs/:id task projection to its
+// one durable task_runs row. The public projection uses the catalog task ID as
+// Task.ID even for an unfanned step; it is not the task_runs primary key.
+// Requiring exactly one row for TaskID prevents that projection from hiding a
+// duplicate instance, and all public fields must agree with the durable row.
+func ResolveUnfannedTaskRecipe(public Task, recipes []TaskRecipe) (TaskRecipe, error) {
+	if public.ID == "" || public.TaskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task has no identity: %+v", public)
+	}
+	match, err := UniqueTaskRecipeForTaskID(public.TaskID, recipes)
+	if err != nil {
+		return TaskRecipe{}, err
+	}
+	if public.ID != public.TaskID && public.ID != match.ID {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task ID %s is neither catalog ID nor durable instance ID %s", public.ID, match.ID)
+	}
+	if !strings.EqualFold(public.Status, match.Status) || public.ClaimedBy != match.ClaimedBy ||
+		public.Attempt != match.Attempt || public.Image != match.Image {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public/durable task disagree: public=%+v durable=%+v", public, match)
+	}
+	return match, nil
+}
+
+// UniqueTaskRecipeForTaskID is only suitable for a known unfanned fixture.
+// It fails closed if a duplicate task_run exists for the catalog task.
+func UniqueTaskRecipeForTaskID(taskID string, recipes []TaskRecipe) (TaskRecipe, error) {
+	if taskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: no catalog task identity")
+	}
+	var match TaskRecipe
+	count := 0
+	for _, recipe := range recipes {
+		if recipe.TaskID == taskID {
+			match = recipe
+			count++
+		}
+	}
+	if count != 1 || match.ID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: catalog task %s maps to %d durable instances", taskID, count)
+	}
+	return match, nil
 }
 
 // queryCellDigest keeps NULL distinct from an empty string and rejects a cell

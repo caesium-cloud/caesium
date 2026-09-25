@@ -72,19 +72,19 @@ func TestRequestRaceGateCannotCertifyOneMissingContender(t *testing.T) {
 }
 
 func TestCancelledRaceTaskSetRejectsExtraAndMismatchedRows(t *testing.T) {
-	fixture := func() (cluster.Run, []cluster.TaskRecipe, map[string]string, cluster.Task) {
-		block := cluster.Task{ID: "block-run", TaskID: "block-catalog", Status: "cancelled", Attempt: 1, Image: "task:v1"}
-		successor := cluster.Task{ID: "successor-run", TaskID: "successor-catalog", Status: "cancelled", Attempt: 0, Image: "task:v1"}
+	fixture := func() (cluster.Run, []cluster.TaskRecipe, map[string]string, cluster.Task, cluster.TaskRecipe) {
+		block := cluster.Task{ID: "block-catalog", TaskID: "block-catalog", Status: "cancelled", Attempt: 1, Image: "task:v1"}
+		successor := cluster.Task{ID: "successor-catalog", TaskID: "successor-catalog", Status: "cancelled", Attempt: 0, Image: "task:v1"}
 		public := cluster.Run{ID: "old-run", Tasks: []cluster.Task{block, successor}}
 		durable := []cluster.TaskRecipe{
-			{ID: block.ID, TaskID: block.TaskID, Status: block.Status, Attempt: block.Attempt, Image: block.Image},
-			{ID: successor.ID, TaskID: successor.TaskID, Status: successor.Status, Attempt: successor.Attempt, Image: successor.Image},
+			{ID: "block-instance", TaskID: block.TaskID, Status: block.Status, Attempt: block.Attempt, Image: block.Image},
+			{ID: "successor-instance", TaskID: successor.TaskID, Status: successor.Status, Attempt: successor.Attempt, Image: successor.Image},
 		}
 		names := map[string]string{block.TaskID: cluster.BlockStep, successor.TaskID: cluster.SuccessorStep}
-		return public, durable, names, block
+		return public, durable, names, block, durable[0]
 	}
-	public, durable, names, block := fixture()
-	if err := checkCancelledRaceTaskSet(public, durable, names, public.ID, block); err != nil {
+	public, durable, names, block, preparedBlock := fixture()
+	if err := checkCancelledRaceTaskSet(public, durable, names, public.ID, block, preparedBlock); err != nil {
 		t.Fatalf("legal two-step cancellation rejected: %v", err)
 	}
 	for _, tc := range []struct {
@@ -108,6 +108,12 @@ func TestCancelledRaceTaskSetRejectsExtraAndMismatchedRows(t *testing.T) {
 		{"public row mismatches durable attempt", func(run *cluster.Run, _ *[]cluster.TaskRecipe, _ map[string]string) {
 			run.Tasks[0].Attempt++
 		}},
+		{"duplicate durable block instance", func(_ *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
+			*recipes = append(*recipes, cluster.TaskRecipe{ID: "second-block-instance", TaskID: "block-catalog", Status: "cancelled", Image: "task:v1"})
+		}},
+		{"public ID has unrelated identity", func(run *cluster.Run, _ *[]cluster.TaskRecipe, _ map[string]string) {
+			run.Tasks[0].ID = "unknown-instance"
+		}},
 		{"durable successor remains claimed", func(_ *cluster.Run, recipes *[]cluster.TaskRecipe, _ map[string]string) {
 			(*recipes)[1].ClaimedBy = "worker-a"
 		}},
@@ -116,9 +122,9 @@ func TestCancelledRaceTaskSetRejectsExtraAndMismatchedRows(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			run, recipes, names, block := fixture()
+			run, recipes, names, block, preparedBlock := fixture()
 			tc.mutate(&run, &recipes, names)
-			if err := checkCancelledRaceTaskSet(run, recipes, names, run.ID, block); err == nil {
+			if err := checkCancelledRaceTaskSet(run, recipes, names, run.ID, block, preparedBlock); err == nil {
 				t.Fatalf("invalid cancellation task set passed: public=%+v durable=%+v catalog=%v", run.Tasks, recipes, names)
 			}
 		})
