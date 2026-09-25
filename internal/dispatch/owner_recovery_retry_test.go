@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -85,7 +86,13 @@ func TestHandleCompleteMemoryOwnerTerminalDuplicate(t *testing.T) {
 			require.Equal(t, http.StatusConflict, duplicate.Code, "terminal duplicate: %s", duplicate.Body.String())
 			var refusal ErrorResponse
 			require.NoError(t, json.Unmarshal(duplicate.Body.Bytes(), &refusal))
-			require.Equal(t, ReasonTaskNotRunning, refusal.Code)
+			require.Equal(t, ReasonTerminalRun, refusal.Code)
+			server := httptest.NewServer(http.HandlerFunc(h.HandleComplete))
+			_, postErr := PostComplete(t.Context(), server.URL, testToken, req)
+			server.Close()
+			require.ErrorIs(t, postErr, ErrOwnerRejected,
+				"a terminal duplicate must be a worker ownership fence")
+			require.NotErrorIs(t, postErr, ErrCompletionApplicationRejected)
 			var afterRun models.JobRun
 			require.NoError(t, store.DB().First(&afterRun, "id = ?", runID).Error)
 			require.Equal(t, beforeRun.Status, afterRun.Status)
@@ -130,18 +137,29 @@ func TestHandleCompleteMemoryOwnerStatusReadErrorRetries(t *testing.T) {
 	var claimed models.TaskRun
 	require.NoError(t, store.DB().Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&claimed).Error)
 	h.WithOwnerManager(run.NewOwnerManager(store, run.CheckpointConfig{}))
-	const callback = "test:terminal_status_read_error"
-	require.NoError(t, store.DB().Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
-		if tx.Statement.Table == "job_runs" {
-			tx.AddError(errors.New("injected job-run read failure"))
-		}
-	}))
-	w := postJSON(t, h.HandleComplete, CompleteRequest{
+	require.NoError(t, store.DB().Model(&models.JobRun{}).Where("id = ?", runID).
+		Update("status", string(run.StatusSucceeded)).Error)
+	req := CompleteRequest{
 		RunID: runID, TaskID: taskID, TaskRunID: claimed.ID,
 		OwnerGeneration: 1, WorkerNode: ownerNodeAddr,
 		Status: "succeeded", Result: "success",
-	})
+	}
+	baseline := postJSON(t, h.HandleComplete, req)
+	require.Equal(t, http.StatusConflict, baseline.Code, "terminal baseline: %s", baseline.Body.String())
+	var baselineResponse ErrorResponse
+	require.NoError(t, json.Unmarshal(baseline.Body.Bytes(), &baselineResponse))
+	require.Equal(t, ReasonTerminalRun, baselineResponse.Code)
+	const callback = "test:terminal_status_read_error"
+	injectedReads := 0
+	require.NoError(t, store.DB().Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "job_runs" {
+			injectedReads++
+			tx.AddError(errors.New("injected job-run read failure"))
+		}
+	}))
+	w := postJSON(t, h.HandleComplete, req)
 	require.NoError(t, store.DB().Callback().Query().Remove(callback))
+	require.Equal(t, 1, injectedReads, "the injected status read must be exercised")
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "unreadable status must not be a terminal refusal: %s", w.Body.String())
 	var response ErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
@@ -149,4 +167,9 @@ func TestHandleCompleteMemoryOwnerStatusReadErrorRetries(t *testing.T) {
 	var row models.TaskRun
 	require.NoError(t, store.DB().First(&row, "id = ?", claimed.ID).Error)
 	require.Equal(t, string(run.TaskStatusRunning), row.Status)
+	again := postJSON(t, h.HandleComplete, req)
+	require.Equal(t, http.StatusConflict, again.Code, "status read recovered: %s", again.Body.String())
+	var againResponse ErrorResponse
+	require.NoError(t, json.Unmarshal(again.Body.Bytes(), &againResponse))
+	require.Equal(t, ReasonTerminalRun, againResponse.Code)
 }

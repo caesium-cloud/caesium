@@ -47,9 +47,13 @@ const (
 	ReasonCompletionApplicationRejected = "completion_application_rejected"
 	ReasonCompletionApplyFailed         = "completion_apply_failed"
 	ReasonTaskNotRunning                = "task_not_running"
-	ReasonNotOwner                      = "not_owner"
-	ReasonMissingRun                    = "missing_run"
-	ReasonMalformed                     = "malformed"
+	// ReasonTerminalRun is a permanent run-state fence. Keep it distinct from
+	// legacy task_not_running, which PostComplete classifies as an application
+	// rejection so a worker can report a deterministic result failure.
+	ReasonTerminalRun = "terminal_run"
+	ReasonNotOwner    = "not_owner"
+	ReasonMissingRun  = "missing_run"
+	ReasonMalformed   = "malformed"
 	// ReasonContention labels caesium_complete_retryable_total when the owner
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
@@ -706,9 +710,9 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		if readErr == nil {
 			switch run.Status(persisted.Status) {
 			case run.StatusSucceeded, run.StatusFailed, run.StatusCancelled, run.StatusSkipped:
-				recordRejected(ReasonTaskNotRunning)
+				recordRejected(ReasonTerminalRun)
 				writeJSON(w, http.StatusConflict, ErrorResponse{
-					Code:    ReasonTaskNotRunning,
+					Code:    ReasonTerminalRun,
 					Message: "run has already reached a terminal state",
 				})
 				return

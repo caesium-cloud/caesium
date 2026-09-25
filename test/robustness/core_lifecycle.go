@@ -262,6 +262,30 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		t.Fatalf("first run never started block: %v", err)
 	}
 	startCancel()
+	claimCtx, claimCancel := context.WithTimeout(ctx, time.Minute)
+	firstTask, claimed := waitClaimedBy(t, claimCtx, fe, member.HTTPBase(), job.ID, first.ID, "")
+	claimCancel()
+	if !claimed || !strings.EqualFold(firstTask.Status, "running") || firstTask.Attempt < 1 {
+		t.Fatalf("inconclusive: old block task has no active completion claim: claimed=%t task=%+v", claimed, firstTask)
+	}
+	names, err := taskStepNames(ctx, fe.httpAPI, member.HTTPBase(), job.ID)
+	if err != nil {
+		t.Fatalf("catalog tasks for cancelled run: %v", err)
+	}
+	if names[firstTask.TaskID] != cluster.BlockStep {
+		t.Fatalf("inconclusive: claimed old task %s is %q, want block", firstTask.ID, names[firstTask.TaskID])
+	}
+	firstLease, err := fe.httpAPI.QueryLease(ctx, member.HTTPBase(), first.ID)
+	if err != nil || firstLease.Generation < 1 || strings.TrimSpace(firstLease.OwnerNode) == "" {
+		t.Fatalf("inconclusive: old block completion lease unavailable: lease=%+v err=%v", firstLease, err)
+	}
+	oldOwner := memberByNode(t, fe, firstLease.OwnerNode)
+	oldClient := validInternalClient(t, fe, oldOwner)
+	oldComplete := map[string]any{
+		"run_id": first.ID, "task_id": firstTask.TaskID, "task_run_id": firstTask.ID,
+		"owner_generation": firstLease.Generation, "attempt": firstTask.Attempt,
+		"worker_node": firstTask.ClaimedBy, "status": "succeeded", "result": "success",
+	}
 
 	second, rawSecond, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), job.ID)
 	if err != nil {
@@ -276,6 +300,15 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	// race. The second run has its own wait key and is released so it can finish.
 	fe.sink.Release(first.ID)
 	fe.sink.Release(second.ID)
+	completionRace := oldClient.Complete(ctx, cluster.InternalBase(oldOwner.IP), oldComplete)
+	if completionRace.Err != "" {
+		t.Fatalf("inconclusive: old completion contender did not reach owner: %s", completionRace.Err)
+	}
+	refusalCode, refusalMessage := ParseRefusal(completionRace.Status, []byte(completionRace.Body))
+	if !CancelledCompleteRefusalAllowed(completionRace.Status, refusalCode) {
+		t.Fatalf("old completion contender was not fenced after replacement: status=%d code=%q body=%s",
+			completionRace.Status, refusalCode, RedactSecrets(refusalMessage))
+	}
 
 	cancelCtx, cancelDone := context.WithTimeout(ctx, 2*time.Minute)
 	var firstAfter cluster.Run
@@ -296,10 +329,6 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	}
 
 	completesAtCancel := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep))
-	names, err := taskStepNames(ctx, fe.httpAPI, member.HTTPBase(), job.ID)
-	if err != nil {
-		t.Fatalf("catalog tasks for cancelled run: %v", err)
-	}
 	checkCancelled := func(got cluster.Run, when string) {
 		if !strings.EqualFold(got.Status, "cancelled") {
 			t.Fatalf("%s: cancelled run regressed to %s", when, got.Status)
@@ -309,8 +338,10 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 			t.Fatalf("%s: durable task rows unavailable: %v", when, rerr)
 		}
 		byID := make(map[string]cluster.TaskRecipe, len(recipes))
+		durableIDs := make([]string, 0, len(recipes))
 		for _, r := range recipes {
 			byID[r.ID] = r
+			durableIDs = append(durableIDs, r.ID+"/"+r.TaskID+"/"+r.Status)
 		}
 		if len(got.Tasks) != 2 {
 			t.Fatalf("%s: cancelled run has %d task rows, want 2", when, len(got.Tasks))
@@ -330,7 +361,8 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 			seen[step] = true
 			durable, ok := byID[tr.ID]
 			if !ok || durable.TaskID != tr.TaskID {
-				t.Fatalf("%s: public %s task %s has no matching durable row", when, step, tr.ID)
+				t.Fatalf("%s: public %s task id=%s task_id=%s has no matching durable row (id_found=%t matched_task_id=%s durable_ids=%v)",
+					when, step, tr.ID, tr.TaskID, ok, durable.TaskID, durableIDs)
 			}
 			if !strings.EqualFold(tr.Status, "cancelled") || !strings.EqualFold(durable.Status, "cancelled") ||
 				strings.TrimSpace(tr.ClaimedBy) != "" || strings.TrimSpace(durable.ClaimedBy) != "" {
@@ -367,6 +399,8 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		"second_raw_admit":    truncate(rawSecond, 200),
 		"completes_at_cancel": completesAtCancel,
 		"completes_after":     completesAfterCancel,
+		"old_complete_status": completionRace.Status,
+		"old_complete_code":   refusalCode,
 		"successor_starts":    len(fe.sink.StartsFor(first.ID, "successor")),
 		"replacement_202_ack": "not_process_death",
 		"histories":           []string{first.ID, second.ID},

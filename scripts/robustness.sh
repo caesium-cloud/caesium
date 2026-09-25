@@ -73,6 +73,7 @@ require_cmd kubectl
 require_cmd helm
 require_cmd docker
 require_cmd python3
+require_cmd awk
 [[ -f "$HOSTLOGIC" ]] || die "missing $HOSTLOGIC"
 python3 "$HOSTLOGIC" self-test >/dev/null || die "hostlogic.py self-test failed"
 
@@ -249,20 +250,33 @@ open_chain() {
   printf 'CS%s' "$(printf '%s' "$tag" | tr -cd '[:alnum:]' | tr '[:lower:]' '[:upper:]' | cut -c1-18)"
 }
 
-# A reverse partition uses the forward tag plus "r". Match the trailing
-# delimiter so healing one direction never consumes its sibling's rules.
+# Match the whole comment identity, including the known rule kind and port.
+# A sibling tag can extend this tag with "r" or "-extra" and must remain owned
+# by its own heal request.
 tagged_rule_lines() {
   local tag="$1"
-  grep -F -- "${tag}-"
+  awk -v tag="$tag" '
+    {
+      for (i = 1; i < NF; i++) {
+        if ($i != "--comment") continue
+        comment = $(i + 1)
+        gsub(/"/, "", comment)
+        if (comment ~ ("^" tag "-(drop|open-count)-[0-9]+$")) print
+      }
+    }'
 }
 
 tagged_rule_lines_self_test() {
   local own='-A FORWARD -m comment --comment rb-test-drop-9001 -j DROP'
+  local own_open='-A CSRBT -m comment --comment "rb-test-open-count-8443" -j RETURN'
   local reverse='-A FORWARD -m comment --comment rb-testr-drop-9001 -j DROP'
-  [[ "$(printf '%s\n%s\n' "$own" "$reverse" | tagged_rule_lines rb-test)" == "$own" ]] \
-    || die "tagged rule matching also selected a reverse partition"
-  [[ "$(printf '%s\n%s\n' 'node rb-test' 'node rb-testr' | awk -v tag=rb-test '$2 != tag')" == 'node rb-testr' ]] \
-    || die "partition journal removal also selected a reverse partition"
+  local prefix='-A FORWARD -m comment --comment rb-test-extra-drop-9001 -j DROP'
+  local expected
+  expected="$(printf '%s\n%s' "$own" "$own_open")"
+  [[ "$(printf '%s\n%s\n%s\n%s\n' "$own" "$own_open" "$reverse" "$prefix" | tagged_rule_lines rb-test)" == "$expected" ]] \
+    || die "tagged rule matching selected a sibling or lost an owned rule"
+  [[ "$(printf '%s\n%s\n%s\n' 'node rb-test' 'node rb-testr' 'node rb-test-extra' | awk -v tag=rb-test '$2 != tag')" == "$(printf '%s\n%s' 'node rb-testr' 'node rb-test-extra')" ]] \
+    || die "partition journal removal also selected a sibling partition"
 }
 tagged_rule_lines_self_test
 

@@ -59,8 +59,8 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		t.Fatalf("trigger: %v", err)
 	}
 	survivors := fe.topo.Survivors(owner)
-	if len(survivors) == 0 {
-		t.Fatalf("no survivor")
+	if len(survivors) != 2 {
+		t.Fatalf("expected two survivors, got %d", len(survivors))
 	}
 	leaseBase := survivors[0].HTTPBase()
 	leaseCtx, leaseCancel := context.WithTimeout(ctx, 90*time.Second)
@@ -138,36 +138,67 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	var recovered cluster.Lease
 	lastLease := lease
 	lastLeaseAt := leaseObservedAt
-	var lastQueryErr error
-	queries, queryErrors := 0, 0
+	var lastProbes []staleSurvivorProbe
+	queries, queryErrors, healthySQLProbes := 0, 0, 0
 	takeCtx, takeCancel := context.WithTimeout(ctx, 90*time.Second)
 	if err := cluster.Poll(takeCtx, time.Second, func() (bool, error) {
-		queries++
-		got, gerr := fe.httpAPI.QueryLease(takeCtx, leaseBase, run.ID)
-		if gerr != nil {
-			queryErrors++
-			lastQueryErr = gerr
-			return false, nil
+		lastProbes = lastProbes[:0]
+		var winner *staleSurvivorProbe
+		for _, survivor := range survivors {
+			probeResult := probeStaleSurvivor(takeCtx, fe, survivor, run.ID)
+			lastProbes = append(lastProbes, probeResult)
+			queries++
+			if probeResult.SQLError != "" {
+				queryErrors++
+				continue
+			}
+			if probeResult.HealthError != "" || probeResult.RefreshError != "" {
+				continue
+			}
+			healthySQLProbes++
+			lastLease = probeResult.Lease
+			lastLeaseAt = time.Now().UTC()
+			if probeResult.Lease.Generation <= lease.Generation || probeResult.Lease.OwnerNode == owner.NodeAddress {
+				continue
+			}
+			if winner == nil {
+				winner = &probeResult
+			}
 		}
-		lastLease = got
-		lastLeaseAt = time.Now().UTC()
-		lastQueryErr = nil
-		if got.Generation <= lease.Generation || got.OwnerNode == owner.NodeAddress {
-			return false, nil
+		if winner != nil {
+			recovered = winner.Lease
+			leaseBase = fmt.Sprintf("http://%s:%d", winner.IP, cluster.HTTPPort)
+			return true, nil
 		}
-		recovered = got
-		return true, nil
+		return false, nil
 	}); err != nil {
 		takeCancel()
-		healthCtx, healthCancel := context.WithTimeout(context.Background(), 8*time.Second)
-		healthErr := fe.httpAPI.Health(healthCtx, leaseBase)
-		healthCancel()
-		memberCtx, memberCancel := context.WithTimeout(context.Background(), 8*time.Second)
-		leader, members, membershipErr := cluster.QueryNode(memberCtx, survivors[0].DqliteAddr())
-		memberCancel()
-		t.Fatalf("survivor did not take the lease: %v; initial=%+v last=%+v last_at=%s now=%s queries=%d query_errors=%d last_query_error=%v survivor_health=%v survivor_dqlite_leader=%v survivor_members=%d survivor_dqlite_error=%v paused_state=%s held=%.1fs",
-			err, lease, lastLease, lastLeaseAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
-			queries, queryErrors, lastQueryErr, healthErr, leader, len(members), membershipErr, pausedState, ev.HeldSeconds)
+		leaderAddress, leaderError := staleDqliteLeader(fe, survivors)
+		var leaderProbe *staleSurvivorProbe
+		if leaderAddress != "" {
+			leaderMember, ok := fe.topo.ByIP(cluster.HostIP(leaderAddress))
+			if !ok {
+				for _, observed := range lastProbes {
+					if observed.IP == cluster.HostIP(leaderAddress) {
+						leaderMember, ok = fe.topo.ByName(observed.Name)
+						break
+					}
+				}
+			}
+			if ok {
+				leaderCtx, leaderCancel := context.WithTimeout(context.Background(), 12*time.Second)
+				last := probeStaleSurvivor(leaderCtx, fe, leaderMember, run.ID)
+				leaderCancel()
+				leaderProbe = &last
+			}
+		}
+		failure := "no lease takeover on healthy survivor SQL path"
+		if healthySQLProbes == 0 {
+			failure = "product availability failure: no healthy survivor SQL path"
+		}
+		t.Fatalf("%s: %v; initial=%+v last=%+v last_at=%s now=%s queries=%d query_errors=%d healthy_sql_probes=%d survivor_probes=%+v dqlite_leader=%s dqlite_error=%v leader_probe=%+v paused_state=%s held=%.1fs",
+			failure, err, lease, lastLease, lastLeaseAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
+			queries, queryErrors, healthySQLProbes, lastProbes, leaderAddress, leaderError, leaderProbe, pausedState, ev.HeldSeconds)
 	}
 	takeCancel()
 	newOwner, ok := fe.topo.ByNodeAddress(recovered.OwnerNode)
@@ -231,6 +262,8 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		"lease_after":        recovered,
 		"lease_queries":      queries,
 		"lease_query_errors": queryErrors,
+		"healthy_sql_probes": healthySQLProbes,
+		"survivor_probes":    lastProbes,
 		"held_seconds":       ev.HeldSeconds,
 		"past_lease":         ev.HeldPastLease(),
 		"refusal_code":       code,
@@ -239,6 +272,74 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		"pause_state_before": beforeState,
 		"pause_state_paused": pausedState,
 	})
+}
+
+type staleSurvivorProbe struct {
+	Name         string        `json:"name"`
+	UID          string        `json:"pod_uid"`
+	IP           string        `json:"pod_ip"`
+	RefreshError string        `json:"refresh_error,omitempty"`
+	HealthError  string        `json:"health_error,omitempty"`
+	SQLError     string        `json:"sql_lease_error,omitempty"`
+	Lease        cluster.Lease `json:"sql_lease"`
+}
+
+func probeStaleSurvivor(ctx context.Context, fe *faultEnv, member cluster.Member, runID string) staleSurvivorProbe {
+	result := staleSurvivorProbe{Name: member.Name, UID: member.UID, IP: member.IP}
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 3*time.Second)
+	current, err := cluster.RefreshMember(refreshCtx, fe.kube, fe.env.Namespace, member.Name)
+	refreshCancel()
+	if err != nil {
+		result.RefreshError = err.Error()
+	} else if current.IP == "" {
+		result.RefreshError = "refreshed pod has no IP"
+	} else {
+		member = current
+		result.UID, result.IP = current.UID, current.IP
+	}
+	if result.IP == "" {
+		result.HealthError = "no pod IP"
+		result.SQLError = "no pod IP"
+		return result
+	}
+	probe := fe.httpAPI.WithTimeout(3 * time.Second)
+	healthCtx, healthCancel := context.WithTimeout(ctx, 3*time.Second)
+	if err := probe.Health(healthCtx, member.HTTPBase()); err != nil {
+		result.HealthError = err.Error()
+	}
+	healthCancel()
+	queryCtx, queryCancel := context.WithTimeout(ctx, 3*time.Second)
+	result.Lease, err = probe.QueryLease(queryCtx, member.HTTPBase(), runID)
+	queryCancel()
+	if err != nil {
+		result.SQLError = err.Error()
+	}
+	return result
+}
+
+func staleDqliteLeader(fe *faultEnv, survivors []cluster.Member) (string, error) {
+	var errorsByMember []string
+	for _, survivor := range survivors {
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		current, refreshErr := cluster.RefreshMember(refreshCtx, fe.kube, fe.env.Namespace, survivor.Name)
+		refreshCancel()
+		if refreshErr != nil || current.IP == "" {
+			refreshMessage := "no pod IP"
+			if refreshErr != nil {
+				refreshMessage = refreshErr.Error()
+			}
+			errorsByMember = append(errorsByMember, fmt.Sprintf("%s/%s/%s: refresh %s", survivor.Name, survivor.UID, survivor.IP, refreshMessage))
+			continue
+		}
+		queryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		leader, _, err := cluster.QueryNode(queryCtx, current.DqliteAddr())
+		cancel()
+		if err == nil && leader != nil && leader.Address != "" {
+			return leader.Address, nil
+		}
+		errorsByMember = append(errorsByMember, fmt.Sprintf("%s/%s/%s: %v", current.Name, current.UID, current.IP, err))
+	}
+	return "", fmt.Errorf("dqlite leader unavailable from survivors: %s", strings.Join(errorsByMember, "; "))
 }
 
 func runCommitBeforeResponseLoss(t *testing.T, fe *faultEnv) {

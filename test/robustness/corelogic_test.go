@@ -130,15 +130,37 @@ func TestParseRefusalUnauthorizedAndStaleGeneration(t *testing.T) {
 }
 
 func TestTerminalCompleteRefusalAllowed(t *testing.T) {
-	if !TerminalCompleteRefusalAllowed(409, RefusalTaskNotRunning) ||
+	if !TerminalCompleteRefusalAllowed(409, RefusalTerminalRun) ||
 		!TerminalCompleteRefusalAllowed(409, RefusalWrongWorker) {
 		t.Fatal("claim/terminal 409 must be allowed")
 	}
 	if TerminalCompleteRefusalAllowed(409, RefusalNotOwner) ||
 		TerminalCompleteRefusalAllowed(409, RefusalMissingRun) ||
+		TerminalCompleteRefusalAllowed(409, RefusalTaskNotRunning) ||
+		TerminalCompleteRefusalAllowed(409, RefusalCompletionRejected) ||
 		TerminalCompleteRefusalAllowed(503, RefusalTaskNotRunning) ||
 		TerminalCompleteRefusalAllowed(200, RefusalTaskNotRunning) {
 		t.Fatal("not_owner, missing_run, 5xx and 200 must not count as the terminal fence")
+	}
+}
+
+func TestCancelledCompleteRefusalAllowed(t *testing.T) {
+	for _, code := range []string{
+		RefusalTerminalRun, RefusalWrongWorker,
+		RefusalNotOwner, RefusalMissingRun, RefusalStaleGeneration,
+	} {
+		if !CancelledCompleteRefusalAllowed(409, code) {
+			t.Fatalf("409 %s must fence an old completion", code)
+		}
+	}
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{{200, ""}, {503, "owner_not_ready"}, {409, ""},
+		{409, RefusalCompletionRejected}, {409, RefusalTaskNotRunning}} {
+		if CancelledCompleteRefusalAllowed(tc.status, tc.code) {
+			t.Fatalf("%d %s must not prove a cancellation fence", tc.status, tc.code)
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ const (
 	RefusalStaleGeneration     = "stale_generation"
 	RefusalUnauthorized        = "unauthorized"
 	RefusalTaskNotRunning      = "task_not_running"
+	RefusalTerminalRun         = "terminal_run"
 	RefusalWrongWorker         = "wrong_worker"
 	RefusalInvalidStatus       = "invalid_status"
 	RefusalCompletionRejected  = "completion_application_rejected"
@@ -343,7 +344,23 @@ func TerminalCompleteRefusalAllowed(status int, code string) bool {
 		return false
 	}
 	switch strings.TrimSpace(code) {
-	case RefusalTaskNotRunning, RefusalWrongWorker, RefusalInvalidStatus, RefusalCompletionRejected:
+	case RefusalTerminalRun, RefusalWrongWorker:
+		return true
+	default:
+		return false
+	}
+}
+
+// CancelledCompleteRefusalAllowed accepts only explicit fences for an old
+// claimed completion after replacement was admitted. A retryable owner error,
+// transport failure, or success cannot prove this contender was fenced.
+func CancelledCompleteRefusalAllowed(status int, code string) bool {
+	if status != 409 {
+		return false
+	}
+	switch strings.TrimSpace(code) {
+	case RefusalTerminalRun, RefusalWrongWorker,
+		RefusalNotOwner, RefusalMissingRun, RefusalStaleGeneration:
 		return true
 	default:
 		return false

@@ -134,9 +134,17 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		if len(row) < 7 {
 			return nil, fmt.Errorf("task_runs row has %d columns, want 7", len(row))
 		}
+		rowID, err := queryUUID(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.id: %w", err)
+		}
+		taskID, err := queryUUID(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.task_id for %s: %w", rowID, err)
+		}
 		out = append(out, TaskRecipe{
-			ID:        fmt.Sprint(row[0]),
-			TaskID:    fmt.Sprint(row[1]),
+			ID:        rowID,
+			TaskID:    taskID,
 			Status:    fmt.Sprint(row[2]),
 			Image:     fmt.Sprint(row[3]),
 			Command:   fmt.Sprint(row[4]),
@@ -145,6 +153,21 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		})
 	}
 	return out, nil
+}
+
+// The database query endpoint can return SQLite UUID bytes as a 32-character
+// hex string, while the public run API encodes the same UUID with hyphens.
+// Reject anything that cannot be mapped to one unambiguous UUID.
+func queryUUID(value any) (string, error) {
+	raw, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected UUID cell %T (%v)", value, value)
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid UUID cell %q: %w", raw, err)
+	}
+	return id.String(), nil
 }
 
 // DecodeBlob turns a database/query cell into bytes. Binary columns that are
