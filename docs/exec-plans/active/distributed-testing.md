@@ -924,16 +924,16 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-25, W5)
+## Progress (as of 2026-09-25, W6)
 
-**W1–W4 are closed, W5 implementation is merged, and W5/N-1 is this PR.**
-A1, A2, B1, B2, C1, C2, D1, D2, E1, E2, E5, F1, F4, G1, G3, G5 and G7 have
-merged acceptance evidence and are checked. B3, G2 and E3 have merged
-implementation PRs but stay **unchecked**: their live acceptance runs are not
-recorded (no `TestCore` kind proof, no post-review coverage collect, no
-two-image `performance.sh`). Do not re-dispatch those three. C3, D3, E4, F2,
-F3, G4 and G6 remain undispatched. This checkpoint is based on merged master
-`498800d0`, which includes all three W5 items. W5 adds the fenced core-failure
+**W1–W5 are closed, and W6 implementation is underway.**
+A1, A2, B1, B2, C1, C2, D1, D2, E1, E2, E5, F1, F4, G1, G2, G3, G5 and G7 have
+merged implementation and recorded acceptance evidence and are checked. B3 and
+E3 have merged implementation PRs but stay **unchecked**: their live acceptance
+runs are not recorded (no `TestCore` kind proof or two-image `performance.sh`).
+Do not re-dispatch those two. C3 and F2 are underway in W6; D3, E4, F3, G4 and
+G6 remain undispatched. This checkpoint is based on merged master `1b0d20e2`,
+which includes all three W5 items and W5/N-1. W5 adds the fenced core-failure
 suite, coverage-instrumented CLI/server collection, and a fail-closed
 base/candidate performance comparator. None of them is a CI job.
 **No repository settings have changed** — `ci-ok` is still absent from master's
@@ -978,19 +978,28 @@ closed; no further status-only PR is owed for it.
 | ε | G7 / [#550](https://github.com/caesium-cloud/caesium/pull/550), merged | Merge `d3199bc22c519626452179591400fb9cf8e4537c`; verified candidate `a23d97a3224b27b883e37b3596087981558637bf`. Settings evidence read twice (2026-09-16 and 2026-09-17) and **not modified**: required contexts remain the eight G5 listed; `strict: false`; `enforce_admins: false`; `require_code_owner_reviews: true`; `rulesets` → `[]`; `allow_update_branch: false`; `ci-ok` still absent. Wired `merge_group` (`types: [checks_requested]`), disjoint concurrency groups, fail-closed `changes` filter outputs, and `scripts/ci-ok.py` candidate-identity / base-freshness / pull-request parent checks. The two legacy `build-and-integration-test*` wrappers still omit `--candidate-sha` and stay exempt. **Live-queue limitation:** no ruleset exists, so `merge_group` has never fired; every queue-specific path is proven only statically (`actionlint` + `scripts/test_ci.py`). The `pull_request` path is live: [run 35221628892](https://github.com/caesium-cloud/caesium/actions/runs/35221628892) `ci-ok` logged `event='pull_request'` identity plus matching base freshness. Recommendation to the CODEOWNER (not applied): add `ci-ok` to required contexts, then either `strict: true` or a merge-queue ruleset. `allow_update_branch: true` is an optional convenience for non-strict protection, not a `strict: true` prerequisite. |
 | W4/N-1 | [#556](https://github.com/caesium-cloud/caesium/pull/556), merged | Merge `459949298e745129bf86c09048f930d82e9b9d72`. Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the five merged W4 items, authored from merged master `334f99b3`. W4 is closed. |
 
-| W5 stream | Item / PR | Current evidence and disposition |
+The W5 rows preserve their merge-time limits; W6 follow-up evidence is below.
+
+| W5 stream | Item / PR | Merge-time evidence and disposition |
 | --- | --- | --- |
 | α | B3 / [#557](https://github.com/caesium-cloud/caesium/pull/557), merged | Merge `84c7f62b313c23f57b58d882e1ca3cf87e5ac4bb`; verified candidate `9dbde3eb4ca159d9bd95ef1cb48892abfcbf1087`. `TestCore` composes B2's pause, partition, response-interposer and bus-publish hook. Review on #557 (11 threads, all resolved in `605a698f` plus the unused-helper fix `9dbde3eb`) made the oracles fail closed: a 2–1 split needs nonzero iptables drop counters, fan-in waits until left is `succeeded` and holds 25s, auth snapshots use the sink barrier, benching is a cap on `network_error` during cooldown, and a duplicate completion must hit the lease owner with a terminal 409. Default `CAESIUM_ROBUSTNESS_RUN` is still `^TestOwnerCrash$`. Catalog rows for B2/B3 stay `status: absent` with empty `gates`. **Limits:** no live `CAESIUM_ROBUSTNESS_RUN='^TestCore$'` kind run was recorded. `early-evidence` on this head passed `TestOwnerCrash` only. The checkbox stays open until that live proof exists. |
 | β | G2 / [#558](https://github.com/caesium-cloud/caesium/pull/558), merged | Merge `7fc1580bc8d75225e0aecae4a731591b5d435c85`; verified candidate `7dcef7f07d85cf460a26239e11bb30889ac9221a`. Separate `build/Dockerfile.coverage` image (not release, not the performance image). `scripts/integration-coverage.sh` refuses a dirty tree, stamps `org.opencontainers.image.revision`, treats `SKIP_BUILD` as unverified, and deletes stale covdata before collect. `scripts/check-coverage.py` ignores `init()` coverage, requires named apply/export/server functions from `server.out`, treats a missing provenance file as incomplete, and writes a baseline only on `verdict=pass`. `python3 -m unittest scripts.test_coverage`: 46 OK. CI on this head: `ci-ok` success, including `ui-e2e` (the earlier jobs-list / callback flakes did not recur). **Limits:** the isolated apply→export collect predates the review-fix commit, so it is not evidence for `7dcef7f0`. Browser coverage was not collected. Not a CI job. The checkbox stays open until a collect on this commit is recorded. |
 | γ | E3 / [#559](https://github.com/caesium-cloud/caesium/pull/559), merged | Merge `498800d0981091acb34c65931b787e3a68bf9ed3`; verified candidate `3025032242cc26ab0d05f25152c5419ef9e04f7a`. `scripts/compare-performance.py` returns exit 0 only when every metric is `faster` or `no_significant_difference`. Direction follows Mann-Whitney U and the Hodges–Lehmann shift, not the mean. `scripts/performance.sh` logs to stderr, fails a `just build-release` that does not return, records per-SHA builder image ID and `go version`, interleaves warm runs, and treats bundle results as a deterministic budget from `node ui/scripts/check-bundle-size.mjs --json`. Browser series are keyed by metric, route and kind. `python3 -m unittest scripts.test_compare_performance`: 37 OK. CI on this head: `ci-ok` success. **Limits:** no live two-image `performance.sh` run. Not a CI job and not an E4 budget. The checkbox stays open until that live comparison is recorded. |
-| W5/N-1 | this PR | Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the three merged W5 items, authored from merged master `498800d0`. Its merge SHA is unavailable until merge; resolve it on the next invocation and record it here. |
+| W5/N-1 | [#561](https://github.com/caesium-cloud/caesium/pull/561), merged | Merge `1b0d20e288207f4142b574b2a350752130ff8b60`. Docs-only sync of `docs/ci.md`, this Progress dashboard, and the README/roadmap status lines to the three merged W5 items, authored from merged master `498800d0`. W5 is closed; the later acceptance evidence is recorded below. |
+
+| W6 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | C3, implementation in progress | Isolated worktree `codex/distributed-testing-w6-alpha` from merged master `1b0d20e2`. No PR, review, or acceptance result yet. |
+| β | F2, implementation in progress | Isolated worktree `codex/distributed-testing-w6-beta` from merged master `1b0d20e2`. No PR, review, or live cluster qualification result yet. |
+| Existing W5 acceptance | B3, G2, E3 | G2's post-review collect on `7dcef7f0` passed: fresh labelled image, complete CLI/server/integration profiles, 7.6% integration coverage, and the apply→export write/read path covered (`/tmp/caesium-w6-g2.ax3fCH/report.json`; local log `.codex/runs/distributed-testing/w6/g2-coverage.log`). Browser coverage was not supplied and remains incomplete. B3's instrumented live `TestCore` kind run is underway; E3's two-image comparison is pending. |
+| W6/N-1 | pending | Shared runbook and final Progress sync follows merged W6 implementation PRs. |
 
 The overall 27-item plan remains active. **The minimum credible gate milestone
 (G3 + G5) is delivered in CI but is not merge-enforced**, and G7 did not close
 that Q6 gap. `early-evidence` still runs `TestOwnerCrash` only. W5's core
 faults, coverage collector and performance comparator are **commands, not CI
-jobs**. Console fault journeys, calibrated budgets, cluster upgrades and a
-coverage collect on the merged G2 commit have not shipped.
+jobs**. Console fault journeys, calibrated budgets and cluster upgrades have
+not shipped; the G2 collect above is local evidence, not a CI lane.
 
 ### Resume and tracking rules
 
@@ -1003,22 +1012,23 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile these
 rows against live PR state, head/merge SHAs, reviews and current-head checks.
-Resume the W5/N-1 PR while it is unfinished. Checkboxes mean merged acceptance
-evidence; rows distinguish implementation and verification from merge. Once
-W5/N-1 is verified merged, record its merge SHA and select **W6** in that
-invocation; choose dependency-ready items while preserving unresolved Q1–Q3, Q5
-and Q6 and shared-file ownership. Dependency readiness alone does not authorize
-dispatch before the current wave's checkpoint.
+Resume an unfinished W6 stream before allocating a later wave. Checkboxes mean
+merged acceptance evidence; rows distinguish implementation and verification
+from merge. W5/N-1 was verified merged as `1b0d20e2`; W6 selected C3 and F2,
+preserving unresolved Q1–Q3, Q5 and Q6 and shared-file ownership. Dependency
+readiness alone does not authorize dispatch before the current wave's checkpoint.
 
-Do **not** re-dispatch B3, G2 or E3. Their implementation PRs are merged. Their
-checkboxes stay open until a live `TestCore` kind run (B3), a coverage collect
-on `7dcef7f0` (G2), and a live two-image `performance.sh` (E3) are recorded.
+Do **not** re-dispatch B3, G2 or E3. Their implementation PRs are merged. G2's
+post-review collect on `7dcef7f0` is recorded above. B3 and E3 checkboxes
+stay open until a live `TestCore` kind run and a two-image `performance.sh`
+comparison are recorded.
 
 Dependency-ready after W5: **C3** (B3, C2), **D3** (B3, D2) and **F2** (F4, B3).
-C3 and D3 both write `test/contracts/scenarios.json` (next after A2 → G3 → B3);
-dispatch only one of them in a wave. F2's lifecycle files are disjoint from
-that manifest. F2 must re-evaluate the stable-address prerequisite against
-#536 rather than inherit F1's block or F4's single-node pass.
+C3 and F2 were dispatched for W6; D3 remains undispatched to preserve the
+plan's C3/D3 sequencing of `test/contracts/scenarios.json` (next after A2 →
+G3 → B3). F2's lifecycle files are disjoint from that manifest. F2 must
+re-evaluate the stable-address prerequisite against #536 rather than inherit
+F1's block or F4's single-node pass.
 
 Still blocked after W5: **E4** (E3 code is merged, plus unresolved Q2/Q5),
 **F3** (C3, E4, F2, plus Q2), **G4** (F3, G6) and **G6** (C3, D3, E4, F2; B3,
@@ -1030,11 +1040,11 @@ G2 and G7 code is merged).
 | --- | --- | --- | --- |
 | A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three manifest rows remain `proven` with `gates: ["early"]`. B2/B3 rows now have selectors but stay `absent` until a live `TestCore` run; D3/G6 follow |
 | B | Real multi-node robustness (3 items) | P0 | B1 merged #472 (`early-evidence`); B2 merged #555 with live kind proofs. B3 merged #557: `TestCore` oracles are fail-closed, but no live kind proof was recorded, so the checkbox stays open. Default selection is still `TestOwnerCrash` |
-| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475; C2 merged #551. C3 is dependency-ready for W6 and shares `scenarios.json` with D3 — dispatch only one of them |
+| C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475; C2 merged #551. C3 is in progress in W6-α; D3 remains undispatched this wave |
 | D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 is dependency-ready for W6 |
 | E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 as a fail-closed comparator; no live two-image run, so the checkbox stays open. E4 still needs Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 is dependency-ready for W6 and must re-evaluate #536 rather than inherit F1's block. F3 needs C3/E4/F2 |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G3, G5 and G7 merged. G2 merged #558: provenance is fail-closed, but the live collect predates that commit, so the checkbox stays open. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 is in progress in W6-β and must re-evaluate #536 rather than inherit F1's block. F3 needs C3/E4/F2 |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2's reviewed commit now has a live CLI/server collect; browser contribution remains incomplete. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
 
 ## Streams
 
@@ -1495,10 +1505,11 @@ below is mandatory, including append-only edits.
   Depends on: none.
   Verify: Make browser retries retain diagnostic evidence without erasing initial failure; a temporary controlled fail-once scenario must fail and upload its trace. Upload reports/screenshots/video/server logs including setup failure, and retain structured outcomes. In the same PR widen ci-config discovery from `test_ci.py` to `test_*.py` and assert that command in `scripts/test_ci.py`; a temporary extra matching test that fails must fail ci-config. This ensures A2's `test_test_evidence.py`, E3's `test_compare_performance.py`, and G2's `test_coverage.py` run immediately when introduced. Keep upload errors visible without masking the original failure; no automatic quarantine, reduced floors, or erased first attempts.
 
-- [ ] G2. Collect actual CLI/server integration coverage with provenance.
+- [x] G2. Collect actual CLI/server integration coverage with provenance.
   Files: new `build/Dockerfile.coverage`, new `scripts/integration-coverage.sh`, new `scripts/check-coverage.py`, new `scripts/test_coverage.py`.
   Depends on: A2, G1.
   Verify: use Go coverage-instrumented binaries built in containers, explicit package selection and `GOCOVERDIR`, and merge compatible profiles from CLI, server, and live browser journeys. Collect on graceful shutdown and provide explicit flushing where required; killed-process or missing profiles are incomplete evidence, not zero coverage or success. Label profile provenance, separate unit/integration/browser contributions, and report uncovered changed paths and critical contract gaps. Set package/diff ratchets after measuring a baseline instead of requiring a vanity global percentage. Demonstrate coverage of a real request-to-write-to-read path. Keep coverage/fault instrumentation out of performance artifacts and audit the separate `reagents/go.mod` scope when relevant.
+  Note (W6 follow-up): a fresh coverage image built from reviewed #558 head `7dcef7f07d85cf460a26239e11bb30889ac9221a` carried that revision label. `bash scripts/integration-coverage.sh` exited 0 with `verdict: pass` and complete CLI, server and merged integration profiles; the instrumented apply→export request/write/read path was covered (7.6% integration coverage). The local report is `/tmp/caesium-w6-g2.ax3fCH/report.json`. No browser profile was supplied, so that contribution remains explicitly incomplete and no browser-coverage claim is made. The collector can merge a labelled browser profile when supplied; this run proves CLI/server coverage and provenance only.
 
 - [x] G3. Wire the first persistent three-node lane and its exact scenario selectors
   Files: `.github/workflows/ci.yml`, `.github/actions/run-integration/action.yml`, `build/ci.docker-bake.hcl`, `build/ci.docker-bake-cache.hcl`, `justfile`, `scripts/collect-evidence.py` (new), `scripts/test_collect_evidence.py` (new), `scripts/test_ci.py`, `scripts/test_test_evidence.py`, `test/contracts/scenarios.json` (created by A2).
