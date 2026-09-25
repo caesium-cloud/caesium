@@ -285,15 +285,49 @@ run_checker() {
   fi
 }
 
+GIT_HEAD=""
+GIT_DIRTY=false
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
+  if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+    GIT_DIRTY=true
+  fi
+fi
+
+IMAGE_PROVENANCE="unknown"
+IMAGE_VERIFIED=false
+
+require_clean_checkout() {
+  [[ -n "$GIT_HEAD" ]] || die "a git checkout is required to bind the coverage image to $CANDIDATE_SHA"
+  if [[ "$GIT_DIRTY" == true ]]; then
+    git -C "$ROOT" status --porcelain | head -60 >&2 || true
+    die "refusing to build $IMAGE from a dirty working tree: the image would be labelled with the clean SHA $GIT_HEAD it was not built from"
+  fi
+  [[ "$CANDIDATE_SHA" == "$GIT_HEAD" ]] \
+    || die "CANDIDATE_SHA $CANDIDATE_SHA does not match this checkout's HEAD $GIT_HEAD"
+}
+
+image_revision() {
+  "$CONTAINER_CLI" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE" 2>/dev/null || true
+}
+
 build_image() {
   require_cmd "$CONTAINER_CLI"
-  log "building coverage image $IMAGE from $DOCKERFILE (builder $BUILDER_IMAGE)"
+  require_clean_checkout
+  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_IMAGE)"
   "$CONTAINER_CLI" build --platform "$PLATFORM" \
     --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
+    --build-arg CAESIUM_REVISION="$CANDIDATE_SHA" \
     --target coverage \
     -t "$IMAGE" \
     -f "$DOCKERFILE" \
     "$ROOT"
+  local rev
+  rev="$(image_revision)"
+  [[ "$rev" == "$CANDIDATE_SHA" ]] \
+    || die "coverage image org.opencontainers.image.revision='$rev' does not match CANDIDATE_SHA $CANDIDATE_SHA"
+  IMAGE_PROVENANCE="built-by-this-run"
+  IMAGE_VERIFIED=true
 }
 
 extract_audit() {
@@ -345,15 +379,31 @@ fi
 
 if [[ "$CMD" == "check" || "$CMD" == "merge" ]]; then
   if [[ "$CMD" == "merge" ]]; then
-    if gocoverdir_complete "$RAW/cli"; then
-      textfmt_dir "$RAW/cli" "$PROFILES/cli.out" || true
+    mkdir -p "$PROFILES"
+    if gocoverdir_complete "$RAW/cli" && textfmt_dir "$RAW/cli" "$PROFILES/cli.out"; then
+      write_provenance "$PROFILES/cli.provenance.json" <<EOF
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
+EOF
+    else
+      write_provenance "$PROFILES/cli.provenance.json" <<EOF
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
+EOF
     fi
-    if gocoverdir_complete "$RAW/server"; then
-      textfmt_dir "$RAW/server" "$PROFILES/server.out" || true
+    if gocoverdir_complete "$RAW/server" && textfmt_dir "$RAW/server" "$PROFILES/server.out"; then
+      write_provenance "$PROFILES/server.provenance.json" <<EOF
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
+EOF
+    else
+      write_provenance "$PROFILES/server.provenance.json" <<EOF
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
+EOF
     fi
     if gocoverdir_complete "$RAW/cli" && gocoverdir_complete "$RAW/server"; then
-      if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
-        textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
+      if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server" \
+        && textfmt_dir "$RAW/integration" "$PROFILES/integration.out"; then
+        write_provenance "$PROFILES/integration.provenance.json" <<EOF
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"merge"}
+EOF
       fi
     fi
   fi
@@ -363,11 +413,18 @@ fi
 
 # ----- collect -----
 require_cmd "$CONTAINER_CLI"
-if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" != "1" ]]; then
-  build_image
-else
+rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration"
+mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$PROFILES" "$AUDIT"
+rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
+
+if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
   "$CONTAINER_CLI" image inspect "$IMAGE" >/dev/null 2>&1 \
     || die "CAESIUM_COVERAGE_SKIP_BUILD=1 but image $IMAGE is missing"
+  IMAGE_PROVENANCE="supplied/unverified"
+  IMAGE_VERIFIED=false
+  log "SKIP_BUILD: $IMAGE is supplied/unverified and is not a provenanced match of $CANDIDATE_SHA"
+else
+  build_image
 fi
 "$CONTAINER_CLI" image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 \
   || die "builder image $BUILDER_IMAGE is required for go tool covdata"
@@ -417,10 +474,10 @@ if [[ "$healthy" -ne 1 ]]; then
   log "server never became healthy; logs:"
   "$CONTAINER_CLI" logs "$SERVER_NAME" || true
   write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
 EOF
   write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
 EOF
   run_checker
   exit $?
@@ -462,7 +519,7 @@ else
   cli_missing=$(gocoverdir_complete "$RAW/cli" && echo false || echo true)
 fi
 write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
 EOF
 
 # Explicit flush while the server is still running, then graceful SIGTERM.
@@ -477,14 +534,26 @@ exit_code="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.l
 oom="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo false)"
 killed=false
 signal="SIGTERM"
-if [[ "$oom" == "true" || "$exit_code" == "137" ]]; then
+server_abnormal=false
+if [[ "$stop_rc" -ne 0 ]]; then
+  server_abnormal=true
+fi
+if [[ "$oom" == "true" ]]; then
   killed=true
+  server_abnormal=true
   signal="SIGKILL"
+fi
+if [[ "$exit_code" != "0" && "$exit_code" != "143" ]]; then
+  server_abnormal=true
+  if [[ "$exit_code" == "137" ]]; then
+    killed=true
+    signal="SIGKILL"
+  fi
 fi
 
 server_complete=false
 server_missing=true
-if [[ "$killed" == "true" ]]; then
+if [[ "$killed" == "true" || "$server_abnormal" == "true" ]]; then
   server_complete=false
   server_missing=$(gocoverdir_complete "$RAW/server" && echo false || echo true)
 elif gocoverdir_complete "$RAW/server"; then
@@ -494,14 +563,14 @@ elif gocoverdir_complete "$RAW/server"; then
   fi
 fi
 write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
 EOF
 
 if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
   if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
     write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
 EOF
   fi
 fi

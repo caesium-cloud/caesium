@@ -42,17 +42,49 @@ def profile(mode="set", *lines):
     return "mode: " + mode + "\n" + "\n".join(lines) + "\n"
 
 
+def funcs_in(relpath):
+    return COV["parse_go_funcs"]((ROOT / relpath).read_text())
+
+
+def func_start(relpath, name):
+    for fn in funcs_in(relpath):
+        if fn["name"] == name:
+            return fn["start"]
+    raise AssertionError(f"no func {name} in {relpath}")
+
+
+def func_block(relpath, name, stmts=4, count=1):
+    sl = func_start(relpath, name) + 1
+    return block(f"{MODULE}/{relpath}", stmts, count, sl=sl)
+
+
+def init_blocks(*relpaths):
+    lines = []
+    for relpath in relpaths:
+        hits = [fn for fn in funcs_in(relpath) if fn["name"] == "init"]
+        if not hits:
+            raise AssertionError(f"no init() in {relpath}")
+        for fn in hits:
+            lines.append(block(f"{MODULE}/{relpath}", 3, 1, sl=fn["start"]))
+    return lines
+
+
 def write_to_read_cli():
-    return profile("set", block(APPLY_CLI, 6, 1), block(EXPORT_CLI, 5, 1), block(OTHER, 2, 0))
+    return profile(
+        "set",
+        func_block("cmd/job/apply.go", "sendApplyRequest", 6, 1),
+        func_block("cmd/job/export.go", "exportGet", 5, 1),
+        block(OTHER, 2, 0),
+    )
 
 
 def write_to_read_server():
     return profile(
         "set",
-        block(APPLY_HTTP, 8, 1),
-        block(APPLY_WRITE, 10, 1),
-        block(EXPORT_HTTP, 7, 1),
-        block(EXPORT_READ, 9, 1),
+        func_block("api/rest/controller/jobdef/apply.go", "Apply", 8, 1),
+        func_block("internal/jobdef/importer.go", "ApplyWithOptions", 10, 1),
+        func_block("api/rest/controller/job/manifest.go", "Manifest", 7, 1),
+        func_block("internal/jobdef/exporter.go", "Export", 9, 1),
         block(OTHER, 2, 0),
     )
 
@@ -60,12 +92,12 @@ def write_to_read_server():
 def unit_covering_path():
     return profile(
         "atomic",
-        block(APPLY_CLI, 6, 3),
-        block(APPLY_HTTP, 8, 2),
-        block(APPLY_WRITE, 10, 4),
-        block(EXPORT_CLI, 5, 1),
-        block(EXPORT_HTTP, 7, 1),
-        block(EXPORT_READ, 9, 1),
+        func_block("cmd/job/apply.go", "sendApplyRequest", 6, 3),
+        func_block("api/rest/controller/jobdef/apply.go", "Apply", 8, 2),
+        func_block("internal/jobdef/importer.go", "ApplyWithOptions", 10, 4),
+        func_block("cmd/job/export.go", "exportGet", 5, 1),
+        func_block("api/rest/controller/job/manifest.go", "Manifest", 7, 1),
+        func_block("internal/jobdef/exporter.go", "Export", 9, 1),
     )
 
 
@@ -111,6 +143,18 @@ def output(result):
 
 
 class CoverprofileParseTests(unittest.TestCase):
+    def test_parse_go_funcs_finds_apply_export_and_init(self):
+        apply_funcs = {fn["name"]: fn for fn in funcs_in("cmd/job/apply.go")}
+        self.assertIn("init", apply_funcs)
+        self.assertIn("sendApplyRequest", apply_funcs)
+        self.assertIn("RunE", apply_funcs)
+        self.assertLess(apply_funcs["RunE"]["start"], apply_funcs["init"]["start"])
+        self.assertGreater(apply_funcs["sendApplyRequest"]["start"], apply_funcs["init"]["end"])
+        export_funcs = {fn["name"]: fn for fn in funcs_in("cmd/job/export.go")}
+        self.assertIn("init", export_funcs)
+        self.assertIn("exportGet", export_funcs)
+        self.assertIn("RunE", export_funcs)
+
     def test_parse_and_package_percent(self):
         text = profile("set", block(APPLY_CLI, 4, 1), block(EXPORT_CLI, 6, 0))
         mode, blocks = COV["parse_profile_text"](text, origin="t")
@@ -241,6 +285,47 @@ class WriteToReadTests(unittest.TestCase):
         report = json.loads((self.dir / "report.json").read_text())
         self.assertEqual(report["write_to_read"]["status"], "incomplete")
 
+    def test_init_only_coverage_is_not_write_to_read(self):
+        init_prof = profile("set", *init_blocks("cmd/job/apply.go", "cmd/job/export.go"))
+        write_source(self.dir, "cli", init_prof, provenance("cli"))
+        write_source(self.dir, "server", init_prof, provenance("server"))
+        result = run_checker(self.dir)
+        self.assertEqual(result.returncode, 1, output(result))
+        report = json.loads((self.dir / "report.json").read_text())
+        self.assertEqual(report["write_to_read"]["status"], "fail")
+        self.assertFalse(report["write_to_read"]["covered"])
+        for item in report["write_to_read"]["evidence"]:
+            self.assertFalse(item["covered"], item)
+
+    def test_server_init_of_cli_files_does_not_satisfy_server_write_read(self):
+        write_source(self.dir, "cli", write_to_read_cli(), provenance("cli"))
+        write_source(
+            self.dir,
+            "server",
+            profile("set", *init_blocks("cmd/job/apply.go", "cmd/job/export.go")),
+            provenance("server"),
+        )
+        result = run_checker(self.dir)
+        self.assertEqual(result.returncode, 1, output(result))
+        report = json.loads((self.dir / "report.json").read_text())
+        self.assertFalse(report["write_to_read"]["covered"])
+        by_id = {item["id"]: item for item in report["write_to_read"]["evidence"]}
+        self.assertFalse(by_id["server_write_http"]["covered"])
+        self.assertFalse(by_id["server_read_http"]["covered"])
+
+    def test_init_only_contract_files_are_gaps(self):
+        extra = profile("set", *init_blocks("cmd/run/retry.go", "cmd/event/event.go"))
+        server = write_to_read_server().rstrip() + "\n" + "\n".join(extra.splitlines()[1:]) + "\n"
+        write_source(self.dir, "cli", write_to_read_cli(), provenance("cli"))
+        write_source(self.dir, "server", server, provenance("server"))
+        result = run_checker(self.dir)
+        self.assertEqual(result.returncode, 0, output(result))
+        report = json.loads((self.dir / "report.json").read_text())
+        by_id = {item["id"]: item for item in report["contract_gaps"]}
+        self.assertEqual(by_id["DT-RETRY-01"]["status"], "gap")
+        self.assertEqual(by_id["DT-EVENT-01"]["status"], "gap")
+        self.assertEqual(by_id["DT-DAG-01"]["status"], "covered")
+
 
 class BrowserMergeTests(unittest.TestCase):
     def setUp(self):
@@ -354,16 +439,30 @@ class RatchetTests(unittest.TestCase):
         result = run_checker(self.dir, extra=("--write-baseline", str(baseline)))
         self.assertEqual(result.returncode, 0, output(result))
         doc = json.loads(baseline.read_text())
-        self.assertIsNone(doc["global_percent"])
+        self.assertNotIn("global_percent", doc)
+        self.assertNotIn("min_global_percent", doc)
         self.assertEqual(doc["kind"], "package-diff-ratchet")
         self.assertIn(f"{MODULE}/cmd/job", doc["packages"])
         floor = doc["packages"][f"{MODULE}/cmd/job"]["min_statements_covered"]
         self.assertGreater(floor, 0)
-        dropped = profile("set", block(APPLY_CLI, 6, 0), block(EXPORT_CLI, 5, 0))
+        dropped = profile(
+            "set",
+            func_block("cmd/job/apply.go", "sendApplyRequest", 6, 0),
+            func_block("cmd/job/export.go", "exportGet", 5, 0),
+        )
         write_source(self.dir, "cli", dropped, provenance("cli"))
         result = run_checker(self.dir, extra=("--ratchet", str(baseline)))
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("ratchet", output(result))
+
+    def test_baseline_round_trip_on_unchanged_profiles_exits_0(self):
+        baseline = self.dir / "baseline.json"
+        first = run_checker(self.dir, extra=("--write-baseline", str(baseline)))
+        self.assertEqual(first.returncode, 0, output(first))
+        self.assertTrue(baseline.is_file())
+        self.assertNotIn("global_percent", json.loads(baseline.read_text()))
+        second = run_checker(self.dir, extra=("--ratchet", str(baseline)))
+        self.assertEqual(second.returncode, 0, output(second))
 
     def test_uncovered_changed_paths_are_reported_and_ratcheted(self):
         changed = self.dir / "changed.txt"
@@ -381,7 +480,11 @@ class RatchetTests(unittest.TestCase):
         write_source(
             self.dir,
             "cli",
-            profile("set", block(EXPORT_CLI, 5, 1), block(APPLY_CLI, 6, 0)),
+            profile(
+                "set",
+                func_block("cmd/job/export.go", "exportGet", 5, 1),
+                func_block("cmd/job/apply.go", "sendApplyRequest", 6, 0),
+            ),
             provenance("cli"),
         )
         result = run_checker(
@@ -490,6 +593,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("caesiumcloud/caesium-coverage", text)
         self.assertNotIn("FROM performance", text.lower())
         self.assertIn("covcounters", text)
+        self.assertIn("org.opencontainers.image.revision", text)
+        self.assertIn("CAESIUM_REVISION", text)
         self.assertIn("must never be tagged as caesium-server-test", text)
         code = "\n".join(
             ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
@@ -531,6 +636,14 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertNotIn("go test ./test/performance", code)
         self.assertNotIn("just performance", code)
         self.assertIn("must not be a test/performance", code)
+        self.assertIn("dirty working tree", text)
+        self.assertIn("org.opencontainers.image.revision", text)
+        self.assertIn("CAESIUM_REVISION", text)
+        self.assertIn("supplied/unverified", text)
+        self.assertIn('rm -rf "$RAW/cli"', text)
+        self.assertIn("*.provenance.json", text)
+        self.assertIn("stop_rc", text)
+        self.assertIn('exit_code" != "0" && "$exit_code" != "143"', text)
 
     def test_collector_bash_syntax(self):
         result = subprocess.run(["bash", "-n", str(COLLECTOR)], capture_output=True, text=True)
@@ -604,6 +717,60 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertEqual(Path(__file__).name, "test_coverage.py")
 
 
+class ProvenanceBindingTests(unittest.TestCase):
+    def test_missing_provenance_file_is_incomplete_not_default_complete(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "cli.out").write_text(write_to_read_cli())
+        write_source(d, "server", write_to_read_server(), provenance("server"))
+        result = run_checker(d)
+        self.assertEqual(result.returncode, 2, output(result))
+        self.assertIn("provenance is missing", output(result))
+        report = json.loads((d / "report.json").read_text())
+        self.assertEqual(report["contributions"]["cli"]["status"], "incomplete")
+        self.assertIsNone(report["contributions"]["cli"]["percent"])
+
+    def test_premerged_profile_without_candidate_sha_fails_strict(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        _, cli_blocks = COV["parse_profile_text"](write_to_read_cli())
+        _, server_blocks = COV["parse_profile_text"](write_to_read_server())
+        merged = COV["merge_blocks"]("set", cli_blocks, server_blocks)
+        mode = "set"
+        lines = ["mode: set"]
+        for (file_path, sl, sc, el, ec), (stmts, count) in merged.items():
+            lines.append(f"{file_path}:{sl}.{sc},{el}.{ec} {stmts} {count}")
+        write_source(d, "integration", "\n".join(lines) + "\n", {"sources": ["cli", "server"]})
+        result = run_checker(d, extra=("--strict",))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("candidate_sha", output(result))
+        report = json.loads((d / "report.json").read_text())
+        self.assertNotEqual(report["verdict"], "pass")
+
+    def test_bad_candidate_sha_does_not_write_baseline(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        write_source(d, "cli", write_to_read_cli(), provenance("cli"))
+        write_source(d, "server", write_to_read_server(), provenance("server"))
+        baseline = d / "baseline.json"
+        result = subprocess.run(
+            [
+                sys.executable, str(CHECKER),
+                "--profiles-dir", str(d),
+                "--candidate-sha", "nothex",
+                "--repo-root", str(ROOT),
+                "--write-baseline", str(baseline),
+                "--report", str(d / "report.json"),
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertFalse(baseline.exists(), "failing run must not write a ratchet floor")
+
+
 class EvaluateDirectTests(unittest.TestCase):
     def test_premerged_integration_requires_named_cli_and_server_sources(self):
         _, cli_blocks = COV["parse_profile_text"](write_to_read_cli())
@@ -628,7 +795,7 @@ class EvaluateDirectTests(unittest.TestCase):
         )
         self.assertTrue(any(item.code == "schema" for item in issues), [i.message for i in issues])
 
-    def test_premerged_integration_with_both_sources_can_pass(self):
+    def test_premerged_integration_without_cli_server_cannot_prove_write_to_read(self):
         _, cli_blocks = COV["parse_profile_text"](write_to_read_cli())
         _, server_blocks = COV["parse_profile_text"](write_to_read_server())
         merged = COV["merge_blocks"]("set", cli_blocks, server_blocks)
@@ -642,15 +809,15 @@ class EvaluateDirectTests(unittest.TestCase):
             "mode": "set",
             "blocks": merged,
             "summary": summary,
-            "provenance": {"sources": ["cli", "server"]},
+            "provenance": {"sources": ["cli", "server"], "candidate_sha": SHA},
         }
         report, issues = COV["evaluate"](
             {"integration": contrib},
             candidate_sha=SHA,
             repo_root=str(ROOT),
         )
-        self.assertEqual(COV["exit_code"](issues), 0, [i.message for i in issues])
-        self.assertTrue(report["write_to_read"]["covered"])
+        self.assertEqual(report["write_to_read"]["status"], "incomplete")
+        self.assertFalse(report["write_to_read"]["covered"])
 
 
 if __name__ == "__main__":

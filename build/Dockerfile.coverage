@@ -150,6 +150,8 @@ RUN set -eu; \
 # no published port, no testfault tag, no performance driver.
 # ---------------------------------------------------------------------------
 FROM alpine:3.23 AS coverage
+ARG CAESIUM_REVISION=""
+LABEL org.opencontainers.image.revision="${CAESIUM_REVISION}"
 RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs tzdata wget && \
     adduser -D -H -u 10001 caesium && \
     mkdir -p /var/lib/caesium/dqlite /var/lib/caesium/coverage && \

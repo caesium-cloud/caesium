@@ -68,6 +68,60 @@ WRITE_TO_READ = {
     ),
 }
 
+# init() of cmd/job/apply.go and export.go runs on every instrumented binary
+# start, including `caesium start` and `--help`. File-level hits are not a
+# request-to-write-to-read proof. Each row must be covered in the named
+# contribution's own profile (server-side evidence from server.out).
+WRITE_TO_READ_EVIDENCE = (
+    {
+        "id": "cli_write",
+        "source": "cli",
+        "file": "github.com/caesium-cloud/caesium/cmd/job/apply.go",
+        "funcs": ("sendApplyRequest", "RunE"),
+        "side": "write",
+    },
+    {
+        "id": "cli_read",
+        "source": "cli",
+        "file": "github.com/caesium-cloud/caesium/cmd/job/export.go",
+        "funcs": ("exportGet", "RunE"),
+        "side": "read",
+    },
+    {
+        "id": "server_write_http",
+        "source": "server",
+        "file": "github.com/caesium-cloud/caesium/api/rest/controller/jobdef/apply.go",
+        "funcs": ("Apply",),
+        "side": "write",
+    },
+    {
+        "id": "server_write_persist",
+        "source": "server",
+        "file": "github.com/caesium-cloud/caesium/internal/jobdef/importer.go",
+        "funcs": ("Apply", "ApplyWithOptions"),
+        "side": "write",
+    },
+    {
+        "id": "server_read_http",
+        "source": "server",
+        "file": "github.com/caesium-cloud/caesium/api/rest/controller/job/manifest.go",
+        "funcs": ("Manifest",),
+        "side": "read",
+    },
+    {
+        "id": "server_read_persist",
+        "source": "server",
+        "file": "github.com/caesium-cloud/caesium/internal/jobdef/exporter.go",
+        "funcs": ("Export",),
+        "side": "read",
+    },
+)
+
+_FUNC_HEAD = re.compile(
+    r"^(?:func\s+(?:\([^)]*\)\s+)?(?P<name>\w+)\s*\(|(?P<rune>RunE)\s*:\s*func\s*\()"
+)
+_FUNC_INDEX = {}
+
 CONTRACT_PATHS = {
     "DT-ADMIT-01": (
         "api/rest/controller/job/run/post.go",
@@ -158,6 +212,120 @@ def load_json(path):
 
 def _is_sha(value):
     return isinstance(value, str) and bool(SHA_RE.fullmatch(value))
+
+
+def parse_go_funcs(text):
+    """Package-level funcs and cobra RunE literals with 1-based line ranges.
+
+    `func init()` is included so callers can exclude those blocks. Nested
+    functions share the outer range; that is enough to tell init from RunE.
+    """
+    funcs = []
+    current = None
+    depth = 0
+    seen_brace = False
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        code = line.split("//", 1)[0]
+        if current is None:
+            match = _FUNC_HEAD.match(line.lstrip())
+            if match is None:
+                continue
+            name = match.group("name") or match.group("rune")
+            current = {"name": name, "start": lineno, "end": lineno}
+            depth = code.count("{") - code.count("}")
+            seen_brace = "{" in code
+            if seen_brace and depth <= 0:
+                funcs.append(current)
+                current = None
+                seen_brace = False
+            continue
+        depth += code.count("{") - code.count("}")
+        current["end"] = lineno
+        if "{" in code:
+            seen_brace = True
+        if seen_brace and depth <= 0:
+            funcs.append(current)
+            current = None
+            seen_brace = False
+    if current is not None:
+        funcs.append(current)
+    return funcs
+
+
+def _repo_file(file_path, repo_root):
+    if not repo_root:
+        return None
+    root = Path(repo_root)
+    if file_path.startswith(ROOT_MODULE + "/"):
+        return root / file_path[len(ROOT_MODULE) + 1:]
+    if file_path == ROOT_MODULE or file_path.endswith("/caesium.go"):
+        return root / "caesium.go"
+    suffix = file_path.split(ROOT_MODULE + "/", 1)[-1] if ROOT_MODULE in file_path else file_path
+    candidate = root / suffix
+    return candidate if candidate.is_file() else None
+
+
+def load_go_funcs(file_path, repo_root):
+    key = (str(repo_root), file_path)
+    if key in _FUNC_INDEX:
+        return _FUNC_INDEX[key]
+    path = _repo_file(file_path, repo_root)
+    if path is None or not path.is_file():
+        _FUNC_INDEX[key] = []
+        return []
+    funcs = parse_go_funcs(path.read_text())
+    _FUNC_INDEX[key] = funcs
+    return funcs
+
+
+def _file_matches(profile_file, wanted):
+    if profile_file == wanted:
+        return True
+    if profile_file.endswith("/" + wanted) or profile_file.endswith(wanted):
+        return True
+    if wanted.startswith(ROOT_MODULE + "/") and profile_file.endswith(wanted[len(ROOT_MODULE) + 1:]):
+        return True
+    return False
+
+
+def _block_in_ranges(start_line, ranges):
+    return any(lo <= start_line <= hi for lo, hi in ranges)
+
+
+def init_ranges(file_path, repo_root):
+    return [(fn["start"], fn["end"]) for fn in load_go_funcs(file_path, repo_root) if fn["name"] == "init"]
+
+
+def function_is_covered(blocks, file_path, func_names, *, repo_root):
+    """True when a non-init block whose start line sits in one of func_names ran."""
+    if not blocks:
+        return False
+    funcs = [fn for fn in load_go_funcs(file_path, repo_root) if fn["name"] in func_names]
+    if not funcs:
+        return False
+    inits = init_ranges(file_path, repo_root)
+    wanted = [(fn["start"], fn["end"]) for fn in funcs]
+    for (profile_file, start_line, _sc, _el, _ec), (_stmts, count) in blocks.items():
+        if count <= 0 or not _file_matches(profile_file, file_path):
+            continue
+        if _block_in_ranges(start_line, inits):
+            continue
+        if _block_in_ranges(start_line, wanted):
+            return True
+    return False
+
+
+def file_has_non_init_coverage(blocks, file_path, *, repo_root):
+    if not blocks:
+        return False
+    inits = init_ranges(file_path, repo_root)
+    for (profile_file, start_line, _sc, _el, _ec), (_stmts, count) in blocks.items():
+        if count <= 0 or not _file_matches(profile_file, file_path):
+            continue
+        if inits and _block_in_ranges(start_line, inits):
+            continue
+        return True
+    return False
 
 
 def package_of(file_path):
@@ -310,18 +478,6 @@ def any_file_covered(summary, files):
     return any(file_is_covered(summary, path) for path in files)
 
 
-def default_provenance(source):
-    return {
-        "schema_version": 1,
-        "source": source,
-        "kind": "coverprofile",
-        "module": ROOT_MODULE if source != "reagents" else REAGENTS_MODULE,
-        "complete": True,
-        "killed": False,
-        "missing": False,
-    }
-
-
 def validate_provenance(prov, source, issues, *, candidate_sha=None):
     if not isinstance(prov, dict):
         issues.append(_fail("schema", f"{source} provenance must be an object", source))
@@ -359,6 +515,12 @@ def validate_provenance(prov, source, issues, *, candidate_sha=None):
             f"{source} candidate_sha {sha} does not match {candidate_sha}",
             source,
         ))
+    if prov.get("verified") is False or prov.get("image_provenance") == "supplied/unverified":
+        issues.append(_incomplete(
+            "unverified",
+            f"{source} image is supplied/unverified and is not a provenanced match of the candidate",
+            source,
+        ))
     return prov
 
 
@@ -389,7 +551,15 @@ def load_contribution(source, path, provenance_path, issues, *, candidate_sha=No
             contrib["status"] = "fail"
             return contrib
     elif path and Path(path).is_file():
-        prov = default_provenance(source)
+        # A profile with no provenance cannot be bound to a candidate commit.
+        contrib["status"] = "incomplete"
+        if source in INTEGRATION_PARTS or source == "integration":
+            issues.append(_incomplete(
+                "missing",
+                f"{source} provenance is missing; that is incomplete, not a default complete",
+                source,
+            ))
+        return contrib
     if prov is not None:
         validate_provenance(prov, source, issues, candidate_sha=candidate_sha)
         contrib["provenance"] = prov
@@ -469,6 +639,18 @@ def load_contribution(source, path, provenance_path, issues, *, candidate_sha=No
         "blocks": blocks,
         "summary": summary,
     })
+    if candidate_sha:
+        sha = (prov or {}).get("candidate_sha")
+        if not sha:
+            issues.append(_fail(
+                "foreign",
+                f"{source} complete profile has no candidate_sha; cannot bind to {candidate_sha}",
+                source,
+            ))
+        elif sha != candidate_sha:
+            pass  # already reported in validate_provenance
+        if (prov or {}).get("verified") is False or (prov or {}).get("image_provenance") == "supplied/unverified":
+            contrib["status"] = "incomplete"
     return contrib
 
 
@@ -551,7 +733,7 @@ def merge_contributions(parts, issues, *, name):
     }
 
 
-def write_to_read_result(integration):
+def write_to_read_result(integration, cli, server, *, repo_root):
     result = {
         "id": WRITE_TO_READ["id"],
         "description": WRITE_TO_READ["description"],
@@ -559,22 +741,43 @@ def write_to_read_result(integration):
         "status": "incomplete",
         "write": [],
         "read": [],
+        "evidence": [],
     }
-    if integration.get("status") != "complete" or not integration.get("summary"):
+    if (
+        integration.get("status") != "complete"
+        or cli.get("status") != "complete"
+        or server.get("status") != "complete"
+        or not server.get("blocks")
+        or not cli.get("blocks")
+    ):
         result["status"] = "incomplete"
         return result
-    summary = integration["summary"]
-    write = [
-        {"file": path, "covered": file_is_covered(summary, path)}
-        for path in WRITE_TO_READ["write"]
-    ]
-    read = [
-        {"file": path, "covered": file_is_covered(summary, path)}
-        for path in WRITE_TO_READ["read"]
-    ]
-    result["write"] = write
-    result["read"] = read
-    if any(item["covered"] for item in write) and any(item["covered"] for item in read):
+    if not repo_root:
+        result["status"] = "incomplete"
+        result["reason"] = "repo-root is required to prove function coverage (init() is not a write or a read)"
+        return result
+    sources = {"cli": cli, "server": server, "integration": integration}
+    evidence = []
+    for spec in WRITE_TO_READ_EVIDENCE:
+        contrib = sources.get(spec["source"]) or {}
+        covered = function_is_covered(
+            contrib.get("blocks"),
+            spec["file"],
+            spec["funcs"],
+            repo_root=repo_root,
+        )
+        evidence.append({
+            "id": spec["id"],
+            "source": spec["source"],
+            "file": spec["file"],
+            "funcs": list(spec["funcs"]),
+            "side": spec["side"],
+            "covered": covered,
+        })
+    result["evidence"] = evidence
+    result["write"] = [item for item in evidence if item["side"] == "write"]
+    result["read"] = [item for item in evidence if item["side"] == "read"]
+    if all(item["covered"] for item in evidence):
         result["covered"] = True
         result["status"] = "pass"
     else:
@@ -582,9 +785,9 @@ def write_to_read_result(integration):
     return result
 
 
-def contract_gaps(integration):
+def contract_gaps(integration, *, repo_root):
     gaps = []
-    if integration.get("status") != "complete" or not integration.get("summary"):
+    if integration.get("status") != "complete" or not integration.get("blocks"):
         return [
             {
                 "id": cid,
@@ -593,10 +796,13 @@ def contract_gaps(integration):
             }
             for cid, paths in CONTRACT_PATHS.items()
         ]
-    summary = integration["summary"]
+    blocks = integration["blocks"]
     for cid, paths in CONTRACT_PATHS.items():
         full = [p if p.startswith(ROOT_MODULE) else f"{ROOT_MODULE}/{p}" for p in paths]
-        covered_files = [path for path in full if file_is_covered(summary, path)]
+        covered_files = [
+            path for path in full
+            if file_has_non_init_coverage(blocks, path, repo_root=repo_root)
+        ]
         covered = bool(full) and len(covered_files) == len(full)
         gaps.append({
             "id": cid,
@@ -682,7 +888,7 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff):
     if not isinstance(ratchet, dict):
         issues.append(_fail("schema", "ratchet must be an object"))
         return applied
-    if "min_global_percent" in ratchet or "global_percent" in ratchet:
+    if ratchet.get("min_global_percent") is not None or ratchet.get("global_percent") is not None:
         issues.append(_fail(
             "ratchet",
             "global percentage floors are not used; package/diff ratchets only",
@@ -762,7 +968,6 @@ def baseline_from_integration(integration, *, uncovered_diff=None):
         "schema_version": 1,
         "kind": "package-diff-ratchet",
         "source": "integration",
-        "global_percent": None,
         "packages": packages,
     }
     if uncovered_diff is not None:
@@ -844,11 +1049,11 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         # does not fail the CLI/server collect unless --require-browser.
         browser["status"] = "incomplete"
 
-    wtr = write_to_read_result(integration)
+    wtr = write_to_read_result(integration, cli, server, repo_root=repo_root)
     if wtr["status"] == "fail":
         issues.append(_fail(
             "write-to-read",
-            "merged integration profile does not cover the job apply→export request-to-write-to-read path",
+            "CLI/server profiles do not cover the job apply→export request-to-write-to-read functions (init() does not count; server write/read must appear in server.out)",
             WRITE_TO_READ["id"],
         ))
     elif wtr["status"] == "incomplete":
@@ -858,7 +1063,7 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
             WRITE_TO_READ["id"],
         ))
 
-    gaps = contract_gaps(integration)
+    gaps = contract_gaps(integration, repo_root=repo_root)
     uncovered, reagents_changed = uncovered_changed_paths(integration, changed_paths or [])
     if reagents_changed and reagents.get("status") != "complete":
         issues.append(_incomplete(
@@ -1092,16 +1297,12 @@ def main(argv=None):
     if any(item.code == "performance" for item in issues):
         report["performance_instrumentation"] = True
 
-    if args.write_baseline:
+    if args.write_baseline and report["verdict"] == "pass":
         integration = None
-        # Recompute from the report's integration contribution via evaluate's
-        # returned issues: the baseline needs the merged blocks, which live on
-        # the in-memory integration contribution, not the public report.
         integration_contrib = contributions.get("integration")
         if integration_contrib and integration_contrib.get("status") == "complete":
             integration = integration_contrib
         else:
-            # evaluate() already merged cli+server; rebuild from contributions.
             rebuild_issues = []
             cli = contributions.get("cli") or _absent("cli")
             server = contributions.get("server") or _absent("server")
