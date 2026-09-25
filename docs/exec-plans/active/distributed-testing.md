@@ -929,8 +929,8 @@ within their resolved contract and available test infrastructure.
 **W1–W5 are closed, and W6 implementation is underway.**
 A1, A2, B1, B2, C1, C2, D1, D2, E1, E2, E5, F1, F4, G1, G2, G3, G5 and G7 have
 merged implementation and recorded acceptance evidence and are checked. B3 and
-E3 have merged implementation PRs but stay **unchecked**: their live acceptance
-runs are not recorded (no `TestCore` kind proof or two-image `performance.sh`).
+E3 have merged implementation PRs but stay **unchecked**: B3's live `TestCore`
+kind run failed, and E3's two-image `performance.sh` has not run.
 Do not re-dispatch those two. C3 and F2 are underway in W6; D3, E4, F3, G4 and
 G6 remain undispatched. This checkpoint is based on merged master `1b0d20e2`,
 which includes all three W5 items and W5/N-1. W5 adds the fenced core-failure
@@ -991,7 +991,7 @@ The W5 rows preserve their merge-time limits; W6 follow-up evidence is below.
 | --- | --- | --- |
 | α | C3, implementation in progress | Isolated worktree `codex/distributed-testing-w6-alpha` from merged master `1b0d20e2`. No PR, review, or acceptance result yet. |
 | β | F2, implementation in progress | Isolated worktree `codex/distributed-testing-w6-beta` from merged master `1b0d20e2`. No PR, review, or live cluster qualification result yet. |
-| Existing W5 acceptance | B3, G2, E3 | G2's post-review collect on `7dcef7f0` passed: fresh labelled image, complete CLI/server/integration profiles, 7.6% integration coverage, and the apply→export write/read path covered (`/tmp/caesium-w6-g2.ax3fCH/report.json`; local log `.codex/runs/distributed-testing/w6/g2-coverage.log`). Browser coverage was not supplied and remains incomplete. B3's instrumented live `TestCore` kind run is underway; E3's two-image comparison is pending. |
+| Existing W5 acceptance | B3, G2, E3 | G2's post-review collect on `7dcef7f0` passed: fresh labelled image, complete CLI/server/integration profiles, 7.6% integration coverage, and the apply→export write/read path covered (`/tmp/caesium-w6-g2.ax3fCH/report.json`; local log `.codex/runs/distributed-testing/w6/g2-coverage.log`). Browser coverage was not supplied and remains incomplete. B3's `^TestCore$` ran on the exact reviewed `9dbde3eb` image in an isolated persistent three-member kind cluster and **failed**: 6/11 subtests passed; `terminal_no_regress`, `frozen_retry_recipe`, `invalid_mtls_peer`, `cancel_completion_race`, and `stale_generation_complete` failed. The first four need contract/harness triage; the lease takeover timeout lacks enough query diagnostics to attribute a product defect. The runner exited 1 and collected evidence at `/tmp/caesium-w6-b3.lW1BGL`, with host log `.codex/runs/distributed-testing/w6/b3-testcore.log`; B3 acceptance remains open and the separate remediation branch owns the follow-up. E3's two-image comparison is pending. |
 | W6/N-1 | pending | Shared runbook and final Progress sync follows merged W6 implementation PRs. |
 
 The overall 27-item plan remains active. **The minimum credible gate milestone
