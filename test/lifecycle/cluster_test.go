@@ -1573,10 +1573,30 @@ func TestLifecycleClusterSnapshotLeader(t *testing.T) {
 	if leaderMember.Name == "" {
 		blockf(t, "snapshot-catch-up", "surviving Raft leader unobservable: %s", lastReason)
 	}
+	survivors := map[string]any{}
+	for _, name := range []string{"caesium-0", "caesium-1"} {
+		pod, err := kube.CoreV1().Pods(fx.LifecycleID).Get(t.Context(), name, metav1.GetOptions{})
+		require.NoError(t, err)
+		var container *corev1.ContainerStatus
+		for i := range pod.Status.ContainerStatuses {
+			if pod.Status.ContainerStatuses[i].Name == "caesium" {
+				container = &pod.Status.ContainerStatuses[i]
+				break
+			}
+		}
+		if container == nil || !container.Ready || container.State.Running == nil || container.ContainerID == "" {
+			blockf(t, "snapshot-catch-up", "surviving %s container is not observably running and ready", name)
+		}
+		survivors[name] = map[string]any{
+			"uid": string(pod.UID), "container_id": container.ContainerID,
+			"restart_count": container.RestartCount, "started_at": container.State.Running.StartedAt,
+		}
+	}
 	writeJSON(t, "cluster-snapshot-leader.json", map[string]any{
 		"name": leaderMember.Name, "uid": leaderMember.UID,
 		"ip": leaderMember.IP, "address": leaderMember.DqliteAddr(),
-		"image_id": leaderMember.ImageID, "observed_at": time.Now().UTC(),
+		"image_id": leaderMember.ImageID, "survivors": survivors,
+		"observed_at": time.Now().UTC(),
 	})
 }
 
@@ -1596,13 +1616,76 @@ func TestLifecycleClusterGenerateSnapshotWrites(t *testing.T) {
 	base := "http://" + pods.Items[0].Status.PodIP + ":8080"
 	h := cluster.NewHTTP(mustEnv(t, "CAESIUM_MANUAL_TRIGGER_API_KEY"))
 	image := mustEnv(t, "CAESIUM_LIFECYCLE_TASK_IMAGE")
+	acknowledged := 0
+	defer func() {
+		writeJSON(t, "cluster-snapshot-write-count.json", map[string]any{
+			"acknowledged_applies": acknowledged, "required_applies": 1400,
+		})
+	}()
 	for i := 0; i < 1400; i++ {
 		def := clusterManifest(t, "history", fmt.Sprintf("lifecycle-snapshot-%s-%04d", suffixOf(fx.LifecycleID), i), image)
 		if err := h.Apply(t.Context(), base, []jobdef.Definition{def}); err != nil {
 			t.Fatalf("catalog write %d/1400: %v", i, err)
 		}
+		acknowledged++
 	}
-	writeJSON(t, "cluster-snapshot-write-count.json", map[string]any{"acknowledged_applies": 1400})
+}
+
+// Further writes update one of the already-created jobs. Each annotation value
+// changes monotonically, so the importer commits a real catalog mutation but
+// its unchanged task topology does not add another DAG snapshot row. The host
+// chooses another bounded batch only after measuring the surviving leader's
+// on-disk snapshot and retained log segments.
+func TestLifecycleClusterGenerateSnapshotUpdateBatch(t *testing.T) {
+	fx := clusterFixture{}
+	if !readJSON(t, "cluster-fixture.json", &fx) {
+		blockf(t, "snapshot-catch-up", "seed fixture missing")
+	}
+	batch, err := strconv.Atoi(mustEnv(t, "CAESIUM_LIFECYCLE_SNAPSHOT_BATCH"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, batch, 1)
+	require.LessOrEqual(t, batch, 18)
+	kube, err := cluster.InClusterClient()
+	require.NoError(t, err)
+	pods, err := kube.CoreV1().Pods(fx.LifecycleID).List(t.Context(), cluster.ListOptions())
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2, "stopped member was not absent")
+	base := "http://" + pods.Items[0].Status.PodIP + ":8080"
+	h := cluster.NewHTTP(mustEnv(t, "CAESIUM_MANUAL_TRIGGER_API_KEY"))
+	alias := fmt.Sprintf("lifecycle-snapshot-%s-%04d", suffixOf(fx.LifecycleID), 0)
+	before, err := h.JobByAlias(t.Context(), base, alias)
+	require.NoError(t, err, "original catalog job must exist before update batch")
+	def := clusterManifest(t, "history", alias, mustEnv(t, "CAESIUM_LIFECYCLE_TASK_IMAGE"))
+	acknowledged := 0
+	first := (batch-1)*500 + 1
+	defer func() {
+		writeJSON(t, fmt.Sprintf("cluster-snapshot-update-batch-%02d.json", batch), map[string]any{
+			"batch": batch, "alias": alias, "job_id": before.ID,
+			"acknowledged_applies": acknowledged, "required_applies": 500,
+			"first_annotation": first, "last_annotation": first + acknowledged - 1,
+		})
+	}()
+	for i := 0; i < 500; i++ {
+		def.Metadata.Annotations = map[string]string{"snapshot_write": fmt.Sprintf("%06d", first+i)}
+		if err := h.Apply(t.Context(), base, []jobdef.Definition{def}); err != nil {
+			t.Fatalf("snapshot update batch %d write %d/500: %v", batch, i, err)
+		}
+		acknowledged++
+	}
+	after, err := h.JobByAlias(t.Context(), base, alias)
+	require.NoError(t, err)
+	require.Equal(t, before.ID, after.ID, "snapshot updates replaced the catalog job")
+	status, raw, err := h.Do(t.Context(), http.MethodGet, base+"/v1/jobs/"+before.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	var stored struct {
+		ID          string            `json:"id"`
+		Annotations map[string]string `json:"annotations"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Equal(t, before.ID, stored.ID)
+	require.Equal(t, fmt.Sprintf("%06d", first+499), stored.Annotations["snapshot_write"],
+		"last acknowledged annotation did not persist")
 }
 
 func TestLifecycleClusterPostStorage(t *testing.T) {

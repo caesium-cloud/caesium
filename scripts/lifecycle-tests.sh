@@ -337,6 +337,7 @@ PY
     "$LC_ART/candidate-platform.tar" "$LC_ART/candidate-image-archive.json" \
     "$LC_ART/candidate-image-node-imports.json" \
     "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
+  rm -f "$LC_ART"/cluster-snapshot-update-batch-*.json
   mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
   cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
   LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" LC_ART="$LC_ART" python3 - <<'PY'
@@ -404,7 +405,8 @@ path.write_text(json.dumps(rec,indent=2)+'\n')
 PY
   }
   lc_phase() {
-    local phase="$1" image_id="$2" base="$3"
+    local phase="$1" image_id="$2" base="$3" log="$1"
+    if [[ -n "${LC_SNAPSHOT_BATCH:-}" ]]; then log="$phase-$LC_SNAPSHOT_BATCH"; fi
     lc_ns exec pod/lifecycle-runner -c runner -- env \
       CAESIUM_LIFECYCLE_ID="$LC_ID" CAESIUM_LIFECYCLE_PAIR="$LC_PAIR" \
       CAESIUM_LIFECYCLE_ARTIFACTS=/artifacts \
@@ -416,8 +418,9 @@ PY
       CAESIUM_LIFECYCLE_INTERNAL_TOKEN=caesium-lifecycle-internal-token-not-for-production-use \
       CAESIUM_MANUAL_TRIGGER_API_KEY=caesium-lifecycle-manual-key \
       CAESIUM_LIFECYCLE_PHASE="$phase" \
+      CAESIUM_LIFECYCLE_SNAPSHOT_BATCH="${LC_SNAPSHOT_BATCH:-}" \
       /lifecycle.test -test.v -test.count=1 -test.run "^TestLifecycleCluster${phase}$" -test.timeout=12m \
-      >"$LC_ART/cluster-logs/$phase.log" 2>&1
+      >"$LC_ART/cluster-logs/$log.log" 2>&1
   }
   lc_info() {
     local pod="$1" file="$2"
@@ -1009,18 +1012,248 @@ EOF
       lc_ns exec "$1" -c caesium -- sh -c \
         'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' >"$2"
     }
+    lc_snapshot_hashes() {
+      lc_ns exec "$1" -c caesium -- sh -c \
+        'cd /var/lib/caesium/dqlite && for f in snapshot-*-*-*; do case "$f" in *.meta) continue;; esac; test -f "$f" && sha256sum "$f"; done' \
+        >"$2" || return 1
+      [[ -s "$2" ]]
+    }
+    # Exit 0 only after the surviving leader's actual files prove truncation;
+    # 2 means another bounded batch is needed, 3 is the on-disk safety cap,
+    # and 1 means evidence is missing or a survivor changed/restarted.
+    lc_snapshot_progress() {
+      LC_ART="$LC_ART" LC_SNAP_BATCH="$1" python3 - <<'PY'
+import json,os,pathlib,re,sys
+art=pathlib.Path(os.environ['LC_ART']);base=art/'cluster-logs'
+batch=int(os.environ['LC_SNAP_BATCH']);out=base/f'snapshot-batch-{batch:02d}.json'
+obs={'batch':batch,'batch_size':500,'batch_cap':18,'leader_file_byte_cap':1536*1024*1024}
+def require(ok,msg):
+  if not ok:raise ValueError(msg)
+def load(path):
+  p=pathlib.Path(path)
+  require(p.is_file() and p.stat().st_size>0,f'missing {p.name}')
+  return json.loads(p.read_text())
+def files(name):
+  p=base/name
+  require(p.is_file() and p.stat().st_size>0,f'missing {name}')
+  found=[]
+  for line in p.read_text().splitlines():
+    fields=line.split()
+    require(len(fields)>=9 and fields[0].startswith('-') and fields[4].isdigit(),
+      f'unparseable file observation in {name}: {line!r}')
+    found.append((fields[-1],int(fields[4])))
+  require(bool(found),f'empty file observation {name}')
+  return found
+def indexes(rows):
+  snapshots=[];segments=[]
+  for path,_ in rows:
+    m=re.search(r'(?:^|/)snapshot-(\d+)-(\d+)-(\d+)$',path)
+    if m:snapshots.append(int(m.group(2)))
+    m=re.search(r'(?:^|/)(\d+)-(\d+)$',path)
+    if m:segments.append((int(m.group(1)),int(m.group(2))))
+  return snapshots,segments
+try:
+  before=load(base/'leader-before.json');after=load(base/f'leader-after-batch-{batch:02d}.json')
+  for key in ('name','uid','ip','address','image_id','survivors'):
+    require(key in before and key in after,f'missing leader identity {key}')
+    require(before[key]==after[key],f'Raft leader or survivor changed during writes: {key}')
+  require(before['name'] in ('caesium-0','caesium-1'),'leader is not a surviving member')
+  require(set(before['survivors'])=={'caesium-0','caesium-1'},'missing survivor identity')
+  for name,identity in before['survivors'].items():
+    for key in ('uid','container_id','restart_count','started_at'):
+      require(identity.get(key) not in (None,''),f'{name} missing {key}')
+  original=load(art/'cluster-snapshot-write-count.json')
+  require(original.get('acknowledged_applies')==1400 and original.get('required_applies')==1400,
+    'distinct catalog write floor was not acknowledged')
+  total=1400;job_id=None;update_batches=[]
+  for n in range(1,batch+1):
+    rec=load(art/f'cluster-snapshot-update-batch-{n:02d}.json')
+    require(rec.get('batch')==n and rec.get('required_applies')==500 and
+      rec.get('acknowledged_applies')==500 and
+      rec.get('first_annotation')==(n-1)*500+1 and rec.get('last_annotation')==n*500,
+      f'update batch {n} has missing or non-monotonic acknowledgements')
+    require(bool(rec.get('job_id')) and bool(rec.get('alias')),f'update batch {n} lost catalog identity')
+    if job_id is None:job_id=rec['job_id']
+    require(rec['job_id']==job_id,f'update batch {n} changed catalog identity')
+    total+=500;update_batches.append(rec)
+  before_snapshots,_=indexes(files('leader-before-snapshot-files.txt'))
+  stopped_snapshots,stopped_segments=indexes(files('stopped-member-before-writes-files.txt'))
+  stopped_bound=load(base/'stopped-member-raft-index.json')
+  require(stopped_bound.get('last_persisted_index_upper_bound',0)>0,
+    'stopped member open Raft tail has no measured upper bound')
+  leader_rows=files(f'leader-after-batch-{batch:02d}-snapshot-files.txt')
+  leader_snapshots,leader_segments=indexes(leader_rows)
+  require(before_snapshots and stopped_segments and leader_snapshots and leader_segments,
+    'missing leader/stopped snapshot or Raft segment indexes')
+  require(all(start<=end for start,end in stopped_segments+leader_segments),
+    'invalid Raft segment range')
+  stopped_end=max(end for _,end in stopped_segments)
+  stopped_upper=stopped_bound['last_persisted_index_upper_bound']
+  require(stopped_upper>=stopped_end,'stopped member index bound is below closed segments')
+  leader_bytes=sum(size for _,size in leader_rows)
+  truncated=(max(leader_snapshots)>max(before_snapshots) and
+    max(leader_snapshots)>stopped_upper and
+    min(start for start,_ in leader_segments)>stopped_upper+1)
+  obs.update({'leader_before':before,'leader_after':after,
+    'acknowledged_distinct_applies':1400,'acknowledged_update_applies':total-1400,
+    'acknowledged_total_applies':total,'update_batches':update_batches,
+    'leader_before_snapshot_indexes':before_snapshots,
+    'stopped_snapshot_indexes':stopped_snapshots,
+    'stopped_segment_ranges':stopped_segments,'stopped_segment_end':stopped_end,
+    'stopped_member_index_bound':stopped_bound,
+    'leader_snapshot_indexes':leader_snapshots,'leader_segment_ranges':leader_segments,
+    'leader_file_bytes':leader_bytes,'truncation_proved':truncated})
+  out.write_text(json.dumps(obs,indent=2)+'\n')
+  if truncated:sys.exit(0)
+  if leader_bytes>=obs['leader_file_byte_cap']:
+    print(f'leader on-disk bytes {leader_bytes} reached cap',file=sys.stderr)
+    sys.exit(3)
+  sys.exit(2)
+except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError) as exc:
+  obs['measurement_error']=str(exc)
+  out.write_text(json.dumps(obs,indent=2)+'\n')
+  print(f'snapshot batch {batch}: {exc}',file=sys.stderr)
+  sys.exit(1)
+PY
+    }
+    # The closed filename ceiling omits entries in open-N. Read the stopped
+    # PVC's open segment bytes while it is exclusively mounted by the helper.
+    # This decoder follows dqlite v1.18.7's uv_segment.c/uv_encoding.c format;
+    # unknown, changed or corrupt bytes block the case rather than shrinking
+    # the upper bound on what the stopped member could replay locally.
+    lc_stopped_raft_index() {
+      local names="$LC_ART/cluster-logs/stopped-open-names.txt" name
+      mkdir -p "$LC_ART/cluster-logs/stopped-open-segments"
+      LC_ART="$LC_ART" python3 - >"$names" <<'PY'
+import os,pathlib,re
+p=pathlib.Path(os.environ['LC_ART'],'cluster-logs','stopped-member-before-writes-files.txt')
+names=[]
+for line in p.read_text().splitlines():
+  fields=line.split()
+  if not fields:continue
+  m=re.fullmatch(r'\./(open-(\d+))',fields[-1])
+  if m:names.append((int(m.group(2)),m.group(1)))
+if len(names)!=len(set(n for n,_ in names)):
+  raise SystemExit('duplicate stopped open segment counter')
+for _,name in sorted(names):print(name)
+PY
+      [[ "$?" == 0 ]] || return 1
+      while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        lc_ns cp -c storage "lifecycle-storage:/data/$name" \
+          "$LC_ART/cluster-logs/stopped-open-segments/$name" || return 1
+      done <"$names"
+      LC_ART="$LC_ART" python3 - <<'PY'
+import hashlib,json,os,pathlib,re,struct,sys
+art=pathlib.Path(os.environ['LC_ART']);base=art/'cluster-logs'
+out=base/'stopped-member-raft-index.json'
+obs={'decoder':'dqlite v1.18.7 uv_segment.c/uv_encoding.c','open_segments':[]}
+def require(ok,msg):
+  if not ok:raise ValueError(msg)
+def crc32(data):
+  # libraft byteCrc32 uses the non-reflected 0x04c11db7 polynomial, seed 0.
+  table=[]
+  for i in range(256):
+    x=i<<24
+    for _ in range(8):x=((x<<1)^0x04c11db7 if x&0x80000000 else x<<1)&0xffffffff
+    table.append(x)
+  value=0
+  for byte in data:value=((value<<8)^table[((value>>24)^byte)&255])&0xffffffff
+  return value
+def open_count(name,expected_size):
+  data=(base/'stopped-open-segments'/name).read_bytes()
+  require(len(data)==expected_size,f'{name} changed size during copy')
+  if not any(data):return 0
+  require(len(data)>=8 and struct.unpack_from('<Q',data)[0]==1,
+    f'{name} has unknown Raft disk format')
+  offset=8;count=0
+  while offset<len(data):
+    if data[offset:offset+16]==b'\0'*16:
+      require(not any(data[offset:]),f'{name} has nonzero data after open tail')
+      break
+    require(offset+24<=len(data),f'{name} has incomplete batch preamble')
+    header_crc,data_crc=struct.unpack_from('<II',data,offset)
+    n=struct.unpack_from('<Q',data,offset+8)[0]
+    require(0<n<=8*1024*1024//32,f'{name} has invalid batch count {n}')
+    header_end=offset+16+16*n
+    require(header_end<=len(data),f'{name} batch header exceeds file')
+    header=memoryview(data)[offset+8:header_end]
+    require(crc32(header)==header_crc,f'{name} batch header CRC mismatch')
+    payload_size=0
+    for i in range(n):
+      term,kind,size=struct.unpack_from('<QB3xI',data,offset+16+i*16)
+      require(term>0 and kind in (1,2,3) and size%8==0,
+        f'{name} has invalid entry metadata')
+      payload_size+=size
+    payload_end=header_end+payload_size
+    require(payload_end<=len(data),f'{name} batch payload exceeds file')
+    require(crc32(memoryview(data)[header_end:payload_end])==data_crc,
+      f'{name} batch data CRC mismatch')
+    count+=n;offset=payload_end
+  return count
+try:
+  rows=(base/'stopped-member-before-writes-files.txt').read_text().splitlines()
+  sizes={};closed=[];snapshots=[];opens=[]
+  for line in rows:
+    fields=line.split()
+    require(len(fields)>=9 and fields[4].isdigit(),f'unparseable stopped file: {line!r}')
+    path=fields[-1];sizes[path]=int(fields[4])
+    m=re.fullmatch(r'\./(\d+)-(\d+)',path)
+    if m:closed.append((int(m.group(1)),int(m.group(2))))
+    m=re.fullmatch(r'\./snapshot-\d+-(\d+)-\d+',path)
+    if m:snapshots.append(int(m.group(1)))
+    m=re.fullmatch(r'\./open-(\d+)',path)
+    if m:opens.append((int(m.group(1)),path[2:]))
+  require(closed and snapshots,'stopped member has no closed segment or snapshot index')
+  require(all(start<=end for start,end in closed),'invalid closed Raft range')
+  require(len(opens)==len(set(n for n,_ in opens)),'duplicate open Raft counter')
+  manifest={}
+  for line in (base/'stopped-member-before-writes.sha256').read_text().splitlines():
+    fields=line.split()
+    require(len(fields)==2 and re.fullmatch(r'[0-9a-f]{64}',fields[0]),
+      'invalid stopped-volume hash manifest')
+    manifest[fields[1]]=fields[0]
+  total_open=0;empty_seen=False
+  for _,name in sorted(opens):
+    path='./'+name;copy=base/'stopped-open-segments'/name
+    require(path in manifest and copy.is_file(),f'{name} lacks stable stopped-volume copy')
+    digest=hashlib.sha256(copy.read_bytes()).hexdigest()
+    require(digest==manifest[path],f'{name} copied bytes differ from stopped-volume manifest')
+    count=open_count(name,sizes[path])
+    require(not (empty_seen and count>0),f'{name} contains entries after an empty open segment')
+    if count==0:empty_seen=True
+    total_open+=count
+    obs['open_segments'].append({'name':name,'sha256':digest,'bytes':sizes[path],'entries':count})
+  closed_end=max(end for _,end in closed)
+  upper=max(closed_end,max(snapshots))+total_open
+  obs.update({'closed_segment_end':closed_end,'snapshot_index':max(snapshots),
+    'open_entry_count':total_open,'last_persisted_index_upper_bound':upper})
+  out.write_text(json.dumps(obs,indent=2)+'\n')
+except (OSError,ValueError,KeyError,TypeError,struct.error) as exc:
+  obs['measurement_error']=str(exc)
+  out.write_text(json.dumps(obs,indent=2)+'\n')
+  print(f'stopped Raft index: {exc}',file=sys.stderr)
+  sys.exit(1)
+PY
+    }
     lc_storage_files() {
       lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
         'cd /data && find . -type f -exec ls -ln {} \; | sort' >"$1"
     }
 
-    # Snapshot catch-up: the stopped member misses acknowledged catalog
-    # writes. Record file-level snapshots/truncation instead of assuming the C
-    # library's unconfigured threshold. A missing measured index is BLOCKED.
+    # Snapshot catch-up: the stopped member misses at least 1,400 distinct
+    # acknowledged catalog writes. If that does not exhaust dqlite's retained
+    # trailing log, add at most eighteen 500-write updates to one catalog job.
+    # Measure the actual leader files after every batch; never infer a pass
+    # from the number of writes or a configured snapshot threshold.
     LC_SNAP_RC=0
+    LC_SNAP_TRUNCATED=0
+    LC_SNAP_REASON=""
+    LC_SNAP_EVIDENCE=""
     lc_scale_two || LC_SNAP_RC=$?
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+      cp "$LC_ART/cluster-logs/SnapshotLeader.log" "$LC_ART/cluster-logs/SnapshotLeader-before.log" || LC_SNAP_RC=$?
       lc_copy_runner_artifacts || LC_SNAP_RC=$?
       cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-before.json" || LC_SNAP_RC=$?
       LC_LEADER="$(LC_ART="$LC_ART" python3 - <<'PY'
@@ -1038,37 +1271,83 @@ PY
       lc_storage_helper_start || LC_SNAP_RC=$?
       lc_manifest_local "$LC_ART/cluster-logs/stopped-member-before-writes.sha256" || LC_SNAP_RC=$?
       lc_storage_files "$LC_ART/cluster-logs/stopped-member-before-writes-files.txt" || LC_SNAP_RC=$?
+      if [[ "$LC_SNAP_RC" == 0 ]]; then
+        lc_stopped_raft_index >"$LC_ART/cluster-logs/stopped-member-raft-index.log" 2>&1 || LC_SNAP_RC=$?
+        if [[ "$LC_SNAP_RC" != 0 ]]; then
+          LC_SNAP_REASON="stopped member open Raft tail could not be bounded from verified local bytes"
+        fi
+      fi
       lc_storage_helper_stop || LC_SNAP_RC=$?
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
-      lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-      lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-      lc_copy_runner_artifacts || LC_SNAP_RC=$?
-      cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-after.json" || LC_SNAP_RC=$?
-      if [[ "$LC_SNAP_RC" == 0 ]]; then
-        LC_ART="$LC_ART" python3 - <<'PY' || LC_SNAP_RC=$?
-import json,os,pathlib
-base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
-a=json.loads((base/'leader-before.json').read_text())
-b=json.loads((base/'leader-after.json').read_text())
-for key in ('name','uid','ip','address','image_id'):
-  if a[key]!=b[key]:raise SystemExit(f'Raft leader changed during writes: {key}: {a[key]} -> {b[key]}')
-PY
-        lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+      for LC_BATCH in {0..18}; do
+        printf -v LC_BATCH_TAG '%02d' "$LC_BATCH"
+        if [[ "$LC_BATCH" == 0 ]]; then
+          lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+        else
+          LC_SNAPSHOT_BATCH="$LC_BATCH" lc_phase GenerateSnapshotUpdateBatch "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+        fi
+        if [[ "$LC_SNAP_RC" != 0 ]]; then
+          LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
+          break
+        fi
+        lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+        cp "$LC_ART/cluster-logs/SnapshotLeader.log" "$LC_ART/cluster-logs/SnapshotLeader-batch-$LC_BATCH_TAG.log" || LC_SNAP_RC=$?
+        lc_copy_runner_artifacts || LC_SNAP_RC=$?
+        cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG.json" || LC_SNAP_RC=$?
+        if [[ "$LC_SNAP_RC" == 0 ]]; then
+          lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" || LC_SNAP_RC=$?
+        fi
+        if [[ "$LC_SNAP_RC" != 0 ]]; then
+          LC_SNAP_REASON="surviving leader or its on-disk files became unobservable at batch $LC_BATCH_TAG"
+          break
+        fi
+        LC_PROGRESS_RC=0
+        lc_snapshot_progress "$LC_BATCH" >"$LC_ART/cluster-logs/snapshot-progress-batch-$LC_BATCH_TAG.log" 2>&1 || LC_PROGRESS_RC=$?
+        LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-batch-$LC_BATCH_TAG.json"
+        case "$LC_PROGRESS_RC" in
+          0)
+            LC_SNAP_TRUNCATED=1
+            cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG.json" "$LC_ART/cluster-logs/leader-after.json" || LC_SNAP_RC=$?
+            cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+            lc_snapshot_hashes "$LC_LEADER" "$LC_ART/cluster-logs/leader-before-rejoin-snapshots.sha256" || LC_SNAP_RC=$?
+            break
+            ;;
+          2) ;;
+          3) LC_SNAP_RC=1; LC_SNAP_REASON="leader on-disk bytes reached the 1536 MiB snapshot workload cap at batch $LC_BATCH_TAG"; break ;;
+          *) LC_SNAP_RC=1; LC_SNAP_REASON="snapshot evidence or survivor identity invalid at batch $LC_BATCH_TAG"; break ;;
+        esac
+      done
+      if [[ "$LC_SNAP_RC" == 0 && "$LC_SNAP_TRUNCATED" != 1 ]]; then
+        LC_SNAP_RC=1
+        LC_SNAP_REASON="leader did not truncate past stopped member within 1400 distinct plus 9000 update applies"
       fi
+    fi
+    if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_scale_three || LC_SNAP_RC=$?
-      lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-      lc_copy_runner_artifacts || true
+      if [[ "$LC_SNAP_RC" == 0 ]]; then
+        lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
+        lc_copy_runner_artifacts || true
+      fi
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_files caesium-2 "$LC_ART/cluster-logs/rejoined-member-files.txt" || LC_SNAP_RC=$?
+      lc_snapshot_hashes caesium-2 "$LC_ART/cluster-logs/rejoined-member-snapshots.sha256" || LC_SNAP_RC=$?
+      lc_ns logs caesium-2 -c caesium >"$LC_ART/cluster-logs/rejoined-member.log" 2>&1 || LC_SNAP_RC=$?
     fi
     if [[ "$LC_SNAP_RC" != 0 ]]; then
-      lc_case snapshot-catch-up blocked "stopped member, acknowledged writes or rejoin failed; inspect cluster-logs/leader-*-snapshot-files.txt and GenerateSnapshotWrites.log"
+      if [[ -n "$LC_SNAP_EVIDENCE" && ! -s "$LC_SNAP_EVIDENCE" ]]; then LC_SNAP_EVIDENCE=""; fi
+      lc_case snapshot-catch-up blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
     else
-      LC_ART="$LC_ART" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
+      LC_ART="$LC_ART" LC_SNAP_BATCH="$LC_BATCH" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
 import json,pathlib,re,os
 base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
+batch=int(os.environ['LC_SNAP_BATCH'])
+progress=[json.loads((base/f'snapshot-batch-{n:02d}.json').read_text()) for n in range(batch+1)]
+if any(p.get('batch')!=n or p.get('acknowledged_total_applies')!=1400+500*n for n,p in enumerate(progress)):
+  raise SystemExit('missing or non-monotonic per-batch acknowledgement evidence')
+if not progress[-1].get('truncation_proved'):
+  raise SystemExit('host did not measure leader truncation before rejoin')
 def paths(name):
   return [line.split()[-1] for line in (base/name).read_text().splitlines() if line.split()]
 def snapshots(name):
@@ -1083,32 +1362,71 @@ def segments(name):
     m=re.search(r'(?:^|/)(\d+)-(\d+)$',p)
     if m:out.append((int(m.group(1)),int(m.group(2))))
   return out
+def snapshot_hashes(name):
+  out={}
+  for line in (base/name).read_text().splitlines():
+    fields=line.split()
+    if len(fields)!=2 or not re.fullmatch(r'[0-9a-f]{64}',fields[0]):
+      raise SystemExit(f'invalid snapshot hash row in {name}: {line!r}')
+    m=re.fullmatch(r'(?:\./)?snapshot-\d+-(\d+)-\d+',fields[1])
+    if not m:raise SystemExit(f'unexpected snapshot path in {name}: {fields[1]}')
+    out.setdefault(int(m.group(1)),set()).add(fields[0])
+  if not out:raise SystemExit(f'no snapshot bytes hashed in {name}')
+  return out
 before=snapshots('leader-before-snapshot-files.txt')
 after=snapshots('leader-after-snapshot-files.txt')
 stopped=segments('stopped-member-before-writes-files.txt')
 stopped_snapshots=snapshots('stopped-member-before-writes-files.txt')
+stopped_bound=json.loads((base/'stopped-member-raft-index.json').read_text())
 leader_after_segments=segments('leader-after-snapshot-files.txt')
 rejoined=snapshots('rejoined-member-files.txt')
+leader_hashes=snapshot_hashes('leader-before-rejoin-snapshots.sha256')
+rejoined_hashes=snapshot_hashes('rejoined-member-snapshots.sha256')
 obs={'leader_before':json.loads((base/'leader-before.json').read_text()),
      'leader_after':json.loads((base/'leader-after.json').read_text()),
+     'acknowledged_total_applies':progress[-1]['acknowledged_total_applies'],
+     'batch_evidence':[f'snapshot-batch-{n:02d}.json' for n in range(batch+1)],
+     'leader_file_bytes':progress[-1]['leader_file_bytes'],
      'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
      'stopped_segment_ranges':stopped,'stopped_snapshot_indexes':stopped_snapshots,
-     'leader_after_segment_ranges':leader_after_segments,'rejoined_snapshot_indexes':rejoined}
+     'stopped_member_index_bound':stopped_bound,
+     'leader_after_segment_ranges':leader_after_segments,'rejoined_snapshot_indexes':rejoined,
+     'leader_snapshot_hashes':{str(k):sorted(v) for k,v in leader_hashes.items()},
+     'rejoined_snapshot_hashes':{str(k):sorted(v) for k,v in rejoined_hashes.items()}}
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
 if not after or not stopped or not leader_after_segments or not rejoined:
   raise SystemExit('missing snapshot or segment index')
-stopped_end=max(end for _,end in stopped)
+if obs['leader_after']!=progress[-1]['leader_after']:
+  raise SystemExit('final leader identity differs from measured pre-rejoin leader')
+stopped_end=stopped_bound.get('last_persisted_index_upper_bound')
+if not isinstance(stopped_end,int) or stopped_end<max(end for _,end in stopped):
+  raise SystemExit('stopped member open tail upper bound is missing or invalid')
 if max(after)<=max(before or [0]) or max(after)<=stopped_end:
   raise SystemExit('leader snapshot did not cross stopped member index')
 if min(start for start,_ in leader_after_segments)<=stopped_end+1:
   raise SystemExit('leader still has log segments that could serve stopped member without snapshot')
 if max(rejoined)<max(after) or max(rejoined)<=max(stopped_snapshots or [0]):
   raise SystemExit('rejoined member has no new local snapshot at the leader index')
+shared=[{'index':index,'sha256':digest} for index in leader_hashes.keys() & rejoined_hashes.keys()
+        for digest in leader_hashes[index] & rejoined_hashes[index]
+        if index>stopped_end and index in after and index in rejoined]
+obs['matched_transferred_snapshots']=sorted(shared,key=lambda item:item['index'])
+log=(base/'rejoined-member.log').read_text()
+obs['install_snapshot_log_lines']=[line for line in log.splitlines()
+  if re.search(r'install.?snapshot|snapshot[^\n]*install',line,re.I)][:20]
+(base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
+if not shared:
+  raise SystemExit('rejoined member has no byte-identical leader snapshot beyond its stopped index bound')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
-        lc_case snapshot-catch-up pass "leader snapshot index crossed stopped member segment end after 1400 acknowledged writes; rejoined member installed that snapshot" "$LC_ART/cluster-logs/snapshot-threshold.json"
+        lc_case snapshot-catch-up pass "leader truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained byte-identical leader snapshot" "$LC_ART/cluster-logs/snapshot-threshold.json"
       else
-        lc_case snapshot-catch-up blocked "snapshot/segment filenames did not prove leader truncation past stopped member and local snapshot catch-up; inspect cluster-logs/snapshot-threshold.json"
+        LC_FINAL_EVIDENCE=""
+        if [[ -s "$LC_ART/cluster-logs/snapshot-threshold.json" ]]; then
+          LC_FINAL_EVIDENCE="$LC_ART/cluster-logs/snapshot-threshold.json"
+        fi
+        lc_case snapshot-catch-up blocked "snapshot/segment bytes did not prove leader truncation past stopped open tail and byte-identical snapshot installation; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
+        LC_SNAP_RC=1
       fi
     fi
 
