@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,8 @@ type TaskRecipe struct {
 	Attempt         int
 	ClaimAttempt    int
 	OwnerGeneration int64
+	ResultDigest    string
+	OutputDigest    string
 }
 
 // QueryTaskRecipes reads frozen recipe fields for one run.
@@ -126,15 +129,15 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 	if err != nil {
 		return nil, fmt.Errorf("refusing to interpolate an unvalidated run id %q: %w", runID, err)
 	}
-	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
+	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation, result, output FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
 	resp, _, err := h.Query(ctx, base, sql, 200)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]TaskRecipe, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
-		if len(row) < 9 {
-			return nil, fmt.Errorf("task_runs row has %d columns, want 9", len(row))
+		if len(row) < 11 {
+			return nil, fmt.Errorf("task_runs row has %d columns, want 11", len(row))
 		}
 		rowID, err := queryUUID(row[0])
 		if err != nil {
@@ -143,6 +146,14 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		taskID, err := queryUUID(row[1])
 		if err != nil {
 			return nil, fmt.Errorf("task_runs.task_id for %s: %w", rowID, err)
+		}
+		resultDigest, err := queryCellDigest(row[9])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.result for %s: %w", rowID, err)
+		}
+		outputDigest, err := queryCellDigest(row[10])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.output for %s: %w", rowID, err)
 		}
 		out = append(out, TaskRecipe{
 			ID:              rowID,
@@ -154,9 +165,27 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 			Attempt:         int(int64From(row[6])),
 			ClaimAttempt:    int(int64From(row[7])),
 			OwnerGeneration: int64From(row[8]),
+			ResultDigest:    resultDigest,
+			OutputDigest:    outputDigest,
 		})
 	}
 	return out, nil
+}
+
+// queryCellDigest keeps NULL distinct from an empty string and rejects a cell
+// shape the read-only SQL endpoint does not produce for text/JSON columns.
+func queryCellDigest(value any) (string, error) {
+	var raw []byte
+	switch v := value.(type) {
+	case nil:
+		raw = []byte{0}
+	case string:
+		raw = append([]byte{1}, v...)
+	default:
+		return "", fmt.Errorf("unexpected text cell %T", value)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // QueryLeaseAbsent proves absence through a successful SQL read. QueryLease's

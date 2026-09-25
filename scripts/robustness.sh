@@ -145,6 +145,7 @@ case "$RUN_PATTERN" in
       TestCore/wrong_token_internal
       TestCore/invalid_mtls_peer
       TestCore/cancel_completion_race
+      TestCore/cancel_post_commit_fence
       TestCore/commit_before_response_loss
       TestCore/stale_generation_complete
       TestCore/worker_unreachable_bench
@@ -160,6 +161,7 @@ case "$RUN_PATTERN" in
       wrong_token_internal
       invalid_mtls_peer
       cancel_completion_race
+      cancel_post_commit_fence
       commit_before_response_loss
       stale_generation_complete
       worker_unreachable_bench

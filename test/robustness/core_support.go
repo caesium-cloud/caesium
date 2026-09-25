@@ -114,6 +114,8 @@ func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, 
 			if requireDurable {
 				tf.ClaimAttempt = r.ClaimAttempt
 				tf.OwnerGeneration = r.OwnerGeneration
+				tf.ResultDigest = r.ResultDigest
+				tf.OutputDigest = r.OutputDigest
 			}
 			if tf.ClaimedBy == "" {
 				tf.ClaimedBy = r.ClaimedBy

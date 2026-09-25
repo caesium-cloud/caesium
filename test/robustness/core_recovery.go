@@ -325,9 +325,28 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("run before stale complete: %v", err)
 	}
+	activeBlock := false
+	for _, task := range detail.Tasks {
+		if task.ID == recoveredBlock.ID && task.TaskID == recoveredBlock.TaskID &&
+			strings.EqualFold(task.Status, "running") && task.ClaimedBy == recoveredBlock.ClaimedBy &&
+			task.Attempt == recoveredBlock.Attempt {
+			activeBlock = true
+			break
+		}
+	}
+	if !activeBlock {
+		t.Fatalf("inconclusive: recovered block claim has no matching active public task: %+v run=%+v", recoveredBlock, detail)
+	}
 	before := fingerprintDurableRun(t, ctx, fe, leaseBase, job.ID, run.ID)
 	cli := validInternalClient(t, fe, newOwner)
-	payload := completePayload(detail, lease, "succeeded", lease.Generation)
+	staleNonce := uuid.NewString()
+	payload := map[string]any{
+		"run_id": run.ID, "task_id": recoveredBlock.TaskID, "task_run_id": recoveredBlock.ID,
+		"owner_generation": lease.Generation, "attempt": recoveredBlock.Attempt,
+		"worker_node": recoveredBlock.ClaimedBy, "status": "succeeded",
+		"result":  "stale-result-" + staleNonce,
+		"outputs": map[string]string{"stale_probe_nonce": staleNonce},
+	}
 	ex := cli.Complete(ctx, cluster.InternalBase(newOwner.IP), payload)
 	if ex.Err != "" {
 		t.Fatalf("stale complete transport: %v", ex.Err)

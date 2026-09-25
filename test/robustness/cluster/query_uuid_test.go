@@ -64,7 +64,7 @@ func TestQueryTaskRecipesKeepsClaimAttemptSeparateFromRetryAttempt(t *testing.T)
 		if r.URL.Path != "/v1/database/query" {
 			t.Fatalf("unexpected query path %q", r.URL.Path)
 		}
-		body := fmt.Sprintf(`{"row_count":1,"rows":[[%q,%q,"running","image:v1","[\"sh\"]","node-b",1,2,3]]}`, instanceID, taskID)
+		body := fmt.Sprintf(`{"row_count":1,"rows":[[%q,%q,"running","image:v1","[\"sh\"]","node-b",1,2,3,"",null]]}`, instanceID, taskID)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}}
 	recipes, err := h.QueryTaskRecipes(context.Background(), "http://query.test", runID)
@@ -74,6 +74,27 @@ func TestQueryTaskRecipesKeepsClaimAttemptSeparateFromRetryAttempt(t *testing.T)
 	got := recipes[0]
 	if got.ID != instanceID || got.TaskID != taskID || got.Attempt != 1 || got.ClaimAttempt != 2 || got.OwnerGeneration != 3 {
 		t.Fatalf("retry and claim identity conflated: %+v", got)
+	}
+	if got.ResultDigest == "" || got.OutputDigest == "" {
+		t.Fatalf("result/output evidence missing: %+v", got)
+	}
+}
+
+func TestQueryCellDigestDistinguishesNullAndOutputMutation(t *testing.T) {
+	nullDigest, err := queryCellDigest(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyDigest, err := queryCellDigest("")
+	if err != nil || emptyDigest == nullDigest {
+		t.Fatalf("NULL and empty text collapsed: null=%q empty=%q err=%v", nullDigest, emptyDigest, err)
+	}
+	changedDigest, err := queryCellDigest(`{"stale_probe":"must-not-persist"}`)
+	if err != nil || changedDigest == emptyDigest {
+		t.Fatalf("output mutation collapsed: empty=%q changed=%q err=%v", emptyDigest, changedDigest, err)
+	}
+	if _, err := queryCellDigest(42); err == nil {
+		t.Fatal("unexpected SQL cell type must be inconclusive")
 	}
 }
 

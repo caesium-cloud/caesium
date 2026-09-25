@@ -4,6 +4,7 @@ package robustness
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -244,7 +245,22 @@ func runFanIn(t *testing.T, fe *faultEnv) {
 	})
 }
 
-func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
+type cancelContender struct {
+	member      cluster.Member
+	job         cluster.Job
+	first       cluster.Run
+	rawFirst    []byte
+	firstTask   cluster.Task
+	blockRecipe cluster.TaskRecipe
+	firstLease  cluster.Lease
+	oldOwner    cluster.Member
+	oldClient   *cluster.InternalClient
+	oldComplete map[string]any
+	names       map[string]string
+}
+
+func prepareCancelContender(t *testing.T, fe *faultEnv) cancelContender {
+	t.Helper()
 	refreshTopo(t, fe)
 	ctx := context.Background()
 	member := fe.leader
@@ -254,6 +270,7 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("trigger first: %v", err)
 	}
+	t.Cleanup(func() { fe.sink.Release(first.ID) })
 	startCtx, startCancel := context.WithTimeout(ctx, 2*time.Minute)
 	if err := cluster.Poll(startCtx, 500*time.Millisecond, func() (bool, error) {
 		return len(fe.sink.StartsFor(first.ID, cluster.BlockStep)) > 0, nil
@@ -279,13 +296,45 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil || firstLease.Generation < 1 || strings.TrimSpace(firstLease.OwnerNode) == "" {
 		t.Fatalf("inconclusive: old block completion lease unavailable: lease=%+v err=%v", firstLease, err)
 	}
+	recipes, err := fe.httpAPI.QueryTaskRecipes(ctx, member.HTTPBase(), first.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: old block durable claim unavailable: %v", err)
+	}
+	var block cluster.TaskRecipe
+	for _, recipe := range recipes {
+		if recipe.ID == firstTask.ID && recipe.TaskID == firstTask.TaskID {
+			block = recipe
+			break
+		}
+	}
+	if block.ID == "" || !strings.EqualFold(block.Status, "running") ||
+		block.ClaimedBy != firstTask.ClaimedBy || block.Attempt != firstTask.Attempt ||
+		block.ClaimAttempt < 1 || block.OwnerGeneration != firstLease.Generation {
+		t.Fatalf("inconclusive: old block claim is not authoritative for current lease: public=%+v durable=%+v lease=%+v", firstTask, block, firstLease)
+	}
 	oldOwner := memberByNode(t, fe, firstLease.OwnerNode)
 	oldClient := validInternalClient(t, fe, oldOwner)
+	completionNonce := uniqueAlias("complete")
 	oldComplete := map[string]any{
 		"run_id": first.ID, "task_id": firstTask.TaskID, "task_run_id": firstTask.ID,
 		"owner_generation": firstLease.Generation, "attempt": firstTask.Attempt,
 		"worker_node": firstTask.ClaimedBy, "status": "succeeded", "result": "success",
+		"outputs": map[string]string{"cancel_race_nonce": completionNonce},
 	}
+	return cancelContender{
+		member: member, job: job, first: first, rawFirst: rawFirst,
+		firstTask: firstTask, blockRecipe: block, firstLease: firstLease, oldOwner: oldOwner,
+		oldClient: oldClient, oldComplete: oldComplete, names: names,
+	}
+}
+
+// runCancelPostCommitFence starts the old completion after the replacement's
+// 202, so it proves the durable post-cancel fence, not transaction overlap.
+func runCancelPostCommitFence(t *testing.T, fe *faultEnv) {
+	c := prepareCancelContender(t, fe)
+	ctx := context.Background()
+	member, job, first, rawFirst := c.member, c.job, c.first, c.rawFirst
+	oldOwner, oldClient, oldComplete, names := c.oldOwner, c.oldClient, c.oldComplete, c.names
 
 	second, rawSecond, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), job.ID)
 	if err != nil {
@@ -296,8 +345,9 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	}
 	t.Logf("replacement 202 run %s (first %s); 202 is not process-death ack", second.ID, first.ID)
 
-	// Release the first barrier while cancel is in flight so a completion can
-	// race. The second run has its own wait key and is released so it can finish.
+	// The replacement has already committed. Releasing this barrier only lets
+	// the external process finish; it cannot turn the completion into a race
+	// with the cancellation transaction.
 	fe.sink.Release(first.ID)
 	fe.sink.Release(second.ID)
 	completionRace := oldClient.Complete(ctx, cluster.InternalBase(oldOwner.IP), oldComplete)
@@ -398,13 +448,13 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("re-read cancelled run: %v", err)
 	}
-	checkCancelled(still, "after completion race")
+	checkCancelled(still, "after post-commit completion")
 
 	secCtx, secCancel := context.WithTimeout(ctx, 5*time.Minute)
 	secondFinal := waitRunStatus(t, secCtx, fe.httpAPI, member.HTTPBase(), job.ID, second.ID, "succeeded")
 	secCancel()
 
-	writeCoreRecord(t, fe, "cancel_completion_race", map[string]any{
+	writeCoreRecord(t, fe, "cancel_post_commit_fence", map[string]any{
 		"first_run":                first.ID,
 		"second_run":               second.ID,
 		"first_status":             still.Status,
@@ -418,6 +468,214 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		"old_lease_absence_proven": leaseAbsenceProven,
 		"successor_starts":         len(fe.sink.StartsFor(first.ID, "successor")),
 		"replacement_202_ack":      "not_process_death",
+		"completion_phase":         "post_cancel_commit",
 		"histories":                []string{first.ID, second.ID},
+	})
+}
+
+// runCancelCompletionRace sends both operations through a shared transport
+// barrier. Neither request can reach a server until BOTH invocation intervals
+// have begun. Persisted events on the old run decide which write committed
+// first; client response arrival time is not used as server ordering evidence.
+func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
+	c := prepareCancelContender(t, fe)
+	gate := newRequestRaceGate()
+	defer gate.releaseBoth()
+	runCtx, runCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer runCancel()
+
+	publicClient := *fe.httpAPI.Client
+	publicClient.Transport = gate.transport("replace", publicClient.Transport)
+	publicAPI := *fe.httpAPI
+	publicAPI.Client = &publicClient
+	internalClient := *c.oldClient
+	internalHTTP := *c.oldClient.HTTP
+	internalHTTP.Transport = gate.transport("complete", internalHTTP.Transport)
+	internalClient.HTTP = &internalHTTP
+
+	type triggerResult struct {
+		run cluster.Run
+		raw []byte
+		err error
+	}
+	triggered := make(chan triggerResult, 1)
+	completed := make(chan cluster.InternalExchange, 1)
+	go func() {
+		run, raw, err := publicAPI.TriggerRun(runCtx, c.member.HTTPBase(), c.job.ID)
+		triggered <- triggerResult{run: run, raw: raw, err: err}
+	}()
+	go func() {
+		completed <- internalClient.Complete(runCtx, cluster.InternalBase(c.oldOwner.IP), c.oldComplete)
+	}()
+	readyCtx, readyCancel := context.WithTimeout(runCtx, 10*time.Second)
+	arrivals, err := gate.awaitBoth(readyCtx)
+	readyCancel()
+	if err != nil {
+		runCancel()
+		t.Fatalf("inconclusive: replacement and completion did not both enter the race: %v", err)
+	}
+	releasedAt := gate.releaseBoth()
+	for _, arrival := range arrivals {
+		if !arrival.At.Before(releasedAt) {
+			t.Fatalf("inconclusive: %s was not invoked before the shared gate opened", arrival.Name)
+		}
+	}
+	var replacement triggerResult
+	select {
+	case replacement = <-triggered:
+	case <-runCtx.Done():
+		t.Fatalf("inconclusive: replacement did not settle: %v", runCtx.Err())
+	}
+	if replacement.err != nil {
+		t.Fatalf("inconclusive: replacement admission: %v", replacement.err)
+	}
+	if replacement.run.ID == c.first.ID {
+		t.Fatalf("replacement admission reused old run %s", c.first.ID)
+	}
+	second := replacement.run
+	t.Cleanup(func() { fe.sink.Release(second.ID) })
+	var contender cluster.InternalExchange
+	select {
+	case contender = <-completed:
+	case <-runCtx.Done():
+		t.Fatalf("inconclusive: completion contender did not settle: %v", runCtx.Err())
+	}
+	if contender.Err != "" {
+		t.Fatalf("inconclusive: completion contender transport: %s", contender.Err)
+	}
+	code, message := ParseRefusal(contender.Status, []byte(contender.Body))
+	if contender.Status == http.StatusOK {
+		var accepted struct {
+			Accepted bool `json:"accepted"`
+		}
+		if err := json.Unmarshal([]byte(contender.Body), &accepted); err != nil || !accepted.Accepted {
+			t.Fatalf("inconclusive: completion 200 lacks accepted=true: body=%s err=%v", RedactSecrets(contender.Body), err)
+		}
+	}
+	leaseAbsent := false
+	if contender.Status == http.StatusConflict && code == RefusalMissingRun {
+		var qerr error
+		leaseAbsent, qerr = fe.httpAPI.QueryLeaseAbsent(context.Background(), c.oldOwner.HTTPBase(), c.first.ID)
+		if qerr != nil {
+			t.Fatalf("inconclusive: missing_run without healthy SQL lease read: %v", qerr)
+		}
+		if !leaseAbsent {
+			t.Fatalf("missing_run refusal while old lease %s still exists", c.first.ID)
+		}
+	}
+	if contender.Status != http.StatusOK &&
+		!CancelledCompleteRefusalAllowed(contender.Status, code) &&
+		!(contender.Status == http.StatusConflict && code == RefusalMissingRun && leaseAbsent) {
+		t.Fatalf("completion contender returned unsupported outcome %d/%q: %s", contender.Status, code, RedactSecrets(message))
+	}
+
+	settleCtx, settleCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	firstFinal := waitRunTerminal(t, settleCtx, fe.httpAPI, c.member.HTTPBase(), c.job.ID, c.first.ID)
+	settleCancel()
+	recipes, err := fe.httpAPI.QueryTaskRecipes(context.Background(), c.member.HTTPBase(), c.first.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: durable old task rows after race: %v", err)
+	}
+	var block cluster.TaskRecipe
+	for _, recipe := range recipes {
+		if recipe.ID == c.blockRecipe.ID && recipe.TaskID == c.blockRecipe.TaskID {
+			block = recipe
+			break
+		}
+	}
+	if block.ID == "" {
+		t.Fatalf("inconclusive: raced block instance %s disappeared", c.blockRecipe.ID)
+	}
+	publicBlockFound := false
+	for _, task := range firstFinal.Tasks {
+		if task.ID == block.ID && task.TaskID == block.TaskID {
+			publicBlockFound = true
+			if !strings.EqualFold(task.Status, block.Status) || task.ClaimedBy != block.ClaimedBy {
+				t.Fatalf("inconclusive: public/durable raced block disagree: public=%+v durable=%+v", task, block)
+			}
+			break
+		}
+	}
+	if !publicBlockFound {
+		t.Fatalf("inconclusive: raced block instance %s missing from public run", block.ID)
+	}
+	eventCtx, eventCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	rows, scope, err := readPersistedEvents(eventCtx, fe.httpAPI, c.member.HTTPBase(), c.first.ID, 2000)
+	eventCancel()
+	if err != nil || !scope.Complete {
+		t.Fatalf("inconclusive: old run's durable event order unavailable: scope=%+v err=%v", scope, err)
+	}
+	events := make([]CancelRaceEvent, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, CancelRaceEvent{Sequence: row.Sequence, Type: row.Type, RunID: row.RunID, TaskID: row.TaskID})
+	}
+	outcome, err := ClassifyCancelCompletionRace(c.first.ID, c.firstTask.TaskID, contender.Status, code,
+		leaseAbsent, firstFinal.Status, block.Status, events)
+	if err != nil {
+		t.Fatalf("cancel/completion race violated durable order: %v (status=%d/%q run=%s block=%s events=%+v)",
+			err, contender.Status, code, firstFinal.Status, block.Status, events)
+	}
+	if contender.Status == http.StatusConflict {
+		// The old task was still blocked, so a rejected synthetic completion
+		// must leave its result and output exactly as they were before the race.
+		if block.ResultDigest != c.blockRecipe.ResultDigest || block.OutputDigest != c.blockRecipe.OutputDigest ||
+			strings.TrimSpace(block.ClaimedBy) != "" {
+			t.Fatalf("rejected completion mutated old task payload or retained its claim: before=%+v after=%+v", c.blockRecipe, block)
+		}
+	} else if block.ResultDigest == c.blockRecipe.ResultDigest || block.OutputDigest == c.blockRecipe.OutputDigest {
+		t.Fatalf("accepted completion lacked its durable result/output: before=%+v after=%+v", c.blockRecipe, block)
+	}
+
+	fe.sink.Release(c.first.ID)
+	fe.sink.Release(second.ID)
+	secCtx, secCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	secondFinal := waitRunStatus(t, secCtx, fe.httpAPI, c.member.HTTPBase(), c.job.ID, second.ID, "succeeded")
+	secCancel()
+	time.Sleep(15 * time.Second)
+	still, err := fe.httpAPI.GetRun(context.Background(), c.member.HTTPBase(), c.job.ID, c.first.ID)
+	if err != nil || !strings.EqualFold(still.Status, firstFinal.Status) {
+		t.Fatalf("old run terminal status regressed after releasing task: first=%s later=%s err=%v", firstFinal.Status, still.Status, err)
+	}
+	lateRecipes, err := fe.httpAPI.QueryTaskRecipes(context.Background(), c.member.HTTPBase(), c.first.ID)
+	if err != nil {
+		t.Fatalf("inconclusive: old task rows unavailable after barrier release: %v", err)
+	}
+	lateBlockFound := false
+	for _, recipe := range lateRecipes {
+		if recipe.ID != block.ID || recipe.TaskID != block.TaskID {
+			continue
+		}
+		lateBlockFound = true
+		if recipe.Status != block.Status || recipe.ClaimedBy != block.ClaimedBy ||
+			recipe.ResultDigest != block.ResultDigest || recipe.OutputDigest != block.OutputDigest {
+			t.Fatalf("old task changed after releasing blocked worker: before=%+v after=%+v", block, recipe)
+		}
+	}
+	if !lateBlockFound {
+		t.Fatalf("inconclusive: old task %s disappeared after barrier release", block.ID)
+	}
+	lateRows, lateScope, err := readPersistedEvents(context.Background(), fe.httpAPI, c.member.HTTPBase(), c.first.ID, 2000)
+	if err != nil || !lateScope.Complete {
+		t.Fatalf("inconclusive: old run's late durable event order unavailable: scope=%+v err=%v", lateScope, err)
+	}
+	lateEvents := make([]CancelRaceEvent, 0, len(lateRows))
+	for _, row := range lateRows {
+		lateEvents = append(lateEvents, CancelRaceEvent{Sequence: row.Sequence, Type: row.Type, RunID: row.RunID, TaskID: row.TaskID})
+	}
+	lateOutcome, err := ClassifyCancelCompletionRace(c.first.ID, c.firstTask.TaskID, contender.Status, code,
+		leaseAbsent, still.Status, block.Status, lateEvents)
+	if err != nil || lateOutcome != outcome {
+		t.Fatalf("old run's race outcome changed after barrier release: first=%s later=%s err=%v", outcome, lateOutcome, err)
+	}
+	writeCoreRecord(t, fe, "cancel_completion_race", map[string]any{
+		"first_run": c.first.ID, "second_run": second.ID,
+		"first_status": still.Status, "second_status": secondFinal.Status,
+		"first_raw_admit": truncate(c.rawFirst, 200), "second_raw_admit": truncate(replacement.raw, 200),
+		"completion_status": contender.Status, "completion_code": code,
+		"outcome": outcome, "lease_absence_proven": leaseAbsent,
+		"gate_arrivals": arrivals, "gate_released_at": releasedAt,
+		"persisted_scope": scope, "persisted_events": events,
+		"late_persisted_scope": lateScope, "late_persisted_events": lateEvents,
+		"histories": []string{c.first.ID, second.ID},
 	})
 }

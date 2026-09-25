@@ -38,6 +38,14 @@ func TestStateDiffsDetectsMutationAndEquality(t *testing.T) {
 	if !strings.Contains(claimDiffs, "claim_attempt") || !strings.Contains(claimDiffs, "owner_generation") {
 		t.Fatalf("durable claim mutation was not detected: %s", claimDiffs)
 	}
+	payloadOnly := before
+	payloadOnly.Tasks = append([]TaskFingerprint(nil), before.Tasks...)
+	payloadOnly.Tasks[0].ResultDigest = "mutated-result"
+	payloadOnly.Tasks[0].OutputDigest = "mutated-output"
+	payloadDiffs := strings.Join(StateDiffs(before, payloadOnly), ",")
+	if !strings.Contains(payloadDiffs, "result_digest") || !strings.Contains(payloadDiffs, "output_digest") {
+		t.Fatalf("rejected completion payload mutation was not detected: %s", payloadDiffs)
+	}
 }
 
 func TestClassifyQuorumLossNeverRejects(t *testing.T) {
@@ -170,6 +178,49 @@ func TestCancelledCompleteRefusalAllowed(t *testing.T) {
 		if CancelledCompleteRefusalAllowed(tc.status, tc.code) {
 			t.Fatalf("%d %s must not prove a cancellation fence", tc.status, tc.code)
 		}
+	}
+}
+
+func TestClassifyCancelCompletionRaceRequiresDurableWinnerOrder(t *testing.T) {
+	const runID, blockID = "run-1", "block-1"
+	started := CancelRaceEvent{Sequence: 1, Type: "task_started", RunID: runID, TaskID: blockID}
+	success := CancelRaceEvent{Sequence: 2, Type: "task_succeeded", RunID: runID, TaskID: blockID}
+	cancel := CancelRaceEvent{Sequence: 3, Type: "run_cancelled", RunID: runID}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", false, "cancelled", "succeeded",
+		[]CancelRaceEvent{started, success, cancel}); err != nil || got != "completion_won_then_cancelled" {
+		t.Fatalf("completion-first history = %q, %v", got, err)
+	}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 409, RefusalMissingRun, true, "cancelled", "cancelled",
+		[]CancelRaceEvent{started, cancel}); err != nil || got != "cancellation_won" {
+		t.Fatalf("cancellation-first history = %q, %v", got, err)
+	}
+	if got, err := ClassifyCancelCompletionRace(runID, blockID, 200, "", false, "succeeded", "succeeded",
+		[]CancelRaceEvent{started, success}); err != nil || got != "completion_won_before_replace" {
+		t.Fatalf("completion-before-replace history = %q, %v", got, err)
+	}
+	for _, tc := range []struct {
+		name        string
+		status      int
+		code        string
+		leaseAbsent bool
+		runStatus   string
+		blockStatus string
+		events      []CancelRaceEvent
+	}{
+		{"success after cancellation", 200, "", false, "cancelled", "succeeded", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_succeeded", RunID: runID, TaskID: blockID}}},
+		{"successor started after cancellation", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 2, Type: "run_cancelled", RunID: runID}, {Sequence: 3, Type: "task_started", RunID: runID, TaskID: "successor"}}},
+		{"rejected but block succeeded", 409, RefusalTerminalRun, false, "cancelled", "succeeded", []CancelRaceEvent{started, success, cancel}},
+		{"missing run without SQL proof", 409, RefusalMissingRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, cancel}},
+		{"missing cancellation event", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started}},
+		{"wrong run scope", 409, RefusalTerminalRun, false, "cancelled", "cancelled", []CancelRaceEvent{started, {Sequence: 3, Type: "run_cancelled", RunID: "other-run"}}},
+		{"nonmonotonic order", 200, "", false, "cancelled", "succeeded", []CancelRaceEvent{started, cancel, success}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if outcome, err := ClassifyCancelCompletionRace(runID, blockID, tc.status, tc.code, tc.leaseAbsent,
+				tc.runStatus, tc.blockStatus, tc.events); err == nil {
+				t.Fatalf("bad history classified as %q", outcome)
+			}
+		})
 	}
 }
 

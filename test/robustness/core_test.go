@@ -105,6 +105,7 @@ func TestCore(t *testing.T) {
 	t.Run("wrong_token_internal", func(t *testing.T) { runWrongToken(t, fe) })
 	t.Run("invalid_mtls_peer", func(t *testing.T) { runInvalidMTLS(t, fe) })
 	t.Run("cancel_completion_race", func(t *testing.T) { runCancelCompletionRace(t, fe) })
+	t.Run("cancel_post_commit_fence", func(t *testing.T) { runCancelPostCommitFence(t, fe) })
 	t.Run("commit_before_response_loss", func(t *testing.T) { runCommitBeforeResponseLoss(t, fe) })
 	t.Run("stale_generation_complete", func(t *testing.T) { runStaleGeneration(t, fe) })
 	t.Run("worker_unreachable_bench", func(t *testing.T) { runWorkerUnreachable(t, fe) })

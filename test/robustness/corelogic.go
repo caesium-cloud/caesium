@@ -42,6 +42,8 @@ type TaskFingerprint struct {
 	Attempt         int    `json:"attempt"`
 	ClaimAttempt    int    `json:"claim_attempt"`
 	OwnerGeneration int64  `json:"owner_generation"`
+	ResultDigest    string `json:"result_digest,omitempty"`
+	OutputDigest    string `json:"output_digest,omitempty"`
 	Error           string `json:"error,omitempty"`
 }
 
@@ -119,6 +121,12 @@ func StateDiffs(before, after StateFingerprint) []string {
 		}
 		if a.OwnerGeneration != b.OwnerGeneration {
 			diffs = append(diffs, prefix+".owner_generation")
+		}
+		if a.ResultDigest != b.ResultDigest {
+			diffs = append(diffs, prefix+".result_digest")
+		}
+		if a.OutputDigest != b.OutputDigest {
+			diffs = append(diffs, prefix+".output_digest")
 		}
 		if a.Error != b.Error {
 			diffs = append(diffs, prefix+".error")
@@ -374,6 +382,88 @@ func CancelledCompleteRefusalAllowed(status int, code string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// CancelRaceEvent is a persisted event read from one selected store. Sequence
+// order is the durable transaction order for this run, not HTTP arrival order.
+type CancelRaceEvent struct {
+	Sequence uint64
+	Type     string
+	RunID    string
+	TaskID   string
+}
+
+// ClassifyCancelCompletionRace accepts either serial order of two overlapping
+// requests. It requires the old run's persisted events to explain the observed
+// completion response and terminal task/run rows. `missing_run` needs a separate
+// successful SQL proof of lease absence, supplied by the caller.
+func ClassifyCancelCompletionRace(runID, blockTaskID string, status int, code string, leaseAbsent bool,
+	runStatus, blockStatus string, events []CancelRaceEvent) (string, error) {
+	if runID == "" || blockTaskID == "" || len(events) == 0 {
+		return "", fmt.Errorf("inconclusive: missing race identity or persisted events")
+	}
+	var succeededSeq, cancelledSeq uint64
+	var previous uint64
+	for _, ev := range events {
+		if ev.RunID != runID || ev.Sequence == 0 || ev.Sequence <= previous {
+			return "", fmt.Errorf("inconclusive: wrong run or non-monotonic persisted event: %+v after %d", ev, previous)
+		}
+		previous = ev.Sequence
+		switch ev.Type {
+		case "task_succeeded":
+			if ev.TaskID == blockTaskID {
+				if succeededSeq != 0 {
+					return "", fmt.Errorf("duplicate block success event for %s", blockTaskID)
+				}
+				succeededSeq = ev.Sequence
+			}
+		case "run_cancelled":
+			if cancelledSeq != 0 {
+				return "", fmt.Errorf("duplicate run cancellation event for %s", runID)
+			}
+			cancelledSeq = ev.Sequence
+		}
+	}
+	if cancelledSeq != 0 {
+		for _, ev := range events {
+			if ev.Sequence > cancelledSeq {
+				switch ev.Type {
+				case "task_started", "task_succeeded", "task_failed":
+					return "", fmt.Errorf("task event %s at %d persisted after run cancellation at %d", ev.Type, ev.Sequence, cancelledSeq)
+				}
+			}
+		}
+	}
+	if status == 409 {
+		if !CancelledCompleteRefusalAllowed(status, code) && !(code == RefusalMissingRun && leaseAbsent) {
+			return "", fmt.Errorf("completion refusal %d/%s is not a proved cancellation fence", status, code)
+		}
+		if !strings.EqualFold(runStatus, "cancelled") || !strings.EqualFold(blockStatus, "cancelled") ||
+			cancelledSeq == 0 || succeededSeq != 0 {
+			return "", fmt.Errorf("rejected completion contradicts durable cancellation: run=%s block=%s success_seq=%d cancel_seq=%d", runStatus, blockStatus, succeededSeq, cancelledSeq)
+		}
+		return "cancellation_won", nil
+	}
+	if status != 200 {
+		return "", fmt.Errorf("completion result %d/%s is neither accepted nor a proved refusal", status, code)
+	}
+	if succeededSeq == 0 || !strings.EqualFold(blockStatus, "succeeded") {
+		return "", fmt.Errorf("accepted completion lacks durable block success: status=%s seq=%d", blockStatus, succeededSeq)
+	}
+	switch strings.ToLower(strings.TrimSpace(runStatus)) {
+	case "cancelled":
+		if cancelledSeq == 0 || succeededSeq >= cancelledSeq {
+			return "", fmt.Errorf("accepted block completion is not ordered before cancellation: success_seq=%d cancel_seq=%d", succeededSeq, cancelledSeq)
+		}
+		return "completion_won_then_cancelled", nil
+	case "succeeded":
+		if cancelledSeq != 0 {
+			return "", fmt.Errorf("succeeded run also has cancellation event at %d", cancelledSeq)
+		}
+		return "completion_won_before_replace", nil
+	default:
+		return "", fmt.Errorf("accepted completion left old run %q", runStatus)
 	}
 }
 
