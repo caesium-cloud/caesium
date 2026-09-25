@@ -1029,7 +1029,7 @@ EOF
         >"$2" || return 1
       [[ -s "$2" ]]
     }
-    # Exit 0 only after the surviving leader's actual files prove truncation;
+    # Exit 0 only after both surviving voters' actual files prove truncation;
     # 2 means another bounded batch is needed, 3 is the on-disk safety cap,
     # and 1 means evidence is missing or a survivor changed/restarted.
     lc_snapshot_progress() {
@@ -1102,9 +1102,16 @@ try:
   stopped_upper=stopped_bound['last_persisted_index_upper_bound']
   require(stopped_upper>=stopped_end,'stopped member index bound is below closed segments')
   leader_bytes=sum(size for _,size in leader_rows)
-  truncated=(max(leader_snapshots)>max(before_snapshots) and
+  other_rows=files(f'other-after-batch-{batch:02d}-snapshot-files.txt')
+  other_snapshots,other_segments=indexes(other_rows)
+  require(other_snapshots and other_segments,'missing other survivor snapshot or Raft segment indexes')
+  require(all(start<=end for start,end in other_segments),'invalid other survivor Raft segment range')
+  leader_truncated=(max(leader_snapshots)>max(before_snapshots) and
     max(leader_snapshots)>stopped_upper and
     min(start for start,_ in leader_segments)>stopped_upper+1)
+  other_truncated=(max(other_snapshots)>stopped_upper and
+    min(start for start,_ in other_segments)>stopped_upper+1)
+  truncated=leader_truncated and other_truncated
   obs.update({'leader_before':before,'leader_after':after,
     'acknowledged_distinct_applies':1400,'acknowledged_update_applies':total-1400,
     'acknowledged_total_applies':total,'update_batches':update_batches,
@@ -1113,7 +1120,11 @@ try:
     'stopped_segment_ranges':stopped_segments,'stopped_segment_end':stopped_end,
     'stopped_member_index_bound':stopped_bound,
     'leader_snapshot_indexes':leader_snapshots,'leader_segment_ranges':leader_segments,
-    'leader_file_bytes':leader_bytes,'truncation_proved':truncated})
+    'other_survivor':'caesium-1' if before['name']=='caesium-0' else 'caesium-0',
+    'other_snapshot_indexes':other_snapshots,'other_segment_ranges':other_segments,
+    'leader_file_bytes':leader_bytes,'other_file_bytes':sum(size for _,size in other_rows),
+    'leader_truncation_proved':leader_truncated,
+    'other_truncation_proved':other_truncated,'truncation_proved':truncated})
   out.write_text(json.dumps(obs,indent=2)+'\n')
   if truncated:sys.exit(0)
   if leader_bytes>=obs['leader_file_byte_cap']:
@@ -1276,6 +1287,7 @@ PY
 )" || LC_SNAP_RC=$?
       if [[ "$LC_SNAP_RC" == 0 ]]; then
         lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-before-snapshot-files.txt" || LC_SNAP_RC=$?
+        if [[ "$LC_LEADER" == caesium-0 ]]; then LC_OTHER=caesium-1; else LC_OTHER=caesium-0; fi
       fi
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
@@ -1308,9 +1320,10 @@ PY
         cp "$LC_ART/cluster-snapshot-leader.json" "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG.json" || LC_SNAP_RC=$?
         if [[ "$LC_SNAP_RC" == 0 ]]; then
           lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" || LC_SNAP_RC=$?
+          lc_files "$LC_OTHER" "$LC_ART/cluster-logs/other-after-batch-$LC_BATCH_TAG-snapshot-files.txt" || LC_SNAP_RC=$?
         fi
         if [[ "$LC_SNAP_RC" != 0 ]]; then
-          LC_SNAP_REASON="surviving leader or its on-disk files became unobservable at batch $LC_BATCH_TAG"
+          LC_SNAP_REASON="a survivor or its on-disk files became unobservable at batch $LC_BATCH_TAG"
           break
         fi
         LC_PROGRESS_RC=0
@@ -1321,6 +1334,7 @@ PY
             LC_SNAP_TRUNCATED=1
             cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG.json" "$LC_ART/cluster-logs/leader-after.json" || LC_SNAP_RC=$?
             cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
+            cp "$LC_ART/cluster-logs/other-after-batch-$LC_BATCH_TAG-snapshot-files.txt" "$LC_ART/cluster-logs/other-after-snapshot-files.txt" || LC_SNAP_RC=$?
             lc_snapshot_hashes "$LC_LEADER" "$LC_ART/cluster-logs/leader-before-rejoin-snapshots.sha256" || LC_SNAP_RC=$?
             break
             ;;
@@ -1331,7 +1345,7 @@ PY
       done
       if [[ "$LC_SNAP_RC" == 0 && "$LC_SNAP_TRUNCATED" != 1 ]]; then
         LC_SNAP_RC=1
-        LC_SNAP_REASON="leader did not truncate past stopped member within 1400 distinct plus 9000 update applies"
+        LC_SNAP_REASON="both survivors did not truncate past stopped member within 1400 distinct plus 9000 update applies"
       fi
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
@@ -1390,6 +1404,8 @@ stopped=segments('stopped-member-before-writes-files.txt')
 stopped_snapshots=snapshots('stopped-member-before-writes-files.txt')
 stopped_bound=json.loads((base/'stopped-member-raft-index.json').read_text())
 leader_after_segments=segments('leader-after-snapshot-files.txt')
+other_after_segments=segments('other-after-snapshot-files.txt')
+other_after_snapshots=snapshots('other-after-snapshot-files.txt')
 rejoined=snapshots('rejoined-member-files.txt')
 leader_hashes=snapshot_hashes('leader-before-rejoin-snapshots.sha256')
 rejoined_hashes=snapshot_hashes('rejoined-member-snapshots.sha256')
@@ -1401,11 +1417,15 @@ obs={'leader_before':json.loads((base/'leader-before.json').read_text()),
      'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
      'stopped_segment_ranges':stopped,'stopped_snapshot_indexes':stopped_snapshots,
      'stopped_member_index_bound':stopped_bound,
-     'leader_after_segment_ranges':leader_after_segments,'rejoined_snapshot_indexes':rejoined,
+     'leader_after_segment_ranges':leader_after_segments,
+     'other_survivor':progress[-1]['other_survivor'],
+     'other_after_segment_ranges':other_after_segments,
+     'other_after_snapshot_indexes':other_after_snapshots,
+     'rejoined_snapshot_indexes':rejoined,
      'leader_snapshot_hashes':{str(k):sorted(v) for k,v in leader_hashes.items()},
      'rejoined_snapshot_hashes':{str(k):sorted(v) for k,v in rejoined_hashes.items()}}
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
-if not after or not stopped or not leader_after_segments or not rejoined:
+if not after or not stopped or not leader_after_segments or not other_after_segments or not other_after_snapshots or not rejoined:
   raise SystemExit('missing snapshot or segment index')
 if obs['leader_after']!=progress[-1]['leader_after']:
   raise SystemExit('final leader identity differs from measured pre-rejoin leader')
@@ -1416,27 +1436,35 @@ if max(after)<=max(before or [0]) or max(after)<=stopped_end:
   raise SystemExit('leader snapshot did not cross stopped member index')
 if min(start for start,_ in leader_after_segments)<=stopped_end+1:
   raise SystemExit('leader still has log segments that could serve stopped member without snapshot')
-if max(rejoined)<max(after) or max(rejoined)<=max(stopped_snapshots or [0]):
-  raise SystemExit('rejoined member has no new local snapshot at the leader index')
+if max(other_after_snapshots)<=stopped_end or min(start for start,_ in other_after_segments)<=stopped_end+1:
+  raise SystemExit('other survivor still has log segments that could serve stopped member without snapshot')
+if max(rejoined)<=stopped_end or max(rejoined)<=max(stopped_snapshots or [0]):
+  raise SystemExit('rejoined member has no new local snapshot beyond its stopped index bound')
+# Dqlite retains only recent snapshots. A transferred snapshot can be pruned
+# before this post-rejoin observation, so matching bytes corroborate the
+# installation but cannot be required. Neither survivor kept the stopped
+# member's next log entry, making snapshot installation necessary for rejoin.
 shared=[{'index':index,'sha256':digest} for index in leader_hashes.keys() & rejoined_hashes.keys()
         for digest in leader_hashes[index] & rejoined_hashes[index]
         if index>stopped_end and index in after and index in rejoined]
 obs['matched_transferred_snapshots']=sorted(shared,key=lambda item:item['index'])
+common_indexes=(leader_hashes.keys() & rejoined_hashes.keys() & set(after) & set(rejoined))
+if any(not leader_hashes[index] & rejoined_hashes[index] for index in common_indexes if index>stopped_end):
+  raise SystemExit('same-index leader and rejoined snapshot bytes differ')
 log=(base/'rejoined-member.log').read_text()
 obs['install_snapshot_log_lines']=[line for line in log.splitlines()
   if re.search(r'install.?snapshot|snapshot[^\n]*install',line,re.I)][:20]
+obs['snapshot_install_inferred_from_two_survivor_log_gap']=True
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
-if not shared:
-  raise SystemExit('rejoined member has no byte-identical leader snapshot beyond its stopped index bound')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
-        lc_case snapshot-catch-up pass "leader truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained byte-identical leader snapshot" "$LC_ART/cluster-logs/snapshot-threshold.json"
+        lc_case snapshot-catch-up pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
       else
         LC_FINAL_EVIDENCE=""
         if [[ -s "$LC_ART/cluster-logs/snapshot-threshold.json" ]]; then
           LC_FINAL_EVIDENCE="$LC_ART/cluster-logs/snapshot-threshold.json"
         fi
-        lc_case snapshot-catch-up blocked "snapshot/segment bytes did not prove leader truncation past stopped open tail and byte-identical snapshot installation; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
+        lc_case snapshot-catch-up blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
         LC_SNAP_RC=1
       fi
     fi
