@@ -23,6 +23,16 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.base = self.root / "base"
         self.candidate.mkdir()
         self.base.mkdir()
+        for relpath, name in (
+            ("internal/run/owner_benchmark_test.go", "BenchmarkOwnerFake"),
+            ("internal/run/recovery_benchmark_test.go", "BenchmarkRecoverFake"),
+        ):
+            for source in (self.candidate, self.base):
+                path = source / relpath
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    f"package run\nimport \"testing\"\nfunc {name}(b *testing.B) {{}}\n"
+                )
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
         fake_docker = fake_bin / "docker"
@@ -40,7 +50,17 @@ class BenchmarkOrderTests(unittest.TestCase):
             "if os.environ.get('FAKE_DOCKER_FAIL') == f'{side}:{repeat}':\n"
             "    print('synthetic benchmark failure')\n"
             "    sys.exit(17)\n"
-            "print(f'BenchmarkOwnerFake-10  1000  {1000 + repeat} ns/op  400 B/op  12 allocs/op')\n"
+            "bad = os.environ.get('FAKE_DOCKER_BAD') == f'{side}:{repeat}'\n"
+            "kind = os.environ.get('FAKE_DOCKER_BAD_KIND') if bad else None\n"
+            "def row(name):\n"
+            "    if kind == 'missing_memory' and name == 'BenchmarkOwnerFake':\n"
+            "        print(f'{name}-10  1000  {1000 + repeat} ns/op')\n"
+            "        return\n"
+            "    print(f'{name}-10  1000  {1000 + repeat} ns/op  400 B/op  12 allocs/op')\n"
+            "row('BenchmarkOwnerFake')\n"
+            "if kind == 'duplicate': row('BenchmarkOwnerFake')\n"
+            "if kind != 'missing': row('BenchmarkRecoverFake')\n"
+            "if kind == 'extra': row('BenchmarkOwnerUnexpected')\n"
         )
         fake_docker.chmod(0o755)
         self.log = self.root / "docker-calls.jsonl"
@@ -49,10 +69,13 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.env["FAKE_CANDIDATE"] = str(self.candidate)
         self.env["FAKE_DOCKER_LOG"] = str(self.log)
 
-    def run_pair(self, *, fail=None):
+    def run_pair(self, *, fail=None, bad=None, bad_kind=None):
         env = self.env.copy()
         if fail:
             env["FAKE_DOCKER_FAIL"] = fail
+        if bad:
+            env["FAKE_DOCKER_BAD"] = bad
+            env["FAKE_DOCKER_BAD_KIND"] = bad_kind
         return subprocess.run(
             ["bash", str(SCRIPT), "4", "linux/arm64", str(self.candidate),
              str(self.base), "builder:candidate", "builder:base", str(self.artifacts)],
@@ -84,8 +107,10 @@ class BenchmarkOrderTests(unittest.TestCase):
             self.assertEqual(args[-4], "builder:" + row["side"])
         for side in ("base", "candidate"):
             prefix = self.artifacts / side / "bench.txt"
-            samples = PARSE_BENCH(prefix.read_text())["BenchmarkOwnerFake"]["ns_per_op"]
-            self.assertEqual(len(samples), 4)
+            parsed = PARSE_BENCH(prefix.read_text())
+            self.assertEqual(set(parsed), {"BenchmarkOwnerFake", "BenchmarkRecoverFake"})
+            for benchmark in parsed.values():
+                self.assertEqual(len(benchmark["ns_per_op"]), 4)
             self.assertEqual(Path(str(prefix) + ".exit").read_text(), "0\n")
             self.assertEqual(
                 Path(str(prefix) + ".repeats.tsv").read_text(),
@@ -107,8 +132,49 @@ class BenchmarkOrderTests(unittest.TestCase):
         order = (self.artifacts / "observations" / "benchmark-order.tsv").read_text()
         self.assertIn("2\tcandidate\t17\n", order)
         self.assertIn("synthetic benchmark failure", candidate.read_text())
-        samples = PARSE_BENCH(candidate.read_text())["BenchmarkOwnerFake"]["ns_per_op"]
-        self.assertEqual(len(samples), 3)
+        for benchmark in PARSE_BENCH(candidate.read_text()).values():
+            self.assertEqual(len(benchmark["ns_per_op"]), 3)
+
+    def test_zero_exit_missing_benchmark_row_fails_closed(self):
+        result = self.run_pair(bad="candidate:2", bad_kind="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls()), 8)
+        candidate = self.artifacts / "candidate" / "bench.txt"
+        self.assertEqual(Path(str(candidate) + ".exit").read_text(), "65\n")
+        self.assertIn("2\t65\n", Path(str(candidate) + ".repeats.tsv").read_text())
+        self.assertIn("missing=['BenchmarkRecoverFake']", candidate.read_text())
+        self.assertEqual(
+            len(PARSE_BENCH(candidate.read_text())["BenchmarkRecoverFake"]["ns_per_op"]), 3
+        )
+
+    def test_zero_exit_duplicate_benchmark_row_fails_closed(self):
+        result = self.run_pair(bad="base:3", bad_kind="duplicate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        base = self.artifacts / "base" / "bench.txt"
+        self.assertEqual(Path(str(base) + ".exit").read_text(), "65\n")
+        self.assertIn("duplicate=['BenchmarkOwnerFake']", base.read_text())
+
+    def test_zero_exit_extra_benchmark_row_fails_closed(self):
+        result = self.run_pair(bad="candidate:1", bad_kind="extra")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidate = self.artifacts / "candidate" / "bench.txt"
+        self.assertEqual(Path(str(candidate) + ".exit").read_text(), "65\n")
+        self.assertIn("extra=['BenchmarkOwnerUnexpected']", candidate.read_text())
+
+    def test_zero_exit_missing_benchmem_metrics_fails_closed(self):
+        result = self.run_pair(bad="candidate:2", bad_kind="missing_memory")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidate = self.artifacts / "candidate" / "bench.txt"
+        self.assertEqual(Path(str(candidate) + ".exit").read_text(), "65\n")
+        self.assertIn("benchmark row lacks -benchmem metrics", candidate.read_text())
+
+    def test_benchmark_harness_mismatch_stops_before_measurement(self):
+        path = self.base / "internal/run/owner_benchmark_test.go"
+        path.write_text(path.read_text().replace("BenchmarkOwnerFake", "BenchmarkOwnerDifferent"))
+        result = self.run_pair()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("benchmark harness differs between sides", result.stderr)
+        self.assertFalse(self.log.exists())
 
 
 if __name__ == "__main__":
