@@ -349,14 +349,16 @@ func (iso *isolation) heal(t *testing.T, fe *faultEnv) {
 	if iso == nil || iso.healed {
 		return
 	}
-	iso.healed = true
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	failed := false
 	for _, p := range iso.plans {
 		if _, err := fe.host.Heal(ctx, p); err != nil {
-			t.Logf("heal %s: %v", p.Tag, err)
+			failed = true
+			t.Errorf("inconclusive: partition heal %s: %v", p.Tag, err)
 		}
 	}
+	iso.healed = !failed
 }
 
 func scrapeCounter(t *testing.T, fe *faultEnv, member cluster.Member, name string, labels map[string]string) float64 {

@@ -150,24 +150,18 @@ func runFrozenRetry(t *testing.T, fe *faultEnv) {
 	}
 
 	beforeReject := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
-	okJob, okAlias := applyFaultFixture(t, fe, member, "retry-ok", 1)
-	okRun, _, err := fe.httpAPI.TriggerRun(ctx, member.HTTPBase(), okJob.ID)
-	if err != nil {
-		t.Fatalf("trigger success fixture %s: %v", okAlias, err)
+	runningJob, running, _ := applyBlockedRun(t, fe, member, "retry-running")
+	if !strings.EqualFold(running.Status, "running") {
+		t.Fatalf("rejected-retry control run %s is %s, want running", running.ID, running.Status)
 	}
-	okCtx, okCancel := context.WithTimeout(ctx, 5*time.Minute)
-	okFinal := waitRunStatus(t, okCtx, fe.httpAPI, member.HTTPBase(), okJob.ID, okRun.ID, "succeeded")
-	okCancel()
-	beforeOK := fingerprintRun(t, ctx, fe, member.HTTPBase(), okJob.ID, okFinal.ID)
-	rejStatus, _, rejRaw, err := fe.httpAPI.RetryRun(ctx, member.HTTPBase(), okJob.ID, okFinal.ID)
+	beforeRunning := fingerprintRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
+	rejStatus, _, rejRaw, err := fe.httpAPI.RetryRun(ctx, member.HTTPBase(), runningJob.ID, running.ID)
 	if err != nil {
 		t.Fatalf("rejected retry transport: %v", err)
 	}
-	if rejStatus == http.StatusAccepted {
-		t.Fatalf("retry of a succeeded run was accepted: %s", truncate(rejRaw, 400))
-	}
-	afterOK := fingerprintRun(t, ctx, fe, member.HTTPBase(), okJob.ID, okFinal.ID)
-	requireNoMutation(t, beforeOK, afterOK, "retry of succeeded run")
+	requireHTTPStatus(t, rejStatus, http.StatusConflict, string(rejRaw))
+	afterRunning := fingerprintRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
+	requireNoMutation(t, beforeRunning, afterRunning, "retry of running run")
 	afterFailed := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	requireNoMutation(t, beforeReject, afterFailed, "retry of a different run")
 
@@ -177,7 +171,7 @@ func runFrozenRetry(t *testing.T, fe *faultEnv) {
 		"after_retry":     afterRetry.Status,
 		"boom_starts":     len(fe.sink.StartsFor(run.ID, retryBoomStep)),
 		"original_boom":   boom,
-		"succeeded_run":   okFinal.ID,
+		"rejected_run":    running.ID,
 		"rejected_status": rejStatus,
 		"rejected_body":   RedactSecrets(string(rejRaw)),
 		"frozen_digest":   digestOf(frozen),
@@ -302,17 +296,63 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 	}
 
 	completesAtCancel := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep))
-	time.Sleep(15 * time.Second)
-	if n := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep)); n > completesAtCancel {
-		t.Fatalf("cancelled run %s produced further block completions (%d -> %d)", first.ID, completesAtCancel, n)
+	names, err := taskStepNames(ctx, fe.httpAPI, member.HTTPBase(), job.ID)
+	if err != nil {
+		t.Fatalf("catalog tasks for cancelled run: %v", err)
 	}
+	checkCancelled := func(got cluster.Run, when string) {
+		if !strings.EqualFold(got.Status, "cancelled") {
+			t.Fatalf("%s: cancelled run regressed to %s", when, got.Status)
+		}
+		recipes, rerr := fe.httpAPI.QueryTaskRecipes(ctx, member.HTTPBase(), first.ID)
+		if rerr != nil {
+			t.Fatalf("%s: durable task rows unavailable: %v", when, rerr)
+		}
+		byID := make(map[string]cluster.TaskRecipe, len(recipes))
+		for _, r := range recipes {
+			byID[r.ID] = r
+		}
+		if len(got.Tasks) != 2 {
+			t.Fatalf("%s: cancelled run has %d task rows, want 2", when, len(got.Tasks))
+		}
+		if len(byID) != 2 || len(recipes) != 2 {
+			t.Fatalf("%s: cancelled run has %d durable task rows (%d distinct), want 2", when, len(recipes), len(byID))
+		}
+		seen := map[string]bool{}
+		for _, tr := range got.Tasks {
+			step := names[tr.TaskID]
+			if step != cluster.BlockStep && step != "successor" {
+				t.Fatalf("%s: unexpected task %s (%s)", when, tr.TaskID, step)
+			}
+			if seen[step] {
+				t.Fatalf("%s: duplicate %s task row", when, step)
+			}
+			seen[step] = true
+			durable, ok := byID[tr.ID]
+			if !ok || durable.TaskID != tr.TaskID {
+				t.Fatalf("%s: public %s task %s has no matching durable row", when, step, tr.ID)
+			}
+			if !strings.EqualFold(tr.Status, "cancelled") || !strings.EqualFold(durable.Status, "cancelled") ||
+				strings.TrimSpace(tr.ClaimedBy) != "" || strings.TrimSpace(durable.ClaimedBy) != "" {
+				t.Fatalf("%s: old %s task public=%s/%q durable=%s/%q, want cancelled and unclaimed",
+					when, step, tr.Status, tr.ClaimedBy, durable.Status, durable.ClaimedBy)
+			}
+		}
+		if !seen[cluster.BlockStep] || !seen["successor"] {
+			t.Fatalf("%s: cancelled run is missing a block or successor task: %v", when, seen)
+		}
+		if n := len(fe.sink.StartsFor(first.ID, "successor")); n != 0 {
+			t.Fatalf("%s: old run started successor %d time(s) after replace", when, n)
+		}
+	}
+	checkCancelled(firstAfter, "at cancel")
+	time.Sleep(15 * time.Second)
+	completesAfterCancel := len(fe.sink.CompletionsFor(first.ID, cluster.BlockStep))
 	still, err := fe.httpAPI.GetRun(ctx, member.HTTPBase(), job.ID, first.ID)
 	if err != nil {
 		t.Fatalf("re-read cancelled run: %v", err)
 	}
-	if !strings.EqualFold(still.Status, "cancelled") {
-		t.Fatalf("cancelled run regressed to %s after the completion race", still.Status)
-	}
+	checkCancelled(still, "after completion race")
 
 	secCtx, secCancel := context.WithTimeout(ctx, 5*time.Minute)
 	secondFinal := waitRunStatus(t, secCtx, fe.httpAPI, member.HTTPBase(), job.ID, second.ID, "succeeded")
@@ -326,6 +366,8 @@ func runCancelCompletionRace(t *testing.T, fe *faultEnv) {
 		"first_raw_admit":     truncate(rawFirst, 200),
 		"second_raw_admit":    truncate(rawSecond, 200),
 		"completes_at_cancel": completesAtCancel,
+		"completes_after":     completesAfterCancel,
+		"successor_starts":    len(fe.sink.StartsFor(first.ID, "successor")),
 		"replacement_202_ack": "not_process_death",
 		"histories":           []string{first.ID, second.ID},
 	})

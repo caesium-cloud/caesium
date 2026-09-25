@@ -77,15 +77,15 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	if !IsTLSHandshakeAlert(ex.Err) {
 		t.Fatalf("invalid peer cert did not produce a TLS alert (err=%q status=%d)", ex.Err, ex.Status)
 	}
+	afterInvalid := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	requireNoMutation(t, before, afterInvalid, "invalid mTLS peer")
 
 	control := validInternalClient(t, fe, owner)
 	ctrl := control.Complete(ctx, target, payload)
-	if ctrl.Err != "" || ctrl.Status == 0 {
-		t.Fatalf("valid-leaf control did not reach the handler on %s: err=%q status=%d", owner.Name, ctrl.Err, ctrl.Status)
+	if ctrl.Err != "" || ctrl.Status != http.StatusOK {
+		t.Fatalf("valid-leaf control was not accepted on %s: err=%q status=%d body=%s",
+			owner.Name, ctrl.Err, ctrl.Status, truncate([]byte(ctrl.Body), 200))
 	}
-
-	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
-	requireNoMutation(t, before, after, "invalid mTLS peer")
 
 	writeCoreRecord(t, fe, "invalid_mtls_peer", map[string]any{
 		"run_id":          run.ID,
@@ -94,6 +94,6 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 		"error_class":     "tls",
 		"control_status":  ctrl.Status,
 		"control_reached": true,
-		"state_digest":    digestOf(after),
+		"state_digest":    digestOf(afterInvalid),
 	})
 }

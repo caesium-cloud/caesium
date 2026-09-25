@@ -69,6 +69,7 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if err != nil {
 		t.Fatalf("lease before pause: %v", err)
 	}
+	leaseObservedAt := time.Now().UTC()
 	startCtx, startCancel := context.WithTimeout(ctx, 90*time.Second)
 	if err := cluster.Poll(startCtx, 500*time.Millisecond, func() (bool, error) {
 		return len(fe.sink.StartsFor(run.ID, cluster.BlockStep)) > 0, nil
@@ -135,12 +136,22 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	}
 
 	var recovered cluster.Lease
+	lastLease := lease
+	lastLeaseAt := leaseObservedAt
+	var lastQueryErr error
+	queries, queryErrors := 0, 0
 	takeCtx, takeCancel := context.WithTimeout(ctx, 90*time.Second)
 	if err := cluster.Poll(takeCtx, time.Second, func() (bool, error) {
+		queries++
 		got, gerr := fe.httpAPI.QueryLease(takeCtx, leaseBase, run.ID)
 		if gerr != nil {
+			queryErrors++
+			lastQueryErr = gerr
 			return false, nil
 		}
+		lastLease = got
+		lastLeaseAt = time.Now().UTC()
+		lastQueryErr = nil
 		if got.Generation <= lease.Generation || got.OwnerNode == owner.NodeAddress {
 			return false, nil
 		}
@@ -148,7 +159,15 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		return true, nil
 	}); err != nil {
 		takeCancel()
-		t.Fatalf("survivor did not take the lease: %v", err)
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		healthErr := fe.httpAPI.Health(healthCtx, leaseBase)
+		healthCancel()
+		memberCtx, memberCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		leader, members, membershipErr := cluster.QueryNode(memberCtx, survivors[0].DqliteAddr())
+		memberCancel()
+		t.Fatalf("survivor did not take the lease: %v; initial=%+v last=%+v last_at=%s now=%s queries=%d query_errors=%d last_query_error=%v survivor_health=%v survivor_dqlite_leader=%v survivor_members=%d survivor_dqlite_error=%v paused_state=%s held=%.1fs",
+			err, lease, lastLease, lastLeaseAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
+			queries, queryErrors, lastQueryErr, healthErr, leader, len(members), membershipErr, pausedState, ev.HeldSeconds)
 	}
 	takeCancel()
 	newOwner, ok := fe.topo.ByNodeAddress(recovered.OwnerNode)
@@ -210,6 +229,8 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 		"owner_paused":       owner.Name,
 		"lease_before":       lease,
 		"lease_after":        recovered,
+		"lease_queries":      queries,
+		"lease_query_errors": queryErrors,
 		"held_seconds":       ev.HeldSeconds,
 		"past_lease":         ev.HeldPastLease(),
 		"refusal_code":       code,

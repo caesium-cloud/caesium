@@ -249,6 +249,23 @@ open_chain() {
   printf 'CS%s' "$(printf '%s' "$tag" | tr -cd '[:alnum:]' | tr '[:lower:]' '[:upper:]' | cut -c1-18)"
 }
 
+# A reverse partition uses the forward tag plus "r". Match the trailing
+# delimiter so healing one direction never consumes its sibling's rules.
+tagged_rule_lines() {
+  local tag="$1"
+  grep -F -- "${tag}-"
+}
+
+tagged_rule_lines_self_test() {
+  local own='-A FORWARD -m comment --comment rb-test-drop-9001 -j DROP'
+  local reverse='-A FORWARD -m comment --comment rb-testr-drop-9001 -j DROP'
+  [[ "$(printf '%s\n%s\n' "$own" "$reverse" | tagged_rule_lines rb-test)" == "$own" ]] \
+    || die "tagged rule matching also selected a reverse partition"
+  [[ "$(printf '%s\n%s\n' 'node rb-test' 'node rb-testr' | awk -v tag=rb-test '$2 != tag')" == 'node rb-testr' ]] \
+    || die "partition journal removal also selected a reverse partition"
+}
+tagged_rule_lines_self_test
+
 # Remove exactly the rules carrying this tag, and nothing else: every delete is
 # built from the node's own `iptables -S` output.
 remove_tagged_rules() {
@@ -261,7 +278,7 @@ remove_tagged_rules() {
     # xargs (not eval) so the quoted --comment argument is split correctly and
     # no rule text is ever interpreted as shell.
     printf '%s\n' "$spec" | xargs docker exec "$node" iptables -D >/dev/null 2>&1 || true
-  done < <(docker exec "$node" iptables -S FORWARD 2>/dev/null | grep -F -- "$tag" || true)
+  done < <(docker exec "$node" iptables -S FORWARD 2>/dev/null | tagged_rule_lines "$tag" || true)
   while docker exec "$node" iptables -C FORWARD -j "$chain" >/dev/null 2>&1; do
     docker exec "$node" iptables -D FORWARD -j "$chain" >/dev/null 2>&1 || break
   done
@@ -1252,10 +1269,10 @@ PY
       remove_tagged_rules "$p_src_node" "$p_tag"
       remove_tagged_rules "$p_dst_node" "$p_tag"
       if [[ -f "$PARTITION_FILE" ]]; then
-        grep -v -F -- " $p_tag" "$PARTITION_FILE" >"$PARTITION_FILE.tmp" 2>/dev/null || true
+        awk -v tag="$p_tag" '$2 != tag' "$PARTITION_FILE" >"$PARTITION_FILE.tmp" 2>/dev/null || true
         mv "$PARTITION_FILE.tmp" "$PARTITION_FILE" 2>/dev/null || true
       fi
-      remaining="$( { docker exec "$p_src_node" iptables -S 2>/dev/null; docker exec "$p_dst_node" iptables -S 2>/dev/null; } | grep -F -- "$p_tag" || true)"
+      remaining="$( { docker exec "$p_src_node" iptables -S 2>/dev/null; docker exec "$p_dst_node" iptables -S 2>/dev/null; } | tagged_rule_lines "$p_tag" || true)"
       if [[ -n "$remaining" ]]; then
         fail_request "$request_id" "$action" "rules tagged $p_tag survived heal: $remaining"; return 0
       fi
