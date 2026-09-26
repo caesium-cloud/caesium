@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "kind": "package-diff-ratchet",
+  "source": "integration",
+  "measured_candidate_sha": "00ba7d99077210030a7cd1dce91ee4245fb337e8",
+  "baseline_refresh": {
+    "previous_measured_candidate_sha": "7dcef7f07d85cf460a26239e11bb30889ac9221a",
+    "reason": "Remeasured after already-merged run API and CLI additions increased statement denominators. Covered-statement floors are retained or raised; the two lower percentage floors reflect those additions, not lost observed paths. Browser profiles and first-attempt journeys are complete.",
+    "package_statement_counts": {
+      "github.com/caesium-cloud/caesium/api/rest/service/run": {
+        "previous_covered": 9,
+        "previous_total": 23,
+        "covered": 9,
+        "total": 28
+      },
+      "github.com/caesium-cloud/caesium/cmd/run": {
+        "previous_covered": 81,
+        "previous_total": 759,
+        "covered": 83,
+        "total": 784
+      }
+    }
+  },
+  "packages": {
+    "github.com/caesium-cloud/caesium": {
+      "min_percent": 66.7,
+      "min_statements_covered": 10
+    },
+    "github.com/caesium-cloud/caesium/api": {
+      "min_percent": 69.6,
+      "min_statements_covered": 302
+    },
+    "github.com/caesium-cloud/caesium/api/middleware": {
+      "min_percent": 7.7,
+      "min_statements_covered": 34
+    },
+    "github.com/caesium-cloud/caesium/api/rest/bind": {
+      "min_percent": 95.1,
+      "min_statements_covered": 366
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/dataset": {
+      "min_percent": 0.7,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/event": {
+      "min_percent": 0.5,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/job": {
+      "min_percent": 17.5,
+      "min_statements_covered": 43
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/jobdef": {
+      "min_percent": 16.8,
+      "min_statements_covered": 32
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/notification": {
+      "min_percent": 0.6,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/api/rest/controller/webhook": {
+      "min_percent": 0.5,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/contract": {
+      "min_percent": 2.2,
+      "min_statements_covered": 2
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/job": {
+      "min_percent": 25.5,
+      "min_statements_covered": 56
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/run": {
+      "min_percent": 32.1,
+      "min_statements_covered": 9
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/trigger": {
+      "min_percent": 11.1,
+      "min_statements_covered": 12
+    },
+    "github.com/caesium-cloud/caesium/cmd": {
+      "min_percent": 66.7,
+      "min_statements_covered": 4
+    },
+    "github.com/caesium-cloud/caesium/cmd/agentprofile": {
+      "min_percent": 29.3,
+      "min_statements_covered": 36
+    },
+    "github.com/caesium-cloud/caesium/cmd/auth": {
+      "min_percent": 29.6,
+      "min_statements_covered": 60
+    },
+    "github.com/caesium-cloud/caesium/cmd/backfill": {
+      "min_percent": 24.6,
+      "min_statements_covered": 28
+    },
+    "github.com/caesium-cloud/caesium/cmd/blame": {
+      "min_percent": 6.1,
+      "min_statements_covered": 6
+    },
+    "github.com/caesium-cloud/caesium/cmd/cache": {
+      "min_percent": 19.1,
+      "min_statements_covered": 18
+    },
+    "github.com/caesium-cloud/caesium/cmd/cliutil": {
+      "min_percent": 25.0,
+      "min_statements_covered": 4
+    },
+    "github.com/caesium-cloud/caesium/cmd/contract": {
+      "min_percent": 4.2,
+      "min_statements_covered": 7
+    },
+    "github.com/caesium-cloud/caesium/cmd/dataset": {
+      "min_percent": 14.9,
+      "min_statements_covered": 43
+    },
+    "github.com/caesium-cloud/caesium/cmd/dev": {
+      "min_percent": 2.3,
+      "min_statements_covered": 5
+    },
+    "github.com/caesium-cloud/caesium/cmd/event": {
+      "min_percent": 14.6,
+      "min_statements_covered": 6
+    },
+    "github.com/caesium-cloud/caesium/cmd/incident": {
+      "min_percent": 51.9,
+      "min_statements_covered": 80
+    },
+    "github.com/caesium-cloud/caesium/cmd/job": {
+      "min_percent": 18.6,
+      "min_statements_covered": 149
+    },
+    "github.com/caesium-cloud/caesium/cmd/receipt": {
+      "min_percent": 8.8,
+      "min_statements_covered": 5
+    },
+    "github.com/caesium-cloud/caesium/cmd/reproduce": {
+      "min_percent": 4.7,
+      "min_statements_covered": 15
+    },
+    "github.com/caesium-cloud/caesium/cmd/run": {
+      "min_percent": 10.6,
+      "min_statements_covered": 83
+    },
+    "github.com/caesium-cloud/caesium/cmd/start": {
+      "min_percent": 29.2,
+      "min_statements_covered": 243
+    },
+    "github.com/caesium-cloud/caesium/cmd/test": {
+      "min_percent": 3.0,
+      "min_statements_covered": 4
+    },
+    "github.com/caesium-cloud/caesium/cmd/trigger": {
+      "min_percent": 11.7,
+      "min_statements_covered": 7
+    },
+    "github.com/caesium-cloud/caesium/cmd/verify": {
+      "min_percent": 2.8,
+      "min_statements_covered": 2
+    },
+    "github.com/caesium-cloud/caesium/cmd/why": {
+      "min_percent": 3.2,
+      "min_statements_covered": 6
+    },
+    "github.com/caesium-cloud/caesium/internal/auth": {
+      "min_percent": 1.5,
+      "min_statements_covered": 10
+    },
+    "github.com/caesium-cloud/caesium/internal/callback": {
+      "min_percent": 3.5,
+      "min_statements_covered": 9
+    },
+    "github.com/caesium-cloud/caesium/internal/cluster": {
+      "min_percent": 56.2,
+      "min_statements_covered": 126
+    },
+    "github.com/caesium-cloud/caesium/internal/event": {
+      "min_percent": 21.5,
+      "min_statements_covered": 70
+    },
+    "github.com/caesium-cloud/caesium/internal/executor": {
+      "min_percent": 18.2,
+      "min_statements_covered": 6
+    },
+    "github.com/caesium-cloud/caesium/internal/freshness": {
+      "min_percent": 4.8,
+      "min_statements_covered": 59
+    },
+    "github.com/caesium-cloud/caesium/internal/harness": {
+      "min_percent": 0.8,
+      "min_statements_covered": 4
+    },
+    "github.com/caesium-cloud/caesium/internal/imagecheck": {
+      "min_percent": 5.9,
+      "min_statements_covered": 33
+    },
+    "github.com/caesium-cloud/caesium/internal/incident": {
+      "min_percent": 0.3,
+      "min_statements_covered": 6
+    },
+    "github.com/caesium-cloud/caesium/internal/job": {
+      "min_percent": 0.8,
+      "min_statements_covered": 18
+    },
+    "github.com/caesium-cloud/caesium/internal/jobdef": {
+      "min_percent": 44.5,
+      "min_statements_covered": 691
+    },
+    "github.com/caesium-cloud/caesium/internal/jobdef/runtime": {
+      "min_percent": 6.1,
+      "min_statements_covered": 8
+    },
+    "github.com/caesium-cloud/caesium/internal/jobdef/secret": {
+      "min_percent": 4.0,
+      "min_statements_covered": 16
+    },
+    "github.com/caesium-cloud/caesium/internal/mcp": {
+      "min_percent": 8.8,
+      "min_statements_covered": 8
+    },
+    "github.com/caesium-cloud/caesium/internal/metrics": {
+      "min_percent": 100.0,
+      "min_statements_covered": 2
+    },
+    "github.com/caesium-cloud/caesium/internal/models": {
+      "min_percent": 18.7,
+      "min_statements_covered": 14
+    },
+    "github.com/caesium-cloud/caesium/internal/notification": {
+      "min_percent": 3.9,
+      "min_statements_covered": 29
+    },
+    "github.com/caesium-cloud/caesium/internal/run": {
+      "min_percent": 0.2,
+      "min_statements_covered": 12
+    },
+    "github.com/caesium-cloud/caesium/internal/trigger/event": {
+      "min_percent": 7.6,
+      "min_statements_covered": 44
+    },
+    "github.com/caesium-cloud/caesium/internal/trigger/http": {
+      "min_percent": 0.4,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/internal/worker": {
+      "min_percent": 0.1,
+      "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/pkg/db": {
+      "min_percent": 45.4,
+      "min_statements_covered": 167
+    },
+    "github.com/caesium-cloud/caesium/pkg/dbtrace": {
+      "min_percent": 71.7,
+      "min_statements_covered": 33
+    },
+    "github.com/caesium-cloud/caesium/pkg/dqlite": {
+      "min_percent": 39.5,
+      "min_statements_covered": 341
+    },
+    "github.com/caesium-cloud/caesium/pkg/env": {
+      "min_percent": 43.0,
+      "min_statements_covered": 52
+    },
+    "github.com/caesium-cloud/caesium/pkg/jobdef": {
+      "min_percent": 23.7,
+      "min_statements_covered": 334
+    },
+    "github.com/caesium-cloud/caesium/pkg/jobdef/schemacompat": {
+      "min_percent": 1.3,
+      "min_statements_covered": 5
+    },
+    "github.com/caesium-cloud/caesium/pkg/jobdef/yamlstrict": {
+      "min_percent": 53.4,
+      "min_statements_covered": 78
+    },
+    "github.com/caesium-cloud/caesium/pkg/jsonmap": {
+      "min_percent": 20.8,
+      "min_statements_covered": 5
+    },
+    "github.com/caesium-cloud/caesium/pkg/jsonutil": {
+      "min_percent": 50.0,
+      "min_statements_covered": 7
+    },
+    "github.com/caesium-cloud/caesium/pkg/log": {
+      "min_percent": 43.7,
+      "min_statements_covered": 59
+    },
+    "github.com/caesium-cloud/caesium/pkg/ptr": {
+      "min_percent": 12.5,
+      "min_statements_covered": 1
+    }
+  },
+  "diff": {
+    "uncovered_changed_paths_max": 0,
+    "basis": "policy",
+    "scope": "audited-statement-files",
+    "coverage_source": "integration+browser",
+    "reason": "Require coverage of changed audited source files; 0 is explicit policy, not a measurement from the empty G2 diff. Missing executable profiles remain eligible. Zero-statement profile files and complete candidate/image-bound Go AST inventory files with no function body or excluded by the image build context are reported separately; harness/test files outside the audit and unmeasured reagents changes are outside this root-module policy."
+  }
+}
