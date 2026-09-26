@@ -1404,12 +1404,13 @@ restore, ordinal-0 and rollback were blocked because the fault left the shared
 cluster unfit for subsequent destructive cases. A prior head passed restore
 and ordinal-1 replacement; that is historical partial evidence. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
-Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
-head `05ae4644`, removes the bundled runtime copy and has the same source tree
+Merged [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
+merge `62c8b2bd`, tested head `05ae4644`, removes the bundled runtime copy and has the same source tree
 as diagnostic-only `b45adfdc`. Its unchanged diagnostic code passed 10 focused
 Python tests, all 331 scripts tests, eight guard-removal controls and containerized
 integration/race readback regressions (1.070 s). Its current-head CI passed all
-37 executed jobs; the dependency hold remains. The earlier `b8498ac8` green
+37 executed jobs. It merged before the planned #571 dependency; this does
+not claim that ordering or production readiness was satisfied. The earlier `b8498ac8` green
 run included the removed runtime copy and is historical.
 Review of separate [#571](https://github.com/caesium-cloud/caesium/pull/571) is
 in progress; see live PR state. Candidate `82ca5905` bounds setup to 10 s and
@@ -1418,18 +1419,22 @@ Containerized package race/vet passed (6.017 s), and the unchanged real
 Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.89 s).
 CI run 36242369660 passed all production/integration checks, but `ui-e2e`
 failed on a jobs-list contrast failure, so `ci-ok` failed too.
-Separate [#572](https://github.com/caesium-cloud/caesium/pull/572), candidate
-`62f96873`, repairs the demonstrated scan/finite-animation race without changing
+Merged [#572](https://github.com/caesium-cloud/caesium/pull/572), merge
+`073402a1`, tested candidate `62f96873`, repairs the demonstrated scan/finite-animation race without changing
 axe rules, contrast thresholds, baselines or product colors. Chromium reproduces
 low contrast during AppShell's fade and a passing scoped scan after it settles.
 Root's containerized exact-head build and real API-applied jobs-page gate pass
 2/2 first-attempt tests in 3.1 s; paused/replaced animations and a genuine settled
-bad color remain failing controls. Current CI/review are in progress; see live
-PR state. Once #572 merges, incorporate master into #571 and rerun affected
-checks; #571 is not yet merge-ready.
-Hold F2 until #571 merges, then incorporate master and revalidate the affected
-Helm shard-2 lane.
-CODEOWNER approval is required for both PRs. No new lifecycle qualification
+bad color remain failing controls. CI run 36244363304 passed all 13 applicable
+jobs, including both browser lanes and `ci-ok`; 13 path-filtered/tag jobs
+skipped as expected. #571 incorporated current master including this fix in
+`6c94bf5d`. Its container package race/vet passed (6.035 s), and the unchanged
+real CLI/HTTP Kubernetes secret-log scenario passed (9.83 s), with verified
+archive/pod identity and five blob hashes. The owned cluster and kubeconfig
+are removed. Fresh CI run 36245148508 is in progress. The old failed UI/ci-ok run is historical; no current pass is claimed.
+F2 diagnostics #569 are already merged. After #571 lands, revalidate the
+affected Helm shard-2 live-secret-log path on merged master. CODEOWNER
+approval remains required for open #571. No new lifecycle qualification
 is claimed; the linked PR holds the durable failure-evidence summary.
 The unresolved
 ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
@@ -1529,9 +1534,8 @@ candidate/image provenance. Integration is 7.6%, browser 8.1%, and their union
 is 9.0% (4,666/51,628 statements). The actual apply→export request/write/read
 path passed. These raw artifacts are local and ephemeral; the linked repair
 PR holds the durable summary. Subsequent review found eligibility and immutable-image gaps.
-Current candidate `74067f98` repairs those paths and passed 72 focused Python
-regressions plus shell syntax/ShellCheck checks. Review remains in progress;
-see live PR state. Fresh actual builder/collection at
+Merged #570 (`38a2e9d3`), tested candidate `74067f98`, repairs those paths
+and passed 72 focused Python regressions plus shell syntax/ShellCheck checks. Fresh actual builder/collection at
 `/tmp/caesium-w6-round2-g2-collect.IMDFDt` exited 0: two first-attempt Chromium
 passes, complete matching provenance, 7.6% integration, 8.1% browser and 9.0%
 union coverage (4,666/51,628), with all 67 package floors applied. All runtime
@@ -1549,7 +1553,9 @@ Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
 `empty_diff=true`; zero uncovered is policy, not a live nonempty diff
 measurement. Eight critical-contract coverage gaps remain. Current CI run
 36243611300 passes all 37 executed jobs; the prior `609cca31` green run is
-historical. Review/approval and merge remain pending; G2 stays unchecked.
+historical. #570 merged at `38a2e9d3`; its collector/ratchet and all 480 audited
+source hashes match this tested content, so G2 collection/ratchets are now
+accepted. Reported contract gaps and G6 promotion remain outstanding.
 
 The max-zero diff floor is explicit policy and is not ready for G6 promotion.
 A reproducible replay at master `f6acf0ea` took the last 60 first-parent commit
@@ -1570,13 +1576,12 @@ dirty tree. `log` goes to stderr so a captured build status cannot look
 successful when `just` failed. Warm repetitions alternate between the two
 servers. Release images must be uninstrumented.
 
-Merged master `f6acf0ea` still refuses pre-#560 comparison bases, including
-W4 `45994929`: #566's guard requires all unrelated `internal/run/*_test.go`
-helpers to match, and #560 added/changed those helpers. It stops after building
-both images, before measurement, with no comparison/report. Run the command
-below from the reviewed #567 candidate, or after #567 merges. That pending PR
-fixes source isolation; its latest full run remains inconclusive, so neither
-merged-master execution nor E3 acceptance is claimed here.
+Historical master `f6acf0ea` refused pre-#560 comparison bases, including
+W4 `45994929`, because #566's guard compared unrelated test helpers. Merged
+#567 (`8f64997b`, tested `253cca28`) now isolates Go-selected production files
+and pinned benchmark fixtures, removing that refusal. The command below is
+available on current master. The latest full run remains bound to `655c063f`
+and inconclusive; no new merged-master comparison or E3 acceptance is claimed.
 
 ```sh
 CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
@@ -1621,8 +1626,7 @@ uninstrumented images and complete paired benchmark samples, but returned
 The merged repair head `08b8bd26` changed harness validation after that run.
 Follow-up [#567](https://github.com/caesium-cloud/caesium/pull/567) isolates
 each benchmark process to its side's Go-selected production files, one pinned
-test helper, and the two shared benchmark sources; it remains under CODEOWNER
-review. A full ten-repeat run on `b9c7bf17` against W4 base `45994929`
+test helper, and the two shared benchmark sources; it merged at `8f64997b`. A full ten-repeat run on `b9c7bf17` against W4 base `45994929`
 completed all 20 paired benchmark samples and cold/warm workloads, but the
 base's first Chromium repeat logged `net::ERR_INTERNET_DISCONNECTED` and
 Playwright exited 1. The comparator returned `overall=fail` with
@@ -1640,14 +1644,14 @@ cause is unproved: it occurred in candidate repeat 2 at
 `2026-09-26T03:00:51.586Z`, and passing browser attempts retained no trace;
 per-repeat server logs were not saved before removal. Future investigation
 needs those logs and a request timeline. No outlier was removed or noise
-threshold changed. The current #567 head `253cca28` fixes a timer-dependent
+threshold changed. Merged #567 (`8f64997b`), tested head `253cca28`, fixes a timer-dependent
 test fixture with an explicit `ns/op` metric: 18 focused tests and 400/400
 repeated fixture rows passed on Go 1.27.1 darwin/arm64, and a package-mode
 mutation still triggered `TestMain` exit 99 and failed the isolation test.
 This test-only change has no new full live comparison; the result above
 belongs to `655c063f`. Current-head CI run
 [36214372032](https://github.com/caesium-cloud/caesium/actions/runs/36214372032)
-succeeded, including `ci-ok`; CODEOWNER approval is required. E3 acceptance
+succeeded, including `ci-ok`; #567 is merged. E3 acceptance
 remains open pending conclusive repeatable measurement.
 This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
 
