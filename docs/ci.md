@@ -17,12 +17,13 @@ campaigns, single-node previous-release upgrade qualification, and
 merge-candidate identity / `merge_group` wiring; the W5 fenced core-failure
 suite, coverage-instrumented CLI/server collection, and fail-closed
 base/candidate performance comparator. W6's checker-strength validator,
-core-failure acceptance repair, persistent-cluster lifecycle runner and common
-performance benchmark harness are tracked in
+core-failure acceptance repair, persistent-cluster lifecycle runner, common
+performance benchmark harness, same-cap snapshot memory sampler (#574) and
+console owner-crash journey (#575) are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
-Console fault journeys and calibrated budgets remain planned. The F2 cluster
-runner and E3 comparator still lack complete live acceptance on their merged
-heads.
+The console journey is merged code with no live kind proof. Calibrated budgets
+remain planned. The F2 cluster runner and E3 comparator still lack complete
+live acceptance.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
@@ -1391,18 +1392,21 @@ window, in-flight and queued work with durable task-run IDs and raw effects,
 rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
 control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
 rollback observation. A skipped or unobservable case is `blocked`; the overall
-record cannot pass on a subset. The latest live probe (`289bb343`, local,
-ephemeral artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
-(pinned image, three voters, mixed-version dispatch/completion, rolling upgrade
-and retained history/effects), and five were blocked. Snapshot catch-up's
-batch 13 write 82 returned EOF after 1,400 initial writes and 6,081 acknowledged
-updates; the attempted annotation was `006082`. `caesium-0` was OOMKilled
-(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Bounded disputed-write
-readback remains unknown: one survivor refused the connection and the other
-hit its deadline. The disputed write remains possibly committed. Replacement,
-restore, ordinal-0 and rollback were blocked because the fault left the shared
-cluster unfit for subsequent destructive cases. A prior head passed restore
-and ordinal-1 replacement; that is historical partial evidence. F2 remains
+record cannot pass on a subset. The `289bb343` probe
+(`/tmp/caesium-w6-f2-observe.9DHTV9`) is historical: five cases passed, and
+snapshot catch-up's batch 13 write 82 returned EOF after 1,400 initial writes
+and 6,081 acknowledged updates (annotation `006082`). `caesium-0` was OOMKilled
+(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Disputed-write readback
+remains unknown. The latest recorded qualification is master `b3382717`,
+cluster `lifecycle-1571311ec3f8`, artifact
+`/tmp/caesium-w6-f2-current/cluster-qualification.json`. It exited 1 with
+`result=fail` and empty failed gates. Eight cases passed, including snapshot
+catch-up after 9,400 acknowledged applies, ordinal-1 replacement and
+storage-copy restore. Both survivors sampled `readings_ok` at round >= 1 on
+batches 0–16, with no OOM and no restart. Peak cgroup current was 896,540,672
+and 930,217,984 bytes; peak RSS was 946,876,416 and 959,262,720 bytes; Go heap
+in-use stayed at or below 19,144,704 bytes. Ordinal-0 was blocked because the
+replacement was still Pending, and rollback was blocked with it. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
 Merged [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
 merge `62c8b2bd`, tested head `05ae4644`, removes the bundled runtime copy and has the same source tree
@@ -1412,37 +1416,30 @@ integration/race readback regressions (1.070 s). Its current-head CI passed all
 37 executed jobs. It merged before the planned #571 dependency; this does
 not claim that ordering or production readiness was satisfied. The earlier `b8498ac8` green
 run included the removed runtime copy and is historical.
-Review of separate [#571](https://github.com/caesium-cloud/caesium/pull/571) is
-in progress; see live PR state. Candidate `82ca5905` bounds setup to 10 s and
-handles empty nonterminal streams plus earlier kubelet readiness responses.
-Containerized package race/vet passed (6.017 s), and the unchanged real
-Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.89 s).
-CI run 36242369660 passed all production/integration checks, but `ui-e2e`
-failed on a jobs-list contrast failure, so `ci-ok` failed too.
-Merged [#572](https://github.com/caesium-cloud/caesium/pull/572), merge
-`073402a1`, tested candidate `62f96873`, repairs the demonstrated scan/finite-animation race without changing
-axe rules, contrast thresholds, baselines or product colors. Chromium reproduces
-low contrast during AppShell's fade and a passing scoped scan after it settles.
-Root's containerized exact-head build and real API-applied jobs-page gate pass
-2/2 first-attempt tests in 3.1 s; paused/replaced animations and a genuine settled
-bad color remain failing controls. CI run 36244363304 passed all 13 applicable
-jobs, including both browser lanes and `ci-ok`; 13 path-filtered/tag jobs
-skipped as expected. #571 incorporated current master including this fix in
-`6c94bf5d`. Its container package race/vet passed (6.035 s), and the unchanged
-real CLI/HTTP Kubernetes secret-log scenario passed (9.83 s), with verified
-archive/pod identity and five blob hashes. The owned cluster and kubeconfig
-are removed. Fresh CI run 36245148508 is in progress. The old failed UI/ci-ok run is historical; no current pass is claimed.
-F2 diagnostics #569 are already merged. After #571 lands, revalidate the
-affected Helm shard-2 live-secret-log path on merged master. CODEOWNER
-approval remains required for open #571. No new lifecycle qualification
-is claimed; the linked PR holds the durable failure-evidence summary.
-The unresolved
-ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
-the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
-Native dqlite's 8,192 retained Raft entries are a possible contributor to memory
-pressure; these artifacts cannot separate Go heap, native allocations and file
-cache. The next bounded probe keeps the same cap and records cgroup anonymous
-and file memory, process RSS and Go heap at every batch and every five seconds.
+[#571](https://github.com/caesium-cloud/caesium/pull/571) merged at
+`ec893213f0532513896aba9630d2a737e1431c47`. Candidate `82ca5905` bounds setup
+to 10 s and handles empty nonterminal streams plus earlier kubelet readiness
+responses. The `82ca5905` UI/`ci-ok` failure is historical. [#572](https://github.com/caesium-cloud/caesium/pull/572)
+merged at `073402a1` and is included in that #571 tree. Post-merge Helm
+revalidation is push run
+[36246186742](https://github.com/caesium-cloud/caesium/actions/runs/36246186742)
+on `ec893213`: `helm-integration-test` (1), (2) and (3),
+`helm-pod-replacement-test` and `ci-ok` succeeded. That revalidation does not
+qualify F2.
+[#574](https://github.com/caesium-cloud/caesium/pull/574) merged at
+`ddf83af27395fd2397a5cccd2f73c1a483c88b30`, tested head `63ce9768`. It records
+cgroup anonymous and file memory, process RSS and Go heap at the same 1Gi cap.
+[CI run 36263025543](https://github.com/caesium-cloud/caesium/actions/runs/36263025543)
+has 37 successes and 6 skips. The `b3382717` run collected the samples
+through truncation and did not OOM. Process RSS approached 1Gi while Go heap
+stayed under 20 MiB. That does not check F2.
+[#575](https://github.com/caesium-cloud/caesium/pull/575) merged the console
+owner-crash journey; that is not an F2 result, and its manifest row stays
+`absent`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for
+the ordinal-0 replacement to be Ready before evidence capture. Its rerun is
+not recorded yet. The unresolved ordinal-0/bootstrap and isolated rollback
+prerequisites remain explicit in the
+[plan's F1/F2 record](exec-plans/active/distributed-testing.md).
 
 ### Fenced core failures (distributed-testing W5/B3)
 
@@ -1580,8 +1577,12 @@ Historical master `f6acf0ea` refused pre-#560 comparison bases, including
 W4 `45994929`, because #566's guard compared unrelated test helpers. Merged
 #567 (`8f64997b`, tested `253cca28`) now isolates Go-selected production files
 and pinned benchmark fixtures, removing that refusal. The command below is
-available on current master. The latest full run remains bound to `655c063f`
-and inconclusive; no new merged-master comparison or E3 acceptance is claimed.
+available on current master. The `655c063f` run below is historical.
+The later ten-repeat comparison of `ec893213` against W4 `45994929` exited 3,
+`overall=inconclusive`, `speed_compared=true`, with noisy
+`browser.action_to_render_ms.live` and cold workload duration. Its browser
+series predate the #575 events-client change, and `ec893213` is no longer
+current master. No E3 acceptance is claimed.
 
 ```sh
 CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
@@ -1648,8 +1649,9 @@ threshold changed. Merged #567 (`8f64997b`), tested head `253cca28`, fixes a tim
 test fixture with an explicit `ns/op` metric: 18 focused tests and 400/400
 repeated fixture rows passed on Go 1.27.1 darwin/arm64, and a package-mode
 mutation still triggered `TestMain` exit 99 and failed the isolation test.
-This test-only change has no new full live comparison; the result above
-belongs to `655c063f`. Current-head CI run
+This test-only change has no full live comparison of its own; the `655c063f`
+result above is historical. The later `ec893213` comparison is the newest
+recorded full run and is still inconclusive. Current-head CI run
 [36214372032](https://github.com/caesium-cloud/caesium/actions/runs/36214372032)
 succeeded, including `ci-ok`; #567 is merged. E3 acceptance
 remains open pending conclusive repeatable measurement.
