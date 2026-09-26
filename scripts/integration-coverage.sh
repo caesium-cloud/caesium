@@ -463,7 +463,9 @@ trap cleanup EXIT
 "$CONTAINER_CLI" network create "$NETWORK" >/dev/null
 
 extract_audit
-# Eligibility is independent of observed counters. Parse all non-test Go source
+# Eligibility is independent of observed counters. Map the image's audited
+# root-module packages to source directories without loading imports/embeds.
+# Parse all non-test Go source
 # files in the builder; missing profiles may only exempt an inventory-proven
 # file with no function body, call, or package variable initializer.
 "$CONTAINER_CLI" run --rm -i --platform "$PLATFORM" \
@@ -476,17 +478,13 @@ cat >/tmp/coverage-source-inventory.go <<'GO'
 package main
 
 import (
-    "bytes"
     "crypto/sha256"
     "encoding/hex"
     "encoding/json"
-    "fmt"
     "go/ast"
     "go/parser"
     "go/token"
-    "io"
     "os"
-    "os/exec"
     "path/filepath"
     "sort"
     "strings"
@@ -498,23 +496,31 @@ func main() {
     packages := strings.Fields(string(raw))
     sort.Strings(packages)
     if len(packages) == 0 { panic("empty coverpkg audit") }
-    args := append([]string{"list", "-json"}, packages...)
-    output, err := exec.Command("go", args...).Output()
-    if err != nil { panic(fmt.Errorf("go list selected packages: %w", err)) }
-    decoder := json.NewDecoder(bytes.NewReader(output))
     files := map[string]any{}
     packageFiles := map[string][]string{}
-    for {
-        var pkg struct { ImportPath, Dir string }
-        if err := decoder.Decode(&pkg); err == io.EOF { break } else if err != nil { panic(err) }
-        packageFiles[pkg.ImportPath] = []string{}
-        entries, err := os.ReadDir(pkg.Dir)
+    const module = "github.com/caesium-cloud/caesium"
+    for _, pkg := range packages {
+        if pkg != module && !strings.HasPrefix(pkg, module+"/") { panic("foreign audited package: "+pkg) }
+        relative := strings.TrimPrefix(strings.TrimPrefix(pkg, module), "/")
+        if relative != "" && (filepath.Clean(relative) != relative || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, "../")) {
+            panic("invalid audited package path: "+pkg)
+        }
+        directory := filepath.Join("/source", relative)
+        resolved, err := filepath.EvalSymlinks(directory)
+        if err != nil { panic(err) }
+        if resolved != "/source" && !strings.HasPrefix(resolved, "/source/") { panic("audited package escapes source root: "+pkg) }
+        if _, duplicate := packageFiles[pkg]; duplicate { panic("duplicate audited package: "+pkg) }
+        packageFiles[pkg] = []string{}
+        entries, err := os.ReadDir(directory)
         if err != nil { panic(err) }
         for _, entry := range entries {
             name := entry.Name()
             if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") { continue }
-            packageFiles[pkg.ImportPath] = append(packageFiles[pkg.ImportPath], pkg.ImportPath+"/"+name)
-            path := filepath.Join(pkg.Dir, name)
+            packageFiles[pkg] = append(packageFiles[pkg], pkg+"/"+name)
+            path := filepath.Join(directory, name)
+            resolved, err := filepath.EvalSymlinks(path)
+            if err != nil { panic(err) }
+            if !strings.HasPrefix(resolved, "/source/") { panic("audited source escapes source root: "+path) }
             source, err := os.ReadFile(path)
             if err != nil { panic(err) }
             tree, err := parser.ParseFile(token.NewFileSet(), path, source, parser.AllErrors)
@@ -535,13 +541,14 @@ func main() {
                 return true
             })
             digest := sha256.Sum256(source)
-            files[pkg.ImportPath+"/"+name] = map[string]any{
+            files[pkg+"/"+name] = map[string]any{
                 "parsed": true, "has_function_body": body, "has_call": call,
                 "has_var_initializer": initializer, "source_sha256": hex.EncodeToString(digest[:]),
             }
         }
+        if len(packageFiles[pkg]) == 0 { panic("audited package has no source files: "+pkg) }
     }
-    if len(packageFiles) != len(packages) { panic("partial go list package inventory") }
+    if len(packageFiles) != len(packages) { panic("partial source package inventory") }
     for _, name := range packages {
         if _, found := packageFiles[name]; !found { panic("missing audited package: "+name) }
     }

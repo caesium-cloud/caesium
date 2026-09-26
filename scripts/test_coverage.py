@@ -12,6 +12,7 @@ import hashlib
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1086,6 +1087,54 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
 
 
 class DockerfileAndCollectorTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("go"), "Go is required for the standalone AST inventory fixture")
+    def test_inventory_parses_clean_source_without_resolving_ui_embeds(self):
+        # Run only the standard-library inventory helper, never compile product
+        # source. A clean checkout's missing ui/dist must not prevent AST proof.
+        helper = COLLECTOR.read_text().split("cat >/tmp/coverage-source-inventory.go <<'GO'\n", 1)[1].split("\nGO\n", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="coverage-inventory.") as tmp:
+            root = Path(tmp).resolve()
+            source, audit = root / "source", root / "audit"
+            (source / "ui").mkdir(parents=True)
+            audit.mkdir()
+            embed = source / "ui/embed.go"
+            embed.write_text('package ui\nimport "embed"\n//go:embed all:dist\nvar Assets embed.FS\n')
+            types = source / "ui/types.go"
+            types.write_text("package ui\ntype Declaration struct { ID string }\n")
+            functions = source / "ui/functions.go"
+            functions.write_text("package ui\nfunc Value() int { return 1 }\nvar Initialized = Value()\nvar Literal = func() int { return 2 }\n")
+            (source / "ui/ignored_test.go").write_text("not valid Go source")
+            package = MODULE + "/ui"
+            manifest = audit / "coverpkg-packages.txt"
+            manifest.write_text(package + "\n")
+            executable = root / "inventory.go"
+            executable.write_text(helper.replace('"/source', '"' + str(source)).replace('"/audit', '"' + str(audit)))
+            env = os.environ.copy()
+            env.update(GOTOOLCHAIN="local", GOPROXY="off", GOWORK="off", GO111MODULE="off",
+                       INVENTORY_SHA=SHA, INVENTORY_IMAGE_ID=IMAGE_ID)
+            def inventory_run():
+                return subprocess.run(["go", "run", str(executable)], cwd=root, env=env,
+                                      text=True, capture_output=True, timeout=60)
+            result = inventory_run()
+            self.assertEqual(result.returncode, 0, output(result))
+            doc = json.loads((audit / "source-inventory.json").read_text())
+            self.assertEqual(doc["packages"][package], [package + "/embed.go", package + "/functions.go", package + "/types.go"])
+            self.assertFalse(doc["files"][package + "/embed.go"]["has_var_initializer"])
+            for field in ("has_function_body", "has_call", "has_var_initializer"):
+                self.assertTrue(doc["files"][package + "/functions.go"][field])
+            self.assertFalse(doc["files"][package + "/types.go"]["has_function_body"])
+            self.assertEqual(doc["files"][package + "/embed.go"]["source_sha256"], hashlib.sha256(embed.read_bytes()).hexdigest())
+            self.assertFalse((source / "ui/dist").exists())
+            for bad in (MODULE + "/missing", MODULE + "/../escape", "example.invalid/foreign"):
+                with self.subTest(package=bad):
+                    manifest.write_text(bad + "\n")
+                    self.assertNotEqual(inventory_run().returncode, 0)
+            manifest.write_text(package + "\n")
+            types.write_text("package ui\ntype Broken struct {")
+            result = inventory_run()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("types.go", result.stderr, "parser diagnostics must remain visible")
+
     def test_committed_ratchet_has_measured_source_and_package_diff_floors(self):
         ratchet = json.loads((ROOT / "scripts/coverage-ratchet.json").read_text())
         self.assertTrue(COV["_is_sha"](ratchet["measured_candidate_sha"]))
