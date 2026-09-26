@@ -3,6 +3,8 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import type { AxeResults, NodeResult, Result } from "axe-core";
 import { applyAndRun, applyDefinitions, failOnUnexpectedPageErrors, findJobByAlias, loadFixtureDefinition } from "./helpers/fixtures";
 
+import { waitForFiniteAnimations } from "./helpers/animations";
+
 failOnUnexpectedPageErrors();
 
 /**
@@ -168,6 +170,9 @@ async function assertNoNewViolations(page: Page, testInfo: TestInfo, label: stri
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .exclude(CANVAS_EXCLUSIONS);
   if (include) scan.include(include);
+  // Visible rows can still inherit AppShell's 500 ms entry fade, giving axe
+  // a transient composite foreground rather than the settled design token.
+  await waitForFiniteAnimations(page);
   const results: AxeResults = await scan.analyze();
 
   await testInfo.attach(`axe-${label}`, {
@@ -223,6 +228,53 @@ test("jobs list is keyboard-reachable and free of critical/serious violations", 
   const triggerButton = page.locator('[data-testid="job-row"] button[title="Trigger run"]').first();
   await triggerButton.focus();
   await expect(triggerButton).toBeFocused();
+});
+
+test("jobs contrast scans wait for finite fades and still reject settled defects", async ({ page, request }, testInfo) => {
+  await applyDefinitions(request, await loadFixtureDefinition("run-history.job.yaml"));
+  await page.goto("/jobs");
+  await expect(page.getByTestId("job-row").first()).toBeVisible();
+  await page.mouse.move(0, 0); // Non-hover card rows, as in the failed CI scan.
+  await waitForFiniteAnimations(page);
+
+  const ids = '[data-testid="job-row"] .font-mono.text-text-4';
+  await expect(page.locator(ids).first()).toBeVisible();
+  await page.locator("main").evaluate((main) => {
+    const fade = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
+    fade.pause();
+    fade.currentTime = 0;
+  });
+  try {
+    // A paused finite fade cannot be silently skipped or leave the scan hung.
+    await expect(waitForFiniteAnimations(page, 200)).rejects.toThrow();
+
+    let ready = false;
+    const waiting = waitForFiniteAnimations(page).then(() => { ready = true; });
+    await page.locator("main").evaluate((main) => {
+      main.getAnimations().forEach((animation) => animation.cancel());
+      const replacement = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
+      replacement.pause();
+      replacement.currentTime = 0;
+    });
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(ready, "a replacement finite fade must remain pending").toBe(false);
+    await page.locator("main").evaluate((main) => main.getAnimations().forEach((animation) => animation.finish()));
+    await waiting;
+    await expect(page.locator("main")).toHaveCSS("opacity", "1");
+    await assertNoNewViolations(page, testInfo, "jobs-list");
+
+    // Readiness does not excuse a genuinely bad settled foreground. Preserve
+    // the full scan and its 4.5:1 rule, including this concrete failed CI color.
+    await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.color = "#727886"; });
+    try {
+      await expect(assertNoNewViolations(page, testInfo, "jobs-list")).rejects.toThrow("NEW critical/serious axe violation");
+    } finally {
+      await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.removeProperty("color"); });
+    }
+  } finally {
+    // Failure diagnostics must not wait on the deliberately paused long fade.
+    await page.locator("main").evaluate((main) => main.getAnimations().forEach((animation) => animation.cancel()));
+  }
 });
 
 test("job detail run page (DAG + task panel) is free of critical/serious violations; Escape returns focus", async ({
