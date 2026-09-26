@@ -23,6 +23,8 @@ import {
   overlayPreservesEnv,
   ownerKillSequence,
   ownerRestartSequence,
+  authModesFromPodList,
+  memberLogCommand,
   parseBootstrapAdminKey,
   parseLeaseResponse,
   podLogsCommand,
@@ -229,6 +231,41 @@ test("bootstrap admin key is read from the full caesium container log", () => {
   expect(command.argv).toContain("-c");
   expect(command.argv).toContain("caesium");
   expect(command.argv).not.toContain("--tail");
+});
+
+test("auth mode is read from the caesium container spec and logs are per pod", () => {
+  expect(authModesFromPodList({
+    items: [{
+      metadata: { name: "caesium-0" },
+      spec: { containers: [{ name: "caesium", env: [{ name: "CAESIUM_AUTH_MODE", value: "api-key" }] }] },
+    }],
+  })).toEqual([{ name: "caesium-0", mode: "api-key" }]);
+  const command = memberLogCommand({
+    robustnessId: "rb-d3-example",
+    artifactsDir: "/tmp/caesium-d3-example",
+    kubeconfig: "/tmp/caesium-d3-example/kubeconfig",
+    namespace: "rb-d3-example",
+    taskImage: "example.invalid/task:1",
+    serverImage: "example.invalid/caesium:abc",
+    chartDir: "/tmp/chart",
+    valuesFile: "/tmp/values.yaml",
+    repoRoot: "/tmp/repo",
+    hashSecret: UI_E2E_AUTH_HASH_SECRET,
+  }, "caesium-0", true);
+  expect(command.argv).toContain("caesium-0");
+  expect(command.argv).toContain("--previous");
+  expect(() => memberLogCommand({
+    robustnessId: "rb-d3-example",
+    artifactsDir: "/tmp/caesium-d3-example",
+    kubeconfig: "/tmp/caesium-d3-example/kubeconfig",
+    namespace: "rb-d3-example",
+    taskImage: "example.invalid/task:1",
+    serverImage: "example.invalid/caesium:abc",
+    chartDir: "/tmp/chart",
+    valuesFile: "/tmp/values.yaml",
+    repoRoot: "/tmp/repo",
+    hashSecret: UI_E2E_AUTH_HASH_SECRET,
+  }, "Pod_Bad", false)).toThrow(/unsafe pod name/);
 });
 
 test("bootstrap admin key is the csk_live token from pod logs", () => {

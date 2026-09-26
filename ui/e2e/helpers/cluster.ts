@@ -386,6 +386,49 @@ export function caesiumMemberSelector(): string {
   return "app.kubernetes.io/name=caesium,app.kubernetes.io/instance=caesium";
 }
 
+export function authModesFromPodList(payload: unknown): { name: string; mode: string }[] {
+  const modes: { name: string; mode: string }[] = [];
+  for (const pod of podItems(payload)) {
+    const metadata = objectField(pod, "metadata");
+    const name = stringField(metadata, "name") ?? "";
+    const spec = objectField(pod, "spec");
+    const containers = Array.isArray(spec?.containers) ? spec.containers : [];
+    for (const container of containers) {
+      const record = objectField(container, null);
+      if (!record || stringField(record, "name") !== "caesium") continue;
+      const env = Array.isArray(record.env) ? record.env : [];
+      for (const entry of env) {
+        const variable = objectField(entry, null);
+        if (!variable || stringField(variable, "name") !== "CAESIUM_AUTH_MODE") continue;
+        modes.push({ name, mode: stringField(variable, "value") ?? "" });
+      }
+    }
+  }
+  return modes;
+}
+
+export function memberLogCommand(session: ClusterRecoverySession, podName: string, previous: boolean): ShellCommand {
+  if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(podName)) {
+    throw new Error(`unsafe pod name ${podName}`);
+  }
+  const argv = [
+    "kubectl",
+    "--kubeconfig",
+    session.kubeconfig,
+    "--namespace",
+    session.namespace,
+    "logs",
+    podName,
+    "-c",
+    "caesium",
+  ];
+  if (previous) argv.push("--previous");
+  return {
+    argv,
+    description: previous ? `read the previous caesium log for ${podName}` : `read the current caesium log for ${podName}`,
+  };
+}
+
 export function portForwardCommand(input: {
   kubeconfig: string;
   namespace: string;
