@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,12 @@ import (
 )
 
 const kubernetesStopAPITimeout = 30 * time.Second
+
+const (
+	// Leave time for the REST log handler to respond before its 30s WriteTimeout.
+	kubernetesLogReadinessTimeout = 10 * time.Second
+	kubernetesLogReadinessPoll    = 100 * time.Millisecond
+)
 
 // kueueQueueLabel is the label Kueue reads to assign a workload to a LocalQueue.
 // Stamping it on the pod delegates admission to Kueue: its webhook gates the pod
@@ -362,6 +369,10 @@ func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 // Logs streams the log output from a Caesium Kubernetes pod's
 // only container based on the request input.
 func (e *kubernetesEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
+	return e.logsWhenReady(req, kubernetesLogReadinessTimeout)
+}
+
+func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout time.Duration) (io.ReadCloser, error) {
 	opts := &v1.PodLogOptions{
 		Follow:     true,
 		Timestamps: true,
@@ -371,12 +382,163 @@ func (e *kubernetesEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, err
 		opts.SinceTime = &metav1.Time{Time: req.Since}
 	}
 
-	logs := e.backend.GetLogs(req.ID, opts)
-	if logs == nil {
-		return nil, fmt.Errorf("failed to retrieve logs")
-	}
+	// Bound opening the stream, including an API request that never returns its
+	// headers. Stop this timer on success: a setup deadline must not terminate a
+	// healthy live reader. The reader retains parent cancellation until Close.
+	ctx, cancel := context.WithCancelCause(e.ctx)
+	timer := time.AfterFunc(timeout, func() { cancel(context.DeadlineExceeded) })
+	defer timer.Stop()
+	failed := true
+	defer func() {
+		if failed {
+			cancel(nil)
+		}
+	}()
 
-	return logs.Stream(e.ctx)
+	for {
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
+		logs := e.backend.GetLogs(req.ID, opts)
+		if logs == nil {
+			return nil, fmt.Errorf("failed to retrieve logs")
+		}
+		reader, err := logs.Stream(ctx)
+		if err == nil && reader != nil {
+			// The apiserver returns 204 for an unbound (including Kueue-gated)
+			// pod. client-go exposes that as a successful, empty reader. Peek
+			// under the opening budget so it cannot finish marker capture early.
+			buffered := bufio.NewReader(reader)
+			_, peekErr := buffered.Peek(1)
+			if peekErr == nil || errors.Is(peekErr, io.EOF) {
+				final := false
+				if errors.Is(peekErr, io.EOF) {
+					pod, getErr := e.backend.Get(ctx, req.ID, metav1.GetOptions{})
+					if getErr != nil {
+						_ = reader.Close()
+						if ctx.Err() != nil {
+							return nil, context.Cause(ctx)
+						}
+						return nil, getErr
+					}
+					if ctx.Err() != nil {
+						_ = reader.Close()
+						return nil, context.Cause(ctx)
+					}
+					final = pod != nil && (pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed)
+					if !final && !podCanStartLogs(pod) {
+						_ = reader.Close()
+						return nil, fmt.Errorf("empty log stream for unavailable pod %q", req.ID)
+					}
+				}
+				if peekErr == nil || final {
+					if !timer.Stop() || ctx.Err() != nil {
+						_ = reader.Close()
+						if ctx.Err() != nil {
+							return nil, context.Cause(ctx)
+						}
+						return nil, context.DeadlineExceeded
+					}
+					failed = false
+					return &kubernetesLogReader{Reader: buffered, closer: reader, cancel: cancel}, nil
+				}
+			} else {
+				_ = reader.Close()
+				if ctx.Err() != nil {
+					return nil, context.Cause(ctx)
+				}
+				return nil, peekErr
+			}
+			_ = reader.Close()
+		} else {
+			if reader != nil {
+				_ = reader.Close()
+			}
+			if ctx.Err() != nil {
+				return nil, context.Cause(ctx)
+			}
+			if err == nil {
+				return nil, fmt.Errorf("failed to retrieve log stream")
+			}
+			if !containerLogsPending(err, req.ID) {
+				return nil, err
+			}
+			// A kubelet may not have synced a newly bound pod yet. Confirm the
+			// apiserver object still exists and has no permanent startup failure.
+			pod, getErr := e.backend.Get(ctx, req.ID, metav1.GetOptions{})
+			if getErr != nil {
+				if ctx.Err() != nil {
+					return nil, context.Cause(ctx)
+				}
+				return nil, getErr
+			}
+			if ctx.Err() != nil {
+				return nil, context.Cause(ctx)
+			}
+			if !podCanStartLogs(pod) {
+				return nil, err
+			}
+		}
+
+		// A newly created pod can reject /log before its only container starts.
+		// Retry only observed readiness; authorization, missing pods, image
+		// failures and other API errors retain their original failure.
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-time.After(kubernetesLogReadinessPoll):
+		}
+	}
+}
+
+func containerLogsPending(err error, pod string) bool {
+	var status *apierrors.StatusError
+	if !errors.As(err, &status) {
+		return false
+	}
+	if apierrors.IsNotFound(err) {
+		// An apiserver object lookup names Details.Kind=pods. The kubelet's
+		// unsynced-pod response has this narrower message and is confirmed by Get.
+		return (status.ErrStatus.Details == nil || status.ErrStatus.Details.Kind != "pods") &&
+			status.ErrStatus.Message == fmt.Sprintf("pod %q does not exist", pod)
+	}
+	if !apierrors.IsBadRequest(err) {
+		return false
+	}
+	if status.ErrStatus.Message == fmt.Sprintf("container %q in pod %q is not available", "atom", pod) {
+		return true
+	}
+	prefix := fmt.Sprintf("container %q in pod %q is waiting to start: ", "atom", pod)
+	if !strings.HasPrefix(status.ErrStatus.Message, prefix) {
+		return false
+	}
+	reason := strings.TrimPrefix(status.ErrStatus.Message, prefix)
+	return reason == "ContainerCreating" || reason == "PodInitializing"
+}
+
+func podCanStartLogs(pod *v1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil ||
+		(pod.Status.Phase != v1.PodPending && pod.Status.Phase != v1.PodRunning) {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "atom" && status.State.Waiting != nil {
+			reason := status.State.Waiting.Reason
+			return reason == "" || reason == "ContainerCreating" || reason == "PodInitializing"
+		}
+	}
+	return true
+}
+
+type kubernetesLogReader struct {
+	io.Reader
+	closer io.Closer
+	cancel context.CancelCauseFunc
+}
+
+func (r *kubernetesLogReader) Close() error {
+	r.cancel(nil)
+	return r.closer.Close()
 }
 
 func convertEnvVars(env map[string]string) []v1.EnvVar {
