@@ -3,8 +3,9 @@
 # profiles, graceful shutdown + SIGUSR2 flush, merge, and check.
 #
 # The script is the command (G6 owns any later justfile recipe). It never
-# starts caesium-server-test, never publishes a host port, never runs
-# just integration-up / ui-e2e / performance, and never treats a killed
+# starts caesium-server-test, publishes only an ephemeral loopback port for
+# its isolated Chromium journey, never runs just integration-up / ui-e2e /
+# performance, and never treats a killed
 # process or missing GOCOVERDIR as 0% success.
 #
 #   CAESIUM_COVERAGE_ARTIFACTS=/tmp/cov \
@@ -17,12 +18,12 @@
 #   CAESIUM_COVERAGE_IMAGE     default caesiumcloud/caesium-coverage:latest
 #   CAESIUM_BUILDER_IMAGE      default caesiumcloud/caesium-builder:latest
 #   CAESIUM_COVERAGE_UNIT_PROFILE / CAESIUM_COVERAGE_BROWSER_DIR
-#   CAESIUM_COVERAGE_BROWSER_PROFILE
+#   CAESIUM_COVERAGE_BROWSER_PROFILE / CAESIUM_COVERAGE_BROWSER_PROVENANCE
 #   CAESIUM_COVERAGE_RATCHET / CAESIUM_COVERAGE_WRITE_BASELINE
-#   CAESIUM_COVERAGE_CHANGED_PATHS
+#   CAESIUM_COVERAGE_CHANGED_PATHS / CAESIUM_COVERAGE_DIFF_BASE
 #   CAESIUM_COVERAGE_SKIP_BUILD=1
 #   CAESIUM_COVERAGE_KEEP=1
-#   CAESIUM_COVERAGE_REQUIRE_BROWSER=1
+#   Browser evidence is required by collect, check, and merge.
 #   CAESIUM_COVERAGE_STRICT=1
 set -euo pipefail
 
@@ -65,9 +66,10 @@ if [[ ! "$ID" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]]; then
   die "CAESIUM_COVERAGE_ID must be a lowercase DNS-1123 name of at most 40 characters, got '$ID'"
 fi
 
-# Never collide with the integration-up server or bind its host port.
+# Never collide with the integration-up server or bind its fixed host port.
 [[ "$ID" != "caesium-server-test" ]] || die "refusing to use caesium-server-test as the coverage id"
 SERVER_NAME="${ID}-server"
+BROWSER_SERVER_NAME="${ID}-browser"
 NETWORK="${ID}-net"
 IMAGE="${CAESIUM_COVERAGE_IMAGE:-caesiumcloud/caesium-coverage:latest}"
 case "$IMAGE" in
@@ -76,6 +78,7 @@ case "$IMAGE" in
     ;;
 esac
 BUILDER_IMAGE="${CAESIUM_BUILDER_IMAGE:-caesiumcloud/caesium-builder:latest}"
+BUILDER_RUN_IMAGE="$BUILDER_IMAGE"
 
 PODMAN="${CAESIUM_PODMAN:-false}"
 if [[ "$PODMAN" == "true" ]]; then
@@ -147,7 +150,7 @@ textfmt_dir() {
     -v "$src:/in:ro" \
     -v "$(dirname "$dest"):/out" \
     -w / \
-    "$BUILDER_IMAGE" \
+    "$BUILDER_RUN_IMAGE" \
     go tool covdata textfmt -i=/in -o="/out/$(basename "$dest")"
 }
 
@@ -167,7 +170,6 @@ merge_gocoverdirs() {
   require_cmd "$CONTAINER_CLI"
   rm -rf "$dest"
   mkdir -p "$dest"
-  local i_flags=()
   local mount_flags=()
   local idx=0
   local joined=""
@@ -183,7 +185,7 @@ merge_gocoverdirs() {
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
     "${mount_flags[@]}" \
     -v "$dest:/out" \
-    "$BUILDER_IMAGE" \
+    "$BUILDER_RUN_IMAGE" \
     go tool covdata merge -i="$joined" -o=/out
 }
 
@@ -205,6 +207,7 @@ EOF
 copy_optional_browser() {
   local dir="${CAESIUM_COVERAGE_BROWSER_DIR:-}"
   local profile="${CAESIUM_COVERAGE_BROWSER_PROFILE:-}"
+  local provenance="${CAESIUM_COVERAGE_BROWSER_PROVENANCE:-}"
   if [[ -z "$dir" && -z "$profile" ]]; then
     if [[ -f "$PROFILES/browser.out" || -f "$PROFILES/browser.provenance.json" ]]; then
       return
@@ -214,51 +217,55 @@ copy_optional_browser() {
 EOF
     return
   fi
+  # A supplied profile cannot acquire candidate provenance just because this
+  # check command happened to run in a checkout with CANDIDATE_SHA set.
+  [[ -n "$provenance" && -f "$provenance" ]] \
+    || die "external browser coverage requires CAESIUM_COVERAGE_BROWSER_PROVENANCE"
   if [[ -n "$profile" ]]; then
-    if [[ ! -f "$profile" ]]; then
-      write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"coverprofile","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false}
-EOF
-      return
-    fi
+    [[ -f "$profile" ]] || die "external browser profile is missing: $profile"
     cp "$profile" "$PROFILES/browser.out"
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"coverprofile","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"labelled-profile"}
-EOF
+    cp "$provenance" "$PROFILES/browser.provenance.json"
     return
   fi
-  mkdir -p "$RAW/browser"
-  if [[ -d "$dir" ]]; then
-    cp -a "$dir"/. "$RAW/browser/" 2>/dev/null || true
+  if [[ ! -d "$dir" ]] || ! gocoverdir_complete "$dir"; then
+    die "external browser GOCOVERDIR is incomplete: $dir"
   fi
-  if gocoverdir_complete "$RAW/browser" && textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"labelled-gocoverdir"}
-EOF
-  else
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"labelled-gocoverdir"}
-EOF
+  # Stage first so supplying this invocation's raw/browser itself is safe.
+  local imported
+  imported="$(mktemp -d "$RAW/browser-import.XXXXXX")"
+  if ! cp -a "$dir"/. "$imported/"; then
+    rm -rf "$imported"
+    die "cannot copy external browser GOCOVERDIR: $dir"
   fi
+  # Do not overlay supplied evidence on counters from an earlier collect.
+  rm -rf "$RAW/browser"
+  mv "$imported" "$RAW/browser"
+  if ! gocoverdir_complete "$RAW/browser" || ! textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
+    die "external browser GOCOVERDIR is incomplete: $dir"
+  fi
+  cp "$provenance" "$PROFILES/browser.provenance.json"
 }
 
 run_checker() {
   copy_optional_unit
   copy_optional_browser
   local extra=()
-  if [[ -n "${CAESIUM_COVERAGE_RATCHET:-}" ]]; then
-    extra+=(--ratchet "$CAESIUM_COVERAGE_RATCHET")
+  local ratchet="${CAESIUM_COVERAGE_RATCHET:-$ROOT/scripts/coverage-ratchet.json}"
+  if [[ -f "$ratchet" ]]; then
+    extra+=(--ratchet "$ratchet")
+  else
+    die "committed coverage ratchet is missing: $ratchet"
   fi
   if [[ -z "${CAESIUM_COVERAGE_WRITE_BASELINE:-}" ]]; then
     CAESIUM_COVERAGE_WRITE_BASELINE="$ARTIFACTS/ratchet.json"
   fi
   extra+=(--write-baseline "$CAESIUM_COVERAGE_WRITE_BASELINE")
-  if [[ -n "${CAESIUM_COVERAGE_CHANGED_PATHS:-}" ]]; then
-    extra+=(--changed-paths "$CAESIUM_COVERAGE_CHANGED_PATHS")
+  extra+=(--changed-paths "$CHANGED_PATHS")
+  extra+=(--diff-base "$DIFF_BASE" --coverpkg-audit "$AUDIT/coverpkg-packages.txt")
+  if [[ -f "$AUDIT/source-inventory.json" ]]; then
+    extra+=(--source-inventory "$AUDIT/source-inventory.json")
   fi
-  if [[ "${CAESIUM_COVERAGE_REQUIRE_BROWSER:-}" == "1" ]]; then
-    extra+=(--require-browser)
-  fi
+  extra+=(--require-browser)
   if [[ "${CAESIUM_COVERAGE_REQUIRE_UNIT:-}" == "1" ]]; then
     extra+=(--require-unit)
   fi
@@ -294,6 +301,24 @@ if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/nu
   fi
 fi
 
+# The diff floor is only meaningful when its file list is real. Bind it to a
+# checked-out base, including in check mode, rather than silently treating an
+# omitted --changed-paths as an empty diff.
+CHANGED_PATHS="${CAESIUM_COVERAGE_CHANGED_PATHS:-$ARTIFACTS/changed-paths.txt}"
+DIFF_BASE="${CAESIUM_COVERAGE_DIFF_BASE:-external-changed-paths}"
+if [[ -z "${CAESIUM_COVERAGE_CHANGED_PATHS:-}" ]]; then
+  [[ -n "$GIT_HEAD" && "$GIT_DIRTY" == false ]] \
+    || die "a clean git checkout is required to compute changed paths"
+  [[ "$CANDIDATE_SHA" == "$GIT_HEAD" ]] \
+    || die "CANDIDATE_SHA $CANDIDATE_SHA does not match the checkout used to compute changed paths ($GIT_HEAD)"
+  DIFF_BASE="${CAESIUM_COVERAGE_DIFF_BASE:-master}"
+  git -C "$ROOT" rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null \
+    || die "coverage diff base $DIFF_BASE is not a commit"
+  DIFF_BASE="$(git -C "$ROOT" merge-base "$DIFF_BASE" "$GIT_HEAD")"
+  git -C "$ROOT" diff --name-only --diff-filter=ACMR "$DIFF_BASE" "$GIT_HEAD" -- '*.go' > "$CHANGED_PATHS"
+fi
+[[ -f "$CHANGED_PATHS" ]] || die "coverage changed-paths file is missing: $CHANGED_PATHS"
+
 IMAGE_PROVENANCE="unknown"
 IMAGE_VERIFIED=false
 
@@ -308,22 +333,46 @@ require_clean_checkout() {
 }
 
 image_revision() {
-  "$CONTAINER_CLI" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE" 2>/dev/null || true
+  "$CONTAINER_CLI" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${1:-$IMAGE}" 2>/dev/null || true
+}
+
+resolve_builder_image() {
+  "$CONTAINER_CLI" image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 \
+    || die "builder image $BUILDER_IMAGE is required for go tool covdata"
+  BUILDER_RUN_IMAGE="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_IMAGE")"
+  [[ "$BUILDER_RUN_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || die "builder image has no immutable identity"
+  # Docker FROM needs a named reference: a bare local ID is interpreted as a
+  # repository named sha256. Local builders need not have RepoDigests.
+  local builder_name="${BUILDER_IMAGE%%@*}" canonical_id
+  if [[ "$BUILDER_IMAGE" == *@* && ! "${BUILDER_IMAGE#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    die "builder image must have a valid named reference"
+  fi
+  [[ "$builder_name" =~ ^[a-z0-9][a-z0-9._:/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$ \
+    && ! "$builder_name" =~ ^sha256:[0-9a-f]{64}$ \
+    && ! "$builder_name" =~ ^[0-9a-f]{64}$ ]] \
+    || die "builder image must have a valid named reference"
+  BUILDER_BUILD_IMAGE="$builder_name@$BUILDER_RUN_IMAGE"
+  canonical_id="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_BUILD_IMAGE")" \
+    || die "pinned canonical builder reference is unavailable: $BUILDER_BUILD_IMAGE"
+  [[ "$canonical_id" == "$BUILDER_RUN_IMAGE" ]] \
+    || die "pinned canonical builder reference differs from the resolved builder image"
 }
 
 build_image() {
   require_cmd "$CONTAINER_CLI"
   require_clean_checkout
-  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_IMAGE)"
+  resolve_builder_image
+  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_BUILD_IMAGE)"
   "$CONTAINER_CLI" build --platform "$PLATFORM" \
-    --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
+    --build-arg BUILDER_IMAGE="$BUILDER_BUILD_IMAGE" \
     --build-arg CAESIUM_REVISION="$CANDIDATE_SHA" \
     --target coverage \
     -t "$IMAGE" \
     -f "$DOCKERFILE" \
     "$ROOT"
   local rev
-  rev="$(image_revision)"
+  IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
+  rev="$(image_revision "$IMAGE_ID")"
   [[ "$rev" == "$CANDIDATE_SHA" ]] \
     || die "coverage image org.opencontainers.image.revision='$rev' does not match CANDIDATE_SHA $CANDIDATE_SHA"
   IMAGE_PROVENANCE="built-by-this-run"
@@ -333,8 +382,11 @@ build_image() {
 extract_audit() {
   require_cmd "$CONTAINER_CLI"
   local cid
-  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE")"
-  "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/" || true
+  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE_ID")"
+  if ! "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/"; then
+    "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+    die "cannot extract the pinned coverage image audit"
+  fi
   "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
 }
 
@@ -360,13 +412,16 @@ if [[ "${CAESIUM_COVERAGE_KEEP:-}" == "1" ]]; then
   KEEP_RESOURCES=1
 fi
 
+# Invoked by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   if [[ "$KEEP_RESOURCES" -eq 1 ]]; then
-    log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $NETWORK in place"
+    log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $BROWSER_SERVER_NAME / $NETWORK in place"
     return
   fi
   if command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
     "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+    "$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
     "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
   fi
 }
@@ -380,32 +435,28 @@ fi
 if [[ "$CMD" == "check" || "$CMD" == "merge" ]]; then
   if [[ "$CMD" == "merge" ]]; then
     mkdir -p "$PROFILES"
-    if gocoverdir_complete "$RAW/cli" && textfmt_dir "$RAW/cli" "$PROFILES/cli.out"; then
-      write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
-EOF
-    else
-      write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
-EOF
+    # Preserve the source records exactly. Raw-file existence says nothing
+    # about candidate identity, process shutdown, or verified image origin.
+    rm -f "$PROFILES/cli.out" "$PROFILES/server.out" "$PROFILES/integration.out" "$PROFILES/integration.provenance.json" "$AUDIT/merge-provenance.json"
+    rm -rf "$RAW/integration"
+    mkdir -p "$RAW/integration"
+    preflight_rc=0
+    python3 "$ROOT/scripts/merge-coverage-provenance.py" \
+      --profiles-dir "$PROFILES" --candidate-sha "$CANDIDATE_SHA" \
+      --output "$AUDIT/merge-provenance.json" || preflight_rc=$?
+    if [[ "$preflight_rc" -ne 0 ]]; then
+      placeholder_report "$ARTIFACTS/report.json" "merge input provenance failed validation"
+      exit "$preflight_rc"
     fi
-    if gocoverdir_complete "$RAW/server" && textfmt_dir "$RAW/server" "$PROFILES/server.out"; then
-      write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
-EOF
-    else
-      write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
-EOF
+    if ! gocoverdir_complete "$RAW/cli" || ! gocoverdir_complete "$RAW/server"; then
+      placeholder_report "$ARTIFACTS/report.json" "merge raw CLI/server profile is incomplete"
+      exit 2
     fi
-    if gocoverdir_complete "$RAW/cli" && gocoverdir_complete "$RAW/server"; then
-      if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server" \
-        && textfmt_dir "$RAW/integration" "$PROFILES/integration.out"; then
-        write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"merge"}
-EOF
-      fi
-    fi
+    textfmt_dir "$RAW/cli" "$PROFILES/cli.out"
+    textfmt_dir "$RAW/server" "$PROFILES/server.out"
+    merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"
+    textfmt_dir "$RAW/integration" "$PROFILES/integration.out"
+    cp "$AUDIT/merge-provenance.json" "$PROFILES/integration.provenance.json"
   fi
   run_checker
   exit $?
@@ -413,6 +464,9 @@ fi
 
 # ----- collect -----
 require_cmd "$CONTAINER_CLI"
+if [[ -n "${CAESIUM_COVERAGE_BROWSER_DIR:-}" || -n "${CAESIUM_COVERAGE_BROWSER_PROFILE:-}" ]]; then
+  die "collect runs its own Chromium journey; external browser profiles are accepted only by check/merge"
+fi
 rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration"
 mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$PROFILES" "$AUDIT"
 rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
@@ -420,29 +474,154 @@ rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
 if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
   "$CONTAINER_CLI" image inspect "$IMAGE" >/dev/null 2>&1 \
     || die "CAESIUM_COVERAGE_SKIP_BUILD=1 but image $IMAGE is missing"
+  IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
   IMAGE_PROVENANCE="supplied/unverified"
   IMAGE_VERIFIED=false
+  resolve_builder_image
   log "SKIP_BUILD: $IMAGE is supplied/unverified and is not a provenanced match of $CANDIDATE_SHA"
 else
   build_image
 fi
-"$CONTAINER_CLI" image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 \
-  || die "builder image $BUILDER_IMAGE is required for go tool covdata"
-
+# Runtime and builder identities were pinned before the image build; retain
+# them for audit extraction and every subsequent collection process.
+[[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "coverage image has no immutable identity"
+IMAGE_GOOS="$("$CONTAINER_CLI" image inspect --format '{{.Os}}' "$IMAGE_ID")"
+IMAGE_GOARCH="$("$CONTAINER_CLI" image inspect --format '{{.Architecture}}' "$IMAGE_ID")"
+[[ -n "$IMAGE_GOOS" && -n "$IMAGE_GOARCH" ]] || die "coverage image has no target build context"
 trap cleanup EXIT
 
 "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
 "$CONTAINER_CLI" network create "$NETWORK" >/dev/null
 
 extract_audit
+# Eligibility is independent of observed counters. Map the image's audited
+# root-module packages to source directories without loading imports/embeds.
+# Parse all non-test Go source in the builder, including build-excluded files.
+# Missing profiles may exempt only proven files with no function body or files
+# excluded by the image's target build context.
+rm -f "$AUDIT/source-inventory.json"
+"$CONTAINER_CLI" run --rm -i --platform "$PLATFORM" \
+  -v "$ROOT:/source:ro" -v "$AUDIT:/audit" -w /source \
+  -e INVENTORY_SHA="$CANDIDATE_SHA" \
+  -e INVENTORY_IMAGE_ID="$IMAGE_ID" \
+  -e INVENTORY_GOOS="$IMAGE_GOOS" -e INVENTORY_GOARCH="$IMAGE_GOARCH" \
+  "$BUILDER_RUN_IMAGE" sh -s <<'INVENTORY'
+set -eu
+cat >/tmp/coverage-source-inventory.go <<'GO'
+package main
+
+import (
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "go/ast"
+    "go/build"
+    "go/parser"
+    "go/token"
+    "os"
+    "path/filepath"
+    "sort"
+    "strings"
+)
+
+func main() {
+    raw, err := os.ReadFile("/audit/coverpkg-packages.txt")
+    if err != nil { panic(err) }
+    packages := strings.Fields(string(raw))
+    sort.Strings(packages)
+    if len(packages) == 0 { panic("empty coverpkg audit") }
+    files := map[string]any{}
+    packageFiles := map[string][]string{}
+    const module = "github.com/caesium-cloud/caesium"
+    target := build.Default
+    target.GOOS, target.GOARCH = os.Getenv("INVENTORY_GOOS"), os.Getenv("INVENTORY_GOARCH")
+    if target.GOOS == "" || target.GOARCH == "" { panic("missing image build context") }
+    target.CgoEnabled = true
+    target.BuildTags = []string{} // Dockerfile.coverage adds no build tags.
+    buildContext := map[string]any{
+        "goos": target.GOOS, "goarch": target.GOARCH, "build_tags": target.BuildTags,
+        "cgo_enabled": target.CgoEnabled, "compiler": target.Compiler,
+        "release_tags": target.ReleaseTags, "tool_tags": target.ToolTags,
+    }
+    for _, pkg := range packages {
+        if pkg != module && !strings.HasPrefix(pkg, module+"/") { panic("foreign audited package: "+pkg) }
+        relative := strings.TrimPrefix(strings.TrimPrefix(pkg, module), "/")
+        if relative != "" && (filepath.Clean(relative) != relative || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, "../")) {
+            panic("invalid audited package path: "+pkg)
+        }
+        directory := filepath.Join("/source", relative)
+        resolved, err := filepath.EvalSymlinks(directory)
+        if err != nil { panic(err) }
+        if resolved != "/source" && !strings.HasPrefix(resolved, "/source/") { panic("audited package escapes source root: "+pkg) }
+        if _, duplicate := packageFiles[pkg]; duplicate { panic("duplicate audited package: "+pkg) }
+        packageFiles[pkg] = []string{}
+        entries, err := os.ReadDir(directory)
+        if err != nil { panic(err) }
+        for _, entry := range entries {
+            name := entry.Name()
+            if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") { continue }
+            packageFiles[pkg] = append(packageFiles[pkg], pkg+"/"+name)
+            path := filepath.Join(directory, name)
+            resolved, err := filepath.EvalSymlinks(path)
+            if err != nil { panic(err) }
+            if !strings.HasPrefix(resolved, "/source/") { panic("audited source escapes source root: "+path) }
+            source, err := os.ReadFile(path)
+            if err != nil { panic(err) }
+            matched, err := target.MatchFile(directory, name)
+            if err != nil { panic(err) }
+            tree, err := parser.ParseFile(token.NewFileSet(), path, source, parser.AllErrors)
+            if err != nil { panic(err) }
+            body, call, initializer := false, false, false
+            ast.Inspect(tree, func(node ast.Node) bool {
+                switch n := node.(type) {
+                case *ast.FuncDecl: body = body || n.Body != nil
+                case *ast.FuncLit: body = true
+                case *ast.CallExpr: call = true
+                case *ast.GenDecl:
+                    if n.Tok == token.VAR {
+                        for _, spec := range n.Specs {
+                            initializer = initializer || len(spec.(*ast.ValueSpec).Values) != 0
+                        }
+                    }
+                }
+                return true
+            })
+            digest := sha256.Sum256(source)
+            files[pkg+"/"+name] = map[string]any{
+                "parsed": true, "build_matched": matched, "has_function_body": body, "has_call": call,
+                "has_var_initializer": initializer, "source_sha256": hex.EncodeToString(digest[:]),
+            }
+        }
+        if len(packageFiles[pkg]) == 0 { panic("audited package has no source files: "+pkg) }
+    }
+    if len(packageFiles) != len(packages) { panic("partial source package inventory") }
+    for _, name := range packages {
+        if _, found := packageFiles[name]; !found { panic("missing audited package: "+name) }
+    }
+    auditDigest := sha256.Sum256([]byte(strings.Join(packages, "\n")+"\n"))
+    record := map[string]any{
+        "schema_version": 1, "kind": "go-ast-source-inventory", "parser": "go/parser",
+        "complete": true, "packages": packageFiles, "build_context": buildContext,
+        "candidate_sha": os.Getenv("INVENTORY_SHA"), "image_id": os.Getenv("INVENTORY_IMAGE_ID"),
+        "coverpkg_sha256": hex.EncodeToString(auditDigest[:]), "files": files,
+    }
+    encoded, err := json.MarshalIndent(record, "", "  ")
+    if err != nil { panic(err) }
+    if err := os.WriteFile("/audit/source-inventory.json", append(encoded, '\n'), 0644); err != nil { panic(err) }
+}
+GO
+go run /tmp/coverage-source-inventory.go
+INVENTORY
+[[ -s "$AUDIT/source-inventory.json" ]] || die "builder source inventory was not produced"
 write_fixture
 
 # Bind-mount GOCOVERDIR so a graceful exit lands counters on the host. 0777
 # avoids UID 10001 vs host-root permission misses on Docker Desktop binds.
 chmod 0777 "$RAW/cli" "$RAW/server"
 
-IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
+BUILD_CONTEXT="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["build_context"]))' "$AUDIT/source-inventory.json")"
 
 log "starting coverage server $SERVER_NAME on network $NETWORK (no host port)"
 "$CONTAINER_CLI" run -d \
@@ -456,7 +635,7 @@ log "starting coverage server $SERVER_NAME on network $NETWORK (no host port)"
   -e CAESIUM_LOG_LEVEL=info \
   -e CAESIUM_AUTH_MODE=none \
   -v "$RAW/server:/var/lib/caesium/coverage" \
-  "$IMAGE" start >/dev/null
+  "$IMAGE_ID" start >/dev/null
 
 healthy=0
 for _ in $(seq 1 60); do
@@ -464,7 +643,7 @@ for _ in $(seq 1 60); do
       --network "$NETWORK" \
       --user 0:0 \
       --entrypoint wget \
-      "$IMAGE" -q -O - http://caesium:8080/health 2>/dev/null | grep -q healthy; then
+      "$IMAGE_ID" -q -O - http://caesium:8080/health 2>/dev/null | grep -q healthy; then
     healthy=1
     break
   fi
@@ -474,10 +653,10 @@ if [[ "$healthy" -ne 1 ]]; then
   log "server never became healthy; logs:"
   "$CONTAINER_CLI" logs "$SERVER_NAME" || true
   write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
 EOF
   write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
 EOF
   run_checker
   exit $?
@@ -492,7 +671,7 @@ cli_rc=0
   -e GOCOVERDIR=/coverage \
   -v "$RAW/cli:/coverage" \
   -v "$ARTIFACTS/fixture.job.yaml:/examples/fixture.job.yaml:ro" \
-  "$IMAGE" job apply --path /examples/fixture.job.yaml --server http://caesium:8080 \
+  "$IMAGE_ID" job apply --path /examples/fixture.job.yaml --server http://caesium:8080 \
   || cli_rc=$?
 if [[ "$cli_rc" -eq 0 ]]; then
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
@@ -501,7 +680,7 @@ if [[ "$cli_rc" -eq 0 ]]; then
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
     -v "$RAW/cli:/coverage" \
-    "$IMAGE" job export coverage-write-read --server http://caesium:8080 \
+    "$IMAGE_ID" job export coverage-write-read --server http://caesium:8080 \
     >/dev/null || cli_rc=$?
 fi
 
@@ -519,7 +698,7 @@ else
   cli_missing=$(gocoverdir_complete "$RAW/cli" && echo false || echo true)
 fi
 write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
 EOF
 
 # Explicit flush while the server is still running, then graceful SIGTERM.
@@ -563,17 +742,87 @@ elif gocoverdir_complete "$RAW/server"; then
   fi
 fi
 write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
 EOF
 
 if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
   if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
     write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
 EOF
   fi
 fi
+
+# A separate process and GOCOVERDIR keep the browser contribution distinct
+# from the CLI/server write-to-read path. The live Console bundle is served by
+# the same instrumented image; Playwright drives Chromium over a loopback-only
+# ephemeral host port and must record both expected first-attempt passes.
+"$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+chmod 0777 "$RAW/browser"
+log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
+"$CONTAINER_CLI" run -d \
+  --name "$BROWSER_SERVER_NAME" \
+  --platform "$PLATFORM" \
+  --network "$NETWORK" \
+  -p 127.0.0.1::8080 \
+  --user 10001:10001 \
+  -e GOCOVERDIR=/var/lib/caesium/coverage \
+  -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
+  -e CAESIUM_AUTH_MODE=none \
+  -v "$RAW/browser:/var/lib/caesium/coverage" \
+  "$IMAGE_ID" start >/dev/null
+
+browser_healthy=0
+for _ in $(seq 1 60); do
+  if "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+      --network "$NETWORK" --user 0:0 --entrypoint wget \
+      "$IMAGE_ID" -q -O - "http://$BROWSER_SERVER_NAME:8080/health" 2>/dev/null | grep -q healthy; then
+    browser_healthy=1
+    break
+  fi
+  sleep 1
+done
+browser_rc=125
+if [[ "$browser_healthy" -eq 1 ]]; then
+  browser_addr="$("$CONTAINER_CLI" port "$BROWSER_SERVER_NAME" 8080/tcp | head -n 1)"
+  if [[ "$browser_addr" =~ ^127\.0\.0\.1:[0-9]+$ ]]; then
+    browser_rc=0
+    bash "$ROOT/scripts/coverage-browser-journey.sh" \
+      "http://$browser_addr" "$ARTIFACTS/browser-playwright.json" \
+      >"$ARTIFACTS/browser-journey.log" 2>&1 || browser_rc=$?
+  else
+    log "unexpected browser coverage port mapping: $browser_addr"
+  fi
+else
+  "$CONTAINER_CLI" logs "$BROWSER_SERVER_NAME" >"$ARTIFACTS/browser-server.log" 2>&1 || true
+fi
+
+"$CONTAINER_CLI" kill --signal=SIGUSR2 "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
+sleep 1
+browser_stop_rc=0
+"$CONTAINER_CLI" stop -t 60 "$BROWSER_SERVER_NAME" >/dev/null || browser_stop_rc=$?
+browser_inspect="$("$CONTAINER_CLI" inspect "$BROWSER_SERVER_NAME" 2>/dev/null || true)"
+browser_exit="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["State"].get("ExitCode", 1) if d else 1)' 2>/dev/null || echo 1)"
+browser_oom="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo true)"
+browser_complete=false
+browser_missing=true
+browser_killed=false
+if [[ "$browser_oom" == true || "$browser_exit" == 137 ]]; then
+  browser_killed=true
+fi
+if [[ "$browser_rc" -eq 0 && "$browser_stop_rc" -eq 0 && "$browser_killed" == false && ( "$browser_exit" == 0 || "$browser_exit" == 143 ) ]] \
+    && gocoverdir_complete "$RAW/browser"; then
+  browser_missing=false
+  if textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
+    browser_complete=true
+  fi
+else
+  browser_missing=$(gocoverdir_complete "$RAW/browser" && echo false || echo true)
+fi
+write_provenance "$PROFILES/browser.provenance.json" <<EOF
+{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
+EOF
 
 log "checking labelled coverage"
 run_checker

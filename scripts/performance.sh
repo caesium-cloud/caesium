@@ -87,18 +87,14 @@ manifest = []
 benchmark_names = []
 benchmark_function = re.compile(r'^func\s+(Benchmark(?:Owner|Recover)[A-Za-z0-9_]*)\s*\(\s*[A-Za-z_][A-Za-z_0-9]*\s+\*testing\.B\s*\)', re.M)
 
-# Check helper identity before creating any overlay. Benchmarks call helpers
-# from other internal/run test files, including owner_state_test.go.
-def other_test_files(root, sha):
-    paths = git(root, "ls-tree", "-r", "--name-only", sha, "--", "internal/run").stdout.decode().splitlines()
-    return sorted(path for path in paths if path.endswith("_test.go") and path not in files)
-
-candidate_helpers = other_test_files(candidate_dir, candidate_sha)
-base_helpers = other_test_files(base_dir, base_sha)
-if candidate_helpers != base_helpers:
-    raise SystemExit("benchmark harness: internal/run test helper path sets differ between base and candidate")
+# The benchmark files' linearTopo/wideTopo fixtures call newTopoBuilder and
+# its task/edge/build methods from this file. Pin the entire defining file on
+# both sides before overlaying benchmarks. The benchmark runner selects only
+# this helper and the two benchmark files; unrelated package tests cannot
+# change the measurement process.
+helper_files = ("internal/run/owner_state_test.go",)
 helper_manifest = []
-for path in candidate_helpers:
+for path in helper_files:
     candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
     base_blob = git(base_dir, "show", f"{base_sha}:{path}").stdout
     if candidate_blob != base_blob:
@@ -738,7 +734,9 @@ if [[ "$RUN_LOAD" == "1" ]]; then
           PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
           CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
           CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
-          npx playwright test e2e/performance.spec.ts --project=default
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
+          npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
+            --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
         )
         brc=$?
         set -e
@@ -769,7 +767,9 @@ if [[ "$RUN_LOAD" != "1" && "$RUN_BROWSER" == "1" ]]; then
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
         CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
         CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
-        npx playwright test e2e/performance.spec.ts --project=default
+        PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
+        npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
+          --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
       )
       brc=$?
       set -e

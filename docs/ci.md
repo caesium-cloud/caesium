@@ -16,16 +16,22 @@ coverage; the W4 targeted-fault harness, open-loop load driver, native fuzz
 campaigns, single-node previous-release upgrade qualification, and
 merge-candidate identity / `merge_group` wiring; the W5 fenced core-failure
 suite, coverage-instrumented CLI/server collection, and fail-closed
-base/candidate performance comparator; plus the remaining Console fault
-journeys, cluster upgrades and calibrated budgets, are tracked in
+base/candidate performance comparator. W6's checker-strength validator,
+core-failure acceptance repair, persistent-cluster lifecycle runner and common
+performance benchmark harness are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
+Console fault journeys and calibrated budgets remain planned. The F2 cluster
+runner and E3 comparator still lack complete live acceptance on their merged
+heads.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
 dependencies**: G7 wired the `merge_group` trigger and candidate-identity
 checks on the existing aggregate. W5 added **no jobs and no `ci-ok`
 dependencies** either: `TestCore`, the coverage collector and
-`scripts/performance.sh` are local commands. None of these waves changed
+`scripts/performance.sh` are local commands. W6 also added **no jobs or
+aggregate dependencies**: the C3 validator and F2 cluster runner remain
+standalone. None of these waves changed
 repository settings:
 `ci-ok` is still absent from master's required status checks, so that
 promotion gates `v*` publication rather than PR merge, and `merge_group` is
@@ -1340,7 +1346,7 @@ closes #493) later made the candidate reconcile `info.yaml` and recover a
 genuine sole member's raft configuration, so that case now **starts** on
 the candidate. F4 asserts #536's contract there and keeps the **pinned
 v0.1.0** image at a changed address, on a copy of the volume, as the
-deterministic failing transition (exit 1, `address … in info.yaml does not
+deterministic failing transition (nonzero exit, `address … in info.yaml does not
 match`). Upgrade-then-readdress is the only supported order for this pair.
 
 **Recorded-outcome cases**, each on its own volume copy, with no pre-judged
@@ -1358,13 +1364,103 @@ restore-from-snapshot, or rollback as a product guarantee. The published
 amd64/arm64 CLI checksums are carried in `versions.json` but
 `scripts/ci-cli-smoke.sh` is not re-run by this lane.
 
+### Persistent-cluster lifecycle qualification (distributed-testing W6/F2)
+
+F2 extends the F4 controller with `CAESIUM_LIFECYCLE_MODE=cluster`. Run it only
+in the exclusive Docker/kind/Helm lane from a clean, committed candidate;
+leave the candidate image tag absent so this invocation builds and verifies
+it. The controller creates its own four-node kind cluster, three persistent
+StatefulSet members and artifact kubeconfig, and refuses a pre-existing cluster
+with the same id. It checks the pinned `v0.1.0` digest and every candidate
+archive/config/layer hash and node import before testing the image-only Helm
+upgrade. The cluster result is `$ARTIFACTS/cluster-qualification.json`; retain the printed local artifact directory after the command.
+
+```sh
+CANDIDATE_SHA=$(git rev-parse HEAD)
+ARTIFACTS=$(mktemp -d)
+printf 'Lifecycle artifacts: %s\n' "$ARTIFACTS"
+CAESIUM_LIFECYCLE_MODE=cluster \
+CAESIUM_LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+CAESIUM_LIFECYCLE_ARTIFACTS="$ARTIFACTS" \
+CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  bash scripts/lifecycle-tests.sh
+```
+
+The required cases cover three PVC-backed voters, a protocol-2 mixed-version
+window, in-flight and queued work with durable task-run IDs and raw effects,
+rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
+control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
+rollback observation. A skipped or unobservable case is `blocked`; the overall
+record cannot pass on a subset. The latest live probe (`289bb343`, local,
+ephemeral artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
+(pinned image, three voters, mixed-version dispatch/completion, rolling upgrade
+and retained history/effects), and five were blocked. Snapshot catch-up's
+batch 13 write 82 returned EOF after 1,400 initial writes and 6,081 acknowledged
+updates; the attempted annotation was `006082`. `caesium-0` was OOMKilled
+(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Bounded disputed-write
+readback remains unknown: one survivor refused the connection and the other
+hit its deadline. The disputed write remains possibly committed. Replacement,
+restore, ordinal-0 and rollback were blocked because the fault left the shared
+cluster unfit for subsequent destructive cases. A prior head passed restore
+and ordinal-1 replacement; that is historical partial evidence. F2 remains
+unchecked and is not a CI job or a complete cluster-upgrade qualification.
+Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
+head `05ae4644`, removes the bundled runtime copy and has the same source tree
+as diagnostic-only `b45adfdc`. Its unchanged diagnostic code passed 10 focused
+Python tests, all 331 scripts tests, eight guard-removal controls and containerized
+integration/race readback regressions (1.070 s). Its current-head CI passed all
+37 executed jobs; the dependency hold remains. The earlier `b8498ac8` green
+run included the removed runtime copy and is historical.
+Review of separate [#571](https://github.com/caesium-cloud/caesium/pull/571) is
+in progress; see live PR state. Candidate `82ca5905` bounds setup to 10 s and
+handles empty nonterminal streams plus earlier kubelet readiness responses.
+Containerized package race/vet passed (6.017 s), and the unchanged real
+Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.89 s).
+CI run 36242369660 passed all production/integration checks, but `ui-e2e`
+failed on a jobs-list contrast failure, so `ci-ok` failed too.
+Separate [#572](https://github.com/caesium-cloud/caesium/pull/572), candidate
+`62f96873`, repairs the demonstrated scan/finite-animation race without changing
+axe rules, contrast thresholds, baselines or product colors. Chromium reproduces
+low contrast during AppShell's fade and a passing scoped scan after it settles.
+Root's containerized exact-head build and real API-applied jobs-page gate pass
+2/2 first-attempt tests in 3.1 s; paused/replaced animations and a genuine settled
+bad color remain failing controls. Current CI/review are in progress; see live
+PR state. Once #572 merges, incorporate master into #571 and rerun affected
+checks; #571 is not yet merge-ready.
+Hold F2 until #571 merges, then incorporate master and revalidate the affected
+Helm shard-2 lane.
+CODEOWNER approval is required for both PRs. No new lifecycle qualification
+is claimed; the linked PR holds the durable failure-evidence summary.
+The unresolved
+ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
+the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
+Native dqlite's 8,192 retained Raft entries are a possible contributor to memory
+pressure; these artifacts cannot separate Go heap, native allocations and file
+cache. The next bounded probe keeps the same cap and records cgroup anonymous
+and file memory, process RSS and Go heap at every batch and every five seconds.
+
 ### Fenced core failures (distributed-testing W5/B3)
 
 B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
 the `early-evidence` lane. That lane still runs `^TestOwnerCrash$`.
 
 ```sh
-CAESIUM_ROBUSTNESS_RUN='^TestCore$' just tag="$CANDIDATE_SHA" robustness-test
+(
+set -eu
+test -z "$(git status --porcelain)"  # run from a clean candidate checkout
+CANDIDATE_SHA=$(git rev-parse HEAD)
+PLATFORM=$(just --evaluate platform)
+just tag="$CANDIDATE_SHA" build-release
+docker build --platform "$PLATFORM" \
+  --build-arg BUILDER_IMAGE="caesiumcloud/caesium-builder:${CANDIDATE_SHA}" \
+  --build-arg CAESIUM_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}" \
+  --target instrumented-server \
+  -t "caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
+  -f build/Dockerfile.robustness .
+CAESIUM_ROBUSTNESS_RUN='^TestCore$' \
+CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
+  just tag="$CANDIDATE_SHA" robustness-test
+)
 ```
 
 `scripts/robustness.sh` gives that selection a 70-minute runner timeout and
@@ -1373,9 +1469,21 @@ cancel race, response loss, stale generation, benching, quorum loss). The
 durable-event crash subtest is required only when
 `CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE` is set; without it the case is
 inconclusive, not a pass. A 2–1 split must show nonzero iptables drop counters
-before any minority result counts. Catalog rows stay `status: absent` until a
-live run of this command is recorded. No such run is recorded for the merged
-candidate `9dbde3eb`.
+before any minority result counts. Catalog rows remain `status: absent` with
+empty gates; G6 owns their registration and promotion. W6's B3 repair (#564) fixed
+terminal completion fencing and the live scenario's public-versus-durable task
+identity checks. Its final reviewed head `ee9f7541` passed all 12/12 `TestCore`
+subtests on an owned persistent three-member kind cluster; cancellation
+returned `409/terminal_run`, with a cancelled first run, successful replacement
+and no late task-success event. That proof predates #560's run-start changes.
+A fresh run on merged master `f6acf0ea188632e3054f36acfbef015f5e077067`,
+which includes #560, built release and instrumented images and passed all
+12/12 `TestCore` subtests on an owned persistent three-member kind cluster in
+299.68 s. Its raw log is local and ephemeral:
+`/tmp/caesium-w6-b3-current.isBpc5/robustness/robustness.test.log`; the durable
+summary is in [W6/N-1 #568](https://github.com/caesium-cloud/caesium/pull/568).
+This revalidates B3 on merged code. The `early-evidence` selector still runs
+`^TestOwnerCrash$`, and the core suite remains a local command.
 
 ### Coverage collection with provenance (distributed-testing W5/G2)
 
@@ -1399,7 +1507,60 @@ incomplete. A baseline is written only when the verdict is `pass`, and a
 baseline this script writes can be passed back with `--ratchet`. A killed
 server or a nonzero stop other than exit 143 is incomplete, not 0%. This is
 not a CI job. The collect that existed before review fix `7dcef7f0` is not
-evidence for that commit.
+evidence for that commit. A fresh image labelled with reviewed head `7dcef7f0`
+later produced `verdict: pass`, complete CLI/server/integration profiles and
+covered the apply→export write/read path (7.6% integration coverage). No
+browser profile was supplied and no package/diff ratchet was committed, so G2
+acceptance remains open.
+
+The later [G2 follow-up #570](https://github.com/caesium-cloud/caesium/pull/570)
+collected real Chromium evidence on `00ba7d99`
+(`/tmp/caesium-w6-g2-browser.IuzH9B`): both browser scenarios passed on their
+first attempt with no skips or flaky outcomes; CLI, server, integration and
+browser provenance were complete, and `all_surfaces` coverage was 9.0%.
+That collection failed the old percentage floors after already-merged source
+changes increased the denominator. The independently reviewed baseline refresh
+keeps or raises absolute floors, and replaying the retained profile against it
+passed. A historical collection on #570 head `57548a21` at
+`/tmp/caesium-w6-g2-final.5sormO` exited 0 with `verdict=pass` and the committed
+ratchet applied. Both real Chromium journeys passed on their first attempts;
+CLI, server, integration and browser profiles have complete matching
+candidate/image provenance. Integration is 7.6%, browser 8.1%, and their union
+is 9.0% (4,666/51,628 statements). The actual apply→export request/write/read
+path passed. These raw artifacts are local and ephemeral; the linked repair
+PR holds the durable summary. Subsequent review found eligibility and immutable-image gaps.
+Current candidate `74067f98` repairs those paths and passed 72 focused Python
+regressions plus shell syntax/ShellCheck checks. Review remains in progress;
+see live PR state. Fresh actual builder/collection at
+`/tmp/caesium-w6-round2-g2-collect.IMDFDt` exited 0: two first-attempt Chromium
+passes, complete matching provenance, 7.6% integration, 8.1% browser and 9.0%
+union coverage (4,666/51,628), with all 67 package floors applied. All runtime
+and builder-tool launches use immutable image IDs; Docker FROM uses a verified
+named digest reference, failing closed if it becomes unavailable.
+The actual apply→persisted alias lookup→manifest export path is covered.
+Exported YAML bytes were discarded, so no retained value-equality assertion
+is claimed. All 149 package manifests/480 source hashes and image-bound build
+contexts match. Missing audited executable profiles remain eligible. Exclusions
+now reflect no function body/literal, zero-statement profiles or Go build
+constraints; separate-module reagents changes are explicitly unmeasured and
+outside the root-module diff scope, not permanently incomplete. Requiring
+reagents coverage still fails when its profile is missing.
+Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
+`empty_diff=true`; zero uncovered is policy, not a live nonempty diff
+measurement. Eight critical-contract coverage gaps remain. Current CI run
+36243611300 passes all 37 executed jobs; the prior `609cca31` green run is
+historical. Review/approval and merge remain pending; G2 stays unchecked.
+
+The max-zero diff floor is explicit policy and is not ready for G6 promotion.
+A reproducible replay at master `f6acf0ea` took the last 60 first-parent commit
+diffs and evaluated each changed filename list against retained current
+integration/browser profiles, audited packages and source inventory. The
+prior `609cca31` policy failed 12 of 18 eligible samples (six passed).
+After the eligibility fixes, `74067f98` fails 11 of 18 (seven pass; none
+incomplete). This maps current coverage onto historical touched filenames;
+it is neither execution of historical source nor historical CI outcomes.
+Genuinely uncovered changed code still needs journeys before promotion.
+Local, ephemeral details: `/tmp/caesium-w6-round2-new-policy-replay.json`.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
@@ -1409,13 +1570,34 @@ dirty tree. `log` goes to stderr so a captured build status cannot look
 successful when `just` failed. Warm repetitions alternate between the two
 servers. Release images must be uninstrumented.
 
+Merged master `f6acf0ea` still refuses pre-#560 comparison bases, including
+W4 `45994929`: #566's guard requires all unrelated `internal/run/*_test.go`
+helpers to match, and #560 added/changed those helpers. It stops after building
+both images, before measurement, with no comparison/report. Run the command
+below from the reviewed #567 candidate, or after #567 merges. That pending PR
+fixes source isolation; its latest full run remains inconclusive, so neither
+merged-master execution nor E3 acceptance is claimed here.
+
 ```sh
 CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
 CAESIUM_PERF_ARTIFACTS="$(mktemp -d)" \
 CAESIUM_PERF_BASE_SHA="<base>" \
 CAESIUM_PERF_CANDIDATE_SHA="$(git rev-parse HEAD)" \
+CAESIUM_PERF_REPEATS=10 CAESIUM_PERF_BROWSER=1 \
   bash scripts/performance.sh
 ```
+
+W6's E3 repair (#566) measures the same benchmark source on both sides:
+`performance.sh` copies the candidate's two benchmark files into its temporary
+base worktree **after** building the release images, hashes them and the shared
+test helpers into a manifest, and uses `performance-benchmarks.sh` for one
+alternating Go sample per side per repeat. The comparator requires complete
+named benchmark rows and zero-exit evidence in every paired repeat, plus
+matching source/image/harness provenance. A base harness compile failure is
+reported separately from a measured base benchmark failure. Cleanup verifies
+the exact linked worktree and overlay before removing it. The command above
+enables browser measurements explicitly; the script default is
+`CAESIUM_PERF_BROWSER=0`.
 
 `scripts/compare-performance.py` exits 0 only when every metric is `faster` or
 `no_significant_difference`. Any inconclusive metric, undersampled series, or
@@ -1428,11 +1610,64 @@ not from a Python gzip of the files. Browser rows are keyed by metric, route
 and kind. Compare an already-written report without Docker:
 
 ```sh
-CAESIUM_PERF_ARTIFACTS=/tmp/perf bash scripts/performance.sh compare comparison.json
+CAESIUM_PERF_ARTIFACTS=/tmp/perf bash scripts/performance.sh compare
 ```
 
-No live two-image run is recorded for merged candidate `30250322`. This is not
-a CI job and not a calibrated SLO (E4 / Q2 / Q5).
+The prior E3 implementation head `30250322` failed its first live comparison:
+the base lacked the new benchmark functions and two browser series were
+inconclusive. A later ten-repeat run on repair head `87546de6` used matched
+uninstrumented images and complete paired benchmark samples, but returned
+`overall=inconclusive` (one noisy browser series and one slower warm workload).
+The merged repair head `08b8bd26` changed harness validation after that run.
+Follow-up [#567](https://github.com/caesium-cloud/caesium/pull/567) isolates
+each benchmark process to its side's Go-selected production files, one pinned
+test helper, and the two shared benchmark sources; it remains under CODEOWNER
+review. A full ten-repeat run on `b9c7bf17` against W4 base `45994929`
+completed all 20 paired benchmark samples and cold/warm workloads, but the
+base's first Chromium repeat logged `net::ERR_INTERNET_DISCONNECTED` and
+Playwright exited 1. The comparator returned `overall=fail` with
+`speed_compared=false`, correctly withholding a speed verdict.
+
+The bounded retry on `655c063f` completed exit 3 with
+`overall=inconclusive`, `speed_compared=true`; artifacts are
+`/tmp/caesium-w6-e3-diagnostics.egK8Ux`. All 20 paired benchmark samples,
+cold/warm workload correctness, and 20 first-attempt Chromium repeat sets
+passed (80 tests, no skips or flaky outcomes). Per-repeat Playwright JSON and
+diagnostics are retained separately. Forty-one metrics reported no significant
+difference; `browser.route_readiness_ms./jobs.live` was inconclusive because
+candidate CV 1.980 exceeded 0.3, with one 3,276 ms sample among ten. That sample's
+cause is unproved: it occurred in candidate repeat 2 at
+`2026-09-26T03:00:51.586Z`, and passing browser attempts retained no trace;
+per-repeat server logs were not saved before removal. Future investigation
+needs those logs and a request timeline. No outlier was removed or noise
+threshold changed. The current #567 head `253cca28` fixes a timer-dependent
+test fixture with an explicit `ns/op` metric: 18 focused tests and 400/400
+repeated fixture rows passed on Go 1.27.1 darwin/arm64, and a package-mode
+mutation still triggered `TestMain` exit 99 and failed the isolation test.
+This test-only change has no new full live comparison; the result above
+belongs to `655c063f`. Current-head CI run
+[36214372032](https://github.com/caesium-cloud/caesium/actions/runs/36214372032)
+succeeded, including `ci-ok`; CODEOWNER approval is required. E3 acceptance
+remains open pending conclusive repeatable measurement.
+This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
+
+### Checker-strength mutation validator (distributed-testing W6/C3)
+
+Run the standalone C3 validator on a clean, committed candidate:
+
+```sh
+bash scripts/validate-test-oracles.sh
+```
+
+It clones the candidate into a temporary isolated checkout, runs named model,
+history and robustness probes, then applies eight recorded known-bad patches
+one at a time. Each mutant must fail its named test with the expected oracle
+assertion; a compile error, timeout, resource failure, missing test or missing
+assertion marker cannot count as a successful rejection. Legal duplicate
+delivery and ambiguous response timeout histories must still pass on the
+candidate. The merged C3 head passed the candidate probes and all eight
+mutation rejections. Its ordinary Go/Python probes run in existing unit/config
+lanes; the full mutation script is not yet a CI job (G6 owns promotion).
 
 ## 5. Server env per lane, and the silent-drift rule
 
