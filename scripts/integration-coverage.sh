@@ -393,32 +393,28 @@ fi
 if [[ "$CMD" == "check" || "$CMD" == "merge" ]]; then
   if [[ "$CMD" == "merge" ]]; then
     mkdir -p "$PROFILES"
-    if gocoverdir_complete "$RAW/cli" && textfmt_dir "$RAW/cli" "$PROFILES/cli.out"; then
-      write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
-EOF
-    else
-      write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
-EOF
+    # Preserve the source records exactly. Raw-file existence says nothing
+    # about candidate identity, process shutdown, or verified image origin.
+    rm -f "$PROFILES/cli.out" "$PROFILES/server.out" "$PROFILES/integration.out" "$PROFILES/integration.provenance.json" "$AUDIT/merge-provenance.json"
+    rm -rf "$RAW/integration"
+    mkdir -p "$RAW/integration"
+    preflight_rc=0
+    python3 "$ROOT/scripts/merge-coverage-provenance.py" \
+      --profiles-dir "$PROFILES" --candidate-sha "$CANDIDATE_SHA" \
+      --output "$AUDIT/merge-provenance.json" || preflight_rc=$?
+    if [[ "$preflight_rc" -ne 0 ]]; then
+      placeholder_report "$ARTIFACTS/report.json" "merge input provenance failed validation"
+      exit "$preflight_rc"
     fi
-    if gocoverdir_complete "$RAW/server" && textfmt_dir "$RAW/server" "$PROFILES/server.out"; then
-      write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"merge"}
-EOF
-    else
-      write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"merge"}
-EOF
+    if ! gocoverdir_complete "$RAW/cli" || ! gocoverdir_complete "$RAW/server"; then
+      placeholder_report "$ARTIFACTS/report.json" "merge raw CLI/server profile is incomplete"
+      exit 2
     fi
-    if gocoverdir_complete "$RAW/cli" && gocoverdir_complete "$RAW/server"; then
-      if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server" \
-        && textfmt_dir "$RAW/integration" "$PROFILES/integration.out"; then
-        write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"merge"}
-EOF
-      fi
-    fi
+    textfmt_dir "$RAW/cli" "$PROFILES/cli.out"
+    textfmt_dir "$RAW/server" "$PROFILES/server.out"
+    merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"
+    textfmt_dir "$RAW/integration" "$PROFILES/integration.out"
+    cp "$AUDIT/merge-provenance.json" "$PROFILES/integration.provenance.json"
   fi
   run_checker
   exit $?

@@ -656,6 +656,114 @@ class ContractGapTests(unittest.TestCase):
         self.assertEqual(statuses, {"incomplete"})
 
 
+class CollectorMergeProvenanceTests(unittest.TestCase):
+    """Drive real merge-mode shell wiring with a deterministic covdata stand-in."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.art = Path(self.tmp.name)
+        self.profiles = self.art / "profiles"
+        self.profiles.mkdir()
+        self.originals = {}
+        for source in ("cli", "server"):
+            raw = self.art / "raw" / source
+            raw.mkdir(parents=True)
+            (raw / "covmeta.fake").write_text("meta")
+            (raw / "covcounters.fake").write_text("counters")
+            self.originals[source] = provenance(
+                source, kind="gocoverdir", verified=True,
+                image_provenance="built-by-this-run", image_id="sha256:" + "c" * 64,
+                exit_code=0, stop_rc=0, signal="SIGTERM", oom_killed=False,
+            )
+            write_source(self.profiles, source, prov=self.originals[source])
+        (self.art / "fake-cli.out").write_text(write_to_read_cli())
+        (self.art / "fake-server.out").write_text(write_to_read_server())
+        fake = self.art / "fake-container"
+        fake.write_text('''#!/usr/bin/env python3
+import os, pathlib, shutil, sys
+root = pathlib.Path(os.environ["FAKE_COV_ROOT"])
+with (root / "container-calls").open("a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+mounts = {}
+for i, value in enumerate(args):
+    if value == "-v":
+        host, inside, *rest = args[i + 1].split(":")
+        mounts[inside] = pathlib.Path(host)
+if "textfmt" in args:
+    out = next(value[3:] for value in args if value.startswith("-o="))
+    dest = mounts["/out"] / pathlib.Path(out).name
+    source = mounts["/in"].name
+    if source == "integration":
+        cli = (root / "fake-cli.out").read_text().splitlines()
+        server = (root / "fake-server.out").read_text().splitlines()
+        dest.write_text("\\n".join(cli + server[1:]) + "\\n")
+    else:
+        shutil.copyfile(root / ("fake-" + source + ".out"), dest)
+elif "merge" in args:
+    (mounts["/out"] / "covmeta.fake").write_text("meta")
+    (mounts["/out"] / "covcounters.fake").write_text("counters")
+''')
+        fake.chmod(0o755)
+        self.env = collector_test_env(self.art)
+        self.env["CAESIUM_CONTAINER_CLI"] = str(fake)
+        self.env["FAKE_COV_ROOT"] = str(self.art)
+
+    def merge(self):
+        return subprocess.run(
+            ["bash", str(COLLECTOR), "merge"],
+            capture_output=True, text=True, env=self.env, cwd=str(ROOT),
+        )
+
+    def test_complete_originals_are_preserved_and_named_in_merged_provenance(self):
+        originals = {
+            source: (self.profiles / f"{source}.provenance.json").read_bytes()
+            for source in ("cli", "server")
+        }
+        result = self.merge()
+        self.assertEqual(result.returncode, 0, output(result))
+        for source, content in originals.items():
+            self.assertEqual((self.profiles / f"{source}.provenance.json").read_bytes(), content)
+        merged = json.loads((self.profiles / "integration.provenance.json").read_text())
+        self.assertEqual(merged["source_provenance"], self.originals)
+        self.assertEqual(merged["image_id"], self.originals["cli"]["image_id"])
+
+    def test_foreign_killed_unverified_or_missing_originals_never_convert_or_pass(self):
+        cases = {
+            "foreign": {"candidate_sha": "b" * 40},
+            "killed": {"complete": False, "killed": True, "signal": "SIGKILL"},
+            "unverified": {"verified": False, "image_provenance": "supplied/unverified"},
+            "review_repro": {"candidate_sha": "b" * 40, "complete": False, "killed": True, "verified": False, "image_provenance": "supplied/unverified"},
+            "missing": None,
+        }
+        for case, changes in cases.items():
+            with self.subTest(case=case):
+                source_path = self.profiles / "cli.provenance.json"
+                if changes is None:
+                    source_path.unlink(missing_ok=True)
+                    original = None
+                else:
+                    source_path.write_text(json.dumps({**self.originals["cli"], **changes}))
+                    original = source_path.read_bytes()
+                write_source(self.profiles, "cli", write_to_read_cli())
+                write_source(self.profiles, "server", write_to_read_server())
+                write_source(self.profiles, "integration", write_to_read_server(), provenance("integration"))
+                result = self.merge()
+                self.assertNotEqual(result.returncode, 0, output(result))
+                report = json.loads((self.art / "report.json").read_text())
+                self.assertNotEqual(report["verdict"], "pass")
+                self.assertFalse((self.art / "container-calls").exists(), "conversion must follow provenance validation")
+                self.assertFalse((self.profiles / "integration.provenance.json").exists())
+                self.assertFalse((self.profiles / "integration.out").exists())
+                self.assertFalse((self.profiles / "cli.out").exists())
+                self.assertFalse((self.profiles / "server.out").exists())
+                if original is None:
+                    self.assertFalse(source_path.exists())
+                else:
+                    self.assertEqual(source_path.read_bytes(), original)
+
+
 class DockerfileAndCollectorTests(unittest.TestCase):
     def test_committed_ratchet_has_measured_source_and_package_diff_floors(self):
         ratchet = json.loads((ROOT / "scripts/coverage-ratchet.json").read_text())
