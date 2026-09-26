@@ -1408,13 +1408,19 @@ Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/
 head `05ae4644`, removes the bundled runtime copy and has the same source tree
 as diagnostic-only `b45adfdc`. Its unchanged diagnostic code passed 10 focused
 Python tests, all 331 scripts tests, eight guard-removal controls and containerized
-integration/race readback regressions (1.070 s). Current CI is pending; the
-37-job green run at `b8498ac8` included the removed runtime copy and is historical.
+integration/race readback regressions (1.070 s). Its current-head CI passed all
+37 executed jobs; the dependency hold remains. The earlier `b8498ac8` green
+run included the removed runtime copy and is historical.
 Review of separate [#571](https://github.com/caesium-cloud/caesium/pull/571) is
-in progress. The `9d86c90c` real Kubernetes log scenario (10.16 s), package race
-checks (3.964 s) and 37 passing CI jobs describe that exact head; three new
-readiness/setup-budget findings still need resolution. Hold F2 until #571
-merges, then incorporate master and revalidate the affected Helm shard-2 lane.
+in progress; see live PR state. Candidate `82ca5905` bounds setup to 10 s and
+handles empty nonterminal streams plus earlier kubelet readiness responses.
+Containerized package race/vet passed (6.017 s), and the unchanged real
+Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.89 s).
+CI run 36242369660 passed all production/integration checks, but `ui-e2e`
+failed on a jobs-list contrast failure, so `ci-ok` failed too.
+That UI failure is under investigation separately; this PR is not merge-ready.
+Hold F2 until #571 merges, then incorporate master and revalidate the affected
+Helm shard-2 lane.
 CODEOWNER approval is required for both PRs. No new lifecycle qualification
 is claimed; the linked PR holds the durable failure-evidence summary.
 The unresolved
@@ -1514,34 +1520,38 @@ CLI, server, integration and browser profiles have complete matching
 candidate/image provenance. Integration is 7.6%, browser 8.1%, and their union
 is 9.0% (4,666/51,628 statements). The actual apply→export request/write/read
 path passed. These raw artifacts are local and ephemeral; the linked repair
-PR holds the durable summary. Subsequent review found eligibility gaps for missing profiles. Current head
-`609cca31` fixes all six review threads and those additional gaps, with
-65 focused regressions and independent reviews passing. Its fresh collection
-at `/tmp/caesium-w6-g2-review-final.zkH53x` exited 0: two first-attempt Chromium
+PR holds the durable summary. Subsequent review found eligibility and immutable-image gaps.
+Current candidate `74067f98` repairs those paths and passed 72 focused Python
+regressions plus shell syntax/ShellCheck checks. Review remains in progress;
+see live PR state. Fresh actual builder/collection at
+`/tmp/caesium-w6-round2-g2-collect.IMDFDt` exited 0: two first-attempt Chromium
 passes, complete matching provenance, 7.6% integration, 8.1% browser and 9.0%
-union coverage (4,666/51,628), with all 67 package floors applied. The actual
-apply→persisted alias lookup→manifest export path is covered. Exported YAML
-bytes were discarded, so no retained value-equality assertion is claimed.
-The builder executed the source-only AST helper; all 149 package manifests
-and 480 source hashes match. Missing audited files remain eligible, and
-statement-free exceptions require a complete bound inventory plus matching
-source. Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
-`empty_diff=true`; zero uncovered is explicit policy, not a live nonempty diff
-measurement. Eight critical-contract coverage gaps remain. The 37-job green
-CI run and collection above describe `609cca31`; round-two findings on
-uninstrumentable/build-excluded files and mutable-image launches are being
-addressed, with fresh candidate verification pending. G2 stays unchecked.
+union coverage (4,666/51,628), with all 67 package floors applied. All runtime
+and builder-tool launches use immutable image IDs; Docker FROM uses a verified
+named digest reference, failing closed if it becomes unavailable.
+The actual apply→persisted alias lookup→manifest export path is covered.
+Exported YAML bytes were discarded, so no retained value-equality assertion
+is claimed. All 149 package manifests/480 source hashes and image-bound build
+contexts match. Missing audited executable profiles remain eligible. Exclusions
+now reflect no function body/literal, zero-statement profiles or Go build
+constraints; separate-module reagents changes are explicitly unmeasured and
+outside the root-module diff scope, not permanently incomplete. Requiring
+reagents coverage still fails when its profile is missing.
+Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
+`empty_diff=true`; zero uncovered is policy, not a live nonempty diff
+measurement. Eight critical-contract coverage gaps remain. Current CI is
+pending; the prior `609cca31` green run is historical. G2 stays unchecked.
 
 The max-zero diff floor is explicit policy and is not ready for G6 promotion.
 A reproducible replay at master `f6acf0ea` took the last 60 first-parent commit
-diffs and evaluated each changed filename list against the retained `609cca31`
-integration/browser profiles, audited packages and source inventory. Eighteen
-diffs contained eligible files: 12 failed the policy and six passed. This
-replays current profile coverage over historical touched filenames; it is
-neither execution of historical source nor a historical CI failure rate.
-Uninstrumentable-file fixes remove false exclusions/failures; genuinely
-uncovered changed code still needs journeys before promotion. Local, ephemeral
-replay details: `/tmp/caesium-w6-round2-policy-replay.json`.
+diffs and evaluated each changed filename list against retained current
+integration/browser profiles, audited packages and source inventory. The
+prior `609cca31` policy failed 12 of 18 eligible samples (six passed).
+After the eligibility fixes, `74067f98` fails 11 of 18 (seven pass; none
+incomplete). This maps current coverage onto historical touched filenames;
+it is neither execution of historical source nor historical CI outcomes.
+Genuinely uncovered changed code still needs journeys before promotion.
+Local, ephemeral details: `/tmp/caesium-w6-round2-new-policy-replay.json`.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
