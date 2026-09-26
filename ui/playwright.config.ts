@@ -33,7 +33,7 @@ export default defineConfig({
   projects: [
     {
       name: "default",
-      testIgnore: ["**/auth/**/*.spec.ts", "**/network-recovery.spec.ts"],
+      testIgnore: ["**/auth/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts"],
     },
     {
       // Run offline/reconnect tests last, in a separate worker/browser. On
@@ -45,6 +45,17 @@ export default defineConfig({
     {
       name: "auth",
       testMatch: "**/auth/**/*.spec.ts",
+    },
+    {
+      // Owner-crash console journey. CI selects network-recovery (which pulls
+      // default) and the auth project; neither matches this file. Selecting
+      // this project without the robustness kubeconfig fails the test — it
+      // must not skip. No dependency on default, so a selection does not run
+      // the ordinary browser suite against a cluster URL.
+      name: "cluster-recovery",
+      testMatch: "**/cluster-recovery.spec.ts",
+      timeout: 600_000,
+      retries: 0,
     },
   ],
 });
