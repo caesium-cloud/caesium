@@ -296,6 +296,6 @@
     "basis": "policy",
     "scope": "audited-statement-files",
     "coverage_source": "integration+browser",
-    "reason": "Require coverage of changed audited source files; 0 is explicit policy, not a measurement from the empty G2 diff. Missing profiles remain eligible. Only a complete candidate/image-bound Go AST inventory plus matching source can exempt statement-free declarations; harness/test files outside the audit are reported as excluded."
+    "reason": "Require coverage of changed audited source files; 0 is explicit policy, not a measurement from the empty G2 diff. Missing executable profiles remain eligible. Zero-statement profile files and complete candidate/image-bound Go AST inventory files with no function body or excluded by the image build context are reported separately; harness/test files outside the audit and unmeasured reagents changes are outside this root-module policy."
   }
 }

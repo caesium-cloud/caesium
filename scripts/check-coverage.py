@@ -833,29 +833,165 @@ def contract_gaps(integration, *, repo_root):
     return gaps
 
 
-def statement_free_file(path, inventory, *, repo_root=None):
+def source_record_matches(path, inventory, repo_root):
     record = (inventory or {}).get("files", {}).get(path) or {}
-    attested = record.get("parsed") is True and all(
-        record.get(field) is False for field in ("has_function_body", "has_call", "has_var_initializer")
-    )
-    if not attested:
-        return False
     source = _repo_file(path, repo_root)
-    if source is None or not source.is_file():
-        return False
+    if record.get("parsed") is not True or source is None or not source.is_file():
+        return None
     try:
         raw = source.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != record.get("source_sha256"):
-            return False
-        # Independent conservative check: even a relabelled AST record cannot
-        # exempt a real function/literal or package initializer. Strip comments
-        # and literals before checking tokens; unknown source remains eligible.
-        code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|`[^`]*`|\'(?:\\.|[^\'\\])*\'', " ", raw.decode(), flags=re.S)
+        return raw.decode() if hashlib.sha256(raw).hexdigest() == record.get("source_sha256") else None
     except (OSError, UnicodeError):
+        return None
+
+
+def source_has_function_body(text):
+    """Independent body guard; calls, vars and interface signatures aren't bodies."""
+    code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|`[^`]*`|\'(?:\\.|[^\'\\])*\'', " ", text, flags=re.S)
+    tokens = re.findall(r"\n|\w+|[^\s]", code)
+    def balanced(at):
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        stack = [pairs[tokens[at]]]
+        at += 1
+        while at < len(tokens) and stack:
+            token = tokens[at]
+            if token in pairs:
+                stack.append(pairs[token])
+            elif token in pairs.values() and token != stack.pop():
+                return len(tokens)
+            at += 1
+        return at
+    for index, token in enumerate(tokens):
+        if token != "func":
+            continue
+        at = index + 1
+        while at < len(tokens) and tokens[at] == "\n":
+            at += 1
+        if at < len(tokens) and re.fullmatch(r"\w+", tokens[at]):
+            at += 1
+            if at < len(tokens) and tokens[at] == "[":
+                at = balanced(at)
+        if at >= len(tokens) or tokens[at] != "(":
+            continue
+        at = balanced(at)
+        if at + 1 < len(tokens) and re.fullmatch(r"\w+", tokens[at]) and tokens[at + 1] == "(":
+            at = balanced(at + 1)
+        while at < len(tokens):
+            token = tokens[at]
+            if token in ("\n", ";", "}", ")", ",", "="):
+                break
+            if token == "{":
+                return True
+            if token in ("struct", "interface") and at + 1 < len(tokens) and tokens[at + 1] == "{":
+                at = balanced(at + 1)
+            elif token in ("(", "["):
+                at = balanced(at)
+            else:
+                at += 1
+    return False
+
+
+def source_build_matches(path, text, context):
+    """Independently check filename and Go build expressions before exclusion."""
+    goos, goarch = context["goos"], context["goarch"]
+    aliases = {"android": "linux", "illumos": "solaris", "ios": "darwin"}
+    os_tags = {goos, aliases.get(goos, goos)}
+    tags = os_tags | {goarch, context["compiler"]} | set(context["build_tags"] + context["release_tags"] + context["tool_tags"])
+    if context["cgo_enabled"]:
+        tags.add("cgo")
+    if goos in {"aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos", "ios", "linux", "netbsd", "openbsd", "solaris"}:
+        tags.add("unix")
+    name = path.rsplit("/", 1)[-1]
+    if name.startswith((".", "_")):
         return False
-    if not re.match(r"\s*package\s+\w+\b", code):
+    known_os = set("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris wasip1 windows zos".split())
+    known_arch = set("386 amd64 amd64p32 arm arm64 loong64 mips mipsle mips64 mips64le ppc64 ppc64le riscv riscv64 s390x sparc sparc64 wasm".split())
+    suffix = name[:-3].split("_")[1:]
+    if suffix and suffix[-1] in known_arch:
+        if suffix[-1] != goarch:
+            return False
+        suffix = suffix[:-1]
+    if suffix and suffix[-1] in known_os and suffix[-1] not in os_tags:
         return False
-    return not re.search(r"\b(func|var)\b|\b(?!package\b|import\b|type\b|const\b)\w+\s*\(", code)
+    # Block comments cannot carry Go build directives. Keep their line breaks
+    # so a directive-looking comment cannot authorize forged build exclusion.
+    header_source = re.sub(r"/\*.*?\*/", lambda match: "\n" * match.group().count("\n"), text, flags=re.S)
+    # Consume both branches regardless of Boolean short-circuiting.
+    package = re.search(r"^\s*package\b", header_source, flags=re.M)
+    header = header_source[:package.start()] if package else header_source
+    expressions = re.findall(r"^//go:build\s+(.+)$", header, flags=re.M)
+    if len(expressions) > 1:
+        return None
+    if expressions:
+        expr = expressions[0]
+        tokens = re.findall(r"&&|\|\||!|\(|\)|[\w.]+", expr)
+        if "".join(tokens) != re.sub(r"\s+", "", expr):
+            return None
+        at = 0
+        def unary():
+            nonlocal at
+            if at >= len(tokens):
+                raise ValueError("missing build operand")
+            token = tokens[at]; at += 1
+            if token == "!":
+                return not unary()
+            if token == "(":
+                value = either()
+                if at >= len(tokens) or tokens[at] != ")":
+                    raise ValueError("unclosed build expression")
+                at += 1
+                return value
+            if not re.fullmatch(r"[\w.]+", token):
+                raise ValueError("invalid build tag")
+            return token in tags
+        def both():
+            nonlocal at
+            value = unary()
+            while at < len(tokens) and tokens[at] == "&&":
+                at += 1
+                right = unary(); value = value and right
+            return value
+        def either():
+            nonlocal at
+            value = both()
+            while at < len(tokens) and tokens[at] == "||":
+                at += 1
+                right = both(); value = value or right
+            return value
+        try:
+            value = either()
+            return value if at == len(tokens) else None
+        except ValueError:
+            return None
+    for expression in re.findall(r"^//\s*\+build\s+(.+)$", header, flags=re.M):
+        alternatives = []
+        for option in expression.split():
+            operands = option.split(",")
+            if any(not re.fullmatch(r"!?[\w.]+", operand) for operand in operands):
+                return None
+            alternatives.append(all((operand[1:] not in tags) if operand.startswith("!") else operand in tags for operand in operands))
+        if not any(alternatives):
+            return False
+    return True
+
+
+def statement_free_file(path, inventory, *, repo_root=None):
+    record = (inventory or {}).get("files", {}).get(path) or {}
+    text = source_record_matches(path, inventory, repo_root)
+    return text is not None and record.get("has_function_body") is False and not source_has_function_body(text)
+
+
+def diff_exclusion_reason(path, files, inventory, *, repo_root=None):
+    stats = files.get(path)
+    if stats is not None and stats["total"] == 0:
+        return "zero-statements"
+    record = (inventory or {}).get("files", {}).get(path) or {}
+    text = source_record_matches(path, inventory, repo_root)
+    if text is not None and record.get("build_matched") is False and source_build_matches(path, text, inventory["build_context"]) is False:
+        return "build-excluded"
+    if statement_free_file(path, inventory, repo_root=repo_root):
+        return "no-function-body"
+    return None
 
 
 def validate_source_inventory(inventory, *, candidate_sha, image_records, audited_packages, repo_root, issues):
@@ -871,6 +1007,27 @@ def validate_source_inventory(inventory, *, candidate_sha, image_records, audite
         not re.fullmatch(r"sha256:[0-9a-f]{64}", str(inventory.get("image_id") or "")),
     )):
         issues.append(_fail("source-inventory", "source inventory has foreign/schema candidate, image, or coverpkg identity", "diff"))
+        return None
+    build_context = inventory.get("build_context")
+    contexts = []
+    for record in image_records:
+        if "source_provenance" in record:
+            parts = record["source_provenance"]
+            if not isinstance(parts, dict) or not parts or any(not isinstance(part, dict) for part in parts.values()):
+                contexts.append(None)
+            else:
+                contexts.extend(part.get("build_context") for part in parts.values())
+        else:
+            contexts.append(record.get("build_context"))
+    if not isinstance(build_context, dict) or any((
+        not re.fullmatch(r"[a-z0-9]+", str(build_context.get("goos") or "")),
+        not re.fullmatch(r"[a-z0-9]+", str(build_context.get("goarch") or "")),
+        build_context.get("build_tags") != [], build_context.get("cgo_enabled") is not True,
+        build_context.get("compiler") != "gc",
+        any(not isinstance(build_context.get(field), list) or any(not isinstance(tag, str) for tag in build_context.get(field, [])) for field in ("release_tags", "tool_tags")),
+        not contexts or any(context != build_context for context in contexts),
+    )):
+        issues.append(_fail("source-inventory", "source inventory build context differs from the collected image", "diff"))
         return None
     files = inventory.get("files")
     if not isinstance(files, dict) or not files:
@@ -905,7 +1062,7 @@ def validate_source_inventory(inventory, *, candidate_sha, image_records, audite
         if not isinstance(record, dict) or any((
             normalize_changed_path(path) != path, package_of(path) not in (audited_packages or set()),
             record.get("parsed") is not True,
-            any(type(record.get(field)) is not bool for field in ("has_function_body", "has_call", "has_var_initializer")),
+            any(type(record.get(field)) is not bool for field in ("has_function_body", "has_call", "has_var_initializer", "build_matched")),
             not re.fullmatch(r"[0-9a-f]{64}", str(record.get("source_sha256") or "")),
         )):
             issues.append(_fail("source-inventory", f"source inventory has an invalid parsed file: {path}", "diff"))
@@ -931,7 +1088,7 @@ def uncovered_changed_paths(integration, changed_paths, *, audited_packages=None
         if audited_packages is not None:
             if package_of(normalized) not in audited_packages:
                 continue
-            if (not stats or stats["total"] <= 0) and statement_free_file(normalized, source_inventory, repo_root=repo_root):
+            if diff_exclusion_reason(normalized, files, source_inventory, repo_root=repo_root):
                 continue
         if stats is None or stats["covered"] == 0:
             out.append(normalized)
@@ -1207,7 +1364,7 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
             issues.append(_fail("coverpkg-audit", f"profile packages are missing from the coverpkg audit: {unlisted}", "diff"))
     eligible = sorted(path for path in normalized if audited_packages is not None
                       and package_of(path) in audited_packages
-                      and (files.get(path, {}).get("total", 0) > 0 or not statement_free_file(path, source_inventory, repo_root=repo_root)))
+                      and not diff_exclusion_reason(path, files, source_inventory, repo_root=repo_root))
     diff_observation = {
         "changed_path_count": len(changed_paths or []), "eligible_path_count": len(eligible),
         "eligible_paths": eligible, "excluded_paths": sorted(normalized - set(eligible)),
@@ -1215,10 +1372,15 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         "coverage_source": "integration+browser" if browser.get("status") == "complete" else "integration",
         "empty_diff": changed_paths == [], "policy": diff_policy or None,
         "source_inventory_supplied": source_inventory is not None,
-        "statement_free_paths": sorted(path for path in normalized - set(eligible) if statement_free_file(path, source_inventory, repo_root=repo_root)),
+        "statement_free_paths": sorted(path for path in normalized - set(eligible) if diff_exclusion_reason(path, files, source_inventory, repo_root=repo_root) == "no-function-body"),
+        "zero_statement_paths": sorted(path for path in normalized - set(eligible) if diff_exclusion_reason(path, files, source_inventory, repo_root=repo_root) == "zero-statements"),
+        "build_excluded_paths": sorted(path for path in normalized - set(eligible) if diff_exclusion_reason(path, files, source_inventory, repo_root=repo_root) == "build-excluded"),
+        "separate_module": {"paths": sorted(reagents_changed), "status": "unmeasured" if reagents.get("status") != "complete" else "measured-separately", "in_root_diff_scope": False},
         "status": "complete" if changed_paths is not None and audited_packages is not None and merged_with_browser.get("status") == "complete" else "incomplete",
     }
-    if reagents_changed and reagents.get("status") != "complete":
+    if reagents_changed and not require_reagents and reagents.get("status") in ("absent", "incomplete"):
+        reagents["status"] = "unmeasured"
+    if reagents_changed and require_reagents and reagents.get("status") != "complete":
         issues.append(_incomplete(
             "reagents",
             "reagents paths changed but no reagents coverage profile was collected",

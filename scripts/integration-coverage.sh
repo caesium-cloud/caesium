@@ -78,6 +78,7 @@ case "$IMAGE" in
     ;;
 esac
 BUILDER_IMAGE="${CAESIUM_BUILDER_IMAGE:-caesiumcloud/caesium-builder:latest}"
+BUILDER_RUN_IMAGE="$BUILDER_IMAGE"
 
 PODMAN="${CAESIUM_PODMAN:-false}"
 if [[ "$PODMAN" == "true" ]]; then
@@ -149,7 +150,7 @@ textfmt_dir() {
     -v "$src:/in:ro" \
     -v "$(dirname "$dest"):/out" \
     -w / \
-    "$BUILDER_IMAGE" \
+    "$BUILDER_RUN_IMAGE" \
     go tool covdata textfmt -i=/in -o="/out/$(basename "$dest")"
 }
 
@@ -184,7 +185,7 @@ merge_gocoverdirs() {
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
     "${mount_flags[@]}" \
     -v "$dest:/out" \
-    "$BUILDER_IMAGE" \
+    "$BUILDER_RUN_IMAGE" \
     go tool covdata merge -i="$joined" -o=/out
 }
 
@@ -332,22 +333,31 @@ require_clean_checkout() {
 }
 
 image_revision() {
-  "$CONTAINER_CLI" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE" 2>/dev/null || true
+  "$CONTAINER_CLI" image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${1:-$IMAGE}" 2>/dev/null || true
+}
+
+resolve_builder_image() {
+  "$CONTAINER_CLI" image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 \
+    || die "builder image $BUILDER_IMAGE is required for go tool covdata"
+  BUILDER_RUN_IMAGE="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_IMAGE")"
+  [[ "$BUILDER_RUN_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || die "builder image has no immutable identity"
 }
 
 build_image() {
   require_cmd "$CONTAINER_CLI"
   require_clean_checkout
-  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_IMAGE)"
+  resolve_builder_image
+  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_RUN_IMAGE)"
   "$CONTAINER_CLI" build --platform "$PLATFORM" \
-    --build-arg BUILDER_IMAGE="$BUILDER_IMAGE" \
+    --build-arg BUILDER_IMAGE="$BUILDER_RUN_IMAGE" \
     --build-arg CAESIUM_REVISION="$CANDIDATE_SHA" \
     --target coverage \
     -t "$IMAGE" \
     -f "$DOCKERFILE" \
     "$ROOT"
   local rev
-  rev="$(image_revision)"
+  IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
+  rev="$(image_revision "$IMAGE_ID")"
   [[ "$rev" == "$CANDIDATE_SHA" ]] \
     || die "coverage image org.opencontainers.image.revision='$rev' does not match CANDIDATE_SHA $CANDIDATE_SHA"
   IMAGE_PROVENANCE="built-by-this-run"
@@ -357,8 +367,11 @@ build_image() {
 extract_audit() {
   require_cmd "$CONTAINER_CLI"
   local cid
-  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE")"
-  "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/" || true
+  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE_ID")"
+  if ! "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/"; then
+    "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+    die "cannot extract the pinned coverage image audit"
+  fi
   "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
 }
 
@@ -446,15 +459,20 @@ rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
 if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
   "$CONTAINER_CLI" image inspect "$IMAGE" >/dev/null 2>&1 \
     || die "CAESIUM_COVERAGE_SKIP_BUILD=1 but image $IMAGE is missing"
+  IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
   IMAGE_PROVENANCE="supplied/unverified"
   IMAGE_VERIFIED=false
+  resolve_builder_image
   log "SKIP_BUILD: $IMAGE is supplied/unverified and is not a provenanced match of $CANDIDATE_SHA"
 else
   build_image
 fi
-"$CONTAINER_CLI" image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 \
-  || die "builder image $BUILDER_IMAGE is required for go tool covdata"
-
+# Runtime and builder identities were pinned before the image build; retain
+# them for audit extraction and every subsequent collection process.
+[[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "coverage image has no immutable identity"
+IMAGE_GOOS="$("$CONTAINER_CLI" image inspect --format '{{.Os}}' "$IMAGE_ID")"
+IMAGE_GOARCH="$("$CONTAINER_CLI" image inspect --format '{{.Architecture}}' "$IMAGE_ID")"
+[[ -n "$IMAGE_GOOS" && -n "$IMAGE_GOARCH" ]] || die "coverage image has no target build context"
 trap cleanup EXIT
 
 "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
@@ -465,14 +483,16 @@ trap cleanup EXIT
 extract_audit
 # Eligibility is independent of observed counters. Map the image's audited
 # root-module packages to source directories without loading imports/embeds.
-# Parse all non-test Go source
-# files in the builder; missing profiles may only exempt an inventory-proven
-# file with no function body, call, or package variable initializer.
+# Parse all non-test Go source in the builder, including build-excluded files.
+# Missing profiles may exempt only proven files with no function body or files
+# excluded by the image's target build context.
+rm -f "$AUDIT/source-inventory.json"
 "$CONTAINER_CLI" run --rm -i --platform "$PLATFORM" \
   -v "$ROOT:/source:ro" -v "$AUDIT:/audit" -w /source \
   -e INVENTORY_SHA="$CANDIDATE_SHA" \
-  -e INVENTORY_IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")" \
-  "$BUILDER_IMAGE" sh -s <<'INVENTORY'
+  -e INVENTORY_IMAGE_ID="$IMAGE_ID" \
+  -e INVENTORY_GOOS="$IMAGE_GOOS" -e INVENTORY_GOARCH="$IMAGE_GOARCH" \
+  "$BUILDER_RUN_IMAGE" sh -s <<'INVENTORY'
 set -eu
 cat >/tmp/coverage-source-inventory.go <<'GO'
 package main
@@ -482,6 +502,7 @@ import (
     "encoding/hex"
     "encoding/json"
     "go/ast"
+    "go/build"
     "go/parser"
     "go/token"
     "os"
@@ -499,6 +520,16 @@ func main() {
     files := map[string]any{}
     packageFiles := map[string][]string{}
     const module = "github.com/caesium-cloud/caesium"
+    target := build.Default
+    target.GOOS, target.GOARCH = os.Getenv("INVENTORY_GOOS"), os.Getenv("INVENTORY_GOARCH")
+    if target.GOOS == "" || target.GOARCH == "" { panic("missing image build context") }
+    target.CgoEnabled = true
+    target.BuildTags = []string{} // Dockerfile.coverage adds no build tags.
+    buildContext := map[string]any{
+        "goos": target.GOOS, "goarch": target.GOARCH, "build_tags": target.BuildTags,
+        "cgo_enabled": target.CgoEnabled, "compiler": target.Compiler,
+        "release_tags": target.ReleaseTags, "tool_tags": target.ToolTags,
+    }
     for _, pkg := range packages {
         if pkg != module && !strings.HasPrefix(pkg, module+"/") { panic("foreign audited package: "+pkg) }
         relative := strings.TrimPrefix(strings.TrimPrefix(pkg, module), "/")
@@ -523,6 +554,8 @@ func main() {
             if !strings.HasPrefix(resolved, "/source/") { panic("audited source escapes source root: "+path) }
             source, err := os.ReadFile(path)
             if err != nil { panic(err) }
+            matched, err := target.MatchFile(directory, name)
+            if err != nil { panic(err) }
             tree, err := parser.ParseFile(token.NewFileSet(), path, source, parser.AllErrors)
             if err != nil { panic(err) }
             body, call, initializer := false, false, false
@@ -542,7 +575,7 @@ func main() {
             })
             digest := sha256.Sum256(source)
             files[pkg+"/"+name] = map[string]any{
-                "parsed": true, "has_function_body": body, "has_call": call,
+                "parsed": true, "build_matched": matched, "has_function_body": body, "has_call": call,
                 "has_var_initializer": initializer, "source_sha256": hex.EncodeToString(digest[:]),
             }
         }
@@ -555,7 +588,7 @@ func main() {
     auditDigest := sha256.Sum256([]byte(strings.Join(packages, "\n")+"\n"))
     record := map[string]any{
         "schema_version": 1, "kind": "go-ast-source-inventory", "parser": "go/parser",
-        "complete": true, "packages": packageFiles,
+        "complete": true, "packages": packageFiles, "build_context": buildContext,
         "candidate_sha": os.Getenv("INVENTORY_SHA"), "image_id": os.Getenv("INVENTORY_IMAGE_ID"),
         "coverpkg_sha256": hex.EncodeToString(auditDigest[:]), "files": files,
     }
@@ -573,7 +606,7 @@ write_fixture
 # avoids UID 10001 vs host-root permission misses on Docker Desktop binds.
 chmod 0777 "$RAW/cli" "$RAW/server"
 
-IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")"
+BUILD_CONTEXT="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["build_context"]))' "$AUDIT/source-inventory.json")"
 
 log "starting coverage server $SERVER_NAME on network $NETWORK (no host port)"
 "$CONTAINER_CLI" run -d \
@@ -587,7 +620,7 @@ log "starting coverage server $SERVER_NAME on network $NETWORK (no host port)"
   -e CAESIUM_LOG_LEVEL=info \
   -e CAESIUM_AUTH_MODE=none \
   -v "$RAW/server:/var/lib/caesium/coverage" \
-  "$IMAGE" start >/dev/null
+  "$IMAGE_ID" start >/dev/null
 
 healthy=0
 for _ in $(seq 1 60); do
@@ -595,7 +628,7 @@ for _ in $(seq 1 60); do
       --network "$NETWORK" \
       --user 0:0 \
       --entrypoint wget \
-      "$IMAGE" -q -O - http://caesium:8080/health 2>/dev/null | grep -q healthy; then
+      "$IMAGE_ID" -q -O - http://caesium:8080/health 2>/dev/null | grep -q healthy; then
     healthy=1
     break
   fi
@@ -605,10 +638,10 @@ if [[ "$healthy" -ne 1 ]]; then
   log "server never became healthy; logs:"
   "$CONTAINER_CLI" logs "$SERVER_NAME" || true
   write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"never-healthy"}
 EOF
   write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":false,"missing":true,"killed":false,"collection":"server-never-healthy"}
 EOF
   run_checker
   exit $?
@@ -623,7 +656,7 @@ cli_rc=0
   -e GOCOVERDIR=/coverage \
   -v "$RAW/cli:/coverage" \
   -v "$ARTIFACTS/fixture.job.yaml:/examples/fixture.job.yaml:ro" \
-  "$IMAGE" job apply --path /examples/fixture.job.yaml --server http://caesium:8080 \
+  "$IMAGE_ID" job apply --path /examples/fixture.job.yaml --server http://caesium:8080 \
   || cli_rc=$?
 if [[ "$cli_rc" -eq 0 ]]; then
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
@@ -632,7 +665,7 @@ if [[ "$cli_rc" -eq 0 ]]; then
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
     -v "$RAW/cli:/coverage" \
-    "$IMAGE" job export coverage-write-read --server http://caesium:8080 \
+    "$IMAGE_ID" job export coverage-write-read --server http://caesium:8080 \
     >/dev/null || cli_rc=$?
 fi
 
@@ -650,7 +683,7 @@ else
   cli_missing=$(gocoverdir_complete "$RAW/cli" && echo false || echo true)
 fi
 write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
 EOF
 
 # Explicit flush while the server is still running, then graceful SIGTERM.
@@ -694,14 +727,14 @@ elif gocoverdir_complete "$RAW/server"; then
   fi
 fi
 write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
 EOF
 
 if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
   if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
     write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
 EOF
   fi
 fi
@@ -723,13 +756,13 @@ log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
   -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
   -e CAESIUM_AUTH_MODE=none \
   -v "$RAW/browser:/var/lib/caesium/coverage" \
-  "$IMAGE" start >/dev/null
+  "$IMAGE_ID" start >/dev/null
 
 browser_healthy=0
 for _ in $(seq 1 60); do
   if "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
       --network "$NETWORK" --user 0:0 --entrypoint wget \
-      "$IMAGE" -q -O - "http://$BROWSER_SERVER_NAME:8080/health" 2>/dev/null | grep -q healthy; then
+      "$IMAGE_ID" -q -O - "http://$BROWSER_SERVER_NAME:8080/health" 2>/dev/null | grep -q healthy; then
     browser_healthy=1
     break
   fi
@@ -773,7 +806,7 @@ else
   browser_missing=$(gocoverdir_complete "$RAW/browser" && echo false || echo true)
 fi
 write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
+{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
 EOF
 
 log "checking labelled coverage"

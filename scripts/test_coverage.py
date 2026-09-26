@@ -37,7 +37,9 @@ EXPORT_HTTP = f"{MODULE}/api/rest/controller/job/manifest.go"
 EXPORT_READ = f"{MODULE}/internal/jobdef/exporter.go"
 OTHER = f"{MODULE}/pkg/log/log.go"
 IMAGE_ID = "sha256:" + "c" * 64
-AUDITED_PACKAGES = {MODULE, f"{MODULE}/api", f"{MODULE}/cmd/run", f"{MODULE}/cmd/event", f"{MODULE}/internal/models",
+BUILD_CONTEXT = {"goos": "linux", "goarch": "amd64", "build_tags": [], "cgo_enabled": True,
+                 "compiler": "gc", "release_tags": ["go1.1"], "tool_tags": []}
+AUDITED_PACKAGES = {MODULE, f"{MODULE}/ui", f"{MODULE}/internal/atom", f"{MODULE}/internal/testfault", f"{MODULE}/api", f"{MODULE}/cmd/run", f"{MODULE}/cmd/event", f"{MODULE}/internal/models",
                     *(p.rsplit("/", 1)[0] for p in (APPLY_CLI, APPLY_HTTP, APPLY_WRITE, EXPORT_HTTP, OTHER))}
 DIFF_POLICY = {
     "basis": "policy", "scope": "audited-statement-files",
@@ -122,7 +124,7 @@ def provenance(source, **overrides):
         "complete": True,
         "missing": False,
         "killed": False,
-        "image_id": IMAGE_ID,
+        "image_id": IMAGE_ID, "build_context": BUILD_CONTEXT,
     }
     if source == "browser":
         doc.update(kind="gocoverdir", verified=True, image_provenance="built-by-this-run",
@@ -199,7 +201,7 @@ def write_source_inventory(directory, records, **changes):
     complete_files.update(records)
     inventory = {
         "schema_version": 1, "kind": "go-ast-source-inventory", "parser": "go/parser",
-        "complete": True, "packages": package_files,
+        "complete": True, "packages": package_files, "build_context": BUILD_CONTEXT,
         "candidate_sha": SHA, "image_id": IMAGE_ID,
         "coverpkg_sha256": hashlib.sha256(("\n".join(sorted(AUDITED_PACKAGES)) + "\n").encode()).hexdigest(),
         "files": complete_files,
@@ -211,7 +213,7 @@ def write_source_inventory(directory, records, **changes):
 
 
 def inventory_file(relpath, **changes):
-    record = {"parsed": True, "has_function_body": False, "has_call": False, "has_var_initializer": False,
+    record = {"parsed": True, "build_matched": True, "has_function_body": False, "has_call": False, "has_var_initializer": False,
               "source_sha256": hashlib.sha256((ROOT / relpath).read_bytes()).hexdigest()}
     record.update(changes)
     return record
@@ -702,15 +704,15 @@ class RatchetTests(unittest.TestCase):
         inv = write_source_inventory(self.dir, {f"{MODULE}/cmd/job/diff.go": inventory_file("cmd/job/diff.go")})
         self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
 
-        # An audited package absent from every profile cannot silently vanish.
+        # A package initializer without a function body is not coverable.
         changed.write_text("internal/models/models.go\n")
         inv = write_source_inventory(self.dir, {f"{MODULE}/internal/models/models.go": inventory_file("internal/models/models.go", has_var_initializer=True)})
         result = run_checker(self.dir, extra=extra + ("--source-inventory", str(inv)))
-        self.assertEqual(result.returncode, 1, output(result))
-        self.assertIn(f"{MODULE}/internal/models/models.go", json.loads((self.dir / "report.json").read_text())["uncovered_changed_paths"])
+        self.assertEqual(result.returncode, 0, output(result))
+        self.assertIn(f"{MODULE}/internal/models/models.go", json.loads((self.dir / "report.json").read_text())["diff_coverage"]["statement_free_paths"])
         inv = write_source_inventory(self.dir, {f"{MODULE}/internal/models/models.go": inventory_file("internal/models/models.go")})
-        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1,
-                         "relabelled package initializer must remain eligible")
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 0,
+                         "package initializer alone has no Go coverage function body")
 
     def test_statement_free_exemption_requires_valid_bound_inventory(self):
         path = f"{MODULE}/internal/models/task.go"
@@ -731,7 +733,7 @@ class RatchetTests(unittest.TestCase):
             with self.subTest(field=field):
                 inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go")}, **{field: value})
                 self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
-        for field in ("has_function_body", "has_call", "has_var_initializer", "parsed"):
+        for field in ("has_function_body", "parsed"):
             changes = {field: field != "parsed"}
             inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go", **changes)})
             self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
@@ -755,6 +757,81 @@ class RatchetTests(unittest.TestCase):
         inv.write_text("{invalid")
         self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
         self.assertEqual(json.loads((self.dir / "report.json").read_text())["verdict"], "fail")
+
+    def test_actual_uncoverable_files_and_build_exclusions_are_reported(self):
+        changed = self.dir / "changed.txt"
+        paths = ["internal/models/models.go", "internal/atom/atom.go", "ui/embed.go",
+                 "internal/testfault/testfault.go", "internal/testfault/disabled.go"]
+        changed.write_text("\n".join(paths) + "\n")
+        records = {f"{MODULE}/{path}": inventory_file(path) for path in paths}
+        records[f"{MODULE}/internal/testfault/testfault.go"].update(has_function_body=True, build_matched=False)
+        records[f"{MODULE}/internal/testfault/disabled.go"].update(has_function_body=True)
+        records[f"{MODULE}/internal/models/models.go"].update(has_var_initializer=True, has_call=True)
+        inv = write_source_inventory(self.dir, records)
+        policy = self.dir / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "package-diff-ratchet", "source": "integration",
+                                      "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}}, "diff": DIFF_POLICY}))
+        write_source(self.dir, "server", write_to_read_server() + block(f"{MODULE}/internal/testfault/disabled.go", 0, 0) + "\n", provenance("server"))
+        write_source(self.dir, "browser", profile("set", block(OTHER, 2, 1)), provenance("browser"))
+        extra = ("--changed-paths", str(changed), "--source-inventory", str(inv), "--ratchet", str(policy), "--require-browser")
+        result = run_checker(self.dir, extra=extra)
+        self.assertEqual(result.returncode, 0, output(result))
+        diff = json.loads((self.dir / "report.json").read_text())["diff_coverage"]
+        self.assertEqual(diff["eligible_paths"], [])
+        self.assertEqual(diff["zero_statement_paths"], [f"{MODULE}/internal/testfault/disabled.go"])
+        self.assertEqual(diff["build_excluded_paths"], [f"{MODULE}/internal/testfault/testfault.go"])
+        self.assertEqual(diff["statement_free_paths"], sorted(f"{MODULE}/{path}" for path in paths[:3]))
+        # Forging both the AST and build flag cannot exempt real function code.
+        changed.write_text("cmd/job/diff.go\n")
+        inv = write_source_inventory(self.dir, {f"{MODULE}/cmd/job/diff.go": inventory_file("cmd/job/diff.go", build_matched=False)})
+        self.assertEqual(run_checker(self.dir, extra=extra).returncode, 1)
+        # Erasing executable records from an otherwise complete manifest is rejected.
+        doc = json.loads(inv.read_text()); del doc["files"][f"{MODULE}/cmd/job/diff.go"]
+        inv.write_text(json.dumps(doc))
+        self.assertEqual(run_checker(self.dir, extra=extra).returncode, 1)
+
+    def test_function_body_guard_distinguishes_declarations_from_literals(self):
+        declaration = "package fixture\ntype Engine interface { ID() string; Callback(func(int) error) }\nvar Assets any\nvar All = Register()\ntype Handler func() struct { ID int }\n"
+        self.assertFalse(COV["source_has_function_body"](declaration))
+        for code in ("func Empty() {}", "var F = func() int { return 1 }", "func (r *Reader) Read() (int, error) { return 0, nil }", "func Value() struct { ID int } { return struct{ID int}{1} }"):
+            with self.subTest(source=code):
+                self.assertTrue(COV["source_has_function_body"]("package fixture\n" + code))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = f"{MODULE}/literal.go"
+            source = root / "literal.go"; source.write_text("package fixture\nvar F = func() int { return 1 }\n")
+            record = {"parsed": True, "has_function_body": False, "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+            self.assertFalse(COV["statement_free_file"](path, {"files": {path: record}}, repo_root=root), "forged FuncLit body flag must not grant exemption")
+
+    def test_build_context_identity_and_independent_match_are_fail_closed(self):
+        path = f"{MODULE}/internal/testfault/testfault.go"
+        source = (ROOT / "internal/testfault/testfault.go").read_text()
+        self.assertFalse(COV["source_build_matches"](path, source, BUILD_CONTEXT))
+        self.assertTrue(COV["source_build_matches"](path, "/*\n//go:build testfault\n*/\npackage p\nfunc F() {}\n", BUILD_CONTEXT),
+                        "a directive inside a block comment cannot authorize forged exclusion")
+        tagged = {**BUILD_CONTEXT, "build_tags": ["testfault"]}
+        self.assertTrue(COV["source_build_matches"](path, source, tagged))
+        for name, code, expected in [("platform_windows.go", "package p\nfunc F() {}", False),
+                                     ("platform_linux_amd64.go", "package p\nfunc F() {}", True),
+                                     ("tag.go", "//go:build linux && (arm64 || amd64) && !testfault\n\npackage p\n", True)]:
+            self.assertEqual(COV["source_build_matches"](f"{MODULE}/{name}", code, BUILD_CONTEXT), expected)
+        inv = write_source_inventory(self.dir, {path: inventory_file("internal/testfault/testfault.go", has_function_body=True, build_matched=False)}, build_context={**BUILD_CONTEXT, "goarch": "arm64"})
+        result = run_checker(self.dir, extra=("--source-inventory", str(inv)))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("build context differs", output(result))
+
+
+    def test_malformed_merged_provenance_context_fails_closed(self):
+        inventory = json.loads(write_source_inventory(self.dir, {}).read_text())
+        for parts in (None, [], {}, {"cli": None}, {"cli": {}}):
+            with self.subTest(parts=parts):
+                issues = []
+                result = COV["validate_source_inventory"](
+                    inventory, candidate_sha=SHA,
+                    image_records=[{"image_id": IMAGE_ID, "source_provenance": parts}],
+                    audited_packages=AUDITED_PACKAGES, repo_root=ROOT, issues=issues)
+                self.assertIsNone(result)
+                self.assertTrue(any("build context differs" in issue.message for issue in issues))
 
 
 class ReagentsAuditTests(unittest.TestCase):
@@ -782,15 +859,18 @@ class ReagentsAuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("contamination", output(result))
 
-    def test_changed_reagents_without_profile_is_incomplete_not_skipped(self):
+    def test_changed_reagents_without_profile_is_reported_unmeasured_outside_root_diff(self):
         changed = self.dir / "changed.txt"
         changed.write_text("reagents/cmd/git-source/main.go\n")
         result = run_checker(self.dir, extra=("--changed-paths", str(changed)))
-        self.assertEqual(result.returncode, 2, output(result))
-        self.assertIn("reagents", output(result))
+        self.assertEqual(result.returncode, 0, output(result))
         report = json.loads((self.dir / "report.json").read_text())
-        self.assertEqual(report["contributions"]["reagents"]["status"], "incomplete")
+        self.assertEqual(report["contributions"]["reagents"]["status"], "unmeasured")
         self.assertIsNone(report["contributions"]["reagents"]["percent"])
+        self.assertEqual(report["diff_coverage"]["separate_module"], {"paths": [f"{COV['REAGENTS_MODULE']}/cmd/git-source/main.go"], "status": "unmeasured", "in_root_diff_scope": False})
+
+        required = run_checker(self.dir, extra=("--changed-paths", str(changed), "--require-reagents"))
+        self.assertEqual(required.returncode, 2, output(required))
 
     def test_missing_repo_root_does_not_silently_skip_reagents(self):
         result = subprocess.run(
@@ -980,6 +1060,28 @@ elif "merge" in args:
         self.assertEqual(self.merge().returncode, 0)
         self.assertEqual({p.name for p in raw.iterdir()}, {"covmeta.current", "covcounters.current"})
 
+    def test_external_browser_copy_failure_cannot_reuse_stale_evidence(self):
+        for source, text in (("cli", write_to_read_cli()), ("server", write_to_read_server())):
+            write_source(self.profiles, source, text, self.originals[source])
+        raw = self.art / "raw/browser"; raw.mkdir()
+        (raw / "covmeta.stale").write_text("stale")
+        (raw / "covcounters.stale").write_text("stale")
+        supplied = self.art / "supplied"; supplied.mkdir()
+        (supplied / "covmeta.current").write_text("current")
+        (supplied / "covcounters.current").write_text("current")
+        prov = self.art / "external.json"; prov.write_text(json.dumps(provenance("browser")))
+        fakebin = self.art / "bin"; fakebin.mkdir()
+        copier = fakebin / "cp"; copier.write_text("#!/bin/sh\nexit 17\n"); copier.chmod(0o755)
+        self.env.update(CAESIUM_COVERAGE_BROWSER_DIR=str(supplied), CAESIUM_COVERAGE_BROWSER_PROVENANCE=str(prov),
+                        PATH=str(fakebin) + os.pathsep + self.env["PATH"])
+        result = subprocess.run(["bash", str(COLLECTOR), "check"], capture_output=True, text=True, env=self.env, cwd=ROOT)
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("cannot copy external browser", output(result))
+        self.assertEqual(json.loads((self.art / "report.json").read_text())["verdict"], "incomplete")
+        self.assertFalse((self.art / "ratchet.json").exists())
+        self.assertEqual({p.name for p in raw.iterdir()}, {"covmeta.stale", "covcounters.stale"})
+        self.assertEqual(list((self.art / "raw").glob("browser-import.*")), [])
+
 
 class CollectorCollectTests(unittest.TestCase):
     """Exercise collector lifecycle decisions without launching containers/browsers."""
@@ -1028,13 +1130,21 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
     elif args and args[0]=="build": pass
     elif args[:2]==["image","inspect"]:
         if "--format" in args:
-            print("a"*40 if "revision" in args[args.index("--format")+1] else "sha256:"+"c"*64)
+            fmt=args[args.index("--format")+1]
+            if "revision" in fmt: print("a"*40)
+            elif ".Os" in fmt: print("linux")
+            elif ".Architecture" in fmt: print("amd64")
+            elif "builder" in args[-1]: print("sha256:"+"b"*64)
+            elif args[-1]=="caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): print("sha256:"+"d"*64)
+            else: print("sha256:"+"c"*64)
     elif args and args[0]=="create": print("audit-export")
     elif args and args[0]=="port": print("127.0.0.1:12345")
     elif args and args[0]=="inspect":
         killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
         print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
     elif args and args[0]=="run":
+        if name and os.environ.get("FAKE_SCENARIO")=="retag":
+            (root/"retagged").write_text("other candidate now owns the tag")
         if mounts.get("/source"):
             if "-i" not in args: raise SystemExit("inventory stdin was not attached")
             shutil.copyfile(root/"source-inventory.json",mounts["/audit"]/"source-inventory.json")
@@ -1050,6 +1160,7 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
 ''')
         # The stand-in only emulates CLI responses; it cannot launch a real engine.
         code = container.read_text().replace("import os, pathlib, shutil, sys", "import os, pathlib, shutil, sys, json")
+        code = code.replace('args = sys.argv[1:]', 'args = sys.argv[1:]\nwith (root / "container-args.jsonl").open("a") as log: log.write(json.dumps(args) + "\\n")')
         container.write_text(code)
         (self.art / "container-names.json").write_text(json.dumps(["cov-test-browser"]))
 
@@ -1069,6 +1180,24 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertEqual(browser["test_exit_code"], 0)
         self.assertEqual(browser["image_id"], IMAGE_ID)
         self.assertIn("cov-test-browser", result.stdout.split("KEEP=1;")[-1])
+
+
+    def test_retag_between_collection_launches_cannot_change_measured_image(self):
+        result = self.collect("retag")
+        self.assertEqual(result.returncode, 0, output(result))
+        self.assertTrue((self.art / "retagged").exists(), "fake engine must change tag after first process starts")
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        builds = [args for args in calls if args[0] == "build"]
+        self.assertEqual(len(builds), 1)
+        self.assertIn("BUILDER_IMAGE=sha256:" + "b" * 64, builds[0])
+        launches = [args for args in calls if args[0] in ("run", "create")]
+        self.assertGreater(len(launches), 7)
+        for args in launches:
+            self.assertNotIn("caesiumcloud/caesium-coverage:latest", args)
+            self.assertNotIn("caesiumcloud/caesium-builder:latest", args)
+            self.assertTrue(IMAGE_ID in args or "sha256:" + "b" * 64 in args, args)
+        for source in ("cli", "server", "integration", "browser"):
+            self.assertEqual(json.loads((self.profiles / f"{source}.provenance.json").read_text())["image_id"], IMAGE_ID)
 
     def test_failed_journey_or_killed_server_cannot_collect_or_recheck_success(self):
         for scenario in ("journey-failed", "killed"):
@@ -1100,9 +1229,12 @@ class DockerfileAndCollectorTests(unittest.TestCase):
             embed = source / "ui/embed.go"
             embed.write_text('package ui\nimport "embed"\n//go:embed all:dist\nvar Assets embed.FS\n')
             types = source / "ui/types.go"
-            types.write_text("package ui\ntype Declaration struct { ID string }\n")
+            types.write_text("package ui\ntype Declaration interface { ID() string; Callback(func(int) error) }\nvar Uninitialised int\nvar Registered = len([]int{1})\n")
             functions = source / "ui/functions.go"
             functions.write_text("package ui\nfunc Value() int { return 1 }\nvar Initialized = Value()\nvar Literal = func() int { return 2 }\n")
+            (source / "ui/excluded.go").write_text("//go:build testfault\n\npackage ui\nfunc Fault() { println(1) }\n")
+            (source / "ui/platform_windows.go").write_text("package ui\nfunc Platform() { println(1) }\n")
+            (source / "ui/empty.go").write_text("package ui\nfunc Empty() {}\n")
             (source / "ui/ignored_test.go").write_text("not valid Go source")
             package = MODULE + "/ui"
             manifest = audit / "coverpkg-packages.txt"
@@ -1111,18 +1243,25 @@ class DockerfileAndCollectorTests(unittest.TestCase):
             executable.write_text(helper.replace('"/source', '"' + str(source)).replace('"/audit', '"' + str(audit)))
             env = os.environ.copy()
             env.update(GOTOOLCHAIN="local", GOPROXY="off", GOWORK="off", GO111MODULE="off",
-                       INVENTORY_SHA=SHA, INVENTORY_IMAGE_ID=IMAGE_ID)
+                       INVENTORY_SHA=SHA, INVENTORY_IMAGE_ID=IMAGE_ID, INVENTORY_GOOS="linux", INVENTORY_GOARCH="amd64")
             def inventory_run():
                 return subprocess.run(["go", "run", str(executable)], cwd=root, env=env,
                                       text=True, capture_output=True, timeout=60)
             result = inventory_run()
             self.assertEqual(result.returncode, 0, output(result))
             doc = json.loads((audit / "source-inventory.json").read_text())
-            self.assertEqual(doc["packages"][package], [package + "/embed.go", package + "/functions.go", package + "/types.go"])
+            self.assertEqual(doc["packages"][package], [package + "/embed.go", package + "/empty.go", package + "/excluded.go", package + "/functions.go", package + "/platform_windows.go", package + "/types.go"])
             self.assertFalse(doc["files"][package + "/embed.go"]["has_var_initializer"])
             for field in ("has_function_body", "has_call", "has_var_initializer"):
                 self.assertTrue(doc["files"][package + "/functions.go"][field])
             self.assertFalse(doc["files"][package + "/types.go"]["has_function_body"])
+            self.assertTrue(doc["files"][package + "/types.go"]["has_var_initializer"])
+            self.assertTrue(doc["files"][package + "/types.go"]["has_call"])
+            self.assertTrue(doc["files"][package + "/empty.go"]["has_function_body"])
+            self.assertFalse(doc["files"][package + "/excluded.go"]["build_matched"])
+            self.assertFalse(doc["files"][package + "/platform_windows.go"]["build_matched"])
+            self.assertTrue(doc["files"][package + "/functions.go"]["build_matched"])
+            self.assertEqual(doc["build_context"]["goos"], "linux")
             self.assertEqual(doc["files"][package + "/embed.go"]["source_sha256"], hashlib.sha256(embed.read_bytes()).hexdigest())
             self.assertFalse((source / "ui/dist").exists())
             for bad in (MODULE + "/missing", MODULE + "/../escape", "example.invalid/foreign"):
