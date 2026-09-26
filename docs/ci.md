@@ -1392,18 +1392,21 @@ window, in-flight and queued work with durable task-run IDs and raw effects,
 rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
 control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
 rollback observation. A skipped or unobservable case is `blocked`; the overall
-record cannot pass on a subset. The latest live probe (`289bb343`, local,
-ephemeral artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
-(pinned image, three voters, mixed-version dispatch/completion, rolling upgrade
-and retained history/effects), and five were blocked. Snapshot catch-up's
-batch 13 write 82 returned EOF after 1,400 initial writes and 6,081 acknowledged
-updates; the attempted annotation was `006082`. `caesium-0` was OOMKilled
-(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Bounded disputed-write
-readback remains unknown: one survivor refused the connection and the other
-hit its deadline. The disputed write remains possibly committed. Replacement,
-restore, ordinal-0 and rollback were blocked because the fault left the shared
-cluster unfit for subsequent destructive cases. A prior head passed restore
-and ordinal-1 replacement; that is historical partial evidence. F2 remains
+record cannot pass on a subset. The `289bb343` probe
+(`/tmp/caesium-w6-f2-observe.9DHTV9`) is historical: five cases passed, and
+snapshot catch-up's batch 13 write 82 returned EOF after 1,400 initial writes
+and 6,081 acknowledged updates (annotation `006082`). `caesium-0` was OOMKilled
+(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Disputed-write readback
+remains unknown. The latest recorded qualification is master `b3382717`,
+cluster `lifecycle-1571311ec3f8`, artifact
+`/tmp/caesium-w6-f2-current/cluster-qualification.json`. It exited 1 with
+`result=fail` and empty failed gates. Eight cases passed, including snapshot
+catch-up after 9,400 acknowledged applies, ordinal-1 replacement and
+storage-copy restore. Both survivors sampled `readings_ok` at round >= 1 on
+batches 0–16, with no OOM and no restart. Peak cgroup current was 896,540,672
+and 930,217,984 bytes; peak RSS was 946,876,416 and 959,262,720 bytes; Go heap
+in-use stayed at or below 19,144,704 bytes. Ordinal-0 was blocked because the
+replacement was still Pending, and rollback was blocked with it. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
 Merged [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
 merge `62c8b2bd`, tested head `05ae4644`, removes the bundled runtime copy and has the same source tree
@@ -1427,16 +1430,16 @@ qualify F2.
 `ddf83af27395fd2397a5cccd2f73c1a483c88b30`, tested head `63ce9768`. It records
 cgroup anonymous and file memory, process RSS and Go heap at the same 1Gi cap.
 [CI run 36263025543](https://github.com/caesium-cloud/caesium/actions/runs/36263025543)
-has 37 successes and 6 skips. No live cluster run of that sampler is recorded,
-so it does not explain the OOM or check F2.
+has 37 successes and 6 skips. The `b3382717` run collected the samples
+through truncation and did not OOM. Process RSS approached 1Gi while Go heap
+stayed under 20 MiB. That does not check F2.
 [#575](https://github.com/caesium-cloud/caesium/pull/575) merged the console
 owner-crash journey; that is not an F2 result, and its manifest row stays
-`absent`. The unresolved ordinal-0/bootstrap and isolated rollback
+`absent`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for
+the ordinal-0 replacement to be Ready before evidence capture. Its rerun is
+not recorded yet. The unresolved ordinal-0/bootstrap and isolated rollback
 prerequisites remain explicit in the
 [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
-Native dqlite's 8,192 retained Raft entries are a possible contributor to memory
-pressure. The `289bb343` artifacts cannot separate Go heap, native allocations
-and file cache; the merged sampler is what a later live run must collect.
 
 ### Fenced core failures (distributed-testing W5/B3)
 
