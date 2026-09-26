@@ -1117,6 +1117,7 @@ CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' just tag="$CANDIDATE_SHA" robustne
 CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' \
 CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
   just tag="$CANDIDATE_SHA" robustness-test
+)
 ```
 
 `scripts/robustness.sh` refuses a `CAESIUM_ROBUSTNESS_RUN` whose required
@@ -1389,20 +1390,26 @@ window, in-flight and queued work with durable task-run IDs and raw effects,
 rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
 control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
 rollback observation. A skipped or unobservable case is `blocked`; the overall
-record cannot pass on a subset. At merged F2 head `cdccfd89`, the latest live
-run passed pinned image identity, three voters, mixed-version dispatch and
-completion, rolling upgrade, and retained history/effects. It failed overall:
-snapshot catch-up stopped at catalog-write batch 13; replacement, restore,
-ordinal-0 and rollback were blocked because that fault left the shared cluster
-unfit for subsequent destructive cases. A prior head passed restore and
-ordinal-1 replacement, but that result does not qualify `cdccfd89`. F2 is
-not a CI job or a complete cluster-upgrade qualification. The unresolved
+record cannot pass on a subset. The latest exact-head probe (`289bb343`,
+artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
+(pinned image, three voters, mixed-version dispatch/completion, rolling upgrade
+and retained history/effects), and five were blocked. Snapshot catch-up's
+batch 13 write 82 returned EOF after 1,400 initial writes and 6,081 acknowledged
+updates; the attempted annotation was `006082`. `caesium-0` was OOMKilled
+(exit 137) at its 1Gi cap at `2026-09-26T02:24:20Z`. Bounded disputed-write
+readback remains unknown: one survivor refused the connection and the other
+hit its deadline. The disputed write remains possibly committed. Replacement,
+restore, ordinal-0 and rollback were blocked because the fault left the shared
+cluster unfit for subsequent destructive cases. A prior head passed restore
+and ordinal-1 replacement; that is historical partial evidence. F2 remains
+unchecked and is not a CI job or a complete cluster-upgrade qualification.
+The unresolved
 ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
 the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
-The batch-13 EOF is unattributed: retained current pod logs end before the
-failure, while teardown captured only absent previous-container logs. The
-next exact-head probe must save current survivor logs, pod events and a bounded
-readback of the disputed write before cleanup.
+Native dqlite's 8,192 retained Raft entries are a possible contributor to memory
+pressure; these artifacts cannot separate Go heap, native allocations and file
+cache. The next bounded probe keeps the same cap and records cgroup anonymous
+and file memory, process RSS and Go heap at every batch and every five seconds.
 
 ### Fenced core failures (distributed-testing W5/B3)
 
@@ -1410,6 +1417,8 @@ B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
 the `early-evidence` lane. That lane still runs `^TestOwnerCrash$`.
 
 ```sh
+(
+set -eu
 test -z "$(git status --porcelain)"  # run from a clean candidate checkout
 CANDIDATE_SHA=$(git rev-parse HEAD)
 PLATFORM=$(just --evaluate platform)
@@ -1423,6 +1432,7 @@ docker build --platform "$PLATFORM" \
 CAESIUM_ROBUSTNESS_RUN='^TestCore$' \
 CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
   just tag="$CANDIDATE_SHA" robustness-test
+)
 ```
 
 `scripts/robustness.sh` gives that selection a 70-minute runner timeout and
@@ -1468,6 +1478,23 @@ later produced `verdict: pass`, complete CLI/server/integration profiles and
 covered the apply→export write/read path (7.6% integration coverage). No
 browser profile was supplied and no package/diff ratchet was committed, so G2
 acceptance remains open.
+
+The later G2 follow-up (#570) collected real Chromium evidence on `00ba7d99`
+(`/tmp/caesium-w6-g2-browser.IuzH9B`): both browser scenarios passed on their
+first attempt with no skips or flaky outcomes; CLI, server, integration and
+browser provenance were complete, and `all_surfaces` coverage was 9.0%.
+That collection failed the old percentage floors after already-merged source
+changes increased the denominator. The independently reviewed baseline refresh
+keeps or raises absolute floors, and replaying the retained profile against it
+passed. A fresh final collection on #570 head `57548a21` at
+`/tmp/caesium-w6-g2-final.5sormO` exited 0 with `verdict=pass` and the committed
+ratchet applied. Both real Chromium journeys passed on their first attempts;
+CLI, server, integration and browser profiles have complete matching
+candidate/image provenance. Integration is 7.6%, browser 8.1%, and their union
+is 9.0% (4,666/51,628 statements). The actual apply→export request/write/read
+path passed. Independent artifact review confirmed this evidence. G2 remains
+unchecked while the repair PR has green current-head CI and awaits required
+CODEOWNER approval and merge; eight critical-contract coverage gaps remain reported.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
@@ -1525,8 +1552,24 @@ review. A full ten-repeat run on `b9c7bf17` against W4 base `45994929`
 completed all 20 paired benchmark samples and cold/warm workloads, but the
 base's first Chromium repeat logged `net::ERR_INTERNET_DISCONNECTED` and
 Playwright exited 1. The comparator returned `overall=fail` with
-`speed_compared=false`, correctly withholding a speed verdict. E3 acceptance
-is still open. This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
+`speed_compared=false`, correctly withholding a speed verdict.
+
+The bounded current-head retry (`655c063f`) completed exit 3 with
+`overall=inconclusive`, `speed_compared=true`; artifacts are
+`/tmp/caesium-w6-e3-diagnostics.egK8Ux`. All 20 paired benchmark samples,
+cold/warm workload correctness, and 20 first-attempt Chromium repeat sets
+passed (80 tests, no skips or flaky outcomes). Per-repeat Playwright JSON and
+diagnostics are retained separately. Forty-one metrics reported no significant
+difference; `browser.route_readiness_ms./jobs.live` was inconclusive because
+candidate CV 1.980 exceeded 0.3, with one 3,276 ms sample among ten. That sample's
+cause is unproved: it occurred in candidate repeat 2 at
+`2026-09-26T03:00:51.586Z`, and passing browser attempts retained no trace;
+per-repeat server logs were not saved before removal. Future investigation
+needs those logs and a request timeline. No outlier was removed or noise
+threshold changed. E3
+acceptance remains open pending conclusive repeatable measurement; #567 has
+green current-head CI and awaits required CODEOWNER approval. This is not a CI
+job or a calibrated SLO (E4 / Q2 / Q5).
 
 ### Checker-strength mutation validator (distributed-testing W6/C3)
 
