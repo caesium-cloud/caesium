@@ -141,12 +141,14 @@ func TestLogsReadinessWaitHonorsParentCancellation(t *testing.T) {
 }
 
 func TestLogsSetupTimeoutCancelsHungHTTPHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	requestEnded := make(chan struct{})
-	engine := newHTTPLogEngine(t, context.Background(), func(_ http.ResponseWriter, r *http.Request) {
+	engine := newHTTPLogEngine(t, ctx, func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 		close(requestEnded)
 	})
-	reader, err := engine.logsWhenReady(&atom.EngineLogsRequest{ID: "task"}, 500*time.Millisecond)
+	reader, err := openLogsWithinTestBudget(t, engine, cancel)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Nil(t, reader)
 	select {
@@ -157,15 +159,53 @@ func TestLogsSetupTimeoutCancelsHungHTTPHeaders(t *testing.T) {
 }
 
 func TestLogsSetupTimeoutBoundsRepeatedContainerReadinessErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var attempts atomic.Int32
-	engine := newHTTPLogEngine(t, context.Background(), func(w http.ResponseWriter, _ *http.Request) {
+	engine := newHTTPLogEngine(t, ctx, func(w http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		writeLogAPIError(w, http.StatusBadRequest, metav1.StatusReasonBadRequest, pendingLogMessage("task", "ContainerCreating"))
 	})
-	reader, err := engine.logsWhenReady(&atom.EngineLogsRequest{ID: "task"}, 500*time.Millisecond)
+	reader, err := openLogsWithinTestBudget(t, engine, cancel)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Nil(t, reader)
 	require.Greater(t, attempts.Load(), int32(1), "the readiness error must be retried within the setup budget")
+}
+
+func openLogsWithinTestBudget(t *testing.T, engine *kubernetesEngine, cancel context.CancelFunc) (io.ReadCloser, error) {
+	t.Helper()
+	type result struct {
+		reader io.ReadCloser
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		reader, err := engine.logsWhenReady(&atom.EngineLogsRequest{ID: "task"}, 500*time.Millisecond)
+		done <- result{reader, err}
+	}()
+	watchdog := time.NewTimer(2 * time.Second)
+	defer watchdog.Stop()
+	select {
+	case got := <-done:
+		if got.reader != nil {
+			t.Cleanup(func() { _ = got.reader.Close() })
+		}
+		return got.reader, got.err
+	case <-watchdog.C:
+		// Cancel and join before failing so a wrong opening budget cannot leave
+		// the HTTP handler or readiness loop alive during server cleanup.
+		cancel()
+		select {
+		case got := <-done:
+			if got.reader != nil {
+				_ = got.reader.Close()
+			}
+		case <-time.After(time.Second):
+			t.Error("log setup did not stop after parent cancellation")
+		}
+		t.Fatal("500ms log setup budget exceeded the 2s outer watchdog")
+		return nil, nil
+	}
 }
 
 func TestLogsSetupTimeoutStopsAfterReturningLiveReader(t *testing.T) {
