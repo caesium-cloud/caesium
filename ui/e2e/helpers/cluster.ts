@@ -667,8 +667,12 @@ export function overlayPreservesEnv(overlayYaml: string, existing: EnvVar[]): st
 }
 
 export function parseBootstrapAdminKey(text: string): string | null {
-  const match = text.match(/csk_live_[A-Za-z0-9]+/);
-  return match ? match[0] : null;
+  // Debug SQL inserts the 13-character key_prefix before stdout prints the
+  // full secret. The prefix is not a usable API key.
+  const banner = text.match(/BOOTSTRAP ADMIN API KEY[^\n]*\n\s*(csk_live_[A-Za-z0-9]{20,})/);
+  if (banner) return banner[1];
+  const matches = text.match(/csk_live_[A-Za-z0-9]{20,}/g);
+  return matches ? matches.sort((left, right) => right.length - left.length)[0] : null;
 }
 
 export function consoleRecoveryDefinition(alias: string, taskImage: string, marker: string): Record<string, unknown> {

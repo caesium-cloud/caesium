@@ -272,11 +272,18 @@ test("bootstrap admin key is the csk_live token from pod logs", () => {
   const text = [
     "==========================================================",
     "  BOOTSTRAP ADMIN API KEY (shown once, save it now):",
-    "  csk_live_abcDEF123",
+    "  csk_live_abcDEF1234567890abcd",
     "==========================================================",
   ].join("\n");
-  expect(parseBootstrapAdminKey(text)).toBe("csk_live_abcDEF123");
+  expect(parseBootstrapAdminKey(text)).toBe("csk_live_abcDEF1234567890abcd");
   expect(parseBootstrapAdminKey("no key here")).toBeNull();
+  const prefixed = [
+    'VALUES ("id","csk_live_abcD","hmac")',
+    "BOOTSTRAP ADMIN API KEY (shown once, save it now):",
+    "  csk_live_abcDEF1234567890abcd",
+  ].join("\n");
+  expect(parseBootstrapAdminKey(prefixed)).toBe("csk_live_abcDEF1234567890abcd");
+  expect(parseBootstrapAdminKey('key_prefix":"csk_live_abcD"')).toBeNull();
 });
 
 test("console job is a kubernetes hold that prints a marker", () => {
