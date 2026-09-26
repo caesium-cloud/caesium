@@ -1547,8 +1547,9 @@ outside the root-module diff scope, not permanently incomplete. Requiring
 reagents coverage still fails when its profile is missing.
 Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
 `empty_diff=true`; zero uncovered is policy, not a live nonempty diff
-measurement. Eight critical-contract coverage gaps remain. Current CI is
-pending; the prior `609cca31` green run is historical. G2 stays unchecked.
+measurement. Eight critical-contract coverage gaps remain. Current CI run
+36243611300 passes all 37 executed jobs; the prior `609cca31` green run is
+historical. Review/approval and merge remain pending; G2 stays unchecked.
 
 The max-zero diff floor is explicit policy and is not ready for G6 promotion.
 A reproducible replay at master `f6acf0ea` took the last 60 first-parent commit
