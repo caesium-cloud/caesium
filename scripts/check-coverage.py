@@ -521,6 +521,12 @@ def validate_provenance(prov, source, issues, *, candidate_sha=None):
             f"{source} image is supplied/unverified and is not a provenanced match of the candidate",
             source,
         ))
+    if source == "browser" and prov.get("test_exit_code") not in (None, 0):
+        issues.append(_fail(
+            "browser-journey",
+            f"Chromium journey exited {prov['test_exit_code']}; browser coverage is not passing evidence",
+            source,
+        ))
     return prov
 
 
@@ -881,13 +887,15 @@ def audit_reagents(repo_root, issues):
     return audit
 
 
-def apply_ratchet(integration, ratchet, issues, *, uncovered_diff):
+def apply_ratchet(integration, ratchet, issues, *, uncovered_diff, changed_paths_supplied):
     applied = {"applied": False, "packages": {}, "diff": None}
     if not ratchet:
         return applied
     if not isinstance(ratchet, dict):
         issues.append(_fail("schema", "ratchet must be an object"))
         return applied
+    if ratchet.get("schema_version") != 1 or ratchet.get("kind") != "package-diff-ratchet" or ratchet.get("source") != "integration":
+        issues.append(_fail("schema", "ratchet must be a schema-1 integration package-diff-ratchet"))
     if ratchet.get("min_global_percent") is not None or ratchet.get("global_percent") is not None:
         issues.append(_fail(
             "ratchet",
@@ -902,6 +910,9 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff):
         return applied
     packages = integration["summary"]["packages"]
     floors = ratchet.get("packages") or {}
+    if not isinstance(floors, dict) or not floors:
+        issues.append(_fail("schema", "ratchet.packages must contain measured package floors"))
+        floors = {}
     for name, floor in floors.items():
         if not isinstance(floor, dict):
             issues.append(_fail("schema", f"ratchet.packages[{name}] must be an object", name))
@@ -936,6 +947,12 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff):
     diff_floor = ratchet.get("diff") or {}
     if diff_floor:
         applied["diff"] = {"uncovered_changed_paths": list(uncovered_diff)}
+        if not changed_paths_supplied:
+            issues.append(_incomplete(
+                "ratchet",
+                "diff ratchet has no changed-paths input; an empty diff cannot be assumed",
+                "diff",
+            ))
         max_uncovered = diff_floor.get("uncovered_changed_paths_max")
         min_percent = diff_floor.get("min_percent")
         if max_uncovered is not None and len(uncovered_diff) > int(max_uncovered):
@@ -953,7 +970,7 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff):
     return applied
 
 
-def baseline_from_integration(integration, *, uncovered_diff=None):
+def baseline_from_integration(integration, *, uncovered_diff=None, candidate_sha=None):
     if integration.get("status") != "complete" or not integration.get("summary"):
         raise ValueError("cannot write a baseline from incomplete integration coverage")
     packages = {}
@@ -970,6 +987,8 @@ def baseline_from_integration(integration, *, uncovered_diff=None):
         "source": "integration",
         "packages": packages,
     }
+    if candidate_sha:
+        baseline["measured_candidate_sha"] = candidate_sha
     if uncovered_diff is not None:
         baseline["diff"] = {
             "uncovered_changed_paths_max": len(uncovered_diff),
@@ -1095,7 +1114,11 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
     if unit.get("status") == "absent":
         unit["status"] = "incomplete"
 
-    ratchet_result = apply_ratchet(integration, ratchet, issues, uncovered_diff=uncovered)
+    ratchet_result = apply_ratchet(
+        integration, ratchet, issues,
+        uncovered_diff=uncovered,
+        changed_paths_supplied=changed_paths is not None,
+    )
 
     report = {
         "schema_version": 1,
@@ -1108,6 +1131,11 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
             "browser": contribution_public(browser),
             "reagents": contribution_public(reagents),
         },
+        "all_surfaces": (
+            contribution_public(merged_with_browser)
+            if browser.get("status") == "complete"
+            else {"source": "integration+browser", "status": "incomplete", "percent": None}
+        ),
         "write_to_read": wtr,
         "contract_gaps": gaps,
         "uncovered_changed_paths": uncovered,
@@ -1276,7 +1304,7 @@ def main(argv=None):
             print(f"coverage: schema: {err}", file=sys.stderr)
             return 1
     try:
-        changed = load_changed_paths(args.changed_paths) if args.changed_paths else []
+        changed = load_changed_paths(args.changed_paths) if args.changed_paths else None
     except OSError as err:
         print(f"coverage: schema: {err}", file=sys.stderr)
         return 1
@@ -1310,7 +1338,8 @@ def main(argv=None):
         try:
             baseline = baseline_from_integration(
                 integration,
-                uncovered_diff=report.get("uncovered_changed_paths"),
+                uncovered_diff=(report.get("uncovered_changed_paths") if args.changed_paths else None),
+                candidate_sha=args.candidate_sha,
             )
         except ValueError:
             baseline = None

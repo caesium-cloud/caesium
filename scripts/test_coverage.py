@@ -20,6 +20,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts/check-coverage.py"
 COLLECTOR = ROOT / "scripts/integration-coverage.sh"
+BROWSER_JOURNEY = ROOT / "scripts/coverage-browser-journey.sh"
+BROWSER_CHECKER = ROOT / "scripts/check-browser-journey.py"
 DOCKERFILE = ROOT / "build/Dockerfile.coverage"
 COV = runpy.run_path(str(CHECKER))
 
@@ -140,6 +142,26 @@ def run_checker(profiles_dir, extra=(), env=None):
 
 def output(result):
     return result.stdout + result.stderr
+
+
+def collector_test_env(art):
+    """Synthetic checker input with explicit ratchet and diff provenance."""
+    changed = art / "changed-paths.txt"
+    changed.write_text("")
+    ratchet = art / "test-ratchet.json"
+    ratchet.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "package-diff-ratchet",
+        "source": "integration",
+        "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}},
+        "diff": {"uncovered_changed_paths_max": 0},
+    }))
+    env = os.environ.copy()
+    env["CAESIUM_COVERAGE_ARTIFACTS"] = str(art)
+    env["CAESIUM_COVERAGE_CHANGED_PATHS"] = str(changed)
+    env["CAESIUM_COVERAGE_RATCHET"] = str(ratchet)
+    env["CANDIDATE_SHA"] = SHA
+    return env
 
 
 class CoverprofileParseTests(unittest.TestCase):
@@ -351,6 +373,20 @@ class BrowserMergeTests(unittest.TestCase):
         self.assertEqual(report["contributions"]["browser"]["status"], "complete")
         self.assertIsNotNone(report["contributions"]["browser"]["percent"])
         self.assertGreater(report["contributions"]["browser"]["percent"], 0)
+        self.assertEqual(report["all_surfaces"]["status"], "complete")
+        self.assertGreater(report["all_surfaces"]["covered"], report["contributions"]["integration"]["covered"])
+
+    def test_failed_chromium_journey_fails_even_with_a_complete_profile(self):
+        browser = profile("set", block(f"{MODULE}/api/ui.go", 3, 1))
+        write_source(
+            self.dir, "browser", browser,
+            provenance("browser", kind="gocoverdir", test_exit_code=1),
+        )
+        result = run_checker(self.dir, extra=("--require-browser",))
+        self.assertEqual(result.returncode, 1, output(result))
+        report = json.loads((self.dir / "report.json").read_text())
+        self.assertEqual(report["verdict"], "fail")
+        self.assertIn("browser-journey", output(result))
 
     def test_require_browser_without_profile_is_incomplete(self):
         result = run_checker(self.dir, extra=("--require-browser",))
@@ -367,6 +403,39 @@ class BrowserMergeTests(unittest.TestCase):
         result = run_checker(self.dir)
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("foreign", output(result))
+
+
+class BrowserJourneyResultTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "playwright.json"
+
+    def check(self, first="passed", second="passed", *, retry=False, missing=False):
+        specs = [{
+            "title": "sidebar navigates between every primary control-plane page",
+            "tests": [{"results": [{"status": first}]}],
+        }]
+        if not missing:
+            specs.append({
+                "title": "operator can pause and unpause a job from the detail page",
+                "tests": [{"results": [{"status": "failed"}, {"status": second}]}]
+                if retry else [{"results": [{"status": second}]}],
+            })
+        self.path.write_text(json.dumps({"suites": [{"specs": specs}]}))
+        return subprocess.run(
+            [sys.executable, str(BROWSER_CHECKER), str(self.path)],
+            capture_output=True, text=True,
+        )
+
+    def test_two_first_attempt_passes(self):
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_skip_retry_or_missing_journey_does_not_pass(self):
+        for kwargs in ({"first": "skipped"}, {"retry": True}, {"missing": True}):
+            with self.subTest(kwargs=kwargs):
+                result = self.check(**kwargs)
+                self.assertNotEqual(result.returncode, 0, output(result))
 
 
 class ForeignAndPerformanceTests(unittest.TestCase):
@@ -442,6 +511,7 @@ class RatchetTests(unittest.TestCase):
         self.assertNotIn("global_percent", doc)
         self.assertNotIn("min_global_percent", doc)
         self.assertEqual(doc["kind"], "package-diff-ratchet")
+        self.assertEqual(doc["measured_candidate_sha"], SHA)
         self.assertIn(f"{MODULE}/cmd/job", doc["packages"])
         floor = doc["packages"][f"{MODULE}/cmd/job"]["min_statements_covered"]
         self.assertGreater(floor, 0)
@@ -494,6 +564,19 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, output(result))
         report = json.loads((self.dir / "report.json").read_text())
         self.assertIn(APPLY_CLI, report["uncovered_changed_paths"])
+
+    def test_diff_ratchet_without_changed_paths_is_incomplete(self):
+        baseline = self.dir / "ratchet.json"
+        baseline.write_text(json.dumps({
+            "schema_version": 1,
+            "kind": "package-diff-ratchet",
+            "source": "integration",
+            "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}},
+            "diff": {"uncovered_changed_paths_max": 0},
+        }))
+        result = run_checker(self.dir, extra=("--ratchet", str(baseline)))
+        self.assertEqual(result.returncode, 2, output(result))
+        self.assertIn("no changed-paths input", output(result))
 
 
 class ReagentsAuditTests(unittest.TestCase):
@@ -574,6 +657,13 @@ class ContractGapTests(unittest.TestCase):
 
 
 class DockerfileAndCollectorTests(unittest.TestCase):
+    def test_committed_ratchet_has_measured_source_and_package_diff_floors(self):
+        ratchet = json.loads((ROOT / "scripts/coverage-ratchet.json").read_text())
+        self.assertTrue(COV["_is_sha"](ratchet["measured_candidate_sha"]))
+        self.assertGreater(len(ratchet["packages"]), 0)
+        self.assertIn("uncovered_changed_paths_max", ratchet["diff"])
+        self.assertNotIn("global_percent", ratchet)
+
     def test_dockerfile_is_a_separate_coverage_target(self):
         text = DOCKERFILE.read_text()
         self.assertIn("go build -cover", text)
@@ -622,7 +712,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertNotIn("--name caesium-server-test", text)
         self.assertNotIn("--publish", text)
         self.assertNotIn(" --publish-all", text)
-        self.assertNotRegex(text, r'(^|[^\w-])-p\s+\d')
+        self.assertIn("-p 127.0.0.1::8080", text)
+        self.assertNotIn("-p 8080:8080", text)
         self.assertIn("kill --signal=SIGUSR2", text)
         self.assertIn("CAESIUM_COVERAGE_BROWSER_DIR", text)
         self.assertIn("no host port", text)
@@ -646,7 +737,7 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn('exit_code" != "0" && "$exit_code" != "143"', text)
 
     def test_collector_bash_syntax(self):
-        result = subprocess.run(["bash", "-n", str(COLLECTOR)], capture_output=True, text=True)
+        result = subprocess.run(["bash", "-n", str(COLLECTOR), str(BROWSER_JOURNEY)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_checker_is_python_stdlib(self):
@@ -662,9 +753,7 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         profiles = art / "profiles"
         write_source(profiles, "cli", write_to_read_cli(), provenance("cli"))
         write_source(profiles, "server", write_to_read_server(), provenance("server"))
-        env = os.environ.copy()
-        env["CAESIUM_COVERAGE_ARTIFACTS"] = str(art)
-        env["CANDIDATE_SHA"] = SHA
+        env = collector_test_env(art)
         result = subprocess.run(
             ["bash", str(COLLECTOR), "check"],
             capture_output=True, text=True, env=env, cwd=str(ROOT),
@@ -678,9 +767,7 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         art = Path(tmp.name)
-        env = os.environ.copy()
-        env["CAESIUM_COVERAGE_ARTIFACTS"] = str(art)
-        env["CANDIDATE_SHA"] = SHA
+        env = collector_test_env(art)
         result = subprocess.run(
             ["bash", str(COLLECTOR), "check"],
             capture_output=True, text=True, env=env, cwd=str(ROOT),
@@ -701,10 +788,11 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         write_source(profiles, "server", write_to_read_server(), provenance("server"))
         browser = art / "browser.out"
         browser.write_text(profile("set", block(f"{MODULE}/api/ui.go", 3, 1)))
-        env = os.environ.copy()
-        env["CAESIUM_COVERAGE_ARTIFACTS"] = str(art)
-        env["CANDIDATE_SHA"] = SHA
+        browser_provenance = art / "browser.provenance.json"
+        browser_provenance.write_text(json.dumps(provenance("browser", kind="gocoverdir")))
+        env = collector_test_env(art)
         env["CAESIUM_COVERAGE_BROWSER_PROFILE"] = str(browser)
+        env["CAESIUM_COVERAGE_BROWSER_PROVENANCE"] = str(browser_provenance)
         result = subprocess.run(
             ["bash", str(COLLECTOR), "check"],
             capture_output=True, text=True, env=env, cwd=str(ROOT),
@@ -712,6 +800,21 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, output(result))
         report = json.loads((art / "report.json").read_text())
         self.assertEqual(report["contributions"]["browser"]["status"], "complete")
+
+    def test_collector_refuses_to_relabel_an_external_browser_profile(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        art = Path(tmp.name)
+        browser = art / "browser.out"
+        browser.write_text(profile("set", block(f"{MODULE}/api/ui.go", 3, 1)))
+        env = collector_test_env(art)
+        env["CAESIUM_COVERAGE_BROWSER_PROFILE"] = str(browser)
+        result = subprocess.run(
+            ["bash", str(COLLECTOR), "check"],
+            capture_output=True, text=True, env=env, cwd=str(ROOT),
+        )
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("requires CAESIUM_COVERAGE_BROWSER_PROVENANCE", output(result))
 
     def test_g1_wildcard_will_discover_this_module(self):
         self.assertEqual(Path(__file__).name, "test_coverage.py")

@@ -3,8 +3,9 @@
 # profiles, graceful shutdown + SIGUSR2 flush, merge, and check.
 #
 # The script is the command (G6 owns any later justfile recipe). It never
-# starts caesium-server-test, never publishes a host port, never runs
-# just integration-up / ui-e2e / performance, and never treats a killed
+# starts caesium-server-test, publishes only an ephemeral loopback port for
+# its isolated Chromium journey, never runs just integration-up / ui-e2e /
+# performance, and never treats a killed
 # process or missing GOCOVERDIR as 0% success.
 #
 #   CAESIUM_COVERAGE_ARTIFACTS=/tmp/cov \
@@ -17,12 +18,12 @@
 #   CAESIUM_COVERAGE_IMAGE     default caesiumcloud/caesium-coverage:latest
 #   CAESIUM_BUILDER_IMAGE      default caesiumcloud/caesium-builder:latest
 #   CAESIUM_COVERAGE_UNIT_PROFILE / CAESIUM_COVERAGE_BROWSER_DIR
-#   CAESIUM_COVERAGE_BROWSER_PROFILE
+#   CAESIUM_COVERAGE_BROWSER_PROFILE / CAESIUM_COVERAGE_BROWSER_PROVENANCE
 #   CAESIUM_COVERAGE_RATCHET / CAESIUM_COVERAGE_WRITE_BASELINE
-#   CAESIUM_COVERAGE_CHANGED_PATHS
+#   CAESIUM_COVERAGE_CHANGED_PATHS / CAESIUM_COVERAGE_DIFF_BASE
 #   CAESIUM_COVERAGE_SKIP_BUILD=1
 #   CAESIUM_COVERAGE_KEEP=1
-#   CAESIUM_COVERAGE_REQUIRE_BROWSER=1
+#   CAESIUM_COVERAGE_REQUIRE_BROWSER=1  # check/merge; collect always requires it
 #   CAESIUM_COVERAGE_STRICT=1
 set -euo pipefail
 
@@ -65,9 +66,10 @@ if [[ ! "$ID" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]]; then
   die "CAESIUM_COVERAGE_ID must be a lowercase DNS-1123 name of at most 40 characters, got '$ID'"
 fi
 
-# Never collide with the integration-up server or bind its host port.
+# Never collide with the integration-up server or bind its fixed host port.
 [[ "$ID" != "caesium-server-test" ]] || die "refusing to use caesium-server-test as the coverage id"
 SERVER_NAME="${ID}-server"
+BROWSER_SERVER_NAME="${ID}-browser"
 NETWORK="${ID}-net"
 IMAGE="${CAESIUM_COVERAGE_IMAGE:-caesiumcloud/caesium-coverage:latest}"
 case "$IMAGE" in
@@ -167,7 +169,6 @@ merge_gocoverdirs() {
   require_cmd "$CONTAINER_CLI"
   rm -rf "$dest"
   mkdir -p "$dest"
-  local i_flags=()
   local mount_flags=()
   local idx=0
   local joined=""
@@ -205,6 +206,7 @@ EOF
 copy_optional_browser() {
   local dir="${CAESIUM_COVERAGE_BROWSER_DIR:-}"
   local profile="${CAESIUM_COVERAGE_BROWSER_PROFILE:-}"
+  local provenance="${CAESIUM_COVERAGE_BROWSER_PROVENANCE:-}"
   if [[ -z "$dir" && -z "$profile" ]]; then
     if [[ -f "$PROFILES/browser.out" || -f "$PROFILES/browser.provenance.json" ]]; then
       return
@@ -214,49 +216,42 @@ copy_optional_browser() {
 EOF
     return
   fi
+  # A supplied profile cannot acquire candidate provenance just because this
+  # check command happened to run in a checkout with CANDIDATE_SHA set.
+  [[ -n "$provenance" && -f "$provenance" ]] \
+    || die "external browser coverage requires CAESIUM_COVERAGE_BROWSER_PROVENANCE"
   if [[ -n "$profile" ]]; then
-    if [[ ! -f "$profile" ]]; then
-      write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"coverprofile","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false}
-EOF
-      return
-    fi
+    [[ -f "$profile" ]] || die "external browser profile is missing: $profile"
     cp "$profile" "$PROFILES/browser.out"
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"coverprofile","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"labelled-profile"}
-EOF
+    cp "$provenance" "$PROFILES/browser.provenance.json"
     return
   fi
   mkdir -p "$RAW/browser"
   if [[ -d "$dir" ]]; then
     cp -a "$dir"/. "$RAW/browser/" 2>/dev/null || true
   fi
-  if gocoverdir_complete "$RAW/browser" && textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":true,"missing":false,"killed":false,"collection":"labelled-gocoverdir"}
-EOF
-  else
-    write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","complete":false,"missing":true,"killed":false,"collection":"labelled-gocoverdir"}
-EOF
+  if ! gocoverdir_complete "$RAW/browser" || ! textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
+    die "external browser GOCOVERDIR is incomplete: $dir"
   fi
+  cp "$provenance" "$PROFILES/browser.provenance.json"
 }
 
 run_checker() {
   copy_optional_unit
   copy_optional_browser
   local extra=()
-  if [[ -n "${CAESIUM_COVERAGE_RATCHET:-}" ]]; then
-    extra+=(--ratchet "$CAESIUM_COVERAGE_RATCHET")
+  local ratchet="${CAESIUM_COVERAGE_RATCHET:-$ROOT/scripts/coverage-ratchet.json}"
+  if [[ -f "$ratchet" ]]; then
+    extra+=(--ratchet "$ratchet")
+  else
+    die "committed coverage ratchet is missing: $ratchet"
   fi
   if [[ -z "${CAESIUM_COVERAGE_WRITE_BASELINE:-}" ]]; then
     CAESIUM_COVERAGE_WRITE_BASELINE="$ARTIFACTS/ratchet.json"
   fi
   extra+=(--write-baseline "$CAESIUM_COVERAGE_WRITE_BASELINE")
-  if [[ -n "${CAESIUM_COVERAGE_CHANGED_PATHS:-}" ]]; then
-    extra+=(--changed-paths "$CAESIUM_COVERAGE_CHANGED_PATHS")
-  fi
-  if [[ "${CAESIUM_COVERAGE_REQUIRE_BROWSER:-}" == "1" ]]; then
+  extra+=(--changed-paths "$CHANGED_PATHS")
+  if [[ "$CMD" == "collect" || "${CAESIUM_COVERAGE_REQUIRE_BROWSER:-}" == "1" ]]; then
     extra+=(--require-browser)
   fi
   if [[ "${CAESIUM_COVERAGE_REQUIRE_UNIT:-}" == "1" ]]; then
@@ -293,6 +288,23 @@ if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/nu
     GIT_DIRTY=true
   fi
 fi
+
+# The diff floor is only meaningful when its file list is real. Bind it to a
+# checked-out base, including in check mode, rather than silently treating an
+# omitted --changed-paths as an empty diff.
+CHANGED_PATHS="${CAESIUM_COVERAGE_CHANGED_PATHS:-$ARTIFACTS/changed-paths.txt}"
+if [[ -z "${CAESIUM_COVERAGE_CHANGED_PATHS:-}" ]]; then
+  [[ -n "$GIT_HEAD" && "$GIT_DIRTY" == false ]] \
+    || die "a clean git checkout is required to compute changed paths"
+  [[ "$CANDIDATE_SHA" == "$GIT_HEAD" ]] \
+    || die "CANDIDATE_SHA $CANDIDATE_SHA does not match the checkout used to compute changed paths ($GIT_HEAD)"
+  DIFF_BASE="${CAESIUM_COVERAGE_DIFF_BASE:-master}"
+  git -C "$ROOT" rev-parse --verify "${DIFF_BASE}^{commit}" >/dev/null \
+    || die "coverage diff base $DIFF_BASE is not a commit"
+  DIFF_BASE="$(git -C "$ROOT" merge-base "$DIFF_BASE" "$GIT_HEAD")"
+  git -C "$ROOT" diff --name-only --diff-filter=ACMR "$DIFF_BASE" "$GIT_HEAD" -- '*.go' > "$CHANGED_PATHS"
+fi
+[[ -f "$CHANGED_PATHS" ]] || die "coverage changed-paths file is missing: $CHANGED_PATHS"
 
 IMAGE_PROVENANCE="unknown"
 IMAGE_VERIFIED=false
@@ -367,6 +379,7 @@ cleanup() {
   fi
   if command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
     "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+    "$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
     "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
   fi
 }
@@ -413,6 +426,9 @@ fi
 
 # ----- collect -----
 require_cmd "$CONTAINER_CLI"
+if [[ -n "${CAESIUM_COVERAGE_BROWSER_DIR:-}" || -n "${CAESIUM_COVERAGE_BROWSER_PROFILE:-}" ]]; then
+  die "collect runs its own Chromium journey; external browser profiles are accepted only by check/merge"
+fi
 rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration"
 mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$PROFILES" "$AUDIT"
 rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
@@ -574,6 +590,76 @@ if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
 EOF
   fi
 fi
+
+# A separate process and GOCOVERDIR keep the browser contribution distinct
+# from the CLI/server write-to-read path. The live Console bundle is served by
+# the same instrumented image; Playwright drives Chromium over a loopback-only
+# ephemeral host port and must record both expected first-attempt passes.
+"$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+chmod 0777 "$RAW/browser"
+log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
+"$CONTAINER_CLI" run -d \
+  --name "$BROWSER_SERVER_NAME" \
+  --platform "$PLATFORM" \
+  --network "$NETWORK" \
+  -p 127.0.0.1::8080 \
+  --user 10001:10001 \
+  -e GOCOVERDIR=/var/lib/caesium/coverage \
+  -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
+  -e CAESIUM_AUTH_MODE=none \
+  -v "$RAW/browser:/var/lib/caesium/coverage" \
+  "$IMAGE" start >/dev/null
+
+browser_healthy=0
+for _ in $(seq 1 60); do
+  if "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+      --network "$NETWORK" --user 0:0 --entrypoint wget \
+      "$IMAGE" -q -O - "http://$BROWSER_SERVER_NAME:8080/health" 2>/dev/null | grep -q healthy; then
+    browser_healthy=1
+    break
+  fi
+  sleep 1
+done
+browser_rc=125
+if [[ "$browser_healthy" -eq 1 ]]; then
+  browser_addr="$("$CONTAINER_CLI" port "$BROWSER_SERVER_NAME" 8080/tcp | head -n 1)"
+  if [[ "$browser_addr" =~ ^127\.0\.0\.1:[0-9]+$ ]]; then
+    browser_rc=0
+    bash "$ROOT/scripts/coverage-browser-journey.sh" \
+      "http://$browser_addr" "$ARTIFACTS/browser-playwright.json" \
+      >"$ARTIFACTS/browser-journey.log" 2>&1 || browser_rc=$?
+  else
+    log "unexpected browser coverage port mapping: $browser_addr"
+  fi
+else
+  "$CONTAINER_CLI" logs "$BROWSER_SERVER_NAME" >"$ARTIFACTS/browser-server.log" 2>&1 || true
+fi
+
+"$CONTAINER_CLI" kill --signal=SIGUSR2 "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
+sleep 1
+browser_stop_rc=0
+"$CONTAINER_CLI" stop -t 60 "$BROWSER_SERVER_NAME" >/dev/null || browser_stop_rc=$?
+browser_inspect="$("$CONTAINER_CLI" inspect "$BROWSER_SERVER_NAME" 2>/dev/null || true)"
+browser_exit="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["State"].get("ExitCode", 1) if d else 1)' 2>/dev/null || echo 1)"
+browser_oom="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo true)"
+browser_complete=false
+browser_missing=true
+browser_killed=false
+if [[ "$browser_oom" == true || "$browser_exit" == 137 ]]; then
+  browser_killed=true
+fi
+if [[ "$browser_rc" -eq 0 && "$browser_stop_rc" -eq 0 && "$browser_killed" == false && ( "$browser_exit" == 0 || "$browser_exit" == 143 ) ]] \
+    && gocoverdir_complete "$RAW/browser"; then
+  browser_missing=false
+  if textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
+    browser_complete=true
+  fi
+else
+  browser_missing=$(gocoverdir_complete "$RAW/browser" && echo false || echo true)
+fi
+write_provenance "$PROFILES/browser.provenance.json" <<EOF
+{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
+EOF
 
 log "checking labelled coverage"
 run_checker
