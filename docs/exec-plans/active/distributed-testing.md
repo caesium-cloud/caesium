@@ -1113,13 +1113,15 @@ paths. G2's `74067f98` proof now qualifies merged #570's collection/ratchets;
 G6 promotion remains unimplemented and the reported coverage gaps remain.
 F2's diagnostic-only #569 excludes #571's runtime changes and is already
 merged. #571 is merged, and Helm shard 2 on the identical runtime tree passed
-in push run [36246186742](https://github.com/caesium-cloud/caesium/actions/runs/36246186742) on `ec893213`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for the ordinal-0 replacement to be Ready. Its `abef2e97` rerun (`lifecycle-39c05836d9e3`) died in snapshot batch 12 when `caesium-0` reached the 1Gi cgroup limit, so that wait was not executed.
+in push run [36246186742](https://github.com/caesium-cloud/caesium/actions/runs/36246186742) on `ec893213`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for the ordinal-0 replacement to be Ready. Its `abef2e97` rerun (`lifecycle-39c05836d9e3`) failed at snapshot batch 12 with `caesium-0` held at the 1Gi cgroup limit (`memory.events max` 109,886, `oom_kill` 0), so that wait was not executed.
 E3's comparison of `ec893213` against W4 `45994929` is inconclusive. Later
 commits do not change Go scheduler or runtime sources. They do change
 `ui/src/lib/events.ts`, so that report's browser series are not current-master
 browser evidence. E3 still needs a conclusive full two-image comparison before
 acceptance. F2's `b3382717` run passed snapshot catch-up with the #574 samples
-and no OOM. Ordinal-0 was observed too early, and rollback stays blocked.
+and no OOM, but the `abef2e97` rerun failed it on identical product code, so
+that pass is not reproducible at the 1Gi cap. Ordinal-0 was observed too early,
+and rollback stays blocked.
 External prerequisites remain unresolved.
 
 [#575](https://github.com/caesium-cloud/caesium/pull/575) merged the D3 console
@@ -1138,7 +1140,7 @@ and Q6 remain visible rather than silently treated as satisfied.
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475, C2 merged #551, C3 merged #563; the full mutation validator remains standalone until G6 |
 | D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 implementation merged #575; the manifest row stays absent until a live kind proof |
 | E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repairs #566 and #567. The ten-repeat comparison of `ec893213` against W4 `45994929` is inconclusive, and its browser series predate the #575 events-client change. E4 needs E3 acceptance and Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged. #574's sampler ran on `b3382717`: snapshot catch-up passed, no OOM, RSS near 1Gi while Go heap stayed small. The `abef2e97` rerun hit the 1Gi cap at snapshot batch 12 and never reached ordinal-0. F3 needs F2/E4/C3 and Q2 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged. #574's sampler ran on `b3382717`: snapshot catch-up passed, no OOM, RSS near 1Gi while Go heap stayed small. The `abef2e97` rerun on identical product code hit the 1Gi cap at snapshot batch 12 (`memory.events max` 109,886, `oom_kill` 0), so snapshot catch-up at 1Gi is not reproducible. Ordinal-0 and rollback remain blocked: #578's Ready wait has not run, ordinal-0 rejoin is an external prerequisite, and isolated rollback is always recorded blocked. F3 needs F2/E4/C3 and Q2 |
 | G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2 repair #570 is merged and accepted with fresh collection/ratchet evidence at `74067f98` and 37 passing tested-head CI jobs; its checkbox is checked. Eight reported contract gaps remain. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
 
 ## Streams
@@ -1580,7 +1582,7 @@ below is mandatory, including append-only edits.
   Files: new `test/lifecycle/cluster_test.go`, `test/lifecycle/versions.json` (created by F4), `scripts/lifecycle-tests.sh` (created by F4), new `helm/caesium/ci/test-values-lifecycle.yaml`.
   Depends on: F1, F4, B3.
   Verify: Extend F4's known release fixtures to three persistent members. Upgrade with active/queued work, reconcile history and raw effects, and test mixed versions only where Q4/F1 permits them. Exercise supported rollback or backup restore on isolated volumes, membership replacement, and snapshot catch-up. Use actual release digests and the chart, retain real HTTP/CLI observations, and fail or block unavailable prerequisites explicitly. Single-node migration qualification is already delivered by F4 and does not wait for this item.
-  Note: the runner merged in #565, diagnostics in #569, and same-cap memory samples in #574 (`ddf83af2`). The 1Gi limit is unchanged. On `b3382717` (`lifecycle-1571311ec3f8`) snapshot catch-up passed with those samples and no OOM; ordinal-0 was captured while Pending and rollback stayed blocked. The [#578](https://github.com/caesium-cloud/caesium/pull/578) rerun on `abef2e97` (`lifecycle-39c05836d9e3`) reached the 1Gi cgroup limit during snapshot batch 12 and did not execute the Ready wait. F2 stays unchecked. Ordinal-0 rejoin and isolated rollback remain external prerequisites.
+  Note: the runner merged in #565, diagnostics in #569, and same-cap memory samples in #574 (`ddf83af2`). The 1Gi limit is unchanged. On `b3382717` (`lifecycle-1571311ec3f8`) snapshot catch-up passed with those samples, no OOM and `memory.events max` 0; ordinal-0 was captured while Pending and rollback stayed blocked. The [#578](https://github.com/caesium-cloud/caesium/pull/578) rerun on `abef2e97` (`lifecycle-39c05836d9e3`) runs the same product code and candidate image, but it reached the 1Gi cgroup limit during snapshot batch 12 (`memory.events max` 109,886, `oom_kill` 0, header timeout) and did not execute the Ready wait. Snapshot catch-up at 1Gi is therefore not reproducible: one pass, one fail. F2 stays unchecked. Ordinal-0 rejoin and isolated rollback remain external prerequisites.
 
 - [ ] F3. Add seeded sustained faults and multi-host qualification.
   Files: new `test/robustness/exploratory_test.go`, new `test/robustness/workloads/`, new `test/chaos/`, new `scripts/soak-tests.sh`.
