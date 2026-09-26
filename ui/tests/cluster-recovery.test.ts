@@ -25,6 +25,7 @@ import {
   ownerRestartSequence,
   parseBootstrapAdminKey,
   parseLeaseResponse,
+  podLogsCommand,
   robustnessTaskImage,
   planAuthExtraEnv,
   stripRuntimeContainerID,
@@ -210,6 +211,24 @@ test("lease query accepts only a uuid and reads the harness row shape", () => {
     generation: 2,
   });
   expect(endpointHost("10.0.0.2:9001")).toBe("10.0.0.2");
+});
+
+test("bootstrap admin key is read from the full caesium container log", () => {
+  const command = podLogsCommand({
+    robustnessId: "rb-d3-example",
+    artifactsDir: "/tmp/caesium-d3-example",
+    kubeconfig: "/tmp/caesium-d3-example/kubeconfig",
+    namespace: "rb-d3-example",
+    taskImage: "example.invalid/task:1",
+    serverImage: "example.invalid/caesium:abc",
+    chartDir: "/tmp/chart",
+    valuesFile: "/tmp/values.yaml",
+    repoRoot: "/tmp/repo",
+    hashSecret: UI_E2E_AUTH_HASH_SECRET,
+  });
+  expect(command.argv).toContain("-c");
+  expect(command.argv).toContain("caesium");
+  expect(command.argv).not.toContain("--tail");
 });
 
 test("bootstrap admin key is the csk_live token from pod logs", () => {

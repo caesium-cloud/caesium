@@ -521,8 +521,10 @@ export function podLogsCommand(session: ClusterRecoverySession): ShellCommand {
       "logs",
       "-l",
       caesiumMemberSelector(),
-      "--tail",
-      "400",
+      "-c",
+      "caesium",
+      // The key is printed once to stdout at process start. Debug SQL then
+      // fills a short tail, so a line limit hides the banner.
     ],
     description: "read caesium pod logs for the bootstrap admin key",
   };
