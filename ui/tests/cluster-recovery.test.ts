@@ -24,10 +24,13 @@ import {
   ownerKillSequence,
   ownerRestartSequence,
   authModesFromPodList,
+  apiKeyAuthViolation,
+  criLogText,
   memberLogCommand,
+  nodeLogSourcesFromPodList,
+  nodePodLogCommand,
   parseBootstrapAdminKey,
   parseLeaseResponse,
-  podLogsCommand,
   robustnessTaskImage,
   planAuthExtraEnv,
   stripRuntimeContainerID,
@@ -215,8 +218,10 @@ test("lease query accepts only a uuid and reads the harness row shape", () => {
   expect(endpointHost("10.0.0.2:9001")).toBe("10.0.0.2");
 });
 
-test("bootstrap admin key is read from the full caesium container log", () => {
-  const command = podLogsCommand({
+test("bootstrap admin key is read from one pod's full caesium container log", () => {
+  // kubectl logs defaults to --tail=10 only when a selector is given; a named
+  // pod without --tail returns the whole live file.
+  const command = memberLogCommand({
     robustnessId: "rb-d3-example",
     artifactsDir: "/tmp/caesium-d3-example",
     kubeconfig: "/tmp/caesium-d3-example/kubeconfig",
@@ -227,10 +232,57 @@ test("bootstrap admin key is read from the full caesium container log", () => {
     valuesFile: "/tmp/values.yaml",
     repoRoot: "/tmp/repo",
     hashSecret: UI_E2E_AUTH_HASH_SECRET,
+  }, "caesium-0", false);
+  expect(command.argv).toEqual([
+    "kubectl", "--kubeconfig", "/tmp/caesium-d3-example/kubeconfig", "--namespace", "rb-d3-example",
+    "logs", "caesium-0", "-c", "caesium",
+  ]);
+  expect(command.argv).not.toContain("-l");
+  expect(command.argv.some((arg) => arg.startsWith("--tail"))).toBe(false);
+});
+
+test("api-key auth must be on every listed member", () => {
+  const withMode = (pod: ReturnType<typeof memberPod>, ...modes: string[]) => ({
+    ...pod,
+    spec: { ...pod.spec, containers: [{ name: "caesium", env: modes.map((value) => ({ name: "CAESIUM_AUTH_MODE", value })) }] },
   });
-  expect(command.argv).toContain("-c");
-  expect(command.argv).toContain("caesium");
-  expect(command.argv).not.toContain("--tail");
+  const a = memberPod("caesium-0", "robustness-worker-a", "10.0.0.1", containerID);
+  const b = memberPod("caesium-1", "robustness-worker-b", "10.0.0.2", `${containerID.slice(0, -1)}b`);
+  expect(apiKeyAuthViolation({ items: [withMode(a, "api-key"), withMode(b, "api-key")] })).toBeNull();
+  expect(apiKeyAuthViolation({ items: [withMode(a, "api-key"), withMode(b, "none")] })).toMatch(/caesium-1.*none/);
+  expect(apiKeyAuthViolation({ items: [withMode(a, "api-key"), b] })).toMatch(/caesium-1.*\(unset\)/);
+  expect(apiKeyAuthViolation({ items: [withMode(a, "api-key"), withMode(b, "api-key", "none")] })).toMatch(/caesium-1/);
+  expect(apiKeyAuthViolation({ items: [] })).toMatch(/no caesium members/);
+});
+
+test("rotated node log files are a fallback source for the bootstrap banner", () => {
+  const uid = "7c4f1a2e-0b3d-4e5f-8a9b-0c1d2e3f4a5b";
+  const listed = {
+    items: [
+      { metadata: { name: "caesium-2", uid }, spec: { nodeName: "robustness-control-plane" } },
+      { metadata: { name: "caesium-1" }, spec: { nodeName: "robustness-worker" } },
+    ],
+  };
+  const sources = nodeLogSourcesFromPodList(listed);
+  expect(sources).toEqual([{ name: "caesium-2", node: "robustness-control-plane", uid }]);
+  const command = nodePodLogCommand("rb-d3-example", sources[0]);
+  expect(command.argv.slice(0, 5)).toEqual(["docker", "exec", "robustness-control-plane", "sh", "-c"]);
+  expect(command.argv.at(-1)).toBe(`/var/log/pods/rb-d3-example_caesium-2_${uid}/caesium`);
+  expect(command.argv[5]).toContain("gzip -dc");
+  expect(commandViolation(command.argv)).toBeNull();
+  expect(() => nodePodLogCommand("rb-d3-example", { ...sources[0], uid: "../x" })).toThrow(/uid/);
+  expect(() => nodePodLogCommand("rb_d3", sources[0])).toThrow(/namespace/);
+  expect(() => nodePodLogCommand("rb-d3-example", { ...sources[0], node: FOREIGN_CLUSTER_ID })).toThrow(/node/);
+
+  const cri = [
+    '2026-09-26T20:08:00.000000001Z stderr F time=... VALUES ("id","csk_live_abcD","hmac")',
+    "2026-09-26T20:08:00.000000002Z stdout F ==========================================================",
+    "2026-09-26T20:08:00.000000003Z stdout F   BOOTSTRAP ADMIN API KEY (shown once, save it now):",
+    "2026-09-26T20:08:00.000000004Z stdout P   csk_live_abcDEF1234",
+    "2026-09-26T20:08:00.000000005Z stdout F 567890abcd",
+  ].join("\n");
+  expect(criLogText(cri)).toContain("BOOTSTRAP ADMIN API KEY (shown once, save it now):\n  csk_live_abcDEF1234567890abcd\n");
+  expect(parseBootstrapAdminKey(criLogText(cri))).toBe("csk_live_abcDEF1234567890abcd");
 });
 
 test("auth mode is read from the caesium container spec and logs are per pod", () => {

@@ -26,8 +26,12 @@ import {
   formatKillEvidence,
   helmAuthTemplateCommand,
   authModesFromPodList,
+  apiKeyAuthViolation,
+  criLogText,
   helmAuthUpgradeCommand,
   memberLogCommand,
+  nodeLogSourcesFromPodList,
+  nodePodLogCommand,
   helmGetValuesCommand,
   killEvidenceShowsDeath,
   kubeletStopCommand,
@@ -359,25 +363,40 @@ async function ensureApiKeyAuth(current: ClusterRecoverySession): Promise<void> 
   }
   if (process.env.CAESIUM_E2E_AUTH_ADMIN_KEY?.trim()) return;
   const listed = JSON.parse(run(kubectlGetPodsCommand(current.kubeconfig, current.namespace, caesiumMemberSelector()))) as unknown;
+  const authViolation = apiKeyAuthViolation(listed);
+  if (authViolation) throw new Error(`${authViolation} after the upgrade`);
   const modes = authModesFromPodList(listed);
-  if (!modes.some((entry) => entry.mode === "api-key")) {
-    throw new Error(`CAESIUM_AUTH_MODE is not api-key after the upgrade: ${JSON.stringify(modes)}`);
-  }
   const dir = path.join(current.artifactsDir, "bootstrap-logs");
   fs.mkdirSync(dir, { recursive: true });
+  const readKey = (stdoutPath: string, normalize: (text: string) => string = (text) => text): string | null => {
+    const text = fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, "utf8") : "";
+    const found = parseBootstrapAdminKey(normalize(text));
+    if (found) process.env.CAESIUM_E2E_AUTH_ADMIN_KEY = found;
+    return found;
+  };
   for (const member of membersFromPodList(listed)) {
     for (const previous of [false, true]) {
       const suffix = previous ? "previous" : "current";
       const stdoutPath = path.join(dir, `${member.name}.${suffix}.log`);
       const stderrPath = path.join(dir, `${member.name}.${suffix}.err`);
       captureCommand(memberLogCommand(current, member.name, previous), stdoutPath, stderrPath);
-      const text = fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, "utf8") : "";
-      const found = parseBootstrapAdminKey(text);
-      if (found) {
-        process.env.CAESIUM_E2E_AUTH_ADMIN_KEY = found;
-        return;
-      }
+      if (readKey(stdoutPath)) return;
     }
+  }
+  // The banner can rotate out of the live file while helm rolls the other
+  // members at debug log level; read the rotated files on the node.
+  for (const source of nodeLogSourcesFromPodList(listed)) {
+    const stdoutPath = path.join(dir, `${source.name}.node.log`);
+    const stderrPath = path.join(dir, `${source.name}.node.err`);
+    let command: ShellCommand;
+    try {
+      command = nodePodLogCommand(current.namespace, source);
+    } catch (error) {
+      fs.writeFileSync(stderrPath, `${error instanceof Error ? error.message : String(error)}\n`);
+      continue;
+    }
+    captureCommand(command, stdoutPath, stderrPath);
+    if (readKey(stdoutPath, criLogText)) return;
   }
   throw new Error(`bootstrap admin API key was not in ${dir}; modes=${JSON.stringify(modes)}`);
 }

@@ -407,6 +407,74 @@ export function authModesFromPodList(payload: unknown): { name: string; mode: st
   return modes;
 }
 
+// Every listed member must run with api-key auth. A member without the
+// variable, or whose last entry (the one Kubernetes applies) is another mode,
+// fails the check, so a partially rolled fleet is not accepted.
+export function apiKeyAuthViolation(payload: unknown): string | null {
+  const members = membersFromPodList(payload);
+  if (members.length === 0) return "no caesium members are listed";
+  const modes = authModesFromPodList(payload);
+  const wrong = members
+    .map((member) => ({ name: member.name, mode: modes.filter((entry) => entry.name === member.name).pop()?.mode ?? "(unset)" }))
+    .filter((entry) => entry.mode !== "api-key");
+  return wrong.length === 0 ? null : `CAESIUM_AUTH_MODE is not api-key on every member: ${JSON.stringify(wrong)}`;
+}
+
+export type NodeLogSource = { name: string; node: string; uid: string };
+
+export function nodeLogSourcesFromPodList(payload: unknown): NodeLogSource[] {
+  return podItems(payload).flatMap((pod) => {
+    const metadata = objectField(pod, "metadata");
+    const name = stringField(metadata, "name");
+    const uid = stringField(metadata, "uid");
+    const node = stringField(objectField(pod, "spec"), "nodeName");
+    return name && uid && node ? [{ name, node, uid }] : [];
+  });
+}
+
+// kubectl logs serves only the live log file. Kubelet rotates at
+// containerLogMaxSize and keeps older files (all but the newest gzipped)
+// beside it under /var/log/pods, so a one-time banner that rotated out is
+// still readable on the node. Read-only, so control-plane nodes are allowed.
+export function nodePodLogCommand(namespace: string, source: NodeLogSource): ShellCommand {
+  rejectResourceName(namespace, "namespace");
+  rejectResourceName(source.name, "pod");
+  if (!UUID_RE.test(source.uid)) throw new Error(`refusing pod uid ${source.uid}`);
+  if (!SAFE_NODE_RE.test(source.node) || source.node === FOREIGN_CLUSTER_ID) {
+    throw new Error(`refusing node name ${source.node}`);
+  }
+  const dir = `/var/log/pods/${namespace}_${source.name}_${source.uid}/caesium`;
+  return {
+    argv: [
+      "docker",
+      "exec",
+      source.node,
+      "sh",
+      "-c",
+      'for f in "$1"/*; do case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac; done',
+      "sh",
+      dir,
+    ],
+    description: `read current and rotated caesium log files for ${source.name} on ${source.node}`,
+  };
+}
+
+// Node log files are CRI-formatted: "<time> <stream> <F|P> <content>". P marks
+// a partial line that continues in the next record.
+export function criLogText(text: string): string {
+  let out = "";
+  for (const line of text.split("\n")) {
+    const match = line.match(/^\S+ (?:stdout|stderr) ([FP]) ?(.*)$/);
+    if (!match) {
+      if (line) out += `${line}\n`;
+      continue;
+    }
+    out += match[2];
+    if (match[1] === "F") out += "\n";
+  }
+  return out;
+}
+
 export function memberLogCommand(session: ClusterRecoverySession, podName: string, previous: boolean): ShellCommand {
   if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(podName)) {
     throw new Error(`unsafe pod name ${podName}`);
@@ -550,26 +618,6 @@ export function helmAuthUpgradeCommand(session: ClusterRecoverySession, overlayP
       "240s",
     ],
     description: "helm upgrade the robustness release with an owned api-key overlay",
-  };
-}
-
-export function podLogsCommand(session: ClusterRecoverySession): ShellCommand {
-  return {
-    argv: [
-      "kubectl",
-      "--kubeconfig",
-      session.kubeconfig,
-      "--namespace",
-      session.namespace,
-      "logs",
-      "-l",
-      caesiumMemberSelector(),
-      "-c",
-      "caesium",
-      // The key is printed once to stdout at process start. Debug SQL then
-      // fills a short tail, so a line limit hides the banner.
-    ],
-    description: "read caesium pod logs for the bootstrap admin key",
   };
 }
 
