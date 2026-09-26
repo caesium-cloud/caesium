@@ -16,16 +16,22 @@ coverage; the W4 targeted-fault harness, open-loop load driver, native fuzz
 campaigns, single-node previous-release upgrade qualification, and
 merge-candidate identity / `merge_group` wiring; the W5 fenced core-failure
 suite, coverage-instrumented CLI/server collection, and fail-closed
-base/candidate performance comparator; plus the remaining Console fault
-journeys, cluster upgrades and calibrated budgets, are tracked in
+base/candidate performance comparator. W6's checker-strength validator,
+core-failure acceptance repair, persistent-cluster lifecycle runner and common
+performance benchmark harness are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
+Console fault journeys and calibrated budgets remain planned. The F2 cluster
+runner and E3 comparator still lack complete live acceptance on their merged
+heads.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
 dependencies**: G7 wired the `merge_group` trigger and candidate-identity
 checks on the existing aggregate. W5 added **no jobs and no `ci-ok`
 dependencies** either: `TestCore`, the coverage collector and
-`scripts/performance.sh` are local commands. None of these waves changed
+`scripts/performance.sh` are local commands. W6 also added **no jobs or
+aggregate dependencies**: the C3 validator and F2 cluster runner remain
+standalone. None of these waves changed
 repository settings:
 `ci-ok` is still absent from master's required status checks, so that
 promotion gates `v*` publication rather than PR merge, and `merge_group` is
@@ -1358,13 +1364,65 @@ restore-from-snapshot, or rollback as a product guarantee. The published
 amd64/arm64 CLI checksums are carried in `versions.json` but
 `scripts/ci-cli-smoke.sh` is not re-run by this lane.
 
+### Persistent-cluster lifecycle qualification (distributed-testing W6/F2)
+
+F2 extends the F4 controller with `CAESIUM_LIFECYCLE_MODE=cluster`. Run it only
+in the exclusive Docker/kind/Helm lane from a clean, committed candidate;
+leave the candidate image tag absent so this invocation builds and verifies
+it. The controller creates its own four-node kind cluster, three persistent
+StatefulSet members and artifact kubeconfig, and refuses a pre-existing cluster
+with the same id. It checks the pinned `v0.1.0` digest and every candidate
+archive/config/layer hash and node import before testing the image-only Helm
+upgrade. The cluster result is `$CAESIUM_LIFECYCLE_ARTIFACTS/cluster-qualification.json`.
+
+```sh
+CANDIDATE_SHA=$(git rev-parse HEAD)
+CAESIUM_LIFECYCLE_MODE=cluster \
+CAESIUM_LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
+CAESIUM_LIFECYCLE_ARTIFACTS="$(mktemp -d)" \
+CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
+  bash scripts/lifecycle-tests.sh
+```
+
+The required cases cover three PVC-backed voters, a protocol-2 mixed-version
+window, in-flight and queued work with durable task-run IDs and raw effects,
+rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
+control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
+rollback observation. A skipped or unobservable case is `blocked`; the overall
+record cannot pass on a subset. At merged F2 head `cdccfd89`, the latest live
+run passed pinned image identity, three voters, mixed-version dispatch and
+completion, rolling upgrade, and retained history/effects. It failed overall:
+snapshot catch-up stopped at catalog-write batch 13; replacement, restore,
+ordinal-0 and rollback were blocked because that fault left the shared cluster
+unfit for subsequent destructive cases. A prior head passed restore and
+ordinal-1 replacement, but that result does not qualify `cdccfd89`. F2 is
+not a CI job or a complete cluster-upgrade qualification. The unresolved
+ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
+the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
+The batch-13 EOF is unattributed: retained current pod logs end before the
+failure, while teardown captured only absent previous-container logs. The
+next exact-head probe must save current survivor logs, pod events and a bounded
+readback of the disputed write before cleanup.
+
 ### Fenced core failures (distributed-testing W5/B3)
 
 B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
 the `early-evidence` lane. That lane still runs `^TestOwnerCrash$`.
 
 ```sh
-CAESIUM_ROBUSTNESS_RUN='^TestCore$' just tag="$CANDIDATE_SHA" robustness-test
+test -z "$(git status --porcelain)"  # run from a clean candidate checkout
+CANDIDATE_SHA=$(git rev-parse HEAD)
+PLATFORM=$(just --evaluate platform)
+just tag="$CANDIDATE_SHA" build-release
+docker build --platform "$PLATFORM" \
+  --build-arg BUILDER_IMAGE="caesiumcloud/caesium-builder:${CANDIDATE_SHA}" \
+  --build-arg CAESIUM_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}" \
+  --target instrumented-server \
+  -t "caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
+  -f build/Dockerfile.robustness .
+CAESIUM_ROBUSTNESS_RUN='^TestCore$' \
+CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
+  just tag="$CANDIDATE_SHA" robustness-test
 ```
 
 `scripts/robustness.sh` gives that selection a 70-minute runner timeout and
@@ -1373,9 +1431,15 @@ cancel race, response loss, stale generation, benching, quorum loss). The
 durable-event crash subtest is required only when
 `CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE` is set; without it the case is
 inconclusive, not a pass. A 2–1 split must show nonzero iptables drop counters
-before any minority result counts. Catalog rows stay `status: absent` until a
-live run of this command is recorded. No such run is recorded for the merged
-candidate `9dbde3eb`.
+before any minority result counts. Catalog rows remain `status: absent` with
+empty gates; G6 owns their registration and promotion. W6's B3 repair (#564) fixed
+terminal completion fencing and the live scenario's public-versus-durable task
+identity checks. Its final reviewed head `ee9f7541` passed all 12/12 `TestCore`
+subtests on an owned persistent three-member kind cluster; cancellation
+returned `409/terminal_run`, with a cancelled first run, successful replacement
+and no late task-success event. This is live B3 acceptance for the merged
+repair, not an `early-evidence` expansion: that gate still runs
+`^TestOwnerCrash$` and the core suite remains a local command.
 
 ### Coverage collection with provenance (distributed-testing W5/G2)
 
@@ -1399,7 +1463,11 @@ incomplete. A baseline is written only when the verdict is `pass`, and a
 baseline this script writes can be passed back with `--ratchet`. A killed
 server or a nonzero stop other than exit 143 is incomplete, not 0%. This is
 not a CI job. The collect that existed before review fix `7dcef7f0` is not
-evidence for that commit.
+evidence for that commit. A fresh image labelled with reviewed head `7dcef7f0`
+later produced `verdict: pass`, complete CLI/server/integration profiles and
+covered the apply→export write/read path (7.6% integration coverage). No
+browser profile was supplied and no package/diff ratchet was committed, so G2
+acceptance remains open.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
@@ -1414,8 +1482,21 @@ CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1
 CAESIUM_PERF_ARTIFACTS="$(mktemp -d)" \
 CAESIUM_PERF_BASE_SHA="<base>" \
 CAESIUM_PERF_CANDIDATE_SHA="$(git rev-parse HEAD)" \
+CAESIUM_PERF_REPEATS=10 CAESIUM_PERF_BROWSER=1 \
   bash scripts/performance.sh
 ```
+
+W6's E3 repair (#566) measures the same benchmark source on both sides:
+`performance.sh` copies the candidate's two benchmark files into its temporary
+base worktree **after** building the release images, hashes them and the shared
+test helpers into a manifest, and uses `performance-benchmarks.sh` for one
+alternating Go sample per side per repeat. The comparator requires complete
+named benchmark rows and zero-exit evidence in every paired repeat, plus
+matching source/image/harness provenance. A base harness compile failure is
+reported separately from a measured base benchmark failure. Cleanup verifies
+the exact linked worktree and overlay before removing it. The command above
+enables browser measurements explicitly; the script default is
+`CAESIUM_PERF_BROWSER=0`.
 
 `scripts/compare-performance.py` exits 0 only when every metric is `faster` or
 `no_significant_difference`. Any inconclusive metric, undersampled series, or
@@ -1428,11 +1509,42 @@ not from a Python gzip of the files. Browser rows are keyed by metric, route
 and kind. Compare an already-written report without Docker:
 
 ```sh
-CAESIUM_PERF_ARTIFACTS=/tmp/perf bash scripts/performance.sh compare comparison.json
+CAESIUM_PERF_ARTIFACTS=/tmp/perf bash scripts/performance.sh compare
 ```
 
-No live two-image run is recorded for merged candidate `30250322`. This is not
-a CI job and not a calibrated SLO (E4 / Q2 / Q5).
+The prior E3 implementation head `30250322` failed its first live comparison:
+the base lacked the new benchmark functions and two browser series were
+inconclusive. A later ten-repeat run on repair head `87546de6` used matched
+uninstrumented images and complete paired benchmark samples, but returned
+`overall=inconclusive` (one noisy browser series and one slower warm workload).
+The merged repair head `08b8bd26` changed harness validation after that run.
+Follow-up [#567](https://github.com/caesium-cloud/caesium/pull/567) isolates
+each benchmark process to its side's Go-selected production files, one pinned
+test helper, and the two shared benchmark sources; it remains under CODEOWNER
+review. A full ten-repeat run on `b9c7bf17` against W4 base `45994929`
+completed all 20 paired benchmark samples and cold/warm workloads, but the
+base's first Chromium repeat logged `net::ERR_INTERNET_DISCONNECTED` and
+Playwright exited 1. The comparator returned `overall=fail` with
+`speed_compared=false`, correctly withholding a speed verdict. E3 acceptance
+is still open. This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
+
+### Checker-strength mutation validator (distributed-testing W6/C3)
+
+Run the standalone C3 validator on a clean, committed candidate:
+
+```sh
+bash scripts/validate-test-oracles.sh
+```
+
+It clones the candidate into a temporary isolated checkout, runs named model,
+history and robustness probes, then applies eight recorded known-bad patches
+one at a time. Each mutant must fail its named test with the expected oracle
+assertion; a compile error, timeout, resource failure, missing test or missing
+assertion marker cannot count as a successful rejection. Legal duplicate
+delivery and ambiguous response timeout histories must still pass on the
+candidate. The merged C3 head passed the candidate probes and all eight
+mutation rejections. Its ordinary Go/Python probes run in existing unit/config
+lanes; the full mutation script is not yet a CI job (G6 owns promotion).
 
 ## 5. Server env per lane, and the silent-drift rule
 
