@@ -1405,24 +1405,18 @@ cluster unfit for subsequent destructive cases. A prior head passed restore
 and ordinal-1 replacement; that is historical partial evidence. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
 Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
-head `b8498ac8`, contains the six resolved diagnostic review fixes in ancestor
-`b45adfdc`: explicit empty disputed-write fields and expected survivor rows,
-match/null validation, and immediate previous logs and batch-0 captures.
-That unchanged diagnostic code passed 10 focused Python tests, all 331 scripts
-tests and eight guard-removal negative controls. Final-head containerized
-Kubernetes race tests passed (3.974 s), as did the integration/race
-`ReadSnapshotDisputedWrite|SnapshotReadbackBases` regressions (1.068 s).
-The earlier diagnostic-only CI failed Helm shard 2 on an existing Kubernetes
-live-log readiness defect. Separate [#571](https://github.com/caesium-cloud/caesium/pull/571),
-head `9d86c90c`, fixed that defect and passed the unchanged real Kubernetes
-CLI/HTTP live/retained secret-log scenario (10.16 s), package race tests/vet
-(3.964 s) and all 37 executed CI jobs. F2 includes that fix as an explicit
-dependency; its production tree and integration assertions match #571, with
-only the five diagnostic/test paths differing. F2's final CI passed all 37
-executed jobs, including all Helm shards and `ci-ok`. Merge #571 first;
-CODEOWNER approval is required for both PRs.
-These diagnostic fixes have no new live lifecycle qualification; the linked
-PR holds the durable failure-evidence summary.
+head `05ae4644`, removes the bundled runtime copy and has the same source tree
+as diagnostic-only `b45adfdc`. Its unchanged diagnostic code passed 10 focused
+Python tests, all 331 scripts tests, eight guard-removal controls and containerized
+integration/race readback regressions (1.070 s). Current CI is pending; the
+37-job green run at `b8498ac8` included the removed runtime copy and is historical.
+Review of separate [#571](https://github.com/caesium-cloud/caesium/pull/571) is
+in progress. The `9d86c90c` real Kubernetes log scenario (10.16 s), package race
+checks (3.964 s) and 37 passing CI jobs describe that exact head; three new
+readiness/setup-budget findings still need resolution. Hold F2 until #571
+merges, then incorporate master and revalidate the affected Helm shard-2 lane.
+CODEOWNER approval is required for both PRs. No new lifecycle qualification
+is claimed; the linked PR holds the durable failure-evidence summary.
 The unresolved
 ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
 the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
@@ -1533,8 +1527,21 @@ and 480 source hashes match. Missing audited files remain eligible, and
 statement-free exceptions require a complete bound inventory plus matching
 source. Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
 `empty_diff=true`; zero uncovered is explicit policy, not a live nonempty diff
-measurement. Eight critical-contract coverage gaps remain. All 37 current-head
-CI jobs pass; CODEOWNER approval and merge are pending, so G2 stays unchecked.
+measurement. Eight critical-contract coverage gaps remain. The 37-job green
+CI run and collection above describe `609cca31`; round-two findings on
+uninstrumentable/build-excluded files and mutable-image launches are being
+addressed, with fresh candidate verification pending. G2 stays unchecked.
+
+The max-zero diff floor is explicit policy and is not ready for G6 promotion.
+A reproducible replay at master `f6acf0ea` took the last 60 first-parent commit
+diffs and evaluated each changed filename list against the retained `609cca31`
+integration/browser profiles, audited packages and source inventory. Eighteen
+diffs contained eligible files: 12 failed the policy and six passed. This
+replays current profile coverage over historical touched filenames; it is
+neither execution of historical source nor a historical CI failure rate.
+Uninstrumentable-file fixes remove false exclusions/failures; genuinely
+uncovered changed code still needs journeys before promotion. Local, ephemeral
+replay details: `/tmp/caesium-w6-round2-policy-replay.json`.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
