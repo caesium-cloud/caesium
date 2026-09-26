@@ -12,7 +12,6 @@ import {
 import { loginAtUrl, obtainAuthKeys, type AuthLaneKeys } from "./helpers/auth";
 import {
   OWNER_CONSOLE_PORT,
-  SERVICE_CONSOLE_PORT,
   assessClusterRecoveryGate,
   caesiumMemberSelector,
   chooseOwner,
@@ -30,6 +29,8 @@ import {
   helmGetValuesCommand,
   killEvidenceShowsDeath,
   kubeletStopCommand,
+  nodeImageListCommand,
+  robustnessTaskImage,
   kubectlGetPodsCommand,
   leaseQueryBody,
   membersFromPodList,
@@ -46,6 +47,7 @@ import {
   serviceConsoleForward,
   statusFromRowText,
   stripRuntimeContainerID,
+  taskImageListed,
   taskListCommand,
   taskPlacementIssues,
   type ClusterRecoverySession,
@@ -131,7 +133,12 @@ test("authenticated console observes the owner crash and converges on the durabl
   const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   const alias = `d3-console-${suffix}`;
   const marker = `d3-marker-${suffix}`;
-  const definition = consoleRecoveryDefinition(alias, activeSession.taskImage, marker);
+  const taskImage = robustnessTaskImage(activeSession.robustnessId);
+  const loaded = run(nodeImageListCommand(intendedOwner.node));
+  if (!taskImageListed(loaded, taskImage)) {
+    throw new Error(`task image ${taskImage} is not loaded on ${intendedOwner.node}`);
+  }
+  const definition = consoleRecoveryDefinition(alias, taskImage, marker);
   const applied = await apiSend(ownerOrigin, adminKey, "POST", "/v1/jobdefs/apply", { definitions: [definition] });
   if (applied.status < 200 || applied.status >= 300) {
     throw new Error(`apply failed: ${applied.status} ${applied.text.slice(0, 500)}`);
@@ -185,18 +192,30 @@ test("authenticated console observes the owner crash and converges on the durabl
     throw new Error(`owner container was not in a valid ctr task list before SIGKILL\n${before}`);
   }
 
+  const beforeFault = await readRun(ownerOrigin, adminKey, job.id, runId);
+  if (beforeFault.status === "succeeded" || beforeFault.status === "failed" || beforeFault.status === "cancelled") {
+    throw new Error(`run reached ${beforeFault.status} before the owner fault`);
+  }
   const statusBefore = await headingStatus(page);
   let faultSignals = 0;
+  let faultRecordedAt = 0;
   let watchFault = true;
-  const onFailed = () => {
-    if (watchFault) faultSignals += 1;
+  const noteFault = () => {
+    faultSignals += 1;
+    if (faultRecordedAt === 0) faultRecordedAt = Date.now();
+  };
+  const onFailed = (request: { url(): string }) => {
+    if (!watchFault || !request.url().startsWith(ownerOrigin)) return;
+    noteFault();
   };
   const onConsole = (message: ConsoleMessage) => {
     if (!watchFault || message.type() !== "error") return;
-    if (/net::ERR_|Failed to load resource|disconnected/i.test(message.text())) faultSignals += 1;
+    if (!/net::ERR_/i.test(message.text())) return;
+    noteFault();
   };
   page.on("requestfailed", onFailed);
   page.on("console", onConsole);
+  const faultStartedAt = Date.now();
 
   run(kubeletStopCommand(refreshed.node));
   let listing = before;
@@ -222,10 +241,12 @@ test("authenticated console observes the owner crash and converges on the durabl
   watchFault = false;
   page.off("requestfailed", onFailed);
   page.off("console", onConsole);
-  const faultRecordedAt = Date.now();
+  if (faultRecordedAt === 0) faultRecordedAt = faultStartedAt;
 
-  serviceForward = await startPortForward(serviceConsoleForward(activeSession));
-  serviceOrigin = `http://127.0.0.1:${SERVICE_CONSOLE_PORT}`;
+  stopChild(ownerForward);
+  ownerForward = undefined;
+  serviceForward = await startPortForward(serviceConsoleForward(activeSession, OWNER_CONSOLE_PORT));
+  serviceOrigin = ownerOrigin;
   await waitForHealth(serviceOrigin);
 
   let eventStreamAttempts = 0;
@@ -234,6 +255,8 @@ test("authenticated console observes the owner crash and converges on the durabl
   const runPath = `/v1/jobs/${job.id}/runs/${runId}`;
   const onEventResponse = (response: PlaywrightResponse) => {
     if (response.request().method() !== "GET") return;
+    const started = response.request().timing().startTime;
+    if (!Number.isFinite(started) || started < faultStartedAt) return;
     const pathname = new URL(response.url()).pathname;
     if (pathname === "/v1/events") {
       eventStreamAttempts += 1;
@@ -244,7 +267,6 @@ test("authenticated console observes the owner crash and converges on the durabl
   };
   page.on("response", onEventResponse);
   try {
-    await loginAtUrl(page, `${serviceOrigin}/jobs/${job.id}/runs/${runId}`, authKeys.runner);
     await expect(page.getByRole("heading", { name: /^Run / })).toBeVisible({ timeout: 30_000 });
     const durable = await poll(120_000, 1_000, async () => {
       const snapshot = await readRun(serviceOrigin, adminKey, job.id, runId);
@@ -258,6 +280,12 @@ test("authenticated console observes the owner crash and converges on the durabl
       snapshot: await readRun(serviceOrigin, adminKey, job.id, runId),
       lease: await readLease(serviceOrigin, adminKey, runId),
     }));
+    if (durable.snapshot.status === "succeeded") {
+      const completed = Date.parse(durable.snapshot.completedAt);
+      if (!Number.isFinite(completed) || completed + 2000 < faultStartedAt) {
+        throw new Error(`run completed_at ${durable.snapshot.completedAt || "missing"} is not after the owner fault`);
+      }
+    }
     const taskId = durable.snapshot.tasks[0]?.taskId ?? "";
     const logExcerpt = taskId ? await readRetainedLog(serviceOrigin, adminKey, job.id, runId, taskId, marker) : "";
 
@@ -571,8 +599,10 @@ async function startPortForward(command: ShellCommand): Promise<ChildProcess> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (error) reject(error);
-      else resolve();
+      if (error) {
+        if (child.exitCode === null) child.kill("SIGTERM");
+        reject(error);
+      } else resolve();
     };
     const onData = (chunk: Buffer) => {
       output += chunk.toString();

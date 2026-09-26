@@ -97,6 +97,7 @@ export type LeaseSnapshot = {
 export type DurableRunSnapshot = {
   id: string;
   status: string;
+  completedAt: string;
   tasks: { id: string; taskId: string; status: string }[];
 };
 
@@ -125,9 +126,9 @@ export type ConsoleSurface = {
   /** Those event-stream responses that returned 200. */
   eventStreamAuthorized: number;
   /**
-   * Browser GET /v1/jobs/:id/runs/:id that returned 200. API-key login keeps
-   * the bearer token in page memory, and EventSource cannot send it, so a 401
-   * on /v1/events is followed by this authenticated poll.
+   * Browser GET /v1/jobs/:id/runs/:id that returned 200 after the fault.
+   * The mount fetch does not count. API-key EventSource stays 401, and the
+   * page recovers by polling this route once the stream is unhealthy.
    */
   authenticatedRunReads: number;
   showedSuccessBeforeFault: boolean;
@@ -421,14 +422,31 @@ export function ownerConsoleForward(session: ClusterRecoverySession, podName: st
   });
 }
 
-/** The Service, not a pod IP, is the supported console entry after the owner is gone. */
-export function serviceConsoleForward(session: ClusterRecoverySession): ShellCommand {
+/** The Service on the page's existing local port, so the same document recovers. */
+export function serviceConsoleForward(session: ClusterRecoverySession, localPort = OWNER_CONSOLE_PORT): ShellCommand {
   return portForwardCommand({
     kubeconfig: session.kubeconfig,
     namespace: session.namespace,
     target: `svc/${CONSOLE_SERVICE}`,
-    localPort: SERVICE_CONSOLE_PORT,
+    localPort,
   });
+}
+
+export function robustnessTaskImage(robustnessId: string): string {
+  rejectResourceName(robustnessId, "cluster");
+  return `caesium-robustness-task:${robustnessId}`;
+}
+
+export function nodeImageListCommand(node: string): ShellCommand {
+  rejectNode(node);
+  return {
+    argv: ["docker", "exec", node, "ctr", "-n", "k8s.io", "images", "ls"],
+    description: "list images loaded on the owner worker",
+  };
+}
+
+export function taskImageListed(listing: string, image: string): boolean {
+  return listing.split(/\r?\n/).some((line) => line.includes(image));
 }
 
 export function helmGetValuesCommand(session: ClusterRecoverySession): ShellCommand {
@@ -630,7 +648,7 @@ export function consoleRecoveryDefinition(alias: string, taskImage: string, mark
         name: "hold",
         engine: "kubernetes",
         image: taskImage,
-        command: ["sh", "-c", `echo ${marker}; sleep 60`],
+        command: ["sh", "-c", `echo ${marker}; sleep 900`],
       },
     ],
   };
@@ -724,6 +742,7 @@ export function parseRunSnapshot(payload: unknown): DurableRunSnapshot | { error
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return { error: "run response is not an object" };
   const id = stringField(payload as Record<string, unknown>, "id");
   const status = stringField(payload as Record<string, unknown>, "status");
+  const completedAt = stringField(payload as Record<string, unknown>, "completed_at") ?? "";
   if (!id || !UUID_RE.test(id)) return { error: "run response has no uuid id" };
   if (!status) return { error: "run response has no status" };
   const rawTasks = (payload as { tasks?: unknown }).tasks;
@@ -738,7 +757,7 @@ export function parseRunSnapshot(payload: unknown): DurableRunSnapshot | { error
       if (taskId) tasks.push({ id: taskRunId, taskId, status: taskStatus });
     }
   }
-  return { id, status, tasks };
+  return { id, status, completedAt, tasks };
 }
 
 export function ctrListingKind(listing: string): "ok" | "error" | "invalid" {

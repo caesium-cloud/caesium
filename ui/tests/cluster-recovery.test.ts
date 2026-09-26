@@ -25,9 +25,11 @@ import {
   ownerRestartSequence,
   parseBootstrapAdminKey,
   parseLeaseResponse,
+  robustnessTaskImage,
   planAuthExtraEnv,
   stripRuntimeContainerID,
   taskDeadFromListing,
+  taskImageListed,
   taskPlacementIssues,
   type ConsoleSurface,
   type DurableOutcome,
@@ -226,7 +228,7 @@ test("console job is a kubernetes hold that prints a marker", () => {
   const step = (definition.steps as { engine: string; command: string[] }[])[0];
   expect(step.engine).toBe("kubernetes");
   expect(step.command[2]).toContain("d3-marker-abcdef123456");
-  expect(step.command[2]).toContain("sleep 60");
+  expect(step.command[2]).toContain("sleep 900");
   expect(() => consoleRecoveryDefinition("Bad Alias", "img", "d3-marker-abcdef123456")).toThrow(/alias/);
 });
 
@@ -272,6 +274,30 @@ test("convergence rejects duplicate, stale, false success, and a fault that was 
   noStream.console.authenticatedRunReads = 0;
   expect(codes(noStream)).toEqual(["event_stream_not_recovered"]);
 
+  const sameGeneration = passingJourney();
+  sameGeneration.durable.generationAfter = sameGeneration.durable.generationBefore;
+  expect(codes(sameGeneration)).toContain("survivor_not_recorded");
+
+  const sameOwner = passingJourney();
+  sameOwner.durable.ownerAfter = sameOwner.durable.ownerBefore;
+  expect(codes(sameOwner)).toContain("survivor_not_recorded");
+
+  const unseenFault = passingJourney();
+  unseenFault.fault.sawDisconnectOrStatusChange = false;
+  expect(codes(unseenFault)).toEqual(["missing_fault_while_connected"]);
+
+  const staleHeading = passingJourney();
+  staleHeading.console.headingStatus = "running";
+  expect(codes(staleHeading)).toContain("status_mismatch");
+
+  const missingLog = passingJourney();
+  missingLog.console.logText = "line without the marker";
+  expect(codes(missingLog)).toContain("log_mismatch");
+
+  const liveBadge = passingJourney();
+  liveBadge.console.logSourceLabel = "Live stream";
+  expect(codes(liveBadge)).toContain("retained_log_not_shown");
+
   const apiKeyFallback = passingJourney();
   apiKeyFallback.console.eventStreamAttempts = 2;
   apiKeyFallback.console.eventStreamAuthorized = 0;
@@ -297,6 +323,12 @@ test("convergence rejects duplicate, stale, false success, and a fault that was 
   const staleStatus = passingJourney();
   staleStatus.console.runRows = [{ id: runId, status: "running" }];
   expect(codes(staleStatus)).toContain("stale_row");
+});
+
+test("the flattened task image must already be loaded on the node", () => {
+  expect(robustnessTaskImage("robust-1")).toBe("caesium-robustness-task:robust-1");
+  expect(taskImageListed("caesium-robustness-task:robust-1  sha256:abc\n", "caesium-robustness-task:robust-1")).toBe(true);
+  expect(taskImageListed("alpine:3.23\n", "caesium-robustness-task:robust-1")).toBe(false);
 });
 
 test("the cluster spec fails closed instead of skipping", () => {
