@@ -67,6 +67,8 @@ affinity:
 
 # The 1,400 acknowledged snapshot writes OOMKilled two voters at 512Mi.
 # Keep this limit identical for the previous and candidate images during upgrade.
+# Snapshot catch-up samples cgroup, RSS and Go heap at this same 1Gi cap.
+# Do not raise the limit or Raft retention to force a passing catch-up.
 resources:
   requests:
     cpu: 50m

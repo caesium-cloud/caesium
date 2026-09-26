@@ -57,6 +57,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lifecycle-snapshot-phase.sh
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
 cd "$ROOT"
 
 # F2's cluster lane is a separate mode. The F4 standalone path below is kept
@@ -355,6 +357,10 @@ PY
     local rc=$?
     trap - EXIT INT TERM
     set +e
+    if [[ -n "${LC_PHASE_PID:-}" ]]; then
+      lc_stop_phase_group "$LC_PHASE_PID"
+      LC_PHASE_PID=""
+    fi
     if [[ "$LC_SIGNALLED" == 1 ]]; then rc=143; fi
     if [[ "$LC_OWNED" == 1 ]]; then
       lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
@@ -399,7 +405,7 @@ PY
   }
   trap lc_cleanup EXIT
   trap 'LC_SIGNALLED=1; exit 130' INT
-  trap 'LC_SIGNALLED=1; exit 143' TERM
+  trap 'LC_SIGNALLED=1; lc_stop_phase_group "${LC_PHASE_PID:-}"; exit 143' TERM
   lc_case() {
     LC_CASE="$1" LC_STATUS="$2" LC_DETAIL="$3" LC_EVIDENCE="${4:-}" LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY'
 import json,os,pathlib,re
@@ -1297,6 +1303,9 @@ PY
       lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
         'cd /data && find . -type f -exec ls -ln {} \; | sort' >"$1"
     }
+    # Snapshot phase helpers live in scripts/lifecycle-snapshot-phase.sh.
+    # A probe failure still appends a sample and must not change the write rc.
+    # The 1Gi cap is not raised here.
 
     # Snapshot catch-up: the stopped member misses at least 1,400 distinct
     # acknowledged catalog writes. If that does not exhaust dqlite's retained
@@ -1307,6 +1316,15 @@ PY
     LC_SNAP_TRUNCATED=0
     LC_SNAP_REASON=""
     LC_SNAP_EVIDENCE=""
+    # 15s between rounds, 40 rounds: finite inside the 12m write-phase timeout.
+    LC_MEM_ACTIVE=0
+    LC_MEM_BATCHES=""
+    LC_MEM_APPLY_BATCH=""
+    LC_MEM_SEQ=0
+    LC_MEM_INTERVAL=15
+    LC_MEM_SAMPLE_CAP=40
+    LC_PHASE_PID=""
+    LC_PHASE_DONE=""
     lc_scale_two || LC_SNAP_RC=$?
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
@@ -1340,12 +1358,10 @@ PY
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       for LC_BATCH in {0..18}; do
         printf -v LC_BATCH_TAG '%02d' "$LC_BATCH"
-        if [[ "$LC_BATCH" == 0 ]]; then
-          lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-        else
-          LC_SNAPSHOT_BATCH="$LC_BATCH" lc_phase GenerateSnapshotUpdateBatch "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-        fi
+        lc_run_snapshot_phase "$LC_BATCH"
         if [[ "$LC_SNAP_RC" != 0 ]]; then
+          LC_MEM_APPLY_BATCH="$LC_BATCH"
+          lc_memory_sample_members apply-error "$LC_BATCH" 1 || true
           LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
           lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
           LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
@@ -1399,7 +1415,7 @@ PY
     fi
     if [[ "$LC_SNAP_RC" != 0 ]]; then
       if [[ -n "$LC_SNAP_EVIDENCE" && ! -s "$LC_SNAP_EVIDENCE" ]]; then LC_SNAP_EVIDENCE=""; fi
-      lc_case snapshot-catch-up blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
+      lc_snapshot_case blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
     else
       LC_ART="$LC_ART" LC_SNAP_BATCH="$LC_BATCH" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
 import json,pathlib,re,os
@@ -1495,13 +1511,13 @@ obs['snapshot_install_inferred_from_two_survivor_log_gap']=True
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
-        lc_case snapshot-catch-up pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
+        lc_snapshot_case pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
       else
         LC_FINAL_EVIDENCE=""
         if [[ -s "$LC_ART/cluster-logs/snapshot-threshold.json" ]]; then
           LC_FINAL_EVIDENCE="$LC_ART/cluster-logs/snapshot-threshold.json"
         fi
-        lc_case snapshot-catch-up blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
+        lc_snapshot_case blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
         LC_SNAP_RC=1
       fi
     fi
