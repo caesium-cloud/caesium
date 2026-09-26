@@ -9,6 +9,14 @@ import {
 
 failOnUnexpectedPageErrors();
 
+test.beforeEach(async ({ page }) => {
+  page.on("requestfailed", (request) => {
+    const url = new URL(request.url());
+    const resource = `${url.origin}${url.pathname}`;
+    console.error(`browser request failed: ${request.method()} ${resource}: ${request.failure()?.errorText ?? "unknown"}`);
+  });
+});
+
 /**
  * Live-backend browser performance coverage for E3.
  *

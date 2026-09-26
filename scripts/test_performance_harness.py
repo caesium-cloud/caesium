@@ -15,6 +15,8 @@ FILES = (
     "internal/run/owner_benchmark_test.go",
     "internal/run/recovery_benchmark_test.go",
 )
+HELPER = "internal/run/owner_state_test.go"
+UNRELATED_TEST = "internal/run/concurrency_test.go"
 
 
 def git(root, *args):
@@ -33,10 +35,12 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         git(self.candidate, "config", "user.name", "E3 Test")
         git(self.candidate, "config", "user.email", "e3@example.invalid")
         (self.candidate / "README").write_text("product source at base\n")
-        helper = self.candidate / "internal/run/owner_state_test.go"
+        helper = self.candidate / HELPER
         helper.parent.mkdir(parents=True)
         helper.write_text("package run\nfunc newTopoBuilder() {}\n")
-        git(self.candidate, "add", "--", "README", "internal/run/owner_state_test.go")
+        unrelated = self.candidate / UNRELATED_TEST
+        unrelated.write_text("package run\n// unrelated test at base\n")
+        git(self.candidate, "add", "--", "README", HELPER, UNRELATED_TEST)
         git(self.candidate, "commit", "-qm", "base product")
         self.base_sha = git(self.candidate, "rev-parse", "HEAD")
         subprocess.run(["git", "-C", str(self.candidate), "worktree", "add", "-q", "--detach",
@@ -88,9 +92,10 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertEqual(doc["candidate_release_image_id"], "sha256:candidate-release")
         self.assertEqual(doc["base_overlay_paths"], list(FILES))
         self.assertEqual(doc["benchmark_names"], ["BenchmarkOwnerFake", "BenchmarkRecoverFake"])
-        self.assertEqual(doc["helper_files"][0]["path"], "internal/run/owner_state_test.go")
+        self.assertEqual(len(doc["helper_files"]), 1)
+        self.assertEqual(doc["helper_files"][0]["path"], HELPER)
         self.assertEqual(doc["helper_files"][0]["sha256"], hashlib.sha256(
-            (self.candidate / "internal/run/owner_state_test.go").read_bytes()).hexdigest())
+            (self.candidate / HELPER).read_bytes()).hexdigest())
         self.assertEqual(git(self.base, "rev-parse", "HEAD"), self.base_sha)
         self.assertEqual(git(self.candidate, "status", "--porcelain"), "")
         self.assertEqual(
@@ -172,15 +177,35 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertEqual(overlay.read_bytes(), original)
 
     def test_different_test_helper_fails_before_overlay(self):
-        helper = self.candidate / "internal/run/owner_state_test.go"
+        helper = self.candidate / HELPER
         helper.write_text(helper.read_text() + "// candidate helper drift\n")
-        git(self.candidate, "add", "--", "internal/run/owner_state_test.go")
+        git(self.candidate, "add", "--", HELPER)
         git(self.candidate, "commit", "-qm", "change benchmark helper")
         self.candidate_sha = git(self.candidate, "rev-parse", "HEAD")
         result = self.prepare()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("test helper differs", result.stderr)
+        self.assertIn(f"test helper differs between base and candidate: {HELPER}", result.stderr)
         self.assertFalse((self.base / FILES[0]).exists())
+        self.assertFalse(self.manifest.exists())
+
+    def test_unrelated_changed_and_added_tests_do_not_block_overlay(self):
+        unrelated = self.candidate / UNRELATED_TEST
+        unrelated.write_text("package run\n// changed independently in candidate\n")
+        added = self.candidate / "internal/run/start_idempotency_test.go"
+        added.write_text("package run\n// added independently in candidate\n")
+        git(self.candidate, "add", "--", UNRELATED_TEST, "internal/run/start_idempotency_test.go")
+        git(self.candidate, "commit", "-qm", "change unrelated tests")
+        self.candidate_sha = git(self.candidate, "rev-parse", "HEAD")
+
+        result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        doc = json.loads(self.manifest.read_text())
+        self.assertEqual(doc["helper_files"], [{
+            "path": HELPER,
+            "sha256": hashlib.sha256((self.candidate / HELPER).read_bytes()).hexdigest(),
+        }])
+        self.assertEqual(doc["base_overlay_paths"], list(FILES))
+        self.assertFalse((self.base / "internal/run/start_idempotency_test.go").exists())
 
     def test_failed_git_status_cannot_validate_overlay_cleanup(self):
         self.assertEqual(self.prepare().returncode, 0)
