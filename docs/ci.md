@@ -1436,8 +1436,14 @@ stayed under 20 MiB. That does not check F2.
 [#575](https://github.com/caesium-cloud/caesium/pull/575) merged the console
 owner-crash journey; that is not an F2 result, and its manifest row stays
 `absent`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for
-the ordinal-0 replacement to be Ready before evidence capture. Its rerun is
-not recorded yet. The unresolved ordinal-0/bootstrap and isolated rollback
+the ordinal-0 replacement to be Ready before evidence capture. Its rerun on
+`abef2e97`, cluster `lifecycle-39c05836d9e3` (2026-09-26T20:02:52Z–20:16:57Z),
+exited 1 before that wait. Snapshot batch 12 timed out after `caesium-0`
+cgroup `memory.current` reached 1,073,741,824 bytes, with anonymous memory
+1,065,152,512 and RSS 1,111,932,928. The sampled `oom_kill` counter stayed 0
+and the container was not restarted. The later destructive cases were blocked
+because that snapshot did not finish. The `b3382717` snapshot pass still
+stands, and the Ready wait is not live-proven. The unresolved ordinal-0/bootstrap and isolated rollback
 prerequisites remain explicit in the
 [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
 
