@@ -1201,7 +1201,7 @@
       "owner_item": "D3",
       "registered_by": "D3",
       "gates": [],
-      "notes": "Planned D3 browser journey against the B3 cluster. Not proven.",
+      "notes": "Selector ui/e2e/cluster-recovery.spec.ts is the Playwright cluster-recovery project (not selected by ui-e2e or ui-e2e-auth). Live kind proof is orchestrator-owned and not yet recorded.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
