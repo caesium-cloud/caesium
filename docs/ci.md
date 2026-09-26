@@ -1405,15 +1405,23 @@ cluster unfit for subsequent destructive cases. A prior head passed restore
 and ordinal-1 replacement; that is historical partial evidence. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
 Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
-head `b45adfdc`, preserves explicit empty disputed-write fields and expected
-survivor rows, validates match/null consistency, and captures immediate previous
-logs and batch-0 failures. It passed 10 focused Python tests, all 331 scripts
-tests, the containerized integration/race
-`ReadSnapshotDisputedWrite|SnapshotReadbackBases` regressions (1.070 s), and
-eight guard-removal negative controls. Current-head CI failed Helm shard 2 on an existing Kubernetes live-log
-readiness defect, which separate [#571](https://github.com/caesium-cloud/caesium/pull/571)
-is repairing; CODEOWNER approval is required. These diagnostic fixes have no new live
-qualification; the linked PR holds the durable failure-evidence summary.
+head `b8498ac8`, contains the six resolved diagnostic review fixes in ancestor
+`b45adfdc`: explicit empty disputed-write fields and expected survivor rows,
+match/null validation, and immediate previous logs and batch-0 captures.
+That unchanged diagnostic code passed 10 focused Python tests, all 331 scripts
+tests and eight guard-removal negative controls. Final-head containerized
+Kubernetes race tests passed (3.974 s), as did the integration/race
+`ReadSnapshotDisputedWrite|SnapshotReadbackBases` regressions (1.068 s).
+The earlier diagnostic-only CI failed Helm shard 2 on an existing Kubernetes
+live-log readiness defect. Separate [#571](https://github.com/caesium-cloud/caesium/pull/571),
+head `9d86c90c`, fixed that defect and passed the unchanged real Kubernetes
+CLI/HTTP live/retained secret-log scenario (10.16 s), package race tests/vet
+(3.964 s) and all 37 executed CI jobs. F2 includes that fix as an explicit
+dependency; its production tree and integration assertions match #571, with
+only the five diagnostic/test paths differing. Merge #571 first. F2's final
+CI is in progress; CODEOWNER approval is required for both PRs.
+These diagnostic fixes have no new live lifecycle qualification; the linked
+PR holds the durable failure-evidence summary.
 The unresolved
 ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
 the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
@@ -1524,8 +1532,8 @@ and 480 source hashes match. Missing audited files remain eligible, and
 statement-free exceptions require a complete bound inventory plus matching
 source. Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
 `empty_diff=true`; zero uncovered is explicit policy, not a live nonempty diff
-measurement. Eight critical-contract coverage gaps remain. Current CI,
-CODEOWNER approval and merge are pending, so G2 stays unchecked.
+measurement. Eight critical-contract coverage gaps remain. All 37 current-head
+CI jobs pass; CODEOWNER approval and merge are pending, so G2 stays unchecked.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
