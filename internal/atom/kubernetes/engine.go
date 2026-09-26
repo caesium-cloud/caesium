@@ -30,11 +30,6 @@ import (
 
 const kubernetesStopAPITimeout = 30 * time.Second
 
-const (
-	kubernetesLogReadinessTimeout = 30 * time.Second
-	kubernetesLogReadinessPoll    = 100 * time.Millisecond
-)
-
 // kueueQueueLabel is the label Kueue reads to assign a workload to a LocalQueue.
 // Stamping it on the pod delegates admission to Kueue: its webhook gates the pod
 // (injecting the kueue.x-k8s.io/admission scheduling gate) until the named
@@ -367,10 +362,6 @@ func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 // Logs streams the log output from a Caesium Kubernetes pod's
 // only container based on the request input.
 func (e *kubernetesEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
-	return e.logsWhenReady(req, kubernetesLogReadinessTimeout)
-}
-
-func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout time.Duration) (io.ReadCloser, error) {
 	opts := &v1.PodLogOptions{
 		Follow:     true,
 		Timestamps: true,
@@ -380,84 +371,12 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 		opts.SinceTime = &metav1.Time{Time: req.Since}
 	}
 
-	// Bound opening the stream, including an API request that never returns its
-	// headers. Stop this timer on success: a setup deadline must not terminate a
-	// healthy live reader. The reader retains parent cancellation until Close.
-	ctx, cancel := context.WithCancelCause(e.ctx)
-	timer := time.AfterFunc(timeout, func() { cancel(context.DeadlineExceeded) })
-	defer timer.Stop()
-	failed := true
-	defer func() {
-		if failed {
-			cancel(nil)
-		}
-	}()
-
-	for {
-		if ctx.Err() != nil {
-			return nil, context.Cause(ctx)
-		}
-		logs := e.backend.GetLogs(req.ID, opts)
-		if logs == nil {
-			return nil, fmt.Errorf("failed to retrieve logs")
-		}
-		reader, err := logs.Stream(ctx)
-		if err == nil && reader != nil {
-			if !timer.Stop() || ctx.Err() != nil {
-				_ = reader.Close()
-				if ctx.Err() != nil {
-					return nil, context.Cause(ctx)
-				}
-				return nil, context.DeadlineExceeded
-			}
-			failed = false
-			return &kubernetesLogReader{ReadCloser: reader, cancel: cancel}, nil
-		}
-		if reader != nil {
-			_ = reader.Close()
-		}
-		if ctx.Err() != nil {
-			return nil, context.Cause(ctx)
-		}
-		if err == nil {
-			return nil, fmt.Errorf("failed to retrieve log stream")
-		}
-		if !containerLogsPending(err, req.ID) {
-			return nil, err
-		}
-
-		// A newly created pod can reject /log before its only container starts.
-		// Retry just that readiness response; authorization, missing pods, image
-		// failures and other API errors retain their original failure.
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		case <-time.After(kubernetesLogReadinessPoll):
-		}
+	logs := e.backend.GetLogs(req.ID, opts)
+	if logs == nil {
+		return nil, fmt.Errorf("failed to retrieve logs")
 	}
-}
 
-func containerLogsPending(err error, pod string) bool {
-	var status *apierrors.StatusError
-	if !apierrors.IsBadRequest(err) || !errors.As(err, &status) {
-		return false
-	}
-	prefix := fmt.Sprintf("container %q in pod %q is waiting to start: ", "atom", pod)
-	if !strings.HasPrefix(status.ErrStatus.Message, prefix) {
-		return false
-	}
-	reason := strings.TrimPrefix(status.ErrStatus.Message, prefix)
-	return reason == "ContainerCreating" || reason == "PodInitializing"
-}
-
-type kubernetesLogReader struct {
-	io.ReadCloser
-	cancel context.CancelCauseFunc
-}
-
-func (r *kubernetesLogReader) Close() error {
-	r.cancel(nil)
-	return r.ReadCloser.Close()
+	return logs.Stream(e.ctx)
 }
 
 func convertEnvVars(env map[string]string) []v1.EnvVar {
