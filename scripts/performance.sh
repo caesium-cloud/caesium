@@ -89,9 +89,9 @@ benchmark_function = re.compile(r'^func\s+(Benchmark(?:Owner|Recover)[A-Za-z0-9_
 
 # The benchmark files' linearTopo/wideTopo fixtures call newTopoBuilder and
 # its task/edge/build methods from this file. Pin the entire defining file on
-# both sides before overlaying benchmarks. Other package tests are compiled
-# but do not supply benchmark fixtures, so their independent changes must not
-# prevent a base/candidate comparison.
+# both sides before overlaying benchmarks. The benchmark runner selects only
+# this helper and the two benchmark files; unrelated package tests cannot
+# change the measurement process.
 helper_files = ("internal/run/owner_state_test.go",)
 helper_manifest = []
 for path in helper_files:
