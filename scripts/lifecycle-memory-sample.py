@@ -32,6 +32,10 @@ GO_SERIES = {
     "heap_inuse_bytes": "go_memstats_heap_inuse_bytes",
     "last_gc_time_seconds": "go_memstats_last_gc_time_seconds",
 }
+PROCESS_START_SERIES = "process_start_time_seconds"
+HEAP_GAP_KEYS = (
+    "heap_alloc_bytes", "heap_inuse_bytes", "last_gc_time_seconds", "gc_duration_seconds",
+)
 GC_SERIES = "go_gc_duration_seconds"
 METRIC_RE = re.compile(
     r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)"
@@ -111,6 +115,11 @@ if v2_current=$(first_readable "$root" "$@"); then
 fi
 emit_file memory.current "$v2_current"
 emit_file memory.stat "$v2_stat"
+v2_events=""
+if [ -n "$v2_stat" ]; then
+  v2_events="${v2_stat%/memory.stat}/memory.events"
+fi
+emit_file memory.events "$v2_events"
 
 v1_usage=""
 v1_stat=""
@@ -167,6 +176,14 @@ printf '%s\n' "--- section proc.status path=/proc/${pid}/status"
 if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/status" ]; then
   printf '%s\n' 'status=present'
   cat "${root}/proc/${pid}/status" 2>/dev/null
+  printf '\n'
+else
+  printf '%s\n' 'status=absent'
+fi
+printf '%s\n' "--- section proc.stat path=/proc/${pid}/stat"
+if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/stat" ]; then
+  printf '%s\n' 'status=present'
+  cat "${root}/proc/${pid}/stat" 2>/dev/null
   printf '\n'
 else
   printf '%s\n' 'status=absent'
@@ -518,6 +535,10 @@ def parse_go_metrics(section: dict | None) -> dict:
     else:
         missing.append(GC_SERIES)
     record["gc_duration_seconds"] = gc
+    start = _series_value(parsed, PROCESS_START_SERIES)
+    record["process_start_time_seconds"] = start
+    if not start["present"]:
+        missing.append(PROCESS_START_SERIES)
     record["absent_series"] = missing
     return record
 
@@ -535,18 +556,42 @@ def _reading_gaps(cgroup: dict, rss: dict, go: dict, truncated: bool) -> list[st
         gaps.append("cgroup")
     if rss.get("matches_caesium") is not True or not isinstance(rss.get("rss_bytes"), int):
         gaps.append("process_rss")
-    series_present = any((go.get(key) or {}).get("present") for key in (
-        "heap_alloc_bytes", "heap_inuse_bytes", "last_gc_time_seconds", "gc_duration_seconds"))
-    # A finished scrape may legitimately omit a series; record that absence.
-    # A truncated scrape with no Go series never reached /metrics.
-    if go.get("metrics_status") != "present" or (truncated and not series_present):
+    series_present = any((go.get(key) or {}).get("present") for key in HEAP_GAP_KEYS)
+    # A scrape that contains none of the heap/GC series is not Go evidence.
+    if go.get("metrics_status") != "present" or not series_present or (truncated and not series_present):
         gaps.append("go_metrics")
     return gaps
 
 
+def _proc_start_ticks(section: dict | None) -> int | None:
+    if section is None or section.get("status") != "present":
+        return None
+    fields = (section.get("body") or "").split()
+    # Field 2 is (comm). The starttime field is 22, counting from 1, after comm.
+    if len(fields) < 22 or not fields[1].endswith(")"):
+        if len(fields) >= 22 and fields[21].isdigit():
+            return int(fields[21])
+        return None
+    if fields[21].isdigit():
+        return int(fields[21])
+    return None
+
+
+def _oom_events(section: dict | None) -> dict:
+    if section is None or section.get("status") != "present":
+        return {"present": False, "oom": None, "oom_kill": None}
+    parsed, _errors = _parse_stat(section.get("body") or "")
+    return {
+        "present": True,
+        "oom": parsed.get("oom"),
+        "oom_kill": parsed.get("oom_kill"),
+    }
+
+
 def build_sample(*, member: str, timestamp: str, reason: str, batch: int, lifecycle_id: str,
                  capture_text: str, capture_exit_code: int, capture_artifact: str,
-                 source: str = SOURCE, timestamp_source: str = "host-utc") -> dict:
+                 source: str = SOURCE, timestamp_source: str = "host-utc",
+                 round_index: int = 0, container_id: str = "", restart_count: int | None = None) -> dict:
     parsed = parse_capture(capture_text)
     sections = parsed["sections"]
     cgroup = parse_cgroup(sections)
@@ -577,6 +622,12 @@ def build_sample(*, member: str, timestamp: str, reason: str, batch: int, lifecy
         "capture_error": capture_error,
         "readings_ok": not gaps,
         "reading_gaps": gaps,
+        "round": round_index,
+        "container_id": container_id,
+        "restart_count": restart_count,
+        "process_start_ticks": _proc_start_ticks(sections.get("proc.stat")),
+        "process_start_time_seconds": (go_metrics.get("process_start_time_seconds") or {}).get("value"),
+        "oom_events": _oom_events(sections.get("memory.events")),
         "cgroup": cgroup,
         "process_rss": rss,
         "go": go_metrics,
@@ -616,8 +667,10 @@ def gap_reasons(samples: list[dict], batches: list[int], apply_batch: int | None
                     if sample.get("member") == member and sample.get("batch") == batch]
             if not rows:
                 reasons.append(f"{member} batch {batch} has no memory sample")
-            elif not any(sample.get("readings_ok") for sample in rows):
-                reasons.append(f"{member} batch {batch} memory readings are incomplete")
+            elif not any(sample.get("readings_ok") and int(sample.get("round") or 0) >= 1
+                         for sample in rows):
+                reasons.append(
+                    f"{member} batch {batch} has no in-write memory sample; a pre-write round does not count")
     if apply_batch is not None:
         for member in MEMBERS:
             rows = [sample for sample in samples
@@ -752,6 +805,9 @@ def cmd_sample(argv: list[str]) -> int:
     parser.add_argument("--capture", required=True, type=Path)
     parser.add_argument("--artifact-root", type=Path)
     parser.add_argument("--timeout", type=int, default=12)
+    parser.add_argument("--round", type=int, default=0)
+    parser.add_argument("--container-id", default="")
+    parser.add_argument("--restart-count", default="")
     parser.add_argument("--source", default=SOURCE)
     parser.add_argument("--timestamp", default="")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -765,6 +821,13 @@ def cmd_sample(argv: list[str]) -> int:
         parser.error("batch must be 0..18")
     if args.timeout < 1:
         parser.error("timeout must be positive")
+    if args.round < 0:
+        parser.error("round must be >= 0")
+    restart_count = None
+    if args.restart_count != "":
+        if not re.fullmatch(r"\d+", args.restart_count):
+            parser.error("restart-count must be an integer")
+        restart_count = int(args.restart_count)
     timestamp = args.timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         code, stdout, stderr = run_bounded(command, PROBE_SCRIPT, args.timeout)
@@ -780,6 +843,7 @@ def cmd_sample(argv: list[str]) -> int:
         member=args.member, timestamp=timestamp, reason=args.reason, batch=args.batch,
         lifecycle_id=args.lifecycle_id, capture_text=capture_text, capture_exit_code=code,
         capture_artifact=_relative_artifact(args.capture, args.artifact_root), source=args.source,
+        round_index=args.round, container_id=args.container_id, restart_count=restart_count,
     )
     append_jsonl(args.jsonl, sample)
     return 0
@@ -816,6 +880,7 @@ def cmd_finish(argv: list[str]) -> int:
     )
     if evidence_error:
         document["case_evidence_error"] = evidence_error
+        code = 3
     args.dest.parent.mkdir(parents=True, exist_ok=True)
     args.dest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     return code

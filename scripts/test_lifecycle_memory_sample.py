@@ -33,6 +33,8 @@ go_gc_duration_seconds{quantile="0"} 1e-05
 go_gc_duration_seconds{quantile="1"} 0.002
 go_gc_duration_seconds_sum 0.01
 go_gc_duration_seconds_count 4
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1700000100
 """
 
 PARTIAL_METRICS = """\
@@ -73,6 +75,7 @@ class MemoryProbeFixtureTest(unittest.TestCase):
             "--lifecycle-id", self.lifecycle_id, "--jsonl", str(jsonl),
             "--capture", str(capture), "--artifact-root", str(self.root),
             "--timeout", str(timeout), "--timestamp", "2026-09-26T00:00:00Z",
+            "--round", "1", "--container-id", "abc123", "--restart-count", "0",
             "--", *(command or ["/bin/sh", "-s"]),
         ]
         subprocess.run(argv, env=env, check=True, capture_output=True, text=True)
@@ -199,6 +202,7 @@ class MemoryProbeFixtureTest(unittest.TestCase):
             "go_memstats_heap_inuse_bytes",
             "go_memstats_last_gc_time_seconds",
             "go_gc_duration_seconds",
+            "process_start_time_seconds",
         ])
         self.assertTrue(sample["readings_ok"])
         self.assertEqual(sample["reading_gaps"], [])
@@ -234,7 +238,7 @@ class MemoryProbeFixtureTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(document["truncation_proved"])
         self.assertTrue(document["memory_samples"]["gap"])
-        self.assertIn("memory readings are incomplete", document["memory_samples"]["gap_detail"])
+        self.assertIn("no in-write memory sample", document["memory_samples"]["gap_detail"])
         self.assertEqual(document["memory_samples"]["memory_limit"], "1Gi")
 
     def test_publish_requires_both_survivors_and_preserves_blocked_evidence(self):
@@ -283,38 +287,110 @@ class MemoryProbeFixtureTest(unittest.TestCase):
             "--dest", str(dest), "--batches", "0", "--apply-batch", "",
             "--evidence", str(self.root / "missing.json"),
         ], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 3)
         document = json.loads(dest.read_text())
         self.assertEqual(document["case_evidence_error"], "evidence file missing")
         self.assertTrue(document["memory_samples"]["gap"])
         self.assertEqual(document["memory_samples"]["samples"], [])
         self.assertEqual(document["memory_limit"], "1Gi")
 
-    def test_controller_samples_during_catalog_writes_and_does_not_pass_oom(self):
-        source = CONTROLLER.read_text()
-        loop = source.split("for LC_BATCH in {0..18}; do", 1)[1].split(
-            'if [[ "$LC_SNAP_RC" == 0 && "$LC_SNAP_TRUNCATED" != 1 ]];', 1)[0]
-        self.assertIn('lc_run_snapshot_phase "$LC_BATCH"', loop)
-        self.assertLess(loop.index("apply-error"), loop.index(
-            'LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"'))
-        self.assertLess(
-            loop.index('LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"'),
-            loop.index("lc_capture_snapshot_write_failure"))
-        self.assertNotIn("snapshot-catch-up pass", loop)
-        watch = source.split("lc_memory_watch_phase() {", 1)[1].split("lc_run_snapshot_phase() {", 1)[0]
-        self.assertIn("lc_memory_sample_members cadence", watch)
-        self.assertIn('"$LC_MEM_SAMPLE_CAP"', watch)
-        self.assertIn('"$LC_MEM_INTERVAL"', watch)
-        phase = source.split("lc_run_snapshot_phase() {", 1)[1].split("lc_snapshot_case() {", 1)[0]
-        self.assertIn("GenerateSnapshotWrites", phase)
-        self.assertIn("GenerateSnapshotUpdateBatch", phase)
-        self.assertIn("LC_PHASE_DONE", phase)
-        case = source.split("lc_snapshot_case() {", 1)[1].split("# Snapshot catch-up:", 1)[0]
-        self.assertIn("memory samples are an evidence gap, not a pass", case)
-        self.assertIn("status=blocked", case)
-        self.assertIn('LC_SNAP_RC=1', case)
-        self.assertEqual(source.count("LC_MEM_INTERVAL=15"), 1)
-        self.assertEqual(source.count("LC_MEM_SAMPLE_CAP=40"), 1)
+    def test_pre_write_round_and_empty_go_scrape_are_gaps(self):
+        metrics = self.v2_tree(metrics="\n")
+        early = self.sample(env=self.probe_env(metrics))
+        self.assertFalse(early["readings_ok"])
+        self.assertIn("go_metrics", early["reading_gaps"])
+        during = dict(early, round=0, readings_ok=True, reading_gaps=[])
+        document, code = self.module.publish(
+            samples=[during, dict(during, member="caesium-1")],
+            lifecycle_id=self.lifecycle_id, batches=[13], apply_batch=None, evidence={"ok": True})
+        self.assertEqual(code, 2)
+        self.assertIn("no in-write memory sample", document["memory_samples"]["gap_detail"])
+        document, code = self.module.publish(
+            samples=[], lifecycle_id=self.lifecycle_id, batches=[], apply_batch=None, evidence={"ok": True})
+        self.assertEqual(code, 2)
+        self.assertIn("no catalog-write batch", document["memory_samples"]["gap_detail"])
+
+    def test_corrupt_pass_evidence_does_not_publish_a_pass(self):
+        metrics = self.v2_tree()
+        first = self.sample(member="caesium-0", batch=0, env=self.probe_env(metrics))
+        second = self.sample(member="caesium-1", batch=0, env=self.probe_env(metrics))
+        bad = self.root / "truncated.json"
+        bad.write_text("{")
+        dest = self.root / "case.json"
+        jsonl = self.root / "snapshot-memory-samples.jsonl"
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "finish",
+            "--lifecycle-id", self.lifecycle_id, "--jsonl", str(jsonl),
+            "--dest", str(dest), "--batches", "0", "--evidence", str(bad),
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3)
+        document = json.loads(dest.read_text())
+        self.assertIsNone(document["case_evidence"])
+        self.assertIn("case_evidence_error", document)
+        self.assertTrue(first["readings_ok"] and second["readings_ok"])
+
+    def test_controller_blocks_a_pass_and_keeps_a_failed_write_rc(self):
+        art = self.root / "art"
+        art.mkdir()
+        (art / "cluster-logs").mkdir()
+        evidence = art / "proof.json"
+        evidence.write_text('{"truncation_proved": true}\n')
+        script = f'''
+set -euo pipefail
+ROOT={ROOT}
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
+lc_case() {{ printf '%s\\n' "$2" > "$LC_ART/status"; }}
+lc_phase() {{ printf '%s\\n' 7 > "$LC_PHASE_DONE"; return 7; }}
+lc_base() {{ printf '%s\\n' base; }}
+lc_memory_sample_members() {{ :; }}
+LC_ART={art}
+LC_ID={self.lifecycle_id}
+LC_CAND_ID=cand
+LC_MEM_ACTIVE=0
+LC_MEM_BATCHES=
+LC_MEM_APPLY_BATCH=
+LC_MEM_SEQ=0
+LC_MEM_INTERVAL=0
+LC_MEM_SAMPLE_CAP=1
+LC_PHASE_PID=
+LC_SNAP_RC=0
+mkdir -p "$LC_ART/cluster-logs"
+lc_run_snapshot_phase 0
+[[ "$LC_SNAP_RC" == 7 ]]
+: > "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl"
+LC_MEM_ACTIVE=1
+LC_MEM_BATCHES=0
+lc_snapshot_case pass "would pass" {evidence}
+[[ "$(cat "$LC_ART/status")" == blocked ]]
+[[ "$LC_SNAP_RC" == 1 ]]
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((art / "status").read_text().strip(), "blocked")
+
+    def test_phase_group_kill_reaps_the_runner_child(self):
+        art = self.root / "group"
+        art.mkdir()
+        script = f'''
+set -euo pipefail
+ROOT={ROOT}
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
+set -m
+( sleep 30 & echo $! > {art}/child; wait ) &
+pgid=$!
+sleep 0.2
+lc_stop_phase_group "$pgid"
+child=$(cat {art}/child)
+if kill -0 "$child" 2>/dev/null; then
+  echo "child still alive" >&2
+  exit 1
+fi
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        controller = CONTROLLER.read_text()
+        self.assertIn('lc_stop_phase_group "${LC_PHASE_PID:-}"', controller)
+        self.assertIn("lc_stop_phase_group \"$LC_PHASE_PID\"", controller)
 
     def test_lifecycle_chart_keeps_1gi_limit_and_topology(self):
         text = VALUES.read_text()

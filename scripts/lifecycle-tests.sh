@@ -57,6 +57,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lifecycle-snapshot-phase.sh
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
 cd "$ROOT"
 
 # F2's cluster lane is a separate mode. The F4 standalone path below is kept
@@ -356,8 +358,7 @@ PY
     trap - EXIT INT TERM
     set +e
     if [[ -n "${LC_PHASE_PID:-}" ]]; then
-      kill "${LC_PHASE_PID}" 2>/dev/null || true
-      wait "${LC_PHASE_PID}" 2>/dev/null || true
+      lc_stop_phase_group "$LC_PHASE_PID"
       LC_PHASE_PID=""
     fi
     if [[ "$LC_SIGNALLED" == 1 ]]; then rc=143; fi
@@ -404,7 +405,7 @@ PY
   }
   trap lc_cleanup EXIT
   trap 'LC_SIGNALLED=1; exit 130' INT
-  trap 'LC_SIGNALLED=1; exit 143' TERM
+  trap 'LC_SIGNALLED=1; lc_stop_phase_group "${LC_PHASE_PID:-}"; exit 143' TERM
   lc_case() {
     LC_CASE="$1" LC_STATUS="$2" LC_DETAIL="$3" LC_EVIDENCE="${4:-}" LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY'
 import json,os,pathlib,re
@@ -1302,110 +1303,9 @@ PY
       lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
         'cd /data && find . -type f -exec ls -ln {} \; | sort' >"$1"
     }
-    # One bounded probe of both survivors. Cadence and the post-error sample
-    # share this path. A probe failure still appends a sample; it must not
-    # change the catalog-write exit code. The 1Gi cap is not raised here.
-    lc_memory_sample_member() {
-      local member="$1" reason="$2" batch="$3" batch_tag="$4" capture
-      local dir="$LC_ART/cluster-logs/memory-captures"
-      mkdir -p "$dir"
-      LC_MEM_SEQ=$((LC_MEM_SEQ + 1))
-      capture="$dir/${batch_tag}-${reason}-${member}-${LC_MEM_SEQ}.txt"
-      python3 "$ROOT/scripts/lifecycle-memory-sample.py" sample \
-        --member "$member" --reason "$reason" --batch "$batch" \
-        --lifecycle-id "$LC_ID" \
-        --jsonl "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl" \
-        --capture "$capture" --artifact-root "$LC_ART" --timeout 12 \
-        -- kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
-          --request-timeout=12s exec -i "$member" -c caesium -- sh -s || true
-    }
-    lc_memory_sample_members() {
-      local reason="$1" batch="$2" batch_tag member
-      printf -v batch_tag '%02d' "$batch"
-      for member in caesium-0 caesium-1; do
-        lc_memory_sample_member "$member" "$reason" "$batch" "$batch_tag" || true
-      done
-    }
-    # Stop sampling once the write phase's rc file appears, and never sample
-    # more than LC_MEM_SAMPLE_CAP rounds inside the 12m phase timeout.
-    lc_memory_watch_phase() {
-      local batch="$1" samples=0 i
-      while [[ "$samples" -lt "$LC_MEM_SAMPLE_CAP" && ! -f "$LC_PHASE_DONE" ]]; do
-        lc_memory_sample_members cadence "$batch" || true
-        samples=$((samples + 1))
-        [[ -f "$LC_PHASE_DONE" ]] && break
-        i=0
-        while [[ "$i" -lt "$LC_MEM_INTERVAL" && ! -f "$LC_PHASE_DONE" ]]; do
-          sleep 1
-          i=$((i + 1))
-        done
-      done
-    }
-    lc_run_snapshot_phase() {
-      local batch="$1" batch_tag wait_rc
-      printf -v batch_tag '%02d' "$batch"
-      LC_MEM_ACTIVE=1
-      if [[ -n "$LC_MEM_BATCHES" ]]; then
-        LC_MEM_BATCHES="${LC_MEM_BATCHES},${batch}"
-      else
-        LC_MEM_BATCHES="$batch"
-      fi
-      LC_PHASE_DONE="$LC_ART/cluster-logs/snapshot-phase-${batch_tag}.rc"
-      rm -f "$LC_PHASE_DONE"
-      set +e
-      (
-        set +e
-        if [[ "$batch" == 0 ]]; then
-          lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)"
-        else
-          LC_SNAPSHOT_BATCH="$batch" lc_phase GenerateSnapshotUpdateBatch "$LC_CAND_ID" "$(lc_base)"
-        fi
-        printf '%s\n' "$?" >"$LC_PHASE_DONE"
-      ) &
-      LC_PHASE_PID=$!
-      set -e
-      lc_memory_watch_phase "$batch"
-      set +e
-      wait "$LC_PHASE_PID"
-      wait_rc=$?
-      set -e
-      LC_PHASE_PID=""
-      if [[ -f "$LC_PHASE_DONE" ]]; then
-        LC_SNAP_RC="$(tr -dc '0-9' <"$LC_PHASE_DONE")"
-      else
-        LC_SNAP_RC=$wait_rc
-      fi
-      [[ "$LC_SNAP_RC" =~ ^[0-9]+$ ]] || LC_SNAP_RC=1
-    }
-    # Attach memory samples to whatever evidence the snapshot case already has.
-    # Missing or incomplete readings block a pass; they do not turn an OOM
-    # or a failed catalog write into a pass.
-    lc_snapshot_case() {
-      local status="$1" detail="$2" evidence="${3:-}" finish_rc=0 published
-      published="$evidence"
-      if [[ "${LC_MEM_ACTIVE:-0}" == 1 ]]; then
-        published="$LC_ART/cluster-logs/snapshot-memory-case.json"
-        python3 "$ROOT/scripts/lifecycle-memory-sample.py" finish \
-          --lifecycle-id "$LC_ID" \
-          --jsonl "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl" \
-          --dest "$published" \
-          --batches "$LC_MEM_BATCHES" \
-          --apply-batch "${LC_MEM_APPLY_BATCH:-}" \
-          --evidence "$evidence" || finish_rc=$?
-        if [[ ! -s "$published" ]]; then
-          printf '%s\n' '{"memory_samples":{"gap":true,"gap_detail":"memory sample publisher failed","samples":[],"memory_limit":"1Gi"}}' >"$published"
-          finish_rc=1
-        fi
-        if [[ "$finish_rc" != 0 ]]; then
-          detail="${detail}; memory samples are an evidence gap, not a pass"
-          if [[ "$status" == pass ]]; then
-            status=blocked
-            LC_SNAP_RC=1
-          fi
-        fi
-      fi
-      lc_case snapshot-catch-up "$status" "$detail" "$published"
-    }
+    # Snapshot phase helpers live in scripts/lifecycle-snapshot-phase.sh.
+    # A probe failure still appends a sample and must not change the write rc.
+    # The 1Gi cap is not raised here.
 
     # Snapshot catch-up: the stopped member misses at least 1,400 distinct
     # acknowledged catalog writes. If that does not exhaust dqlite's retained
@@ -1461,7 +1361,7 @@ PY
         lc_run_snapshot_phase "$LC_BATCH"
         if [[ "$LC_SNAP_RC" != 0 ]]; then
           LC_MEM_APPLY_BATCH="$LC_BATCH"
-          lc_memory_sample_members apply-error "$LC_BATCH" || true
+          lc_memory_sample_members apply-error "$LC_BATCH" 1 || true
           LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
           lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
           LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
