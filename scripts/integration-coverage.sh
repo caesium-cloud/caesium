@@ -23,7 +23,7 @@
 #   CAESIUM_COVERAGE_CHANGED_PATHS / CAESIUM_COVERAGE_DIFF_BASE
 #   CAESIUM_COVERAGE_SKIP_BUILD=1
 #   CAESIUM_COVERAGE_KEEP=1
-#   CAESIUM_COVERAGE_REQUIRE_BROWSER=1  # check/merge; collect always requires it
+#   Browser evidence is required by collect, check, and merge.
 #   CAESIUM_COVERAGE_STRICT=1
 set -euo pipefail
 
@@ -226,10 +226,19 @@ EOF
     cp "$provenance" "$PROFILES/browser.provenance.json"
     return
   fi
-  mkdir -p "$RAW/browser"
-  if [[ -d "$dir" ]]; then
-    cp -a "$dir"/. "$RAW/browser/" 2>/dev/null || true
+  if [[ ! -d "$dir" ]] || ! gocoverdir_complete "$dir"; then
+    die "external browser GOCOVERDIR is incomplete: $dir"
   fi
+  # Stage first so supplying this invocation's raw/browser itself is safe.
+  local imported
+  imported="$(mktemp -d "$RAW/browser-import.XXXXXX")"
+  if ! cp -a "$dir"/. "$imported/"; then
+    rm -rf "$imported"
+    die "cannot copy external browser GOCOVERDIR: $dir"
+  fi
+  # Do not overlay supplied evidence on counters from an earlier collect.
+  rm -rf "$RAW/browser"
+  mv "$imported" "$RAW/browser"
   if ! gocoverdir_complete "$RAW/browser" || ! textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
     die "external browser GOCOVERDIR is incomplete: $dir"
   fi
@@ -251,9 +260,8 @@ run_checker() {
   fi
   extra+=(--write-baseline "$CAESIUM_COVERAGE_WRITE_BASELINE")
   extra+=(--changed-paths "$CHANGED_PATHS")
-  if [[ "$CMD" == "collect" || "${CAESIUM_COVERAGE_REQUIRE_BROWSER:-}" == "1" ]]; then
-    extra+=(--require-browser)
-  fi
+  extra+=(--diff-base "$DIFF_BASE" --coverpkg-audit "$AUDIT/coverpkg-packages.txt")
+  extra+=(--require-browser)
   if [[ "${CAESIUM_COVERAGE_REQUIRE_UNIT:-}" == "1" ]]; then
     extra+=(--require-unit)
   fi
@@ -293,6 +301,7 @@ fi
 # checked-out base, including in check mode, rather than silently treating an
 # omitted --changed-paths as an empty diff.
 CHANGED_PATHS="${CAESIUM_COVERAGE_CHANGED_PATHS:-$ARTIFACTS/changed-paths.txt}"
+DIFF_BASE="${CAESIUM_COVERAGE_DIFF_BASE:-external-changed-paths}"
 if [[ -z "${CAESIUM_COVERAGE_CHANGED_PATHS:-}" ]]; then
   [[ -n "$GIT_HEAD" && "$GIT_DIRTY" == false ]] \
     || die "a clean git checkout is required to compute changed paths"
@@ -372,9 +381,11 @@ if [[ "${CAESIUM_COVERAGE_KEEP:-}" == "1" ]]; then
   KEEP_RESOURCES=1
 fi
 
+# Invoked by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   if [[ "$KEEP_RESOURCES" -eq 1 ]]; then
-    log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $NETWORK in place"
+    log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $BROWSER_SERVER_NAME / $NETWORK in place"
     return
   fi
   if command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
@@ -444,6 +455,7 @@ fi
 trap cleanup EXIT
 
 "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
 "$CONTAINER_CLI" network create "$NETWORK" >/dev/null
 

@@ -3,8 +3,8 @@
 
 Fail-closed, stdlib-only. A missing or killed GOCOVERDIR profile is incomplete
 evidence, never 0% coverage and never a pass. Unit, integration (CLI+server)
-and browser contributions are reported separately. Package/diff floors come
-from a measured baseline; there is no global percentage gate.
+and browser contributions are reported separately. Package floors are measured;
+the audited statement-file diff gate is explicit policy, never an empty-diff baseline.
 
   python3 scripts/check-coverage.py \\
       --profiles-dir "$ARTIFACTS/profiles" \\
@@ -521,12 +521,21 @@ def validate_provenance(prov, source, issues, *, candidate_sha=None):
             f"{source} image is supplied/unverified and is not a provenanced match of the candidate",
             source,
         ))
-    if source == "browser" and prov.get("test_exit_code") not in (None, 0):
-        issues.append(_fail(
-            "browser-journey",
-            f"Chromium journey exited {prov['test_exit_code']}; browser coverage is not passing evidence",
-            source,
-        ))
+    if source == "browser":
+        if prov.get("test_exit_code") != 0 or type(prov.get("test_exit_code")) is not int:
+            issue = _incomplete if prov.get("test_exit_code") is None else _fail
+            issues.append(issue("browser-journey", "browser requires a recorded successful first-attempt journey exit", source))
+        if any((prov.get("schema_version") != 1, prov.get("source") != "browser", prov.get("module") != ROOT_MODULE,
+                prov.get("kind") != "gocoverdir",
+                prov.get("collection") != "chromium-live-console", prov.get("verified") is not True,
+                prov.get("image_provenance") != "built-by-this-run",
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", str(prov.get("image_id") or "")))):
+            issues.append(_incomplete("browser-provenance", "browser requires collector-shaped verified image provenance", source))
+        if any((prov.get("complete") is not True, prov.get("missing") is not False,
+                prov.get("killed") is not False, prov.get("exit_code") not in (0, 143),
+                type(prov.get("exit_code")) is not int, prov.get("stop_rc") != 0,
+                type(prov.get("stop_rc")) is not int, prov.get("oom_killed") is not False)):
+            issues.append(_incomplete("browser-process", "browser process was killed, incomplete, or lacks clean shutdown evidence", source))
     return prov
 
 
@@ -567,8 +576,12 @@ def load_contribution(source, path, provenance_path, issues, *, candidate_sha=No
             ))
         return contrib
     if prov is not None:
+        prior_issue_count = len(issues)
         validate_provenance(prov, source, issues, candidate_sha=candidate_sha)
         contrib["provenance"] = prov
+        if source == "browser" and len(issues) != prior_issue_count:
+            contrib["status"] = "fail" if any(item.verdict == "fail" for item in issues[prior_issue_count:]) else "incomplete"
+            return contrib
 
     if prov and (prov.get("missing") or not prov.get("complete", True) or prov.get("killed")):
         contrib["status"] = "incomplete"
@@ -819,7 +832,7 @@ def contract_gaps(integration, *, repo_root):
     return gaps
 
 
-def uncovered_changed_paths(integration, changed_paths):
+def uncovered_changed_paths(integration, changed_paths, *, audited_packages=None):
     out = []
     reagents_changed = []
     if not changed_paths:
@@ -834,6 +847,8 @@ def uncovered_changed_paths(integration, changed_paths):
             reagents_changed.append(normalized)
             continue
         stats = files.get(normalized)
+        if audited_packages is not None and (package_of(normalized) not in audited_packages or not stats or stats["total"] <= 0):
+            continue
         if stats is None or stats["covered"] == 0:
             out.append(normalized)
     return out, reagents_changed
@@ -947,6 +962,9 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff, changed_paths
     diff_floor = ratchet.get("diff") or {}
     if diff_floor:
         applied["diff"] = {"uncovered_changed_paths": list(uncovered_diff)}
+        if any((diff_floor.get("basis") != "policy", diff_floor.get("scope") != "audited-statement-files",
+                diff_floor.get("coverage_source") != "integration+browser")):
+            issues.append(_fail("schema", "diff floor must be explicit audited-statement-files integration+browser policy", "diff"))
         if not changed_paths_supplied:
             issues.append(_incomplete(
                 "ratchet",
@@ -970,7 +988,7 @@ def apply_ratchet(integration, ratchet, issues, *, uncovered_diff, changed_paths
     return applied
 
 
-def baseline_from_integration(integration, *, uncovered_diff=None, candidate_sha=None):
+def baseline_from_integration(integration, *, candidate_sha=None, diff_policy=None):
     if integration.get("status") != "complete" or not integration.get("summary"):
         raise ValueError("cannot write a baseline from incomplete integration coverage")
     packages = {}
@@ -989,10 +1007,10 @@ def baseline_from_integration(integration, *, uncovered_diff=None, candidate_sha
     }
     if candidate_sha:
         baseline["measured_candidate_sha"] = candidate_sha
-    if uncovered_diff is not None:
-        baseline["diff"] = {
-            "uncovered_changed_paths_max": len(uncovered_diff),
-        }
+    # A measured profile determines package floors, not a policy for future
+    # changes. Preserve an explicit policy only; never derive it from len([]).
+    if diff_policy:
+        baseline["diff"] = dict(diff_policy)
     return baseline
 
 
@@ -1023,7 +1041,8 @@ def contribution_public(contrib):
 
 def evaluate(contributions, *, candidate_sha=None, repo_root=None,
              changed_paths=None, ratchet=None, require_browser=False,
-             require_reagents=False, require_unit=False):
+             require_reagents=False, require_unit=False, audited_packages=None,
+             diff_base=None):
     issues = []
     if candidate_sha and not _is_sha(candidate_sha):
         issues.append(_fail("schema", "candidate_sha is not a commit SHA"))
@@ -1055,6 +1074,10 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
 
     merged_with_browser = integration
     if browser.get("status") == "complete":
+        browser_image = (browser.get("provenance") or {}).get("image_id")
+        image_records = [part.get("provenance") or {} for part in (cli, server, supplied_integration) if part and part.get("status") == "complete"]
+        if not image_records or any(record.get("image_id") != browser_image for record in image_records):
+            issues.append(_fail("browser-provenance", "browser image must equal the CLI/server integration image", "browser"))
         merged_with_browser = merge_contributions(
             [
                 {**integration, "status": integration.get("status") or "incomplete"},
@@ -1083,7 +1106,28 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         ))
 
     gaps = contract_gaps(integration, repo_root=repo_root)
-    uncovered, reagents_changed = uncovered_changed_paths(integration, changed_paths or [])
+    uncovered, reagents_changed = uncovered_changed_paths(merged_with_browser, changed_paths or [], audited_packages=audited_packages)
+    diff_policy = (ratchet or {}).get("diff") or {}
+    if diff_policy and audited_packages is None:
+        issues.append(_incomplete("ratchet", "diff policy requires the image's audited coverpkg package list", "diff"))
+    if diff_policy and browser.get("status") != "complete":
+        issues.append(_incomplete("ratchet", "integration+browser diff policy requires complete browser evidence", "diff"))
+    normalized = {normalize_changed_path(path) for path in changed_paths or []} - {""}
+    files = (merged_with_browser.get("summary") or {}).get("files") or {}
+    if audited_packages is not None:
+        unlisted = sorted({package_of(path) for path in files} - audited_packages)
+        if unlisted:
+            issues.append(_fail("coverpkg-audit", f"profile packages are missing from the coverpkg audit: {unlisted}", "diff"))
+    eligible = sorted(path for path in normalized if audited_packages is not None
+                      and package_of(path) in audited_packages and files.get(path, {}).get("total", 0) > 0)
+    diff_observation = {
+        "changed_path_count": len(changed_paths or []), "eligible_path_count": len(eligible),
+        "eligible_paths": eligible, "excluded_paths": sorted(normalized - set(eligible)),
+        "base": diff_base, "audit_supplied": audited_packages is not None,
+        "coverage_source": "integration+browser" if browser.get("status") == "complete" else "integration",
+        "empty_diff": changed_paths == [], "policy": diff_policy or None,
+        "status": "complete" if changed_paths is not None and audited_packages is not None and merged_with_browser.get("status") == "complete" else "incomplete",
+    }
     if reagents_changed and reagents.get("status") != "complete":
         issues.append(_incomplete(
             "reagents",
@@ -1139,6 +1183,8 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         "write_to_read": wtr,
         "contract_gaps": gaps,
         "uncovered_changed_paths": uncovered,
+        "diff_coverage": diff_observation,
+        "browser_required": require_browser,
         "reagents_audit": reagents_audit,
         "ratchet": {
             "applied": ratchet_result["applied"],
@@ -1244,11 +1290,13 @@ def parse_args(argv=None):
     parser.add_argument("--candidate-sha", default=None)
     parser.add_argument("--repo-root", default=None, help="Repository root (reagents/go.mod audit)")
     parser.add_argument("--changed-paths", default=None, help="File listing changed paths, one per line")
-    parser.add_argument("--ratchet", default=None, help="Measured package/diff floors JSON")
+    parser.add_argument("--diff-base", default=None, help="Resolved diff base, or external changed-paths label")
+    parser.add_argument("--coverpkg-audit", default=None, help="Image audit/coverpkg-packages.txt for the diff policy")
+    parser.add_argument("--ratchet", default=None, help="Measured package floors and explicit diff policy JSON")
     parser.add_argument(
         "--write-baseline",
         default=None,
-        help="Write package/diff floors from this complete integration profile",
+        help="Write measured package floors, preserving any supplied explicit diff policy",
     )
     parser.add_argument("--report", default=None, help="Write the coverage report JSON")
     parser.add_argument("--require-browser", action="store_true")
@@ -1305,7 +1353,10 @@ def main(argv=None):
             return 1
     try:
         changed = load_changed_paths(args.changed_paths) if args.changed_paths else None
-    except OSError as err:
+        audited_packages = set(load_changed_paths(args.coverpkg_audit)) if args.coverpkg_audit else None
+        if audited_packages is not None and (not audited_packages or any(not (p == ROOT_MODULE or p.startswith(ROOT_MODULE + "/")) or p.startswith(REAGENTS_MODULE) for p in audited_packages)):
+            raise ValueError("coverpkg audit must contain only root-module packages and cannot be empty")
+    except (OSError, ValueError) as err:
         print(f"coverage: schema: {err}", file=sys.stderr)
         return 1
 
@@ -1318,6 +1369,8 @@ def main(argv=None):
         require_browser=args.require_browser,
         require_reagents=args.require_reagents,
         require_unit=args.require_unit,
+        audited_packages=audited_packages,
+        diff_base=args.diff_base,
     )
     issues = preload_issues + issues
     report["issues"] = [item.as_dict() for item in issues]
@@ -1338,8 +1391,8 @@ def main(argv=None):
         try:
             baseline = baseline_from_integration(
                 integration,
-                uncovered_diff=(report.get("uncovered_changed_paths") if args.changed_paths else None),
                 candidate_sha=args.candidate_sha,
+                diff_policy=(ratchet or {}).get("diff"),
             )
         except ValueError:
             baseline = None

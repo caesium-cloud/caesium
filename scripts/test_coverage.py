@@ -34,6 +34,13 @@ EXPORT_CLI = f"{MODULE}/cmd/job/export.go"
 EXPORT_HTTP = f"{MODULE}/api/rest/controller/job/manifest.go"
 EXPORT_READ = f"{MODULE}/internal/jobdef/exporter.go"
 OTHER = f"{MODULE}/pkg/log/log.go"
+IMAGE_ID = "sha256:" + "c" * 64
+AUDITED_PACKAGES = {MODULE, f"{MODULE}/api", f"{MODULE}/cmd/run", f"{MODULE}/cmd/event",
+                    *(p.rsplit("/", 1)[0] for p in (APPLY_CLI, APPLY_HTTP, APPLY_WRITE, EXPORT_HTTP, OTHER))}
+DIFF_POLICY = {
+    "basis": "policy", "scope": "audited-statement-files",
+    "coverage_source": "integration+browser", "uncovered_changed_paths_max": 0,
+}
 
 
 def block(file, stmts=4, count=1, sl=1):
@@ -113,7 +120,12 @@ def provenance(source, **overrides):
         "complete": True,
         "missing": False,
         "killed": False,
+        "image_id": IMAGE_ID,
     }
+    if source == "browser":
+        doc.update(kind="gocoverdir", verified=True, image_provenance="built-by-this-run",
+                   test_exit_code=0, exit_code=0, stop_rc=0, oom_killed=False,
+                   collection="chromium-live-console")
     doc.update(overrides)
     return doc
 
@@ -128,6 +140,8 @@ def write_source(dirpath, source, text=None, prov=None):
 
 
 def run_checker(profiles_dir, extra=(), env=None):
+    audit = Path(profiles_dir) / "coverpkg-packages.txt"
+    audit.write_text("\n".join(sorted(AUDITED_PACKAGES)) + "\n")
     cmd = [
         sys.executable,
         str(CHECKER),
@@ -135,6 +149,7 @@ def run_checker(profiles_dir, extra=(), env=None):
         "--candidate-sha", SHA,
         "--repo-root", str(ROOT),
         "--report", str(Path(profiles_dir) / "report.json"),
+        "--coverpkg-audit", str(audit), "--diff-base", "fixture-base",
         *extra,
     ]
     return subprocess.run(cmd, capture_output=True, text=True, env=env or os.environ.copy())
@@ -154,13 +169,16 @@ def collector_test_env(art):
         "kind": "package-diff-ratchet",
         "source": "integration",
         "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}},
-        "diff": {"uncovered_changed_paths_max": 0},
+        "diff": DIFF_POLICY,
     }))
     env = os.environ.copy()
     env["CAESIUM_COVERAGE_ARTIFACTS"] = str(art)
     env["CAESIUM_COVERAGE_CHANGED_PATHS"] = str(changed)
     env["CAESIUM_COVERAGE_RATCHET"] = str(ratchet)
     env["CANDIDATE_SHA"] = SHA
+    audit = art / "audit"
+    audit.mkdir(exist_ok=True)
+    (audit / "coverpkg-packages.txt").write_text("\n".join(sorted(AUDITED_PACKAGES)) + "\n")
     return env
 
 
@@ -404,6 +422,20 @@ class BrowserMergeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("foreign", output(result))
 
+    def test_missing_or_wrong_browser_image_and_process_evidence_cannot_pass(self):
+        for field in ("test_exit_code", "image_id", "verified", "exit_code", "stop_rc", "oom_killed"):
+            with self.subTest(field=field):
+                prov = provenance("browser")
+                del prov[field]
+                write_source(self.dir, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), prov)
+                result = run_checker(self.dir, extra=("--require-browser",))
+                self.assertNotEqual(result.returncode, 0, output(result))
+                self.assertNotEqual(json.loads((self.dir / "report.json").read_text())["contributions"]["browser"]["status"], "complete")
+        write_source(self.dir, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), provenance("browser", image_id="sha256:" + "d" * 64))
+        result = run_checker(self.dir, extra=("--require-browser",))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("browser image must equal", output(result))
+
 
 class BrowserJourneyResultTests(unittest.TestCase):
     def setUp(self):
@@ -546,7 +578,9 @@ class RatchetTests(unittest.TestCase):
         report = json.loads((self.dir / "report.json").read_text())
         self.assertEqual(report["uncovered_changed_paths"], [])
         doc = json.loads(baseline.read_text())
-        self.assertEqual(doc["diff"]["uncovered_changed_paths_max"], 0)
+        self.assertNotIn("diff", doc, "an empty/uncovered count is not a measured diff policy")
+        doc["diff"] = DIFF_POLICY
+        baseline.write_text(json.dumps(doc))
         write_source(
             self.dir,
             "cli",
@@ -572,11 +606,43 @@ class RatchetTests(unittest.TestCase):
             "kind": "package-diff-ratchet",
             "source": "integration",
             "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}},
-            "diff": {"uncovered_changed_paths_max": 0},
+            "diff": DIFF_POLICY,
         }))
         result = run_checker(self.dir, extra=("--ratchet", str(baseline)))
         self.assertEqual(result.returncode, 2, output(result))
         self.assertIn("no changed-paths input", output(result))
+
+    def test_audited_diff_credits_browser_and_reports_excluded_and_empty_inputs(self):
+        changed = self.dir / "changed.txt"
+        changed.write_text("api/ui.go\ninternal/models/models.go\ntest/robustness/corelogic.go\ncmd/job/apply_test.go\n")
+        policy = self.dir / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "package-diff-ratchet", "source": "integration",
+                                      "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}}, "diff": DIFF_POLICY}))
+        write_source(self.dir, "server", write_to_read_server() + block(f"{MODULE}/api/ui.go", 3, 0) + "\n", provenance("server"))
+        write_source(self.dir, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), provenance("browser"))
+        extra = ("--changed-paths", str(changed), "--ratchet", str(policy), "--require-browser")
+        result = run_checker(self.dir, extra=extra)
+        self.assertEqual(result.returncode, 0, output(result))
+        report = json.loads((self.dir / "report.json").read_text())
+        self.assertEqual(report["diff_coverage"]["changed_path_count"], 4)
+        self.assertEqual(report["diff_coverage"]["eligible_paths"], [f"{MODULE}/api/ui.go"])
+        self.assertFalse(report["diff_coverage"]["empty_diff"])
+        self.assertEqual(report["diff_coverage"]["base"], "fixture-base")
+        self.assertEqual(report["uncovered_changed_paths"], [])
+        write_source(self.dir, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 0)), provenance("browser"))
+        self.assertEqual(run_checker(self.dir, extra=extra).returncode, 1, "eligible uncovered statement file must fail")
+        changed.write_text("")
+        self.assertEqual(run_checker(self.dir, extra=extra).returncode, 0)
+        empty = json.loads((self.dir / "report.json").read_text())["diff_coverage"]
+        self.assertTrue(empty["empty_diff"])
+        self.assertEqual(empty["eligible_path_count"], 0)
+
+    def test_partial_coverpkg_audit_cannot_exempt_profile_packages(self):
+        audit = self.dir / "partial-audit.txt"
+        audit.write_text(MODULE + "\n")
+        result = run_checker(self.dir, extra=("--coverpkg-audit", str(audit)))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("missing from the coverpkg audit", output(result))
 
 
 class ReagentsAuditTests(unittest.TestCase):
@@ -679,6 +745,7 @@ class CollectorMergeProvenanceTests(unittest.TestCase):
             write_source(self.profiles, source, prov=self.originals[source])
         (self.art / "fake-cli.out").write_text(write_to_read_cli())
         (self.art / "fake-server.out").write_text(write_to_read_server())
+        (self.art / "fake-browser.out").write_text(profile("set", block(f"{MODULE}/api/ui.go", 3, 1)))
         fake = self.art / "fake-container"
         fake.write_text('''#!/usr/bin/env python3
 import os, pathlib, shutil, sys
@@ -709,6 +776,7 @@ elif "merge" in args:
         self.env = collector_test_env(self.art)
         self.env["CAESIUM_CONTAINER_CLI"] = str(fake)
         self.env["FAKE_COV_ROOT"] = str(self.art)
+        write_source(self.profiles, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), provenance("browser"))
 
     def merge(self):
         return subprocess.run(
@@ -762,6 +830,144 @@ elif "merge" in args:
                     self.assertFalse(source_path.exists())
                 else:
                     self.assertEqual(source_path.read_bytes(), original)
+
+    def test_killed_browser_stays_incomplete_on_check_and_merge_without_opt_in(self):
+        write_source(self.profiles, "cli", write_to_read_cli(), self.originals["cli"])
+        write_source(self.profiles, "server", write_to_read_server(), self.originals["server"])
+        write_source(self.profiles, "browser", prov=provenance("browser", complete=False, killed=True, exit_code=137, oom_killed=True))
+        for mode in ("check", "merge"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(["bash", str(COLLECTOR), mode], capture_output=True, text=True, env=self.env, cwd=str(ROOT))
+                self.assertEqual(result.returncode, 2, output(result))
+                report = json.loads((self.art / "report.json").read_text())
+                self.assertEqual(report["verdict"], "incomplete")
+                self.assertTrue(report["browser_required"])
+                self.assertFalse((self.art / "ratchet.json").exists())
+
+    def test_external_browser_raw_missing_or_empty_cannot_reuse_stale_counters(self):
+        raw = self.art / "raw/browser"
+        raw.mkdir()
+        (raw / "covmeta.stale").write_text("stale")
+        (raw / "covcounters.stale").write_text("stale")
+        prov = self.art / "external-browser.provenance.json"
+        prov.write_text(json.dumps(provenance("browser")))
+        self.env["CAESIUM_COVERAGE_BROWSER_PROVENANCE"] = str(prov)
+        empty = self.art / "empty"
+        empty.mkdir()
+        for source in (self.art / "missing", empty):
+            with self.subTest(source=source.name):
+                self.env["CAESIUM_COVERAGE_BROWSER_DIR"] = str(source)
+                result = subprocess.run(["bash", str(COLLECTOR), "check"], capture_output=True, text=True, env=self.env, cwd=str(ROOT))
+                self.assertEqual(result.returncode, 1, output(result))
+                self.assertNotEqual(json.loads((self.art / "report.json").read_text())["verdict"], "pass")
+        supplied = self.art / "supplied"
+        supplied.mkdir()
+        (supplied / "covmeta.current").write_text("current")
+        (supplied / "covcounters.current").write_text("current")
+        self.env["CAESIUM_COVERAGE_BROWSER_DIR"] = str(supplied)
+        self.assertEqual(self.merge().returncode, 0)
+        self.assertEqual({p.name for p in raw.iterdir()}, {"covmeta.current", "covcounters.current"})
+
+
+class CollectorCollectTests(unittest.TestCase):
+    """Exercise collector lifecycle decisions without launching containers/browsers."""
+
+    def setUp(self):
+        CollectorMergeProvenanceTests.setUp(self)
+        self.bin = self.art / "bin"
+        self.bin.mkdir()
+        self.env.update(CAESIUM_COVERAGE_ID="cov-test", CAESIUM_COVERAGE_KEEP="1")
+        self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
+        self.env["FAKE_BROWSER_CHECKER"] = str(BROWSER_CHECKER)
+        self.env["FAKE_BROWSER_JOURNEY"] = str(BROWSER_JOURNEY)
+        git = self.bin / "git"
+        git.write_text('''#!/usr/bin/env python3
+import sys
+args=sys.argv[1:]
+if "status" in args: pass
+elif "--git-dir" in args: print(".git")
+else: print("a" * 40)
+''')
+        sleeper = self.bin / "sleep"
+        sleeper.write_text("#!/bin/sh\nexit 0\n")
+        bash = self.bin / "bash"
+        bash.write_text('''#!/usr/bin/env python3
+import os,sys,json,pathlib,subprocess
+if len(sys.argv)>1 and sys.argv[1]==os.environ["FAKE_BROWSER_JOURNEY"]:
+    failed=os.environ.get("FAKE_SCENARIO")=="journey-failed"
+    report=pathlib.Path(sys.argv[3]);report.write_text(json.dumps({"suites":[{"specs":[
+      {"title":"sidebar navigates between every primary control-plane page","tests":[{"results":[{"status":"failed" if failed else "passed"}]}]},
+      {"title":"operator can pause and unpause a job from the detail page","tests":[{"results":[{"status":"passed"}]}]}
+    ]}]}))
+    raise SystemExit(subprocess.run([sys.executable,os.environ["FAKE_BROWSER_CHECKER"],str(report)]).returncode)
+os.execv("/bin/bash",["bash"]+sys.argv[1:])
+''')
+        for path in (git, sleeper, bash):
+            path.chmod(0o755)
+        container = self.art / "fake-container"
+        with container.open("a") as stream:
+            stream.write('''else:
+    name=next((args[i+1] for i,v in enumerate(args) if v=="--name"),"")
+    names_path=root/"container-names.json"
+    names=json.loads(names_path.read_text()) if names_path.exists() else []
+    if args[:2]==["rm","-f"]:
+        names=[n for n in names if n not in args[2:]]
+    elif args and args[0]=="build": pass
+    elif args[:2]==["image","inspect"]:
+        if "--format" in args:
+            print("a"*40 if "revision" in args[args.index("--format")+1] else "sha256:"+"c"*64)
+    elif args and args[0]=="create": print("audit-export")
+    elif args and args[0]=="port": print("127.0.0.1:12345")
+    elif args and args[0]=="inspect":
+        killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
+        print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
+    elif args and args[0]=="run":
+        if name:
+            if name in names: raise SystemExit("container name already exists: "+name)
+            names.append(name)
+        if "wget" in args: print("healthy")
+        for inside in ("/coverage","/var/lib/caesium/coverage"):
+            if inside in mounts:
+                (mounts[inside]/"covmeta.fake").write_text("meta")
+                (mounts[inside]/"covcounters.fake").write_text("counters")
+    names_path.write_text(json.dumps(names))
+''')
+        # The stand-in only emulates CLI responses; it cannot launch a real engine.
+        code = container.read_text().replace("import os, pathlib, shutil, sys", "import os, pathlib, shutil, sys, json")
+        container.write_text(code)
+        (self.art / "container-names.json").write_text(json.dumps(["cov-test-browser"]))
+
+    def collect(self, scenario):
+        self.env["FAKE_SCENARIO"] = scenario
+        return subprocess.run(["bash", str(COLLECTOR), "collect"], capture_output=True, text=True,
+                              env=self.env, cwd=str(ROOT), timeout=30)
+
+    def test_clean_collect_requires_browser_and_replaces_kept_browser(self):
+        result = self.collect("clean")
+        self.assertEqual(result.returncode, 0, output(result))
+        report = json.loads((self.art / "report.json").read_text())
+        self.assertEqual(report["verdict"], "pass")
+        self.assertTrue(report["browser_required"])
+        browser = json.loads((self.profiles / "browser.provenance.json").read_text())
+        self.assertTrue(browser["complete"])
+        self.assertEqual(browser["test_exit_code"], 0)
+        self.assertEqual(browser["image_id"], IMAGE_ID)
+        self.assertIn("cov-test-browser", result.stdout.split("KEEP=1;")[-1])
+
+    def test_failed_journey_or_killed_server_cannot_collect_or_recheck_success(self):
+        for scenario in ("journey-failed", "killed"):
+            with self.subTest(scenario=scenario):
+                result = self.collect(scenario)
+                self.assertNotEqual(result.returncode, 0, output(result))
+                browser = json.loads((self.profiles / "browser.provenance.json").read_text())
+                self.assertFalse(browser["complete"])
+                self.assertEqual(browser["killed"], scenario == "killed")
+                for mode in ("check", "merge"):
+                    checked = subprocess.run(["bash", str(COLLECTOR), mode], capture_output=True, text=True,
+                                             env=self.env, cwd=str(ROOT), timeout=30)
+                    self.assertNotEqual(checked.returncode, 0, output(checked))
+                    self.assertNotEqual(json.loads((self.art / "report.json").read_text())["verdict"], "pass")
+                self.assertFalse((self.art / "ratchet.json").exists())
 
 
 class DockerfileAndCollectorTests(unittest.TestCase):
@@ -845,8 +1051,16 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn('exit_code" != "0" && "$exit_code" != "143"', text)
 
     def test_collector_bash_syntax(self):
-        result = subprocess.run(["bash", "-n", str(COLLECTOR), str(BROWSER_JOURNEY)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for script in (COLLECTOR, BROWSER_JOURNEY):
+            with self.subTest(script=script.name):
+                result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_browser_journey_rejects_invalid_url_or_missing_report_before_npm(self):
+        for args in (("https://example.com", "/tmp/unused.json"), ("http://127.0.0.1:12345",)):
+            result = subprocess.run(["bash", str(BROWSER_JOURNEY), *args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, output(result))
+            self.assertNotIn("npm", output(result))
 
     def test_checker_is_python_stdlib(self):
         first = CHECKER.read_text().splitlines()[0]
@@ -861,6 +1075,7 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         profiles = art / "profiles"
         write_source(profiles, "cli", write_to_read_cli(), provenance("cli"))
         write_source(profiles, "server", write_to_read_server(), provenance("server"))
+        write_source(profiles, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), provenance("browser"))
         env = collector_test_env(art)
         result = subprocess.run(
             ["bash", str(COLLECTOR), "check"],

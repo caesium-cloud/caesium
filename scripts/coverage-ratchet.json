@@ -292,6 +292,10 @@
     }
   },
   "diff": {
-    "uncovered_changed_paths_max": 0
+    "uncovered_changed_paths_max": 0,
+    "basis": "policy",
+    "scope": "audited-statement-files",
+    "coverage_source": "integration+browser",
+    "reason": "Require coverage of changed audited files containing instrumented statements; 0 is explicit policy, not a measurement from the empty G2 diff. Noninstrumented harness, test, and type-only files are excluded and reported."
   }
 }
