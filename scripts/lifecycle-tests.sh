@@ -355,6 +355,11 @@ PY
     local rc=$?
     trap - EXIT INT TERM
     set +e
+    if [[ -n "${LC_PHASE_PID:-}" ]]; then
+      kill "${LC_PHASE_PID}" 2>/dev/null || true
+      wait "${LC_PHASE_PID}" 2>/dev/null || true
+      LC_PHASE_PID=""
+    fi
     if [[ "$LC_SIGNALLED" == 1 ]]; then rc=143; fi
     if [[ "$LC_OWNED" == 1 ]]; then
       lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
@@ -1297,6 +1302,110 @@ PY
       lc_ns exec pod/lifecycle-storage -c storage -- sh -c \
         'cd /data && find . -type f -exec ls -ln {} \; | sort' >"$1"
     }
+    # One bounded probe of both survivors. Cadence and the post-error sample
+    # share this path. A probe failure still appends a sample; it must not
+    # change the catalog-write exit code. The 1Gi cap is not raised here.
+    lc_memory_sample_member() {
+      local member="$1" reason="$2" batch="$3" batch_tag="$4" capture
+      local dir="$LC_ART/cluster-logs/memory-captures"
+      mkdir -p "$dir"
+      LC_MEM_SEQ=$((LC_MEM_SEQ + 1))
+      capture="$dir/${batch_tag}-${reason}-${member}-${LC_MEM_SEQ}.txt"
+      python3 "$ROOT/scripts/lifecycle-memory-sample.py" sample \
+        --member "$member" --reason "$reason" --batch "$batch" \
+        --lifecycle-id "$LC_ID" \
+        --jsonl "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl" \
+        --capture "$capture" --artifact-root "$LC_ART" --timeout 12 \
+        -- kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
+          --request-timeout=12s exec -i "$member" -c caesium -- sh -s || true
+    }
+    lc_memory_sample_members() {
+      local reason="$1" batch="$2" batch_tag member
+      printf -v batch_tag '%02d' "$batch"
+      for member in caesium-0 caesium-1; do
+        lc_memory_sample_member "$member" "$reason" "$batch" "$batch_tag" || true
+      done
+    }
+    # Stop sampling once the write phase's rc file appears, and never sample
+    # more than LC_MEM_SAMPLE_CAP rounds inside the 12m phase timeout.
+    lc_memory_watch_phase() {
+      local batch="$1" samples=0 i
+      while [[ "$samples" -lt "$LC_MEM_SAMPLE_CAP" && ! -f "$LC_PHASE_DONE" ]]; do
+        lc_memory_sample_members cadence "$batch" || true
+        samples=$((samples + 1))
+        [[ -f "$LC_PHASE_DONE" ]] && break
+        i=0
+        while [[ "$i" -lt "$LC_MEM_INTERVAL" && ! -f "$LC_PHASE_DONE" ]]; do
+          sleep 1
+          i=$((i + 1))
+        done
+      done
+    }
+    lc_run_snapshot_phase() {
+      local batch="$1" batch_tag wait_rc
+      printf -v batch_tag '%02d' "$batch"
+      LC_MEM_ACTIVE=1
+      if [[ -n "$LC_MEM_BATCHES" ]]; then
+        LC_MEM_BATCHES="${LC_MEM_BATCHES},${batch}"
+      else
+        LC_MEM_BATCHES="$batch"
+      fi
+      LC_PHASE_DONE="$LC_ART/cluster-logs/snapshot-phase-${batch_tag}.rc"
+      rm -f "$LC_PHASE_DONE"
+      set +e
+      (
+        set +e
+        if [[ "$batch" == 0 ]]; then
+          lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)"
+        else
+          LC_SNAPSHOT_BATCH="$batch" lc_phase GenerateSnapshotUpdateBatch "$LC_CAND_ID" "$(lc_base)"
+        fi
+        printf '%s\n' "$?" >"$LC_PHASE_DONE"
+      ) &
+      LC_PHASE_PID=$!
+      set -e
+      lc_memory_watch_phase "$batch"
+      set +e
+      wait "$LC_PHASE_PID"
+      wait_rc=$?
+      set -e
+      LC_PHASE_PID=""
+      if [[ -f "$LC_PHASE_DONE" ]]; then
+        LC_SNAP_RC="$(tr -dc '0-9' <"$LC_PHASE_DONE")"
+      else
+        LC_SNAP_RC=$wait_rc
+      fi
+      [[ "$LC_SNAP_RC" =~ ^[0-9]+$ ]] || LC_SNAP_RC=1
+    }
+    # Attach memory samples to whatever evidence the snapshot case already has.
+    # Missing or incomplete readings block a pass; they do not turn an OOM
+    # or a failed catalog write into a pass.
+    lc_snapshot_case() {
+      local status="$1" detail="$2" evidence="${3:-}" finish_rc=0 published
+      published="$evidence"
+      if [[ "${LC_MEM_ACTIVE:-0}" == 1 ]]; then
+        published="$LC_ART/cluster-logs/snapshot-memory-case.json"
+        python3 "$ROOT/scripts/lifecycle-memory-sample.py" finish \
+          --lifecycle-id "$LC_ID" \
+          --jsonl "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl" \
+          --dest "$published" \
+          --batches "$LC_MEM_BATCHES" \
+          --apply-batch "${LC_MEM_APPLY_BATCH:-}" \
+          --evidence "$evidence" || finish_rc=$?
+        if [[ ! -s "$published" ]]; then
+          printf '%s\n' '{"memory_samples":{"gap":true,"gap_detail":"memory sample publisher failed","samples":[],"memory_limit":"1Gi"}}' >"$published"
+          finish_rc=1
+        fi
+        if [[ "$finish_rc" != 0 ]]; then
+          detail="${detail}; memory samples are an evidence gap, not a pass"
+          if [[ "$status" == pass ]]; then
+            status=blocked
+            LC_SNAP_RC=1
+          fi
+        fi
+      fi
+      lc_case snapshot-catch-up "$status" "$detail" "$published"
+    }
 
     # Snapshot catch-up: the stopped member misses at least 1,400 distinct
     # acknowledged catalog writes. If that does not exhaust dqlite's retained
@@ -1307,6 +1416,15 @@ PY
     LC_SNAP_TRUNCATED=0
     LC_SNAP_REASON=""
     LC_SNAP_EVIDENCE=""
+    # 15s between rounds, 40 rounds: finite inside the 12m write-phase timeout.
+    LC_MEM_ACTIVE=0
+    LC_MEM_BATCHES=""
+    LC_MEM_APPLY_BATCH=""
+    LC_MEM_SEQ=0
+    LC_MEM_INTERVAL=15
+    LC_MEM_SAMPLE_CAP=40
+    LC_PHASE_PID=""
+    LC_PHASE_DONE=""
     lc_scale_two || LC_SNAP_RC=$?
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
@@ -1340,12 +1458,10 @@ PY
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       for LC_BATCH in {0..18}; do
         printf -v LC_BATCH_TAG '%02d' "$LC_BATCH"
-        if [[ "$LC_BATCH" == 0 ]]; then
-          lc_phase GenerateSnapshotWrites "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-        else
-          LC_SNAPSHOT_BATCH="$LC_BATCH" lc_phase GenerateSnapshotUpdateBatch "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
-        fi
+        lc_run_snapshot_phase "$LC_BATCH"
         if [[ "$LC_SNAP_RC" != 0 ]]; then
+          LC_MEM_APPLY_BATCH="$LC_BATCH"
+          lc_memory_sample_members apply-error "$LC_BATCH" || true
           LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
           lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
           LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
@@ -1399,7 +1515,7 @@ PY
     fi
     if [[ "$LC_SNAP_RC" != 0 ]]; then
       if [[ -n "$LC_SNAP_EVIDENCE" && ! -s "$LC_SNAP_EVIDENCE" ]]; then LC_SNAP_EVIDENCE=""; fi
-      lc_case snapshot-catch-up blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
+      lc_snapshot_case blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
     else
       LC_ART="$LC_ART" LC_SNAP_BATCH="$LC_BATCH" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
 import json,pathlib,re,os
@@ -1495,13 +1611,13 @@ obs['snapshot_install_inferred_from_two_survivor_log_gap']=True
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
-        lc_case snapshot-catch-up pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
+        lc_snapshot_case pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
       else
         LC_FINAL_EVIDENCE=""
         if [[ -s "$LC_ART/cluster-logs/snapshot-threshold.json" ]]; then
           LC_FINAL_EVIDENCE="$LC_ART/cluster-logs/snapshot-threshold.json"
         fi
-        lc_case snapshot-catch-up blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
+        lc_snapshot_case blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
         LC_SNAP_RC=1
       fi
     fi
