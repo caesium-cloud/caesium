@@ -1418,7 +1418,15 @@ Containerized package race/vet passed (6.017 s), and the unchanged real
 Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.89 s).
 CI run 36242369660 passed all production/integration checks, but `ui-e2e`
 failed on a jobs-list contrast failure, so `ci-ok` failed too.
-That UI failure is under investigation separately; this PR is not merge-ready.
+Separate [#572](https://github.com/caesium-cloud/caesium/pull/572), candidate
+`62f96873`, repairs the demonstrated scan/finite-animation race without changing
+axe rules, contrast thresholds, baselines or product colors. Chromium reproduces
+low contrast during AppShell's fade and a passing scoped scan after it settles.
+Root's containerized exact-head build and real API-applied jobs-page gate pass
+2/2 first-attempt tests in 3.1 s; paused/replaced animations and a genuine settled
+bad color remain failing controls. Current CI/review are in progress; see live
+PR state. Once #572 merges, incorporate master into #571 and rerun affected
+checks; #571 is not yet merge-ready.
 Hold F2 until #571 merges, then incorporate master and revalidate the affected
 Helm shard-2 lane.
 CODEOWNER approval is required for both PRs. No new lifecycle qualification
