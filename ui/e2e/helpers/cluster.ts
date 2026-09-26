@@ -120,7 +120,16 @@ export type ConsoleSurface = {
   runRows: ConsoleRunRow[];
   logText: string;
   logSourceLabel: string;
-  eventStreamReconnects: number;
+  /** Browser GET /v1/events after reconnect, including unauthorized attempts. */
+  eventStreamAttempts: number;
+  /** Those event-stream responses that returned 200. */
+  eventStreamAuthorized: number;
+  /**
+   * Browser GET /v1/jobs/:id/runs/:id that returned 200. API-key login keeps
+   * the bearer token in page memory, and EventSource cannot send it, so a 401
+   * on /v1/events is followed by this authenticated poll.
+   */
+  authenticatedRunReads: number;
   showedSuccessBeforeFault: boolean;
   reloadedHeadingStatus: string;
   reloadedHeadingCount: number;
@@ -878,10 +887,12 @@ export function convergenceIssues(input: {
       detail: `console heading ${surface.headingStatus || "missing"} / reload ${surface.reloadedHeadingStatus || "missing"} != durable ${durable.status}`,
     });
   }
-  if (surface.eventStreamReconnects < 1) {
+  if (!eventStreamRecovered(surface)) {
     issues.push({
       code: "event_stream_not_recovered",
-      detail: "no successful GET /v1/events was observed from the page after the fault",
+      detail: surface.eventStreamAttempts < 1
+        ? "the page did not open GET /v1/events after reconnect"
+        : "GET /v1/events was not authorized and no authenticated run read recovered the page",
     });
   }
   if (!durable.logExcerpt) {
@@ -934,6 +945,11 @@ function rowIssues(rows: ConsoleRunRow[], durable: DurableOutcome, label: string
     }
   }
   return issues;
+}
+
+function eventStreamRecovered(surface: ConsoleSurface): boolean {
+  if (surface.eventStreamAuthorized >= 1) return true;
+  return surface.eventStreamAttempts >= 1 && surface.authenticatedRunReads >= 1;
 }
 
 function showsSuccess(status: string): boolean {

@@ -267,8 +267,28 @@ test("convergence rejects duplicate, stale, false success, and a fault that was 
   expect(codes(earlySuccess)).toContain("false_terminal_success");
 
   const noStream = passingJourney();
-  noStream.console.eventStreamReconnects = 0;
+  noStream.console.eventStreamAttempts = 0;
+  noStream.console.eventStreamAuthorized = 0;
+  noStream.console.authenticatedRunReads = 0;
   expect(codes(noStream)).toEqual(["event_stream_not_recovered"]);
+
+  const apiKeyFallback = passingJourney();
+  apiKeyFallback.console.eventStreamAttempts = 2;
+  apiKeyFallback.console.eventStreamAuthorized = 0;
+  apiKeyFallback.console.authenticatedRunReads = 1;
+  expect(codes(apiKeyFallback)).toEqual([]);
+
+  const pollWithoutEvents = passingJourney();
+  pollWithoutEvents.console.eventStreamAttempts = 0;
+  pollWithoutEvents.console.eventStreamAuthorized = 0;
+  pollWithoutEvents.console.authenticatedRunReads = 3;
+  expect(codes(pollWithoutEvents)).toEqual(["event_stream_not_recovered"]);
+
+  const unauthorizedEvents = passingJourney();
+  unauthorizedEvents.console.eventStreamAttempts = 2;
+  unauthorizedEvents.console.eventStreamAuthorized = 0;
+  unauthorizedEvents.console.authenticatedRunReads = 0;
+  expect(codes(unauthorizedEvents)).toEqual(["event_stream_not_recovered"]);
 
   const lostReload = passingJourney();
   lostReload.console.reloadedLogText = "";
@@ -315,7 +335,9 @@ function passingJourney(): { durable: DurableOutcome; console: ConsoleSurface; f
       runRows: [{ id: runId, status: "succeeded" }],
       logText: "line\nd3-marker-abcdef123456\n",
       logSourceLabel: "Retained snapshot",
-      eventStreamReconnects: 1,
+      eventStreamAttempts: 1,
+      eventStreamAuthorized: 1,
+      authenticatedRunReads: 0,
       showedSuccessBeforeFault: false,
       reloadedHeadingStatus: "succeeded",
       reloadedHeadingCount: 1,

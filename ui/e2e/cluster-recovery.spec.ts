@@ -228,10 +228,19 @@ test("authenticated console observes the owner crash and converges on the durabl
   serviceOrigin = `http://127.0.0.1:${SERVICE_CONSOLE_PORT}`;
   await waitForHealth(serviceOrigin);
 
-  let eventStreamReconnects = 0;
+  let eventStreamAttempts = 0;
+  let eventStreamAuthorized = 0;
+  let authenticatedRunReads = 0;
+  const runPath = `/v1/jobs/${job.id}/runs/${runId}`;
   const onEventResponse = (response: PlaywrightResponse) => {
-    if (response.request().method() !== "GET" || response.status() !== 200) return;
-    if (new URL(response.url()).pathname === "/v1/events") eventStreamReconnects += 1;
+    if (response.request().method() !== "GET") return;
+    const pathname = new URL(response.url()).pathname;
+    if (pathname === "/v1/events") {
+      eventStreamAttempts += 1;
+      if (response.status() === 200) eventStreamAuthorized += 1;
+      return;
+    }
+    if (pathname === runPath && response.status() === 200) authenticatedRunReads += 1;
   };
   page.on("response", onEventResponse);
   try {
@@ -286,7 +295,9 @@ test("authenticated console observes the owner crash and converges on the durabl
       console: {
         ...beforeReload,
         showedSuccessBeforeFault: statusBefore === "succeeded" || statusBefore === "completed" || statusBefore === "success",
-        eventStreamReconnects,
+        eventStreamAttempts,
+        eventStreamAuthorized,
+        authenticatedRunReads,
         reloadedHeadingStatus: afterReload.headingStatus,
         reloadedHeadingCount: afterReload.headingCount,
         reloadedRunRows: afterReload.runRows,
