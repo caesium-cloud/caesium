@@ -1418,8 +1418,9 @@ head `9d86c90c`, fixed that defect and passed the unchanged real Kubernetes
 CLI/HTTP live/retained secret-log scenario (10.16 s), package race tests/vet
 (3.964 s) and all 37 executed CI jobs. F2 includes that fix as an explicit
 dependency; its production tree and integration assertions match #571, with
-only the five diagnostic/test paths differing. Merge #571 first. F2's final
-CI is in progress; CODEOWNER approval is required for both PRs.
+only the five diagnostic/test paths differing. F2's final CI passed all 37
+executed jobs, including all Helm shards and `ci-ok`. Merge #571 first;
+CODEOWNER approval is required for both PRs.
 These diagnostic fixes have no new live lifecycle qualification; the linked
 PR holds the durable failure-evidence summary.
 The unresolved
