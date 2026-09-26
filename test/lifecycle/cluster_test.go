@@ -1631,6 +1631,62 @@ func TestLifecycleClusterGenerateSnapshotWrites(t *testing.T) {
 	}
 }
 
+type snapshotDisputedReadback struct {
+	Pod              string `json:"pod"`
+	Base             string `json:"base"`
+	HTTPStatus       int    `json:"http_status,omitempty"`
+	Error            string `json:"error,omitempty"`
+	JobID            string `json:"job_id,omitempty"`
+	Annotation       string `json:"annotation,omitempty"`
+	MatchesAttempted bool   `json:"matches_attempted"`
+}
+
+// An EOF from Apply leaves the write's commit status unknown. Read each
+// survivor directly with a short deadline and record what it serves. This is
+// diagnostic evidence only: the caller still fails the snapshot phase.
+func readSnapshotDisputedWrite(ctx context.Context, h *cluster.HTTP, bases map[string]string,
+	jobID, expected string, timeout time.Duration) []snapshotDisputedReadback {
+	names := make([]string, 0, len(bases))
+	for name := range bases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	readbacks := make([]snapshotDisputedReadback, 0, len(names))
+	for _, name := range names {
+		base := bases[name]
+		row := snapshotDisputedReadback{Pod: name, Base: base}
+		if base == "" {
+			row.Error = "survivor has no observable HTTP address"
+			readbacks = append(readbacks, row)
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, timeout)
+		status, raw, err := h.Do(probeCtx, http.MethodGet,
+			strings.TrimRight(base, "/")+"/v1/jobs/"+jobID, nil)
+		cancel()
+		row.HTTPStatus = status
+		if err != nil {
+			row.Error = err.Error()
+		} else if status != http.StatusOK {
+			row.Error = fmt.Sprintf("job read returned HTTP %d (%d response bytes)", status, len(raw))
+		} else {
+			var stored struct {
+				ID          string            `json:"id"`
+				Annotations map[string]string `json:"annotations"`
+			}
+			if err := json.Unmarshal(raw, &stored); err != nil {
+				row.Error = fmt.Sprintf("decode job readback: %v", err)
+			} else {
+				row.JobID = stored.ID
+				row.Annotation = stored.Annotations["snapshot_write"]
+				row.MatchesAttempted = stored.ID == jobID && row.Annotation == expected
+			}
+		}
+		readbacks = append(readbacks, row)
+	}
+	return readbacks
+}
+
 // Further writes update one of the already-created jobs. Each annotation value
 // changes monotonically, so the importer commits a real catalog mutation but
 // its unchanged task topology does not add another DAG snapshot row. The host
@@ -1666,8 +1722,37 @@ func TestLifecycleClusterGenerateSnapshotUpdateBatch(t *testing.T) {
 		})
 	}()
 	for i := 0; i < 500; i++ {
-		def.Metadata.Annotations = map[string]string{"snapshot_write": fmt.Sprintf("%06d", first+i)}
+		attempted := fmt.Sprintf("%06d", first+i)
+		def.Metadata.Annotations = map[string]string{"snapshot_write": attempted}
 		if err := h.Apply(t.Context(), base, []jobdef.Definition{def}); err != nil {
+			readbackPods := pods.Items
+			addressSource := "current pod listing"
+			podRefreshError := ""
+			refreshCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			currentPods, refreshErr := kube.CoreV1().Pods(fx.LifecycleID).List(refreshCtx, cluster.ListOptions())
+			cancel()
+			if refreshErr != nil {
+				addressSource = "pre-batch pod listing"
+				podRefreshError = refreshErr.Error()
+			} else {
+				readbackPods = currentPods.Items
+			}
+			bases := make(map[string]string, len(readbackPods))
+			for _, pod := range readbackPods {
+				if pod.Status.PodIP == "" {
+					bases[pod.Name] = ""
+				} else {
+					bases[pod.Name] = "http://" + net.JoinHostPort(pod.Status.PodIP, "8080")
+				}
+			}
+			writeJSON(t, fmt.Sprintf("cluster-snapshot-disputed-batch-%02d.json", batch), map[string]any{
+				"lifecycle_id": fx.LifecycleID, "batch": batch, "write_index": i + 1, "alias": alias,
+				"job_id": before.ID, "attempted_annotation": attempted,
+				"apply_error": err.Error(), "observed_at": time.Now().UTC(),
+				"address_source": addressSource, "pod_refresh_error": podRefreshError,
+				"readbacks": readSnapshotDisputedWrite(t.Context(), h, bases, before.ID,
+					attempted, 5*time.Second),
+			})
 			t.Fatalf("snapshot update batch %d write %d/500: %v", batch, i, err)
 		}
 		acknowledged++

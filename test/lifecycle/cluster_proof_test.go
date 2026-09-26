@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
@@ -15,6 +16,41 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestReadSnapshotDisputedWriteKeepsAmbiguousCommitUnknown(t *testing.T) {
+	const jobID = "9aa0a5d2-1095-4e47-9d78-b6307c13f763"
+	committed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/jobs/"+jobID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"` + jobID + `","annotations":{"snapshot_write":"006099"}}`))
+	}))
+	defer committed.Close()
+	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"` + jobID + `","annotations":{"snapshot_write":"006098"}}`))
+	}))
+	defer stale.Close()
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer unavailable.Close()
+
+	rows := readSnapshotDisputedWrite(t.Context(), cluster.NewHTTP(""), map[string]string{
+		"caesium-1": stale.URL, "caesium-0": committed.URL,
+		"caesium-2": unavailable.URL, "missing-address": "",
+	}, jobID, "006099", 25*time.Millisecond)
+	require.Len(t, rows, 4)
+	require.Equal(t, "caesium-0", rows[0].Pod)
+	require.Equal(t, http.StatusOK, rows[0].HTTPStatus)
+	require.True(t, rows[0].MatchesAttempted)
+	require.Equal(t, "006098", rows[1].Annotation)
+	require.False(t, rows[1].MatchesAttempted)
+	require.Contains(t, rows[2].Error, "deadline exceeded")
+	require.False(t, rows[2].MatchesAttempted)
+	require.Equal(t, "survivor has no observable HTTP address", rows[3].Error)
+	require.False(t, rows[3].MatchesAttempted)
+}
 
 func TestResolvePodNameBySourceIP(t *testing.T) {
 	const podName = "148d4542-8df5-4bf2-8ff4-d542af055498-7c39392d-d1bf-43fc-b803-fce7d606141f-attempt1-bd606dbc-2d65-4ef4-a0d2-d795606e2673"

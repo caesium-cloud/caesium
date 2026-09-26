@@ -338,6 +338,7 @@ PY
     "$LC_ART/candidate-image-node-imports.json" \
     "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
   rm -f "$LC_ART"/cluster-snapshot-update-batch-*.json
+  rm -f "$LC_ART"/cluster-snapshot-disputed-batch-*.json
   mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
   cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
   LC_ID="$LC_ID" LC_SHA="$LC_SHA" LC_PAIR="$LC_PAIR" LC_STARTED="$LC_STARTED" LC_ART="$LC_ART" python3 - <<'PY'
@@ -358,7 +359,14 @@ PY
     if [[ "$LC_OWNED" == 1 ]]; then
       lc_ns logs pod/lifecycle-runner -c recorder >"$LC_ART/cluster-logs/recorder.log" 2>&1 || true
       lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-final.txt" 2>&1 || true
-      for n in 0 1 2; do lc_ns logs "caesium-$n" -c caesium --previous >"$LC_ART/cluster-logs/caesium-$n-previous.log" 2>&1 || true; done
+      lc_ns --request-timeout=10s get events --sort-by=.metadata.creationTimestamp -o wide \
+        >"$LC_ART/cluster-logs/events-final.txt" 2>&1 || true
+      for n in 0 1 2; do
+        lc_ns --request-timeout=10s logs "caesium-$n" -c caesium --tail=2000 --timestamps=true \
+          >"$LC_ART/cluster-logs/caesium-$n-current.log" 2>&1 || true
+        lc_ns --request-timeout=10s logs "caesium-$n" -c caesium --previous \
+          >"$LC_ART/cluster-logs/caesium-$n-previous.log" 2>&1 || true
+      done
       if [[ "${CAESIUM_LIFECYCLE_KEEP:-0}" != 1 ]]; then
         if ! kind delete cluster --name "$LC_ID" >"$LC_ART/cluster-logs/kind-delete.log" 2>&1; then
           rc=1
@@ -1029,6 +1037,28 @@ EOF
         >"$2" || return 1
       [[ -s "$2" ]]
     }
+    # Preserve the live state at the write failure, before storage-helper
+    # cleanup or kind teardown can erase the evidence. The runner records a
+    # five-second direct readback of the disputed annotation from each survivor;
+    # a missing readback remains explicitly unavailable, never a successful
+    # write or a snapshot pass.
+    lc_capture_snapshot_write_failure() {
+      local batch="$1" prefix="$LC_ART/cluster-logs/snapshot-failure-batch-$1"
+      local pods_rc=0 events_rc=0 log0_rc=0 log1_rc=0 copy_rc=0
+      lc_ns --request-timeout=10s get pods -o json >"$prefix-pods.json" 2>&1 || pods_rc=$?
+      lc_ns --request-timeout=10s get events --sort-by=.metadata.creationTimestamp -o wide \
+        >"$prefix-events.txt" 2>&1 || events_rc=$?
+      lc_ns --request-timeout=10s logs caesium-0 -c caesium --tail=2000 --timestamps=true \
+        >"$prefix-caesium-0.log" 2>&1 || log0_rc=$?
+      lc_ns --request-timeout=10s logs caesium-1 -c caesium --tail=2000 --timestamps=true \
+        >"$prefix-caesium-1.log" 2>&1 || log1_rc=$?
+      lc_run_timed 20 "$prefix-artifact-copy.log" kubectl --kubeconfig "$LC_KUBE" \
+        --namespace "$LC_ID" cp -c runner lifecycle-runner:/artifacts/. "$LC_ART/" || copy_rc=$?
+      LC_ART="$LC_ART" LC_ID="$LC_ID" LC_SNAP_BATCH="$batch" LC_DIAG_PODS_RC="$pods_rc" \
+        LC_DIAG_EVENTS_RC="$events_rc" LC_DIAG_LOG0_RC="$log0_rc" \
+        LC_DIAG_LOG1_RC="$log1_rc" LC_DIAG_COPY_RC="$copy_rc" \
+        python3 "$ROOT/scripts/lifecycle-snapshot-failure.py"
+    }
     # Exit 0 only after both surviving voters' actual files prove truncation;
     # 2 means another bounded batch is needed, 3 is the on-disk safety cap,
     # and 1 means evidence is missing or a survivor changed/restarted.
@@ -1312,6 +1342,10 @@ PY
         fi
         if [[ "$LC_SNAP_RC" != 0 ]]; then
           LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
+          if [[ "$LC_BATCH" != 0 ]]; then
+            lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
+            LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
+          fi
           break
         fi
         lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
