@@ -31,8 +31,11 @@ class BenchmarkOrderTests(unittest.TestCase):
             for source in (self.candidate, self.base):
                 path = source / relpath
                 path.parent.mkdir(parents=True, exist_ok=True)
+                # This fixture checks source isolation and row parsing, not
+                # performance. A fixed metric survives a zero-tick 1x timer.
                 path.write_text(
-                    f"package run\nimport \"testing\"\nfunc {name}(b *testing.B) {{}}\n"
+                    f"package run\nimport \"testing\"\n"
+                    f"func {name}(b *testing.B) {{ b.ReportMetric(1, \"ns/op\") }}\n"
                 )
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
@@ -194,7 +197,10 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_candidate_only_testmain_cannot_run_in_benchmark_process(self):
-        self.assertIsNotNone(shutil.which("go"))
+        if shutil.which("go") is None:
+            if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+                self.fail("Go is required for the benchmark source-isolation check in CI")
+            self.skipTest("host Go is unavailable; benchmark source-isolation check needs Go")
         for source in (self.candidate, self.base):
             (source / "go.mod").write_text("module example.com/benchmarkscope\n\ngo 1.23\n")
             (source / "internal/run/production.go").write_text(
