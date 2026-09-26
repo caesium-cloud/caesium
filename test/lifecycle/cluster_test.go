@@ -1500,7 +1500,9 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	if err := json.Unmarshal([]byte(pvcRaw), &pvc); err != nil {
 		blockf(t, "ordinal-0-disk-loss", "fresh PVC JSON unobservable: %v", err)
 	}
-	require.NotEmpty(t, pvc.Spec.VolumeName)
+	if strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		blockf(t, "ordinal-0-disk-loss", "fresh PVC has no volumeName")
+	}
 	require.NotEqual(t, old["caesium-0"].Volume, pvc.Spec.VolumeName, "ordinal-0 PVC retained the old PV")
 	infoRaw, ok := host["info_yaml"].(string)
 	require.True(t, ok)
@@ -1508,11 +1510,9 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 		ID      uint64 `yaml:"ID"`
 		Address string `yaml:"Address"`
 	}
-	if err := yaml.Unmarshal([]byte(infoRaw), &info); err != nil {
-		blockf(t, "ordinal-0-disk-loss", "fresh info.yaml unobservable: %v", err)
+	if err := yaml.Unmarshal([]byte(infoRaw), &info); err != nil || info.ID == 0 || strings.TrimSpace(info.Address) == "" {
+		blockf(t, "ordinal-0-disk-loss", "fresh info.yaml unobservable: id=%d address=%q err=%v", info.ID, info.Address, err)
 	}
-	require.NotZero(t, info.ID)
-	require.NotEmpty(t, info.Address)
 	evidence["fresh_info_id"] = info.ID
 	evidence["fresh_info_address"] = info.Address
 	evidence["fresh_volume"] = pvc.Spec.VolumeName
