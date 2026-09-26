@@ -87,18 +87,14 @@ manifest = []
 benchmark_names = []
 benchmark_function = re.compile(r'^func\s+(Benchmark(?:Owner|Recover)[A-Za-z0-9_]*)\s*\(\s*[A-Za-z_][A-Za-z_0-9]*\s+\*testing\.B\s*\)', re.M)
 
-# Check helper identity before creating any overlay. Benchmarks call helpers
-# from other internal/run test files, including owner_state_test.go.
-def other_test_files(root, sha):
-    paths = git(root, "ls-tree", "-r", "--name-only", sha, "--", "internal/run").stdout.decode().splitlines()
-    return sorted(path for path in paths if path.endswith("_test.go") and path not in files)
-
-candidate_helpers = other_test_files(candidate_dir, candidate_sha)
-base_helpers = other_test_files(base_dir, base_sha)
-if candidate_helpers != base_helpers:
-    raise SystemExit("benchmark harness: internal/run test helper path sets differ between base and candidate")
+# The benchmark files' linearTopo/wideTopo fixtures call newTopoBuilder and
+# its task/edge/build methods from this file. Pin the entire defining file on
+# both sides before overlaying benchmarks. Other package tests are compiled
+# but do not supply benchmark fixtures, so their independent changes must not
+# prevent a base/candidate comparison.
+helper_files = ("internal/run/owner_state_test.go",)
 helper_manifest = []
-for path in candidate_helpers:
+for path in helper_files:
     candidate_blob = git(candidate_dir, "show", f"{candidate_sha}:{path}").stdout
     base_blob = git(base_dir, "show", f"{base_sha}:{path}").stdout
     if candidate_blob != base_blob:
