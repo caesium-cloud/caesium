@@ -734,7 +734,9 @@ if [[ "$RUN_LOAD" == "1" ]]; then
           PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
           CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
           CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
-          npx playwright test e2e/performance.spec.ts --project=default
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
+          npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
+            --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
         )
         brc=$?
         set -e
@@ -765,7 +767,9 @@ if [[ "$RUN_LOAD" != "1" && "$RUN_BROWSER" == "1" ]]; then
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
         CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
         CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
-        npx playwright test e2e/performance.spec.ts --project=default
+        PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
+        npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
+          --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
       )
       brc=$?
       set -e
