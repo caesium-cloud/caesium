@@ -2,7 +2,25 @@
   "schema_version": 1,
   "kind": "package-diff-ratchet",
   "source": "integration",
-  "measured_candidate_sha": "7dcef7f07d85cf460a26239e11bb30889ac9221a",
+  "measured_candidate_sha": "00ba7d99077210030a7cd1dce91ee4245fb337e8",
+  "baseline_refresh": {
+    "previous_measured_candidate_sha": "7dcef7f07d85cf460a26239e11bb30889ac9221a",
+    "reason": "Remeasured after already-merged run API and CLI additions increased statement denominators. Covered-statement floors are retained or raised; the two lower percentage floors reflect those additions, not lost observed paths. Browser profiles and first-attempt journeys are complete.",
+    "package_statement_counts": {
+      "github.com/caesium-cloud/caesium/api/rest/service/run": {
+        "previous_covered": 9,
+        "previous_total": 23,
+        "covered": 9,
+        "total": 28
+      },
+      "github.com/caesium-cloud/caesium/cmd/run": {
+        "previous_covered": 81,
+        "previous_total": 759,
+        "covered": 83,
+        "total": 784
+      }
+    }
+  },
   "packages": {
     "github.com/caesium-cloud/caesium": {
       "min_percent": 66.7,
@@ -53,7 +71,7 @@
       "min_statements_covered": 56
     },
     "github.com/caesium-cloud/caesium/api/rest/service/run": {
-      "min_percent": 39.1,
+      "min_percent": 32.1,
       "min_statements_covered": 9
     },
     "github.com/caesium-cloud/caesium/api/rest/service/trigger": {
@@ -121,8 +139,8 @@
       "min_statements_covered": 15
     },
     "github.com/caesium-cloud/caesium/cmd/run": {
-      "min_percent": 10.7,
-      "min_statements_covered": 81
+      "min_percent": 10.6,
+      "min_statements_covered": 83
     },
     "github.com/caesium-cloud/caesium/cmd/start": {
       "min_percent": 29.2,
@@ -205,8 +223,8 @@
       "min_statements_covered": 2
     },
     "github.com/caesium-cloud/caesium/internal/models": {
-      "min_percent": 17.6,
-      "min_statements_covered": 13
+      "min_percent": 18.7,
+      "min_statements_covered": 14
     },
     "github.com/caesium-cloud/caesium/internal/notification": {
       "min_percent": 3.9,
