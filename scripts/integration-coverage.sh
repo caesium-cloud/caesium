@@ -261,6 +261,9 @@ run_checker() {
   extra+=(--write-baseline "$CAESIUM_COVERAGE_WRITE_BASELINE")
   extra+=(--changed-paths "$CHANGED_PATHS")
   extra+=(--diff-base "$DIFF_BASE" --coverpkg-audit "$AUDIT/coverpkg-packages.txt")
+  if [[ -f "$AUDIT/source-inventory.json" ]]; then
+    extra+=(--source-inventory "$AUDIT/source-inventory.json")
+  fi
   extra+=(--require-browser)
   if [[ "${CAESIUM_COVERAGE_REQUIRE_UNIT:-}" == "1" ]]; then
     extra+=(--require-unit)
@@ -460,6 +463,103 @@ trap cleanup EXIT
 "$CONTAINER_CLI" network create "$NETWORK" >/dev/null
 
 extract_audit
+# Eligibility is independent of observed counters. Parse all non-test Go source
+# files in the builder; missing profiles may only exempt an inventory-proven
+# file with no function body, call, or package variable initializer.
+"$CONTAINER_CLI" run --rm -i --platform "$PLATFORM" \
+  -v "$ROOT:/source:ro" -v "$AUDIT:/audit" -w /source \
+  -e INVENTORY_SHA="$CANDIDATE_SHA" \
+  -e INVENTORY_IMAGE_ID="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$IMAGE")" \
+  "$BUILDER_IMAGE" sh -s <<'INVENTORY'
+set -eu
+cat >/tmp/coverage-source-inventory.go <<'GO'
+package main
+
+import (
+    "bytes"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "fmt"
+    "go/ast"
+    "go/parser"
+    "go/token"
+    "io"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "sort"
+    "strings"
+)
+
+func main() {
+    raw, err := os.ReadFile("/audit/coverpkg-packages.txt")
+    if err != nil { panic(err) }
+    packages := strings.Fields(string(raw))
+    sort.Strings(packages)
+    if len(packages) == 0 { panic("empty coverpkg audit") }
+    args := append([]string{"list", "-json"}, packages...)
+    output, err := exec.Command("go", args...).Output()
+    if err != nil { panic(fmt.Errorf("go list selected packages: %w", err)) }
+    decoder := json.NewDecoder(bytes.NewReader(output))
+    files := map[string]any{}
+    packageFiles := map[string][]string{}
+    for {
+        var pkg struct { ImportPath, Dir string }
+        if err := decoder.Decode(&pkg); err == io.EOF { break } else if err != nil { panic(err) }
+        packageFiles[pkg.ImportPath] = []string{}
+        entries, err := os.ReadDir(pkg.Dir)
+        if err != nil { panic(err) }
+        for _, entry := range entries {
+            name := entry.Name()
+            if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") { continue }
+            packageFiles[pkg.ImportPath] = append(packageFiles[pkg.ImportPath], pkg.ImportPath+"/"+name)
+            path := filepath.Join(pkg.Dir, name)
+            source, err := os.ReadFile(path)
+            if err != nil { panic(err) }
+            tree, err := parser.ParseFile(token.NewFileSet(), path, source, parser.AllErrors)
+            if err != nil { panic(err) }
+            body, call, initializer := false, false, false
+            ast.Inspect(tree, func(node ast.Node) bool {
+                switch n := node.(type) {
+                case *ast.FuncDecl: body = body || n.Body != nil
+                case *ast.FuncLit: body = true
+                case *ast.CallExpr: call = true
+                case *ast.GenDecl:
+                    if n.Tok == token.VAR {
+                        for _, spec := range n.Specs {
+                            initializer = initializer || len(spec.(*ast.ValueSpec).Values) != 0
+                        }
+                    }
+                }
+                return true
+            })
+            digest := sha256.Sum256(source)
+            files[pkg.ImportPath+"/"+name] = map[string]any{
+                "parsed": true, "has_function_body": body, "has_call": call,
+                "has_var_initializer": initializer, "source_sha256": hex.EncodeToString(digest[:]),
+            }
+        }
+    }
+    if len(packageFiles) != len(packages) { panic("partial go list package inventory") }
+    for _, name := range packages {
+        if _, found := packageFiles[name]; !found { panic("missing audited package: "+name) }
+    }
+    auditDigest := sha256.Sum256([]byte(strings.Join(packages, "\n")+"\n"))
+    record := map[string]any{
+        "schema_version": 1, "kind": "go-ast-source-inventory", "parser": "go/parser",
+        "complete": true, "packages": packageFiles,
+        "candidate_sha": os.Getenv("INVENTORY_SHA"), "image_id": os.Getenv("INVENTORY_IMAGE_ID"),
+        "coverpkg_sha256": hex.EncodeToString(auditDigest[:]), "files": files,
+    }
+    encoded, err := json.MarshalIndent(record, "", "  ")
+    if err != nil { panic(err) }
+    if err := os.WriteFile("/audit/source-inventory.json", append(encoded, '\n'), 0644); err != nil { panic(err) }
+}
+GO
+go run /tmp/coverage-source-inventory.go
+INVENTORY
+[[ -s "$AUDIT/source-inventory.json" ]] || die "builder source inventory was not produced"
 write_fixture
 
 # Bind-mount GOCOVERDIR so a graceful exit lands counters on the host. 0777

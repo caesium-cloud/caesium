@@ -22,6 +22,7 @@ Exit status:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -832,7 +833,87 @@ def contract_gaps(integration, *, repo_root):
     return gaps
 
 
-def uncovered_changed_paths(integration, changed_paths, *, audited_packages=None):
+def statement_free_file(path, inventory, *, repo_root=None):
+    record = (inventory or {}).get("files", {}).get(path) or {}
+    attested = record.get("parsed") is True and all(
+        record.get(field) is False for field in ("has_function_body", "has_call", "has_var_initializer")
+    )
+    if not attested:
+        return False
+    source = _repo_file(path, repo_root)
+    if source is None or not source.is_file():
+        return False
+    try:
+        raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != record.get("source_sha256"):
+            return False
+        # Independent conservative check: even a relabelled AST record cannot
+        # exempt a real function/literal or package initializer. Strip comments
+        # and literals before checking tokens; unknown source remains eligible.
+        code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|`[^`]*`|\'(?:\\.|[^\'\\])*\'', " ", raw.decode(), flags=re.S)
+    except (OSError, UnicodeError):
+        return False
+    if not re.match(r"\s*package\s+\w+\b", code):
+        return False
+    return not re.search(r"\b(func|var)\b|\b(?!package\b|import\b|type\b|const\b)\w+\s*\(", code)
+
+
+def validate_source_inventory(inventory, *, candidate_sha, image_records, audited_packages, repo_root, issues):
+    if inventory is None:
+        return None
+    expected_audit = hashlib.sha256(("\n".join(sorted(audited_packages or [])) + "\n").encode()).hexdigest()
+    if not isinstance(inventory, dict) or any((
+        inventory.get("schema_version") != 1, inventory.get("kind") != "go-ast-source-inventory",
+        inventory.get("complete") is not True,
+        inventory.get("parser") != "go/parser", not candidate_sha,
+        inventory.get("candidate_sha") != candidate_sha, inventory.get("coverpkg_sha256") != expected_audit,
+        not image_records or any(record.get("image_id") != inventory.get("image_id") for record in image_records),
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", str(inventory.get("image_id") or "")),
+    )):
+        issues.append(_fail("source-inventory", "source inventory has foreign/schema candidate, image, or coverpkg identity", "diff"))
+        return None
+    files = inventory.get("files")
+    if not isinstance(files, dict) or not files:
+        issues.append(_fail("source-inventory", "source inventory has no parsed files", "diff"))
+        return None
+    packages = inventory.get("packages")
+    if not isinstance(packages, dict) or set(packages) != set(audited_packages or []):
+        issues.append(_fail("source-inventory", "source inventory does not include every audited package", "diff"))
+        return None
+    expected_files = []
+    for package, paths in packages.items():
+        if not isinstance(paths, list) or any(not isinstance(path, str) or package_of(path) != package for path in paths):
+            issues.append(_fail("source-inventory", f"invalid source-file manifest for {package}", "diff"))
+            return None
+        directory = _repo_file(package + "/inventory.go", repo_root)
+        if directory is None or not directory.parent.is_dir():
+            issues.append(_fail("source-inventory", f"audited package source is unavailable: {package}", "diff"))
+            return None
+        try:
+            source_paths = {package + "/" + source.name for source in directory.parent.glob("*.go")
+                            if source.is_file() and not source.name.endswith("_test.go")}
+        except OSError:
+            source_paths = set()
+        if not source_paths or set(paths) != source_paths:
+            issues.append(_fail("source-inventory", f"source-file manifest is incomplete for {package}", "diff"))
+            return None
+        expected_files.extend(paths)
+    if len(expected_files) != len(set(expected_files)) or set(expected_files) != set(files):
+        issues.append(_fail("source-inventory", "source inventory is partial or differs from its source-file manifest", "diff"))
+        return None
+    for path, record in files.items():
+        if not isinstance(record, dict) or any((
+            normalize_changed_path(path) != path, package_of(path) not in (audited_packages or set()),
+            record.get("parsed") is not True,
+            any(type(record.get(field)) is not bool for field in ("has_function_body", "has_call", "has_var_initializer")),
+            not re.fullmatch(r"[0-9a-f]{64}", str(record.get("source_sha256") or "")),
+        )):
+            issues.append(_fail("source-inventory", f"source inventory has an invalid parsed file: {path}", "diff"))
+            return None
+    return inventory
+
+
+def uncovered_changed_paths(integration, changed_paths, *, audited_packages=None, source_inventory=None, repo_root=None):
     out = []
     reagents_changed = []
     if not changed_paths:
@@ -847,8 +928,11 @@ def uncovered_changed_paths(integration, changed_paths, *, audited_packages=None
             reagents_changed.append(normalized)
             continue
         stats = files.get(normalized)
-        if audited_packages is not None and (package_of(normalized) not in audited_packages or not stats or stats["total"] <= 0):
-            continue
+        if audited_packages is not None:
+            if package_of(normalized) not in audited_packages:
+                continue
+            if (not stats or stats["total"] <= 0) and statement_free_file(normalized, source_inventory, repo_root=repo_root):
+                continue
         if stats is None or stats["covered"] == 0:
             out.append(normalized)
     return out, reagents_changed
@@ -1042,7 +1126,7 @@ def contribution_public(contrib):
 def evaluate(contributions, *, candidate_sha=None, repo_root=None,
              changed_paths=None, ratchet=None, require_browser=False,
              require_reagents=False, require_unit=False, audited_packages=None,
-             diff_base=None):
+             diff_base=None, source_inventory=None):
     issues = []
     if candidate_sha and not _is_sha(candidate_sha):
         issues.append(_fail("schema", "candidate_sha is not a commit SHA"))
@@ -1073,9 +1157,9 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         integration = merge_contributions([cli, server], issues, name="integration")
 
     merged_with_browser = integration
+    image_records = [part.get("provenance") or {} for part in (cli, server, supplied_integration) if part and part.get("status") == "complete"]
     if browser.get("status") == "complete":
         browser_image = (browser.get("provenance") or {}).get("image_id")
-        image_records = [part.get("provenance") or {} for part in (cli, server, supplied_integration) if part and part.get("status") == "complete"]
         if not image_records or any(record.get("image_id") != browser_image for record in image_records):
             issues.append(_fail("browser-provenance", "browser image must equal the CLI/server integration image", "browser"))
         merged_with_browser = merge_contributions(
@@ -1106,7 +1190,10 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         ))
 
     gaps = contract_gaps(integration, repo_root=repo_root)
-    uncovered, reagents_changed = uncovered_changed_paths(merged_with_browser, changed_paths or [], audited_packages=audited_packages)
+    source_inventory = validate_source_inventory(source_inventory, candidate_sha=candidate_sha,
+        image_records=image_records, audited_packages=audited_packages, repo_root=repo_root, issues=issues)
+    uncovered, reagents_changed = uncovered_changed_paths(merged_with_browser, changed_paths or [],
+        audited_packages=audited_packages, source_inventory=source_inventory, repo_root=repo_root)
     diff_policy = (ratchet or {}).get("diff") or {}
     if diff_policy and audited_packages is None:
         issues.append(_incomplete("ratchet", "diff policy requires the image's audited coverpkg package list", "diff"))
@@ -1119,13 +1206,16 @@ def evaluate(contributions, *, candidate_sha=None, repo_root=None,
         if unlisted:
             issues.append(_fail("coverpkg-audit", f"profile packages are missing from the coverpkg audit: {unlisted}", "diff"))
     eligible = sorted(path for path in normalized if audited_packages is not None
-                      and package_of(path) in audited_packages and files.get(path, {}).get("total", 0) > 0)
+                      and package_of(path) in audited_packages
+                      and (files.get(path, {}).get("total", 0) > 0 or not statement_free_file(path, source_inventory, repo_root=repo_root)))
     diff_observation = {
         "changed_path_count": len(changed_paths or []), "eligible_path_count": len(eligible),
         "eligible_paths": eligible, "excluded_paths": sorted(normalized - set(eligible)),
         "base": diff_base, "audit_supplied": audited_packages is not None,
         "coverage_source": "integration+browser" if browser.get("status") == "complete" else "integration",
         "empty_diff": changed_paths == [], "policy": diff_policy or None,
+        "source_inventory_supplied": source_inventory is not None,
+        "statement_free_paths": sorted(path for path in normalized - set(eligible) if statement_free_file(path, source_inventory, repo_root=repo_root)),
         "status": "complete" if changed_paths is not None and audited_packages is not None and merged_with_browser.get("status") == "complete" else "incomplete",
     }
     if reagents_changed and reagents.get("status") != "complete":
@@ -1292,6 +1382,7 @@ def parse_args(argv=None):
     parser.add_argument("--changed-paths", default=None, help="File listing changed paths, one per line")
     parser.add_argument("--diff-base", default=None, help="Resolved diff base, or external changed-paths label")
     parser.add_argument("--coverpkg-audit", default=None, help="Image audit/coverpkg-packages.txt for the diff policy")
+    parser.add_argument("--source-inventory", default=None, help="Candidate/image-bound Go AST inventory for statement-free exclusions")
     parser.add_argument("--ratchet", default=None, help="Measured package floors and explicit diff policy JSON")
     parser.add_argument(
         "--write-baseline",
@@ -1345,12 +1436,18 @@ def main(argv=None):
         print(f"coverage: schema: {err}", file=sys.stderr)
         return 1
     ratchet = None
+    source_inventory = None
     if args.ratchet:
         try:
             ratchet = load_json(args.ratchet)
         except ValueError as err:
             print(f"coverage: schema: {err}", file=sys.stderr)
             return 1
+    if args.source_inventory:
+        try:
+            source_inventory = load_json(args.source_inventory)
+        except ValueError as err:
+            preload_issues.append(_fail("source-inventory", str(err), "diff"))
     try:
         changed = load_changed_paths(args.changed_paths) if args.changed_paths else None
         audited_packages = set(load_changed_paths(args.coverpkg_audit)) if args.coverpkg_audit else None
@@ -1371,6 +1468,7 @@ def main(argv=None):
         require_unit=args.require_unit,
         audited_packages=audited_packages,
         diff_base=args.diff_base,
+        source_inventory=source_inventory,
     )
     issues = preload_issues + issues
     report["issues"] = [item.as_dict() for item in issues]

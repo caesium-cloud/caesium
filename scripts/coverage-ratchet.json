@@ -296,6 +296,6 @@
     "basis": "policy",
     "scope": "audited-statement-files",
     "coverage_source": "integration+browser",
-    "reason": "Require coverage of changed audited files containing instrumented statements; 0 is explicit policy, not a measurement from the empty G2 diff. Noninstrumented harness, test, and type-only files are excluded and reported."
+    "reason": "Require coverage of changed audited source files; 0 is explicit policy, not a measurement from the empty G2 diff. Missing profiles remain eligible. Only a complete candidate/image-bound Go AST inventory plus matching source can exempt statement-free declarations; harness/test files outside the audit are reported as excluded."
   }
 }

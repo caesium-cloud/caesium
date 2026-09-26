@@ -8,6 +8,7 @@ caesium-server-test, bind host 8080, or run just integration-up / ui-e2e.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -35,7 +36,7 @@ EXPORT_HTTP = f"{MODULE}/api/rest/controller/job/manifest.go"
 EXPORT_READ = f"{MODULE}/internal/jobdef/exporter.go"
 OTHER = f"{MODULE}/pkg/log/log.go"
 IMAGE_ID = "sha256:" + "c" * 64
-AUDITED_PACKAGES = {MODULE, f"{MODULE}/api", f"{MODULE}/cmd/run", f"{MODULE}/cmd/event",
+AUDITED_PACKAGES = {MODULE, f"{MODULE}/api", f"{MODULE}/cmd/run", f"{MODULE}/cmd/event", f"{MODULE}/internal/models",
                     *(p.rsplit("/", 1)[0] for p in (APPLY_CLI, APPLY_HTTP, APPLY_WRITE, EXPORT_HTTP, OTHER))}
 DIFF_POLICY = {
     "basis": "policy", "scope": "audited-statement-files",
@@ -180,6 +181,39 @@ def collector_test_env(art):
     audit.mkdir(exist_ok=True)
     (audit / "coverpkg-packages.txt").write_text("\n".join(sorted(AUDITED_PACKAGES)) + "\n")
     return env
+
+
+def write_source_inventory(directory, records, **changes):
+    package_files = {}
+    complete_files = {}
+    for package in sorted(AUDITED_PACKAGES):
+        rel = package.removeprefix(MODULE).lstrip("/")
+        package_files[package] = []
+        for source in sorted((ROOT / rel).glob("*.go")):
+            if source.name.endswith("_test.go"):
+                continue
+            path = package + "/" + source.name
+            package_files[package].append(path)
+            complete_files[path] = inventory_file(str(source.relative_to(ROOT)), has_function_body=True)
+    complete_files.update(records)
+    inventory = {
+        "schema_version": 1, "kind": "go-ast-source-inventory", "parser": "go/parser",
+        "complete": True, "packages": package_files,
+        "candidate_sha": SHA, "image_id": IMAGE_ID,
+        "coverpkg_sha256": hashlib.sha256(("\n".join(sorted(AUDITED_PACKAGES)) + "\n").encode()).hexdigest(),
+        "files": complete_files,
+    }
+    inventory.update(changes)
+    path = Path(directory) / "source-inventory.json"
+    path.write_text(json.dumps(inventory))
+    return path
+
+
+def inventory_file(relpath, **changes):
+    record = {"parsed": True, "has_function_body": False, "has_call": False, "has_var_initializer": False,
+              "source_sha256": hashlib.sha256((ROOT / relpath).read_bytes()).hexdigest()}
+    record.update(changes)
+    return record
 
 
 class CoverprofileParseTests(unittest.TestCase):
@@ -614,13 +648,14 @@ class RatchetTests(unittest.TestCase):
 
     def test_audited_diff_credits_browser_and_reports_excluded_and_empty_inputs(self):
         changed = self.dir / "changed.txt"
-        changed.write_text("api/ui.go\ninternal/models/models.go\ntest/robustness/corelogic.go\ncmd/job/apply_test.go\n")
+        changed.write_text("api/ui.go\ninternal/models/task.go\ntest/robustness/corelogic.go\ncmd/job/apply_test.go\n")
+        inventory = write_source_inventory(self.dir, {f"{MODULE}/internal/models/task.go": inventory_file("internal/models/task.go")})
         policy = self.dir / "policy.json"
         policy.write_text(json.dumps({"schema_version": 1, "kind": "package-diff-ratchet", "source": "integration",
                                       "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}}, "diff": DIFF_POLICY}))
         write_source(self.dir, "server", write_to_read_server() + block(f"{MODULE}/api/ui.go", 3, 0) + "\n", provenance("server"))
         write_source(self.dir, "browser", profile("set", block(f"{MODULE}/api/ui.go", 3, 1)), provenance("browser"))
-        extra = ("--changed-paths", str(changed), "--ratchet", str(policy), "--require-browser")
+        extra = ("--changed-paths", str(changed), "--ratchet", str(policy), "--require-browser", "--source-inventory", str(inventory))
         result = run_checker(self.dir, extra=extra)
         self.assertEqual(result.returncode, 0, output(result))
         report = json.loads((self.dir / "report.json").read_text())
@@ -643,6 +678,82 @@ class RatchetTests(unittest.TestCase):
         result = run_checker(self.dir, extra=("--coverpkg-audit", str(audit)))
         self.assertEqual(result.returncode, 1, output(result))
         self.assertIn("missing from the coverpkg audit", output(result))
+
+    def test_omitted_real_executable_file_remains_eligible_without_profile_blocks(self):
+        changed = self.dir / "changed.txt"
+        changed.write_text("cmd/job/diff.go\n")
+        policy = self.dir / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "package-diff-ratchet", "source": "integration",
+                                      "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}}, "diff": DIFF_POLICY}))
+        write_source(self.dir, "browser", profile("set", block(OTHER, 2, 1)), provenance("browser"))
+        extra = ("--changed-paths", str(changed), "--ratchet", str(policy), "--require-browser")
+        write_source(self.dir, "cli", write_to_read_cli() + func_block("cmd/job/diff.go", "sendDiffRequest", 4, 0) + "\n", provenance("cli"))
+        self.assertEqual(run_checker(self.dir, extra=extra).returncode, 1)
+        write_source(self.dir, "cli", write_to_read_cli(), provenance("cli"))
+        for inv in (None, write_source_inventory(self.dir, {f"{MODULE}/internal/models/task.go": inventory_file("internal/models/task.go")})):
+            result = run_checker(self.dir, extra=extra + (("--source-inventory", str(inv)) if inv else ()))
+            self.assertEqual(result.returncode, 1, output(result))
+            report = json.loads((self.dir / "report.json").read_text())
+            self.assertEqual(report["diff_coverage"]["eligible_paths"], [f"{MODULE}/cmd/job/diff.go"])
+            self.assertEqual(report["uncovered_changed_paths"], [f"{MODULE}/cmd/job/diff.go"])
+        # A forged statement-free label cannot exempt the actual function
+        # source, even with a matching digest and otherwise complete manifest.
+        inv = write_source_inventory(self.dir, {f"{MODULE}/cmd/job/diff.go": inventory_file("cmd/job/diff.go")})
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
+
+        # An audited package absent from every profile cannot silently vanish.
+        changed.write_text("internal/models/models.go\n")
+        inv = write_source_inventory(self.dir, {f"{MODULE}/internal/models/models.go": inventory_file("internal/models/models.go", has_var_initializer=True)})
+        result = run_checker(self.dir, extra=extra + ("--source-inventory", str(inv)))
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn(f"{MODULE}/internal/models/models.go", json.loads((self.dir / "report.json").read_text())["uncovered_changed_paths"])
+        inv = write_source_inventory(self.dir, {f"{MODULE}/internal/models/models.go": inventory_file("internal/models/models.go")})
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1,
+                         "relabelled package initializer must remain eligible")
+
+    def test_statement_free_exemption_requires_valid_bound_inventory(self):
+        path = f"{MODULE}/internal/models/task.go"
+        changed = self.dir / "changed.txt"
+        changed.write_text("internal/models/task.go\n")
+        policy = self.dir / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "package-diff-ratchet", "source": "integration",
+                                      "packages": {f"{MODULE}/cmd/job": {"min_percent": 0}}, "diff": DIFF_POLICY}))
+        write_source(self.dir, "browser", profile("set", block(OTHER, 2, 1)), provenance("browser"))
+        extra = ("--changed-paths", str(changed), "--ratchet", str(policy), "--require-browser")
+        inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go")})
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 0)
+        report = json.loads((self.dir / "report.json").read_text())
+        self.assertEqual(report["diff_coverage"]["statement_free_paths"], [path])
+        for field, value in (("candidate_sha", "b" * 40), ("image_id", "sha256:" + "d" * 64),
+                             ("coverpkg_sha256", "0" * 64), ("files", {}), ("complete", False),
+                             ("packages", {})):
+            with self.subTest(field=field):
+                inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go")}, **{field: value})
+                self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
+        for field in ("has_function_body", "has_call", "has_var_initializer", "parsed"):
+            changes = {field: field != "parsed"}
+            inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go", **changes)})
+            self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
+        inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go", source_sha256="0" * 64)})
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
+        doc = json.loads(inv.read_text())
+        del doc["files"][path]
+        inv.write_text(json.dumps(doc))
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1,
+                         "partial record map must not authorize an exemption")
+        inv = write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go")})
+        doc = json.loads(inv.read_text())
+        omitted = f"{MODULE}/internal/models/models.go"
+        del doc["files"][omitted]
+        doc["packages"][f"{MODULE}/internal/models"].remove(omitted)
+        inv.write_text(json.dumps(doc))
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1,
+                         "consistently truncated manifest must not authorize an exemption")
+        self.assertFalse(COV["statement_free_file"](path, json.loads(write_source_inventory(self.dir, {path: inventory_file("internal/models/task.go")}).read_text()), repo_root=str(self.dir)),
+                         "unavailable source cannot authorize an exemption")
+        inv.write_text("{invalid")
+        self.assertEqual(run_checker(self.dir, extra=extra + ("--source-inventory", str(inv))).returncode, 1)
+        self.assertEqual(json.loads((self.dir / "report.json").read_text())["verdict"], "fail")
 
 
 class ReagentsAuditTests(unittest.TestCase):
@@ -880,6 +991,7 @@ class CollectorCollectTests(unittest.TestCase):
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.env["FAKE_BROWSER_CHECKER"] = str(BROWSER_CHECKER)
         self.env["FAKE_BROWSER_JOURNEY"] = str(BROWSER_JOURNEY)
+        write_source_inventory(self.art, {})
         git = self.bin / "git"
         git.write_text('''#!/usr/bin/env python3
 import sys
@@ -922,6 +1034,9 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
         print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
     elif args and args[0]=="run":
+        if mounts.get("/source"):
+            if "-i" not in args: raise SystemExit("inventory stdin was not attached")
+            shutil.copyfile(root/"source-inventory.json",mounts["/audit"]/"source-inventory.json")
         if name:
             if name in names: raise SystemExit("container name already exists: "+name)
             names.append(name)
