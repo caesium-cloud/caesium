@@ -1134,7 +1134,7 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
             if "revision" in fmt: print("a"*40)
             elif ".Os" in fmt: print("linux")
             elif ".Architecture" in fmt: print("amd64")
-            elif "builder" in args[-1]: print("sha256:"+"b"*64)
+            elif "builder" in args[-1]: print("sha256:"+("d" if "@" in args[-1] and os.environ.get("FAKE_SCENARIO")=="builder-mismatch" else "b")*64)
             elif args[-1]=="caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): print("sha256:"+"d"*64)
             else: print("sha256:"+"c"*64)
     elif args and args[0]=="create": print("audit-export")
@@ -1189,7 +1189,7 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
         builds = [args for args in calls if args[0] == "build"]
         self.assertEqual(len(builds), 1)
-        self.assertIn("BUILDER_IMAGE=sha256:" + "b" * 64, builds[0])
+        self.assertIn("BUILDER_IMAGE=caesiumcloud/caesium-builder:latest@sha256:" + "b" * 64, builds[0])
         launches = [args for args in calls if args[0] in ("run", "create")]
         self.assertGreater(len(launches), 7)
         for args in launches:
@@ -1198,6 +1198,27 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
             self.assertTrue(IMAGE_ID in args or "sha256:" + "b" * 64 in args, args)
         for source in ("cli", "server", "integration", "browser"):
             self.assertEqual(json.loads((self.profiles / f"{source}.provenance.json").read_text())["image_id"], IMAGE_ID)
+
+    def test_builder_canonical_reference_must_be_named_and_match_pinned_id(self):
+        for builder in ("sha256:" + "b" * 64, "b" * 64, "[invalid]", "builder:latest@@sha256:" + "b" * 64):
+            with self.subTest(builder=builder):
+                self.env["CAESIUM_BUILDER_IMAGE"] = builder
+                result = self.collect("clean")
+                self.assertEqual(result.returncode, 1, output(result))
+                self.assertIn("valid named reference", output(result))
+        self.env.pop("CAESIUM_BUILDER_IMAGE")
+        result = self.collect("builder-mismatch")
+        self.assertEqual(result.returncode, 1, output(result))
+        self.assertIn("differs from the resolved builder image", output(result))
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        self.assertFalse(any(args[0] in ("build", "run", "create") for args in calls),
+                         "malformed/mismatched builder references must fail before build or collection")
+        self.env["CAESIUM_BUILDER_IMAGE"] = "caesiumcloud/caesium-builder:latest@sha256:" + "e" * 64
+        result = self.collect("clean")
+        self.assertEqual(result.returncode, 0, output(result))
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        builds = [args for args in calls if args[0] == "build"]
+        self.assertIn("BUILDER_IMAGE=caesiumcloud/caesium-builder:latest@sha256:" + "b" * 64, builds[0])
 
     def test_failed_journey_or_killed_server_cannot_collect_or_recheck_success(self):
         for scenario in ("journey-failed", "killed"):

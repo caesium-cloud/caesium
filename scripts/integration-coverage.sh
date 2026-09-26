@@ -341,15 +341,30 @@ resolve_builder_image() {
     || die "builder image $BUILDER_IMAGE is required for go tool covdata"
   BUILDER_RUN_IMAGE="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_IMAGE")"
   [[ "$BUILDER_RUN_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || die "builder image has no immutable identity"
+  # Docker FROM needs a named reference: a bare local ID is interpreted as a
+  # repository named sha256. Local builders need not have RepoDigests.
+  local builder_name="${BUILDER_IMAGE%%@*}" canonical_id
+  if [[ "$BUILDER_IMAGE" == *@* && ! "${BUILDER_IMAGE#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    die "builder image must have a valid named reference"
+  fi
+  [[ "$builder_name" =~ ^[a-z0-9][a-z0-9._:/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$ \
+    && ! "$builder_name" =~ ^sha256:[0-9a-f]{64}$ \
+    && ! "$builder_name" =~ ^[0-9a-f]{64}$ ]] \
+    || die "builder image must have a valid named reference"
+  BUILDER_BUILD_IMAGE="$builder_name@$BUILDER_RUN_IMAGE"
+  canonical_id="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_BUILD_IMAGE")" \
+    || die "pinned canonical builder reference is unavailable: $BUILDER_BUILD_IMAGE"
+  [[ "$canonical_id" == "$BUILDER_RUN_IMAGE" ]] \
+    || die "pinned canonical builder reference differs from the resolved builder image"
 }
 
 build_image() {
   require_cmd "$CONTAINER_CLI"
   require_clean_checkout
   resolve_builder_image
-  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_RUN_IMAGE)"
+  log "building coverage image $IMAGE from $DOCKERFILE revision=$CANDIDATE_SHA (builder $BUILDER_BUILD_IMAGE)"
   "$CONTAINER_CLI" build --platform "$PLATFORM" \
-    --build-arg BUILDER_IMAGE="$BUILDER_RUN_IMAGE" \
+    --build-arg BUILDER_IMAGE="$BUILDER_BUILD_IMAGE" \
     --build-arg CAESIUM_REVISION="$CANDIDATE_SHA" \
     --target coverage \
     -t "$IMAGE" \
