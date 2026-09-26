@@ -540,8 +540,10 @@ rebalancing is left to go-dqlite's 30-second `RolesAdjustmentFrequency` default.
 reproduction below describe the pinned `v0.1.0` release. PR #536 makes the
 candidate reconcile a retained member's `info.yaml` and discovery address on
 restart. F4 confirmed the candidate boots with a changed address, and F2's
-W6 rolling upgrade passed with changed pod IPs. The executable F4/F2 oracles
-below use that current contract. Keep the old-release failure as historical
+W6 rolling upgrade passed with changed pod IPs. F4 exercises that current restart contract. F2 requires at least one
+changed pod IP to exercise reconciliation; all-IP reuse is blocked, and its
+host records a fatal mismatch as `blocked-by-prerequisite`, failing the
+overall qualification. Keep the old-release failure as historical
 compatibility evidence; do not classify every changed-IP candidate restart as
 an expected CrashLoop or an unresolved stable-address prerequisite.
 
@@ -739,7 +741,7 @@ volume and assert:
 the candidate on the retained volume with a different `CAESIUM_NODE_ADDRESS`
 and assert it becomes healthy with retained identities readable and the new
 address reconciled in `info.yaml`. On a copy of the original volume, repeat the
-changed-address restart with pinned `v0.1.0` and assert exit status 1 with the
+changed-address restart with pinned `v0.1.0` and assert a nonzero exit with the
 `address … in info.yaml does not match` fatal. PR #536 superseded F1's
 candidate-failure expectation; upgrade before changing the address.
 
@@ -832,10 +834,13 @@ and in this order:
 2. On the candidate image, the member must rejoin with its retained volume,
    reconcile a changed address in `info.yaml` and discovery state when needed,
    and run AutoMigrate without error. An `info.yaml does not match` fatal is a
-   candidate failure, not an expected blocked result.
+   qualification failure: the current host classification is
+   `blocked-by-prerequisite` and the per-case record is `blocked`; the overall
+   result is `fail`.
 3. The cluster must return to three voters with an agreed leader. Record
-   whether the CNI reused each address, but do not make reuse a condition for
-   passing the upgrade.
+   whether the CNI reused each address. At least one recreated pod must have
+   a changed IP; if every IP is reused, the runner blocks the case because
+   #536 reconciliation was not exercised.
 4. Retained state: every pre-upgrade job/run/task-run identity readable with
    unchanged terminal status; the recorded per-run event tuples replay as a set
    from the explicit resume cursor, allowing duplicates, under exactly the F4
@@ -916,8 +921,9 @@ to exhaustion — plus whatever the provisioned topology supports under Q2; a
 fault applied to a running member's volume through the container runtime is a
 different, unmodelled case and must be recorded as such. Clock faults remain
 outside this plan's scope per A1's clock decision. Repeated failover and node replacement in F3 must reuse
-F2's replacement procedure and inherit its blocked-by-prerequisite status until
-the stable-node-address prerequisite is resolved. Every soak scenario keeps a
+F2's replacement procedure and inherit its applicable qualification limits.
+#536 resolved the candidate's stable-address path; ordinal-0 disk loss still
+needs the external rejoin/bootstrap prerequisite. Every soak scenario keeps a
 short locally reproducible form, and retains its actual fault schedule as well
 as its seed.
 
@@ -937,21 +943,24 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-25, W6)
+## Progress (as of 2026-09-26, W6)
 
 **W1–W5 are closed. W6's initial implementation and first acceptance repairs
 have merged; further acceptance repairs are pending. This W6/N-1 sync records
-the runbook and Progress evidence.** C3's validator
-passed its named candidate probes and eight known-bad mutations. B3's final
-repair head passed all 12 live `TestCore` subtests on a persistent three-member
-kind cluster and its cancellation-first store regression. Their merged code
-and acceptance evidence support checking C3 and B3. F2's latest exact-head
-cluster qualification passed five cases and blocked five after an OOM kill at
-the fixture's 1 GiB limit. E3's bounded full retry passed correctness but
-returned `overall=inconclusive` for one noisy browser series. G2's repair head passed a fresh CLI/server/Chromium collection
-with matching provenance and committed package/diff floors, but its PR remains
-open. F2, E3 and G2 therefore stay unchecked.
-D3, E4, F3, G4 and G6 remain undispatched. The W5 core suite, coverage
+the runbook and Progress evidence.** C3's validator passed its named candidate
+probes and eight known-bad mutations. B3's historical `ee9f7541` proof predates
+#560; a fresh instrumented run on merged master `f6acf0ea`, including #560,
+passed all 12 `TestCore` scenarios in 299.68 s. B3 acceptance is checked.
+F2's latest live qualification passed five cases and blocked five after an OOM
+kill at the fixture's 1 GiB limit. Its current diagnostic fixes pass local
+regressions; that earlier live run remains bound to `289bb343`. E3's bounded
+full comparison on `655c063f` passed correctness but returned
+`overall=inconclusive` for one noisy browser series; the current test-only
+`253cca28` review fix has green CI. G2's current `609cca31` repair passed a fresh exact-head CLI/server/Chromium
+collection and independent artifact review; its CI and merge remain pending.
+F2's diagnostic review fixes pass locally, but its CI exposed an existing
+Kubernetes log-readiness defect; separate repair #571 is in live verification. F2, E3 and G2 stay
+unchecked. D3, E4, F3, G4 and G6 remain undispatched. The core suite, coverage
 collector and performance comparator are local commands, not CI jobs.
 **No repository settings have changed** — `ci-ok` is still absent from master's
 required status checks, and no merge queue exists. See Q6 and G7.
@@ -1011,13 +1020,14 @@ and the latest acceptance evidence.
 | W6 stream | Item / PR | Current evidence and disposition |
 | --- | --- | --- |
 | Interim Progress | [#562](https://github.com/caesium-cloud/caesium/pull/562), merged | Merge `b5ab2b6fd38aa9583e5e3e38698df46e524222f7`; it preceded the final W6 results. |
-| α | C3 / [#563](https://github.com/caesium-cloud/caesium/pull/563), merged | Merge `687402c5e3637574a7ebd7fb812f57e9adbe6a7f`, tested head `115708c5`. The standalone validator passed the named candidate probes and eight known-bad mutations twice. Focused Go/vet and 289 Python tests passed; exact-head `ci-ok` succeeded and all four review threads were resolved. Full mutation validation remains a standalone command until G6. C3 acceptance is checked. |
-| β | F2 / [#565](https://github.com/caesium-cloud/caesium/pull/565), merged | Merge `417b18656aa48c7f9c61e44b65554e16bc3b8df9`, tested head `cdccfd89`. The ninth exact-head live run ended `result=fail`: pinned-release identity, three persistent voters, mixed-version dispatch/completion, rolling upgrade, and retained history/raw effects passed. Snapshot catch-up blocked when catalog-write batch 13 failed after 6,000 acknowledged writes; truncation was unproved. Four later destructive cases blocked because the shared cluster was no longer a valid baseline. Artifact: `/tmp/caesium-w6-f2-final.3jIxGW/cluster-qualification.json`; the owned cluster was deleted. Earlier-head restore and ordinal-1 results do not qualify this head. Exact-head `ci-ok` succeeded and six review threads were resolved; F2 acceptance stays open, including ordinal-0/bootstrap and isolated-rollback prerequisites. |
-| B3 acceptance repair | [#564](https://github.com/caesium-cloud/caesium/pull/564), merged | Merge `07997618aa9e7ac1c995984147772e2ffd247745`, tested head `ee9f7541`. The eighth exact-head `^TestCore$` live run passed 12/12 subtests on an owned persistent three-member kind cluster in 354.72 s (`/tmp/caesium-w6-b3-final.C6Oyou/robustness/robustness.test.log`). Cancellation returned `409/terminal_run`, with a cancelled first run, succeeded replacement and no late success event; a store-backed regression proves the cancellation-first ordering after lease deletion. Exact-head `ci-ok` succeeded and three review threads were resolved. B3 acceptance is checked; the core suite remains a local command. |
-| E3 acceptance repair | [#566](https://github.com/caesium-cloud/caesium/pull/566), merged | Merge `f6acf0ea188632e3054f36acfbef015f5e077067`, tested head `08b8bd26`. The common benchmark harness records image/source/helper provenance, alternates samples, and rejects incomplete rows. Sixty-nine focused Python tests and exact-head `ci-ok` passed; five review threads were resolved. A prior ten-repeat full run at `87546de6` had complete samples but `overall=inconclusive` (one noisy browser series and a 5.05% slower warm workload). The merged repair changed its preflight schema and has no passing full two-image verdict; E3 acceptance stays open. |
-| E3 benchmark isolation | [#567](https://github.com/caesium-cloud/caesium/pull/567), ready for review | Head `655c063f`; closes a reproduced candidate-only `TestMain` false green by isolating Go-selected production files plus the pinned helper and two benchmark files. Eighteen focused tests, independent review and all 37 executed current-head CI checks passed, including `ci-ok`. It retains per-repeat Playwright JSON/artifacts and sanitized failed-request URLs. The bounded ten-repeat full comparison against W4 base `45994929` exited 3 with `overall=inconclusive`, `speed_compared=true`: all 20 benchmark samples, cold/warm correctness and 20 first-attempt Chromium repeat sets passed (80 tests, no skips/flakes). Forty-one metrics show no significant difference; `browser.route_readiness_ms./jobs.live` exceeded the noise limit (candidate CV 1.980, one 3,276 ms sample, ten samples per side). Artifact `/tmp/caesium-w6-e3-diagnostics.egK8Ux/report.json`. The slow sample in candidate repeat 2 is unattributed; passing traces and per-repeat server logs were not retained, so future investigation needs those artifacts. No outlier or threshold was changed. CODEOWNER approval remains required and E3 stays unchecked pending conclusive repeatable measurement. |
-| F2 failure evidence | [#569](https://github.com/caesium-cloud/caesium/pull/569), ready for review | Head `289bb343`; preserves survivor logs/events/pods and bounded disputed-write readback before teardown. Three Python regressions, the containerized Go regression and independent review passed; all 37 executed exact-head CI checks passed, including `ci-ok`. The live run exited 1 with five pass/five blocked. At batch 13 write 82 (annotation `006082`), after 6,081 acknowledged updates plus 1,400 initial writes, `caesium-0` was OOMKilled/137 at the 1 GiB limit. The disputed write remains unknown (member 0 refused connection; member 1 hit its deadline). All five host captures succeeded. Artifact: `/tmp/caesium-w6-f2-observe.9DHTV9/cluster-qualification.json`. This verifies failure capture, not snapshot catch-up or F2 acceptance. |
-| G2 browser/ratchet repair | [#570](https://github.com/caesium-cloud/caesium/pull/570), ready for review | Head `57548a21`; adds real Chromium collection, required browser provenance, automatic changed paths and a committed 67-package/diff ratchet. Review reproduced and fixed a merge false green for foreign/killed inputs; 54 focused regressions passed. A reviewed baseline refresh accounts for already-merged run API/CLI denominator growth while retaining/raising absolute covered-statement floors. Fresh exact-head collection exited 0 with `verdict=pass`, `ratchet.applied=true`, two first-attempt Chromium passes and complete matching CLI/server/integration/browser provenance. Integration 7.6%, browser 8.1%, union 9.0% (4,666/51,628); actual apply→export write/read passed. Artifact: `/tmp/caesium-w6-g2-final.5sormO/report.json`. Eight critical contract gaps remain reported; this is no run-start behavioral proof. All 37 executed current-head CI checks passed, including `ci-ok`; CODEOWNER approval remains required. G2 stays unchecked while the repair PR is open. |
+| α | C3 / [#563](https://github.com/caesium-cloud/caesium/pull/563), merged | Merge `687402c5e3637574a7ebd7fb812f57e9adbe6a7f`, tested head `115708c5`. The standalone validator passed the named candidate probes and eight known-bad mutations twice. Focused Go/vet and 289 Python tests passed; exact-head `ci-ok` succeeded and all four review threads were resolved. Full mutation validation remains a standalone command until G6. C3 acceptance is checked; revalidate changes that affect its tested oracle paths. |
+| β | F2 / [#565](https://github.com/caesium-cloud/caesium/pull/565), merged | Merge `417b18656aa48c7f9c61e44b65554e16bc3b8df9`, tested head `cdccfd89`. The ninth exact-head live run ended `result=fail`: pinned-release identity, three persistent voters, mixed-version dispatch/completion, rolling upgrade, and retained history/raw effects passed. Snapshot catch-up blocked when catalog-write batch 13 failed after 6,000 acknowledged writes; truncation was unproved. Four later destructive cases blocked because the shared cluster was no longer a valid baseline. Local, ephemeral artifact: `/tmp/caesium-w6-f2-final.3jIxGW/cluster-qualification.json`; the owned cluster was deleted. Earlier-head restore and ordinal-1 results do not qualify this head. Exact-head `ci-ok` succeeded and six review threads were resolved; F2 acceptance stays open, including ordinal-0/bootstrap and isolated-rollback prerequisites. |
+| B3 acceptance repair | [#564](https://github.com/caesium-cloud/caesium/pull/564), merged | Merge `07997618aa9e7ac1c995984147772e2ffd247745`, original tested head `ee9f7541`: 12/12 in 354.72 s, before #560. Fresh current-master `f6acf0ea188632e3054f36acfbef015f5e077067` revalidation includes #560 and passed 12/12 `^TestCore$` scenarios in 299.68 s using fresh release/instrumented images and an owned persistent three-member kind cluster. Local, ephemeral proof: `/tmp/caesium-w6-b3-current.isBpc5/robustness/robustness.test.log`; this N-1 PR body holds the durable summary. The cancellation-first store regression also passed on the repair head. B3 is checked; the core suite remains a local command, with CI promotion and catalog proof registration owned by G6. |
+| E3 acceptance repair | [#566](https://github.com/caesium-cloud/caesium/pull/566), merged | Merge `f6acf0ea188632e3054f36acfbef015f5e077067`, tested head `08b8bd26`. The common benchmark harness records image/source/helper provenance, alternates samples, and rejects incomplete rows. Sixty-nine focused Python tests and exact-head `ci-ok` passed; five review threads were resolved. A prior ten-repeat full run at `87546de6` had complete samples but `overall=inconclusive` (one noisy browser series and a 5.05% slower warm workload). Merged master’s all-helper guard refuses pre-#560 bases, including W4 `45994929`, after image builds but before measurement; #567 repairs that guard and still needs a conclusive full verdict; E3 acceptance stays open. |
+| E3 benchmark isolation | [#567](https://github.com/caesium-cloud/caesium/pull/567), ready for review | Current head `253cca284c52bd5723901cb0a9feb9b7c7b93ad3`; isolates Go-selected production files plus pinned fixtures, closing candidate-only `TestMain` interference. The review fix makes fake benchmark metrics deterministic: 18 focused tests and 400/400 parseable fixture runs pass; independent review and all 37 executed current-head CI checks pass, including `ci-ok`. Its sole thread is resolved. Full runtime proof remains bound to `655c063f`: the ten-repeat comparison against W4 base `45994929` exited 3, `overall=inconclusive`, `speed_compared=true`. All 20 benchmark samples, cold/warm correctness and 80 first-attempt Chromium tests pass, without skips/flakes. Forty-one metrics show no significant difference; `browser.route_readiness_ms./jobs.live` exceeds the noise limit (candidate CV 1.980, one 3,276 ms sample, ten per side). Local, ephemeral artifact `/tmp/caesium-w6-e3-diagnostics.egK8Ux/report.json`; the PR body is the durable summary. The slow sample is unattributed because passing traces and per-repeat server logs were not retained. No outlier or threshold changed. CODEOWNER approval remains required; E3 stays unchecked pending conclusive repeatable measurement. |
+| F2 failure evidence | [#569](https://github.com/caesium-cloud/caesium/pull/569), ready for review | Current head `b45adfdc74b909798a2c5608cabe8db9cc36cfdb` fixes all six diagnostic threads: unannotated/missing-survivor readbacks, consistent/null match claims, independent validator controls, previous logs and batch-0 captures. Ten focused and 331 full Python tests pass; 8/8 guard-removal mutations are rejected. Current-head containerized integration/race Go reader/mapping/serialization regressions pass (1.070 s), with independent review clean. Current CI failed Helm shard 2 on an existing Kubernetes live-log readiness defect; separate #571 is in verification; CODEOWNER approval remains required. The live run remains bound to `289bb343`: exit 1, five pass/five blocked, batch 13 write 82 annotation `006082` after 6,081 acknowledged updates plus 1,400 initial writes, survivor OOMKilled/137 at 1 GiB. Readback remains unknown; five host captures succeeded. Local, ephemeral artifact `/tmp/caesium-w6-f2-observe.9DHTV9/cluster-qualification.json`; the PR body is the durable summary. No current-head cluster acceptance is claimed; F2 stays unchecked. |
+| G2 browser/ratchet repair | [#570](https://github.com/caesium-cloud/caesium/pull/570), ready for review | Current head `609cca31f2f861707a05d45e8fe795934d2eb7af`; all six review threads resolved. Explicit diff policy, fresh external imports, required/strict browser evidence, real shell regressions and KEEP cleanup are fixed. Missing audited source files remain eligible; only a complete bound AST/source inventory can exempt statement-free declarations. Sixty-five focused tests and independent reviews pass. Fresh exact-head collect exited 0, `verdict=pass`, `ratchet.applied=true`, two first-attempt Chromium passes; CLI/server/browser provenance matches. Integration 7.6%, browser 8.1%, union 9.0% (4,666/51,628); real apply→persisted public alias lookup→manifest read coverage passed. All 149 inventory package manifests/480 source hashes match; all 67 floors pass. Diff input/eligible counts are both zero against `f6acf0ea`, explicitly empty and policy-based; no nonempty live diff sample is claimed. Local, ephemeral artifact `/tmp/caesium-w6-g2-review-final.zkH53x/report.json`; PR body holds the durable summary. Eight critical contract gaps remain. Current CI, CODEOWNER approval and merge are pending; G2 stays unchecked. |
+| Kubernetes CI readiness | [#571](https://github.com/caesium-cloud/caesium/pull/571), draft | Head `9d86c90c1d897380f7ce99ba80e2d7413bb729a0`, isolated from F2 diagnostics. The engine retries only matching atom/pod `ContainerCreating`/`PodInitializing` responses under a 30 s setup budget; successful readers retain caller cancellation. Containerized race tests/vet and independent review pass; timeout controls reject the wrong-budget mutation at 2 s. Real Kubernetes live/retained redaction verification and exact-head CI are pending. Merge this repair before its dependent F2 PR, with required CODEOWNER approval. |
 | W6/N-1 | [#568](https://github.com/caesium-cloud/caesium/pull/568), this docs sync | Consolidates merged W6 implementation, reproducible commands and current acceptance limits in the runbook and Progress dashboard. Use its live PR state for synchronization/merge status; W6 remains active for F2, E3 and G2 acceptance. |
 
 F2's new capture attributes the immediate EOF to an OOM kill before the
@@ -1050,9 +1060,11 @@ these rows against live PR state, head/merge SHAs, reviews and current-head
 checks. Reconcile W6 acceptance before allocating dependent W7 work. Checkboxes mean merged acceptance
 evidence; rows distinguish merged implementation from passing qualification.
 The code for B3, E3, F2 and G2 is merged, so do not re-dispatch those items.
-B3's exact-head live `TestCore` proof is recorded above; G2's repair head
-has complete browser/ratchet acceptance and green current-head CI, and awaits
-CODEOWNER approval and merge. E3 needs a passing full two-image comparison
+B3’s old exact-head proof is historical; its current-master `f6acf0ea`
+revalidation is recorded above. Revalidate future changes that affect its tested
+paths. G2's current repair has reviewed fresh exact-head collection; it needs current
+CI, CODEOWNER approval and merge. F2's existing Kubernetes CI defect needs #571
+verified and merged before its dependent PR can finish integration. E3 needs a passing full two-image comparison
 on current code. F2 needs passing snapshot catch-up and remaining selected
 lifecycle cases on a valid cluster baseline, with external prerequisites
 explicitly resolved or blocked.
@@ -1069,12 +1081,12 @@ as satisfied.
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three manifest rows are `proven` with `gates: ["early"]`; B2/B3 selectors are present but their rows remain `absent` until G6 registers passing evidence |
-| B | Real multi-node robustness (3 items) | P0 | B1 merged #472, B2 merged #555, B3 merged #557 with acceptance repair #564 and a 12/12 live `TestCore` proof. Default CI selection remains `TestOwnerCrash`; G6 owns core-suite promotion |
+| B | Real multi-node robustness (3 items) | P0 | B1 merged #472, B2 merged #555, B3 merged #557 with repair #564. Fresh merged-master `f6acf0ea` (including #560) passed 12/12 `TestCore` scenarios in 299.68 s. Default CI selection remains `TestOwnerCrash`; G6 owns core-suite promotion |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475, C2 merged #551, C3 merged #563; the full mutation validator remains standalone until G6 |
 | D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 is dependency-ready after W6/N-1 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repair #566, but lacks a passing current-code full comparison. E4 needs E3 acceptance and Q2/Q5 |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repair #566; merged master refuses pre-#560 bases before measurement until #567 lands, whose full candidate comparison remains inconclusive. E4 needs E3 acceptance and Q2/Q5 |
 | F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; the latest observability repair's live cluster run OOMKilled a survivor and left five cases blocked. F3 needs F2/E4/C3 and Q2 |
-| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2's repair head `57548a21` passed a fresh CLI/server/Chromium collect and committed package/diff ratchet; #570 has green current-head CI and awaits CODEOWNER approval and merge, so its checkbox remains open. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
+| G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2 repair #570 has reviewed fresh current-head collection and remains open for CI, CODEOWNER approval and merge; its checkbox stays open. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
 
 ## Streams
 
@@ -1121,7 +1133,7 @@ below is mandatory, including append-only edits.
   Verify: Extend B1's owner-crash regression with owner pause past lease/stale completion, 2–1 split/heal, commit-before-response loss, durable-event-before-delivery crash, and cancel/retry/completion races, including fan-out/fan-in and frozen retry recipes. Make a worker unreachable, observe network-error rejection and peer benching through actual dispatch progress and available `caesium_dispatch_rejected_total`/`caesium_dispatch_stalled_total` metrics, then prove it receives new work after the cooldown. Send wrong-token `/internal/dispatch` and `/internal/complete` requests between real processes; cover valid-token stale-generation refusal separately and invalid peer credentials where mTLS is supported. Assert denied operations have no task/state/effect mutation. During quorum loss, enforce A1's bounded error contract only where resolved; retain uncertain writes and do not equate client timeout with rejection. Check accepted-state durability, generation authority, legal terminal/dependency behavior, raw external attempts, and recovery after healing. Persist histories/fault timelines/topology/digests; missing fault activation or stalling cannot pass.
   Note (W5-α): shipped `TestCore` (selected via `CAESIUM_ROBUSTNESS_RUN='^TestCore$'`; default remains `^TestOwnerCrash$`) composing B2 pause/partition/interposer/hook controls. Catalog B2 selectors now point at `TestTargetedFaults/*`; B3 rows stay `absent` with empty `gates` (no live kind proof in this PR; G6 owns promotion). Durable-event crash skips unless the instrumented image is deployed, and `scripts/robustness.sh` requires that subtest only then. DT-QUORUM-01 bounded rejection is not claimed.
 
-  Acceptance (W6): [#564](https://github.com/caesium-cloud/caesium/pull/564) merged as `07997618`. Its final `ee9f7541` head passed all 12/12 live `^TestCore$` subtests on a persistent three-member kind cluster and the store-backed cancellation-first regression. The repair distinguishes a durably terminal run from a running wrong claim or unreadable store without accepting late task-success mutation. The core suite remains outside the default `early-evidence` selector; G6 owns CI promotion and manifest proof registration.
+  Acceptance (W6): [#564](https://github.com/caesium-cloud/caesium/pull/564) merged as `07997618`. Its historical `ee9f7541` proof predates #560 and includes the store-backed cancellation-first regression. Fresh release/instrumented images on merged master `f6acf0ea188632e3054f36acfbef015f5e077067`, including #560, passed all 12/12 live `^TestCore$` subtests on an owned persistent three-member kind cluster in 299.68 s. Local, ephemeral log `/tmp/caesium-w6-b3-current.isBpc5/robustness/robustness.test.log`; [#568](https://github.com/caesium-cloud/caesium/pull/568) holds the durable current-base summary. The repair distinguishes a durably terminal run from a running wrong claim or unreadable store without accepting late task-success mutation. The core suite remains outside the default `early-evidence` selector; G6 owns CI promotion and manifest proof registration.
 
 ### Stream C — Generated state transitions and checker strength
 
@@ -1542,7 +1554,7 @@ below is mandatory, including append-only edits.
   Files: new `build/Dockerfile.coverage`, new `scripts/integration-coverage.sh`, new `scripts/check-coverage.py`, new `scripts/test_coverage.py`.
   Depends on: A2, G1.
   Verify: use Go coverage-instrumented binaries built in containers, explicit package selection and `GOCOVERDIR`, and merge compatible profiles from CLI, server, and live browser journeys. Collect on graceful shutdown and provide explicit flushing where required; killed-process or missing profiles are incomplete evidence, not zero coverage or success. Label profile provenance, separate unit/integration/browser contributions, and report uncovered changed paths and critical contract gaps. Set package/diff ratchets after measuring a baseline instead of requiring a vanity global percentage. Demonstrate coverage of a real request-to-write-to-read path. Keep coverage/fault instrumentation out of performance artifacts and audit the separate `reagents/go.mod` scope when relevant.
-  Note (W6 follow-up): #558's exact-head CLI/server-only collect passed at 7.6%, but lacked browser evidence and a committed ratchet. Pending repair [#570](https://github.com/caesium-cloud/caesium/pull/570), head `57548a21`, now has a fresh exact-head exit-0 collection with complete matching provenance, two first-attempt Chromium passes, committed 67-package/diff floors, and a covered apply→export request/write/read path. Integration is 7.6%, browser 8.1%, and their union 9.0%; eight of eleven critical contracts remain reported as gaps. The baseline refresh records already-merged statement-denominator growth with retained/raised absolute floors. Artifact `/tmp/caesium-w6-g2-final.5sormO/report.json`. G2 and G6's prerequisite remain unchecked while the repair PR is open pending required CODEOWNER approval and merge.
+  Note (W6 follow-up): [#570](https://github.com/caesium-cloud/caesium/pull/570), current head `609cca31`, fixes the six review threads plus independently discovered missing-profile and clean-checkout inventory defects. Sixty-five focused tests and independent reviews pass. Fresh exact-head exit-0 collection has matching CLI/server/Chromium provenance, two first-attempt browser passes, all 67 package floors and a complete 149-package/480-file AST inventory. Integration 7.6%, browser 8.1%, union 9.0%; all six apply→persist→public lookup/read function selections are covered. Diff metadata is explicitly empty against `f6acf0ea`, with zero-uncovered policy, not a measured nonempty diff floor. Eight critical contracts remain gaps; exported YAML values were discarded, so no retained value-equality assertion is claimed. Local, ephemeral artifact `/tmp/caesium-w6-g2-review-final.zkH53x/report.json`; the PR body is the durable summary. G2 remains unchecked pending current CI, CODEOWNER approval and merge.
 
 - [x] G3. Wire the first persistent three-node lane and its exact scenario selectors
   Files: `.github/workflows/ci.yml`, `.github/actions/run-integration/action.yml`, `build/ci.docker-bake.hcl`, `build/ci.docker-bake-cache.hcl`, `justfile`, `scripts/collect-evidence.py` (new), `scripts/test_collect_evidence.py` (new), `scripts/test_ci.py`, `scripts/test_test_evidence.py`, `test/contracts/scenarios.json` (created by A2).

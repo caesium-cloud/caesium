@@ -1117,7 +1117,6 @@ CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' just tag="$CANDIDATE_SHA" robustne
 CAESIUM_ROBUSTNESS_RUN='^TestTargetedFaults$' \
 CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${CANDIDATE_SHA}-testfault" \
   just tag="$CANDIDATE_SHA" robustness-test
-)
 ```
 
 `scripts/robustness.sh` refuses a `CAESIUM_ROBUSTNESS_RUN` whose required
@@ -1347,7 +1346,7 @@ closes #493) later made the candidate reconcile `info.yaml` and recover a
 genuine sole member's raft configuration, so that case now **starts** on
 the candidate. F4 asserts #536's contract there and keeps the **pinned
 v0.1.0** image at a changed address, on a copy of the volume, as the
-deterministic failing transition (exit 1, `address … in info.yaml does not
+deterministic failing transition (nonzero exit, `address … in info.yaml does not
 match`). Upgrade-then-readdress is the only supported order for this pair.
 
 **Recorded-outcome cases**, each on its own volume copy, with no pre-judged
@@ -1374,13 +1373,15 @@ it. The controller creates its own four-node kind cluster, three persistent
 StatefulSet members and artifact kubeconfig, and refuses a pre-existing cluster
 with the same id. It checks the pinned `v0.1.0` digest and every candidate
 archive/config/layer hash and node import before testing the image-only Helm
-upgrade. The cluster result is `$CAESIUM_LIFECYCLE_ARTIFACTS/cluster-qualification.json`.
+upgrade. The cluster result is `$ARTIFACTS/cluster-qualification.json`; retain the printed local artifact directory after the command.
 
 ```sh
 CANDIDATE_SHA=$(git rev-parse HEAD)
+ARTIFACTS=$(mktemp -d)
+printf 'Lifecycle artifacts: %s\n' "$ARTIFACTS"
 CAESIUM_LIFECYCLE_MODE=cluster \
 CAESIUM_LIFECYCLE_ID="lifecycle-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
-CAESIUM_LIFECYCLE_ARTIFACTS="$(mktemp -d)" \
+CAESIUM_LIFECYCLE_ARTIFACTS="$ARTIFACTS" \
 CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$CANDIDATE_SHA" \
   bash scripts/lifecycle-tests.sh
 ```
@@ -1390,8 +1391,8 @@ window, in-flight and queued work with durable task-run IDs and raw effects,
 rolling upgrade, snapshot catch-up, storage-copy restore with an omitted-copy
 control, fresh-PVC ordinal-1 replacement, ordinal-0 disk loss and an isolated
 rollback observation. A skipped or unobservable case is `blocked`; the overall
-record cannot pass on a subset. The latest exact-head probe (`289bb343`,
-artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
+record cannot pass on a subset. The latest live probe (`289bb343`, local,
+ephemeral artifacts `/tmp/caesium-w6-f2-observe.9DHTV9`) exited 1: five cases passed
 (pinned image, three voters, mixed-version dispatch/completion, rolling upgrade
 and retained history/effects), and five were blocked. Snapshot catch-up's
 batch 13 write 82 returned EOF after 1,400 initial writes and 6,081 acknowledged
@@ -1403,6 +1404,16 @@ restore, ordinal-0 and rollback were blocked because the fault left the shared
 cluster unfit for subsequent destructive cases. A prior head passed restore
 and ordinal-1 replacement; that is historical partial evidence. F2 remains
 unchecked and is not a CI job or a complete cluster-upgrade qualification.
+Current [failure-evidence repair #569](https://github.com/caesium-cloud/caesium/pull/569),
+head `b45adfdc`, preserves explicit empty disputed-write fields and expected
+survivor rows, validates match/null consistency, and captures immediate previous
+logs and batch-0 failures. It passed 10 focused Python tests, all 331 scripts
+tests, the containerized integration/race
+`ReadSnapshotDisputedWrite|SnapshotReadbackBases` regressions (1.070 s), and
+eight guard-removal negative controls. Current-head CI failed Helm shard 2 on an existing Kubernetes live-log
+readiness defect, which separate [#571](https://github.com/caesium-cloud/caesium/pull/571)
+is repairing; CODEOWNER approval is required. These diagnostic fixes have no new live
+qualification; the linked PR holds the durable failure-evidence summary.
 The unresolved
 ordinal-0/bootstrap and isolated rollback prerequisites remain explicit in
 the [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
@@ -1447,9 +1458,15 @@ terminal completion fencing and the live scenario's public-versus-durable task
 identity checks. Its final reviewed head `ee9f7541` passed all 12/12 `TestCore`
 subtests on an owned persistent three-member kind cluster; cancellation
 returned `409/terminal_run`, with a cancelled first run, successful replacement
-and no late task-success event. This is live B3 acceptance for the merged
-repair, not an `early-evidence` expansion: that gate still runs
-`^TestOwnerCrash$` and the core suite remains a local command.
+and no late task-success event. That proof predates #560's run-start changes.
+A fresh run on merged master `f6acf0ea188632e3054f36acfbef015f5e077067`,
+which includes #560, built release and instrumented images and passed all
+12/12 `TestCore` subtests on an owned persistent three-member kind cluster in
+299.68 s. Its raw log is local and ephemeral:
+`/tmp/caesium-w6-b3-current.isBpc5/robustness/robustness.test.log`; the durable
+summary is in [W6/N-1 #568](https://github.com/caesium-cloud/caesium/pull/568).
+This revalidates B3 on merged code. The `early-evidence` selector still runs
+`^TestOwnerCrash$`, and the core suite remains a local command.
 
 ### Coverage collection with provenance (distributed-testing W5/G2)
 
@@ -1479,22 +1496,36 @@ covered the apply→export write/read path (7.6% integration coverage). No
 browser profile was supplied and no package/diff ratchet was committed, so G2
 acceptance remains open.
 
-The later G2 follow-up (#570) collected real Chromium evidence on `00ba7d99`
+The later [G2 follow-up #570](https://github.com/caesium-cloud/caesium/pull/570)
+collected real Chromium evidence on `00ba7d99`
 (`/tmp/caesium-w6-g2-browser.IuzH9B`): both browser scenarios passed on their
 first attempt with no skips or flaky outcomes; CLI, server, integration and
 browser provenance were complete, and `all_surfaces` coverage was 9.0%.
 That collection failed the old percentage floors after already-merged source
 changes increased the denominator. The independently reviewed baseline refresh
 keeps or raises absolute floors, and replaying the retained profile against it
-passed. A fresh final collection on #570 head `57548a21` at
+passed. A historical collection on #570 head `57548a21` at
 `/tmp/caesium-w6-g2-final.5sormO` exited 0 with `verdict=pass` and the committed
 ratchet applied. Both real Chromium journeys passed on their first attempts;
 CLI, server, integration and browser profiles have complete matching
 candidate/image provenance. Integration is 7.6%, browser 8.1%, and their union
 is 9.0% (4,666/51,628 statements). The actual apply→export request/write/read
-path passed. Independent artifact review confirmed this evidence. G2 remains
-unchecked while the repair PR has green current-head CI and awaits required
-CODEOWNER approval and merge; eight critical-contract coverage gaps remain reported.
+path passed. These raw artifacts are local and ephemeral; the linked repair
+PR holds the durable summary. Subsequent review found eligibility gaps for missing profiles. Current head
+`609cca31` fixes all six review threads and those additional gaps, with
+65 focused regressions and independent reviews passing. Its fresh collection
+at `/tmp/caesium-w6-g2-review-final.zkH53x` exited 0: two first-attempt Chromium
+passes, complete matching provenance, 7.6% integration, 8.1% browser and 9.0%
+union coverage (4,666/51,628), with all 67 package floors applied. The actual
+apply→persisted alias lookup→manifest export path is covered. Exported YAML
+bytes were discarded, so no retained value-equality assertion is claimed.
+The builder executed the source-only AST helper; all 149 package manifests
+and 480 source hashes match. Missing audited files remain eligible, and
+statement-free exceptions require a complete bound inventory plus matching
+source. Diff metadata records base `f6acf0ea`, zero input/eligible Go paths and
+`empty_diff=true`; zero uncovered is explicit policy, not a live nonempty diff
+measurement. Eight critical-contract coverage gaps remain. Current CI,
+CODEOWNER approval and merge are pending, so G2 stays unchecked.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
@@ -1503,6 +1534,14 @@ each side's `caesium-builder:$sha` image ID and `go version`, and refuses a
 dirty tree. `log` goes to stderr so a captured build status cannot look
 successful when `just` failed. Warm repetitions alternate between the two
 servers. Release images must be uninstrumented.
+
+Merged master `f6acf0ea` still refuses pre-#560 comparison bases, including
+W4 `45994929`: #566's guard requires all unrelated `internal/run/*_test.go`
+helpers to match, and #560 added/changed those helpers. It stops after building
+both images, before measurement, with no comparison/report. Run the command
+below from the reviewed #567 candidate, or after #567 merges. That pending PR
+fixes source isolation; its latest full run remains inconclusive, so neither
+merged-master execution nor E3 acceptance is claimed here.
 
 ```sh
 CAESIUM_PERF_ID="perf-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
@@ -1554,7 +1593,7 @@ base's first Chromium repeat logged `net::ERR_INTERNET_DISCONNECTED` and
 Playwright exited 1. The comparator returned `overall=fail` with
 `speed_compared=false`, correctly withholding a speed verdict.
 
-The bounded current-head retry (`655c063f`) completed exit 3 with
+The bounded retry on `655c063f` completed exit 3 with
 `overall=inconclusive`, `speed_compared=true`; artifacts are
 `/tmp/caesium-w6-e3-diagnostics.egK8Ux`. All 20 paired benchmark samples,
 cold/warm workload correctness, and 20 first-attempt Chromium repeat sets
@@ -1566,10 +1605,16 @@ cause is unproved: it occurred in candidate repeat 2 at
 `2026-09-26T03:00:51.586Z`, and passing browser attempts retained no trace;
 per-repeat server logs were not saved before removal. Future investigation
 needs those logs and a request timeline. No outlier was removed or noise
-threshold changed. E3
-acceptance remains open pending conclusive repeatable measurement; #567 has
-green current-head CI and awaits required CODEOWNER approval. This is not a CI
-job or a calibrated SLO (E4 / Q2 / Q5).
+threshold changed. The current #567 head `253cca28` fixes a timer-dependent
+test fixture with an explicit `ns/op` metric: 18 focused tests and 400/400
+repeated fixture rows passed on Go 1.27.1 darwin/arm64, and a package-mode
+mutation still triggered `TestMain` exit 99 and failed the isolation test.
+This test-only change has no new full live comparison; the result above
+belongs to `655c063f`. Current-head CI run
+[36214372032](https://github.com/caesium-cloud/caesium/actions/runs/36214372032)
+succeeded, including `ci-ok`; CODEOWNER approval is required. E3 acceptance
+remains open pending conclusive repeatable measurement.
+This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
 
 ### Checker-strength mutation validator (distributed-testing W6/C3)
 
