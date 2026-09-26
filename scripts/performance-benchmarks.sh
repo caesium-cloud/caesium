@@ -37,6 +37,45 @@ if len(names)!=len(set(names)):
   raise SystemExit('benchmark harness contains duplicate function names')
 output.write_text(json.dumps({'source_files':sources,'benchmark_names':sorted(names)},indent=2)+'\n')
 PY
+# Package-mode `go test ./internal/run` also links every unrelated _test.go.
+# TestMain, init, and globals in those files can change benchmark execution
+# even when the shared benchmark/helper blobs are identical. Ask the builder's
+# Go tool for the production files selected for its own GOOS/GOARCH, then pass
+# only those files plus the pinned test-side benchmark fixture closure. Keep
+# this setup identical for the base compile preflight and every paired sample.
+BENCH_SOURCE_SETUP=$(cat <<'SH'
+set -eu
+mkdir -p ui/dist
+touch ui/dist/index.html
+production=$(go list -f '{{range .GoFiles}}{{printf "internal/run/%s " .}}{{end}}{{range .CgoFiles}}{{printf "internal/run/%s " .}}{{end}}' ./internal/run)
+set -f
+set -- $production
+if [ "$#" -eq 0 ]; then
+  echo 'benchmark source selection found no production Go files' >&2
+  exit 1
+fi
+for path do
+  filename=${path#internal/run/}
+  if [ "$filename" = "$path" ] || [ "${filename#*/}" != "$filename" ] ||
+     [ "${filename%_test.go}" != "$filename" ] || [ "${filename%.go}" = "$filename" ]; then
+    printf 'benchmark source selection included an unexpected test or path: %s\n' "$path" >&2
+    exit 1
+  fi
+  if [ ! -f "$path" ]; then
+    printf 'benchmark source selection cannot read %s\n' "$path" >&2
+    exit 1
+  fi
+done
+set -- "$@" internal/run/owner_state_test.go internal/run/owner_benchmark_test.go internal/run/recovery_benchmark_test.go
+for path do
+  if [ ! -f "$path" ]; then
+    printf 'benchmark source selection cannot read %s\n' "$path" >&2
+    exit 1
+  fi
+done
+printf 'benchmark source files: %s\n' "$*" >&2
+SH
+)
 # Compile the candidate benchmark overlay against the base before sampling.
 # A failure here identifies harness incompatibility, distinct from a base
 # benchmark that compiles and then fails while running. Keep the raw output and
@@ -45,7 +84,8 @@ BASE_COMPILE="$ARTIFACTS/observations/benchmark-base-compile.txt"
 if docker run --rm --platform "$DOCKER_PLATFORM" \
   -v "$BASE_SRC:/bld/caesium" -w /bld/caesium \
   "$BASE_BUILDER" \
-  sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -c -o /tmp/caesium-benchmark-base.test ./internal/run' \
+  sh -c "$BENCH_SOURCE_SETUP
+go test -c -o /tmp/caesium-benchmark-base.test \"\$@\"" \
   >"$BASE_COMPILE" 2>&1; then
   printf '0\n' >"$ARTIFACTS/observations/benchmark-base-compile.exit"
 else
@@ -75,7 +115,8 @@ run_sample() {
   if docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$src:/bld/caesium" -w /bld/caesium \
     "$builder" \
-    sh -c "mkdir -p ui/dist && touch ui/dist/index.html && go test -bench='^Benchmark(Owner|Recover)' -benchmem -count=1 -run '^$' ./internal/run" \
+    sh -c "$BENCH_SOURCE_SETUP
+go test -bench='^Benchmark(Owner|Recover)' -benchmem -count=1 -run '^$' \"\$@\"" \
     >"$sample" 2>&1; then
     rc=0
   else

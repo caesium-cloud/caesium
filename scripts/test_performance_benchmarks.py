@@ -3,6 +3,7 @@
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -75,7 +76,7 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.env["FAKE_CANDIDATE"] = str(self.candidate)
         self.env["FAKE_DOCKER_LOG"] = str(self.log)
 
-    def run_pair(self, *, fail=None, bad=None, bad_kind=None, preflight_fail=False):
+    def run_pair(self, *, repeats=4, fail=None, bad=None, bad_kind=None, preflight_fail=False):
         env = self.env.copy()
         if fail:
             env["FAKE_DOCKER_FAIL"] = fail
@@ -85,7 +86,7 @@ class BenchmarkOrderTests(unittest.TestCase):
         if preflight_fail:
             env["FAKE_DOCKER_PREFLIGHT_FAIL"] = "1"
         return subprocess.run(
-            ["bash", str(SCRIPT), "4", "linux/arm64", str(self.candidate),
+            ["bash", str(SCRIPT), str(repeats), "linux/arm64", str(self.candidate),
              str(self.base), "builder:candidate", "builder:base", str(self.artifacts)],
             env=env, capture_output=True, text=True, check=False,
         )
@@ -191,6 +192,77 @@ class BenchmarkOrderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("benchmark harness differs between sides", result.stderr)
         self.assertFalse(self.log.exists())
+
+    def test_candidate_only_testmain_cannot_run_in_benchmark_process(self):
+        self.assertIsNotNone(shutil.which("go"))
+        for source in (self.candidate, self.base):
+            (source / "go.mod").write_text("module example.com/benchmarkscope\n\ngo 1.23\n")
+            (source / "internal/run/production.go").write_text(
+                "package run\nfunc productionValue() int { return 1 }\n"
+            )
+            (source / "internal/run/owner_state_test.go").write_text(
+                "package run\nfunc newTopoBuilder() {}\n"
+            )
+        (self.candidate / "internal/run/unrelated_test.go").write_text(
+            "package run\nimport (\"os\"; \"testing\")\n"
+            "func TestMain(m *testing.M) { os.Exit(99) }\n"
+        )
+        (self.candidate / "internal/run/candidate_only.go").write_text(
+            "package run\nfunc candidateOnly() int { return 2 }\n"
+        )
+        go_cache = self.root / "go-cache"
+        self.env["GOCACHE"] = str(go_cache)
+        self.env["GOPROXY"] = "off"
+        self.env["GOFLAGS"] = "-benchtime=1x"
+        package_mode = subprocess.run(
+            ["go", "test", "-run", "^$", "-bench", "^Benchmark(Owner|Recover)", "./internal/run"],
+            cwd=self.candidate, env=self.env, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(package_mode.returncode, 0)
+        self.assertIn("exit status 99", package_mode.stdout + package_mode.stderr)
+
+        # Execute the runner's actual `sh -c` command locally through a Docker
+        # shim. Go selects each side's production files; no container is used.
+        fake_docker = self.root / "bin/docker"
+        fake_docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "args = sys.argv[1:]\n"
+            "source = args[args.index('-v') + 1].split(':/bld/caesium')[0]\n"
+            "command = args[-1].replace('/tmp/caesium-benchmark-base.test', os.environ['FAKE_COMPILE_PATH'])\n"
+            "os.chdir(source)\n"
+            "os.execvp('sh', ['sh', '-c', command])\n"
+        )
+        fake_docker.chmod(0o755)
+        self.env["FAKE_COMPILE_PATH"] = str(self.root / "benchmark-base.test")
+        result = self.run_pair(repeats=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (self.artifacts / "observations/benchmark-base-compile.exit").read_text(),
+            "0\n",
+            (self.artifacts / "observations/benchmark-base-compile.txt").read_text(),
+        )
+        compile_input = next(
+            line for line in (self.artifacts / "observations/benchmark-base-compile.txt").read_text().splitlines()
+            if line.startswith("benchmark source files:")
+        )
+        for side in ("base", "candidate"):
+            sample = (self.artifacts / side / "bench-repeat-1.txt").read_text()
+            self.assertIn("internal/run/production.go", sample)
+            self.assertIn("internal/run/owner_state_test.go", sample)
+            self.assertNotIn("unrelated_test.go", sample)
+            source_input = next(
+                line for line in sample.splitlines() if line.startswith("benchmark source files:")
+            )
+            if side == "base":
+                self.assertEqual(source_input, compile_input)
+                self.assertNotIn("candidate_only.go", source_input)
+            else:
+                self.assertIn("internal/run/candidate_only.go", source_input)
+            self.assertEqual(
+                set(PARSE_BENCH(sample)), {"BenchmarkOwnerFake", "BenchmarkRecoverFake"}
+            )
+            self.assertEqual((self.artifacts / side / "bench.txt.exit").read_text(), "0\n")
 
 
 if __name__ == "__main__":
