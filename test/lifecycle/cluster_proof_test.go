@@ -43,13 +43,56 @@ func TestReadSnapshotDisputedWriteKeepsAmbiguousCommitUnknown(t *testing.T) {
 	require.Len(t, rows, 4)
 	require.Equal(t, "caesium-0", rows[0].Pod)
 	require.Equal(t, http.StatusOK, rows[0].HTTPStatus)
-	require.True(t, rows[0].MatchesAttempted)
+	require.NotNil(t, rows[0].MatchesAttempted)
+	require.True(t, *rows[0].MatchesAttempted)
 	require.Equal(t, "006098", rows[1].Annotation)
-	require.False(t, rows[1].MatchesAttempted)
+	require.NotNil(t, rows[1].MatchesAttempted)
+	require.False(t, *rows[1].MatchesAttempted)
 	require.Contains(t, rows[2].Error, "deadline exceeded")
-	require.False(t, rows[2].MatchesAttempted)
+	require.Nil(t, rows[2].MatchesAttempted)
 	require.Equal(t, "survivor has no observable HTTP address", rows[3].Error)
-	require.False(t, rows[3].MatchesAttempted)
+	require.Nil(t, rows[3].MatchesAttempted)
+	encoded, err := json.Marshal(rows[2])
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"matches_attempted":null`)
+}
+
+func TestSnapshotReadbackBasesRetainsMissingSurvivor(t *testing.T) {
+	pod := func(name, ip string) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name}, Status: corev1.PodStatus{PodIP: ip}}
+	}
+	expected := []corev1.Pod{pod("caesium-0", "10.0.0.1"), pod("caesium-1", "10.0.0.2")}
+	bases := snapshotReadbackBases(expected, []corev1.Pod{pod("caesium-1", "10.0.0.3"), pod("caesium-2", "10.0.0.4")})
+	require.Equal(t, map[string]string{"caesium-0": "", "caesium-1": "http://10.0.0.3:8080"}, bases)
+	rows := readSnapshotDisputedWrite(t.Context(), cluster.NewHTTP(""), snapshotReadbackBases(expected, nil), "job", "000001", time.Second)
+	require.Len(t, rows, 2)
+	for _, row := range rows {
+		require.Equal(t, "survivor has no observable HTTP address", row.Error)
+		require.Nil(t, row.MatchesAttempted)
+	}
+}
+
+func TestReadSnapshotDisputedWriteSerializesUnannotatedJob(t *testing.T) {
+	const jobID = "9aa0a5d2-1095-4e47-9d78-b6307c13f763"
+	for _, annotations := range []string{"", `,"annotations":null`, `,"annotations":{}`, `,"annotations":{"snapshot_write":""}`} {
+		t.Run(annotations, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"id":"` + jobID + `"` + annotations + `}`))
+			}))
+			defer server.Close()
+			rows := readSnapshotDisputedWrite(t.Context(), cluster.NewHTTP(""), map[string]string{"caesium-0": server.URL}, jobID, "000001", time.Second)
+			require.Len(t, rows, 1)
+			require.Empty(t, rows[0].Error)
+			require.Equal(t, jobID, rows[0].JobID)
+			require.Empty(t, rows[0].Annotation)
+			require.NotNil(t, rows[0].MatchesAttempted)
+			require.False(t, *rows[0].MatchesAttempted)
+			encoded, err := json.Marshal(rows[0])
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), `"annotation":""`)
+			require.Contains(t, string(encoded), `"job_id":"`+jobID+`"`)
+		})
+	}
 }
 
 func TestResolvePodNameBySourceIP(t *testing.T) {

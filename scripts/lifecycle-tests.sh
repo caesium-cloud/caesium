@@ -1044,8 +1044,12 @@ EOF
     # write or a snapshot pass.
     lc_capture_snapshot_write_failure() {
       local batch="$1" prefix="$LC_ART/cluster-logs/snapshot-failure-batch-$1"
-      local pods_rc=0 events_rc=0 log0_rc=0 log1_rc=0 copy_rc=0
+      local pods_rc=0 events_rc=0 log0_rc=0 log1_rc=0 prev_log0_rc=0 prev_log1_rc=0 copy_rc=0
       lc_ns --request-timeout=10s get pods -o json >"$prefix-pods.json" 2>&1 || pods_rc=$?
+      lc_ns --request-timeout=10s logs caesium-0 -c caesium --previous --tail=2000 --timestamps=true \
+        >"$prefix-caesium-0.previous.log" 2>&1 || prev_log0_rc=$?
+      lc_ns --request-timeout=10s logs caesium-1 -c caesium --previous --tail=2000 --timestamps=true \
+        >"$prefix-caesium-1.previous.log" 2>&1 || prev_log1_rc=$?
       lc_ns --request-timeout=10s get events --sort-by=.metadata.creationTimestamp -o wide \
         >"$prefix-events.txt" 2>&1 || events_rc=$?
       lc_ns --request-timeout=10s logs caesium-0 -c caesium --tail=2000 --timestamps=true \
@@ -1056,7 +1060,8 @@ EOF
         --namespace "$LC_ID" cp -c runner lifecycle-runner:/artifacts/. "$LC_ART/" || copy_rc=$?
       LC_ART="$LC_ART" LC_ID="$LC_ID" LC_SNAP_BATCH="$batch" LC_DIAG_PODS_RC="$pods_rc" \
         LC_DIAG_EVENTS_RC="$events_rc" LC_DIAG_LOG0_RC="$log0_rc" \
-        LC_DIAG_LOG1_RC="$log1_rc" LC_DIAG_COPY_RC="$copy_rc" \
+        LC_DIAG_LOG1_RC="$log1_rc" LC_DIAG_PREV_LOG0_RC="$prev_log0_rc" \
+        LC_DIAG_PREV_LOG1_RC="$prev_log1_rc" LC_DIAG_COPY_RC="$copy_rc" \
         python3 "$ROOT/scripts/lifecycle-snapshot-failure.py"
     }
     # Exit 0 only after both surviving voters' actual files prove truncation;
@@ -1342,10 +1347,8 @@ PY
         fi
         if [[ "$LC_SNAP_RC" != 0 ]]; then
           LC_SNAP_REASON="catalog write phase failed at batch $LC_BATCH_TAG"
-          if [[ "$LC_BATCH" != 0 ]]; then
-            lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
-            LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
-          fi
+          lc_capture_snapshot_write_failure "$LC_BATCH_TAG" || true
+          LC_SNAP_EVIDENCE="$LC_ART/cluster-logs/snapshot-failure-batch-$LC_BATCH_TAG.json"
           break
         fi
         lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?

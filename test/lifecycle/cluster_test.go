@@ -1636,9 +1636,22 @@ type snapshotDisputedReadback struct {
 	Base             string `json:"base"`
 	HTTPStatus       int    `json:"http_status,omitempty"`
 	Error            string `json:"error,omitempty"`
-	JobID            string `json:"job_id,omitempty"`
-	Annotation       string `json:"annotation,omitempty"`
-	MatchesAttempted bool   `json:"matches_attempted"`
+	JobID            string `json:"job_id"`
+	Annotation       string `json:"annotation"`
+	MatchesAttempted *bool  `json:"matches_attempted"`
+}
+
+func snapshotReadbackBases(expected, observed []corev1.Pod) map[string]string {
+	bases := make(map[string]string, len(expected))
+	for _, pod := range expected {
+		bases[pod.Name] = ""
+	}
+	for _, pod := range observed {
+		if _, wanted := bases[pod.Name]; wanted && pod.Status.PodIP != "" {
+			bases[pod.Name] = "http://" + net.JoinHostPort(pod.Status.PodIP, "8080")
+		}
+	}
+	return bases
 }
 
 // An EOF from Apply leaves the write's commit status unknown. Read each
@@ -1679,7 +1692,8 @@ func readSnapshotDisputedWrite(ctx context.Context, h *cluster.HTTP, bases map[s
 			} else {
 				row.JobID = stored.ID
 				row.Annotation = stored.Annotations["snapshot_write"]
-				row.MatchesAttempted = stored.ID == jobID && row.Annotation == expected
+				matches := stored.ID == jobID && row.Annotation == expected
+				row.MatchesAttempted = &matches
 			}
 		}
 		readbacks = append(readbacks, row)
@@ -1737,14 +1751,7 @@ func TestLifecycleClusterGenerateSnapshotUpdateBatch(t *testing.T) {
 			} else {
 				readbackPods = currentPods.Items
 			}
-			bases := make(map[string]string, len(readbackPods))
-			for _, pod := range readbackPods {
-				if pod.Status.PodIP == "" {
-					bases[pod.Name] = ""
-				} else {
-					bases[pod.Name] = "http://" + net.JoinHostPort(pod.Status.PodIP, "8080")
-				}
-			}
+			bases := snapshotReadbackBases(pods.Items, readbackPods)
 			writeJSON(t, fmt.Sprintf("cluster-snapshot-disputed-batch-%02d.json", batch), map[string]any{
 				"lifecycle_id": fx.LifecycleID, "batch": batch, "write_index": i + 1, "alias": alias,
 				"job_id": before.ID, "attempted_annotation": attempted,
