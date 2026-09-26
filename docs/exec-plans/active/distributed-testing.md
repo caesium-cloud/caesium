@@ -947,7 +947,8 @@ within their resolved contract and available test infrastructure.
 
 **W1–W5 are closed. W6 remains active.** The acceptance repairs #567,
 #569 and #570 and docs checkpoint #568 merged through checkpoint `8113d211`;
-current master `073402a1` also includes the #572 scan repair.
+#572 merged at `073402a1`, #573 at `02a38131`, and #571 at current master
+`ec893213f0532513896aba9630d2a737e1431c47`.
 C3's validator passed its named candidate probes and eight known-bad mutations.
 B3's current-master proof at `f6acf0ea`, including #560, passed all 12
 `TestCore` scenarios in 299.68 s. G2's merged #570 code matches tested
@@ -958,21 +959,29 @@ collection/ratchets, while eight reported contract gaps remain and G6 promotion
 is still planned.
 
 F2's diagnostic-only repair #569 merged before #571; this did not satisfy the
-planned dependency order. After #571 lands, revalidate the affected Helm
-shard-2 live-secret-log path on merged master. F2's broader live qualification
-remains five pass/five blocked after an OOM at the fixture's 1 GiB limit,
-bound to `289bb343`; disputed write status is unknown. E3's merged isolation
-repair #567 enables pre-#560 comparison bases, but the full comparison on
-`655c063f` remains `overall=inconclusive` for one noisy browser series.
-E3 and F2 stay unchecked.
+planned dependency order. #571 then merged. Its PR head `6c94bf5d` CI run
+[36245148508](https://github.com/caesium-cloud/caesium/actions/runs/36245148508)
+passed every executed job, including all three `helm-integration-test` shards
+and `ci-ok`. `git diff 6c94bf5d ec893213` is only the four documentation files
+from #573, so that Helm result is the post-merge revalidation of the log-retry
+runtime. F2's broader live qualification remains five pass/five blocked after
+an OOM at the fixture's 1 GiB limit, bound to `289bb343`; disputed write status
+is unknown. A current-master ten-repeat comparison of `ec893213` against W4
+base `45994929` exited 3, `overall=inconclusive`, `speed_compared=true`.
+Provenance matched. `browser.route_readiness_ms./jobs.live` was not noisy this
+time. `browser.action_to_render_ms.live` (base CV 0.376) and
+`workload.closed-baseline.cold.duration_seconds` (candidate CV 0.907; nine
+samples near 6.5 s and cold repeat 7 at 32.54 s, p50 6.49 s, p=0.91) exceeded
+the unchanged noise limit. Local ephemeral report
+`/tmp/caesium-w6-e3-current/report.json`. No threshold changed. E3 and F2 stay
+unchecked.
 
 #572 merged at `073402a1` after its tested `62f96873` passed the real
-two-test gate and all 13 applicable CI jobs. #571 incorporated current master
-including that scan fix at `6c94bf5d`; containerized package race/vet passed
-(6.035 s), and the real Kubernetes live/retained secret-log scenario passed
-(9.83 s). Fresh CI run 36245148508 is in progress. The `82ca5905` failed UI/ci-ok run
-is historical. Current #571 review/check gates remain pending. D3, E4, F3, G4 and G6
-remain undispatched. **20/27 items are checked; seven remain open.** The core
+two-test gate and all 13 applicable CI jobs. #571 is merged at `ec893213`.
+The `82ca5905` failed UI/ci-ok run is historical. Open follow-ups are #574
+(same-cap memory samples, not a live qualification) and #575 (D3 console
+journey, not a live kind proof). E4, F3, G4 and G6 remain undispatched.
+**20/27 items are checked; seven remain open.** The core
 suite, coverage collector and performance comparator are local commands,
 not CI jobs. **No repository settings have changed** — `ci-ok` is still absent
 from master's required status checks and no merge queue exists; see Q6 and G7.
@@ -1039,18 +1048,20 @@ and the latest acceptance evidence.
 | E3 benchmark isolation | [#567](https://github.com/caesium-cloud/caesium/pull/567), merged | Merge `8f64997b50cea379490914b0dfa87e6a2a39982a`, tested head `253cca284c52bd5723901cb0a9feb9b7c7b93ad3`; isolates Go-selected production files plus pinned fixtures, closing candidate-only `TestMain` interference. The review fix makes fake benchmark metrics deterministic: 18 focused tests and 400/400 parseable fixture runs pass; independent review and all 37 executed current-head CI checks pass, including `ci-ok`. Its sole thread is resolved. Full runtime proof remains bound to `655c063f`: the ten-repeat comparison against W4 base `45994929` exited 3, `overall=inconclusive`, `speed_compared=true`. All 20 benchmark samples, cold/warm correctness and 80 first-attempt Chromium tests pass, without skips/flakes. Forty-one metrics show no significant difference; `browser.route_readiness_ms./jobs.live` exceeds the noise limit (candidate CV 1.980, one 3,276 ms sample, ten per side). Local, ephemeral artifact `/tmp/caesium-w6-e3-diagnostics.egK8Ux/report.json`; the PR body is the durable summary. The slow sample is unattributed because passing traces and per-repeat server logs were not retained. No outlier or threshold changed. E3 stays unchecked pending conclusive repeatable measurement. |
 | F2 failure evidence | [#569](https://github.com/caesium-cloud/caesium/pull/569), merged | Merge `62c8b2bd`, tested head `05ae46444f166eae1528f6363619d2796bb434c6` reverts runtime changes from both bundled #571 commits; its full source tree equals diagnostic-only `b45adfdc`, and the PR diff contains only five diagnostic/test paths. The unchanged diagnostic code passed ten focused/331 full Python tests, 8/8 guard-removal controls and containerized integration/race reader/mapping/serialization regressions (1.070 s). All six round-one threads and the round-two dependency thread are resolved. Tested-head CI run 36241925127 passed all 37 executed jobs. The 37-job green run on `b8498ac8` included the now-removed runtime copy and is historical. This PR merged before #571. Its planned dependency ordering was not met; after #571 lands, rerun affected checks on merged master, including Helm shard 2. No runtime readiness fix is attributed to this diagnostic-only merge. Live qualification remains bound to `289bb343`: five pass/five blocked, batch 13 write 82 annotation `006082` after 6,081 acknowledged updates plus 1,400 initial writes, survivor OOMKilled/137 at 1 GiB. Readback is unknown; five host captures succeeded. Local, ephemeral artifact `/tmp/caesium-w6-f2-observe.9DHTV9/cluster-qualification.json`; PR body is the durable summary. F2 stays unchecked. |
 | G2 browser/ratchet repair | [#570](https://github.com/caesium-cloud/caesium/pull/570), merged | Merge `38a2e9d3`, tested candidate `74067f988456f4cfd7b0bd56058258295975d731` repairs uncoverable/build-excluded files, separate-module policy and mutable image launches. The merged collector/checker/ratchet and all 480 inventoried source hashes match tested content. Seventy-two focused Python regressions and separate shell syntax/ShellCheck checks pass. Fresh actual builder/collect exits 0, `verdict=pass`, all 67 floors applied, two first-attempt Chromium passes, and matching complete CLI/server/integration/browser provenance. Every runtime/tool launch uses a pinned image ID; Docker FROM uses a verified named digest. Integration 7.6%, browser 8.1%, union 9.0% (4,666/51,628); actual apply→persisted public alias lookup→manifest read function coverage passes. All 149 package manifests/480 source hashes and image build contexts match. Diff input/eligible counts are zero against `f6acf0ea`: explicit empty input and max-zero policy, not measured nonempty live acceptance. Corrected policy replay fails 11 of 18 eligible historical filename samples (seven pass), versus 12 previously; this is not historical-source execution or CI outcomes. Local ephemeral report `/tmp/caesium-w6-round2-g2-collect.IMDFDt/report.json`; PR body is the durable summary. Eight critical-contract gaps remain. Tested-head CI run 36243611300 passed all 37 executed jobs. G2 is checked for coverage collection/ratchets; reported gaps and G6 promotion remain explicit. |
-| Kubernetes CI readiness | [#571](https://github.com/caesium-cloud/caesium/pull/571), review in progress | Current head `6c94bf5d8433f24c56b32686b491ac321c240911` incorporates merged master including #567/#569/#570/#568 and the #572 scan fix. The current PR diff remains only the two Kubernetes engine/test files. Runtime code is unchanged from tested `82ca5905`: 10 s setup, buffered first byte, authoritative pod confirmation for nonterminal empty streams and exact transient responses, and fail-closed permanent/missing/deleting pods. That earlier head passed container package race/vet (6.017 s) and the unchanged real CLI/HTTP Kubernetes live/retained secret-log scenario (9.89 s), but failed UI/ci-ok before #572. Fresh combined-head container package race/vet passed (6.035 s), and the unchanged real Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.83 s). Candidate archive/pod binding and all five referenced blob hashes were verified; local ephemeral artifact `/tmp/caesium-w6-round2-k8s-log-live.uISuX8`. Owned cluster/kubeconfig are removed. Fresh CI run 36245148508 is pending; old CI results do not describe this new head. See live PR state for review/check gates. F2 diagnostics are already merged; after this runtime repair lands, revalidate the affected Helm lane on merged master. |
-| UI scan readiness | [#572](https://github.com/caesium-cloud/caesium/pull/572), merged | Merge `073402a1b9f658eb18e7558614e98e589ac80090`, tested candidate `62f96873da3acd6e995b9558b72251034fef76c5`, two test files only. Actual Chromium reproduces AppShell's 500 ms fade still active at row visibility, transient ratio 3.65, then settled opacity 1 and no scoped violation. The bounded helper requeries finite animations, including paused/replaced effects; infinite spinners remain ongoing. Full axe rules/contrast baselines and product colors are unchanged. Rendered regression rejects genuine settled bad color and the disabled-wait mutation. Independent source review, lint and TypeScript pass. Root containerized exact-head build plus real API-applied jobs page passes 2/2 first-attempt Chromium tests in 3.1 s. Local ephemeral artifact `/tmp/caesium-w6-round2-ui-live.KPY07L`; PR body is the durable summary. CI run 36244363304 passed all 13 applicable jobs; 13 path-filtered/tag jobs skipped as expected. This scan fix is merged and incorporated in #571 current head `6c94bf5d`, whose new checks are running; already-merged #569 requires post-merge Helm revalidation after #571. No distributed acceptance is claimed. |
-| W6/N-1 | [#568](https://github.com/caesium-cloud/caesium/pull/568), merged checkpoint | Merge `8113d211a25af6cce4ed1e81d956e5f1e940d6db`, tested docs head `a45aeac5`. That four-doc checkpoint records the prior open-PR state. This follow-up reconciles actual merges and G2 acceptance; W6 remains active for F2/E3 acceptance and the open #571 CI repair with merged #572 incorporated. |
+| Kubernetes CI readiness | [#571](https://github.com/caesium-cloud/caesium/pull/571), merged | Merge `ec893213f0532513896aba9630d2a737e1431c47` at 2026-09-26T13:44:53Z. Tested head `6c94bf5d8433f24c56b32686b491ac321c240911` differs from the merge only by the four documentation files in #573. Runtime code is unchanged from tested `82ca5905`: 10 s setup, buffered first byte, authoritative pod confirmation for nonterminal empty streams and exact transient responses, and fail-closed permanent/missing/deleting pods. Combined-head container package race/vet passed (6.035 s), and the real Kubernetes CLI/HTTP live/retained secret-log scenario passed (9.83 s). [CI run 36245148508](https://github.com/caesium-cloud/caesium/actions/runs/36245148508) passed all 37 executed jobs, including every Helm shard and `ci-ok`; publish skipped. The `82ca5905` UI failure is historical. This is the post-merge Helm revalidation of the log-retry path. It does not qualify F2. |
+| UI scan readiness | [#572](https://github.com/caesium-cloud/caesium/pull/572), merged | Merge `073402a1b9f658eb18e7558614e98e589ac80090`, tested candidate `62f96873da3acd6e995b9558b72251034fef76c5`, two test files only. Actual Chromium reproduces AppShell's 500 ms fade still active at row visibility, transient ratio 3.65, then settled opacity 1 and no scoped violation. The bounded helper requeries finite animations, including paused/replaced effects; infinite spinners remain ongoing. Full axe rules/contrast baselines and product colors are unchanged. Rendered regression rejects genuine settled bad color and the disabled-wait mutation. Independent source review, lint and TypeScript pass. Root containerized exact-head build plus real API-applied jobs page passes 2/2 first-attempt Chromium tests in 3.1 s. Local ephemeral artifact `/tmp/caesium-w6-round2-ui-live.KPY07L`; PR body is the durable summary. CI run 36244363304 passed all 13 applicable jobs; 13 path-filtered/tag jobs skipped as expected. This scan fix is merged and incorporated in #571, which merged at `ec893213`. Helm revalidation of that runtime is CI run 36245148508. No distributed acceptance is claimed. |
+| W6/N-1 | [#568](https://github.com/caesium-cloud/caesium/pull/568), merged checkpoint | Merge `8113d211a25af6cce4ed1e81d956e5f1e940d6db`, tested docs head `a45aeac5`. That four-doc checkpoint records the prior open-PR state. #573 later merged the next dashboard at `02a38131`. W6 remains active for F2/E3 acceptance. |
 
 F2's new capture attributes the immediate EOF to an OOM kill before the
 snapshot-truncation prerequisite was proved. Native dqlite's 8,192-entry
 retention window is a plausible contributor: retained Raft files grew from
 362 to 725 MB while database snapshots stayed about 1.18 MB. This is an
-inference, not RSS attribution. A follow-up under the same 1 GiB cap must
-sample cgroup anon/file, process RSS and Go heap/GC before changing resources
-or retention policy. The unknown disputed write and blocked destructive cases
-cannot be converted into a passing qualification.
+inference, not RSS attribution. [#574](https://github.com/caesium-cloud/caesium/pull/574)
+adds that same-cap sampling (cgroup anon/file, process RSS, and existing
+`/metrics` Go heap/GC) and still leaves the limit at 1 GiB. It has no live
+cluster run, so it does not explain the OOM or check F2. The unknown disputed
+write and blocked destructive cases cannot be converted into a passing
+qualification.
 
 The overall 27-item plan remains active. **The minimum credible gate milestone
 (G3 + G5) is delivered in CI but is not merge-enforced**, and G7 did not close
@@ -1078,19 +1089,20 @@ revalidation is recorded above. Revalidate future changes that affect its tested
 paths. G2's `74067f98` proof now qualifies merged #570's collection/ratchets;
 G6 promotion remains unimplemented and the reported coverage gaps remain.
 F2's diagnostic-only #569 excludes #571's runtime changes and is already
-merged. #572 is merged and incorporated into #571; after the Kubernetes repair lands, revalidate
-F2's affected Helm path on current master. Required review/check gates still
-apply to the open PRs. E3 needs a passing full two-image comparison
-on current code. F2 needs passing snapshot catch-up and remaining selected
-lifecycle cases on a valid cluster baseline, with external prerequisites
-explicitly resolved or blocked.
+merged. #571 is merged, and Helm shard 2 on the identical runtime tree passed
+in run 36245148508. Required review/check gates still apply to the open PRs.
+E3's current-master comparison is inconclusive; it needs a conclusive full
+two-image comparison before acceptance. F2 needs passing snapshot catch-up and
+the remaining selected lifecycle cases on a valid cluster baseline, with the
+#574 samples collected on that run and external prerequisites explicitly
+resolved or blocked.
 
-After W6/N-1, D3 is dependency-ready and owns the next
-`test/contracts/scenarios.json` edit in the A2 → G3 → B3 → D3 → G6
-sequence. E4 needs E3 acceptance and Q2/Q5; F3 needs C3, E4, F2 and Q2; G4
-needs F3/G6; G6 needs D3, E4, F2 and G2 acceptance as well as merged
-B3/C3/G7 code. Q1–Q3, Q5 and Q6 remain visible rather than silently treated
-as satisfied.
+[#575](https://github.com/caesium-cloud/caesium/pull/575) is the D3 console
+journey. It owns the `d3-console-cluster-recovery` manifest notes and leaves
+the row `absent`. It is not acceptance: no live kind proof is recorded. E4
+needs E3 acceptance and Q2/Q5; F3 needs C3, E4, F2 and Q2; G4 needs F3/G6; G6
+needs D3, E4, F2 and G2 acceptance as well as merged B3/C3/G7 code. Q1–Q3, Q5
+and Q6 remain visible rather than silently treated as satisfied.
 
 ### Stream Status
 
@@ -1099,9 +1111,9 @@ as satisfied.
 | A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three manifest rows are `proven` with `gates: ["early"]`; B2/B3 selectors are present but their rows remain `absent` until G6 registers passing evidence |
 | B | Real multi-node robustness (3 items) | P0 | B1 merged #472, B2 merged #555, B3 merged #557 with repair #564. Fresh merged-master `f6acf0ea` (including #560) passed 12/12 `TestCore` scenarios in 299.68 s. Default CI selection remains `TestOwnerCrash`; G6 owns core-suite promotion |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475, C2 merged #551, C3 merged #563; the full mutation validator remains standalone until G6 |
-| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 is dependency-ready after W6/N-1 |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repair #566; #567 isolation repair is now merged and supports pre-#560 bases; the full candidate comparison remains inconclusive. E4 needs E3 acceptance and Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged, but the latest live cluster run OOMKilled a survivor and left five cases blocked. F3 needs F2/E4/C3 and Q2 |
+| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 is open as #575; the manifest row stays absent until a live kind proof |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repairs #566 and #567. The ten-repeat comparison of master `ec893213` against W4 `45994929` is inconclusive. E4 needs E3 acceptance and Q2/Q5 |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged. #574 adds same-cap memory samples and has no live run. The latest qualification still OOMKilled a survivor and left five cases blocked. F3 needs F2/E4/C3 and Q2 |
 | G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2 repair #570 is merged and accepted with fresh collection/ratchet evidence at `74067f98` and 37 passing tested-head CI jobs; its checkbox is checked. Eight reported contract gaps remain. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
 
 ## Streams
