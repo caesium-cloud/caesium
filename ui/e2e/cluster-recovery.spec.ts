@@ -25,7 +25,13 @@ import {
   formatClusterGateFailure,
   formatKillEvidence,
   helmAuthTemplateCommand,
+  authModesFromPodList,
+  apiKeyAuthViolation,
+  criLogText,
   helmAuthUpgradeCommand,
+  memberLogCommand,
+  nodeLogSourcesFromPodList,
+  nodePodLogCommand,
   helmGetValuesCommand,
   killEvidenceShowsDeath,
   kubeletStopCommand,
@@ -42,7 +48,6 @@ import {
   parseLeaseResponse,
   parseRunSnapshot,
   planAuthExtraEnv,
-  podLogsCommand,
   runIdFromHref,
   serviceConsoleForward,
   statusFromRowText,
@@ -357,21 +362,43 @@ async function ensureApiKeyAuth(current: ClusterRecoverySession): Promise<void> 
     run(helmAuthUpgradeCommand(current, overlayPath));
   }
   if (process.env.CAESIUM_E2E_AUTH_ADMIN_KEY?.trim()) return;
-  let key: string | null = null;
-  for (let attempt = 0; attempt < 30 && !key; attempt += 1) {
-    try {
-      key = parseBootstrapAdminKey(run(podLogsCommand(current)));
-    } catch {
-      key = null;
+  const listed = JSON.parse(run(kubectlGetPodsCommand(current.kubeconfig, current.namespace, caesiumMemberSelector()))) as unknown;
+  const authViolation = apiKeyAuthViolation(listed);
+  if (authViolation) throw new Error(`${authViolation} after the upgrade`);
+  const modes = authModesFromPodList(listed);
+  const dir = path.join(current.artifactsDir, "bootstrap-logs");
+  fs.mkdirSync(dir, { recursive: true });
+  const readKey = (stdoutPath: string, normalize: (text: string) => string = (text) => text): string | null => {
+    const text = fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, "utf8") : "";
+    const found = parseBootstrapAdminKey(normalize(text));
+    if (found) process.env.CAESIUM_E2E_AUTH_ADMIN_KEY = found;
+    return found;
+  };
+  for (const member of membersFromPodList(listed)) {
+    for (const previous of [false, true]) {
+      const suffix = previous ? "previous" : "current";
+      const stdoutPath = path.join(dir, `${member.name}.${suffix}.log`);
+      const stderrPath = path.join(dir, `${member.name}.${suffix}.err`);
+      captureCommand(memberLogCommand(current, member.name, previous), stdoutPath, stderrPath);
+      if (readKey(stdoutPath)) return;
     }
-    if (!key) await sleep(1_000);
   }
-  if (!key) {
-    throw new Error(
-      "bootstrap admin API key was not in caesium pod logs; set CAESIUM_E2E_AUTH_ADMIN_KEY from the one-time bootstrap line",
-    );
+  // The banner can rotate out of the live file while helm rolls the other
+  // members at debug log level; read the rotated files on the node.
+  for (const source of nodeLogSourcesFromPodList(listed)) {
+    const stdoutPath = path.join(dir, `${source.name}.node.log`);
+    const stderrPath = path.join(dir, `${source.name}.node.err`);
+    let command: ShellCommand;
+    try {
+      command = nodePodLogCommand(current.namespace, source);
+    } catch (error) {
+      fs.writeFileSync(stderrPath, `${error instanceof Error ? error.message : String(error)}\n`);
+      continue;
+    }
+    captureCommand(command, stdoutPath, stderrPath);
+    if (readKey(stdoutPath, criLogText)) return;
   }
-  process.env.CAESIUM_E2E_AUTH_ADMIN_KEY = key;
+  throw new Error(`bootstrap admin API key was not in ${dir}; modes=${JSON.stringify(modes)}`);
 }
 
 async function readRunSurface(page: Page, jobId: string, runId: string, marker: string): Promise<{
@@ -546,6 +573,25 @@ async function poll<T>(timeoutMs: number, intervalMs: number, read: () => Promis
     await sleep(intervalMs);
   }
   throw new Error(`timed out after ${timeoutMs}ms: ${last}`);
+}
+
+function captureCommand(command: ShellCommand, stdoutPath: string, stderrPath: string): void {
+  const violation = commandViolation(command.argv);
+  if (violation) throw new Error(`${violation}: ${command.argv.join(" ")}`);
+  const out = fs.openSync(stdoutPath, "w");
+  const err = fs.openSync(stderrPath, "w");
+  try {
+    execFileSync(command.argv[0], command.argv.slice(1), {
+      stdio: ["ignore", out, err],
+      timeout: 120_000,
+      env: commandEnv(),
+    });
+  } catch (error) {
+    fs.appendFileSync(stderrPath, `\n${error instanceof Error ? error.message : String(error)}\n`);
+  } finally {
+    fs.closeSync(out);
+    fs.closeSync(err);
+  }
 }
 
 function run(command: ShellCommand): string {
