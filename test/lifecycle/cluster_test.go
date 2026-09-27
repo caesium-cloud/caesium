@@ -1444,82 +1444,183 @@ func TestLifecycleClusterJoiningOrdinalOne(t *testing.T) {
 			"new_volume": replaced.VolumeName, "new_pod_uid": replaced.UID}})
 }
 
+// dqliteBootstrapID is go-dqlite's fixed ID for the node that bootstraps a
+// cluster (dqlite.BootstrapID). Repeated here so the runner needs no cgo.
+const dqliteBootstrapID uint64 = 3297041220608546238
+
+type ordinalZeroView struct {
+	Name    string   `json:"name"`
+	Address string   `json:"address"`
+	Leader  string   `json:"leader"`
+	Members []string `json:"members"`
+}
+
+// TestLifecycleClusterOrdinalZeroLoss qualifies #582: after caesium-0 loses its
+// PVC while caesium-1/2 keep running, the replacement must join the existing
+// cluster as a new member rather than bootstrap a divergent one. Every member's
+// direct Cluster RPC, including the fresh node's own, must show one cluster
+// with one leader, and the fixture must read the same through caesium-0.
 func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
+	const name = "ordinal-0-disk-loss"
 	fx := clusterFixture{}
 	if !readJSON(t, "cluster-fixture.json", &fx) {
-		blockf(t, "ordinal-0-disk-loss", "seed fixture missing")
+		blockf(t, name, "seed fixture missing")
 	}
-	kube, err := cluster.InClusterClient()
-	require.NoError(t, err)
 	old := map[string]clusterMemberEvidence{}
 	for _, m := range fx.Members {
 		old[m.Name] = m
 	}
-	var evidence = map[string]any{"old_id": old["caesium-0"].DqliteID}
-	var leaderAddress, survivorView string
-	for _, name := range []string{"caesium-1", "caesium-2"} {
-		pod, err := kube.CoreV1().Pods(fx.LifecycleID).Get(t.Context(), name, metav1.GetOptions{})
-		require.NoError(t, err)
-		addr := pod.Status.PodIP + ":9001"
-		leader, members, err := cluster.QueryNode(t.Context(), addr)
-		if err != nil {
-			blockf(t, "ordinal-0-disk-loss", "surviving member %s did not answer direct RPC: %v", name, err)
-		}
-		if leaderAddress == "" {
-			leaderAddress = leader.Address
-		}
-		require.Equal(t, leaderAddress, leader.Address, "survivors disagree on their leader")
-		view := make([]string, 0, len(members))
-		for _, member := range members {
-			view = append(view, fmt.Sprintf("%d/%s/%s", member.ID, member.Address, member.Role.String()))
-		}
-		sort.Strings(view)
-		joined := strings.Join(view, ",")
-		if survivorView == "" {
-			survivorView = joined
-		}
-		require.Equal(t, survivorView, joined, "survivors disagree on membership")
-		evidence[name+"_leader"] = leader
-		evidence[name+"_membership"] = members
-	}
+	oldZero := old["caesium-0"]
+	evidence := map[string]any{"old_id": oldZero.DqliteID, "old_address": oldZero.Address, "old_volume": oldZero.Volume}
+
 	var host map[string]any
 	if !readJSON(t, "cluster-ordinal0-host.json", &host) {
-		blockf(t, "ordinal-0-disk-loss", "fresh PVC, info.yaml and node-store evidence absent")
+		blockf(t, name, "fresh PVC, info.yaml and node-store evidence absent")
 	}
 	for k, v := range host {
 		evidence[k] = v
 	}
-	require.NotEqual(t, host["old_uid"], host["new_uid"], "ordinal-0 pod was not recreated")
+	if host["old_uid"] == host["new_uid"] {
+		failClusterCase(t, name, "ordinal-0 pod was not recreated (uid %v)", host["new_uid"])
+	}
 	var pvc struct {
 		Spec struct {
 			VolumeName string `json:"volumeName"`
 		} `json:"spec"`
 	}
-	pvcRaw, ok := host["pvc"].(string)
-	require.True(t, ok)
-	if err := json.Unmarshal([]byte(pvcRaw), &pvc); err != nil {
-		blockf(t, "ordinal-0-disk-loss", "fresh PVC JSON unobservable: %v", err)
+	pvcRaw, _ := host["pvc"].(string)
+	if err := json.Unmarshal([]byte(pvcRaw), &pvc); err != nil || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		blockf(t, name, "fresh PVC volumeName unobservable: %v", err)
 	}
-	if strings.TrimSpace(pvc.Spec.VolumeName) == "" {
-		blockf(t, "ordinal-0-disk-loss", "fresh PVC has no volumeName")
+	if pvc.Spec.VolumeName == oldZero.Volume {
+		failClusterCase(t, name, "ordinal-0 PVC retained the old PV %s: disk loss was not injected", oldZero.Volume)
 	}
-	require.NotEqual(t, old["caesium-0"].Volume, pvc.Spec.VolumeName, "ordinal-0 PVC retained the old PV")
-	infoRaw, ok := host["info_yaml"].(string)
-	require.True(t, ok)
+	evidence["fresh_volume"] = pvc.Spec.VolumeName
+	infoRaw, _ := host["info_yaml"].(string)
 	var info struct {
 		ID      uint64 `yaml:"ID"`
 		Address string `yaml:"Address"`
 	}
 	if err := yaml.Unmarshal([]byte(infoRaw), &info); err != nil || info.ID == 0 || strings.TrimSpace(info.Address) == "" {
-		blockf(t, "ordinal-0-disk-loss", "fresh info.yaml unobservable: id=%d address=%q err=%v", info.ID, info.Address, err)
+		blockf(t, name, "fresh info.yaml unobservable: id=%d address=%q err=%v", info.ID, info.Address, err)
 	}
 	evidence["fresh_info_id"] = info.ID
 	evidence["fresh_info_address"] = info.Address
-	evidence["fresh_volume"] = pvc.Spec.VolumeName
-	require.NotEmpty(t, strings.TrimSpace(fmt.Sprint(host["node_store"])), "fresh node store not recorded")
-	writeCase(t, caseRecord{Name: "ordinal-0-disk-loss", Status: statusBlocked,
-		Detail:       "fresh ordinal-0 evidence and surviving membership recorded; no product rejoin/re-bootstrap procedure is qualified",
+	if info.ID == oldZero.DqliteID || info.ID == dqliteBootstrapID {
+		failClusterCase(t, name, "fresh ordinal 0 reused node ID %d (old %d, bootstrap %d): it did not join as a new member",
+			info.ID, oldZero.DqliteID, dqliteBootstrapID)
+	}
+
+	_, h, topo := clusterKube(t)
+	fresh, ok := topo.ByName("caesium-0")
+	if !ok {
+		blockf(t, name, "caesium-0 absent from the ready topology")
+	}
+	if fresh.DqliteAddr() != info.Address {
+		failClusterCase(t, name, "fresh info.yaml address %s is not the pod's dqlite address %s", info.Address, fresh.DqliteAddr())
+	}
+
+	// Role adjustment runs on the leader every 30 s, so the new member's
+	// promotion and the stale entry's demotion settle after Ready. Poll for a
+	// bounded window and judge the last complete observation.
+	var views []ordinalZeroView
+	var lastErr error
+	settled := false
+	deadline := time.Now().Add(3 * time.Minute)
+	for !settled && time.Now().Before(deadline) {
+		views, lastErr = nil, nil
+		for _, m := range topo.Members {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			leader, members, err := cluster.QueryNode(ctx, m.DqliteAddr())
+			cancel()
+			if err != nil || leader == nil {
+				lastErr = fmt.Errorf("%s: leader=%v err=%v", m.Name, leader, err)
+				break
+			}
+			view := ordinalZeroView{Name: m.Name, Address: m.DqliteAddr(), Leader: fmt.Sprintf("%d/%s", leader.ID, leader.Address)}
+			for _, member := range members {
+				view.Members = append(view.Members, fmt.Sprintf("%d/%s/%s", member.ID, member.Address, strings.ToLower(member.Role.String())))
+			}
+			sort.Strings(view.Members)
+			views = append(views, view)
+		}
+		if lastErr == nil {
+			settled = ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), topo) == nil
+		}
+		if !settled {
+			time.Sleep(5 * time.Second)
+		}
+	}
+	evidence["direct_cluster_views"] = views
+	if lastErr != nil {
+		blockf(t, name, "direct dqlite RPC unanswered after 3m: %v", lastErr)
+	}
+	if err := ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), topo); err != nil {
+		writeCase(t, caseRecord{Name: name, Status: statusFail, Detail: err.Error(), Observations: evidence})
+		t.Fatalf("FAIL %s: %v", name, err)
+	}
+
+	// Record what happened to the lost member's entry.
+	stale := "absent"
+	for _, entry := range views[0].Members {
+		if strings.HasPrefix(entry, fmt.Sprintf("%d/", oldZero.DqliteID)) {
+			stale = entry
+		}
+	}
+	evidence["stale_entry"] = stale
+
+	// The fixture must read the same through the fresh node as through the
+	// survivors. A divergent node would serve its own empty database here.
+	c := newClient(t)
+	for _, m := range topo.Members {
+		c.base = m.HTTPBase()
+		assertRunUnchanged(t, t.Context(), c, fx.Succeeded, "succeeded via "+m.Name)
+		assertRunUnchanged(t, t.Context(), c, fx.Failed, "failed via "+m.Name)
+		raw, err := h.SystemNodes(t.Context(), m.HTTPBase())
+		if err != nil {
+			blockf(t, name, "GET /v1/system/nodes via %s: %v", m.Name, err)
+		}
+		evidence["system_nodes_"+m.Name] = json.RawMessage(raw)
+	}
+	writeCase(t, caseRecord{Name: name, Status: statusPass,
+		Detail: fmt.Sprintf("fresh ordinal 0 joined as new node %d at %s; every member's direct Cluster RPC agrees on one leader and one membership; "+
+			"retained runs read identically through caesium-0 and survivors; stale entry: %s", info.ID, fresh.DqliteAddr(), stale),
 		Observations: evidence})
+}
+
+// ordinalZeroSettled reports why the observed direct Cluster RPC views do not
+// yet show one cluster that the fresh node joined as a voter.
+func ordinalZeroSettled(views []ordinalZeroView, freshID uint64, freshAddr string, topo cluster.Topology) error {
+	if len(views) != len(topo.Members) || len(views) == 0 {
+		return fmt.Errorf("observed %d of %d members", len(views), len(topo.Members))
+	}
+	for _, v := range views {
+		if v.Leader != views[0].Leader {
+			return fmt.Errorf("%s reports leader %s but %s reports %s", v.Name, v.Leader, views[0].Name, views[0].Leader)
+		}
+		if strings.Join(v.Members, ",") != strings.Join(views[0].Members, ",") {
+			return fmt.Errorf("%s membership %v differs from %s membership %v", v.Name, v.Members, views[0].Name, views[0].Members)
+		}
+	}
+	want := fmt.Sprintf("%d/%s/voter", freshID, freshAddr)
+	found, liveVoters := false, 0
+	for _, entry := range views[0].Members {
+		if entry == want {
+			found = true
+		}
+		for _, m := range topo.Members {
+			if strings.HasSuffix(entry, "/"+m.DqliteAddr()+"/voter") {
+				liveVoters++
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("fresh node %s is not a voter in the shared membership %v", want, views[0].Members)
+	}
+	if liveVoters != len(topo.Members) {
+		return fmt.Errorf("%d of %d live members are voters: %v", liveVoters, len(topo.Members), views[0].Members)
+	}
+	return nil
 }
 
 // The stopped-member snapshot experiment must inspect the actual surviving

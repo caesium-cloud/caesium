@@ -170,6 +170,7 @@ All settings are in `helm/caesium/values.yaml`.
 | `config.databaseType` | `internal` (dqlite) or `postgres` | `internal` |
 | `config.databaseDSN` | PostgreSQL DSN when using `postgres` | `""` |
 | `config.extraEnv` | Extra env vars injected into pod spec | `[]` |
+| `peerDiscovery.probeSeconds` | How long ordinal 0 with an empty data directory probes the other ordinals before bootstrapping a new cluster | `20` |
 | `persistence.enabled` | Enable PVC-backed dqlite storage | `true` |
 | `persistence.storageClass` | StorageClass name (empty = cluster default) | `""` |
 | `persistence.accessModes` | PVC access modes | `[ReadWriteOnce]` |
@@ -302,9 +303,51 @@ Two limits are worth knowing:
   reach another and the repair has nothing to talk to. Recover by restoring
   from a volume snapshot.
 
-Replacing a pod with an **empty** PVC is a different case: a replaced ordinal 0
-with no data directory re-bootstraps instead of rejoining, because the chart
-gives ordinal 0 an empty peer list.
+### Replacing a member whose volume was lost
+
+Replacing a pod with an **empty** PVC (the disk was lost, or the PVC was
+deleted) is a different case: the node has no identity to keep, so it joins the
+cluster as a **new member** with a fresh dqlite node ID and receives the data
+by snapshot from the leader. No manual step is needed.
+
+For ordinals 1 and up this was always the case: the `peer-discovery` init
+container seeds ordinal *N* with ordinals `0..N-1`. Ordinal 0 is special
+because it is also the member that bootstraps a brand new cluster, so the init
+container decides between the two (#582):
+
+- If `/var/lib/caesium/dqlite/info.yaml` exists, ordinal 0 is an existing
+  member restarting and nothing is probed.
+- Otherwise it TCP-probes the dqlite port of every other ordinal through the
+  headless Service (which publishes not-ready addresses) for up to
+  `peerDiscovery.probeSeconds` (default 20 s). If any answers, a cluster
+  already exists and ordinal 0 is seeded with the other ordinals, so it joins.
+  On a new install the other ordinals do not exist yet, nothing answers, and
+  ordinal 0 bootstraps after the window. A new install's first start of
+  ordinal 0 is therefore up to that much slower.
+- Caesium itself repeats the check (`CAESIUM_DATABASE_BOOTSTRAP_PEERS`, set by
+  the chart to the other ordinals): a node with an empty data directory and no
+  seeds probes those peers for up to 10 s more and joins if any answers. It
+  logs either
+  `this node has no dqlite identity but a bootstrap peer answered; joining the existing cluster as a new member instead of bootstrapping`
+  or
+  `no dqlite bootstrap peer answered within the probe window; bootstrapping a new cluster`.
+
+The lost member's old entry is not removed. It stays in the raft configuration
+under its old node ID (for the original ordinal 0 that is dqlite's bootstrap
+ID) at the old pod address. go-dqlite's role adjustment promotes the new member
+to voter and demotes the unreachable old entry to a spare, so the cluster is
+back to three live voters and the stale spare has no vote. It is harmless but
+is listed by `GET /v1/system/nodes` and direct dqlite `Cluster` calls.
+
+Residual risks:
+
+- If ordinal 0 loses its disk while **every** other member is unreachable at
+  once (for example, all pods are being rescheduled), both probes find nothing
+  and ordinal 0 bootstraps an empty cluster of its own. Replace one member at a
+  time and do not delete ordinal 0's PVC while the other members are down.
+- If the replacement pod is given exactly the old pod's IP, raft refuses the
+  join because the stale entry holds that address; the pod stays not Ready
+  instead of serving a divergent database. Deleting the pod again gets a new IP.
 
 ## Air-Gapped Deployment Notes
 

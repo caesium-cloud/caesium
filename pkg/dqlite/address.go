@@ -678,15 +678,79 @@ func ensureClusterAddress(
 	}
 }
 
+// How long a node with no persisted identity and no configured seeds keeps
+// probing its bootstrap peers for a live cluster before it concludes that none
+// exists and bootstraps a new one, and how long it waits between rounds.
+// Variables rather than constants only so tests can shorten them.
+var (
+	bootstrapProbeWindow   = 10 * time.Second
+	bootstrapProbeInterval = time.Second
+)
+
+// freshNodeJoinSeeds decides whether a node with an empty data directory may
+// bootstrap a new cluster, or has to join one that already exists (#582).
+//
+// go-dqlite bootstraps whenever it has no info.yaml and no cluster addresses,
+// under its fixed BootstrapID. That is right for the very first member of a new
+// cluster and wrong for a member whose volume was lost while its peers kept
+// running: it would come up as a second, empty, single-member cluster reusing
+// an ID the real cluster still lists. The seeds tell go-dqlite who to join; the
+// bootstrap peers are the other members this node would have, which it must
+// find silent before it is allowed to start a cluster of its own.
+//
+// It returns the addresses to join through, or nil when the node should keep
+// go-dqlite's own behaviour: it already has an identity, it has seeds (go-dqlite
+// then joins through them), it has no bootstrap peers, or none of them answered
+// within bootstrapProbeWindow. The window is bounded, so the one residual risk
+// is losing this node's disk while every bootstrap peer is unreachable at once.
+func freshNodeJoinSeeds(ctx context.Context, dir, address string, seeds, bootstrapPeers []string) []string {
+	if len(seeds) > 0 || fileExists(dir, infoFileName) {
+		return nil
+	}
+	peers := peerAddresses(nil, 0, address, bootstrapPeers)
+	if len(peers) == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(bootstrapProbeWindow)
+	for {
+		if peer, ok := anyNodeReachable(ctx, peers); ok {
+			log.Warn("this node has no dqlite identity but a bootstrap peer answered; "+
+				"joining the existing cluster as a new member instead of bootstrapping",
+				"node_address", address, "peer", peer, "peers", strings.Join(peers, ","))
+			return peers
+		}
+		if ctx.Err() != nil || !time.Now().Add(bootstrapProbeInterval).Before(deadline) {
+			log.Info("no dqlite bootstrap peer answered within the probe window; bootstrapping a new cluster",
+				"node_address", address, "peers", strings.Join(peers, ","), "window", bootstrapProbeWindow.String())
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(bootstrapProbeInterval):
+		}
+	}
+}
+
 // openNativeApp starts the local dqlite node at the configured address,
 // reconciling a data directory that was created at a different one.
+//
+// A node with no data directory at all first checks its bootstrap peers (see
+// freshNodeJoinSeeds) and joins the cluster they belong to rather than
+// bootstrapping a divergent one.
 //
 // Order matters. The membership repair runs *before* App.Ready: go-dqlite's
 // startup loop tries to promote this node before it reports ready, and a
 // promotion can only complete once the leader can dial the address this node
 // actually listens on. Waiting for readiness first would deadlock exactly the
 // case this function exists to repair.
-func openNativeApp(ctx context.Context, dir, address string, seeds []string, opts ...dqliteapp.Option) (*dqliteapp.App, error) {
+func openNativeApp(ctx context.Context, dir, address string, seeds, bootstrapPeers []string, opts ...dqliteapp.Option) (*dqliteapp.App, error) {
+	if joinSeeds := freshNodeJoinSeeds(ctx, dir, address, seeds, bootstrapPeers); len(joinSeeds) > 0 {
+		// Options apply in order, so this replaces the empty cluster list and
+		// makes go-dqlite generate a fresh node ID and join.
+		seeds = joinSeeds
+		opts = append(append([]dqliteapp.Option(nil), opts...), dqliteapp.WithCluster(joinSeeds))
+	}
+
 	migration, err := reconcilePersistedNodeAddress(dir, address, seeds)
 	if err != nil {
 		return nil, err

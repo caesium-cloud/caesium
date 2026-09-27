@@ -50,6 +50,12 @@ spec:
                   fieldPath: metadata.namespace
             - name: DQLITE_PORT
               value: {{ .Values.config.dqlitePort | quote }}
+            - name: REPLICAS
+              value: {{ .Values.replicaCount | quote }}
+            - name: DATA_DIR
+              value: /var/lib/caesium/dqlite
+            - name: PROBE_SECONDS
+              value: {{ .Values.peerDiscovery.probeSeconds | quote }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -62,6 +68,9 @@ spec:
               readOnly: true
             - name: peer-config
               mountPath: /etc/caesium
+            - name: data
+              mountPath: /var/lib/caesium/dqlite
+              readOnly: true
       containers:
         - name: caesium
           image: "{{ .Values.image.repository }}:{{ $imageTag }}"
@@ -74,6 +83,10 @@ spec:
               database_nodes="$(tr -d '\n' < /etc/caesium/database-nodes)"
               if [ -n "${database_nodes}" ]; then
                 export CAESIUM_DATABASE_NODES="${database_nodes}"
+              fi
+              bootstrap_peers="$(tr -d '\n' < /etc/caesium/database-bootstrap-peers 2>/dev/null || true)"
+              if [ -n "${bootstrap_peers}" ]; then
+                export CAESIUM_DATABASE_BOOTSTRAP_PEERS="${bootstrap_peers}"
               fi
               exec /bin/caesium start
           ports:

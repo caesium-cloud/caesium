@@ -9,23 +9,75 @@ data:
     #!/bin/sh
     set -eu
 
+    # Writes two files the caesium container reads at startup:
+    #   /etc/caesium/database-nodes            -> CAESIUM_DATABASE_NODES (join seeds)
+    #   /etc/caesium/database-bootstrap-peers  -> CAESIUM_DATABASE_BOOTSTRAP_PEERS
+    # Ordinal N>0 always joins through ordinals 0..N-1. Ordinal 0 bootstraps a
+    # new cluster only when its data directory is empty AND no other ordinal
+    # answers on the dqlite port within PROBE_SECONDS; if one answers, its
+    # volume was lost while the cluster kept running and it must join (#582).
+
     ORDINAL="${HOSTNAME##*-}"
 
-    if [ "${ORDINAL}" -eq 0 ]; then
-      echo "" > /etc/caesium/database-nodes
+    addr() {
+      echo "${RELEASE_NAME}-${1}.${HEADLESS_SVC}.${POD_NAMESPACE}.svc.cluster.local:${DQLITE_PORT}"
+    }
+
+    join_list() {
+      out=""
+      for a in "$@"; do
+        if [ -z "${out}" ]; then out="${a}"; else out="${out},${a}"; fi
+      done
+      echo "${out}"
+    }
+
+    if [ "${ORDINAL}" -ne 0 ]; then
+      PEERS=""
+      i=0
+      while [ "${i}" -lt "${ORDINAL}" ]; do
+        PEERS="$(join_list ${PEERS:+"${PEERS}"} "$(addr "${i}")")"
+        i=$((i + 1))
+      done
+      echo "${PEERS}" > /etc/caesium/database-nodes
+      echo "" > /etc/caesium/database-bootstrap-peers
       exit 0
     fi
 
-    PEERS=""
-    i=0
-    while [ "${i}" -lt "${ORDINAL}" ]; do
-      ADDR="${RELEASE_NAME}-${i}.${HEADLESS_SVC}.${POD_NAMESPACE}.svc.cluster.local:${DQLITE_PORT}"
-      if [ -z "${PEERS}" ]; then
-        PEERS="${ADDR}"
-      else
-        PEERS="${PEERS},${ADDR}"
-      fi
+    OTHERS=""
+    i=1
+    while [ "${i}" -lt "${REPLICAS}" ]; do
+      OTHERS="$(join_list ${OTHERS:+"${OTHERS}"} "$(addr "${i}")")"
       i=$((i + 1))
     done
+    echo "${OTHERS}" > /etc/caesium/database-bootstrap-peers
+    echo "" > /etc/caesium/database-nodes
 
-    echo "${PEERS}" > /etc/caesium/database-nodes
+    if [ -z "${OTHERS}" ]; then
+      exit 0
+    fi
+    if [ -f "${DATA_DIR}/info.yaml" ]; then
+      echo "ordinal 0 has a dqlite identity; restarting as an existing member"
+      exit 0
+    fi
+
+    # Empty data directory. The headless Service publishes not-ready
+    # addresses, so a surviving peer resolves even while it is not Ready; on a
+    # new install the other ordinals do not exist yet and never resolve.
+    deadline=$(( $(date +%s) + PROBE_SECONDS ))
+    while :; do
+      i=1
+      while [ "${i}" -lt "${REPLICAS}" ]; do
+        host="${RELEASE_NAME}-${i}.${HEADLESS_SVC}.${POD_NAMESPACE}.svc.cluster.local"
+        if nc -z -w 2 "${host}" "${DQLITE_PORT}" >/dev/null 2>&1; then
+          echo "ordinal 0 has an empty data directory and ${host}:${DQLITE_PORT} answered; joining the existing cluster"
+          echo "${OTHERS}" > /etc/caesium/database-nodes
+          exit 0
+        fi
+        i=$((i + 1))
+      done
+      if [ "$(date +%s)" -ge "${deadline}" ]; then
+        break
+      fi
+      sleep 2
+    done
+    echo "ordinal 0 has an empty data directory and no peer answered within ${PROBE_SECONDS}s; bootstrapping a new cluster"

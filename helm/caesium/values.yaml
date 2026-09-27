@@ -43,6 +43,14 @@ service:
   port: 8080
   annotations: {}
 
+# -- Peer discovery for the dqlite cluster (init container)
+peerDiscovery:
+  # -- How long ordinal 0 with an empty data directory probes the other
+  # ordinals' dqlite port before it bootstraps a new cluster. If any answers,
+  # it joins the existing cluster as a new member instead (disk-loss
+  # replacement). Adds up to this delay to ordinal 0's first start.
+  probeSeconds: 20
+
 # -- Headless service for StatefulSet peer discovery (always created)
 headlessService:
   port: 9001

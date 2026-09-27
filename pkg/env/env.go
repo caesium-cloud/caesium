@@ -168,13 +168,18 @@ type Environment struct {
 	// (internal/guardrails/guardrails_test.go); override it for an
 	// air-gapped or private-registry-only install so the helper never needs
 	// to reach Docker Hub.
-	DockerSubpathHelperImage       string        `envconfig:"DOCKER_SUBPATH_HELPER_IMAGE" default:"alpine:3.23"`
-	KubernetesConfig               string        `default:"" split_words:"true"`
-	KubernetesNamespace            string        `default:"default" split_words:"true"`
-	PodmanURI                      string        `default:"" split_words:"true"`
-	NodeAddress                    string        `default:"127.0.0.1:9001" split_words:"true"`
-	NodeLabels                     string        `default:"" split_words:"true"`
-	DatabaseNodes                  []string      `default:"" split_words:"true"`
+	DockerSubpathHelperImage string   `envconfig:"DOCKER_SUBPATH_HELPER_IMAGE" default:"alpine:3.23"`
+	KubernetesConfig         string   `default:"" split_words:"true"`
+	KubernetesNamespace      string   `default:"default" split_words:"true"`
+	PodmanURI                string   `default:"" split_words:"true"`
+	NodeAddress              string   `default:"127.0.0.1:9001" split_words:"true"`
+	NodeLabels               string   `default:"" split_words:"true"`
+	DatabaseNodes            []string `default:"" split_words:"true"`
+	// DatabaseBootstrapPeers lists the other members a node would have. A node
+	// with an empty data directory and no DatabaseNodes seeds probes them for
+	// a bounded window and joins their cluster if any answers, instead of
+	// bootstrapping a new one (#582). The Helm chart sets it for ordinal 0.
+	DatabaseBootstrapPeers         []string      `default:"" split_words:"true"`
 	APIExternalURL                 string        `envconfig:"API_EXTERNAL_URL" default:""`
 	DatabasePath                   string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
 	DatabaseType                   string        `default:"internal" split_words:"true"`

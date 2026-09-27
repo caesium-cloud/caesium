@@ -133,7 +133,7 @@ func TestNativeAppOptionsBoundTheRetainedRaftLog(t *testing.T) {
 	}, func(client.LogLevel, string, ...any) {})
 	require.NoError(t, err)
 
-	app, err := openNativeApp(ctx, dir, address, nil, opts...)
+	app, err := openNativeApp(ctx, dir, address, nil, nil, opts...)
 	require.NoError(t, err)
 	defer func() { _ = app.Close() }()
 
