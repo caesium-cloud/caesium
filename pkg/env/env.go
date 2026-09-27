@@ -3,6 +3,7 @@ package env
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"time"
@@ -56,6 +57,9 @@ func validate() error {
 		if variables.DatabaseStandbys < 0 {
 			return fmt.Errorf("CAESIUM_DATABASE_STANDBYS must be greater than or equal to 0")
 		}
+		if err := ValidateDatabaseSnapshotParams(variables.DatabaseSnapshotThreshold, variables.DatabaseSnapshotTrailing); err != nil {
+			return err
+		}
 	}
 
 	switch strings.ToLower(strings.TrimSpace(variables.WakeupFanoutMode)) {
@@ -96,6 +100,54 @@ func validate() error {
 	return nil
 }
 
+// Raft snapshot parameters for the embedded dqlite node. dqlite keeps every
+// retained Raft log entry in memory as well as on disk: an entry is released
+// only once a snapshot is taken and the entry falls more than the trailing
+// amount behind it. Between snapshots a node therefore holds between Trailing
+// and Trailing+Threshold entries (on restart it loads everything retained on
+// disk), and each entry is one committed transaction's WAL pages.
+//
+// dqlite's own defaults (threshold 1024, trailing 8192) bound that at 9,216
+// entries: about 1.26 GB at the 137 KB catalog-write entries the F2 lifecycle
+// qualification measured, where the retained log (up to 784 MB observed) plus
+// a ~150 MB process base drove a voter to its 1Gi cgroup limit. Trailing 2048
+// bounds it at 3,072 entries (about 421 MB at 137 KB) and also bounds the
+// segment files kept on the data volume. The threshold stays at dqlite's
+// default, so snapshot frequency (a full copy of the database every Threshold
+// entries) is unchanged. The cost of a smaller trailing log is that a follower
+// more than Trailing entries behind the leader's last snapshot is caught up by
+// a full snapshot install instead of by log replication.
+//
+// The Environment default tags for DatabaseSnapshotThreshold/Trailing repeat
+// these values (TestProcess pins them together).
+const (
+	DefaultDatabaseSnapshotThreshold = 1024
+	DefaultDatabaseSnapshotTrailing  = 2048
+
+	// minDatabaseSnapshotTrailing mirrors dqlite_node_set_snapshot_params_v2,
+	// which rejects a trailing amount below 4.
+	minDatabaseSnapshotTrailing = 4
+)
+
+// ValidateDatabaseSnapshotParams checks CAESIUM_DATABASE_SNAPSHOT_THRESHOLD and
+// CAESIUM_DATABASE_SNAPSHOT_TRAILING against the constraints dqlite enforces
+// when the node starts, so a bad value fails configuration instead of dqlite
+// startup. Trailing must be at least the threshold: dqlite requires it so the
+// data since the second-to-last snapshot can still be recovered from the log if
+// the last snapshot is unusable.
+func ValidateDatabaseSnapshotParams(threshold, trailing int) error {
+	if threshold < 1 || int64(threshold) > math.MaxUint32 {
+		return fmt.Errorf("CAESIUM_DATABASE_SNAPSHOT_THRESHOLD must be between 1 and %d", uint64(math.MaxUint32))
+	}
+	if trailing < minDatabaseSnapshotTrailing || int64(trailing) > math.MaxUint32 {
+		return fmt.Errorf("CAESIUM_DATABASE_SNAPSHOT_TRAILING must be between %d and %d", minDatabaseSnapshotTrailing, uint64(math.MaxUint32))
+	}
+	if trailing < threshold {
+		return fmt.Errorf("CAESIUM_DATABASE_SNAPSHOT_TRAILING (%d) must be greater than or equal to CAESIUM_DATABASE_SNAPSHOT_THRESHOLD (%d)", trailing, threshold)
+	}
+	return nil
+}
+
 // Variables returns the processed environment variables.
 func Variables() Environment {
 	return *variables
@@ -132,6 +184,8 @@ type Environment struct {
 	DatabaseShards                 int           `default:"1" split_words:"true"`
 	DatabaseVoters                 int           `default:"3" split_words:"true"`
 	DatabaseStandbys               int           `default:"3" split_words:"true"`
+	DatabaseSnapshotThreshold      int           `default:"1024" split_words:"true"`
+	DatabaseSnapshotTrailing       int           `default:"2048" split_words:"true"`
 	DatabaseConsoleEnabled         bool          `default:"false" split_words:"true"`
 	ManualTriggerAPIKey            string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
 	EventIngestAPIKey              string        `envconfig:"EVENT_INGEST_API_KEY" default:""`
