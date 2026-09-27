@@ -84,7 +84,7 @@
           "ordinal_0_rejoin": "blocked until a fresh caesium-0 can join the surviving quorum instead of self-bootstrapping",
           "restore": "requires a stopped-member consistent copy, pre-startup per-file digest match, peer-independent local assertion and failing omitted-snapshot control",
           "snapshot_catch_up": "measure leader truncation past the stopped member's index; no threshold is assumed",
-          "rollback": "record observed behavior only; no binary rollback guarantee"
+          "rollback": "record observed behavior only; no binary rollback guarantee. Run v0.1.0 via the chart on an isolated copy of all three candidate-migrated PVCs (taken with the three members frozen together, crash-consistent), in a separate namespace whose NetworkPolicy isolation is proved by dialling before the release starts; blocked only when the copy, isolation or observation fails"
         }
       },
       "standalone": {

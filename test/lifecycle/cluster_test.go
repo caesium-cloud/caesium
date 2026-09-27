@@ -1891,3 +1891,165 @@ func TestLifecycleClusterPostStorage(t *testing.T) {
 	writeJSON(t, "cluster-post-storage.json", map[string]any{"members": memberEvidence(topo, membership),
 		"leader": membership.Leader, "retained_run_ids": []string{fx.Succeeded.ID, fx.Failed.ID, fx.InFlight.ID, fx.Predecessor.ID}})
 }
+
+// TestLifecycleClusterRollbackProbe is the in-cluster probe for F2's isolated
+// rollback recorded-outcome case (W8-β). The host controller runs it in a pod
+// of the ISOLATED rollback namespace, and in the main namespace's runner pod,
+// because only in-cluster callers can dial pod IPs and only a caller inside
+// the isolated namespace is permitted to reach its members. It never judges an
+// outcome: every mode prints one marker-prefixed JSON line with what it saw,
+// and the host decides whether the observation is complete. The test is
+// skipped unless the host selects a mode.
+//
+//	listen  accept and close TCP connections on :9001 (isolation target)
+//	dial    TCP-dial each label=host:port in CAESIUM_LIFECYCLE_ROLLBACK_TARGETS
+//	http    read /health, /health/ready and the seeded fixture through each
+//	        label=base URL in CAESIUM_LIFECYCLE_ROLLBACK_TARGETS
+func TestLifecycleClusterRollbackProbe(t *testing.T) {
+	const marker = "CAESIUM_ROLLBACK_PROBE_JSON "
+	mode := strings.TrimSpace(os.Getenv("CAESIUM_LIFECYCLE_ROLLBACK_MODE"))
+	if mode == "" {
+		t.Skip("CAESIUM_LIFECYCLE_ROLLBACK_MODE is set only by scripts/lifecycle-tests.sh")
+	}
+	emit := func(v any) {
+		raw, err := json.Marshal(v)
+		require.NoError(t, err)
+		fmt.Printf("%s%s\n", marker, raw)
+	}
+	type target struct{ Label, Value string }
+	parseTargets := func() []target {
+		var out []target
+		for _, item := range strings.Split(mustEnv(t, "CAESIUM_LIFECYCLE_ROLLBACK_TARGETS"), ",") {
+			label, value, ok := strings.Cut(strings.TrimSpace(item), "=")
+			require.Truef(t, ok && label != "" && value != "", "malformed rollback probe target %q", item)
+			out = append(out, target{Label: label, Value: value})
+		}
+		return out
+	}
+	switch mode {
+	case "listen":
+		ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", ":9001")
+		require.NoError(t, err)
+		defer func() { _ = ln.Close() }()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	case "dial":
+		type dialResult struct {
+			Label     string `json:"label"`
+			Target    string `json:"target"`
+			Reachable bool   `json:"reachable"`
+			Error     string `json:"error,omitempty"`
+			ElapsedMs int64  `json:"elapsed_ms"`
+		}
+		var results []dialResult
+		for _, tg := range parseTargets() {
+			start := time.Now()
+			conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(t.Context(), "tcp", tg.Value)
+			r := dialResult{Label: tg.Label, Target: tg.Value, ElapsedMs: time.Since(start).Milliseconds()}
+			if err != nil {
+				r.Error = err.Error()
+			} else {
+				r.Reachable = true
+				_ = conn.Close()
+			}
+			results = append(results, r)
+		}
+		emit(map[string]any{"mode": "dial", "observed_at": time.Now().UTC(), "results": results})
+	case "http":
+		fx := clusterFixture{}
+		require.True(t, readJSON(t, "cluster-fixture.json", &fx), "seed fixture missing from the rollback probe pod")
+		type httpRead struct {
+			Path   string `json:"path"`
+			Status int    `json:"status,omitempty"`
+			Body   string `json:"body,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
+		ctx := t.Context()
+		members := []map[string]any{}
+		for _, tg := range parseTargets() {
+			c := &client{base: strings.TrimRight(tg.Value, "/"), manualKey: os.Getenv("CAESIUM_MANUAL_TRIGGER_API_KEY"),
+				http: &http.Client{Timeout: 10 * time.Second}}
+			read := func(path string) (httpRead, []byte) {
+				status, raw, err := c.do(ctx, http.MethodGet, path, nil)
+				r := httpRead{Path: path, Status: status, Body: truncate(raw, 2048)}
+				if err != nil {
+					r.Error = err.Error()
+				}
+				return r, raw
+			}
+			obs := map[string]any{"member": tg.Label, "base": c.base, "observed_at": time.Now().UTC()}
+			health, _ := read("/health")
+			ready, _ := read("/health/ready")
+			obs["health"], obs["health_ready"] = health, ready
+			if health.Status == 0 && ready.Status == 0 {
+				obs["fixture_reads"] = "not attempted: the member returned no HTTP answer on /health or /health/ready"
+				members = append(members, obs)
+				continue
+			}
+			obs["features"], _ = read("/v1/system/features")
+			jobs, raw := read("/v1/jobs")
+			jobsObs := map[string]any{"status": jobs.Status, "error": jobs.Error}
+			if jobs.Status == http.StatusOK {
+				var listed []struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(raw, &listed); err != nil {
+					jobsObs["decode_error"] = err.Error()
+				} else {
+					seen := map[string]bool{}
+					for _, j := range listed {
+						seen[j.ID] = true
+					}
+					present := map[string]bool{}
+					for key, job := range fx.Jobs {
+						present[key] = seen[job.ID]
+					}
+					jobsObs["listed"] = len(listed)
+					jobsObs["fixture_jobs_present"] = present
+				}
+			}
+			obs["jobs"] = jobsObs
+			runs := map[string]any{}
+			for key, run := range map[string]runFixture{"succeeded": fx.Succeeded, "failed": fx.Failed,
+				"in_flight": fx.InFlight, "predecessor": fx.Predecessor} {
+				row := map[string]any{"run_id": run.ID, "job_id": run.JobID, "seeded_status": run.Status,
+					"seeded_tasks": len(run.Tasks), "seeded_events": len(run.Events)}
+				got, err := c.run(ctx, run.JobID, run.ID)
+				if err != nil {
+					row["read_error"] = err.Error()
+				} else {
+					row["observed_status"] = got.Status
+					row["observed_tasks"] = len(got.Tasks)
+				}
+				events, err := readEventBacklog(ctx, c, run.ID, 0)
+				if err != nil {
+					row["events_error"] = err.Error()
+				} else {
+					have := map[string]bool{}
+					for _, e := range events {
+						have[e.key()] = true
+					}
+					missing := 0
+					for _, e := range run.Events {
+						if !have[e.key()] {
+							missing++
+						}
+					}
+					row["observed_events"] = len(events)
+					row["seeded_events_missing"] = missing
+				}
+				runs[key] = row
+			}
+			obs["fixture_runs"] = runs
+			members = append(members, obs)
+		}
+		emit(map[string]any{"mode": "http", "members": members})
+	default:
+		t.Fatalf("unknown CAESIUM_LIFECYCLE_ROLLBACK_MODE %q", mode)
+	}
+}
