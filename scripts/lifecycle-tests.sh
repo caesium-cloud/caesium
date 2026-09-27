@@ -981,6 +981,597 @@ raise SystemExit(0 if record.get('lifecycle_id')==os.environ['LC_ID'] and record
 PY
     LC_ROLLING_PASS=1
   fi
+  # ===========================================================================
+  # BEGIN lc_rollback_* (F2 rollback-recorded-outcome, W8-β)
+  #
+  # Binary rollback is not a supported path (F1). This records what the pinned
+  # previous release does when started on an ISOLATED copy of the
+  # candidate-migrated three-member volume set, and never judges it: the case
+  # is `recorded-outcome` with observations, or `blocked` when the copy, the
+  # isolation proof or the observation itself failed.
+  #
+  # Consistency: scaling the StatefulSet to zero is not usable here. The chart
+  # is OrderedReady and every pod IP changes on a cold start, so caesium-0
+  # would restart alone with all three recorded addresses stale; #536's address
+  # repair needs a reachable leader and a sole-member recovery needs a
+  # one-member configuration, so the main cluster could not reform. Instead all
+  # three caesium containers are frozen together with containerd's cgroup
+  # freezer (`ctr task pause`) while read-only helper pods on the same nodes
+  # copy each PVC to an emptyDir, then thawed. The copy is the state of all
+  # three members at one frozen instant, including unflushed page-cache writes,
+  # i.e. crash-consistent (F1 failure case 1), not a clean shutdown. Each
+  # member's live bytes are hashed while frozen and must equal its copy. The
+  # main cluster is then re-verified (Ready, direct Raft membership, retained
+  # fixture) before any later destructive case runs.
+  #
+  # Isolation: the copy is restored into fresh PVCs of a separate namespace
+  # whose NetworkPolicy admits only its own pods, DNS and the API server. A
+  # listener in that namespace and the main runner prove it by dialling: an
+  # in-namespace positive control, pre-policy reachability of the main
+  # members, and post-policy unreachability in both directions. The previous
+  # release is installed there only after that proof.
+  # ===========================================================================
+  LC_RB_NS="${LC_ID}-rollback"
+  LC_RB_DIR="$LC_ART/cluster-logs/rollback"
+  LC_RB_LABELS="caesium-lifecycle-id: $LC_ID, caesium-lifecycle-role: rollback"
+  lc_rb() { kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_RB_NS" "$@"; }
+  lc_rollback_mark() {
+    python3 - "$LC_RB_DIR/timeline.tsv" "$*" <<'PY'
+import datetime,sys
+with open(sys.argv[1],'a') as out:
+  out.write(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds')+'\t'+sys.argv[2]+'\n')
+PY
+  }
+  lc_rollback_helper() {
+    # <namespace> <name> <claim> <read-only true|false> <node-or-empty> <file>
+    local ns="$1" name="$2" claim="$3" ro="$4" node="$5" file="$6" selector=""
+    if [[ -n "$node" ]]; then selector="  nodeSelector: {kubernetes.io/hostname: $node}"; fi
+    cat >"$file" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+  namespace: $ns
+  labels: {$LC_RB_LABELS}
+spec:
+  restartPolicy: Never
+  securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+$selector
+  containers:
+    - name: storage
+      image: $LC_TASK
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - {name: data, mountPath: /data, readOnly: $ro}
+        - {name: snap, mountPath: /snap}
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: $claim, readOnly: $ro}
+    - {name: snap, emptyDir: {}}
+EOF
+    kubectl --kubeconfig "$LC_KUBE" apply -f "$file" >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    kubectl --kubeconfig "$LC_KUBE" --namespace "$ns" wait --for=condition=Ready "pod/$name" --timeout=180s \
+      >>"$LC_RB_DIR/kubectl.log" 2>&1
+  }
+  lc_rollback_ctr() {
+    # <node> <out-file> ctr args...; exit code is ctr's, or 124/127 from the timer.
+    local node="$1" out="$2"
+    shift 2
+    : >"$out"
+    lc_run_timed 20 "$out" docker exec --privileged "$node" ctr --namespace=k8s.io "$@"
+  }
+  lc_rollback_task_state() {
+    # <node> <container-id> <want PAUSED|RUNNING> <out-file>
+    lc_rollback_ctr "$1" "$4" task ls || return 1
+    awk -v id="$2" -v want="$3" '$1==id && $3==want {found=1} END {exit found?0:1}' "$4"
+  }
+  lc_rollback_probe() {
+    # <rb|main> <dial|http> <targets> <out-json>; the marker line is required.
+    local where="$1" mode="$2" targets="$3" out="$4" raw="${4%.json}.log" rc=0
+    local -a cmd=(env CAESIUM_LIFECYCLE_ARTIFACTS=/artifacts CAESIUM_LIFECYCLE_ID="$LC_ID"
+      CAESIUM_MANUAL_TRIGGER_API_KEY=caesium-lifecycle-manual-key
+      CAESIUM_LIFECYCLE_ROLLBACK_MODE="$mode" CAESIUM_LIFECYCLE_ROLLBACK_TARGETS="$targets"
+      /lifecycle.test -test.v -test.count=1 -test.run '^TestLifecycleClusterRollbackProbe$' -test.timeout=10m)
+    if [[ "$where" == rb ]]; then
+      lc_rb exec pod/lifecycle-rb-probe -c probe -- "${cmd[@]}" >"$raw" 2>&1 || rc=$?
+    else
+      lc_ns exec pod/lifecycle-runner -c runner -- "${cmd[@]}" >"$raw" 2>&1 || rc=$?
+    fi
+    printf 'exit=%s\n' "$rc" >>"$raw"
+    if ! grep -m1 '^CAESIUM_ROLLBACK_PROBE_JSON ' "$raw" | cut -d' ' -f2- >"$out"; then rc=1; fi
+    [[ -s "$out" ]] || rc=1
+    return "$rc"
+  }
+  # Freeze all three members, copy every PVC while frozen, always thaw.
+  lc_rollback_copy() {
+    local n rc=0 pids=() copy_rc
+    for n in 0 1 2; do
+      LC_RB_NODE[n]="$(lc_ns get pod "caesium-$n" -o jsonpath='{.spec.nodeName}')" || return 1
+      LC_RB_CID[n]="$(lc_ns get pod "caesium-$n" -o jsonpath='{.status.containerStatuses[?(@.name=="caesium")].containerID}')" || return 1
+      LC_RB_CID[n]="${LC_RB_CID[n]#containerd://}"
+      [[ -n "${LC_RB_NODE[n]}" && "${LC_RB_CID[n]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+      printf '%s %s %s\n' "caesium-$n" "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" >>"$LC_RB_DIR/members.txt"
+      lc_rollback_helper "$LC_ID" "lifecycle-rb-src-$n" "data-caesium-$n" true "" \
+        "$LC_RB_DIR/src-$n.yaml" || return 1
+      [[ "$(lc_ns get pod "lifecycle-rb-src-$n" -o jsonpath='{.spec.nodeName}')" == "${LC_RB_NODE[n]}" ]] || return 1
+    done
+    lc_ns get pods -o json >"$LC_RB_DIR/main-pods-before-freeze.json" || return 1
+    lc_rollback_mark "freeze begin"
+    for n in 0 1 2; do
+      lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/pause-$n.txt" task pause "${LC_RB_CID[n]}" || rc=1
+      lc_rollback_mark "paused caesium-$n rc=$rc"
+    done
+    for n in 0 1 2; do
+      lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" PAUSED "$LC_RB_DIR/paused-state-$n.txt" || rc=1
+    done
+    if [[ "$rc" == 0 ]]; then
+      for n in 0 1 2; do
+        lc_ns exec "lifecycle-rb-src-$n" -c storage -- sh -c \
+          'set -eo pipefail; cd /data; find . -type f -exec sha256sum {} \; | sort >/tmp/live.sha256
+           tar -cf - -C /data . | tar -xpf - -C /snap
+           cd /snap; find . -type f -exec sha256sum {} \; | sort >/tmp/copy.sha256
+           cmp /tmp/live.sha256 /tmp/copy.sha256 >&2; cat /tmp/copy.sha256' \
+          >"$LC_RB_DIR/copy-$n.sha256" 2>"$LC_RB_DIR/copy-$n.err" &
+        pids[n]=$!
+      done
+      for n in 0 1 2; do
+        copy_rc=0
+        wait "${pids[n]}" || copy_rc=$?
+        printf 'frozen copy exit=%s\n' "$copy_rc" >>"$LC_RB_DIR/copy-$n.err"
+        [[ "$copy_rc" == 0 && -s "$LC_RB_DIR/copy-$n.sha256" ]] || rc=1
+      done
+      lc_rollback_mark "frozen copies complete rc=$rc"
+    fi
+    for n in 0 1 2; do
+      lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/resume-$n.txt" task resume "${LC_RB_CID[n]}" || true
+      lc_rollback_mark "resumed caesium-$n"
+    done
+    for n in 0 1 2; do
+      lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" RUNNING "$LC_RB_DIR/resumed-state-$n.txt" || rc=1
+    done
+    lc_rollback_mark "freeze end rc=$rc"
+    if [[ "$rc" == 0 ]]; then
+      for n in 0 1 2; do
+        lc_ns exec "lifecycle-rb-src-$n" -c storage -- tar -cf - -C /snap . >"$LC_RB_DIR/copy-$n.tar" || rc=1
+        lc_ns exec "lifecycle-rb-src-$n" -c storage -- cat /snap/info.yaml >"$LC_RB_DIR/copy-info-$n.yaml" || rc=1
+        lc_ns exec "lifecycle-rb-src-$n" -c storage -- cat /snap/cluster.yaml >"$LC_RB_DIR/copy-cluster-$n.yaml" || rc=1
+        [[ -s "$LC_RB_DIR/copy-$n.tar" ]] || rc=1
+      done
+    fi
+    return "$rc"
+  }
+  # Re-prove the main cluster after the freeze with the same runner phase the
+  # storage cases use: Ready candidate pods, three voters by direct Raft RPC
+  # with unchanged IDs and volumes, and the retained fixture unchanged.
+  lc_rollback_main_baseline() {
+    local rc=0
+    lc_ns wait --for=condition=Ready pod/caesium-0 pod/caesium-1 pod/caesium-2 --timeout=300s \
+      >"$LC_RB_DIR/main-ready.log" 2>&1 || rc=$?
+    lc_ns get pods -o json >"$LC_RB_DIR/main-pods-after-freeze.json" 2>&1 || rc=1
+    if [[ "$rc" == 0 ]]; then
+      lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || rc=$?
+      cp "$LC_ART/cluster-logs/PostStorage.log" "$LC_RB_DIR/main-baseline-PostStorage.log" || true
+      lc_copy_runner_artifacts || rc=1
+      cp "$LC_ART/cluster-post-storage.json" "$LC_RB_DIR/main-baseline.json" || rc=1
+    fi
+    printf '%s\n' "$rc" >"$LC_RB_DIR/main-baseline-exit.txt"
+    lc_rollback_mark "main cluster re-verified rc=$rc"
+    return "$rc"
+  }
+  # Fresh PVCs in the isolated namespace, one per worker so the StatefulSet's
+  # required anti-affinity can place every member next to its PV.
+  lc_rollback_restore() {
+    local n sc rc=0
+    sc="$(lc_ns get pvc data-caesium-0 -o jsonpath='{.spec.storageClassName}')" || return 1
+    cat >"$LC_RB_DIR/namespace.yaml" <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $LC_RB_NS
+  labels: {$LC_RB_LABELS}
+EOF
+    kubectl --kubeconfig "$LC_KUBE" apply -f "$LC_RB_DIR/namespace.yaml" >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    for n in 0 1 2; do
+      cat >"$LC_RB_DIR/pvc-$n.yaml" <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-caesium-$n
+  namespace: $LC_RB_NS
+  labels: {$LC_RB_LABELS}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: $sc
+  resources: {requests: {storage: 1Gi}}
+EOF
+      kubectl --kubeconfig "$LC_KUBE" apply -f "$LC_RB_DIR/pvc-$n.yaml" >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+      lc_rollback_helper "$LC_RB_NS" "lifecycle-rb-dst-$n" "data-caesium-$n" false "${LC_RB_NODE[n]}" \
+        "$LC_RB_DIR/dst-$n.yaml" || return 1
+      lc_rb exec -i "lifecycle-rb-dst-$n" -c storage -- tar -xpf - -C /data <"$LC_RB_DIR/copy-$n.tar" || rc=1
+      lc_rb exec "lifecycle-rb-dst-$n" -c storage -- sh -c \
+        'cd /data && find . -type f -exec sha256sum {} \; | sort' >"$LC_RB_DIR/restored-$n.sha256" || rc=1
+      cmp -s "$LC_RB_DIR/copy-$n.sha256" "$LC_RB_DIR/restored-$n.sha256" || rc=1
+    done
+    lc_rb delete pod lifecycle-rb-dst-0 lifecycle-rb-dst-1 lifecycle-rb-dst-2 --wait=true --timeout=120s \
+      >>"$LC_RB_DIR/kubectl.log" 2>&1 || rc=1
+    lc_rb get pvc -o json >"$LC_RB_DIR/rollback-pvcs.json" 2>&1 || rc=1
+    lc_rollback_mark "restored copies into $LC_RB_NS rc=$rc"
+    return "$rc"
+  }
+  lc_rollback_isolate() {
+    local rc=0 n echo_ip cp_ip svc_ip recorder_ip nodes="" ip main_targets="" main0="" settle
+    cat >"$LC_RB_DIR/probe-pods.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-rb-probe
+  namespace: $LC_RB_NS
+  labels: {$LC_RB_LABELS}
+spec:
+  restartPolicy: Never
+  volumes: [{name: artifacts, emptyDir: {}}]
+  containers:
+    - name: probe
+      image: $LC_RUNNER
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 86400"]
+      volumeMounts: [{name: artifacts, mountPath: /artifacts}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-rb-echo
+  namespace: $LC_RB_NS
+  labels: {$LC_RB_LABELS}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: echo
+      image: $LC_RUNNER
+      imagePullPolicy: IfNotPresent
+      command: ["/lifecycle.test"]
+      args: ["-test.run", "^TestLifecycleClusterRollbackProbe$", "-test.timeout", "3h"]
+      env: [{name: CAESIUM_LIFECYCLE_ROLLBACK_MODE, value: listen}]
+      readinessProbe: {tcpSocket: {port: 9001}, periodSeconds: 1}
+EOF
+    kubectl --kubeconfig "$LC_KUBE" apply -f "$LC_RB_DIR/probe-pods.yaml" >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    lc_rb wait --for=condition=Ready pod/lifecycle-rb-probe pod/lifecycle-rb-echo --timeout=120s \
+      >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    lc_rb cp "$LC_ART/cluster-fixture.json" lifecycle-rb-probe:/artifacts/cluster-fixture.json -c probe \
+      >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    echo_ip="$(lc_rb get pod lifecycle-rb-echo -o jsonpath='{.status.podIP}')"
+    recorder_ip="$(lc_ns get pod lifecycle-runner -o jsonpath='{.status.podIP}')"
+    svc_ip="$(lc_ns get service lifecycle-recorder -o jsonpath='{.spec.clusterIP}')"
+    for n in 0 1 2; do
+      ip="$(lc_ns get pod "caesium-$n" -o jsonpath='{.status.podIP}')"
+      [[ -n "$ip" ]] || return 1
+      main_targets="$main_targets,main-caesium-$n-dqlite=$ip:9001,main-caesium-$n-http=$ip:8080"
+      if [[ "$n" == 0 ]]; then main0="main-caesium-0-http=$ip:8080"; fi
+    done
+    [[ -n "$echo_ip" && -n "$recorder_ip" && -n "$svc_ip" ]] || return 1
+    main_targets="${main_targets#,},main-recorder-pod=$recorder_ip:8090,main-recorder-service=$svc_ip:8090"
+    # Controls before the policy exists: the probe reaches its own namespace
+    # and the main members, so a later refusal is the policy, not the tooling.
+    lc_rollback_probe rb dial "rb-echo=$echo_ip:9001,$main_targets" "$LC_RB_DIR/isolation-pre-policy.json" || rc=1
+    while IFS= read -r ip; do
+      [[ -n "$ip" ]] && nodes="$nodes        - ipBlock: {cidr: $ip/32}"$'\n'
+    done < <(kubectl --kubeconfig "$LC_KUBE" get nodes \
+      -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}')
+    cp_ip="$(kubectl --kubeconfig "$LC_KUBE" get nodes -l node-role.kubernetes.io/control-plane \
+      -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+    local api_ip
+    api_ip="$(kubectl --kubeconfig "$LC_KUBE" --namespace default get service kubernetes -o jsonpath='{.spec.clusterIP}')"
+    [[ -n "$nodes" && -n "$cp_ip" && -n "$api_ip" ]] || return 1
+    # Ingress: own namespace, plus node addresses so kubelet probes keep
+    # working. Egress: own namespace, cluster DNS and the API server only.
+    cat >"$LC_RB_DIR/network-policy.yaml" <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lifecycle-rollback-isolation
+  namespace: $LC_RB_NS
+  labels: {$LC_RB_LABELS}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+$nodes
+  egress:
+    - to: [{podSelector: {}}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to: [{ipBlock: {cidr: $cp_ip/32}}]
+      ports: [{protocol: TCP, port: 6443}]
+    - to: [{ipBlock: {cidr: $api_ip/32}}]
+      ports: [{protocol: TCP, port: 443}]
+EOF
+    kubectl --kubeconfig "$LC_KUBE" apply -f "$LC_RB_DIR/network-policy.yaml" >>"$LC_RB_DIR/kubectl.log" 2>&1 || return 1
+    lc_rollback_mark "network policy applied"
+    # Enforcement is asynchronous; wait for the first refusal, bounded.
+    for _ in {1..20}; do
+      lc_rollback_probe rb dial "$main0" \
+        "$LC_RB_DIR/isolation-settle.json" || true
+      settle="$(LC_F="$LC_RB_DIR/isolation-settle.json" python3 -c '
+import json,os
+try:print("refused" if not json.load(open(os.environ["LC_F"]))["results"][0]["reachable"] else "open")
+except Exception:print("unknown")')"
+      [[ "$settle" == refused ]] && break
+      sleep 3
+    done
+    lc_rollback_probe rb dial "rb-echo=$echo_ip:9001,$main_targets" "$LC_RB_DIR/isolation-from-rollback.json" || rc=1
+    lc_rollback_probe main dial "$main0,rb-echo-from-main=$echo_ip:9001" \
+      "$LC_RB_DIR/isolation-from-main.json" || rc=1
+    LC_RB_DIR="$LC_RB_DIR" python3 - >"$LC_RB_DIR/isolation.json" <<'PY' || rc=1
+import json,os,pathlib,sys
+d=pathlib.Path(os.environ['LC_RB_DIR'])
+def results(name):
+  return {r['label']:r for r in json.loads((d/name).read_text())['results']}
+pre=results('isolation-pre-policy.json');post=results('isolation-from-rollback.json')
+main=results('isolation-from-main.json')
+problems=[]
+main_labels=[k for k in pre if k.startswith('main-')]
+if not pre.get('rb-echo',{}).get('reachable'):problems.append('pre-policy in-namespace control failed')
+for k in main_labels:
+  if k.startswith('main-caesium') and not pre[k]['reachable']:
+    problems.append(f'pre-policy control {k} was not reachable, so a later refusal proves nothing')
+if not post.get('rb-echo',{}).get('reachable'):problems.append('post-policy in-namespace positive control failed')
+for k in main_labels:
+  if post.get(k,{}).get('reachable',True):problems.append(f'rollback namespace still reaches {k}')
+first=next(k for k in main if k.startswith('main-caesium-0-http'))
+if not main[first]['reachable']:problems.append('main runner positive control failed')
+if main.get('rb-echo-from-main',{}).get('reachable',True):problems.append('main runner still reaches the rollback namespace')
+out={'proved':not problems,'problems':problems,'pre_policy':pre,'post_policy_from_rollback':post,
+  'post_policy_from_main':main}
+print(json.dumps(out,indent=2))
+sys.exit(0 if not problems else 1)
+PY
+    lc_rollback_mark "isolation probed rc=$rc"
+    return "$rc"
+  }
+  # Install the pinned previous release on the copy and watch it, bounded.
+  lc_rollback_observe() {
+    local rc=0 n start=$SECONDS poll=0 targets="" ip
+    helm install caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_RB_NS" \
+      --values "$LC_VALUES" --set image.tag=v0.1.0 >"$LC_RB_DIR/helm-install.log" 2>&1 || rc=$?
+    printf '%s\n' "$rc" >"$LC_RB_DIR/helm-install-exit.txt"
+    lc_rollback_mark "helm install previous release rc=$rc"
+    [[ "$rc" == 0 ]] || return 1
+    helm get manifest caesium --kubeconfig "$LC_KUBE" --namespace "$LC_RB_NS" \
+      >"$LC_RB_DIR/manifest-installed.yaml" 2>&1 || rc=1
+    # Stop once every created member is Ready, or once each has restarted at
+    # least twice (the outcome has repeated), after 60 s; never past 300 s.
+    while (( SECONDS - start < 300 )); do
+      sleep 5
+      poll=$((poll + 1))
+      lc_rb get pods -o json >"$LC_RB_DIR/poll.json" 2>/dev/null || continue
+      if LC_RB_DIR="$LC_RB_DIR" LC_ELAPSED=$((SECONDS - start)) python3 - <<'PY'; then break; fi
+import datetime,json,os,pathlib,sys
+d=pathlib.Path(os.environ['LC_RB_DIR']);elapsed=int(os.environ['LC_ELAPSED'])
+pods=[p for p in json.loads((d/'poll.json').read_text()).get('items',[])
+  if p['metadata']['name'] in ('caesium-0','caesium-1','caesium-2')]
+row={'at':datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),'elapsed_s':elapsed,'members':{}}
+ready=0;repeated=0
+for p in pods:
+  st=[s for s in p.get('status',{}).get('containerStatuses',[]) if s.get('name')=='caesium']
+  s=st[0] if st else {}
+  state=next(iter(s.get('state',{})),'none')
+  last=s.get('lastState',{}).get('terminated',{})
+  ok=bool(s.get('ready'))
+  row['members'][p['metadata']['name']]={'phase':p.get('status',{}).get('phase'),'ready':ok,
+    'restart_count':s.get('restartCount',0),'state':state,
+    'reason':next(iter(s.get('state',{}).values()),{}).get('reason'),'last_exit_code':last.get('exitCode')}
+  ready+=ok;repeated+=s.get('restartCount',0)>=2
+with open(d/'timeline-pods.jsonl','a') as out:out.write(json.dumps(row)+'\n')
+done=(pods and ready==len(pods)==3) or (elapsed>=60 and pods and repeated==len(pods))
+sys.exit(0 if done else 1)
+PY
+    done
+    lc_rollback_mark "observation window closed after $((SECONDS - start))s, $poll polls"
+    lc_rb get pods -o json >"$LC_RB_DIR/rollback-pods.json" 2>&1 || rc=1
+    lc_rb get statefulset caesium -o json >"$LC_RB_DIR/rollback-statefulset.json" 2>&1 || rc=1
+    lc_rb get events --sort-by=.metadata.creationTimestamp -o wide >"$LC_RB_DIR/rollback-events.txt" 2>&1 || true
+    for n in 0 1 2; do
+      if lc_rb get pod "caesium-$n" >/dev/null 2>&1; then
+        lc_rb logs "caesium-$n" -c caesium --timestamps=true --tail=-1 >"$LC_RB_DIR/caesium-$n.log" 2>"$LC_RB_DIR/caesium-$n.log.err" || true
+        lc_rb logs "caesium-$n" -c caesium --previous --timestamps=true --tail=-1 \
+          >"$LC_RB_DIR/caesium-$n-previous.log" 2>"$LC_RB_DIR/caesium-$n-previous.log.err" || true
+        ip="$(lc_rb get pod "caesium-$n" -o jsonpath='{.status.podIP}')"
+        [[ -n "$ip" ]] && targets="$targets,caesium-$n=http://$ip:8080"
+      fi
+    done
+    if [[ -n "$targets" ]]; then
+      lc_rollback_probe rb http "${targets#,}" "$LC_RB_DIR/http.json" || rc=1
+    fi
+    lc_rollback_mark "public HTTP surface probed rc=$rc"
+    lc_rb scale statefulset/caesium --replicas=0 >>"$LC_RB_DIR/kubectl.log" 2>&1 || rc=1
+    for n in 0 1 2; do
+      lc_rb wait --for=delete "pod/caesium-$n" --timeout=120s >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
+    done
+    # What did the refused (or accepted) start leave on the copy?
+    for n in 0 1 2; do
+      lc_rollback_helper "$LC_RB_NS" "lifecycle-rb-dst-$n" "data-caesium-$n" true "${LC_RB_NODE[n]}" \
+        "$LC_RB_DIR/post-$n.yaml" || { rc=1; continue; }
+      lc_rb exec "lifecycle-rb-dst-$n" -c storage -- sh -c \
+        'cd /data && find . -type f -exec sha256sum {} \; | sort' >"$LC_RB_DIR/post-run-$n.sha256" || rc=1
+      lc_rb exec "lifecycle-rb-dst-$n" -c storage -- cat /data/info.yaml >"$LC_RB_DIR/post-run-info-$n.yaml" || rc=1
+    done
+    lc_rb delete pod lifecycle-rb-dst-0 lifecycle-rb-dst-1 lifecycle-rb-dst-2 --ignore-not-found=true \
+      --wait=true --timeout=120s >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
+    lc_rollback_mark "post-run volumes read rc=$rc"
+    return "$rc"
+  }
+  # Build the observations and the case record. Blocked only when the copy,
+  # the isolation proof or an observation failed; any product behavior is a
+  # recorded outcome.
+  lc_rollback_record() {
+    local reason="$1" detail
+    detail="$(LC_RB_DIR="$LC_RB_DIR" LC_RB_NS="$LC_RB_NS" LC_REASON="$reason" LC_PREV="$LC_PREV" python3 - <<'PY'
+import hashlib,json,os,pathlib,re,sys
+d=pathlib.Path(os.environ['LC_RB_DIR']);reason=os.environ['LC_REASON']
+def text(name,limit=None):
+  p=d/name
+  if not p.exists():return None
+  s=p.read_text(errors='replace')
+  return s if limit is None or len(s)<=limit else s[:limit]+f'\n...[truncated, {len(s)} bytes in {name}]'
+def js(name):
+  try:return json.loads((d/name).read_text())
+  except Exception:return None
+def manifest(name):
+  s=text(name)
+  if s is None:return None
+  return {line.split(None,1)[1]:line.split(None,1)[0] for line in s.splitlines() if line.strip()}
+problems=[reason] if reason else []
+timeline=[dict(zip(('at','event'),line.split('\t',1))) for line in (text('timeline.tsv') or '').splitlines()]
+members_txt=(text('members.txt') or '').split('\n')
+copy={}
+for n in range(3):
+  m=manifest(f'copy-{n}.sha256');r=manifest(f'restored-{n}.sha256');post=manifest(f'post-run-{n}.sha256')
+  tar=d/f'copy-{n}.tar'
+  changed=None
+  if m is not None and post is not None:
+    changed=sorted(k for k in set(m)|set(post) if m.get(k)!=post.get(k))
+  copy[f'caesium-{n}']={'member':next((l for l in members_txt if l.startswith(f'caesium-{n} ')),None),
+    'paused_verified':'PAUSED' in (text(f'paused-state-{n}.txt') or ''),
+    'resumed_verified':'RUNNING' in (text(f'resumed-state-{n}.txt') or ''),
+    'frozen_copy_log':text(f'copy-{n}.err'),
+    'files':len(m) if m else 0,'tar_bytes':tar.stat().st_size if tar.exists() else 0,
+    'tar_sha256':hashlib.sha256(tar.read_bytes()).hexdigest() if tar.exists() else None,
+    'copied_info_yaml':text(f'copy-info-{n}.yaml'),'copied_cluster_yaml':text(f'copy-cluster-{n}.yaml'),
+    'restored_manifest_equals_copy':m is not None and m==r,
+    'post_run_info_yaml':text(f'post-run-info-{n}.yaml'),
+    'post_run_changed_files':changed}
+freeze=[t for t in timeline if t['event'].startswith(('freeze','paused','resumed'))]
+pods_before=js('main-pods-before-freeze.json') or {};pods_after=js('main-pods-after-freeze.json') or {}
+def restarts(doc):
+  out={}
+  for p in doc.get('items',[]):
+    if p['metadata']['name'] in ('caesium-0','caesium-1','caesium-2'):
+      s=[c for c in p.get('status',{}).get('containerStatuses',[]) if c.get('name')=='caesium']
+      out[p['metadata']['name']]={'uid':p['metadata'].get('uid'),'ip':p.get('status',{}).get('podIP'),
+        'restart_count':s[0].get('restartCount') if s else None,'ready':bool(s and s[0].get('ready'))}
+  return out
+main={'before_freeze':restarts(pods_before),'after_freeze':restarts(pods_after),
+  'baseline_phase_exit':(text('main-baseline-exit.txt') or '').strip() or None,
+  'baseline':js('main-baseline.json')}
+isolation=js('isolation.json')
+pods=js('rollback-pods.json') or {}
+members={}
+for n in range(3):
+  name=f'caesium-{n}'
+  pod=next((p for p in pods.get('items',[]) if p['metadata']['name']==name),None)
+  cur=text(f'{name}.log',65536);prev=text(f'{name}-previous.log',65536)
+  rec={'created':pod is not None}
+  if pod is not None:
+    st=[s for s in pod.get('status',{}).get('containerStatuses',[]) if s.get('name')=='caesium']
+    s=st[0] if st else {}
+    exits=[x.get('terminated',{}).get('exitCode') for x in (s.get('state',{}),s.get('lastState',{})) if 'terminated' in x]
+    logs='\n'.join(x for x in (cur,prev) if x)
+    rec.update({'node':pod.get('spec',{}).get('nodeName'),'pod_ip':pod.get('status',{}).get('podIP'),
+      'phase':pod.get('status',{}).get('phase'),'ready':bool(s.get('ready')),
+      'restart_count':s.get('restartCount'),'state':s.get('state'),'last_state':s.get('lastState'),
+      'image':s.get('image'),'image_id':s.get('imageID'),'exit_codes':exits,
+      'key_log_lines':[l for l in logs.splitlines()
+        if re.search(r'does not match|error|fatal|panic|refus|level=warn',l,re.I)][:20],
+      'log':cur,'previous_log':prev})
+    if not logs.strip():problems.append(f'{name}: no process log captured')
+    answered=False
+    for m in (js('http.json') or {}).get('members',[]):
+      if m.get('member')==name:
+        rec['http']=m
+        answered=any((m.get(k) or {}).get('status') for k in ('health','health_ready'))
+    rec['http_answered']=answered
+    running='running' in (s.get('state') or {})
+    if not answered and not exits:problems.append(f'{name}: neither an HTTP answer nor a container exit code was observed')
+    if not answered and running and s.get('restartCount',0)==0:
+      problems.append(f'{name}: running container returned only transport errors')
+  members[name]=rec
+if not members['caesium-0']['created']:problems.append('caesium-0 was never created by the rollback StatefulSet')
+for name,c in copy.items():
+  if not (c['paused_verified'] and c['resumed_verified'] and c['restored_manifest_equals_copy'] and c['files']):
+    if not reason:problems.append(f'{name}: copy was not verified')
+sts=js('rollback-statefulset.json') or {}
+obs={'isolated_namespace':os.environ['LC_RB_NS'],'previous_image':os.environ['LC_PREV'],
+  'consistency':'all three candidate containers frozen together (containerd cgroup freezer); '
+    'live bytes hashed while frozen equal the copy; crash-consistent incl. page-cache writes, not a clean shutdown',
+  'timeline':timeline,'freeze_timeline':freeze,'copy':copy,'main_cluster_after_copy':main,
+  'isolation':isolation,
+  'helm_install_exit':(text('helm-install-exit.txt') or '').strip() or None,
+  'statefulset_status':sts.get('status'),'members':members,
+  'pod_timeline':[json.loads(l) for l in (text('timeline-pods.jsonl') or '').splitlines() if l.strip()],
+  'problems':problems}
+created=[n for n,m in members.items() if m['created']]
+parts=[]
+for n in created:
+  m=members[n]
+  line=m['key_log_lines'][0] if m.get('key_log_lines') else 'no error line'
+  parts.append(f"{n}: ready={m.get('ready')} restarts={m.get('restart_count')} exit_codes={m.get('exit_codes')} "
+    f"http_answered={m.get('http_answered')}; first error/warn line: {line[:240]}")
+never=[n for n,m in members.items() if not m['created']]
+summary=(f"{os.environ['LC_PREV']} on an isolated crash-consistent copy of the candidate-migrated three-member volumes: "
+  +'; '.join(parts)+(f"; never created: {', '.join(never)}" if never else ''))
+obs['summary']=summary
+(d/'rollback-observations.json').write_text(json.dumps(obs,indent=2)+'\n')
+print(('BLOCKED ' + '; '.join(problems)) if problems else summary)
+PY
+)" || detail="BLOCKED observation assembly failed"
+    if [[ "$detail" == BLOCKED* ]]; then
+      if [[ -s "$LC_RB_DIR/rollback-observations.json" ]]; then
+        lc_case rollback-recorded-outcome blocked "${detail#BLOCKED }" "$LC_RB_DIR/rollback-observations.json"
+      else
+        lc_case rollback-recorded-outcome blocked "${detail#BLOCKED }"
+      fi
+    else
+      lc_case rollback-recorded-outcome recorded-outcome "$detail" "$LC_RB_DIR/rollback-observations.json"
+    fi
+  }
+  lc_rollback_cleanup() {
+    local n
+    for n in 0 1 2; do
+      lc_ns delete pod "lifecycle-rb-src-$n" --ignore-not-found=true --wait=true --timeout=120s \
+        >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
+    done
+    if [[ "${CAESIUM_LIFECYCLE_KEEP:-0}" != 1 ]]; then
+      kubectl --kubeconfig "$LC_KUBE" delete namespace "$LC_RB_NS" --ignore-not-found=true --wait=true \
+        --timeout=300s >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
+    fi
+    lc_rollback_mark "cleanup done keep=${CAESIUM_LIFECYCLE_KEEP:-0}"
+  }
+  # Runs the whole case. Returns nonzero ONLY when the main cluster could not
+  # be re-verified after the freeze, which invalidates the later cases.
+  lc_rollback_case() {
+    local main_rc=0 reason=""
+    LC_RB_NODE=() LC_RB_CID=()
+    rm -rf "$LC_RB_DIR"
+    mkdir -p "$LC_RB_DIR"
+    lc_rollback_mark "rollback case begin"
+    if ! lc_rollback_copy; then reason="frozen three-member copy failed or was unverifiable; see cluster-logs/rollback/copy-*.err and *-state-*.txt"; fi
+    for n in 0 1 2; do
+      lc_ns delete pod "lifecycle-rb-src-$n" --ignore-not-found=true --wait=true --timeout=120s \
+        >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
+    done
+    lc_rollback_main_baseline || main_rc=1
+    if [[ -z "$reason" ]] && ! lc_rollback_restore; then
+      reason="restoring the copy into $LC_RB_NS failed or its SHA-256 manifest differed"
+    fi
+    if [[ -z "$reason" ]] && ! lc_rollback_isolate; then
+      reason="isolation of $LC_RB_NS from the main cluster was not proved; the previous release was NOT started (see cluster-logs/rollback/isolation*.json)"
+    fi
+    if [[ -z "$reason" ]] && ! lc_rollback_observe; then
+      reason="installing or observing the previous release on the copy failed (helm, pod listing, HTTP probe or post-run volume read)"
+    fi
+    lc_rollback_record "$reason"
+    lc_rollback_cleanup
+    return "$main_rc"
+  }
+  # END lc_rollback_*
+  # ===========================================================================
+  LC_RB_MAIN_RC=0
+  if [[ "$LC_ROLLING_PASS" == 1 && "$LC_INFO_RC" == 0 && "$LC_GET_RC" == 0 && "$LC_ADDRESS_BLOCKED" != 1 ]]; then
+    lc_rollback_case || LC_RB_MAIN_RC=$?
+  fi
   # F2's destructive cases are reported individually. Their launch requires a
   # healthy upgraded quorum. The runner proves that state from pods, the live
   # manifest and direct Raft membership; Helm --wait can time out after that
@@ -988,6 +1579,10 @@ PY
   if [[ "$LC_ROLLING_PASS" != 1 || "$LC_INFO_RC" != 0 || "$LC_GET_RC" != 0 || "$LC_ADDRESS_BLOCKED" == 1 ]]; then
     for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore rollback-recorded-outcome; do
       lc_case "$name" blocked "cannot run after failed/unobservable three-member upgrade"
+    done
+  elif [[ "$LC_RB_MAIN_RC" != 0 ]]; then
+    for name in joining-ordinal-1-replacement ordinal-0-disk-loss snapshot-catch-up storage-snapshot-restore; do
+      lc_case "$name" blocked "main cluster was not re-verified after the rollback-copy freeze (Ready, direct Raft membership, retained fixture); see cluster-logs/rollback/main-*"
     done
   else
     # A helper mounts the PVC only while ordinal 2 is scaled down. Its file
@@ -1527,7 +2122,7 @@ PY
     # before the server restarts. Every digest comes from the local helper
     # mount, so healthy peers cannot supply an answer.
     if [[ "$LC_SNAP_RC" != 0 ]]; then
-      for name in storage-snapshot-restore joining-ordinal-1-replacement ordinal-0-disk-loss rollback-recorded-outcome; do
+      for name in storage-snapshot-restore joining-ordinal-1-replacement ordinal-0-disk-loss; do
         lc_case "$name" blocked "prior snapshot fault did not rejoin/reconcile; shared cluster is not a valid baseline for another destructive case"
       done
     else
@@ -1603,7 +2198,7 @@ PY
     # StatefulSet must create a new claim/PV; UID and PV identity are checked
     # by the live runner before direct Cluster RPCs are accepted.
     if [[ "$LC_RESTORE_RC" != 0 ]]; then
-      for name in joining-ordinal-1-replacement ordinal-0-disk-loss rollback-recorded-outcome; do
+      for name in joining-ordinal-1-replacement ordinal-0-disk-loss; do
         lc_case "$name" blocked "prior restore fault did not rejoin/reconcile; shared cluster is not a valid baseline for another destructive case"
       done
     else
@@ -1631,7 +2226,6 @@ PY
     # preceding cases.
     if [[ "$LC_JOIN_RC" != 0 ]]; then
       lc_case ordinal-0-disk-loss blocked "prior joining replacement did not reconcile; shared cluster is not a valid baseline for ordinal-0 disk loss"
-      lc_case rollback-recorded-outcome blocked "prior joining replacement did not reconcile; no isolated migrated volume copy exists for rollback"
     else
     # Readiness and runner failures need different fallback details: a
     # runner require.* can stop the test before it writes a case record, and
@@ -1693,7 +2287,6 @@ PY
         lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement was Ready but the host-evidence copy or OrdinalZeroLoss runner failed before recording a case; see OrdinalZeroLoss.log"
       fi
     fi
-    lc_case rollback-recorded-outcome blocked "exploratory helm rollback requires an isolated copy of the candidate-migrated three-member volume set; the ordinal-0 disk-loss cluster is not a valid rollback baseline"
     fi
     fi
     fi
