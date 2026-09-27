@@ -1,6 +1,6 @@
 # Distributed Testing and Performance Confidence
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27
 
 Make a passing required CI result meaningful evidence that Caesium preserves
 its backend guarantees, developer workflows, and Console behavior under normal
@@ -943,12 +943,20 @@ within their resolved contract and available test infrastructure.
 | Q5 | Performance SLOs and regression tolerances | E2/E3 supply workloads and repeated comparisons; E4 measures variance and records minimum samples, acceptable relative degradation, absolute SLOs, and bounded inconclusive handling. No arbitrary global percentage becomes a gate. | E4 sign-off and G6 performance promotion. |
 | Q6 | Repository settings and new gate promotion | Read current required checks/rulesets and permissions at execution time; record the selected merge-candidate strategy and settings owner. Apply settings only within the execution request's authorization. | G5 enforcement and G7 candidate/queue policy. |
 
-## Progress (as of 2026-09-26, W6)
+## Progress (as of 2026-09-27, W7)
 
-**W1–W5 are closed. W6 remains active.** The acceptance repairs #567,
+**W7 (2026-09-27): D3 and E3 accepted; F2's memory blocker fixed, F2 still open.** Master is `b486534ac2a0052ed6a68a6cf36a07eb336b2b67` (#584).
+
+- [#581](https://github.com/caesium-cloud/caesium/pull/581) (`149857d7`) made the D3 console owner-crash journey pass a live kind proof on its tested head.
+- [#585](https://github.com/caesium-cloud/caesium/pull/585) (`eec0300c`) bounds dqlite's retained Raft log with explicit snapshot parameters. F2's snapshot catch-up then passed twice under the unchanged 1Gi cap, and #578's ordinal-0 Ready wait finally ran. The replacement bootstrapped a divergent single-member cluster ([#582](https://github.com/caesium-cloud/caesium/issues/582)), so F2 stays blocked on ordinal-0 rejoin and isolated rollback.
+- [#584](https://github.com/caesium-cloud/caesium/pull/584) (`b486534a`) attributed and removed E3's harness noise and added an A/A control. Its acceptance A/B was conclusive (`no_significant_difference`, 42/42).
+
+**22/27 items are checked; five remain open** (E4, F2, F3, G4, G6). E4 waits on Q2/Q5, F2 on the #582 product prerequisite and isolated rollback, F3 on E4/F2/Q2, G6 on E4/F2, and G4 on F3/G6. The W7 rows below are authoritative; the W6 text that follows is the prior checkpoint.
+
+**W1–W6 are closed; W6's open acceptance (E3, F2) carried into W7.** At the W6 checkpoint: The acceptance repairs #567,
 #569 and #570 and docs checkpoint #568 merged through checkpoint `8113d211`;
 #572 merged at `073402a1`, #573 at `02a38131`, and #571 at
-`ec893213f0532513896aba9630d2a737e1431c47`. Current master is
+`ec893213f0532513896aba9630d2a737e1431c47`. Master was then
 `b338271731a39d57a43b6d0d89a6fc6462dcc6a6` (#576), which also contains the
 #574 sampler (`ddf83af2`) and the #575 console journey (`e750fda0`).
 C3's validator passed its named candidate probes and eight known-bad mutations.
@@ -998,7 +1006,7 @@ unchecked.
 two-test gate and all 13 applicable CI jobs. #571 is merged at `ec893213`.
 The `82ca5905` failed UI/ci-ok run is historical. #574 and #575 have since
 merged; neither is acceptance. E4, F3, G4 and G6 remain undispatched.
-**20/27 items are checked; seven remain open** (D3, E3, E4, F2, F3, G4, G6). The core
+At the W6 checkpoint 20/27 items were checked (D3, E3, E4, F2, F3, G4, G6 open). The core
 suite, coverage collector and performance comparator are local commands,
 not CI jobs. **No repository settings have changed** — `ci-ok` is still absent
 from master's required status checks and no merge queue exists; see Q6 and G7.
@@ -1072,11 +1080,25 @@ and the latest acceptance evidence.
 | W7-α | D3 / [#575](https://github.com/caesium-cloud/caesium/pull/575), merged | Merge `e750fda0cbe1fb461d11085b700dcde02d150dbb` at 2026-09-26T19:28:54Z, tested head `58365e59eb038345fa2e3e6a81cf6eb6f062e15b`. The Playwright `cluster-recovery` project is excluded from the default and auth projects. Manifest row `d3-console-cluster-recovery` stays `status: absent` with empty `gates`. [CI run 36263027899](https://github.com/caesium-cloud/caesium/actions/runs/36263027899) has 37 successes and 8 skips. No live kind proof is recorded. D3 stays unchecked. |
 | Progress | [#576](https://github.com/caesium-cloud/caesium/pull/576), merged | Merge `b338271731a39d57a43b6d0d89a6fc6462dcc6a6` at 2026-09-26T19:29:08Z, tested docs head `81ca9c481eeea2bc296e00cd390384b6635e4280`. [CI run 36263024402](https://github.com/caesium-cloud/caesium/actions/runs/36263024402) succeeded on 6 docs-applicable checks and skipped 23 path-filtered or tag-only jobs. That dashboard was authored before #574 and #575 merged, so it still called them open. This checkpoint corrects that. |
 
+The D3 row above is historical. #580 merged the bootstrap-key hardening at
+`ce1d31dd`; its Codex live attempts (latest cluster `rb-d3-c2478967cc66`)
+reached the owner kill and then timed out. The task slept 900 s against a
+600 s test, and the run-link click landed behind the Run History dialog. #577
+and #579 recorded the F2 reruns. The W7 rows below supersede the D3, E3 and F2
+rows above.
+
+| W7 stream | Item / PR | Current evidence and disposition |
+| --- | --- | --- |
+| α | D3 / [#581](https://github.com/caesium-cloud/caesium/pull/581), merged | Merge `149857d74313ca2ce30bb0e85353c11a1c4ea3de`, tested head `58826a1a`; the PR head differs only in the D3 note. **Fixes:** the task now holds on a release file, which the spec delivers by `kubectl exec` to every task pod of the run only after the lease moves to a survivor; the hold exits 1 if never released. The run-list click is scoped to the dialog. Row status reads the badge alone (a hollow row check found live). The cached row gets 30 s to refetch. Traces are kept without video. **Round-1 fixes** (Codex, P2 + P3): timed-out port-forwards are reaped, and task placement is checked on every sample, including the terminal one. **Live proof a4** on cluster `rb-w7a-32fc67ca9424`: robustness 0 (298 s), Playwright 0 (225 s); lease `10.244.1.4:9001` gen 1 → `10.244.2.11:9001` gen 2, 29.9 s after the kill; durable `succeeded`; `convergenceIssues` returned `[]`. The earlier `1dd4caab` proof also passed. Round 2 approved. CI green, including `ui-e2e`, `ui-e2e-auth` and `ci-ok`. **D3 is checked.** The manifest row stays `absent`; G6 registers it. n=1 on an arm64 Docker Desktop host; not a CI job. |
+| β | E3 / [#584](https://github.com/caesium-cloud/caesium/pull/584), merged | Merge `b486534ac2a0052ed6a68a6cf36a07eb336b2b67`, measured candidate `02dc4594`. It excludes #585, which merged first. **Harness faults fixed:** action-to-render was timing Playwright's retry schedule (the ≈80/170 ms bimodality); route readiness tracked Google Fonts latency (r 0.98–1.00); heap sampling was bucketed; memory was measured across full reloads. Browser samples now use the page clock after the visibility check. Long-session memory now runs 32 in-app clicks in one document. Attribution evidence is retained per sample. **A/A mode** runs one image on both sides. **Runs:** A/A `faster` (a correlated benchmark false positive); A/B 1 inconclusive (host contention); A/B 2 `no_significant_difference` (superseded by the review fixes); A/B 3 exit 0 `no_significant_difference`, 42/42, lowest p 0.11, highest CV 0.076, 100/100 first-attempt Chromium tests. The decision rule is unchanged. **E3 is checked.** One run's conclusiveness is partly chance (24 informative metrics, uncorrected α, clustered benchmark false positives), so aggregation and bounded reruns are E4's policy (Q2/Q5). The `ec893213` 32.5 s cold repeat stays unattributed. |
+| γ | F2 memory / [#585](https://github.com/caesium-cloud/caesium/pull/585), merged | Merge `eec0300c16029c916dc178fa1ca5d2900281e6ad`, tested `19280ae5`. **Product change:** `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD/TRAILING`, defaulting to 1024/2048 with the static strategy, applied on every node start. dqlite's implicit 1024/8192 kept up to 9,216 entries of 77–137 KB in memory (about 1.26 GB); the new bound is 3,072 entries (about 421 MB). Trade-off: a follower more than 2,048 entries behind catches up by snapshot install. **Live:** two F2 qualifications (`lifecycle-w7g-87b8ff52f5`, `lifecycle-w7g-9ba221d4d7`) each passed 8/10, including snapshot catch-up, with peak `memory.current` 367–484 MB and `memory.events max` 0. B3 `TestCore` 12/12 (304.79 s) and `just integration-test` passed. Full PR CI passed, including the Helm, podman, distributed and owner-memory lanes. **Ordinal-0:** the Ready wait ran; the replacement bootstrapped a divergent single-member cluster and reported Ready ([#582](https://github.com/caesium-cloud/caesium/issues/582)). **Rollback:** blocked. The leader-only native residual in `abef2e97` is [#583](https://github.com/caesium-cloud/caesium/issues/583). The post-merge master push on `eec0300c` failed amd64 `unit-test` once. The cause was a libdqlite `sm_move` assertion abort in the pre-existing #536 test `TestStaleSingletonCacheNeverForcesRecovery`, which does not use the new options. It is filed as [#587](https://github.com/caesium-cloud/caesium/issues/587). arm64 in that run, the #585 PR runs, master `b486534a` and 150 local loops passed. **F2 stays unchecked.** |
+| W7/N-1 | This docs-only sync | Synchronizes `docs/ci.md` (a new D3 section, plus W7 notes in F2 and E3), the README and roadmap status lines, and this dashboard, all to the three merged W7 items, authored from merged master `b486534a`. Record its merge SHA in the next checkpoint. |
+
 F2's new capture attributes the immediate EOF to an OOM kill before the
 snapshot-truncation prerequisite was proved. Native dqlite's 8,192-entry
 retention window is a plausible contributor: retained Raft files grew from
 362 to 725 MB while database snapshots stayed about 1.18 MB. This is an
-inference, not RSS attribution. [#574](https://github.com/caesium-cloud/caesium/pull/574)
+inference, not RSS attribution (W7-γ later confirmed it; see the W7 rows). [#574](https://github.com/caesium-cloud/caesium/pull/574)
 merged that same-cap sampling (cgroup anon/file, process RSS, and existing
 `/metrics` Go heap/GC) at `ddf83af2` and still leaves the limit at 1 GiB.
 The `b3382717` run collected it: truncation happened with process RSS near the
@@ -1089,7 +1111,7 @@ The overall 27-item plan remains active. **The minimum credible gate milestone
 (G3 + G5) is delivered in CI but is not merge-enforced**, and G7 did not close
 that Q6 gap. `early-evidence` still runs `TestOwnerCrash` only. W5's core
 faults, coverage collector and performance comparator are **commands, not CI
-jobs**. The D3 console journey is merged code without a live kind proof.
+jobs**. W7's D3 live proof and E3 comparison are local evidence, not CI lanes.
 Calibrated budgets and a passing cluster upgrade have not shipped; the G2
 collect above is local evidence, not a CI lane.
 
@@ -1104,9 +1126,9 @@ N-1 consolidates the shared runbook after implementation merges.
 
 On every `exec-plan-wave` invocation, fetch the current base and reconcile
 these rows against live PR state, head/merge SHAs, reviews and current-head
-checks. Reconcile W6 acceptance before allocating dependent W7 work. Checkboxes mean merged acceptance
+checks. W7 reconciled W6's open acceptance: E3 is accepted, and F2 is blocked only on external prerequisites. Checkboxes mean merged acceptance
 evidence; rows distinguish merged implementation from passing qualification.
-The code for B3, E3, F2 and G2 is merged, so do not re-dispatch those items.
+The code for B3, D3, E3, F2 and G2 is merged, so do not re-dispatch those items.
 B3’s old exact-head proof is historical; its current-master `f6acf0ea`
 revalidation is recorded above. Revalidate future changes that affect its tested
 paths. G2's `74067f98` proof now qualifies merged #570's collection/ratchets;
@@ -1114,21 +1136,17 @@ G6 promotion remains unimplemented and the reported coverage gaps remain.
 F2's diagnostic-only #569 excludes #571's runtime changes and is already
 merged. #571 is merged, and Helm shard 2 on the identical runtime tree passed
 in push run [36246186742](https://github.com/caesium-cloud/caesium/actions/runs/36246186742) on `ec893213`. [#578](https://github.com/caesium-cloud/caesium/pull/578) waits for the ordinal-0 replacement to be Ready. Its `abef2e97` rerun (`lifecycle-39c05836d9e3`) failed at snapshot batch 12 with `caesium-0` held at the 1Gi cgroup limit (`memory.events max` 109,886, `oom_kill` 0), so that wait was not executed.
-E3's comparison of `ec893213` against W4 `45994929` is inconclusive. Later
-commits do not change Go scheduler or runtime sources. They do change
-`ui/src/lib/events.ts`, so that report's browser series are not current-master
-browser evidence. E3 still needs a conclusive full two-image comparison before
-acceptance. F2's `b3382717` run passed snapshot catch-up with the #574 samples
-and no OOM, but the `abef2e97` rerun failed it on identical product code, so
-that pass is not reproducible at the 1Gi cap. Ordinal-0 was observed too early,
-and rollback stays blocked.
-External prerequisites remain unresolved.
+W7 closed the E3 and F2 threads above. E3 was accepted by #584's
+conclusive A/B on `02dc4594`, after harness faults were fixed. #585 bounded
+dqlite's Raft retention, and F2's snapshot catch-up then passed twice under
+1Gi. The `b3382717`/`abef2e97` pass/fail pair is historical. #578's Ready wait
+now runs; it shows ordinal-0 bootstrapping a divergent cluster (#582).
+Rollback stays blocked, and external prerequisites remain unresolved.
 
-[#575](https://github.com/caesium-cloud/caesium/pull/575) merged the D3 console
-journey at `e750fda0`. It owns the `d3-console-cluster-recovery` manifest notes
-and leaves the row `absent`. It is not acceptance: no live kind proof is recorded. E4
-needs E3 acceptance and Q2/Q5; F3 needs C3, E4, F2 and Q2; G4 needs F3/G6; G6
-needs D3, E4, F2 and G2 acceptance as well as merged B3/C3/G7 code. Q1–Q3, Q5
+D3 is accepted by #581's live kind proof. Its `d3-console-cluster-recovery`
+manifest row stays `absent` until G6 registers it. E4 now needs only Q2/Q5
+(E3 is accepted); F3 needs C3, E4, F2 and Q2; G4 needs F3/G6; G6
+needs E4 and F2 acceptance (D3 and G2 are accepted) as well as merged B3/C3/G7 code. Q1–Q3, Q5
 and Q6 remain visible rather than silently treated as satisfied.
 
 ### Stream Status
@@ -1138,9 +1156,9 @@ and Q6 remain visible rather than silently treated as satisfied.
 | A | Contracts and scenario evidence (2 items) | P0 | Complete: A1 merged #465, A2 merged #470. Three manifest rows are `proven` with `gates: ["early"]`; B2/B3 selectors are present but their rows remain `absent` until G6 registers passing evidence |
 | B | Real multi-node robustness (3 items) | P0 | B1 merged #472, B2 merged #555, B3 merged #557 with repair #564. Fresh merged-master `f6acf0ea` (including #560) passed 12/12 `TestCore` scenarios in 299.68 s. Default CI selection remains `TestOwnerCrash`; G6 owns core-suite promotion |
 | C | Reference models, generated tests, and checker validation (3 items) | P0 | C1 merged #475, C2 merged #551, C3 merged #563; the full mutation validator remains standalone until G6 |
-| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 implementation merged #575; the manifest row stays absent until a live kind proof |
-| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repairs #566 and #567. The ten-repeat comparison of `ec893213` against W4 `45994929` is inconclusive, and its browser series predate the #575 events-client change. E4 needs E3 acceptance and Q2/Q5 |
-| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged. #574's sampler ran on `b3382717`: snapshot catch-up passed, no OOM, RSS near 1Gi while Go heap stayed small. The `abef2e97` rerun on identical product code hit the 1Gi cap at snapshot batch 12 (`memory.events max` 109,886, `oom_kill` 0), so snapshot catch-up at 1Gi is not reproducible. Ordinal-0 and rollback remain blocked: #578's Ready wait has not run, ordinal-0 rejoin is an external prerequisite, and isolated rollback is always recorded blocked. F3 needs F2/E4/C3 and Q2 |
+| D | Developer and Console journeys (3 items) | P0 | D1 merged #476 and D2 merged #482 (#479/#480 later fixed by #532; #483 remains). D3 merged #575 and was accepted by #581's live kind proof; the manifest row stays absent until G6 registers it |
+| E | Correct load reporting and performance comparison (5 items) | P0 | E1 merged #466, E2 merged #552, E5 merged #471. E3 merged #559 with repairs #566 and #567, and was accepted by #584 (harness noise removed, A/A control, conclusive A/B on `02dc4594`). E4 needs Q2/Q5 and owns the multiple-comparison, aggregation and bounded-rerun policy |
+| F | Upgrades, durability, and sustained faults (4 items) | P1 | F1 merged #474+#478; F4 merged #554. F2 runner merged #565; diagnostic repair #569 is merged. #574's sampler attributed the pressure to native RSS; #585 bounded dqlite's Raft retention (defaults 1024/2048), and snapshot catch-up passed twice at 367–484 MB peak under the 1Gi cap. Ordinal-0 and rollback remain blocked: #578's Ready wait ran and showed a divergent single-member bootstrap (#582), and isolated rollback is always recorded blocked. F3 needs F2/E4/C3 and Q2 |
 | G | Diagnostics, coverage, and CI enforcement (7 items) | P0 | G1, G2, G3, G5 and G7 merged. G2 repair #570 is merged and accepted with fresh collection/ratchet evidence at `74067f98` and 37 passing tested-head CI jobs; its checkbox is checked. Eight reported contract gaps remain. `ci-ok` is still not a required check (Q6). G6 then G4 follow |
 
 ## Streams
