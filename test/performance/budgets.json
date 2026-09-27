@@ -1,0 +1,787 @@
+{
+  "schema_version": 1,
+  "description": "Versioned performance budgets (distributed-testing E4). scripts/compare-performance.py loads this file and applies its rule to scripts/performance.sh comparisons: a target-base comparison AND a comparison against the versioned fixed baseline (test/performance/baseline.json). Values are calibrated on ONE recorded runner (see calibration.runner); they are not portable. Q2 (isolated performance runners) is unresolved, so recalibrating on the promoted runner is a G6 promotion precondition. Every change to decision/families/slos/bundle/rerun_policy/fixed_baseline needs a new `changes` entry whose values_sha256 matches (enforced by the comparator and scripts/test_compare_performance.py).",
+  "decision": {
+    "alpha": 0.05,
+    "alpha_non_inferiority": 0.05,
+    "method": "Per series: Hodges-Lehmann shift of log(candidate) over log(reference), i.e. a ratio, with a distribution-free one-sided Moses bound (normal approximation for the order-statistic index, rounded to the wider side). The degradation ratio is candidate/reference for lower-is-better series and reference/candidate for higher-is-better ones, so > 1 is always worse. One-sided Mann-Whitney p-values (tie and continuity corrected) test 'worse' and 'better'.",
+    "non_inferiority": "A series passes only when the one-sided upper bound of its degradation ratio is <= 1 + max_relative_degradation at alpha_non_inferiority / attempts_allowed (the level is split across the allowed attempts up front, so bounded reruns cannot shop for a pass). A run passes only when EVERY series is non-inferior: an intersection-union test, valid without a multiplicity correction.",
+    "material_regression": "A series is `slower` when its one-sided 'worse' p-value is significant after Holm within its family AND the Hodges-Lehmann degradation point estimate exceeds 1 + max_relative_degradation. A significant slowdown whose upper bound stays within the margin is `within_budget` (exit 0, reported).",
+    "multiple_comparison": "Holm step-down per family at alpha_family = alpha / (number of families with an informative series), for both the 'worse' and the 'better' direction. Holm is valid under arbitrary dependence, so no number of individually (uncorrected) significant series fails a family by itself; only a Holm-significant material regression does. The uncorrected count is still reported per family.",
+    "correlated_series": "Benchmarks in one sample share one `go test` process and its host state, and browser series share one Playwright run, so their false positives cluster (the W7-beta A/A moved six ns/op series by about 2% together). Holm is used because it does not assume independence, and the margins sit above the observed common-mode shift. A common-mode shift is visible as the family geomean_degradation; it never counts as independent evidence.",
+    "aggregation": "Series verdicts roll up by precedence fail > slower > slo_breach > inconclusive > within_budget > faster > no_significant_difference, per family, per comparison (target base, fixed baseline, SLOs), and overall. Family geometric-mean degradation is reported, not gated.",
+    "inconclusive": "A series is inconclusive when it is undersampled (n below min_samples, or too few samples to bound the shift), noisy (either side's CV above max_cv), or its upper bound exceeds the margin without a Holm-significant material regression. Mismatched provenance (platform, Go version, host, catalog, settings) makes the whole comparison inconclusive and not rerun-eligible.",
+    "optimization_claims": "`faster` requires a Holm-significant improvement with every other series non-inferior. The report's optimization_claim lists series that moved in the worse direction; a claim must name those tradeoffs. Neutral performance (no_significant_difference) is a valid result.",
+    "correctness_first": "Correctness, completion, provenance, instrumented images and benchmark harness identity fail closed (exit 2) before any speed comparison, exactly as in E3."
+  },
+  "families": {
+    "workload": {
+      "derivation": "margin = exp((z_ni + z_0.995) * 1.05 * sigma_worst * sqrt(2/10)) - 1 rounded up to 5% (floor 5%), sigma_worst = the largest per-side SD of log samples across the A/A runs; fixed-baseline margin = the same noise allowance plus the largest cross-run location drift, rounded up to 5% and at least margin + 5%; max_cv = max(0.10, 2 x the largest A/A CV) rounded up to 5%.",
+      "rules": [
+        {
+          "match": "workload.closed-baseline.cold.duration_seconds",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0276, max CV 0.027, max cross-run drift 1.4%; derived margin 0.063, fixed 0.078."
+        },
+        {
+          "match": "workload.closed-baseline.warm.duration_seconds",
+          "max_relative_degradation": 0.25,
+          "fixed_baseline_max_relative_degradation": 0.35,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "A/A x3: sigma_log worst 0.0946, max CV 0.095, max cross-run drift 7.7%; derived margin 0.232, fixed 0.327."
+        },
+        {
+          "match": "workload.open-tiny-sustained.cold.duration_seconds",
+          "max_relative_degradation": 0.05,
+          "fixed_baseline_max_relative_degradation": 0.1,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "Open-loop run whose duration is the fixed 40 s arrival window plus drain: A/A (perf-w8g-aa4, 20 samples) CV 0.0001, cross-side drift < 0.1%. The 5% floor is a drain-time guard (about 2 s of extra drain); the sustained/throughput/latency SLOs carry the capacity signal."
+        },
+        {
+          "match": "workload.open-tiny-sustained.warm.duration_seconds",
+          "max_relative_degradation": 0.05,
+          "fixed_baseline_max_relative_degradation": 0.1,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "As the cold series: A/A CV 0.0002. Floor 5%."
+        },
+        {
+          "match": "workload.*",
+          "max_relative_degradation": 0.25,
+          "fixed_baseline_max_relative_degradation": 0.35,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "Catch-all for uncalibrated workloads: the widest calibrated workload class. Calibrate with an A/A run before relying on it."
+        }
+      ]
+    },
+    "benchmark": {
+      "derivation": "margin = exp((z_ni + z_0.995) * 1.05 * sigma_worst * sqrt(2/10)) - 1 rounded up to 5% (floor 5%), sigma_worst = the largest per-side SD of log samples across the A/A runs; fixed-baseline margin = the same noise allowance plus the largest cross-run location drift, rounded up to 5% and at least margin + 5%; max_cv = max(0.10, 2 x the largest A/A CV) rounded up to 5%.",
+      "rules": [
+        {
+          "match": "bench.BenchmarkOwnerApplyCompletionLinear64.ns_per_op",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0668, max CV 0.067, max cross-run drift 2.0%; derived margin 0.159, fixed 0.182."
+        },
+        {
+          "match": "bench.BenchmarkOwnerApplyCompletionWide32.ns_per_op",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0503, max CV 0.051, max cross-run drift 1.4%; derived margin 0.118, fixed 0.133."
+        },
+        {
+          "match": "bench.BenchmarkOwnerDispatchCompleteCycleLinear32.ns_per_op",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0616, max CV 0.062, max cross-run drift 1.7%; derived margin 0.146, fixed 0.165."
+        },
+        {
+          "match": "bench.BenchmarkOwnerNewRunStateLinear64.ns_per_op",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "A/A x3: sigma_log worst 0.0749, max CV 0.078, max cross-run drift 3.9%; derived margin 0.180, fixed 0.226."
+        },
+        {
+          "match": "bench.BenchmarkOwnerReadyTasksWide32.ns_per_op",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0480, max CV 0.048, max cross-run drift 2.5%; derived margin 0.112, fixed 0.139."
+        },
+        {
+          "match": "bench.BenchmarkOwnerSnapshotLinear64.ns_per_op",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0392, max CV 0.040, max cross-run drift 2.1%; derived margin 0.090, fixed 0.113."
+        },
+        {
+          "match": "bench.BenchmarkRecoverCheckpointPlusTailLinear64.ns_per_op",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0687, max CV 0.075, max cross-run drift 0.4%; derived margin 0.164, fixed 0.169."
+        },
+        {
+          "match": "bench.BenchmarkRecoverFromScratchLinear64.ns_per_op",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0551, max CV 0.055, max cross-run drift 1.5%; derived margin 0.129, fixed 0.146."
+        },
+        {
+          "match": "bench.BenchmarkRecoverFromScratchWide32.ns_per_op",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0696, max CV 0.074, max cross-run drift 1.9%; derived margin 0.166, fixed 0.189."
+        },
+        {
+          "match": "bench.BenchmarkRecoverRestoreLinear64.ns_per_op",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0356, max CV 0.037, max cross-run drift 0.2%; derived margin 0.082, fixed 0.085."
+        },
+        {
+          "match": "bench.BenchmarkRecoverRunningReDispatchLinear32.ns_per_op",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0379, max CV 0.039, max cross-run drift 0.9%; derived margin 0.087, fixed 0.097."
+        },
+        {
+          "match": "bench.*.bytes_per_op",
+          "max_relative_degradation": 0.02,
+          "fixed_baseline_max_relative_degradation": 0.05,
+          "min_samples": 10,
+          "max_cv": 0.05,
+          "rationale": "A/A: constant or CV <= 0.0001 on every side, so this is a review threshold, not a noise bound: a 2% growth in bytes/op is a visible, reviewed change."
+        },
+        {
+          "match": "bench.*.allocs_per_op",
+          "max_relative_degradation": 0.02,
+          "fixed_baseline_max_relative_degradation": 0.05,
+          "min_samples": 10,
+          "max_cv": 0.05,
+          "rationale": "A/A: constant on every side (deterministic); the margin is a review threshold, not a noise bound."
+        },
+        {
+          "match": "bench.*.ns_per_op",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "Default for a benchmark added after calibration: the widest calibrated ns/op class. Calibrate it with an A/A run and add a specific rule."
+        },
+        {
+          "match": "bench.*",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "Catch-all; no other benchmark metric is produced today."
+        }
+      ]
+    },
+    "browser": {
+      "derivation": "margin = exp((z_ni + z_0.995) * 1.05 * sigma_worst * sqrt(2/10)) - 1 rounded up to 5% (floor 5%), sigma_worst = the largest per-side SD of log samples across the A/A runs; fixed-baseline margin = the same noise allowance plus the largest cross-run location drift, rounded up to 5% and at least margin + 5%; max_cv = max(0.10, 2 x the largest A/A CV) rounded up to 5%.",
+      "rules": [
+        {
+          "match": "browser.action_to_render_ms.live",
+          "max_relative_degradation": 0.25,
+          "fixed_baseline_max_relative_degradation": 0.3,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "A/A x3: sigma_log worst 0.0848, max CV 0.078, max cross-run drift 2.1%; derived margin 0.206, fixed 0.231."
+        },
+        {
+          "match": "browser.long_session_heap_bytes.live",
+          "max_relative_degradation": 0.05,
+          "fixed_baseline_max_relative_degradation": 0.1,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0080, max CV 0.008, max cross-run drift 0.2%; derived margin 0.018, fixed 0.020. Floor 5%."
+        },
+        {
+          "match": "browser.route_readiness_ms./jobdefs.live",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0447, max CV 0.046, max cross-run drift 3.9%; derived margin 0.104, fixed 0.147."
+        },
+        {
+          "match": "browser.route_readiness_ms./jobs.live",
+          "max_relative_degradation": 0.2,
+          "fixed_baseline_max_relative_degradation": 0.25,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0663, max CV 0.071, max cross-run drift 7.5%; derived margin 0.158, fixed 0.245."
+        },
+        {
+          "match": "browser.route_readiness_ms./jobs.synthetic",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0355, max CV 0.036, max cross-run drift 1.7%; derived margin 0.082, fixed 0.100."
+        },
+        {
+          "match": "browser.route_readiness_ms./system.live",
+          "max_relative_degradation": 0.1,
+          "fixed_baseline_max_relative_degradation": 0.15,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "A/A x3: sigma_log worst 0.0401, max CV 0.040, max cross-run drift 3.8%; derived margin 0.093, fixed 0.134."
+        },
+        {
+          "match": "browser.route_readiness_ms./triggers.live",
+          "max_relative_degradation": 0.15,
+          "fixed_baseline_max_relative_degradation": 0.2,
+          "min_samples": 10,
+          "max_cv": 0.15,
+          "rationale": "A/A x3: sigma_log worst 0.0571, max CV 0.057, max cross-run drift 4.7%; derived margin 0.135, fixed 0.188."
+        },
+        {
+          "match": "browser.*",
+          "max_relative_degradation": 0.25,
+          "fixed_baseline_max_relative_degradation": 0.3,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "Catch-all for a browser series added after calibration: the widest calibrated browser class."
+        }
+      ]
+    },
+    "system": {
+      "derivation": "margin = exp((z_ni + z_0.995) * 1.05 * sigma_worst * sqrt(2/10)) - 1 rounded up to 5% (floor 5%), sigma_worst = the largest per-side SD of log samples across the A/A runs; fixed-baseline margin = the same noise allowance plus the largest cross-run location drift, rounded up to 5% and at least margin + 5%; max_cv = max(0.10, 2 x the largest A/A CV) rounded up to 5%.",
+      "rules": [
+        {
+          "match": "system.*",
+          "max_relative_degradation": 0.25,
+          "fixed_baseline_max_relative_degradation": 0.35,
+          "min_samples": 10,
+          "max_cv": 0.2,
+          "rationale": "UNCALIBRATED: scripts/performance.sh produces no system series today. A series here uses the widest calibrated class until an A/A run calibrates it."
+        }
+      ]
+    }
+  },
+  "slos": [
+    {
+      "id": "closed-baseline-cold-duration",
+      "series": "workload.closed-baseline.cold.duration_seconds",
+      "statistic": "p90",
+      "max": 10.0,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "Cold closed-loop run (3 jobs, fan-out 2, depth 2, 200 ms tasks) on a fresh server. A/A x3 pooled (60 samples, both sides): p90 6.61 s, max 6.67 s; ceiling = 1.5 x max, rounded. p90 by nearest rank over 10 samples excludes exactly one stalled sample."
+    },
+    {
+      "id": "closed-baseline-warm-duration",
+      "series": "workload.closed-baseline.warm.duration_seconds",
+      "statistic": "p90",
+      "max": 4.0,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "Warm run after a discarded warm-up. A/A x3 pooled: p90 2.47 s, max 2.68 s; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "closed-baseline-cold-latency-p99",
+      "workload": "closed-baseline.cold",
+      "field": "latency_p99_seconds",
+      "statistic": "p90",
+      "max": 7.0,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "Driver-clock offer-to-terminal latency p99 per cold sample. A/A x3 pooled: p90 4.27 s, max 4.39 s; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "closed-baseline-warm-latency-p99",
+      "workload": "closed-baseline.warm",
+      "field": "latency_p99_seconds",
+      "statistic": "p90",
+      "max": 3.5,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "Warm per-sample latency p99. A/A x3 pooled: p90 1.82 s, max 2.04 s; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-route-readiness-jobs",
+      "series": "browser.route_readiness_ms./jobs.live",
+      "statistic": "p90",
+      "max": 150.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "First-navigation readiness of /jobs (page clock). A/A x3 pooled: p90 83.6 ms, max 96.8 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-route-readiness-jobs-synthetic",
+      "series": "browser.route_readiness_ms./jobs.synthetic",
+      "statistic": "p90",
+      "max": 190.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "/jobs readiness with the synthetic 500-job list. A/A x3 pooled: p90 121.9 ms, max 126.0 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-route-readiness-jobdefs",
+      "series": "browser.route_readiness_ms./jobdefs.live",
+      "statistic": "p90",
+      "max": 95.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "A/A x3 pooled: p90 56.2 ms, max 61.6 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-route-readiness-system",
+      "series": "browser.route_readiness_ms./system.live",
+      "statistic": "p90",
+      "max": 70.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "A/A x3 pooled: p90 41.3 ms, max 43.5 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-route-readiness-triggers",
+      "series": "browser.route_readiness_ms./triggers.live",
+      "statistic": "p90",
+      "max": 75.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "A/A x3 pooled: p90 44.4 ms, max 47.0 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-action-to-render",
+      "series": "browser.action_to_render_ms.live",
+      "statistic": "p90",
+      "max": 115.0,
+      "min_samples": 10,
+      "unit": "ms",
+      "rationale": "Click event to rendered heading (page clock). A/A x3 pooled: p90 70.7 ms, max 74.7 ms; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "browser-long-session-heap",
+      "series": "browser.long_session_heap_bytes.live",
+      "statistic": "p90",
+      "max": 22000000,
+      "min_samples": 10,
+      "unit": "bytes",
+      "rationale": "JS heap after 32 in-app navigations and a forced GC. A/A x3 pooled: p90 14.35 MB, max 14.44 MB; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "bundle-largest-js-raw",
+      "bundle": "largest_js_raw_bytes",
+      "statistic": "value",
+      "max": 1400000,
+      "unit": "bytes",
+      "rationale": "check-bundle-size.mjs default (lockstep, unit-tested). Observed 1,275,797."
+    },
+    {
+      "id": "bundle-largest-js-gzip",
+      "bundle": "largest_js_gzip_bytes",
+      "statistic": "value",
+      "max": 430000,
+      "unit": "bytes",
+      "rationale": "check-bundle-size.mjs default (lockstep, unit-tested). Observed 368,932."
+    },
+    {
+      "id": "bundle-total-raw",
+      "bundle": "total_raw_bytes",
+      "statistic": "value",
+      "max": 5000000,
+      "unit": "bytes",
+      "rationale": "check-bundle-size.mjs default (lockstep, unit-tested). Observed 2,648,239."
+    },
+    {
+      "id": "bundle-total-gzip",
+      "bundle": "total_gzip_bytes",
+      "statistic": "value",
+      "max": 1600000,
+      "unit": "bytes",
+      "rationale": "check-bundle-size.mjs default (lockstep, unit-tested). Observed 752,630."
+    },
+    {
+      "id": "open-tiny-sustained-cold-sustained",
+      "workload": "open-tiny-sustained.cold",
+      "field": "sustained_verdict",
+      "statistic": "all",
+      "equals": "sustained",
+      "min_samples": 10,
+      "rationale": "The workload exists to prove a sustainable rate fully reconciles (E2). A/A: 20 of 20 cold samples sustained. Evaluated only when the run includes this workload (CAESIUM_PERF_WORKLOADS)."
+    },
+    {
+      "id": "open-tiny-sustained-warm-sustained",
+      "workload": "open-tiny-sustained.warm",
+      "field": "sustained_verdict",
+      "statistic": "all",
+      "equals": "sustained",
+      "min_samples": 10,
+      "rationale": "A/A: 20 of 20 warm samples sustained."
+    },
+    {
+      "id": "open-tiny-sustained-warm-throughput",
+      "workload": "open-tiny-sustained.warm",
+      "field": "completed_per_second",
+      "statistic": "p90",
+      "min": 0.45,
+      "min_samples": 10,
+      "unit": "runs/s",
+      "rationale": "Offered rate 0.5/s. A/A pooled minimum 0.4945/s; the floor is 90% of the offered rate for the 90th-percentile-worst sample."
+    },
+    {
+      "id": "open-tiny-sustained-warm-latency-p99",
+      "workload": "open-tiny-sustained.warm",
+      "field": "latency_p99_seconds",
+      "statistic": "p90",
+      "max": 1.9,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "A/A pooled warm per-sample p99: p90 1.233 s, max 1.246 s; ceiling = 1.5 x max, rounded."
+    }
+  ],
+  "bundle": {
+    "absolute_budgets": {
+      "largest_js_raw_bytes": 1400000,
+      "largest_js_gzip_bytes": 430000,
+      "total_raw_bytes": 5000000,
+      "total_gzip_bytes": 1600000,
+      "enforced_by": "ui/scripts/check-bundle-size.mjs (these values must stay in lockstep with its defaults; a unit test asserts it)"
+    },
+    "max_relative_growth": {
+      "largest_js_raw_bytes": {
+        "target_base": 0.05,
+        "fixed_baseline": 0.1
+      },
+      "largest_js_gzip_bytes": {
+        "target_base": 0.05,
+        "fixed_baseline": 0.1
+      },
+      "total_raw_bytes": {
+        "target_base": 0.05,
+        "fixed_baseline": 0.1
+      },
+      "total_gzip_bytes": {
+        "target_base": 0.05,
+        "fixed_baseline": 0.1
+      }
+    },
+    "rationale": "Bundle sizes are deterministic (identical across all A/A sides), so there is no noise to calibrate. The absolute ceilings are check-bundle-size.mjs's (enforced there and as SLOs here). The relative bounds are review thresholds: one change may grow a size by at most 5% of its base, and the cumulative growth against the fixed baseline is capped at 10% before the baseline must be re-recorded with a reviewed budgets change."
+  },
+  "rerun_policy": {
+    "max_reruns": 2,
+    "rerun_on": "inconclusive only; fail, slower and slo_breach are terminal and are never rerun",
+    "not_rerun_eligible": [
+      "provenance mismatch between base and candidate",
+      "fixed baseline missing, unreadable, from a different runner/setup, or lacking a series",
+      "an undersampled or unevaluable SLO"
+    ],
+    "between_attempts": [
+      "fresh artifacts directory and fresh server/benchmark processes",
+      "server phases start with the other side (candidate first on even attempts)",
+      "images, harness, settings and repeats are unchanged; the attempt's alpha_non_inferiority share is fixed in advance"
+    ],
+    "pooling": "none: every attempt is judged on its own samples; every attempt's report is retained",
+    "unresolved": "an inconclusive last attempt (or a non-rerunnable inconclusive) becomes `inconclusive_unresolved`, exit 3; the strict gate must block"
+  },
+  "fixed_baseline": {
+    "path": "test/performance/baseline.json",
+    "must_match": [
+      "host_id",
+      "platform",
+      "go_version",
+      "catalog_sha256",
+      "settings_sha256",
+      "benchmark_harness_sha256"
+    ],
+    "rationale": "The fixed baseline is not interleaved with the candidate, so it is only meaningful on the recorded runner and setup. Anything else is inconclusive, never silently compared. Its margins (fixed_baseline_max_relative_degradation) are calibrated from cross-run drift between separate A/A runs, which is larger than within-run noise."
+  },
+  "calibration": {
+    "status": "calibrated on ONE shared developer runner; not a promoted CI runner",
+    "runner": {
+      "host_id": "caesium-perf-m5max-dd|Darwin|arm64",
+      "host_id_note": "CAESIUM_PERF_HOST_ID is set explicitly because this Mac has no fixed HostName: its network-assigned hostname was Mac.localdomain during W7 and MacBook-Pro.local during W8, which would change the default hostname|os|arch identity under an unchanged machine. The A/A runs recorded MacBook-Pro.local|Darwin|arm64.",
+      "description": "Apple M5 Max MacBook Pro (18 CPU cores, 64 GiB), macOS 27.0 (26A428), Docker Desktop 4.91.0 (engine 29.8.0), LinuxKit VM 7.0.12 with 8 vCPU and 11.7 GiB, linux/arm64 images",
+      "cpu_model": "Apple M5 Max",
+      "cpu_count": 18,
+      "memory_bytes": 68719476736,
+      "os_version": "macOS 27.0 (26A428)",
+      "docker": "Docker Desktop 4.91.0 (239619), engine 29.8.0",
+      "docker_vm": {
+        "ncpu": 8,
+        "memory_bytes": 12526637056,
+        "kernel": "7.0.12-linuxkit"
+      },
+      "platform": "linux/arm64",
+      "toolchain": "go1.27.1 (caesiumcloud/caesium-builder per SHA)",
+      "co_tenant_containers": "Persistent and idle during every run: the stale kind node caesium-qa-20260914-control-plane (a live Kubernetes control plane), codex-lb, caesium-dev-registry, and 12 MCP helper containers (mcp/fetch, mcp/sequentialthinking). Each run's docker-ps-start/end snapshots are retained with its artifacts.",
+      "isolation": "Every run held the host-wide lane lock, so no other Docker work ran on the daemon; sibling streams' lanes ran between runs. The host itself is a shared workstation."
+    },
+    "workload_coverage": {
+      "gate_default": "closed-baseline with Go benchmarks, browser and bundle (CAESIUM_PERF_REPEATS=10, CAESIUM_PERF_BROWSER=1): about 26 minutes per attempt on this runner",
+      "calibrated_opt_in": "open-tiny-sustained (add it to CAESIUM_PERF_WORKLOADS; about 45 more minutes per attempt): duration rules plus sustained, throughput and latency SLOs",
+      "not_budgeted": "open-api-read-mix: a same-code A/A failed its require-sustained check in 12 of 20 warm samples (#588), so no budget can pass it; every other catalog workload is uncalibrated and falls to the workload.* catch-all"
+    },
+    "limitations": [
+      "Q2 is unresolved: there is no isolated performance runner. These values are calibrated on the runner above only. The fixed baseline and every budget refuse (inconclusive) or mean nothing on another host_id/platform; recalibrating on the promoted runner (new A/A runs, a new baseline, a reviewed budgets change) is a G6 promotion precondition.",
+      "Three full A/A runs and one load-only open-workload A/A run are a small calibration set. Margins use the worst observed per-side noise (including a run the stream's own host-side unit tests overlapped) to stay conservative; more A/A runs on an isolated runner should tighten the benchmark margins, which are wide for micro benchmarks (10-20%).",
+      "The host is a shared macOS workstation (Docker Desktop VM, persistent co-tenant containers, desktop processes). Host-level contention outside Docker is not controlled.",
+      "No performance lane exists in CI yet; nothing here gates a merge until G6 promotes it."
+    ],
+    "method": "Same-code A/A control runs (CAESIUM_PERF_BASE_SHA = candidate SHA: one release image measured on both sides, interleaved exactly like an A/B run) through the unchanged E3 harness, evaluated with `scripts/compare-performance.py --calibrate`. Per series the worst per-side log-scale SD sets the margin (see each family's `derivation`); the cross-run pairs (every A/A run's candidate side against every other run's, i.e. non-interleaved, hours apart) set the fixed-baseline margins. The resulting rule is then re-applied to every A/A run: the tolerance is an A/A false-fail rate of 0 (and <= alpha by construction) and an A/A inconclusive rate <= 1 in 3 per attempt, so that an unchanged candidate is unresolved after three attempts with probability < 4%.",
+    "runs": [
+      {
+        "id": "perf-w8g-aa1",
+        "kind": "A/A",
+        "sha": "710f450a27c4635cd84a2f945124e3064620ce84",
+        "harness": "E3 harness at 710f450a (SLO fields added offline from the retained driver reports)",
+        "workloads": "closed-baseline",
+        "repeats": 10,
+        "families": [
+          "workload",
+          "benchmark",
+          "browser",
+          "bundle"
+        ],
+        "lane": "2026-09-27T17:21:58Z to 17:48:08Z",
+        "minutes": 26,
+        "image_built_by_run": true,
+        "cli_digest": "sha256:1638f95412d1a37d6302b0251c08da8c5a1a015d364dd3afa7fa4d7e2b6fa6f8",
+        "e3_uncorrected_overall": "no_significant_difference",
+        "note": "The stream's own host-side unit-test suite (about 60 s, no Docker) overlapped benchmark repeats 5-6; this run has the highest benchmark CVs and is kept, which makes the margins conservative."
+      },
+      {
+        "id": "perf-w8g-aa2",
+        "kind": "A/A",
+        "sha": "284cbbbd3f483d767a2a4718e5d7923cf1de5aa6",
+        "harness": "E4 harness (product code identical to 710f450a; identical CLI digest)",
+        "workloads": "closed-baseline",
+        "repeats": 10,
+        "families": [
+          "workload",
+          "benchmark",
+          "browser",
+          "bundle"
+        ],
+        "lane": "2026-09-27T17:52:15Z to 18:18:10Z",
+        "minutes": 26,
+        "image_built_by_run": true,
+        "cli_digest": "sha256:1638f95412d1a37d6302b0251c08da8c5a1a015d364dd3afa7fa4d7e2b6fa6f8",
+        "e3_uncorrected_overall": "faster"
+      },
+      {
+        "id": "perf-w8g-aa3",
+        "kind": "A/A",
+        "sha": "284cbbbd3f483d767a2a4718e5d7923cf1de5aa6",
+        "harness": "E4 harness",
+        "workloads": "closed-baseline",
+        "repeats": 10,
+        "families": [
+          "workload",
+          "benchmark",
+          "browser",
+          "bundle"
+        ],
+        "lane": "2026-09-27T18:23:48Z to 18:49:21Z",
+        "minutes": 26,
+        "image_built_by_run": true,
+        "cli_digest": "sha256:1638f95412d1a37d6302b0251c08da8c5a1a015d364dd3afa7fa4d7e2b6fa6f8",
+        "e3_uncorrected_overall": "faster"
+      },
+      {
+        "id": "perf-w8g-aa4",
+        "kind": "A/A (load only)",
+        "sha": "284cbbbd3f483d767a2a4718e5d7923cf1de5aa6",
+        "harness": "E4 harness",
+        "workloads": "open-tiny-sustained,open-api-read-mix",
+        "repeats": 10,
+        "families": [
+          "workload"
+        ],
+        "lane": "2026-09-27T19:03:47Z to 20:14:05Z",
+        "minutes": 70,
+        "image_built_by_run": true,
+        "result": "exit 2 (fail closed): open-api-read-mix failed its require-sustained check (backlog_growth) in 12 of 20 warm samples, 6 per side, same image; all 60 open-tiny-sustained runs and every cold/warm-up open-api-read-mix run passed. Filed as #588. open-tiny-sustained is calibrated from this run; open-api-read-mix is not budgeted."
+      }
+    ],
+    "closed_baseline_family_results": {
+      "runs": [
+        {
+          "comparison": "aa1",
+          "budgeted_overall": "no_significant_difference",
+          "uncorrected_e3_overall": "no_significant_difference",
+          "series": 42,
+          "uncorrected_significant": 0,
+          "min_uncorrected_p": 0.1041,
+          "non_pass_series": [],
+          "slo_breaches": []
+        },
+        {
+          "comparison": "aa2",
+          "budgeted_overall": "no_significant_difference",
+          "uncorrected_e3_overall": "faster",
+          "series": 42,
+          "uncorrected_significant": 1,
+          "min_uncorrected_p": 0.0488,
+          "non_pass_series": [],
+          "slo_breaches": []
+        },
+        {
+          "comparison": "aa3",
+          "budgeted_overall": "no_significant_difference",
+          "uncorrected_e3_overall": "faster",
+          "series": 42,
+          "uncorrected_significant": 2,
+          "min_uncorrected_p": 0.0311,
+          "non_pass_series": [],
+          "slo_breaches": []
+        }
+      ],
+      "control_rates": {
+        "runs": 3,
+        "false_fail": 0.0,
+        "inconclusive": 0.0,
+        "pass": 1.0,
+        "uncorrected_any_significant": 0.6666666666666666,
+        "uncorrected_overall_not_nsd": 0.6666666666666666
+      },
+      "pooled_uncorrected_p": {
+        "count": 72,
+        "below_alpha": 3,
+        "ks_uniform_p": 0.1868423910455229
+      },
+      "cross_run_fixed_baseline": {
+        "pairs": 6,
+        "false_fail": 0.0,
+        "inconclusive": 0.0,
+        "pass": 1.0,
+        "worst_upper": 1.169320933002136
+      }
+    },
+    "open_workload_results": {
+      "runs": [
+        {
+          "comparison": "aa4",
+          "budgeted_overall": "no_significant_difference",
+          "uncorrected_e3_overall": "no_significant_difference",
+          "series": 2,
+          "uncorrected_significant": 0,
+          "min_uncorrected_p": 0.8501,
+          "non_pass_series": [],
+          "slo_breaches": []
+        }
+      ],
+      "control_rates": {
+        "runs": 1,
+        "false_fail": 0.0,
+        "inconclusive": 0.0,
+        "pass": 1.0,
+        "uncorrected_any_significant": 0.0,
+        "uncorrected_overall_not_nsd": 0.0
+      },
+      "pooled_uncorrected_p": {
+        "count": 2,
+        "below_alpha": 0,
+        "ks_uniform_p": 0.04676206769659217
+      },
+      "cross_run_fixed_baseline": {
+        "pairs": 0,
+        "false_fail": null,
+        "inconclusive": null,
+        "pass": null,
+        "worst_upper": null
+      }
+    },
+    "a_b_demonstration": {
+      "run": "perf-w8g-ab",
+      "base": "710f450a27c4635cd84a2f945124e3064620ce84 (master)",
+      "candidate": "c0bb70f8c762975f76059ead3a7f3979caa5a07d (this change's harness; product code identical to master)",
+      "lane": "2026-09-27T21:08:08Z to 21:34:07Z",
+      "minutes": 26,
+      "gate": "one gate run, resolved on attempt 1 of 3, exit 0",
+      "in_run_verdict": "no_significant_difference (target base; fixed baseline not requested because it did not exist yet)",
+      "final_budgets_target_base": "no_significant_difference",
+      "final_budgets_overall_with_fixed_baseline": "no_significant_difference",
+      "fixed_baseline_verdict": "no_significant_difference",
+      "families": {
+        "benchmark": {
+          "verdict": "no_significant_difference",
+          "series": 33,
+          "geomean_degradation": 0.9971,
+          "uncorrected_significant": 0
+        },
+        "browser": {
+          "verdict": "no_significant_difference",
+          "series": 7,
+          "geomean_degradation": 0.9869,
+          "uncorrected_significant": 0
+        },
+        "workload": {
+          "verdict": "no_significant_difference",
+          "series": 2,
+          "geomean_degradation": 1.0256,
+          "uncorrected_significant": 0
+        }
+      },
+      "slos": "no_significant_difference",
+      "slos_not_evaluated": [
+        "open-tiny-sustained-cold-sustained",
+        "open-tiny-sustained-warm-sustained",
+        "open-tiny-sustained-warm-throughput",
+        "open-tiny-sustained-warm-latency-p99"
+      ],
+      "uncorrected_min_p": 0.1041,
+      "largest_upper_bounds": [
+        {
+          "id": "workload.closed-baseline.warm.duration_seconds",
+          "upper": 1.1255,
+          "allowed": 1.25
+        },
+        {
+          "id": "bench.BenchmarkOwnerReadyTasksWide32.ns_per_op",
+          "upper": 1.055,
+          "allowed": 1.15
+        },
+        {
+          "id": "browser.route_readiness_ms./system.live",
+          "upper": 1.0424,
+          "allowed": 1.1
+        }
+      ],
+      "largest_point_estimates": [
+        {
+          "id": "workload.closed-baseline.warm.duration_seconds",
+          "degradation": 1.0576
+        },
+        {
+          "id": "bench.BenchmarkOwnerReadyTasksWide32.ns_per_op",
+          "degradation": 1.018
+        },
+        {
+          "id": "bench.BenchmarkRecoverRestoreLinear64.ns_per_op",
+          "degradation": 1.0025
+        }
+      ],
+      "fixed_baseline_refusal_check": "perf-w8g-aa2 and perf-w8g-aa3 (recorded under the network hostname MacBook-Pro.local|Darwin|arm64) against this baseline: fixed_baseline inconclusive (host_id differs), overall inconclusive_unresolved, not rerun-eligible; the comparator refuses instead of comparing.",
+      "interpretation": "Neutral, as expected: the candidate changes only the measurement harness. No optimization is claimed. The fixed baseline was recorded from this run's candidate side."
+    },
+    "parameters": {
+      "alpha": "0.05 family-wise per comparison (Holm per family at 0.05 / families tested); unchanged from E3's per-series alpha, now corrected.",
+      "alpha_non_inferiority": "0.05 split across the 3 allowed attempts (0.0167 per attempt, z = 2.13).",
+      "min_samples": "10 per side for every series: the largest per-series minimum implied by the calibrated margins is at most 10, and the SLOs need 10 samples for a nearest-rank p90 that excludes exactly one stalled sample.",
+      "max_reruns": "2 (3 attempts). With the observed A/A per-attempt inconclusive rate, an unchanged candidate resolves within 3 attempts with probability > 96%; more attempts would dilute the non-inferiority alpha further.",
+      "max_cv": "per series, max(0.10, 2 x the largest A/A CV), rounded up to 5%: flags contended runs (the W7-beta contended A/B had benchmark CVs 0.15-0.33) as noisy instead of comparing them."
+    }
+  },
+  "changes": [
+    {
+      "version": 1,
+      "date": "2026-09-27",
+      "rationale": "Initial calibrated budgets and decision rule (distributed-testing E4).",
+      "evidence": "budgets.calibration: A/A control runs on the recorded runner, pooled per-series variance, cross-run drift, and one A/B run of master through the rule.",
+      "reviewed_in": "distributed-testing W8-gamma PR (E4)",
+      "values_sha256": "2a2c6cb38de51ab0da393087e384080592ace39d5ed66beae3aaed763ade7f97"
+    }
+  ]
+}
