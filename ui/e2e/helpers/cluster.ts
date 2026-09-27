@@ -1,12 +1,15 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
  * Pure command construction and evidence checks for the console owner-crash
- * journey. Nothing in this module contacts Docker, kind, or a cluster.
- * The Playwright spec is the only caller that executes the commands, and only
- * after the gate has the robustness kubeconfig in hand.
+ * journey. Nothing in this module contacts Docker, kind, or a cluster on its
+ * own. The one process helper (startReadyChild/stopChildProcess) runs only the
+ * command its caller passes. The Playwright spec is the only caller that
+ * executes the commands, and only after the gate has the robustness kubeconfig
+ * in hand.
  */
 
 export const FOREIGN_CLUSTER_ID = "caesium-qa-20260914";
@@ -16,6 +19,16 @@ export const CONSOLE_SERVICE_PORT = 8080;
 export const OWNER_CONSOLE_PORT = 18080;
 export const SERVICE_CONSOLE_PORT = 18081;
 export const UI_E2E_AUTH_HASH_SECRET = "ui-e2e-auth-key-hash-secret-000001";
+/** internal/atom/kubernetes names the single task container "atom". */
+export const TASK_CONTAINER = "atom";
+/** The console hold exits 0 only after this file exists in its own container. */
+export const TASK_RELEASE_FILE = "/tmp/caesium-d3-release";
+/**
+ * An unreleased hold exits 1 after this many one-second polls. It outlives the
+ * spec's 900 s test budget, so the run cannot finish on its own inside the
+ * journey, and it can never finish as a success without a release.
+ */
+export const HOLD_LIMIT_SECONDS = 1500;
 
 export const CLUSTER_ENV = {
   id: "CAESIUM_ROBUSTNESS_ID",
@@ -31,6 +44,7 @@ const SAFE_NODE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const CONTAINER_ID_RE = /^[a-f0-9]{8,128}$/;
 const RUN_STATUS_RE = /\b(succeeded|failed|cancelled|running|queued|skipped|cached)\b/gi;
 const SUCCESS_STATUSES = new Set(["succeeded", "completed", "success"]);
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
 const LISTING_ERROR_MARKERS = [
   "failed to dial",
@@ -745,10 +759,213 @@ export function consoleRecoveryDefinition(alias: string, taskImage: string, mark
         name: "hold",
         engine: "kubernetes",
         image: taskImage,
-        command: ["sh", "-c", `echo ${marker}; sleep 900`],
+        command: ["sh", "-c", consoleHoldScript(marker)],
       },
     ],
   };
+}
+
+/**
+ * Print the marker, then wait for the release file. Every attempt (the first
+ * pod and any pod the survivor re-dispatches) waits for its own release, so
+ * the run can only succeed after the spec releases a pod. An unreleased hold
+ * fails; it never exits 0 by timing out.
+ */
+export function consoleHoldScript(
+  marker: string,
+  options: { releaseFile?: string; limitSeconds?: number } = {},
+): string {
+  const releaseFile = options.releaseFile ?? TASK_RELEASE_FILE;
+  const limitSeconds = options.limitSeconds ?? HOLD_LIMIT_SECONDS;
+  if (!/^[a-z0-9-]{8,80}$/.test(marker)) throw new Error(`unsafe log marker ${marker}`);
+  if (!/^\/[A-Za-z0-9._/-]{1,200}$/.test(releaseFile)) throw new Error(`unsafe release file ${releaseFile}`);
+  if (!Number.isInteger(limitSeconds) || limitSeconds < 1) throw new Error(`unsafe hold limit ${limitSeconds}`);
+  return [
+    `echo ${marker}`,
+    "i=0",
+    `while [ ! -e ${releaseFile} ]; do`,
+    "  i=$((i + 1))",
+    `  if [ "$i" -gt ${limitSeconds} ]; then echo "${marker} hold was never released" >&2; exit 1; fi`,
+    "  sleep 1",
+    "done",
+    `echo "${marker} released"`,
+  ].join("\n");
+}
+
+export type RunTaskPod = {
+  name: string;
+  node: string;
+  /** Pod phase Running and the task container reports state.running. */
+  running: boolean;
+};
+
+/** Task pods whose name carries the run id. Caesium members and deleting pods are skipped. */
+export function runTaskPods(payload: unknown, runId: string): RunTaskPod[] {
+  if (!UUID_RE.test(runId)) return [];
+  const wanted = runId.toLowerCase();
+  const pods: RunTaskPod[] = [];
+  for (const pod of podItems(payload)) {
+    const metadata = objectField(pod, "metadata");
+    const name = stringField(metadata, "name");
+    if (!name || !name.includes(wanted) || metadata?.deletionTimestamp) continue;
+    const status = objectField(pod, "status");
+    const containers = (Array.isArray(status?.containerStatuses) ? status.containerStatuses : []).map((entry) =>
+      objectField(entry, null),
+    );
+    if (containers.some((entry) => stringField(entry, "name") === "caesium")) continue;
+    const task = containers.find((entry) => stringField(entry, "name") === TASK_CONTAINER) ?? null;
+    const running = stringField(status, "phase") === "Running" && objectField(objectField(task, "state"), "running") !== null;
+    pods.push({ name, node: stringField(objectField(pod, "spec"), "nodeName"), running });
+  }
+  return pods;
+}
+
+/**
+ * Pods still to release, and any pod of the run bound to the faulted owner
+ * node (a placement violation: nothing there can run while kubelet is down).
+ */
+export function releaseTargets(
+  pods: RunTaskPod[],
+  ownerNode: string,
+  released: ReadonlySet<string>,
+): { targets: string[]; issues: string[] } {
+  const targets: string[] = [];
+  const issues: string[] = [];
+  for (const pod of pods) {
+    if (pod.node && pod.node === ownerNode) {
+      issues.push(`task pod ${pod.name} is on the owner node ${ownerNode}`);
+      continue;
+    }
+    if (!pod.running || !pod.node || released.has(pod.name)) continue;
+    targets.push(pod.name);
+  }
+  return { targets, issues };
+}
+
+/**
+ * One observation of the release poll. Placement is checked on every sample,
+ * the terminal one included; pods are released only while the run is not
+ * terminal.
+ */
+export function releaseSample(input: {
+  status: string;
+  pods: RunTaskPod[];
+  ownerNode: string;
+  released: ReadonlySet<string>;
+}): { terminal: boolean; targets: string[]; issues: string[] } {
+  const { targets, issues } = releaseTargets(input.pods, input.ownerNode, input.released);
+  const terminal = isTerminalRunStatus(input.status);
+  return { terminal, targets: terminal ? [] : targets, issues };
+}
+
+type SpawnFn = (command: string, args: readonly string[], options: { stdio: ["ignore", "pipe", "pipe"]; env: NodeJS.ProcessEnv }) => ChildProcess;
+
+/**
+ * Spawn a long-lived command (a port-forward) and resolve once its output
+ * contains readyText. On EVERY startup failure (timeout, early exit, spawn
+ * error) the child is stopped and its exit awaited before the rejection, so a
+ * failed attempt can never keep holding the local port.
+ */
+export async function startReadyChild(
+  command: ShellCommand,
+  options: { readyText: string; timeoutMs: number; env?: NodeJS.ProcessEnv; stopWaitMs?: number; spawnFn?: SpawnFn },
+): Promise<ChildProcess> {
+  const violation = commandViolation(command.argv);
+  if (violation) throw new Error(`${violation}: ${command.argv.join(" ")}`);
+  const spawnFn: SpawnFn = options.spawnFn ?? ((cmd, args, opts) => spawn(cmd, [...args], opts));
+  const child = spawnFn(command.argv[0], command.argv.slice(1), {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: options.env ?? process.env,
+  });
+  let output = "";
+  let ready = false;
+  // Stays attached after readiness so the pipes keep draining.
+  const onData = (chunk: Buffer) => {
+    if (ready) return;
+    output = `${output}${chunk.toString()}`.slice(-8_192);
+  };
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${command.description} did not become ready within ${options.timeoutMs}ms\n${output}`));
+      }, options.timeoutMs);
+      const settle = (error?: Error) => {
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onReadyCheck = () => {
+        if (!ready && output.includes(options.readyText)) settle();
+      };
+      child.stdout?.on("data", onReadyCheck);
+      child.stderr?.on("data", onReadyCheck);
+      child.once("exit", (code, signal) => settle(new Error(`${command.description} exited ${code ?? signal}\n${output}`)));
+      child.once("error", (err) => settle(err));
+    });
+  } catch (error) {
+    await stopChildProcess(child, options.stopWaitMs ?? 5_000);
+    throw error;
+  }
+  ready = true;
+  return child;
+}
+
+/** SIGTERM, wait for exit, then SIGKILL if it is still alive. No-op once exited. */
+export async function stopChildProcess(child: ChildProcess | undefined, timeoutMs = 5_000): Promise<void> {
+  // pid is undefined when the spawn itself failed: there is no process to stop.
+  if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  const wait = async (): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const done = await Promise.race([exited.then(() => true), timedOut]);
+    clearTimeout(timer);
+    return done;
+  };
+  child.kill("SIGTERM");
+  if (await wait()) return;
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  await wait();
+}
+
+/** Create the release file inside one task pod of the run, through the API server. */
+export function taskReleaseCommand(kubeconfig: string, namespace: string, podName: string, runId: string): ShellCommand {
+  if (!UUID_RE.test(runId)) throw new Error(`refusing release for unvalidated run id ${runId}`);
+  if (podName.length > 253 || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(podName) || !podName.includes(runId.toLowerCase())) {
+    throw new Error(`refusing to release pod ${podName}`);
+  }
+  return {
+    argv: [
+      "kubectl",
+      "--kubeconfig",
+      kubeconfig,
+      "--namespace",
+      namespace,
+      "exec",
+      podName,
+      "-c",
+      TASK_CONTAINER,
+      "--",
+      "touch",
+      TASK_RELEASE_FILE,
+    ],
+    description: `release the console hold in task pod ${podName}`,
+  };
+}
+
+/**
+ * The run-history row link inside the Run History dialog. The job page behind
+ * the dialog also links to the run (the live overlay), and the dialog overlay
+ * intercepts clicks on it, so the click must stay inside the runs list.
+ */
+export function runHistoryLinkSelector(jobId: string, runId: string): string {
+  if (!UUID_RE.test(runId)) throw new Error(`refusing run link for unvalidated run id ${runId}`);
+  if (!UUID_RE.test(jobId)) throw new Error(`refusing run link for unvalidated job id ${jobId}`);
+  return `a[href*="/jobs/${jobId.toLowerCase()}/runs/${runId.toLowerCase()}"]`;
 }
 
 export function membersFromPodList(payload: unknown): CaesiumMember[] {
@@ -792,23 +1009,13 @@ export function chooseOwner(members: CaesiumMember[]): { owner: CaesiumMember; s
 
 export function taskPlacementIssues(payload: unknown, runId: string, ownerNode: string): string[] {
   if (!UUID_RE.test(runId)) return ["run id is not a uuid"];
+  const pods = runTaskPods(payload, runId);
   const issues: string[] = [];
-  let seen = 0;
-  for (const pod of podItems(payload)) {
-    const metadata = objectField(pod, "metadata");
-    const spec = objectField(pod, "spec");
-    const name = stringField(metadata, "name");
-    if (!name || !name.includes(runId) || metadata?.deletionTimestamp) continue;
-    const statuses = objectField(pod, "status");
-    const containers = Array.isArray(statuses?.containerStatuses) ? statuses.containerStatuses : [];
-    const isMember = containers.some((entry) => stringField(entry as Record<string, unknown>, "name") === "caesium");
-    if (isMember) continue;
-    seen += 1;
-    const node = stringField(spec, "nodeName");
-    if (!node) issues.push(`task pod ${name} is not bound to a node`);
-    else if (node === ownerNode) issues.push(`task pod ${name} is on the owner node ${ownerNode}`);
+  for (const pod of pods) {
+    if (!pod.node) issues.push(`task pod ${pod.name} is not bound to a node`);
+    else if (pod.node === ownerNode) issues.push(`task pod ${pod.name} is on the owner node ${ownerNode}`);
   }
-  if (seen === 0) issues.push(`no task pod for run ${runId} is visible yet`);
+  if (pods.length === 0) issues.push(`no task pod for run ${runId} is visible yet`);
   return issues;
 }
 
@@ -933,6 +1140,21 @@ export function statusFromRowText(text: string): string | null {
   return found[found.length - 1].toLowerCase();
 }
 
+export function isTerminalRunStatus(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status.trim().toLowerCase());
+}
+
+/**
+ * completed_at (server clock) is no earlier than a host instant, allowing the
+ * same 2 s host/kind clock slack the fault check uses. Missing or unparsable
+ * timestamps fail.
+ */
+export function completedAtOrAfter(completedAt: string, instantMs: number, slackMs = 2_000): boolean {
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(completed) || !Number.isFinite(instantMs) || instantMs <= 0) return false;
+  return completed + slackMs >= instantMs;
+}
+
 export function faultWasObserved(fault: FaultObservation): boolean {
   return fault.connectedBeforeFault
     && fault.sawDisconnectOrStatusChange
@@ -1053,7 +1275,12 @@ function rowIssues(rows: ConsoleRunRow[], durable: DurableOutcome, label: string
       issues.push({ code: "stale_row", detail: `${label} contains unexpected run ${row.id}` });
       continue;
     }
-    if (row.status && row.status !== durable.status) {
+    if (!row.status) {
+      // A row whose status cannot be read is not proven fresh.
+      issues.push({ code: "stale_row", detail: `${label} run ${wanted} has no readable status` });
+      continue;
+    }
+    if (row.status !== durable.status) {
       issues.push({
         code: row.status === "succeeded" && durable.status !== "succeeded" ? "false_terminal_success" : "stale_row",
         detail: `${label} run ${wanted} shows ${row.status}, durable status is ${durable.status}`,

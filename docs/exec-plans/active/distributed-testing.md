@@ -1385,11 +1385,25 @@ below is mandatory, including append-only edits.
   default e2e server runs without `CAESIUM_AUTH_MODE`); real scope-based
   denial is already covered live in `ui/e2e/auth/*`.
 
-- [ ] D3. Exercise the operator journey across actual cluster failure.
+- [x] D3. Exercise the operator journey across actual cluster failure.
   Files: new `ui/e2e/cluster-recovery.spec.ts`, new `ui/e2e/helpers/cluster.ts`, `ui/playwright.config.ts`, `test/contracts/scenarios.json` (created by A2).
   Depends on: A2, B3, D2.
   Verify: trigger from the Console, observe a run, fault its owner, reconnect through the supported entry point, and confirm the UI converges on the independently checked durable outcome and retained logs. Exercise both authenticated permissions and event-stream recovery. Observe the fault while the browser is connected; an API-only scenario with a final screenshot is insufficient. Reject duplicate/stale rows and false terminal success. Require available data to remain inspectable after reload.
-  Note: [#575](https://github.com/caesium-cloud/caesium/pull/575) merged the journey at `e750fda0` (tested head `58365e59`). The Playwright project is `cluster-recovery`, excluded from the default and auth projects, with retries 0. `d3-console-cluster-recovery` stays `status: absent` and ungated. No live kind proof is recorded, so the checkbox stays open.
+  Note: [#575](https://github.com/caesium-cloud/caesium/pull/575) merged the journey at `e750fda0`. [#581](https://github.com/caesium-cloud/caesium/pull/581) (W7-α) made it pass live. The hold now waits for a release that the spec delivers by `kubectl exec` to every task pod of the run, only after the lease moves to a survivor. The run-history click is scoped to the dialog. Run-list rows read the status badge, and an unreadable status counts as stale. Task placement is checked on every release sample, the terminal one included, and a port-forward that fails to start is stopped before the retry. Live proof on tested head `58826a1a` (server and runner images built from it), cluster `rb-w7a-32fc67ca9424`, 2026-09-27:
+  - Durations: B1 robustness 298 s, then the `cluster-recovery` project 225 s (journey 39.3 s).
+  - Owner `caesium-0`, lease `10.244.1.4:9001` generation 1. It was killed (kubelet stopped, ctr SIGKILL) while the runner-key browser showed `running`; the disconnect was recorded 1.4 s later.
+  - The lease moved to `10.244.2.11:9001` generation 2 after 29.9 s. The spec then released the first attempt and the survivor's re-dispatch, and the durable status was `succeeded` 2.0 s later.
+  - Checks that ran:
+    - The viewer-key trigger was denied, with no run created.
+    - The task pod was running off the owner node before the kill.
+    - The Service reconnected.
+    - `/v1/events`: 12 attempts, 0 authorized (API-key EventSource), recovered through 8 authenticated run reads.
+    - Heading, one run-list row and reload all showed `succeeded`, with no duplicate rows. The list's first render showed a cached `running` row that refetched in 1.0 s; a row still stale after 30 s fails.
+    - `Retained snapshot` badge with the marker before and after reload.
+    - `convergenceIssues` returned `[]`.
+  - An earlier pass on `1dd4caab` (cluster `rb-w7a-ea623da144a4`) gave the same result before the review fixes.
+  - Ephemeral local artifacts: the W7-α scratchpad `w7a/runs/a4/artifacts/d3-evidence.json`.
+  - The Playwright project stays excluded from default/auth with retries 0. `d3-console-cluster-recovery` stays `status: absent` and ungated until G6.
 
 ### Stream E — Performance with correctness
 

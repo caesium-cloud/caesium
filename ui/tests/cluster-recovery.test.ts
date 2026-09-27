@@ -1,14 +1,21 @@
 // @vitest-environment node
 
-import { readFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   CLUSTER_ENV,
   FOREIGN_CLUSTER_ID,
+  HOLD_LIMIT_SECONDS,
+  TASK_CONTAINER,
+  TASK_RELEASE_FILE,
   UI_E2E_AUTH_HASH_SECRET,
   assessClusterRecoveryGate,
   chooseOwner,
   commandViolation,
+  completedAtOrAfter,
+  consoleHoldScript,
   consoleRecoveryDefinition,
   countExtraEnvEntries,
   convergenceIssues,
@@ -17,6 +24,7 @@ import {
   formatClusterGateFailure,
   formatKillEvidence,
   helmAuthUpgradeCommand,
+  isTerminalRunStatus,
   killEvidenceShowsDeath,
   leaseQueryBody,
   membersFromPodList,
@@ -33,10 +41,18 @@ import {
   parseLeaseResponse,
   robustnessTaskImage,
   planAuthExtraEnv,
+  releaseSample,
+  releaseTargets,
+  runHistoryLinkSelector,
+  runTaskPods,
+  startReadyChild,
+  statusFromRowText,
+  stopChildProcess,
   stripRuntimeContainerID,
   taskDeadFromListing,
   taskImageListed,
   taskPlacementIssues,
+  taskReleaseCommand,
   type ConsoleSurface,
   type DurableOutcome,
   type FaultObservation,
@@ -338,13 +354,241 @@ test("bootstrap admin key is the csk_live token from pod logs", () => {
   expect(parseBootstrapAdminKey('key_prefix":"csk_live_abcD"')).toBeNull();
 });
 
-test("console job is a kubernetes hold that prints a marker", () => {
+test("console job is a kubernetes hold that prints a marker and waits for a release", () => {
   const definition = consoleRecoveryDefinition("d3-console-abcdef123456", "example.invalid/task:1", "d3-marker-abcdef123456");
   const step = (definition.steps as { engine: string; command: string[] }[])[0];
   expect(step.engine).toBe("kubernetes");
-  expect(step.command[2]).toContain("d3-marker-abcdef123456");
-  expect(step.command[2]).toContain("sleep 900");
+  expect(step.command.slice(0, 2)).toEqual(["sh", "-c"]);
+  expect(step.command[2]).toBe(consoleHoldScript("d3-marker-abcdef123456"));
+  expect(step.command[2]).toContain("echo d3-marker-abcdef123456");
+  expect(step.command[2]).toContain(`[ ! -e ${TASK_RELEASE_FILE} ]`);
+  expect(step.command[2]).toContain(`-gt ${HOLD_LIMIT_SECONDS} ]`);
+  expect(step.command[2]).not.toMatch(/sleep 9\d\d/);
+  // The hold must outlive the spec's 900 s test budget.
+  expect(HOLD_LIMIT_SECONDS).toBeGreaterThan(900);
   expect(() => consoleRecoveryDefinition("Bad Alias", "img", "d3-marker-abcdef123456")).toThrow(/alias/);
+  expect(() => consoleHoldScript("d3-marker-abcdef123456", { releaseFile: "relative/file" })).toThrow(/release file/);
+  expect(() => consoleHoldScript("d3-marker-abcdef123456", { releaseFile: "/tmp/x; rm -rf /" })).toThrow(/release file/);
+  expect(() => consoleHoldScript("d3-marker-abcdef123456", { limitSeconds: 0 })).toThrow(/hold limit/);
+});
+
+test("the hold exits 0 only after its release file exists, and fails when never released", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "d3-hold-"));
+  try {
+    const releaseFile = path.join(dir, "release");
+    const marker = "d3-marker-abcdef123456";
+
+    const unreleased = spawnSync("sh", ["-c", consoleHoldScript(marker, { releaseFile, limitSeconds: 1 })], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(unreleased.status).toBe(1);
+    expect(unreleased.stdout).toContain(marker);
+    expect(unreleased.stdout).not.toContain(`${marker} released`);
+    expect(unreleased.stderr).toContain("hold was never released");
+
+    writeFileSync(releaseFile, "");
+    const releasedRun = spawnSync("sh", ["-c", consoleHoldScript(marker, { releaseFile, limitSeconds: 1 })], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    expect(releasedRun.status).toBe(0);
+    expect(releasedRun.stdout).toBe(`${marker}\n${marker} released\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("release targets every running task pod of the run, once, and never the owner node", () => {
+  const run = "22222222-2222-4222-8222-222222222222";
+  const pods = {
+    items: [
+      memberPod("caesium-1", "robustness-worker-a", "10.0.0.2", containerID),
+      taskPod(`hold-${run}-first`, "robustness-worker-b"),
+      taskPod(`hold-${run}-attempt1-second`, "robustness-worker-c"),
+      { ...taskPod(`hold-${run}-pending`, ""), status: { phase: "Pending", containerStatuses: [{ name: TASK_CONTAINER }] } },
+      { ...taskPod(`hold-${run}-waiting`, "robustness-worker-c"), status: waitingStatus() },
+      { ...taskPod(`hold-${run}-gone`, "robustness-worker-b"), metadata: { name: `hold-${run}-gone`, deletionTimestamp: "x" } },
+      taskPod("hold-33333333-3333-4333-8333-333333333333-other", "robustness-worker-b"),
+    ],
+  };
+  const listed = runTaskPods(pods, run);
+  expect(listed.map((pod) => [pod.name, pod.node, pod.running])).toEqual([
+    [`hold-${run}-first`, "robustness-worker-b", true],
+    [`hold-${run}-attempt1-second`, "robustness-worker-c", true],
+    [`hold-${run}-pending`, "", false],
+    [`hold-${run}-waiting`, "robustness-worker-c", false],
+  ]);
+  expect(runTaskPods(pods, "not-a-uuid")).toEqual([]);
+
+  const first = releaseTargets(listed, "robustness-worker-a", new Set());
+  expect(first).toEqual({ targets: [`hold-${run}-first`, `hold-${run}-attempt1-second`], issues: [] });
+  const again = releaseTargets(listed, "robustness-worker-a", new Set([`hold-${run}-first`]));
+  expect(again.targets).toEqual([`hold-${run}-attempt1-second`]);
+
+  const onOwner = releaseTargets([{ name: `hold-${run}-x`, node: "robustness-worker-a", running: true }], "robustness-worker-a", new Set());
+  expect(onOwner.targets).toEqual([]);
+  expect(onOwner.issues.join("\n")).toMatch(/owner node/);
+});
+
+test("placement is checked on the terminal sample too; release stops once the run is terminal", () => {
+  const run = "22222222-2222-4222-8222-222222222222";
+  const owner = "robustness-worker-a";
+  const released = new Set<string>();
+  // running: release the survivor pod, no placement issue
+  const running = releaseSample({
+    status: "running",
+    pods: [{ name: `hold-${run}-attempt1-x`, node: "robustness-worker-b", running: true }],
+    ownerNode: owner,
+    released,
+  });
+  expect(running).toEqual({ terminal: false, targets: [`hold-${run}-attempt1-x`], issues: [] });
+  // -> succeeded: a pod of the run bound to the faulted node on the final
+  // sample is still a placement violation, and nothing more is released.
+  const terminal = releaseSample({
+    status: "succeeded",
+    pods: [
+      { name: `hold-${run}-attempt1-x`, node: "robustness-worker-b", running: false },
+      { name: `hold-${run}-attempt3-y`, node: owner, running: false },
+    ],
+    ownerNode: owner,
+    released: new Set([`hold-${run}-attempt1-x`]),
+  });
+  expect(terminal.terminal).toBe(true);
+  expect(terminal.targets).toEqual([]);
+  expect(terminal.issues).toEqual([`task pod hold-${run}-attempt3-y is on the owner node ${owner}`]);
+  const failedEarly = releaseSample({
+    status: "failed",
+    pods: [{ name: `hold-${run}-attempt1-x`, node: "robustness-worker-b", running: true }],
+    ownerNode: owner,
+    released,
+  });
+  expect(failedEarly).toEqual({ terminal: true, targets: [], issues: [] });
+
+  // The spec records placement issues before it returns on a terminal sample.
+  const source = readFileSync(path.join(uiRoot, "e2e/cluster-recovery.spec.ts"), "utf8");
+  const sampled = source.indexOf("releaseSample({ status: snapshot.status");
+  const recorded = source.indexOf("for (const issue of sample.issues) strayPods.add(issue);");
+  const terminalReturn = source.indexOf("if (sample.terminal) {");
+  expect(sampled).toBeGreaterThan(0);
+  expect(recorded).toBeGreaterThan(sampled);
+  expect(terminalReturn).toBeGreaterThan(recorded);
+  expect(source).not.toMatch(/if \(isTerminalRunStatus\(snapshot\.status\)\) \{\s*return \{ snapshot/);
+});
+
+test("a port-forward start that times out stops and reaps its child before rejecting", async () => {
+  const spawned: ChildProcess[] = [];
+  const spawnFn = (cmd: string, args: readonly string[], opts: { stdio: ["ignore", "pipe", "pipe"]; env: NodeJS.ProcessEnv }) => {
+    const child = spawn(cmd, [...args], opts);
+    spawned.push(child);
+    return child;
+  };
+  const silent = { argv: ["sh", "-c", "exec sleep 30"], description: "silent forward" };
+  await expect(startReadyChild(silent, { readyText: "Forwarding from", timeoutMs: 200, spawnFn })).rejects.toThrow(
+    /silent forward did not become ready within 200ms/,
+  );
+  expect(spawned).toHaveLength(1);
+  expect(spawned[0].exitCode !== null || spawned[0].signalCode !== null).toBe(true);
+
+  const early = { argv: ["sh", "-c", "echo nope; exit 3"], description: "early forward" };
+  await expect(startReadyChild(early, { readyText: "Forwarding from", timeoutMs: 5_000, spawnFn })).rejects.toThrow(
+    /early forward exited 3[\s\S]*nope/,
+  );
+
+  const missing = { argv: ["/nonexistent/d3-kubectl"], description: "missing forward" };
+  await expect(startReadyChild(missing, { readyText: "Forwarding from", timeoutMs: 5_000, spawnFn })).rejects.toThrow(/ENOENT/);
+
+  const ready = { argv: ["sh", "-c", "echo 'Forwarding from 127.0.0.1:1 -> 2'; exec sleep 30"], description: "ready forward" };
+  const child = await startReadyChild(ready, { readyText: "Forwarding from", timeoutMs: 5_000, spawnFn });
+  expect(child.exitCode).toBeNull();
+  await stopChildProcess(child);
+  expect(child.signalCode).toBe("SIGTERM");
+
+  await expect(
+    startReadyChild({ argv: ["kubectl", "delete", "pod", "x"], description: "bad" }, { readyText: "x", timeoutMs: 1, spawnFn }),
+  ).rejects.toThrow(/kubectl delete/);
+  // Refused before spawning.
+  expect(spawned).toHaveLength(4);
+});
+
+test("stopping a child that ignores SIGTERM escalates to SIGKILL", async () => {
+  const stubborn = spawn("sh", ["-c", "trap '' TERM; echo up; while :; do sleep 1; done"], { stdio: ["ignore", "pipe", "pipe"] });
+  await new Promise<void>((resolve) => stubborn.stdout?.once("data", () => resolve()));
+  await stopChildProcess(stubborn, 300);
+  expect(stubborn.signalCode).toBe("SIGKILL");
+  await stopChildProcess(stubborn, 300);
+  await stopChildProcess(undefined);
+});
+
+test("release is a kubectl exec touch in the task container of a pod named for the run", () => {
+  const run = "22222222-2222-4222-8222-222222222222";
+  const command = taskReleaseCommand("/tmp/robustness-owned/kubeconfig", "robust-1", `hold-${run}-abc`, run);
+  expect(command.argv).toEqual([
+    "kubectl",
+    "--kubeconfig",
+    "/tmp/robustness-owned/kubeconfig",
+    "--namespace",
+    "robust-1",
+    "exec",
+    `hold-${run}-abc`,
+    "-c",
+    TASK_CONTAINER,
+    "--",
+    "touch",
+    TASK_RELEASE_FILE,
+  ]);
+  expect(commandViolation(command.argv)).toBeNull();
+  expect(() => taskReleaseCommand("k", "ns", "caesium-0", run)).toThrow(/refusing to release/);
+  expect(() => taskReleaseCommand("k", "ns", `Hold-${run}`, run)).toThrow(/refusing to release/);
+  expect(() => taskReleaseCommand("k", "ns", `hold-${run};rm`, run)).toThrow(/refusing to release/);
+  expect(() => taskReleaseCommand("k", "ns", "hold-x", "not-a-uuid")).toThrow(/unvalidated run id/);
+});
+
+test("the run-history click is scoped to the runs list, not the live overlay behind the dialog", () => {
+  const job = "44444444-4444-4444-8444-444444444444";
+  expect(runHistoryLinkSelector(job, runId)).toBe(`a[href*="/jobs/${job}/runs/${runId}"]`);
+  expect(runHistoryLinkSelector(job.toUpperCase(), runId.toUpperCase())).toBe(`a[href*="/jobs/${job}/runs/${runId}"]`);
+  expect(() => runHistoryLinkSelector(job, "x\"]")).toThrow(/run id/);
+  expect(() => runHistoryLinkSelector("x", runId)).toThrow(/job id/);
+
+  const source = readFileSync(path.join(uiRoot, "e2e/cluster-recovery.spec.ts"), "utf8");
+  expect(source).toContain('page.getByTestId("job-runs-list").locator(runHistoryLinkSelector(jobId, runId))');
+  expect(source).not.toMatch(/page\.locator\(`a\[href\*="\/runs\//);
+});
+
+test("run-history rows need a readable status; glued row text is not a status", () => {
+  // Live a1 evidence: the whole row textContent glued duration and badge.
+  expect(statusFromRowText("2026-09-27 01:47:06 UTCjust now · 982b3460 · 33.7ssucceeded")).toBeNull();
+  expect(statusFromRowText("succeeded")).toBe("succeeded");
+  expect(statusFromRowText(" Running ")).toBe("running");
+
+  const unreadable = passingJourney();
+  unreadable.console.runRows = [{ id: runId, status: null }];
+  expect(convergenceIssues(unreadable)).toContainEqual({
+    code: "stale_row",
+    detail: `run list run ${runId} has no readable status`,
+  });
+  const unreadableAfterReload = passingJourney();
+  unreadableAfterReload.console.reloadedRunRows = [{ id: runId, status: null }];
+  expect(codes(unreadableAfterReload)).toEqual(["stale_row"]);
+  expect(codes(passingJourney())).toEqual([]);
+});
+
+test("terminal status and completion-after-instant checks fail closed", () => {
+  expect(isTerminalRunStatus("succeeded")).toBe(true);
+  expect(isTerminalRunStatus(" Failed ")).toBe(true);
+  expect(isTerminalRunStatus("cancelled")).toBe(true);
+  expect(isTerminalRunStatus("running")).toBe(false);
+  expect(isTerminalRunStatus("")).toBe(false);
+
+  const release = Date.parse("2026-09-26T21:05:00.000Z");
+  expect(completedAtOrAfter("2026-09-26T21:05:03.000Z", release)).toBe(true);
+  expect(completedAtOrAfter("2026-09-26T21:04:59.000Z", release)).toBe(true);
+  expect(completedAtOrAfter("2026-09-26T21:04:57.000Z", release)).toBe(false);
+  expect(completedAtOrAfter("", release)).toBe(false);
+  expect(completedAtOrAfter("not a time", release)).toBe(false);
+  // Never released: a success cannot be attributed to a release.
+  expect(completedAtOrAfter("2026-09-26T21:05:03.000Z", 0)).toBe(false);
 });
 
 test("convergence rejects duplicate, stale, false success, and a fault that was not seen while connected", () => {
@@ -453,6 +697,11 @@ test("the cluster spec fails closed instead of skipping", () => {
   expect(source).not.toMatch(/test\.fixme\s*\(/);
   expect(source).toContain("SIGKILL");
   expect(source).not.toMatch(/kubectl["',\s]+delete/);
+  // A failed run must keep an intact trace; the embedded video stalled its zip.
+  expect(source).toContain('test.use({ video: "off" })');
+  // Port-forwards start through startReadyChild, which reaps a failed start.
+  expect(source).toContain("startReadyChild(command,");
+  expect(source).not.toMatch(/\bspawn\(/);
 });
 
 function codes(input: { durable: DurableOutcome; console: ConsoleSurface; fault: FaultObservation }): string[] {
@@ -529,6 +778,10 @@ function taskPod(name: string, node: string) {
   return {
     metadata: { name },
     spec: { nodeName: node },
-    status: { phase: "Running", containerStatuses: [{ name: "atom" }] },
+    status: { phase: "Running", containerStatuses: [{ name: "atom", state: { running: { startedAt: "2026-09-26T21:03:40Z" } } }] },
   };
+}
+
+function waitingStatus() {
+  return { phase: "Running", containerStatuses: [{ name: "atom", state: { waiting: { reason: "ContainerCreating" } } }] };
 }
