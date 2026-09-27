@@ -32,6 +32,21 @@
 #   CAESIUM_PERF_BROWSER=0                   run ui/e2e/performance.spec.ts (default 0)
 #   CAESIUM_PERF_BUNDLE=1                    run check-bundle-size.mjs (default 1)
 #   CAESIUM_PERF_KEEP=1                      leave owned containers in place
+#
+# A/A control: set CAESIUM_PERF_BASE_SHA to the candidate SHA. The run builds
+# one release image and measures it on both sides with the unchanged decision
+# rule, which estimates this host's false-positive and noisy rate. The
+# comparison document records "control": "a_a".
+#
+# Per-sample attribution evidence (not compared): every server's log
+# ($side/server-logs/<phase>-<repeat>.log), a container/image docker events
+# stream (observations/docker-events.jsonl), each driver report and stderr
+# ($side/runs/), for browser samples a Playwright trace per test plus
+# page-clock diagnostics ($side/browser-diagnostics.jsonl), a per-sample
+# start/end timeline with the host load average (observations/timeline.tsv),
+# and running-container snapshots before and after measurement
+# (observations/docker-ps-{start,end}.txt). The events stream and timeline
+# cover the benchmark phase as well as the server phases.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +56,16 @@ log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 require_env() { [[ -n "${!1:-}" ]] || die "$1 is required"; }
+
+# Attribution timeline: one row per sample start/end with the host's 1-minute
+# load average, so a stalled or slow sample can be matched to host contention.
+# Columns: utc, phase, side, repeat, event, host_load1, exit.
+timeline_mark() {
+  local ts load
+  read -r ts load < <(python3 -c 'import datetime, os; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"), "%.2f" % os.getloadavg()[0])' 2>/dev/null) || true
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ts:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$1" "$2" "$3" "$4" "${load:-NA}" "${5:-}" \
+    >>"$ARTIFACTS/observations/timeline.tsv"
+}
 
 # Overlay only E3's measurement code on the temporary base checkout. The
 # release images are built before this is called; changing their source would
@@ -305,6 +330,23 @@ PERF_PORT="${CAESIUM_PERF_PORT:-18080}"
 NETWORK="caesium-perf-$ID"
 OWNED=()
 BASE_WORKTREE=""
+EVENTS_PID=""
+
+# Stream container/image events for the whole measured phase so a stalled
+# sample can be matched to container create/start/die timing afterwards.
+start_docker_events() {
+  docker events --filter type=container --filter type=image --format '{{json .}}' \
+    >"$ARTIFACTS/observations/docker-events.jsonl" 2>"$ARTIFACTS/observations/docker-events.stderr" &
+  EVENTS_PID=$!
+}
+
+stop_docker_events() {
+  if [[ -n "$EVENTS_PID" ]]; then
+    kill "$EVENTS_PID" 2>/dev/null || true
+    wait "$EVENTS_PID" 2>/dev/null || true
+    EVENTS_PID=""
+  fi
+}
 PERF_LOCK="${CAESIUM_PERF_LOCK:-/tmp/caesium-perf.lock}"
 
 if ! mkdir "$PERF_LOCK" 2>/dev/null; then
@@ -313,6 +355,7 @@ fi
 
 cleanup() {
   local rc=$?
+  stop_docker_events
   rmdir "$PERF_LOCK" 2>/dev/null || true
   if [[ "$KEEP" == "1" ]]; then
     log "CAESIUM_PERF_KEEP=1; leaving owned resources in place"
@@ -320,6 +363,9 @@ cleanup() {
   fi
   local name
   for name in "${OWNED[@]+"${OWNED[@]}"}"; do
+    if docker container inspect "$name" >/dev/null 2>&1; then
+      docker logs --timestamps "$name" >"$ARTIFACTS/observations/$name-at-exit.log" 2>&1 || true
+    fi
     docker rm -f "$name" >/dev/null 2>&1 || true
   done
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
@@ -444,7 +490,14 @@ else
 fi
 
 BASE_BUILT="supplied"
-if docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+AA_CONTROL=0
+if [[ "$BASE_SHA" == "$CANDIDATE_SHA" && "$BASE_IMAGE" == "$CANDIDATE_IMAGE" ]]; then
+  # A/A control: one image, measured on both sides. Its build provenance is
+  # the candidate's, so a supplied candidate image stays "supplied" here too.
+  AA_CONTROL=1
+  BASE_BUILT="$CANDIDATE_BUILT"
+  log "A/A control: base and candidate are both $CANDIDATE_SHA; both sides run $CANDIDATE_IMAGE"
+elif docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
   log "image $BASE_IMAGE already present; recording as supplied"
 else
   BASE_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/caesium-perf-base.XXXXXX")"
@@ -542,6 +595,11 @@ if [[ "$RUN_LOAD" == "1" ]]; then
   cp "$ROOT/.tmp/caesium-load-driver-perf" "$DRIVER"
   chmod +x "$DRIVER"
 fi
+
+# Attribution evidence for every measured phase starts here, before the first
+# benchmark sample.
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' >"$ARTIFACTS/observations/docker-ps-start.txt" 2>&1 || true
+start_docker_events
 
 # ---------------------------------------------------------------------------
 # Hermetic Go benchmarks (no server)
@@ -647,8 +705,10 @@ start_server() {
 }
 
 stop_server() {
-  local side="$1"
+  local side="$1" phase="$2" idx="$3"
   local name="caesium-perf-$ID-$side"
+  mkdir -p "$ARTIFACTS/$side/server-logs"
+  docker logs --timestamps "$name" >"$ARTIFACTS/$side/server-logs/${phase}-${idx}.log" 2>&1 || true
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
@@ -659,6 +719,7 @@ run_workload() {
   mkdir -p "$outdir"
   local json_out="$outdir/${workload}-${phase}-${idx}.json"
   local err_out="$outdir/${workload}-${phase}-${idx}.stderr"
+  timeline_mark "$phase" "$side" "$idx" start
   set +e
   docker run --rm --platform "$DOCKER_PLATFORM" \
     --network "container:$name" \
@@ -678,6 +739,7 @@ run_workload() {
   local rc=$?
   set -e
   printf '%s\n' "$rc" >"$outdir/${workload}-${phase}-${idx}.exit"
+  timeline_mark "$phase" "$side" "$idx" end "$rc"
   return 0
 }
 
@@ -699,7 +761,7 @@ if [[ "$RUN_LOAD" == "1" ]]; then
         log "cold $side $workload #$r"
         run_workload "$side" "cold" "$workload" "$r"
       done
-      stop_server "$side"
+      stop_server "$side" cold "$r"
     done
     r=$((r + 1))
   done
@@ -728,24 +790,28 @@ if [[ "$RUN_LOAD" == "1" ]]; then
       if [[ "$RUN_BROWSER" == "1" ]]; then
         log "browser performance.spec.ts against $side repeat #$r"
         mkdir -p "$ARTIFACTS/$side"
+        timeline_mark browser "$side" "$r" start
         set +e
         (
           cd "$ROOT/ui"
           PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
           CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
           CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
+          CAESIUM_PERF_BROWSER_DIAGNOSTICS_OUT="$ARTIFACTS/$side/browser-diagnostics.jsonl" \
+          CAESIUM_PERF_SIDE="$side" CAESIUM_PERF_REPEAT="$r" \
           PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
           npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
             --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
         )
         brc=$?
         set -e
+        timeline_mark browser "$side" "$r" end "$brc"
         printf '%s\n' "$brc" >>"$ARTIFACTS/$side/browser.exit"
         if [[ "$brc" -ne 0 ]]; then
           log "browser spec failed for $side repeat #$r exit=$brc (recorded)"
         fi
       fi
-      stop_server "$side"
+      stop_server "$side" warm "$r"
     done
     r=$((r + 1))
   done
@@ -761,28 +827,36 @@ if [[ "$RUN_LOAD" != "1" && "$RUN_BROWSER" == "1" ]]; then
       start_server "$side" "$image"
       log "browser performance.spec.ts against $side repeat #$r"
       mkdir -p "$ARTIFACTS/$side"
+      timeline_mark browser "$side" "$r" start
       set +e
       (
         cd "$ROOT/ui"
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:${PERF_PORT}" \
         CAESIUM_MANUAL_TRIGGER_API_KEY="$API_KEY" \
         CAESIUM_PERF_BROWSER_OUT="$ARTIFACTS/$side/browser.jsonl" \
+        CAESIUM_PERF_BROWSER_DIAGNOSTICS_OUT="$ARTIFACTS/$side/browser-diagnostics.jsonl" \
+        CAESIUM_PERF_SIDE="$side" CAESIUM_PERF_REPEAT="$r" \
         PLAYWRIGHT_JSON_OUTPUT_FILE="$ARTIFACTS/$side/playwright/repeat-$r/results.json" \
         npx playwright test e2e/performance.spec.ts --project=default --retries=0 \
           --reporter=list,json --output "$ARTIFACTS/$side/playwright/repeat-$r"
       )
       brc=$?
       set -e
+      timeline_mark browser "$side" "$r" end "$brc"
       printf '%s\n' "$brc" >>"$ARTIFACTS/$side/browser.exit"
-      stop_server "$side"
+      stop_server "$side" browser "$r"
     done
     r=$((r + 1))
   done
 fi
 
+stop_docker_events
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' >"$ARTIFACTS/observations/docker-ps-end.txt" 2>&1 || true
+
 # ---------------------------------------------------------------------------
 # Assemble comparison document and run the fail-closed comparator
 # ---------------------------------------------------------------------------
+export AA_CONTROL
 export BASE_SHA CANDIDATE_SHA BASE_IMAGE CANDIDATE_IMAGE
 export BASE_IMAGE_ID CANDIDATE_IMAGE_ID BASE_CLI_DIGEST CANDIDATE_CLI_DIGEST
 export CATALOG_SHA SETTINGS_SHA BASE_BUILT CANDIDATE_BUILT
@@ -906,11 +980,14 @@ def workload_samples(side, phase):
     out = {}
     if not runs.is_dir():
         return out
-    for path in sorted(runs.glob(f"*-{phase}-*.json")):
+    matched = []
+    for path in runs.glob(f"*-{phase}-*.json"):
         m = re.match(r"^(.*)-" + re.escape(phase) + r"-(\d+)\.json$", path.name)
-        if not m:
-            continue
-        workload = m.group(1)
+        if m:
+            matched.append((m.group(1), int(m.group(2)), path))
+    # Numeric repeat order (not lexical: -10 before -2), so a sample's position
+    # in the series is its repeat number in diagnostics.
+    for workload, repeat, path in sorted(matched):
         report = load_json(path)
         exit_path = path.with_suffix(".exit")
         exit_code = int(exit_path.read_text().strip()) if exit_path.is_file() else None
@@ -928,6 +1005,7 @@ def workload_samples(side, phase):
             "outcome": "passed" if outcome == "passed" else "failed",
             "duration_seconds": duration,
             "exit_code": exit_code,
+            "repeat": repeat,
         })
     return out
 
@@ -1027,6 +1105,7 @@ if os.environ.get("RUN_BUNDLE") == "1":
 doc = {
     "schema_version": 1,
     "required_families": families,
+    "control": "a_a" if os.environ.get("AA_CONTROL") == "1" else None,
     "benchmark_harness": bench_harness,
     "benchmark_sampling": bench_sampling,
     "required_browser_series": [

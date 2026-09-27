@@ -18,6 +18,13 @@ Exit status:
   4  conclusive slower
 
 Stdout is the JSON report. Human summary goes to stderr.
+
+Two report sections are informational only and never change a verdict or the
+exit status: `multiplicity` (how many series were tested at alpha and how
+many significant results chance alone predicts) and each metric's
+`diagnostics.extreme_samples` (robust z-scores that point at the sample to
+attribute). The aggregation/multiple-comparison policy and any outlier rule
+are E4 decisions (Q2/Q5), not this comparator's.
 """
 
 from __future__ import annotations
@@ -39,6 +46,8 @@ SCHEMA_VERSION = 1
 ALPHA = 0.05
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_CV = 0.30
+# Iglewicz-Hoaglin modified z-score cut-off; used only to point at samples.
+EXTREME_ROBUST_Z = 3.5
 
 # Keep in lockstep with ui/scripts/check-bundle-size.mjs.
 DEFAULT_LARGEST_JS_RAW = 1_400_000
@@ -189,6 +198,86 @@ def distribution(xs):
         "p90": percentile(ys, 90) if ys else None,
         "p99": percentile(ys, 99) if ys else None,
         "cv": cv(ys) if ys else None,
+    }
+
+
+def extreme_samples(xs, threshold=EXTREME_ROBUST_Z):
+    """1-based sample positions whose modified z-score exceeds threshold.
+
+    Informational: it names the sample to attribute (sample order is the
+    recorded order, i.e. repeat order for interleaved series). It never
+    removes a sample or changes a verdict. A zero MAD reports nothing.
+    """
+    ys = [float(x) for x in xs]
+    if len(ys) < 3:
+        return []
+    med = statistics.median(ys)
+    mad = statistics.median(abs(y - med) for y in ys)
+    if mad == 0:
+        return []
+    out = []
+    for index, y in enumerate(ys, start=1):
+        z = 0.6745 * (y - med) / mad
+        if abs(z) > threshold:
+            out.append({"sample": index, "value": y, "robust_z": round(z, 2)})
+    return out
+
+
+def is_degenerate(result):
+    """Both sides constant and equal: the test cannot produce a small p."""
+    base, cand = result.get("base") or {}, result.get("candidate") or {}
+    return (base.get("stdev") or 0) == 0 and (cand.get("stdev") or 0) == 0 and \
+        base.get("mean") == cand.get("mean")
+
+
+def multiplicity_summary(metric_results, alpha):
+    """Informational chance-level accounting for the per-metric decisions.
+
+    The expectations assume independent tests at exactly alpha. They are not:
+    every benchmark in one sample shares a `go test` process and its host
+    state, so benchmark verdicts arrive in same-direction clusters (a same-image
+    A/A control produced six "faster" ns/op verdicts at once). The tie-corrected
+    normal approximation is also somewhat conservative. Treat the numbers as an
+    order of magnitude; they never feed a verdict or the exit status.
+    """
+    tested = [m for m in metric_results if m.get("p_value") is not None]
+    informative = [m for m in tested if not is_degenerate(m)]
+    n = len(informative)
+    significant = sum(1 for m in informative if m["p_value"] < alpha)
+    slower = sum(1 for m in informative if m["verdict"] == "slower")
+    tail = sum(
+        math.comb(n, k) * alpha ** k * (1.0 - alpha) ** (n - k)
+        for k in range(significant, n + 1)
+    ) if n else 1.0
+    by_family = {}
+    for m in informative:
+        entry = by_family.setdefault(
+            m.get("family") or "unknown", {"informative": 0, "significant": 0, "slower": 0, "faster": 0}
+        )
+        entry["informative"] += 1
+        entry["significant"] += int(m["p_value"] < alpha)
+        entry["slower"] += int(m["verdict"] == "slower")
+        entry["faster"] += int(m["verdict"] == "faster")
+    return {
+        "informational_only": True,
+        "alpha": alpha,
+        "metrics_with_p_value": len(tested),
+        "informative_metrics": n,
+        "degenerate_metrics": len(tested) - n,
+        "expected_significant_if_no_change": round(alpha * n, 3),
+        "expected_slower_if_no_change": round(alpha / 2.0 * n, 3),
+        "probability_no_slower_if_no_change": round((1.0 - alpha / 2.0) ** n, 4),
+        "observed_significant": significant,
+        "observed_slower": slower,
+        "probability_at_least_observed_significant_if_no_change": round(min(1.0, tail), 4),
+        "by_family": dict(sorted(by_family.items())),
+        "note": (
+            "Per-metric verdicts use alpha without correction; aggregation and "
+            "multiple-comparison policy are E4 decisions (Q2/Q5). Degenerate metrics "
+            "(both sides constant and equal) are excluded from the counts. The "
+            "expectations assume independent tests; benchmarks sampled in one process "
+            "are correlated, so their false positives cluster."
+        ),
     }
 
 
@@ -815,6 +904,10 @@ def compare_metric(metric_id, left, right, min_samples, max_cv, alpha):
         "u1": None,
         "u2": None,
         "lower_is_better": left.get("lower_is_better"),
+        "diagnostics": {
+            "base": {"extreme_samples": extreme_samples(left.get("samples") or [])},
+            "candidate": {"extreme_samples": extreme_samples(right.get("samples") or [])},
+        },
     }
     if left.get("direction_error") or right.get("direction_error"):
         result["verdict"] = "fail"
@@ -935,7 +1028,7 @@ def rollup(metric_results, fail_reasons, inconclusive_reasons):
     return "inconclusive", ["unrecognized metric verdicts"]
 
 
-def benchstat_text(metric_results):
+def benchstat_text(metric_results, multiplicity=None):
     lines = [
         "name                                          old mean        new mean        delta",
         "-----------------------------------------------------------------------------------",
@@ -971,6 +1064,24 @@ def benchstat_text(metric_results):
         lines.append(f"{m['id']:<45} {old_s:>14} {new_s:>14} {delta_s:>10}  {mark}{p_s}{n}")
     lines.append("")
     lines.append("Insignificance is not equivalence. Missing/undersampled/noisy series are not a pass.")
+    for m in rows:
+        if m["verdict"] in {"faster", "no_significant_difference"}:
+            continue
+        for label in ("base", "candidate"):
+            extremes = ((m.get("diagnostics") or {}).get(label) or {}).get("extreme_samples") or []
+            if extremes:
+                shown = ", ".join(f"#{e['sample']}={e['value']:.6g} (z={e['robust_z']})" for e in extremes)
+                lines.append(f"extreme {label} samples in {m['id']}: {shown}")
+    if multiplicity:
+        lines.append(
+            "multiplicity (informational): "
+            f"{multiplicity['informative_metrics']} informative metrics at alpha={multiplicity['alpha']}; "
+            f"with no real change expect {multiplicity['expected_significant_if_no_change']:.2f} significant "
+            f"({multiplicity['expected_slower_if_no_change']:.2f} slower), "
+            f"P(no slower)={multiplicity['probability_no_slower_if_no_change']:.2f}; "
+            f"observed {multiplicity['observed_significant']} significant, "
+            f"{multiplicity['observed_slower']} slower"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1054,6 +1165,8 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
             "metrics": [],
             "bundle": bundle_result,
             "benchstat": "speed not compared: correctness/provenance failed closed\n",
+            "multiplicity": None,
+            "control": doc.get("control"),
             "provenance": prov,
             "required_families": required_families,
             "min_samples": min_samples,
@@ -1079,6 +1192,7 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
                     "p_value": None,
                     "u_statistic": None,
                     "lower_is_better": True,
+                    "diagnostics": None,
                 }
             )
             continue
@@ -1099,6 +1213,7 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
                     "p_value": None,
                     "u_statistic": None,
                     "lower_is_better": left.get("lower_is_better", True),
+                    "diagnostics": None,
                 }
             )
             continue
@@ -1109,6 +1224,7 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
     if overall == "equivalent":
         overall = "no_significant_difference"
         reasons.append("equivalent is forbidden; coerced to no_significant_difference")
+    multiplicity = multiplicity_summary(metric_results, alpha)
     report = {
         "schema_version": SCHEMA_VERSION,
         "overall": overall,
@@ -1116,7 +1232,9 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
         "speed_compared": speed_compared,
         "metrics": metric_results,
         "bundle": bundle_result,
-        "benchstat": benchstat_text(metric_results),
+        "benchstat": benchstat_text(metric_results, multiplicity),
+        "multiplicity": multiplicity,
+        "control": doc.get("control"),
         "provenance": prov,
         "required_families": required_families,
         "min_samples": min_samples,
