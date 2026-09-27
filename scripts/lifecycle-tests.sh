@@ -1626,8 +1626,9 @@ PY
       lc_case joining-ordinal-1-replacement blocked "fresh-PVC ordinal-1 pod or direct membership proof failed; inspect JoiningOrdinalOne.log, PVC/PV and pod events"
     fi
 
-    # Ordinal 0 is intentionally last: replacing its PVC can create an
-    # isolated self-bootstrap, so it must not contaminate the preceding cases.
+    # Ordinal 0 is intentionally last: before #582 replacing its PVC created an
+    # isolated self-bootstrap, and a regression must not contaminate the
+    # preceding cases.
     if [[ "$LC_JOIN_RC" != 0 ]]; then
       lc_case ordinal-0-disk-loss blocked "prior joining replacement did not reconcile; shared cluster is not a valid baseline for ordinal-0 disk loss"
       lc_case rollback-recorded-outcome blocked "prior joining replacement did not reconcile; no isolated migrated volume copy exists for rollback"
@@ -1662,6 +1663,12 @@ PY
       lc_ns exec caesium-0 -c caesium -- sh -c \
         'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' \
         >"$LC_ART/cluster-logs/ordinal0-node-store.txt" 2>&1 || true
+      # The chart's join-or-bootstrap decision for an empty ordinal 0 (#582).
+      lc_ns logs caesium-0 -c peer-discovery --tail=-1 \
+        >"$LC_ART/cluster-logs/ordinal0-peer-discovery.log" 2>&1 || true
+      lc_ns exec caesium-0 -c caesium -- sh -c \
+        'echo "database-nodes=$(cat /etc/caesium/database-nodes)"; echo "database-bootstrap-peers=$(cat /etc/caesium/database-bootstrap-peers 2>/dev/null)"' \
+        >"$LC_ART/cluster-logs/ordinal0-peer-config.txt" 2>&1 || true
       LC_ART="$LC_ART" LC_OLD0_UID="$LC_OLD0_UID" LC_NEW0_UID="${LC_NEW0_UID:-}" python3 - <<'PY'
 import json,os,pathlib
 art=pathlib.Path(os.environ['LC_ART']);out={
@@ -1670,7 +1677,9 @@ art=pathlib.Path(os.environ['LC_ART']);out={
  'pvc':(art/'cluster-logs/ordinal0-pvc.json').read_text(),
  'info_yaml':(art/'cluster-logs/ordinal0-info.yaml').read_text(),
  'node_store':(art/'cluster-logs/ordinal0-node-store.txt').read_text(),
- 'logs':(art/'cluster-logs/ordinal0.log').read_text()}
+ 'logs':(art/'cluster-logs/ordinal0.log').read_text(),
+ 'peer_discovery_log':(art/'cluster-logs/ordinal0-peer-discovery.log').read_text(),
+ 'peer_config':(art/'cluster-logs/ordinal0-peer-config.txt').read_text()}
 (art/'cluster-ordinal0-host.json').write_text(json.dumps(out,indent=2)+'\n')
 PY
       lc_ns cp "$LC_ART/cluster-ordinal0-host.json" lifecycle-runner:/artifacts/cluster-ordinal0-host.json -c runner || LC_ZERO_RC=$?

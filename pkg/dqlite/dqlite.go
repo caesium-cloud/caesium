@@ -171,7 +171,7 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 	// dqlite records the node's advertised address inside that PVC. openNativeApp
 	// reconciles a data directory created at a different address and puts this
 	// node back in the raft configuration before waiting on readiness (#493).
-	dqApp, err := openNativeApp(ctx, vars.DatabasePath, vars.NodeAddress, vars.DatabaseNodes, opts...)
+	dqApp, err := openNativeApp(ctx, vars.DatabasePath, vars.NodeAddress, vars.DatabaseNodes, vars.DatabaseBootstrapPeers, opts...)
 	if err != nil {
 		return nil, err
 	}

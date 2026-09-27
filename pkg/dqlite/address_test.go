@@ -139,7 +139,7 @@ func restartNode(t *testing.T, ctx context.Context, dir, address string, seeds [
 	}
 	openCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return openNativeApp(openCtx, dir, address, seeds, opts...)
+	return openNativeApp(openCtx, dir, address, seeds, nil, opts...)
 }
 
 func clusterMembers(t *testing.T, ctx context.Context, app *dqliteapp.App) map[uint64]client.NodeInfo {
@@ -652,7 +652,7 @@ func TestNeverPromotedSpareRejoinsAtNewAddress(t *testing.T) {
 	restartSpare := func(address string) (*dqliteapp.App, error) {
 		openCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
-		return openNativeApp(openCtx, dirs[3], address, addrs[:1],
+		return openNativeApp(openCtx, dirs[3], address, addrs[:1], nil,
 			dqliteapp.WithAddress(address), dqliteapp.WithCluster(addrs[:1]),
 			dqliteapp.WithVoters(3), dqliteapp.WithStandBys(0))
 	}

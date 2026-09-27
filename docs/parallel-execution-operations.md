@@ -28,6 +28,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_DATABASE_SHARDS` | `1` | Number of dqlite hot write shards. Values greater than `1` are Phase 4 horizontal-scaling mode and require the internal dqlite backend. |
 | `CAESIUM_DATABASE_VOTERS` | `3` | Target dqlite voter count. Must be odd and at least 3. |
 | `CAESIUM_DATABASE_STANDBYS` | `3` | Target dqlite standby count for failover headroom. Extra nodes settle as spares. |
+| `CAESIUM_DATABASE_BOOTSTRAP_PEERS` | `""` | Other members this node would have (`host:port,...`). Only read when the data directory is empty and `CAESIUM_DATABASE_NODES` is empty: the node probes these addresses for up to 10 s and joins their cluster as a new member if any answers, instead of bootstrapping a new cluster. The Helm chart sets it for ordinal 0. See [Kubernetes deployment](kubernetes-deployment.md#replacing-a-member-whose-volume-was-lost). |
 | `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` | `1024` | Raft log entries between dqlite snapshots. Each snapshot writes a full copy of the database to disk. See [Raft log retention](#raft-log-retention). |
 | `CAESIUM_DATABASE_SNAPSHOT_TRAILING` | `2048` | Raft log entries each node keeps, in memory and on disk, behind its latest snapshot. Must be at least 4 and at least `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD`. See [Raft log retention](#raft-log-retention). |
 | `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
