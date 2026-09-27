@@ -1632,24 +1632,37 @@ PY
       lc_case ordinal-0-disk-loss blocked "prior joining replacement did not reconcile; shared cluster is not a valid baseline for ordinal-0 disk loss"
       lc_case rollback-recorded-outcome blocked "prior joining replacement did not reconcile; no isolated migrated volume copy exists for rollback"
     else
+    # Readiness and runner failures need different fallback details: a
+    # runner require.* can stop the test before it writes a case record, and
+    # that must not be reported as a pod that never became Ready.
+    LC_ZERO_READY_RC=0
     LC_ZERO_RC=0
     LC_OLD0_UID="$(lc_ns get pod caesium-0 -o jsonpath='{.metadata.uid}')"
-    lc_ns delete pvc data-caesium-0 --wait=false >/dev/null || LC_ZERO_RC=$?
-    lc_ns delete pod caesium-0 --wait=false >/dev/null || LC_ZERO_RC=$?
+    lc_ns delete pvc data-caesium-0 --wait=false >/dev/null || LC_ZERO_READY_RC=$?
+    lc_ns delete pod caesium-0 --wait=false >/dev/null || LC_ZERO_READY_RC=$?
     for _ in {1..120}; do
       LC_NEW0_UID="$(lc_ns get pod caesium-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
       if [[ -n "$LC_NEW0_UID" && "$LC_NEW0_UID" != "$LC_OLD0_UID" ]]; then break; fi
       sleep 2
     done
+    [[ -n "${LC_NEW0_UID:-}" && "$LC_NEW0_UID" != "$LC_OLD0_UID" ]] || LC_ZERO_READY_RC=1
+    # WaitForFirstConsumer keeps the new PVC Pending until this pod is
+    # scheduled. A UID change alone is that Pending pod, which has no IP and
+    # no volumeName. Ordinal-1 already waits for Ready; do the same here
+    # before reading the store or choosing an HTTP base.
+    if [[ "$LC_ZERO_READY_RC" == 0 ]]; then
+      lc_ns wait --for=condition=Ready pod/caesium-0 --timeout=300s >/dev/null 2>&1 || LC_ZERO_READY_RC=$?
+    fi
     lc_ns get pod caesium-0 -o json >"$LC_ART/cluster-logs/ordinal0-pod.json" 2>&1 || true
     lc_ns get pvc data-caesium-0 -o json >"$LC_ART/cluster-logs/ordinal0-pvc.json" 2>&1 || true
-    lc_ns logs caesium-0 -c caesium --tail=-1 >"$LC_ART/cluster-logs/ordinal0.log" 2>&1 || true
-    lc_ns exec caesium-0 -c caesium -- cat /var/lib/caesium/dqlite/info.yaml \
-      >"$LC_ART/cluster-logs/ordinal0-info.yaml" 2>&1 || true
-    lc_ns exec caesium-0 -c caesium -- sh -c \
-      'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' \
-      >"$LC_ART/cluster-logs/ordinal0-node-store.txt" 2>&1 || true
-    LC_ART="$LC_ART" LC_OLD0_UID="$LC_OLD0_UID" LC_NEW0_UID="${LC_NEW0_UID:-}" python3 - <<'PY'
+    if [[ "$LC_ZERO_READY_RC" == 0 ]]; then
+      lc_ns logs caesium-0 -c caesium --tail=-1 >"$LC_ART/cluster-logs/ordinal0.log" 2>&1 || true
+      lc_ns exec caesium-0 -c caesium -- cat /var/lib/caesium/dqlite/info.yaml \
+        >"$LC_ART/cluster-logs/ordinal0-info.yaml" 2>&1 || true
+      lc_ns exec caesium-0 -c caesium -- sh -c \
+        'cd /var/lib/caesium/dqlite && find . -type f -exec ls -ln {} \; | sort' \
+        >"$LC_ART/cluster-logs/ordinal0-node-store.txt" 2>&1 || true
+      LC_ART="$LC_ART" LC_OLD0_UID="$LC_OLD0_UID" LC_NEW0_UID="${LC_NEW0_UID:-}" python3 - <<'PY'
 import json,os,pathlib
 art=pathlib.Path(os.environ['LC_ART']);out={
  'old_uid':os.environ['LC_OLD0_UID'],'new_uid':os.environ['LC_NEW0_UID'],
@@ -1660,11 +1673,16 @@ art=pathlib.Path(os.environ['LC_ART']);out={
  'logs':(art/'cluster-logs/ordinal0.log').read_text()}
 (art/'cluster-ordinal0-host.json').write_text(json.dumps(out,indent=2)+'\n')
 PY
-    lc_ns cp "$LC_ART/cluster-ordinal0-host.json" lifecycle-runner:/artifacts/cluster-ordinal0-host.json -c runner || LC_ZERO_RC=$?
-    lc_phase OrdinalZeroLoss "$LC_CAND_ID" "$(lc_base)" || LC_ZERO_RC=$?
-    lc_copy_runner_artifacts || true
-    if [[ "$LC_ZERO_RC" != 0 && ! -f "$LC_ART/cases/ordinal-0-disk-loss.json" ]]; then
-      lc_case ordinal-0-disk-loss blocked "surviving quorum, fresh node store or info.yaml was unobservable after ordinal-0 disk loss; see OrdinalZeroLoss.log"
+      lc_ns cp "$LC_ART/cluster-ordinal0-host.json" lifecycle-runner:/artifacts/cluster-ordinal0-host.json -c runner || LC_ZERO_RC=$?
+      lc_phase OrdinalZeroLoss "$LC_CAND_ID" "$(lc_base)" || LC_ZERO_RC=$?
+      lc_copy_runner_artifacts || true
+    fi
+    if [[ ! -f "$LC_ART/cases/ordinal-0-disk-loss.json" ]]; then
+      if [[ "$LC_ZERO_READY_RC" != 0 ]]; then
+        lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement pod was not recreated or did not become Ready; runner not started; inspect ordinal0-pod.json, ordinal0-pvc.json and caesium-0-current.log"
+      elif [[ "$LC_ZERO_RC" != 0 ]]; then
+        lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement was Ready but the host-evidence copy or OrdinalZeroLoss runner failed before recording a case; see OrdinalZeroLoss.log"
+      fi
     fi
     lc_case rollback-recorded-outcome blocked "exploratory helm rollback requires an isolated copy of the candidate-migrated three-member volume set; the ordinal-0 disk-loss cluster is not a valid rollback baseline"
     fi
