@@ -21,18 +21,23 @@ core-failure acceptance repair, persistent-cluster lifecycle runner, common
 performance benchmark harness, same-cap snapshot memory sampler (#574) and
 console owner-crash journey (#575) are tracked in
 [Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md).
-The console journey is merged code with no live kind proof. Calibrated budgets
-remain planned. The F2 cluster runner and E3 comparator still lack complete
-live acceptance.
+W7 made the console journey pass a live kind proof (#581). It attributed and
+removed E3's harness noise, adding an A/A control, and recorded a conclusive
+comparison (#584). It also bounded dqlite's retained Raft log with explicit
+snapshot parameters (#585), after which F2's snapshot catch-up passed twice
+under the 1Gi cap. D3 and E3 are accepted. The F2 cluster qualification is
+still incomplete: ordinal-0 rejoin (#582) and isolated rollback are blocked.
+Calibrated budgets remain planned.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
 dependencies**: G7 wired the `merge_group` trigger and candidate-identity
 checks on the existing aggregate. W5 added **no jobs and no `ci-ok`
 dependencies** either: `TestCore`, the coverage collector and
-`scripts/performance.sh` are local commands. W6 also added **no jobs or
-aggregate dependencies**: the C3 validator and F2 cluster runner remain
-standalone. None of these waves changed
+`scripts/performance.sh` are local commands. W6 and W7 also added **no jobs
+or aggregate dependencies**: the C3 validator, F2 cluster runner, D3
+`cluster-recovery` project and E3 comparator remain standalone. None of these
+waves changed
 repository settings:
 `ci-ok` is still absent from master's required status checks, so that
 promotion gates `v*` publication rather than PR merge, and `merge_group` is
@@ -708,7 +713,9 @@ with reasons, artifact identity fields and fault-activation requirements.
 `early-evidence` lane. **Every other row is `status: absent` with empty
 `gates`**: the file names those scenarios and certifies none of them. B2's
 targeted-fault scenarios are live-proven on owned kind clusters but remain
-`absent` in this file — B3 registers them — then D3 and G6. Do not read an
+`absent` in this file — B3 registers them — then D3 and G6. D3's
+`d3-console-cluster-recovery` row also stays `absent` after its W7 live
+proof; G6 registers it. Do not read an
 `absent` row as coverage, and do not read a passing local `TestTargetedFaults`
 run as an `early-evidence` result.
 
@@ -1025,6 +1032,83 @@ The network-level `net::ERR_*` allowance is **file-scoped and opted into only by
 allowNetworkLevelErrors: true })`), because the real offline cut was observed
 producing `net::ERR_NETWORK_CHANGED` noise against later, unrelated tests in
 that same file. Every other spec keeps the strict default.
+
+### Console cluster-recovery journey (distributed-testing W7/D3)
+
+`ui/e2e/cluster-recovery.spec.ts` (Playwright project `cluster-recovery`,
+excluded from the default and auth projects, retries 0) drives the Console
+across a real owner crash on an owned three-member kind cluster. It runs after
+B1's `TestOwnerCrash` on a kept cluster, from a clean committed candidate
+whose server and runner images were built from that SHA. Run both steps under
+the exclusive Docker/kind lane:
+
+```sh
+SHA=$(git rev-parse HEAD)
+ID="rb-d3-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)"
+ART=$(mktemp -d)
+PLATFORM="linux/$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+d3_proof() {
+  just tag="$SHA" build-release && just tag="$SHA" robustness-runner || return
+  # scripts/robustness.sh only inspects these; it never pulls them.
+  docker pull --platform "$PLATFORM" kindest/node:v1.36.1 || return
+  docker pull --platform "$PLATFORM" alpine:3.23 || return
+  CAESIUM_ROBUSTNESS_KEEP_CLUSTER=1 CAESIUM_ROBUSTNESS_ID="$ID" \
+  CAESIUM_ROBUSTNESS_ARTIFACTS="$ART" \
+  CAESIUM_ROBUSTNESS_IMAGE="caesiumcloud/caesium-robustness:$SHA" \
+  CAESIUM_ROBUSTNESS_SERVER_IMAGE="caesiumcloud/caesium:$SHA" \
+  CAESIUM_ROBUSTNESS_KIND_IMAGE="kindest/node:v1.36.1" \
+  CAESIUM_ROBUSTNESS_TASK_IMAGE="alpine:3.23" \
+    bash scripts/robustness.sh || return   # D3 needs B1's passing cluster
+  (cd ui && CAESIUM_ROBUSTNESS_ID="$ID" CAESIUM_ROBUSTNESS_ARTIFACTS="$ART" \
+    CAESIUM_ROBUSTNESS_TASK_IMAGE="caesium-robustness-task:$ID" \
+    CAESIUM_ROBUSTNESS_SERVER_IMAGE="caesiumcloud/caesium:$SHA" \
+    CAESIUM_AUTH_KEY_HASH_SECRET="<32+ byte test secret>" \
+    npx playwright test --project=cluster-recovery e2e/cluster-recovery.spec.ts)
+}
+d3_proof; rc=$?
+kind delete cluster --name "$ID"   # cleanup never replaces the result
+echo "D3 proof exit status: $rc"; (exit "$rc")
+```
+
+**What the spec does:**
+- Switches the Helm release to api-key auth and finds the bootstrap admin key
+  from member logs, so no key is printed.
+- Denies a viewer-key trigger (no run is created), then triggers from the
+  Console with a runner key.
+- The task holds on a release file: it exits 1 if it is never released, so it
+  cannot succeed by timing out.
+- Kills the owner's pod (kubelet stopped, then ctr SIGKILL) while the browser
+  shows `running`, and requires the browser to observe the fault.
+- Reconnects through the Service and waits until the lease generation advances
+  to a survivor.
+- Only then runs `kubectl exec … touch` in every task pod of the run until the
+  run is terminal. Task placement is checked on every sample, including the
+  terminal one.
+
+**What `convergenceIssues` rejects:**
+- terminal success shown before the fault, or without a survivor completion;
+- a `completed_at` earlier than the fault or the first release;
+- duplicate or stale rows;
+- a missing `Retained snapshot` log badge or marker, before or after reload;
+- no event-stream recovery.
+
+`afterAll` restores the node, captures member logs and writes
+`d3-evidence.json` (no keys).
+
+[#581](https://github.com/caesium-cloud/caesium/pull/581) merged at
+`149857d74313ca2ce30bb0e85353c11a1c4ea3de`. Live proof a4 on tested head
+`58826a1a`, cluster `rb-w7a-32fc67ca9424`, passed:
+- exits: robustness 0 (298 s), Playwright 0 (225 s; journey 39.3 s);
+- lease moved `10.244.1.4:9001` gen 1 → `10.244.2.11:9001` gen 2, 29.9 s after
+  the kill, and the durable status is `succeeded`;
+- the event stream had 12 attempts with 0 authorized. Under api-key auth
+  EventSource cannot send the bearer key, so the page recovered through 8
+  authenticated run reads;
+- `convergenceIssues` returned `[]`.
+
+The earlier `1dd4caab` proof also passed. D3 is checked on this n=1 live pass;
+it is not a CI job. Manifest row `d3-console-cluster-recovery` stays `absent`
+with no gates until G6 registers it.
 
 ### Candidate identity and merge-group wiring (distributed-testing W4/G7)
 
@@ -1460,6 +1544,57 @@ wait is not live-proven. The unresolved ordinal-0/bootstrap and isolated rollbac
 prerequisites remain explicit in the
 [plan's F1/F2 record](exec-plans/active/distributed-testing.md).
 
+**W7-γ: bounded Raft retention (#585).**
+[#585](https://github.com/caesium-cloud/caesium/pull/585) merged at
+`eec0300c16029c916dc178fa1ca5d2900281e6ad`. Evidence was measured on
+`19280ae5` (product code identical to the merge). The attributed cause of the
+1Gi pressure is dqlite's retained Raft log. dqlite holds every retained entry in
+memory until a snapshot releases it, and a restarting node reloads everything
+retained on disk. Caesium passed no snapshot parameters, so it ran dqlite's
+defaults: threshold 1024, trailing 8192. At the measured 137 KB (catalog
+create) and 77 KB (update) entries, that allows about 1.26 GB. The product now
+sets `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` / `CAESIUM_DATABASE_SNAPSHOT_TRAILING`
+(defaults 1024 / 2048, static trailing strategy) on every node start. This
+bounds retention at 3,072 entries (about 421 MB at 137 KB), and snapshot
+frequency is unchanged. The trade-off is that a follower more than 2,048
+entries behind the leader's last snapshot catches up by a full snapshot
+install. See [execution operations](parallel-execution-operations.md). The 1Gi
+lifecycle limit was not changed.
+
+Two cluster qualifications with the fix, each on a candidate image built by
+the run:
+
+| Run | Cluster | Duration | Peak `memory.current` | Peak RSS | Go heap | `memory.events max` / OOM / restarts |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `lifecycle-w7g-87b8ff52f5` | 748 s | 463 / 484 MB | 415 / 435 MB | ≤ 18.4 MB | 0 / 0 / 0 |
+| 2 | `lifecycle-w7g-9ba221d4d7` | 740 s | 401 / 367 MB | 445 / 408 MB | ≤ 18.4 MB | 0 / 0 / 0 |
+
+Both runs passed 8 of 10 cases, including snapshot catch-up; leader retention
+after truncation was exactly 2,048 entries.
+- The snapshot phase now ends at about 2,900 applies instead of 9,400,
+  because truncation arrives sooner. Boundedness beyond that point rests on the
+  mechanism and on the node-level regression test in `pkg/dqlite`, not on a
+  longer live run.
+- #578's ordinal-0 Ready wait ran in both qualifications. The replacement pod
+  (new UID and fresh PV) became Ready, then bootstrapped its own single-member
+  cluster and served an empty database, while the survivors still listed that
+  node ID as a voter at its old IP. The cause is the chart giving ordinal 0 an
+  empty `CAESIUM_DATABASE_NODES`. That product defect is
+  [#582](https://github.com/caesium-cloud/caesium/issues/582), and the case
+  stays blocked.
+- Rollback stays blocked: no isolated copy of the migrated volume set exists.
+- The extra 263 MB of leader-only native memory in the earlier `abef2e97` run is
+  not explained by the retained log. It is filed as
+  [#583](https://github.com/caesium-cloud/caesium/issues/583).
+- B3 `^TestCore$` passed 12/12 (304.79 s) on fresh release and instrumented
+  images from `19280ae5`, and `just integration-test` passed.
+- PR CI passed every lane, including `helm-integration-test` (1)–(3),
+  `helm-pod-replacement-test`, `early-evidence`, podman, arm64 and `ci-ok`.
+
+Artifacts (ephemeral): `/tmp/caesium-w7g-f2-run1/`, `/tmp/caesium-w7g-f2-run2/`,
+`/tmp/caesium-w7g-b3/`. F2 stays unchecked on ordinal-0 rejoin (#582) and
+isolated rollback.
+
 ### Fenced core failures (distributed-testing W5/B3)
 
 B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
@@ -1672,9 +1807,53 @@ This test-only change has no full live comparison of its own; the `655c063f`
 result above is historical. The later `ec893213` comparison is the newest
 recorded full run and is still inconclusive. Current-head CI run
 [36214372032](https://github.com/caesium-cloud/caesium/actions/runs/36214372032)
-succeeded, including `ci-ok`; #567 is merged. E3 acceptance
-remains open pending conclusive repeatable measurement.
-This is not a CI job or a calibrated SLO (E4 / Q2 / Q5).
+succeeded, including `ci-ok`; #567 is merged.
+
+**W7-β: harness noise attribution and acceptance (#584).**
+[#584](https://github.com/caesium-cloud/caesium/pull/584) merged at
+`b486534ac2a0052ed6a68a6cf36a07eb336b2b67`. The measured candidate was
+`02dc4594`; the merge differs only by the plan note and by #585's product
+change, which landed first and was not in the measured candidate. Harness
+faults found and fixed:
+- Action-to-render timed Playwright's assertion retry schedule (one check,
+  then 100/250/500 ms), which produced the ≈80/≈170 ms bimodality. Browser
+  samples are now read from the page clock after the visibility check (forced
+  layout included); the old stopwatch is kept as `wall_ms` for diagnosis.
+- First-navigation route readiness tracked the internet latency of the UI's
+  Google Fonts stylesheet (Pearson r 0.98–1.00). Measured runs warm it first,
+  and the SYNTHETIC test answers it locally.
+- The long-session memory test now loads one document and makes 32 real
+  sidebar clicks; a window nonce plus `performance.timeOrigin` fails any
+  reload. The heap is read at full precision after a forced GC.
+- Per-sample server logs, a `docker events` stream, a host-load timeline,
+  lightweight Playwright traces and page diagnostics are retained. Workload
+  samples are assembled in numeric repeat order.
+
+A/A mode: set `CAESIUM_PERF_BASE_SHA` to the candidate SHA. One image is then
+measured on both sides and the report records `"control": "a_a"`. The
+comparator adds informational `multiplicity` and `extreme_samples` sections.
+They never change a verdict or the exit code; the decision rule (α 0.05,
+max CV 0.3, 5 minimum samples) is unchanged.
+
+Live runs, each 10 repeats of `closed-baseline` with load, benchmarks, browser
+and bundle. The A/B runs compare against W4 `45994929`, using the base image
+`8a6135e6` that a previous run built (provenance records
+`built_by_this_run=false`, `CAESIUM_PERF_ALLOW_UNVERIFIED_IMAGE=1`):
+
+| Run | Exit | Verdict | Notes | Artifacts |
+| --- | --- | --- | --- | --- |
+| A/A (`03ab00a3`, one image) | 0 | `faster` | Six benchmark ns/op series moved together, a correlated false positive | `/tmp/caesium-w7b-e3-aa.4NbOnD` |
+| A/B 1 | 3 | `inconclusive` | Host contention in two candidate benchmark processes | — |
+| A/B 2 | 0 | `no_significant_difference` | Superseded by review fixes | — |
+| A/B 3 (`02dc4594`, acceptance) | 0 | `no_significant_difference` | 42/42 not significant, lowest p 0.11, highest CV 0.076; one-document heap 14.1–14.4 MB; 100/100 first-attempt Chromium tests | `/tmp/caesium-w7b-e3-ab.PhLnRD` |
+
+E3 is checked. With 24 informative metrics at uncorrected α 0.05, and with
+benchmark false positives clustering because the benchmarks share a process,
+a single run's conclusiveness is partly chance. The aggregation, bounded-rerun
+and calibrated-budget policy is E4's (Q2 / Q5). Do not run `just lint` or
+`just unit-test` concurrently with a measured `performance.sh` run; they
+visibly perturb the benchmark phase. The `ec893213` 32.5 s cold repeat remains
+unattributed. This is not a CI job or a calibrated SLO.
 
 ### Checker-strength mutation validator (distributed-testing W6/C3)
 
