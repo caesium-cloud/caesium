@@ -1153,5 +1153,264 @@ if build_release a b .; then echo built; else echo failed-status; fi
             self.assertNotIn("built", proc.stdout.split())
 
 
+def workload_only(base_samples, cand_samples, phase="cold"):
+    doc = document(
+        side("base", workloads={"closed-baseline": {"phase": phase, "samples": base_samples}}),
+        side("candidate", workloads={"closed-baseline": {"phase": phase, "samples": cand_samples}}),
+    )
+    for label in ("base", "candidate"):
+        doc[label]["benchmarks"] = {}
+        doc[label]["browser"] = {}
+        doc[label]["bundle"] = {}
+        doc[label]["system"] = {}
+    return doc
+
+
+class InformationalDiagnosticsTests(unittest.TestCase):
+    """Reporting that names what to attribute but never changes a verdict."""
+
+    # The recorded ec893213 cold series: one 32.5 s repeat among ~6.5 s ones.
+    COLD_BASE = [6.72, 6.59, 6.37, 6.73, 6.32, 6.15, 6.54, 6.2, 6.48, 6.56]
+    COLD_CANDIDATE = [6.97, 6.32, 6.46, 6.26, 6.53, 6.32, 32.54, 6.85, 6.53, 6.12]
+
+    def test_single_stall_stays_inconclusive_and_names_its_repeat(self):
+        doc = workload_only(self.COLD_BASE, self.COLD_CANDIDATE)
+        report = compare_doc(doc)
+        metric = report["metrics"][0]
+        self.assertEqual(report["overall"], "inconclusive")
+        self.assertEqual(metric["verdict"], "inconclusive")
+        self.assertTrue(any("noisy" in reason for reason in metric["reasons"]))
+        extremes = metric["diagnostics"]["candidate"]["extreme_samples"]
+        self.assertEqual([entry["sample"] for entry in extremes], [7])
+        self.assertEqual(extremes[0]["value"], 32.54)
+        self.assertEqual(metric["diagnostics"]["base"]["extreme_samples"], [])
+        # The flagged sample stays in the statistics.
+        self.assertEqual(metric["candidate"]["max"], 32.54)
+        self.assertIn("extreme candidate samples in workload.closed-baseline.duration_seconds: #7=32.54",
+                      report["benchstat"])
+        proc = run_cli(input_doc=doc)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+
+    def test_flagged_extreme_sample_is_not_removed_from_a_slower_verdict(self):
+        cand = around(100, 10, 2)
+        cand[3] = 400.0
+        doc = workload_only(around(50, 10, 2), cand, phase="warm")
+        report = compare_doc(doc)
+        metric = report["metrics"][0]
+        self.assertEqual(metric["verdict"], "slower")
+        self.assertEqual(report["overall"], "slower")
+        self.assertEqual([e["sample"] for e in metric["diagnostics"]["candidate"]["extreme_samples"]], [4])
+        self.assertAlmostEqual(metric["candidate"]["mean"], sum(cand) / 10)
+        self.assertEqual(run_cli(input_doc=doc).returncode, 4)
+
+    def test_extreme_samples_need_spread_and_three_points(self):
+        extreme = COMPARE["extreme_samples"]
+        self.assertEqual(extreme([12_700_000.0] * 9 + [11_900_000.0]), [])  # zero MAD
+        self.assertEqual(extreme([1.0, 100.0]), [])
+        self.assertEqual([e["sample"] for e in extreme([10, 11, 10, 12, 11, 10, 11, 90])], [8])
+
+    def test_multiplicity_counts_informative_series_only(self):
+        report = compare_doc(document())
+        multiplicity = report["multiplicity"]
+        self.assertTrue(multiplicity["informational_only"])
+        # allocs_per_op is constant and equal on both sides: excluded.
+        self.assertEqual(multiplicity["degenerate_metrics"], 1)
+        n = multiplicity["informative_metrics"]
+        self.assertEqual(n, multiplicity["metrics_with_p_value"] - 1)
+        self.assertGreater(n, 0)
+        self.assertAlmostEqual(multiplicity["expected_significant_if_no_change"], round(0.05 * n, 3))
+        self.assertAlmostEqual(multiplicity["expected_slower_if_no_change"], round(0.025 * n, 3))
+        self.assertAlmostEqual(multiplicity["probability_no_slower_if_no_change"], round(0.975 ** n, 4))
+        self.assertEqual(multiplicity["observed_significant"], 0)
+        self.assertEqual(multiplicity["probability_at_least_observed_significant_if_no_change"], 1.0)
+        self.assertIn("multiplicity (informational)", report["benchstat"])
+
+    def test_multiplicity_never_gates_the_exit_status(self):
+        # Every informative series is faster: improbable by chance, and still
+        # exit 0 because verdicts and exit codes ignore the summary.
+        doc = workload_only(around(100, 10, 2), around(50, 10, 2), phase="warm")
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "faster")
+        self.assertEqual(report["multiplicity"]["observed_significant"], 1)
+        self.assertLess(report["multiplicity"]["probability_at_least_observed_significant_if_no_change"], 0.06)
+        self.assertEqual(run_cli(input_doc=doc).returncode, 0)
+
+    def test_multiplicity_breaks_counts_down_by_family(self):
+        # Shape of the same-image A/A control: several benchmarks from the same
+        # processes move together while the other families stay insignificant.
+        base = side("base")
+        cand = side("candidate")
+        for label, body, center in (("base", base, 10_000.0), ("candidate", cand, 9_700.0)):
+            body["benchmarks"] = {
+                f"BenchmarkOwner{name}": {
+                    "ns_per_op": around(center, 10, 40.0),
+                    "bytes_per_op": around(400.0, spread=0),
+                    "allocs_per_op": around(12.0, spread=0),
+                }
+                for name in ("A", "B", "C")
+            }
+        report = compare_doc(document(base, cand))
+        self.assertEqual(report["overall"], "faster")
+        families = report["multiplicity"]["by_family"]
+        self.assertEqual(families["benchmark"], {"informative": 3, "significant": 3, "slower": 0, "faster": 3})
+        self.assertEqual(families["workload"]["significant"], 0)
+        self.assertEqual(families["browser"]["informative"], 3)
+        self.assertEqual(report["multiplicity"]["degenerate_metrics"], 6)
+        self.assertIn("correlated", report["multiplicity"]["note"])
+
+    def test_fail_closed_report_has_no_multiplicity(self):
+        doc = document()
+        doc["candidate"]["correctness"] = {"ok": False, "failures": ["boom"]}
+        report = compare_doc(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertIsNone(report["multiplicity"])
+
+    def test_control_marker_passes_through(self):
+        doc = document()
+        doc["control"] = "a_a"
+        self.assertEqual(compare_doc(doc)["control"], "a_a")
+        self.assertIsNone(compare_doc(document())["control"])
+
+
+class PerformanceShAttributionTests(unittest.TestCase):
+    """Live-run wiring for the A/A control and per-sample evidence."""
+
+    @staticmethod
+    def assembly_code():
+        source = SH.read_text()
+        marker = "python3 - <<'PY'\nimport json, os, pathlib, re\n"
+        return "import json, os, pathlib, re\n" + source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+
+    def assemble(self, art, aa_control):
+        env = os.environ.copy()
+        env.update({
+            "ARTIFACTS": str(art), "RUN_BENCH": "0", "REPEATS": "10",
+            "RUN_LOAD": "1", "RUN_BROWSER": "0", "RUN_BUNDLE": "0",
+            "AA_CONTROL": aa_control,
+            "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "a" * 40,
+            "BASE_IMAGE": "img:a", "CANDIDATE_IMAGE": "img:a",
+            "BASE_IMAGE_ID": "sha256:" + "11" * 32, "CANDIDATE_IMAGE_ID": "sha256:" + "11" * 32,
+            "BASE_CLI_DIGEST": "sha256:cli", "CANDIDATE_CLI_DIGEST": "sha256:cli",
+            "BASE_BUILT": "built", "CANDIDATE_BUILT": "built",
+            "BASE_GO_VERSION": "go1.27.1", "CANDIDATE_GO_VERSION": "go1.27.1",
+            "BASE_BUILDER_ID": "sha256:builder", "CANDIDATE_BUILDER_ID": "sha256:builder",
+            "BASE_TOOLCHAIN": "builder:synthetic", "CANDIDATE_TOOLCHAIN": "builder:synthetic",
+            "DOCKER_PLATFORM": "linux/arm64", "HOST_ID": "synthetic-host",
+            "CATALOG_SHA": "c" * 64, "SETTINGS_SHA": "d" * 64,
+            "BENCH_HARNESS_MANIFEST": str(art / "observations" / "benchmark-harness.json"),
+        })
+        return subprocess.run(
+            [sys.executable, "-c", self.assembly_code()], env=env, capture_output=True, text=True
+        )
+
+    def test_assembly_orders_workloads_by_repeat_and_marks_a_a_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp)
+            (art / "observations").mkdir()
+            for label in ("base", "candidate"):
+                runs = art / label / "runs"
+                runs.mkdir(parents=True)
+                for repeat in range(1, 11):
+                    stem = runs / f"closed-baseline-cold-{repeat}"
+                    stem.with_suffix(".json").write_text(json.dumps({
+                        "outcome": "passed", "duration_seconds": float(repeat),
+                    }))
+                    stem.with_suffix(".exit").write_text("0\n")
+            result = self.assemble(art, "1")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            self.assertEqual(assembled["control"], "a_a")
+            samples = assembled["candidate"]["workloads"]["closed-baseline.cold"]["samples"]
+            # Lexical order would put repeat 10 second.
+            self.assertEqual([s["repeat"] for s in samples], list(range(1, 11)))
+            self.assertEqual([s["value"] for s in samples], [float(r) for r in range(1, 11)])
+            report = compare_doc(assembled)
+            self.assertEqual(report["control"], "a_a")
+
+            result = self.assemble(art, "0")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIsNone(json.loads((art / "comparison.json").read_text())["control"])
+
+    def test_a_a_control_reuses_the_candidate_build_only_for_one_sha_and_image(self):
+        source = SH.read_text()
+        start = source.index('BASE_BUILT="supplied"\nAA_CONTROL=0')
+        end = source.index('if [[ -z "$BASE_WORKTREE" ]]; then')
+        block = source[start:end]
+        prelude = "\n".join([
+            "log() { printf '%s\\n' \"$*\" >&2; }",
+            "die() { printf 'DIE %s\\n' \"$*\"; exit 1; }",
+            "build_release() { echo \"BUILD $1\"; return 0; }",
+            "docker() { return 0; }",  # every image already present
+            "git() { return 0; }",
+            "mktemp() { echo /nonexistent; }",
+            'ROOT=/nonexistent; BASE_WORKTREE=""; CANDIDATE_BUILT=built',
+        ]) + "\n"
+        cases = (
+            ("a" * 40, "a" * 40, "img:x", "img:x", "AA=1 BASE_BUILT=built"),
+            ("a" * 40, "b" * 40, "img:a", "img:b", "AA=0 BASE_BUILT=supplied"),
+            ("a" * 40, "a" * 40, "img:base", "img:candidate", "AA=0 BASE_BUILT=supplied"),
+        )
+        for base_sha, cand_sha, base_img, cand_img, want in cases:
+            script = prelude + (
+                f"BASE_SHA={base_sha}\nCANDIDATE_SHA={cand_sha}\n"
+                f"BASE_IMAGE={base_img}\nCANDIDATE_IMAGE={cand_img}\n"
+            ) + block + 'echo "AA=$AA_CONTROL BASE_BUILT=$BASE_BUILT"\n'
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+            self.assertIn(want, proc.stdout, proc.stdout + proc.stderr)
+
+    def test_live_run_retains_per_sample_attribution_evidence(self):
+        source = SH.read_text()
+        self.assertIn('docker logs --timestamps "$name" >"$ARTIFACTS/$side/server-logs/${phase}-${idx}.log"', source)
+        for call in ('stop_server "$side" cold "$r"', 'stop_server "$side" warm "$r"',
+                     'stop_server "$side" browser "$r"'):
+            self.assertIn(call, source)
+        self.assertNotIn('stop_server "$side"\n', source)
+        self.assertIn("docker events --filter type=container --filter type=image", source)
+        # The events stream and container snapshot start before the first
+        # benchmark sample, not only with the server phases.
+        events_start = source.index("\nstart_docker_events\n")
+        self.assertLess(events_start, source.index('bash "$ROOT/scripts/performance-benchmarks.sh"'))
+        self.assertLess(source.index("docker-ps-start.txt"), events_start)
+        self.assertIn("docker-ps-end.txt", source)
+        for mark in ('timeline_mark "$phase" "$side" "$idx" start',
+                     'timeline_mark "$phase" "$side" "$idx" end "$rc"'):
+            self.assertIn(mark, source)
+        self.assertEqual(source.count('timeline_mark browser "$side" "$r" start'), 2)
+        self.assertEqual(source.count('timeline_mark browser "$side" "$r" end "$brc"'), 2)
+        self.assertEqual(source.count(
+            'CAESIUM_PERF_BROWSER_DIAGNOSTICS_OUT="$ARTIFACTS/$side/browser-diagnostics.jsonl"'), 2)
+        self.assertEqual(source.count('CAESIUM_PERF_SIDE="$side" CAESIUM_PERF_REPEAT="$r"'), 2)
+        spec = (ROOT / "ui/e2e/performance.spec.ts").read_text()
+        for env_name in ("CAESIUM_PERF_BROWSER_DIAGNOSTICS_OUT", "CAESIUM_PERF_SIDE", "CAESIUM_PERF_REPEAT"):
+            self.assertIn(f"process.env.{env_name}", spec)
+        self.assertIn('trace: { mode: "on", screenshots: false, snapshots: false', spec)
+        # Timing is read from the page clock, not from a runner stopwatch
+        # around Playwright's 100/250/500 ms assertion retries.
+        self.assertIn('record("action_to_render_ms", roundMs(renderMs)', spec)
+        self.assertIn('clock: "click-event"', spec)
+        self.assertIn('record("route_readiness_ms", roundMs(readyMs)', spec)
+        self.assertNotIn('record("action_to_render_ms", renderMs)', spec)
+        self.assertIn("--enable-precise-memory-info", spec)
+        # The render-blocking third-party stylesheet is kept off the internet
+        # in measured runs: warmed for the live first navigation, answered
+        # locally where routing disables the cache.
+        self.assertIn("const warmed = PERF_RUN ? await warmThirdPartyStylesheets(page, request) : [];", spec)
+        self.assertIn('third_party_css: PERF_RUN ? "empty-stylesheet" : "live"', spec)
+        # Readiness is stamped after the visibility check (which forces the
+        # pending layout), never before it; the spec's own regression test
+        # proves the cost reaches the recorded time.
+        self.assertIn("probe.headings.push({ text, t: performance.now() });", spec)
+        self.assertIn("probe.firsts[key] = performance.now();", spec)
+        self.assertNotIn("const t = performance.now();\n    pending = false;", spec)
+        self.assertIn('test("render probe: work done by the visibility check reaches the recorded time"', spec)
+        # Long-session memory runs in ONE document via the real sidebar links.
+        session = spec.split('test("live long-session memory', 1)[1].split("\ntest(", 1)[0]
+        self.assertNotIn("page.goto(path)", session)
+        self.assertEqual(session.count("page.goto("), 1)
+        self.assertIn("aside nav a[href=", session)
+        self.assertIn('"in-app navigation replaced the document"', session)
+        self.assertIn('navigation: "in-app"', session)
+
+
 if __name__ == "__main__":
     unittest.main()

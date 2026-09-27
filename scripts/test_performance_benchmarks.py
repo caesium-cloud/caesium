@@ -147,6 +147,27 @@ class BenchmarkOrderTests(unittest.TestCase):
         for benchmark in PARSE_BENCH(candidate.read_text()).values():
             self.assertEqual(len(benchmark["ns_per_op"]), 3)
 
+    def test_timeline_brackets_every_sample_with_host_load(self):
+        result = self.run_pair(repeats=2, fail="candidate:2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [
+            line.split("\t")
+            for line in (self.artifacts / "observations" / "timeline.tsv").read_text().splitlines()
+        ]
+        self.assertEqual(
+            [(row[1], row[2], row[3], row[4], row[6]) for row in rows],
+            [
+                ("benchmark", "base", "1", "start", ""), ("benchmark", "base", "1", "end", "0"),
+                ("benchmark", "candidate", "1", "start", ""), ("benchmark", "candidate", "1", "end", "0"),
+                ("benchmark", "candidate", "2", "start", ""), ("benchmark", "candidate", "2", "end", "17"),
+                ("benchmark", "base", "2", "start", ""), ("benchmark", "base", "2", "end", "0"),
+            ],
+        )
+        for row in rows:
+            self.assertEqual(len(row), 7)
+            self.assertRegex(row[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{3}\+00:00|Z)$")
+            self.assertRegex(row[5], r"^(\d+\.\d\d|NA)$")
+
     def test_base_compile_failure_is_recorded_before_paired_samples(self):
         result = self.run_pair(preflight_fail=True)
         self.assertEqual(result.returncode, 0, result.stderr)

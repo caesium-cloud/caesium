@@ -101,6 +101,16 @@ for side in base candidate; do
   : >"$ARTIFACTS/$side/bench.txt.repeats.tsv"
 done
 
+# Attribution timeline: one row per sample start/end with the host's 1-minute
+# load average, so a stalled or slow sample can be matched to host contention.
+# Columns: utc, phase, side, repeat, event, host_load1, exit.
+timeline_mark() {
+  local ts load
+  read -r ts load < <(python3 -c 'import datetime, os; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"), "%.2f" % os.getloadavg()[0])' 2>/dev/null) || true
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ts:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$1" "$2" "$3" "$4" "${load:-NA}" "${5:-}" \
+    >>"$ARTIFACTS/observations/timeline.tsv"
+}
+
 run_sample() {
   local side="$1" repeat="$2" src builder dest sample rc
   if [[ "$side" == base ]]; then
@@ -112,6 +122,7 @@ run_sample() {
   fi
   dest="$ARTIFACTS/$side/bench.txt"
   sample="$ARTIFACTS/$side/bench-repeat-$repeat.txt"
+  timeline_mark benchmark "$side" "$repeat" start
   if docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$src:/bld/caesium" -w /bld/caesium \
     "$builder" \
@@ -149,6 +160,7 @@ PY
       cat "$sample.validation" >>"$dest"
     fi
   fi
+  timeline_mark benchmark "$side" "$repeat" end "$rc"
   printf '%s\t%s\n' "$repeat" "$rc" >>"$dest.repeats.tsv"
   printf '%s\t%s\t%s\n' "$repeat" "$side" "$rc" >>"$ARTIFACTS/observations/benchmark-order.tsv"
   if [[ "$rc" -ne 0 ]]; then
