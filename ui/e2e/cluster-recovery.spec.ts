@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
   caesiumMemberSelector,
   chooseOwner,
   commandViolation,
+  completedAtOrAfter,
   consoleRecoveryDefinition,
   containerSeen,
   convergenceIssues,
@@ -33,6 +34,7 @@ import {
   nodeLogSourcesFromPodList,
   nodePodLogCommand,
   helmGetValuesCommand,
+  isTerminalRunStatus,
   killEvidenceShowsDeath,
   kubeletStopCommand,
   nodeImageListCommand,
@@ -48,13 +50,19 @@ import {
   parseLeaseResponse,
   parseRunSnapshot,
   planAuthExtraEnv,
+  releaseSample,
+  runHistoryLinkSelector,
   runIdFromHref,
+  runTaskPods,
   serviceConsoleForward,
+  startReadyChild,
+  stopChildProcess,
   statusFromRowText,
   stripRuntimeContainerID,
   taskImageListed,
   taskListCommand,
   taskPlacementIssues,
+  taskReleaseCommand,
   type ClusterRecoverySession,
   type CaesiumMember,
   type ConsoleRunRow,
@@ -68,6 +76,11 @@ import { failOnUnexpectedPageErrors } from "./helpers/fixtures";
 // cut; tolerate only that class, in this file, the same way network-recovery does.
 failOnUnexpectedPageErrors({ allowNetworkLevelErrors: true });
 
+// On a failed run the retained trace embeds the page video, and zipping that
+// entry stalled worker teardown until the project timeout, leaving a truncated
+// trace.zip (both live D3 failures). Keep the trace and failure screenshot.
+test.use({ video: "off" });
+
 let session: ClusterRecoverySession | undefined;
 let owner: CaesiumMember | undefined;
 let faultedNode: string | undefined;
@@ -76,6 +89,8 @@ let serviceForward: ChildProcess | undefined;
 let ownerOrigin = "";
 let serviceOrigin = "";
 let keys: AuthLaneKeys | undefined;
+/** Timeline and observations for d3-evidence.json in the artifacts dir. No keys. */
+const evidence: Record<string, unknown> = {};
 
 test.beforeAll(async () => {
   test.setTimeout(600_000);
@@ -110,7 +125,8 @@ test.beforeAll(async () => {
   }
 });
 
-test.afterAll(() => {
+test.afterAll(async () => {
+  test.setTimeout(600_000);
   if (session && faultedNode) {
     for (const command of ownerRestartSequence({ kubeconfig: session.kubeconfig, node: faultedNode })) {
       try {
@@ -120,12 +136,24 @@ test.afterAll(() => {
       }
     }
   }
-  stopChild(ownerForward);
-  stopChild(serviceForward);
+  await stopChildProcess(ownerForward);
+  await stopChildProcess(serviceForward);
+  ownerForward = undefined;
+  serviceForward = undefined;
+  if (session) {
+    await captureFinalLogs(session);
+    try {
+      fs.writeFileSync(path.join(session.artifactsDir, "d3-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+    } catch (err) {
+      console.error(`writing d3-evidence.json failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 });
 
+// A passing journey measures a few minutes; 900 s covers the sum of the
+// per-step windows below so a slow step fails on its own message.
 test("authenticated console observes the owner crash and converges on the durable outcome", async ({ page }) => {
-  test.setTimeout(600_000);
+  test.setTimeout(900_000);
   if (!session || !owner || !keys || !ownerOrigin) {
     throw new Error("cluster-recovery fails closed: the session was not established");
   }
@@ -144,6 +172,14 @@ test("authenticated console observes the owner crash and converges on the durabl
     throw new Error(`task image ${taskImage} is not loaded on ${intendedOwner.node}`);
   }
   const definition = consoleRecoveryDefinition(alias, taskImage, marker);
+  Object.assign(evidence, {
+    robustnessId: activeSession.robustnessId,
+    serverImage: activeSession.serverImage,
+    taskImage,
+    alias,
+    marker,
+    owner: { pod: intendedOwner.name, node: intendedOwner.node, ip: intendedOwner.ip },
+  });
   const applied = await apiSend(ownerOrigin, adminKey, "POST", "/v1/jobdefs/apply", { definitions: [definition] });
   if (applied.status < 200 || applied.status >= 300) {
     throw new Error(`apply failed: ${applied.status} ${applied.text.slice(0, 500)}`);
@@ -165,6 +201,7 @@ test("authenticated console observes the owner crash and converges on the durabl
   await page.waitForURL(/\/jobs\/[^/]+\/runs\/[0-9a-f-]{36}$/i, { timeout: 30_000 });
   const runId = page.url().match(/\/runs\/([0-9a-f-]{36})/i)?.[1]?.toLowerCase();
   if (!runId) throw new Error(`console trigger did not open a run url (${page.url()})`);
+  Object.assign(evidence, { jobId: job.id, runId, triggeredAt: iso(Date.now()) });
 
   await expect(page.locator("h1").locator("xpath=..").locator("[data-status='running']")).toBeVisible({ timeout: 90_000 });
 
@@ -175,11 +212,16 @@ test("authenticated console observes the owner crash and converges on the durabl
     }
     return lease;
   });
-  await poll(60_000, 1_000, async () => {
-    const listed = JSON.parse(run(kubectlGetPodsCommand(activeSession.kubeconfig, activeSession.namespace)));
+  evidence.leaseBefore = leaseBefore;
+  // Fault an owner whose run is executing: the hold container must be running
+  // on a node other than the owner's before the kill.
+  evidence.taskRunningBeforeFault = await poll(60_000, 1_000, async () => {
+    const listed = JSON.parse(run(kubectlGetPodsCommand(activeSession.kubeconfig, activeSession.namespace))) as unknown;
     const issues = taskPlacementIssues(listed, runId, intendedOwner.node);
     if (issues.length > 0) throw new Error(issues.join("; "));
-    return true;
+    const running = runTaskPods(listed, runId).filter((pod) => pod.running);
+    if (running.length === 0) throw new Error(`no task pod for run ${runId} is running yet`);
+    return running.map((pod) => `${pod.name}@${pod.node}`);
   });
 
   const refreshed = membersFromPodList(
@@ -248,11 +290,19 @@ test("authenticated console observes the owner crash and converges on the durabl
   page.off("console", onConsole);
   if (faultRecordedAt === 0) faultRecordedAt = faultStartedAt;
 
-  stopChild(ownerForward);
+  evidence.fault = {
+    startedAt: iso(faultStartedAt),
+    recordedAt: iso(faultRecordedAt),
+    signals: faultSignals,
+    headingBefore: statusBefore,
+    headingDuring: statusDuring,
+  };
+
+  await stopChildProcess(ownerForward);
   ownerForward = undefined;
-  serviceForward = await startPortForward(serviceConsoleForward(activeSession, OWNER_CONSOLE_PORT));
+  serviceForward = await startServiceForward(activeSession);
   serviceOrigin = ownerOrigin;
-  await waitForHealth(serviceOrigin);
+  evidence.serviceForwardAt = iso(Date.now());
 
   let eventStreamAttempts = 0;
   let eventStreamAuthorized = 0;
@@ -273,22 +323,81 @@ test("authenticated console observes the owner crash and converges on the durabl
   page.on("response", onEventResponse);
   try {
     await expect(page.getByRole("heading", { name: /^Run / })).toBeVisible({ timeout: 30_000 });
-    const durable = await poll(120_000, 1_000, async () => {
-      const snapshot = await readRun(serviceOrigin, adminKey, job.id, runId);
+
+    // The hold stays closed until the lease has moved to a survivor, so the
+    // run cannot complete before the takeover is observed.
+    let lastLease = "no lease read";
+    const takeover = await poll(120_000, 1_000, async () => {
       const lease = await readLease(serviceOrigin, adminKey, runId);
-      const tookOver = snapshot.status === "succeeded"
-        && lease.generation > leaseBefore.generation
-        && endpointHost(lease.ownerNode) !== endpointHost(leaseBefore.ownerNode);
-      if (!tookOver && snapshot.status !== "failed" && snapshot.status !== "cancelled") return undefined;
-      return { snapshot, lease };
-    }).catch(async () => ({
-      snapshot: await readRun(serviceOrigin, adminKey, job.id, runId),
-      lease: await readLease(serviceOrigin, adminKey, runId),
-    }));
+      lastLease = `generation ${lease.generation} owner ${lease.ownerNode}`;
+      if (lease.generation > leaseBefore.generation && endpointHost(lease.ownerNode) !== endpointHost(leaseBefore.ownerNode)) {
+        return { lease, at: Date.now(), terminalStatus: "" };
+      }
+      const snapshot = await readRun(serviceOrigin, adminKey, job.id, runId);
+      if (isTerminalRunStatus(snapshot.status)) return { lease, at: Date.now(), terminalStatus: snapshot.status };
+      return undefined;
+    }).catch((err: unknown) => {
+      throw new Error(`survivor takeover was not observed within 120s (last lease ${lastLease}): ${errorText(err)}`);
+    });
+    evidence.takeover = {
+      observedAt: iso(takeover.at),
+      lease: takeover.lease,
+      terminalBeforeTakeover: takeover.terminalStatus || null,
+    };
+
+    // Release every task pod of the run (the first attempt and any survivor
+    // re-dispatch) until the run is terminal.
+    const released = new Set<string>();
+    const releases: { pod: string; startedAt: string; ok: boolean; detail: string }[] = [];
+    const seenPods = new Set<string>();
+    const strayPods = new Set<string>();
+    let firstReleaseAt = 0;
+    let lastStatus = "unread";
+    // Placement is checked on every sample, the terminal one included; a run
+    // that went terminal before the takeover is sampled once, with no release.
+    const durable = await poll(150_000, 1_000, async () => {
+      const snapshot = await readRun(serviceOrigin, adminKey, job.id, runId);
+      lastStatus = snapshot.status;
+      const listed = JSON.parse(run(kubectlGetPodsCommand(activeSession.kubeconfig, activeSession.namespace))) as unknown;
+      const pods = runTaskPods(listed, runId);
+      for (const pod of pods) seenPods.add(`${pod.name}@${pod.node || "unbound"}`);
+      const sample = releaseSample({ status: snapshot.status, pods, ownerNode: intendedOwner.node, released });
+      for (const issue of sample.issues) strayPods.add(issue);
+      if (sample.terminal) {
+        return { snapshot, lease: await readLease(serviceOrigin, adminKey, runId) };
+      }
+      for (const pod of sample.targets) {
+        const startedAt = Date.now();
+        const result = tryRun(taskReleaseCommand(activeSession.kubeconfig, activeSession.namespace, pod, runId));
+        releases.push({ pod, startedAt: iso(startedAt), ok: result.ok, detail: result.detail.slice(0, 300) });
+        if (!result.ok) continue;
+        released.add(pod);
+        if (firstReleaseAt === 0) firstReleaseAt = startedAt;
+      }
+      return undefined;
+    }).catch((err: unknown) => {
+      throw new Error(
+        `run stayed ${lastStatus} after the survivor took over and the hold was released: ${errorText(err)}; releases=${JSON.stringify(releases)}`,
+      );
+    });
+    Object.assign(evidence, {
+      releases,
+      taskPods: [...seenPods],
+      durable: {
+        status: durable.snapshot.status,
+        completedAt: durable.snapshot.completedAt,
+        lease: durable.lease,
+      },
+    });
+    if (strayPods.size > 0) throw new Error(`task placement after the fault: ${[...strayPods].join("; ")}`);
     if (durable.snapshot.status === "succeeded") {
-      const completed = Date.parse(durable.snapshot.completedAt);
-      if (!Number.isFinite(completed) || completed + 2000 < faultStartedAt) {
+      if (!completedAtOrAfter(durable.snapshot.completedAt, faultStartedAt)) {
         throw new Error(`run completed_at ${durable.snapshot.completedAt || "missing"} is not after the owner fault`);
+      }
+      if (!completedAtOrAfter(durable.snapshot.completedAt, firstReleaseAt)) {
+        throw new Error(
+          `run completed_at ${durable.snapshot.completedAt || "missing"} is not after the first hold release (${firstReleaseAt ? iso(firstReleaseAt) : "never released"})`,
+        );
       }
     }
     const taskId = durable.snapshot.tasks[0]?.taskId ?? "";
@@ -297,7 +406,7 @@ test("authenticated console observes the owner crash and converges on the durabl
     await poll(30_000, 500, async () => ((await headingStatus(page)) === durable.snapshot.status ? true : undefined)).catch(
       () => undefined,
     );
-    const beforeReload = await readRunSurface(page, job.id, runId, marker);
+    const beforeReload = await readRunSurface(page, job.id, runId, marker, durable.snapshot.status);
     await page.reload();
     await expect(page.getByPlaceholder("csk_live_...")).toBeVisible();
     await page.getByPlaceholder("csk_live_...").fill(authKeys.runner);
@@ -306,7 +415,7 @@ test("authenticated console observes the owner crash and converges on the durabl
     );
     await page.getByRole("button", { name: "Sign In" }).click();
     await whoami;
-    const afterReload = await readRunSurface(page, job.id, runId, marker);
+    const afterReload = await readRunSurface(page, job.id, runId, marker, durable.snapshot.status);
 
     const outcome: DurableOutcome = {
       runId,
@@ -337,6 +446,28 @@ test("authenticated console observes the owner crash and converges on the durabl
         reloadedLogText: afterReload.logText,
         reloadedLogSourceLabel: afterReload.logSourceLabel,
       },
+    });
+    Object.assign(evidence, {
+      console: {
+        headingStatus: beforeReload.headingStatus,
+        reloadedHeadingStatus: afterReload.headingStatus,
+        runRows: beforeReload.runRows,
+        runListFirstRows: beforeReload.runListFirstRows,
+        runListSettledMs: beforeReload.runListSettledMs,
+        reloadedRunRows: afterReload.runRows,
+        reloadedRunListFirstRows: afterReload.runListFirstRows,
+        reloadedRunListSettledMs: afterReload.runListSettledMs,
+        logSourceLabel: beforeReload.logSourceLabel,
+        reloadedLogSourceLabel: afterReload.logSourceLabel,
+        logHasMarker: beforeReload.logText.includes(marker),
+        reloadedLogHasMarker: afterReload.logText.includes(marker),
+        eventStreamAttempts,
+        eventStreamAuthorized,
+        authenticatedRunReads,
+      },
+      retainedLogExcerpt: logExcerpt,
+      issues,
+      checkedAt: iso(Date.now()),
     });
     expect(issues, JSON.stringify(issues, null, 2)).toEqual([]);
   } finally {
@@ -401,12 +532,20 @@ async function ensureApiKeyAuth(current: ClusterRecoverySession): Promise<void> 
   throw new Error(`bootstrap admin API key was not in ${dir}; modes=${JSON.stringify(modes)}`);
 }
 
-async function readRunSurface(page: Page, jobId: string, runId: string, marker: string): Promise<{
+async function readRunSurface(
+  page: Page,
+  jobId: string,
+  runId: string,
+  marker: string,
+  durableStatus: string,
+): Promise<{
   headingStatus: string;
   headingCount: number;
   logText: string;
   logSourceLabel: string;
   runRows: ConsoleRunRow[];
+  runListFirstRows: ConsoleRunRow[];
+  runListSettledMs: number;
 }> {
   const node = page.locator(".react-flow__node").first();
   await expect(node).toBeVisible({ timeout: 30_000 });
@@ -426,10 +565,24 @@ async function readRunSurface(page: Page, jobId: string, runId: string, marker: 
   await page.locator(`a[href="/jobs/${jobId}"]`).first().click();
   await page.getByTestId("job-detail-view-tabs").getByRole("link", { name: "Runs" }).click();
   await expect(page.getByTestId("job-runs-list")).toBeVisible();
-  const runRows = await readRunRows(page, jobId);
-  await page.locator(`a[href*="/runs/${runId}"]`).first().click();
+  // The list renders its cached query first and refetches every 15 s while the
+  // event stream is unauthorized. Give it the heading's 30 s to converge; a row
+  // that is still stale (or unreadable) then is rejected by convergenceIssues.
+  const listOpenedAt = Date.now();
+  const runListFirstRows = await readRunRows(page, jobId);
+  let runRows = runListFirstRows;
+  while (!rowsShow(runRows, runId, durableStatus) && Date.now() - listOpenedAt < 30_000) {
+    await sleep(1_000);
+    runRows = await readRunRows(page, jobId);
+  }
+  const runListSettledMs = Date.now() - listOpenedAt;
+  await page.getByTestId("job-runs-list").locator(runHistoryLinkSelector(jobId, runId)).first().click();
   await expect(page.getByRole("heading", { name: /^Run / })).toBeVisible();
-  return { headingStatus: heading, headingCount: headings, logText, logSourceLabel, runRows };
+  return { headingStatus: heading, headingCount: headings, logText, logSourceLabel, runRows, runListFirstRows, runListSettledMs };
+}
+
+function rowsShow(rows: ConsoleRunRow[], runId: string, status: string): boolean {
+  return rows.length > 0 && rows.every((row) => row.id === runId && row.status === status);
 }
 
 async function readRunRows(page: Page, jobId: string): Promise<ConsoleRunRow[]> {
@@ -441,7 +594,11 @@ async function readRunRows(page: Page, jobId: string): Promise<ConsoleRunRow[]> 
     const href = (await link.getAttribute("href")) ?? "";
     const id = runIdFromHref(href, jobId);
     if (!id) continue;
-    rows.push({ id, status: statusFromRowText((await link.textContent()) ?? "") });
+    // Read the status badge alone: the row's whole textContent glues the
+    // duration to the badge ("2.4ssucceeded"), which defeats a word match.
+    const badge = link.locator(":scope > div").last();
+    const badgeText = (await badge.count()) > 0 ? ((await badge.textContent()) ?? "") : "";
+    rows.push({ id, status: statusFromRowText(badgeText) });
   }
   return rows;
 }
@@ -552,8 +709,8 @@ function runsFromList(payload: unknown): { id: string }[] {
   });
 }
 
-async function waitForHealth(base: string): Promise<void> {
-  await poll(30_000, 500, async () => {
+async function waitForHealth(base: string, timeoutMs = 30_000): Promise<void> {
+  await poll(timeoutMs, 500, async () => {
     const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) });
     return response.ok ? true : undefined;
   });
@@ -605,6 +762,23 @@ function run(command: ShellCommand): string {
   });
 }
 
+function tryRun(command: ShellCommand, timeoutMs = 30_000): { ok: boolean; detail: string } {
+  const violation = commandViolation(command.argv);
+  if (violation) throw new Error(`${violation}: ${command.argv.join(" ")}`);
+  try {
+    const out = execFileSync(command.argv[0], command.argv.slice(1), {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: commandEnv(),
+    });
+    return { ok: true, detail: out.trim() };
+  } catch (err) {
+    return { ok: false, detail: errorText(err) };
+  }
+}
+
 function runAllowFailure(command: ShellCommand): void {
   const violation = commandViolation(command.argv);
   if (violation) throw new Error(`${violation}: ${command.argv.join(" ")}`);
@@ -626,45 +800,69 @@ function commandEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-async function startPortForward(command: ShellCommand): Promise<ChildProcess> {
-  const violation = commandViolation(command.argv);
-  if (violation) throw new Error(violation);
-  const child = spawn(command.argv[0], command.argv.slice(1), {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: commandEnv(),
-  });
-  let output = "";
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error(`port-forward did not become ready\n${output}`));
-    }, 20_000);
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) {
-        if (child.exitCode === null) child.kill("SIGTERM");
-        reject(error);
-      } else resolve();
-    };
-    const onData = (chunk: Buffer) => {
-      output += chunk.toString();
-      if (output.includes("Forwarding from")) finish();
-    };
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
-    child.once("exit", (code) => finish(new Error(`port-forward exited ${code}\n${output}`)));
-    child.once("error", (err) => finish(err));
-  });
-  return child;
+/** A failed start stops and reaps its own child (startReadyChild). */
+function startPortForward(command: ShellCommand): Promise<ChildProcess> {
+  return startReadyChild(command, { readyText: "Forwarding from", timeoutMs: 20_000, env: commandEnv() });
 }
 
-function stopChild(child: ChildProcess | undefined): void {
-  if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
+/**
+ * Reconnect through the Service on the page's local port. kubectl binds one
+ * member when it starts; until the node controller marks the killed member
+ * NotReady it can still pick that pod, whose kubelet is down, so retry until a
+ * healthy member answers.
+ */
+async function startServiceForward(current: ClusterRecoverySession): Promise<ChildProcess> {
+  const deadline = Date.now() + 90_000;
+  let attempts = 0;
+  let last = "no attempt";
+  while (Date.now() < deadline) {
+    attempts += 1;
+    let child: ChildProcess | undefined;
+    try {
+      // A rejected start has already stopped its own child.
+      child = await startPortForward(serviceConsoleForward(current, OWNER_CONSOLE_PORT));
+      await waitForHealth(ownerOrigin, 10_000);
+      evidence.serviceForwardAttempts = attempts;
+      return child;
+    } catch (err) {
+      last = errorText(err);
+      await stopChildProcess(child);
+      await sleep(3_000);
+    }
+  }
+  throw new Error(`service port-forward did not reach a healthy member after ${attempts} attempts: ${last}`);
+}
+
+/** Member logs once kubelet is back, for diagnosis. Failures are recorded, not thrown. */
+async function captureFinalLogs(current: ClusterRecoverySession): Promise<void> {
+  const dir = path.join(current.artifactsDir, "d3-final-logs");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const listed = JSON.parse(run(kubectlGetPodsCommand(current.kubeconfig, current.namespace, caesiumMemberSelector()))) as unknown;
+    for (const member of membersFromPodList(listed)) {
+      const base = path.join(dir, member.name);
+      if (member.name !== owner?.name) {
+        captureCommand(memberLogCommand(current, member.name, false), `${base}.current.log`, `${base}.current.err`);
+        continue;
+      }
+      // The owner's node kubelet was just restarted; its log API needs a moment.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        captureCommand(memberLogCommand(current, member.name, true), `${base}.previous.log`, `${base}.previous.err`);
+        if (fs.statSync(`${base}.previous.log`).size > 0) break;
+        await sleep(10_000);
+      }
+    }
+  } catch (err) {
+    console.error(`final log capture failed: ${errorText(err)}`);
+  }
+}
+
+function iso(ms: number): string {
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : "";
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function sleep(ms: number): Promise<void> {
