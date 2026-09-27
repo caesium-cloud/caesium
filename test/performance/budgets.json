@@ -780,7 +780,7 @@
       "date": "2026-09-27",
       "rationale": "Initial calibrated budgets and decision rule (distributed-testing E4).",
       "evidence": "budgets.calibration: A/A control runs on the recorded runner, pooled per-series variance, cross-run drift, and one A/B run of master through the rule.",
-      "reviewed_in": "distributed-testing W8-gamma PR (E4)",
+      "reviewed_in": "https://github.com/caesium-cloud/caesium/pull/589",
       "values_sha256": "2a2c6cb38de51ab0da393087e384080592ace39d5ed66beae3aaed763ade7f97"
     }
   ]
