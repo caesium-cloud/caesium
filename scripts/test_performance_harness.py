@@ -230,5 +230,147 @@ class BenchmarkHarnessSetupTests(unittest.TestCase):
         self.assertTrue(all((self.base / path).exists() for path in FILES))
 
 
+class GateRerunLoopTests(unittest.TestCase):
+    """E4's bounded rerun loop, run with a stubbed attempt (no Docker)."""
+
+    @staticmethod
+    def gate_block():
+        source = SCRIPT.read_text()
+        start = source.index("# --- gate loop begin")
+        end = source.index("# --- gate loop end ---")
+        return source[start:end]
+
+    def run_gate(self, outcomes, max_reruns=2):
+        """outcomes: list of (exit_code, rerun_required) per attempt."""
+        tmp = tempfile.TemporaryDirectory(prefix="caesium-gate-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        plan = root / "plan.json"
+        plan.write_text(json.dumps(outcomes))
+        calls = root / "calls.tsv"
+        stub = f"""
+set -euo pipefail
+log() {{ printf '%s\\n' "$*" >&2; }}
+GATE_ROOT={root}/gate
+MAX_RERUNS={max_reruns}
+mkdir -p "$GATE_ROOT"
+run_attempt() {{
+  printf '%s\\t%s\\t%s\\n' "$1" "$2" "$3" >>{calls}
+  mkdir -p "$2"
+  python3 - "$1" "$2" {plan} <<'PY'
+import json, pathlib, sys
+attempt, out, plan = int(sys.argv[1]), pathlib.Path(sys.argv[2]), json.loads(pathlib.Path(sys.argv[3]).read_text())
+rc, rerun = plan[attempt - 1]
+overall = {{0: "no_significant_difference", 2: "fail", 3: "inconclusive", 4: "slower"}}[rc]
+(out / "report.json").write_text(json.dumps({{"overall": overall, "reruns": {{"rerun_required": rerun}}}}))
+sys.exit(rc)
+PY
+}}
+"""
+        script = stub + self.gate_block() + "\nset +e\nrun_gate\nrc=$?\necho \"GATE_RC=$rc\"\n"
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertIn("GATE_RC=", proc.stdout, proc.stderr)
+        rc = int(proc.stdout.rsplit("GATE_RC=", 1)[1].strip())
+        rows = [line.split("\t") for line in calls.read_text().splitlines()] if calls.exists() else []
+        gate = json.loads((root / "gate" / "gate.json").read_text())
+        return rc, rows, gate
+
+    def test_conclusive_first_attempt_is_not_rerun(self):
+        rc, rows, gate = self.run_gate([(0, False)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(gate["final"], {"attempt": 1, "exit_code": 0, "overall": "no_significant_difference"})
+
+    def test_regression_and_failure_are_terminal(self):
+        for code in (2, 4):
+            rc, rows, _ = self.run_gate([(code, False), (0, False)])
+            self.assertEqual((rc, len(rows)), (code, 1))
+
+    def test_inconclusive_reruns_with_the_prior_attempt_and_stops_when_resolved(self):
+        rc, rows, gate = self.run_gate([(3, True), (0, False), (0, False)])
+        self.assertEqual(rc, 0)
+        self.assertEqual([r[0] for r in rows], ["1", "2"])
+        self.assertTrue(rows[1][1].endswith("/attempt-2"))
+        self.assertTrue(rows[1][2].endswith("/attempt-1"))  # images/evidence of attempt 1
+        self.assertEqual(rows[0][2], "")
+        self.assertEqual([a["overall"] for a in gate["attempts"]], ["inconclusive", "no_significant_difference"])
+
+    def test_rerun_budget_is_bounded_and_unresolved_blocks(self):
+        rc, rows, gate = self.run_gate([(3, True), (3, True), (3, False), (0, False)], max_reruns=2)
+        self.assertEqual(rc, 3)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(gate["final"]["attempt"], 3)
+        # Even a report that still asks for a rerun cannot exceed the budget.
+        rc, rows, _ = self.run_gate([(3, True), (3, True), (3, True), (0, False)], max_reruns=2)
+        self.assertEqual((rc, len(rows)), (3, 3))
+
+    def test_non_rerunnable_inconclusive_stops_immediately(self):
+        rc, rows, _ = self.run_gate([(3, False), (0, False)])
+        self.assertEqual((rc, len(rows)), (3, 1))
+
+    def test_live_invocation_is_a_gate_run_and_attempt_pins_one_attempt(self):
+        source = SCRIPT.read_text()
+        self.assertIn('if [[ -z "${CAESIUM_PERF_ATTEMPT:-}" ]]; then', source)
+        self.assertIn('CAESIUM_PERF_ID="$GATE_ID-a$1"', source)
+        self.assertIn('compare_args=(--budgets "$BUDGETS" --attempt "$ATTEMPT")', source)
+        self.assertIn('compare_args+=(--baseline "$BASELINE")', source)
+        self.assertLess(source.index("run_gate || rc=$?"), source.index('PERF_LOCK="${CAESIUM_PERF_LOCK'))
+
+    def test_even_attempts_start_server_phases_with_the_candidate(self):
+        source = SCRIPT.read_text()
+        self.assertEqual(source.count("if (( (r + ORDER_FLIP) % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi"), 3)
+        self.assertNotIn("if (( r % 2 == 1 )); then order=(base candidate)", source)
+        formula = source.split("ORDER_FLIP=$(( ", 1)[1].split(" ))", 1)[0]
+        for attempt, first in ((1, "base"), (2, "candidate"), (3, "base")):
+            proc = subprocess.run(
+                ["bash", "-c", f"ATTEMPT={attempt}; ORDER_FLIP=$(( {formula} )); r=1; "
+                 "if (( (r + ORDER_FLIP) % 2 == 1 )); then echo base; else echo candidate; fi"],
+                capture_output=True, text=True, check=True)
+            self.assertEqual(proc.stdout.strip(), first, attempt)
+
+
+class PriorAttemptImageReuseTests(unittest.TestCase):
+    def run_prior_built(self, recorded_id, built, docker_id, side="candidate"):
+        source = SCRIPT.read_text()
+        start = source.index("prior_built() {")
+        end = source.index("\n}\n", source.index("PRIOR\n", start)) + 3
+        with tempfile.TemporaryDirectory() as tmp:
+            prior = Path(tmp) / "attempt-1"
+            prior.mkdir()
+            (prior / "comparison.json").write_text(json.dumps({
+                side: {"provenance": {"image_id": recorded_id, "built_by_this_run": built}},
+            }))
+            script = (
+                f'PRIOR_ATTEMPT="{prior}"\n'
+                f'docker() {{ echo "{docker_id}"; }}\n'
+                + source[start:end]
+                + f'\nif prior_built {side} img:x; then echo REUSE; else echo SUPPLIED; fi\n'
+            )
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+            return proc.stdout.strip()
+
+    def test_reuses_only_an_image_the_prior_attempt_built_with_the_same_id(self):
+        self.assertEqual(self.run_prior_built("sha256:1", True, "sha256:1"), "REUSE")
+        self.assertEqual(self.run_prior_built("sha256:1", True, "sha256:2"), "SUPPLIED")
+        self.assertEqual(self.run_prior_built("sha256:1", False, "sha256:1"), "SUPPLIED")
+        self.assertEqual(self.run_prior_built("sha256:1", True, "sha256:1", side="base"), "REUSE")
+
+
+class BaselineRecordSubcommandTests(unittest.TestCase):
+    def test_baseline_record_requires_a_finished_attempt_with_runner_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = Path(tmp) / "attempt-1"
+            attempt.mkdir()
+            proc = subprocess.run(["bash", str(SCRIPT), "baseline-record", str(attempt), str(Path(tmp) / "b.json")],
+                                  capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("comparison.json", proc.stderr)
+            (attempt / "comparison.json").write_text("{}")
+            proc = subprocess.run(["bash", str(SCRIPT), "baseline-record", str(attempt), str(Path(tmp) / "b.json")],
+                                  capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("host.json", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -744,6 +744,8 @@ class PerformanceShWiringTests(unittest.TestCase):
             inp.write_text(json.dumps(doc))
             env = os.environ.copy()
             env["CAESIUM_PERF_ARTIFACTS"] = tmp
+            # The synthetic host cannot match the recorded fixed baseline.
+            env["CAESIUM_PERF_BASELINE"] = "none"
             proc = subprocess.run(
                 ["bash", str(SH), "compare", str(inp)],
                 capture_output=True,
@@ -754,6 +756,21 @@ class PerformanceShWiringTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             report = json.loads((Path(tmp) / "report.json").read_text())
             self.assertEqual(report["overall"], "faster")
+            self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "not_requested")
+            self.assertTrue(report["strict_gate"]["blocking"])
+
+            # By default the compare subcommand also judges against the
+            # versioned fixed baseline; a synthetic host never matches it.
+            del env["CAESIUM_PERF_BASELINE"]
+            proc = subprocess.run(
+                ["bash", str(SH), "compare", str(inp)],
+                capture_output=True, text=True, env=env, cwd=str(ROOT),
+            )
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            report = json.loads((Path(tmp) / "report.json").read_text())
+            self.assertEqual(report["overall"], "inconclusive_unresolved")
+            self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "inconclusive")
+            self.assertFalse(report["decision"]["fixed_baseline"]["rerun_eligible"])
 
     def test_compare_subcommand_rejects_benchmark_without_harness(self):
         doc = BenchmarkHarnessProvenanceTests.bench_document()
@@ -1331,6 +1348,41 @@ class PerformanceShAttributionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIsNone(json.loads((art / "comparison.json").read_text())["control"])
 
+    def test_assembly_carries_driver_slo_fields_and_run_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp)
+            (art / "observations").mkdir()
+            for label in ("base", "candidate"):
+                runs = art / label / "runs"
+                runs.mkdir(parents=True)
+                for repeat in range(1, 11):
+                    stem = runs / f"open-tiny-sustained-warm-{repeat}"
+                    stem.with_suffix(".json").write_text(json.dumps({
+                        "outcome": "passed", "duration_seconds": 50.0 + repeat,
+                        "latency": {"p50_seconds": 1.5, "p99_seconds": 2.5},
+                        "throughput": {"completed_per_second": 0.48, "verdict": "sustained"},
+                        "backlog": {"slope_per_second": -0.01},
+                        "counts": {"unreconciled": 0},
+                    }))
+                    stem.with_suffix(".exit").write_text("0\n")
+            result = self.assemble(art, "0")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            sample = assembled["candidate"]["workloads"]["open-tiny-sustained.warm"]["samples"][0]
+            self.assertEqual(sample["value"], 51.0)
+            self.assertEqual(sample["latency_p99_seconds"], 2.5)
+            self.assertEqual(sample["completed_per_second"], 0.48)
+            self.assertEqual(sample["sustained_verdict"], "sustained")
+            self.assertEqual(sample["backlog_slope_per_second"], -0.01)
+            self.assertEqual(sample["unreconciled"], 0)
+            self.assertEqual(assembled["settings"]["repeats"], 10)
+            self.assertEqual(assembled["settings"]["server_phase_first_side"], "base")
+            self.assertTrue(assembled["measured_at"])
+            # Carried fields are SLO inputs, never extra compared series.
+            report = compare_doc(assembled)
+            self.assertEqual([m["id"] for m in report["metrics"]
+                              if m["family"] == "workload"], ["workload.open-tiny-sustained.warm.duration_seconds"])
+
     def test_a_a_control_reuses_the_candidate_build_only_for_one_sha_and_image(self):
         source = SH.read_text()
         start = source.index('BASE_BUILT="supplied"\nAA_CONTROL=0')
@@ -1410,6 +1462,578 @@ class PerformanceShAttributionTests(unittest.TestCase):
         self.assertIn("aside nav a[href=", session)
         self.assertIn('"in-app navigation replaced the document"', session)
         self.assertIn('navigation: "in-app"', session)
+
+
+# ---------------------------------------------------------------------------
+# E4: budgeted decision rule, fixed baseline, SLOs, bounded reruns
+# ---------------------------------------------------------------------------
+
+BUDGETS_PATH = ROOT / "test/performance/budgets.json"
+BASELINE_PATH = ROOT / "test/performance/baseline.json"
+
+
+def real_budgets():
+    return json.loads(BUDGETS_PATH.read_text())
+
+
+def signed(budgets):
+    """Re-sign a mutated budgets copy as a new reviewed change (test-only)."""
+    budgets = json.loads(json.dumps(budgets))
+    budgets["changes"].append({
+        "version": len(budgets["changes"]) + 1,
+        "date": "2026-09-27",
+        "rationale": "synthetic test budgets",
+        "evidence": "scripts/test_compare_performance.py",
+        "reviewed_in": "test",
+        "values_sha256": "",
+    })
+    budgets["changes"][-1]["values_sha256"] = COMPARE["budget_values_sha256"](budgets)
+    return COMPARE["validate_budgets"](budgets)
+
+
+def test_budgets(slos=None, max_reruns=None):
+    budgets = real_budgets()
+    if slos is not None:
+        budgets["slos"] = slos
+    if max_reruns is not None:
+        budgets["rerun_policy"]["max_reruns"] = max_reruns
+    return signed(budgets)
+
+
+def budgeted(doc, budgets=None, baseline=None, baseline_error=None, attempt=1):
+    return COMPARE["compare"](
+        doc,
+        budgets=budgets if budgets is not None else test_budgets(slos=[]),
+        baseline=baseline,
+        baseline_error=baseline_error,
+        attempt=attempt,
+    )
+
+
+def shifted(center, ratio, n=10, cv_pct=1.0, phase=0):
+    """Deterministic samples: a fixed spread pattern around center*ratio."""
+    pattern = [-1.6, -1.1, -0.7, -0.3, 0.0, 0.2, 0.5, 0.8, 1.2, 1.5, -0.9, 0.9]
+    out = []
+    for i in range(n):
+        step = pattern[(i + phase) % len(pattern)]
+        out.append(center * ratio * (1.0 + cv_pct / 100.0 * step))
+    return out
+
+
+def bench_family_doc(base_centers, cand_ratios, cv_pct=1.0):
+    """Benchmarks only: every series of one family, like one go test process."""
+    base = side("base", workloads={}, browser={}, bundle={}, system={})
+    cand = side("candidate", workloads={}, browser={}, bundle={}, system={})
+    base["benchmarks"] = {}
+    cand["benchmarks"] = {}
+    for index, (name, center) in enumerate(sorted(base_centers.items())):
+        base["benchmarks"][name] = {
+            "ns_per_op": shifted(center, 1.0, cv_pct=cv_pct, phase=index),
+            "bytes_per_op": [400.0] * 10,
+            "allocs_per_op": [12.0] * 10,
+        }
+        cand["benchmarks"][name] = {
+            "ns_per_op": shifted(center, cand_ratios.get(name, 1.0), cv_pct=cv_pct, phase=index + 3),
+            "bytes_per_op": [400.0] * 10,
+            "allocs_per_op": [12.0] * 10,
+        }
+    doc = document(base, cand)
+    doc["required_families"] = ["benchmark"]
+    return doc
+
+
+BENCH_NAMES = {f"BenchmarkOwner{name}": 10_000.0 + 1_000.0 * i
+               for i, name in enumerate("ABCDEFGHIJK")}
+
+
+class BudgetFileReviewTests(unittest.TestCase):
+    """Budget values change only with a visible, reviewed changes entry."""
+
+    def test_committed_budgets_are_complete_and_reviewed(self):
+        budgets = COMPARE["load_budgets"](BUDGETS_PATH)
+        self.assertEqual(budgets["schema_version"], 1)
+        for change in budgets["changes"]:
+            for key in ("date", "rationale", "evidence", "reviewed_in", "values_sha256"):
+                self.assertTrue(str(change.get(key, "")).strip(), (key, change))
+        self.assertEqual(budgets["changes"][-1]["values_sha256"], COMPARE["budget_values_sha256"](budgets))
+        calibration = budgets["calibration"]
+        for key in ("runner", "runs", "limitations"):
+            self.assertIn(key, calibration)
+        self.assertIn("host_id", calibration["runner"])
+        self.assertIn("Q2", json.dumps(calibration["limitations"]))
+        for family in ("workload", "benchmark", "browser", "system"):
+            for rule in budgets["families"][family]["rules"]:
+                self.assertNotIn("PROVISIONAL", rule["rationale"])
+
+    def test_value_change_without_a_changes_entry_is_refused(self):
+        budgets = real_budgets()
+        budgets["families"]["benchmark"]["rules"][0]["max_relative_degradation"] += 0.05
+        with self.assertRaisesRegex(COMPARE["CompareError"], "last reviewed change"):
+            COMPARE["validate_budgets"](budgets)
+        # The CLI refuses it too (usage error, never a silent comparison).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "budgets.json"
+            path.write_text(json.dumps(budgets))
+            proc = run_cli("--budgets", str(path), input_doc=document())
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("last reviewed change", proc.stderr)
+        # A reviewed entry with rationale, evidence and review makes it valid.
+        self.assertTrue(signed(budgets))
+
+    def test_changes_entry_needs_rationale_evidence_and_review(self):
+        for key in ("rationale", "evidence", "reviewed_in"):
+            budgets = signed(real_budgets())
+            budgets["changes"][-1][key] = " "
+            with self.assertRaisesRegex(COMPARE["CompareError"], key):
+                COMPARE["validate_budgets"](budgets)
+
+    def test_descriptions_and_calibration_notes_are_not_budget_values(self):
+        budgets = real_budgets()
+        budgets["description"] += " edited"
+        budgets["calibration"]["note"] = "more evidence"
+        COMPARE["validate_budgets"](budgets)
+
+    def test_every_committed_budget_revision_is_logged(self):
+        """Against git history: a committed value change needs a new entry."""
+        log = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "--format=%H", "--", "test/performance/budgets.json"],
+            capture_output=True, text=True,
+        )
+        if log.returncode != 0:
+            self.skipTest("git history unavailable")
+        revisions = [sha for sha in log.stdout.split() if sha]
+        versions = []
+        for sha in reversed(revisions):
+            shown = subprocess.run(
+                ["git", "-C", str(ROOT), "show", f"{sha}:test/performance/budgets.json"],
+                capture_output=True, text=True,
+            )
+            if shown.returncode == 0:
+                versions.append((sha, json.loads(shown.stdout)))
+        versions.append(("working-tree", real_budgets()))
+        for (_, older), (label, newer) in zip(versions, versions[1:]):
+            old_digest = COMPARE["budget_values_sha256"](older)
+            new_digest = COMPARE["budget_values_sha256"](newer)
+            if old_digest == new_digest:
+                continue
+            self.assertGreater(len(newer["changes"]), len(older["changes"]),
+                               f"{label} changed budget values without a new changes entry")
+            self.assertEqual(newer["changes"][-1]["values_sha256"], new_digest, label)
+            self.assertEqual(newer["changes"][:len(older["changes"])], older["changes"],
+                             f"{label} rewrote earlier reviewed changes")
+
+    def test_bundle_budgets_stay_in_lockstep_with_the_mjs_check(self):
+        absolute = real_budgets()["bundle"]["absolute_budgets"]
+        mjs = MJS.read_text()
+        for key, env in (("largest_js_raw_bytes", "BUNDLE_MAX_BYTES"),
+                         ("largest_js_gzip_bytes", "BUNDLE_MAX_GZIP_BYTES"),
+                         ("total_raw_bytes", "BUNDLE_TOTAL_MAX_BYTES"),
+                         ("total_gzip_bytes", "BUNDLE_TOTAL_MAX_GZIP_BYTES")):
+            self.assertRegex(mjs, rf'process\.env\.{env} \?\? "{absolute[key]}"')
+        self.assertEqual(absolute["largest_js_raw_bytes"], COMPARE["DEFAULT_LARGEST_JS_RAW"])
+        self.assertEqual(absolute["largest_js_gzip_bytes"], COMPARE["DEFAULT_LARGEST_JS_GZIP"])
+        self.assertEqual(absolute["total_raw_bytes"], COMPARE["DEFAULT_TOTAL_RAW"])
+        self.assertEqual(absolute["total_gzip_bytes"], COMPARE["DEFAULT_TOTAL_GZIP"])
+        slo_bundle = {s["bundle"]: s["max"] for s in real_budgets()["slos"] if "bundle" in s}
+        self.assertEqual(slo_bundle, {k: v for k, v in absolute.items() if k in COMPARE["BUNDLE_KEYS"]})
+
+    def test_committed_baseline_matches_the_budgets_setup(self):
+        baseline = json.loads(BASELINE_PATH.read_text())
+        self.assertEqual(baseline["schema_version"], 1)
+        prov = baseline["provenance"]
+        for field in real_budgets()["fixed_baseline"]["must_match"]:
+            self.assertTrue(prov.get(field), field)
+        self.assertIs(prov["instrumented"], False)
+        self.assertIs(prov["built_by_this_run"], True)
+        self.assertIn(baseline["report"]["target_base"], COMPARE["PASS_VERDICTS"])
+        for key in ("cpu_model", "cpu_count", "memory_bytes", "os_version", "docker", "co_tenant_containers"):
+            self.assertIn(key, baseline["runner"])
+        self.assertEqual(baseline["runner"]["host_id"], real_budgets()["calibration"]["runner"]["host_id"])
+        for metric_id, body in baseline["metrics"].items():
+            self.assertEqual(body["n"], len(body["samples"]), metric_id)
+            self.assertGreaterEqual(body["n"], 10, metric_id)
+            for key in ("median", "mad", "iqr", "p95", "p99"):
+                self.assertIn(key, body, metric_id)
+
+
+class BudgetStatisticsTests(unittest.TestCase):
+    def test_holm_adjustment(self):
+        adjusted = COMPARE["holm_adjust"]({"a": 0.01, "b": 0.04, "c": 0.03})
+        self.assertAlmostEqual(adjusted["a"], 0.03)
+        self.assertAlmostEqual(adjusted["c"], 0.06)
+        self.assertAlmostEqual(adjusted["b"], 0.06)  # monotone: never below c
+
+    def test_moses_bounds_cover_the_shift(self):
+        base = [float(x) for x in range(100, 110)]
+        cand = [x + 5.0 for x in base]
+        hl, lower, upper = COMPARE["moses_shift_bounds"](base, cand, 0.05)
+        self.assertAlmostEqual(hl, 5.0)
+        self.assertLess(lower, 5.0)
+        self.assertGreater(upper, 5.0)
+        # Too few samples to exclude a single pairwise difference.
+        self.assertEqual(COMPARE["moses_shift_bounds"]([1.0, 2.0], [3.0, 4.0], 0.01)[1:], (None, None))
+
+    def test_degradation_is_a_ratio_and_direction_aware(self):
+        base = shifted(100.0, 1.0)
+        cand = shifted(100.0, 1.2)
+        slower = COMPARE["degradation_estimate"](base, cand, True, 0.05)
+        self.assertAlmostEqual(slower["point"], 1.2, places=2)
+        # The same move is an improvement for a higher-is-better series.
+        faster = COMPARE["degradation_estimate"](base, cand, False, 0.05)
+        self.assertAlmostEqual(faster["point"], 1 / 1.2, places=2)
+        self.assertLess(faster["upper"], 1.0)
+
+    def test_one_sided_mann_whitney(self):
+        greater, less = COMPARE["mann_whitney_one_sided"](shifted(10, 1.0), shifted(10, 1.3))
+        self.assertLess(greater, 0.001)
+        self.assertGreater(less, 0.99)
+
+
+class BudgetDecisionTests(unittest.TestCase):
+    def test_a_a_like_input_is_no_significant_difference(self):
+        # Same distribution on both sides, samples in a different order, in
+        # every sampled family: exactly the same-code control case.
+        doc = document()
+        for label, phase in (("base", 0), ("candidate", 5)):
+            doc[label]["workloads"] = {"closed-baseline.warm": {"phase": "warm", "samples": shifted(2.2, 1.0, cv_pct=7, phase=phase)}}
+            doc[label]["benchmarks"] = {
+                name: {"ns_per_op": shifted(center, 1.0, cv_pct=3, phase=phase + i),
+                       "bytes_per_op": [400.0] * 10, "allocs_per_op": [12.0] * 10}
+                for i, (name, center) in enumerate(sorted(BENCH_NAMES.items()))
+            }
+            doc[label]["browser"] = {"route_readiness_ms": {"/jobs": shifted(77, 1.0, cv_pct=3, phase=phase)},
+                                     "action_to_render_ms": shifted(66, 1.0, cv_pct=2, phase=phase),
+                                     "long_session_heap_bytes": shifted(14e6, 1.0, cv_pct=0.7, phase=phase)}
+            doc[label]["system"] = {}
+        doc = document(doc["base"], doc["candidate"])
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "no_significant_difference", report["reasons"])
+        self.assertEqual(report["reruns"]["status"], "resolved")
+        self.assertIn("not equivalence", report["reasons"][0])
+        proc = run_cli("--budgets", str(BUDGETS_PATH), input_doc=doc)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_correlated_small_shifts_do_not_fail_on_uncorrected_p_values(self):
+        # The W7-beta A/A shape: six ns/op series from one process move ~2.5%
+        # together, several with uncorrected p < 0.05.
+        ratios = {name: 1.025 for name in list(sorted(BENCH_NAMES))[:6]}
+        doc = bench_family_doc(BENCH_NAMES, ratios, cv_pct=1.5)
+        report = budgeted(doc)
+        family = report["decision"]["target_base"]["families"]["benchmark"]
+        self.assertGreaterEqual(family["uncorrected_significant"], 1)
+        self.assertIn(report["overall"], ("no_significant_difference", "within_budget"))
+        self.assertNotIn("slower", family["counts"])
+        self.assertEqual(COMPARE["EXIT_BY_OVERALL"][report["overall"]], 0)
+        self.assertGreater(family["geomean_degradation"], 1.0)
+        # The same data under E3's uncorrected rule reports it as slower.
+        self.assertEqual(report["uncorrected_overall"], "slower")
+
+    def test_one_material_regression_among_many_series_fails(self):
+        ratios = {"BenchmarkOwnerC": 1.30}
+        doc = bench_family_doc(BENCH_NAMES, ratios, cv_pct=1.5)
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "slower", report["reasons"])
+        slow = [s for s in report["decision"]["target_base"]["series"] if s["verdict"] == "slower"]
+        self.assertEqual([s["id"] for s in slow], ["bench.BenchmarkOwnerC.ns_per_op"])
+        self.assertEqual(report["reruns"]["status"], "resolved")  # never rerun a regression
+        proc = run_cli("--budgets", str(BUDGETS_PATH), input_doc=doc)
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+
+    def test_known_faster_is_faster_with_tradeoffs_listed(self):
+        ratios = {"BenchmarkOwnerA": 0.7, "BenchmarkOwnerB": 1.01}
+        report = budgeted(bench_family_doc(BENCH_NAMES, ratios, cv_pct=1.0))
+        self.assertEqual(report["overall"], "faster", report["reasons"])
+        claim = report["decision"]["optimization_claim"]
+        self.assertEqual(claim["improved_series"], ["bench.BenchmarkOwnerA.ns_per_op"])
+        self.assertIn("bench.BenchmarkOwnerB.ns_per_op", [t["id"] for t in claim["tradeoff_candidates"]])
+        self.assertIn("tradeoffs", claim["note"])
+
+    def test_significant_slowdown_within_budget_is_reported_not_failed(self):
+        doc = bench_family_doc({"BenchmarkOwnerA": 10_000.0}, {"BenchmarkOwnerA": 1.03}, cv_pct=0.5)
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "within_budget", report["reasons"])
+        self.assertEqual(COMPARE["EXIT_BY_OVERALL"]["within_budget"], 0)
+
+    def test_unestablished_bound_is_inconclusive_and_rerun(self):
+        margin = real_budgets()["families"]["benchmark"]["rules"][0]["max_relative_degradation"]
+        doc = bench_family_doc({"BenchmarkOwnerA": 10_000.0}, {"BenchmarkOwnerA": 1.0 + margin * 0.8}, cv_pct=4.5)
+        report = budgeted(doc)
+        series = {s["id"]: s for s in report["decision"]["target_base"]["series"]}
+        self.assertEqual(series["bench.BenchmarkOwnerA.ns_per_op"]["verdict"], "inconclusive")
+        self.assertEqual(report["overall"], "inconclusive", report["reasons"])
+        self.assertTrue(report["reruns"]["rerun_required"])
+        self.assertEqual(report["reruns"]["next_attempt"], 2)
+        self.assertTrue(any("not established" in r or "noisy" in r for r in report["reasons"]))
+
+    def test_noisy_series_is_inconclusive_until_the_rerun_budget_is_exhausted(self):
+        doc = workload_only(InformationalDiagnosticsTests.COLD_BASE, InformationalDiagnosticsTests.COLD_CANDIDATE)
+        budgets = test_budgets(slos=[])
+        allowed = budgets["rerun_policy"]["max_reruns"] + 1
+        for attempt in range(1, allowed):
+            report = budgeted(doc, budgets, attempt=attempt)
+            self.assertEqual(report["overall"], "inconclusive")
+            self.assertEqual(report["reruns"]["status"], "rerun_required")
+        report = budgeted(doc, budgets, attempt=allowed)
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+        self.assertEqual(report["reruns"]["status"], "exhausted")
+        self.assertTrue(report["strict_gate"]["blocking"])
+        self.assertTrue(any("noisy" in r for r in report["reasons"]))
+        with self.assertRaisesRegex(COMPARE["CompareError"], "attempt must be between"):
+            budgeted(doc, budgets, attempt=allowed + 1)
+        proc = run_cli("--budgets", str(BUDGETS_PATH), "--attempt", str(allowed), input_doc=doc)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["overall"], "inconclusive_unresolved")
+
+    def test_non_inferiority_alpha_is_split_across_allowed_attempts(self):
+        budgets = test_budgets(slos=[])
+        report = budgeted(document(), budgets)
+        allowed = budgets["rerun_policy"]["max_reruns"] + 1
+        self.assertAlmostEqual(report["decision"]["alpha_non_inferiority_per_attempt"],
+                               budgets["decision"]["alpha_non_inferiority"] / allowed)
+
+    def test_undersampled_is_inconclusive(self):
+        doc = workload_only([6.4, 6.5, 6.3, 6.6], [6.4, 6.5, 6.3, 6.6])
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "inconclusive")
+        self.assertTrue(any("undersampled" in r for r in report["reasons"]))
+
+    def test_mismatched_host_is_unresolved_without_a_rerun(self):
+        doc = document()
+        doc["candidate"]["provenance"]["host_id"] = "other-host"
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+        self.assertEqual(report["reruns"]["status"], "unresolved_not_rerunnable")
+        self.assertTrue(any("host_id differs" in r for r in report["reasons"]))
+
+    def test_correctness_failure_aborts_before_budgets(self):
+        doc = document()
+        doc["candidate"]["correctness"] = {"ok": False, "failures": ["run 2 failed"]}
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "fail")
+        self.assertFalse(report["speed_compared"])
+        self.assertEqual(report["decision"]["slos"]["verdict"], "not_evaluated")
+        self.assertEqual(report["reruns"]["status"], "resolved")
+
+    def test_higher_is_better_series_degrades_when_it_drops(self):
+        base = side("base", workloads={}, benchmarks={}, browser={}, bundle={},
+                    system={"throughput": {"samples": shifted(50.0, 1.0), "lower_is_better": False}})
+        cand = side("candidate", workloads={}, benchmarks={}, browser={}, bundle={},
+                    system={"throughput": {"samples": shifted(50.0, 0.6), "lower_is_better": False}})
+        report = budgeted(document(base, cand))
+        self.assertEqual(report["overall"], "slower", report["reasons"])
+
+    def test_series_without_a_rule_fails_closed(self):
+        result = COMPARE["evaluate_series"](
+            "mystery.series", {"samples": [1.0] * 10}, {"samples": [1.0] * 10}, None, None, 0.05)
+        self.assertEqual(result["status"], "fail")
+        self.assertIsNone(COMPARE["rule_for"](real_budgets(), "mystery", "mystery.series"))
+
+    def test_bundle_growth_beyond_budget_is_slower(self):
+        doc = document()
+        doc["candidate"]["bundle"] = {"largest_js_raw_bytes": 800_000, "total_raw_bytes": 2_200_000}
+        report = budgeted(doc)
+        self.assertEqual(report["overall"], "slower")
+        self.assertTrue(any("total_raw_bytes grew" in r for r in report["reasons"]))
+
+
+class BudgetSloTests(unittest.TestCase):
+    def test_series_slo_breach_fails_even_when_the_comparison_is_neutral(self):
+        slo = {"id": "t-readiness", "series": "browser.route_readiness_ms./jobs.live", "statistic": "p90",
+               "max": 50.0, "min_samples": 10, "unit": "ms", "rationale": "test"}
+        report = budgeted(document(), test_budgets(slos=[slo]))
+        self.assertEqual(report["decision"]["target_base"]["verdict"], "no_significant_difference")
+        self.assertEqual(report["overall"], "slo_breach")
+        self.assertEqual(COMPARE["EXIT_BY_OVERALL"]["slo_breach"], 4)
+
+    def test_breach_on_a_noisy_run_is_rerun_not_terminal(self):
+        slo = {"id": "t-readiness", "series": "browser.route_readiness_ms./jobs.live", "statistic": "p90",
+               "max": 50.0, "min_samples": 10, "unit": "ms", "rationale": "test"}
+        doc = document()
+        # Host contention: the benchmark series swings far beyond its max_cv.
+        noisy = [10_000.0, 30_000.0] * 5
+        doc["candidate"]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["ns_per_op"] = noisy
+        report = budgeted(doc, test_budgets(slos=[slo]))
+        self.assertEqual(report["decision"]["slos"]["verdict"], "inconclusive")
+        self.assertEqual(report["overall"], "inconclusive")
+        self.assertTrue(report["reruns"]["rerun_required"])
+        self.assertTrue(any("noisy run" in r for r in report["reasons"]))
+
+    def test_p90_excludes_exactly_one_stall_in_ten(self):
+        values = [6.5] * 9 + [32.5]
+        slo = {"id": "cold", "workload": "closed-baseline.cold", "field": "latency_p99_seconds",
+               "statistic": "p90", "max": 10.0, "min_samples": 10, "rationale": "test"}
+        doc = workload_only([], [])
+        doc["base"]["workloads"] = {"closed-baseline.cold": {"phase": "cold", "samples": shifted(6.5, 1.0)}}
+        doc["candidate"]["workloads"] = {"closed-baseline.cold": {"phase": "cold", "samples": [
+            {"value": v, "outcome": "passed", "latency_p99_seconds": lat}
+            for v, lat in zip(shifted(6.5, 1.0), values)
+        ]}}
+        report = budgeted(doc, test_budgets(slos=[slo]))
+        self.assertEqual(report["decision"]["slos"]["results"][0]["verdict"], "pass")
+        doc["candidate"]["workloads"]["closed-baseline.cold"]["samples"][0]["latency_p99_seconds"] = 30.0
+        report = budgeted(doc, test_budgets(slos=[slo]))
+        self.assertEqual(report["decision"]["slos"]["results"][0]["verdict"], "breach")
+        self.assertEqual(report["overall"], "slo_breach")
+
+    def test_floor_and_equality_slos(self):
+        slos = [
+            {"id": "rate", "workload": "open", "field": "completed_per_second", "statistic": "p90",
+             "min": 0.4, "min_samples": 10, "rationale": "test"},
+            {"id": "sustained", "workload": "open", "field": "sustained_verdict", "statistic": "all",
+             "equals": "sustained", "min_samples": 10, "rationale": "test"},
+        ]
+        samples = [{"value": 60.0, "outcome": "passed", "completed_per_second": 0.5,
+                    "sustained_verdict": "sustained"} for _ in range(10)]
+        doc = document()
+        doc["candidate"]["workloads"]["open"] = {"phase": "warm", "samples": samples}
+        doc["base"]["workloads"]["open"] = {"phase": "warm", "samples": [dict(s) for s in samples]}
+        report = budgeted(doc, test_budgets(slos=slos))
+        self.assertEqual([r["verdict"] for r in report["decision"]["slos"]["results"]], ["pass", "pass"])
+        samples[3]["sustained_verdict"] = "growing"
+        samples[4]["completed_per_second"] = 0.1
+        samples[5]["completed_per_second"] = 0.1
+        report = budgeted(doc, test_budgets(slos=slos))
+        self.assertEqual([r["verdict"] for r in report["decision"]["slos"]["results"]], ["breach", "breach"])
+
+    def test_undersampled_slo_is_unresolved_and_unmeasured_slo_is_reported(self):
+        slos = [
+            {"id": "few", "series": "workload.closed-baseline.duration_seconds", "statistic": "p90",
+             "max": 1000.0, "min_samples": 20, "rationale": "test"},
+            {"id": "absent", "series": "workload.never.cold.duration_seconds", "statistic": "p90",
+             "max": 1.0, "min_samples": 10, "rationale": "test"},
+        ]
+        report = budgeted(document(), test_budgets(slos=slos))
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+        self.assertEqual(report["decision"]["slos"]["not_evaluated"], ["absent"])
+
+
+class FixedBaselineTests(unittest.TestCase):
+    def baseline_from(self, doc):
+        report = budgeted(doc)
+        doc["candidate"]["provenance"]["built_by_this_run"] = True
+        return COMPARE["record_baseline"](doc, report, runner={"host_id": "perf-host-1"},
+                                          recorded_at="2026-09-27T00:00:00Z")
+
+    def test_recorded_baseline_round_trips_and_exposes_cumulative_regression(self):
+        reference = document()
+        baseline = self.baseline_from(reference)
+        self.assertEqual(baseline["provenance"]["host_id"], "perf-host-1")
+        metric = baseline["metrics"]["bench.BenchmarkOwnerApplyCompletionLinear64.ns_per_op"]
+        self.assertEqual(metric["n"], 10)
+        self.assertEqual(len(metric["samples"]), 10)
+        for key in ("median", "mad", "iqr", "p95", "p99"):
+            self.assertIn(key, metric)
+
+        report = budgeted(document(), baseline=baseline)
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "no_significant_difference")
+        self.assertEqual(report["overall"], "no_significant_difference")
+        self.assertFalse(report["strict_gate"]["blocking"])
+
+        # Base and candidate moved together (each PR was within budget), so the
+        # target-base comparison passes; the fixed baseline sees the drift.
+        drifted = document()
+        for label in ("base", "candidate"):
+            drifted[label]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["ns_per_op"] = around(13_000.0)
+        report = budgeted(drifted, baseline=baseline)
+        self.assertEqual(report["decision"]["target_base"]["verdict"], "no_significant_difference")
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "slower")
+        self.assertEqual(report["overall"], "slower")
+
+    def test_cumulative_improvement_does_not_become_an_optimization_claim(self):
+        baseline = self.baseline_from(document())
+        improved = document()
+        for label in ("base", "candidate"):
+            improved[label]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["ns_per_op"] = around(7_000.0)
+        report = budgeted(improved, baseline=baseline)
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "faster")
+        self.assertEqual(report["overall"], "no_significant_difference")
+
+    def test_missing_baseline_is_unresolved(self):
+        report = budgeted(document(), baseline_error="fixed baseline is missing: /nowhere")
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "inconclusive")
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+        with tempfile.TemporaryDirectory() as tmp:
+            budgets = Path(tmp) / "budgets.json"
+            budgets.write_text(json.dumps(test_budgets(slos=[])))
+            proc = run_cli("--budgets", str(budgets), "--baseline", str(Path(tmp) / "none.json"),
+                           input_doc=document())
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("fixed baseline is missing", proc.stdout)
+
+    def test_baseline_from_another_host_is_refused_not_compared(self):
+        baseline = self.baseline_from(document())
+        baseline["provenance"]["host_id"] = "ci-runner-7"
+        slower = document()
+        slower["candidate"]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["ns_per_op"] = around(30_000.0)
+        slower["base"]["benchmarks"]["BenchmarkOwnerApplyCompletionLinear64"]["ns_per_op"] = around(30_000.0)
+        report = budgeted(slower, baseline=baseline)
+        fixed = report["decision"]["fixed_baseline"]
+        self.assertEqual(fixed["verdict"], "inconclusive")
+        self.assertNotIn("series", fixed)  # never silently compared
+        self.assertTrue(any("host_id differs" in r for r in fixed["reasons"]))
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+
+    def test_new_series_needs_a_re_recorded_baseline(self):
+        baseline = self.baseline_from(document())
+        del baseline["metrics"]["browser.action_to_render_ms.live"]
+        report = budgeted(document(), baseline=baseline)
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "inconclusive")
+        self.assertFalse(report["decision"]["fixed_baseline"]["rerun_eligible"])
+        self.assertEqual(report["overall"], "inconclusive_unresolved")
+
+    def test_recording_refuses_a_failed_or_unverified_run(self):
+        doc = document()
+        doc["candidate"]["correctness"] = {"ok": False, "failures": ["boom"]}
+        with self.assertRaisesRegex(COMPARE["CompareError"], "target-base verdict"):
+            COMPARE["record_baseline"](doc, budgeted(doc))
+        doc = document()
+        with self.assertRaisesRegex(COMPARE["CompareError"], "did not build"):
+            COMPARE["record_baseline"](doc, budgeted(doc))
+        doc["candidate"]["provenance"]["built_by_this_run"] = True
+        doc["candidate"]["provenance"]["instrumented"] = True
+        with self.assertRaisesRegex(COMPARE["CompareError"], "instrumented"):
+            COMPARE["record_baseline"](doc, budgeted(document()))
+
+    def test_record_baseline_cli(self):
+        doc = document()
+        doc["candidate"]["provenance"]["built_by_this_run"] = True
+        doc["settings"] = {"repeats": 10}
+        doc["measured_at"] = "2026-09-27T12:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "baseline.json"
+            runner = Path(tmp) / "host.json"
+            runner.write_text(json.dumps({"host_id": "perf-host-1", "cpu_model": "synthetic"}))
+            proc = run_cli("--budgets", str(BUDGETS_PATH), "--record-baseline", str(out),
+                           "--runner-json", str(runner), input_doc=doc)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            recorded = json.loads(out.read_text())
+            self.assertEqual(recorded["runner"]["cpu_model"], "synthetic")
+            self.assertEqual(recorded["settings"], {"repeats": 10})
+            self.assertEqual(recorded["recorded_at"], "2026-09-27T12:00:00+00:00")
+            self.assertEqual(recorded["source"]["base_git_sha"], "a" * 40)
+
+
+class CalibrationTests(unittest.TestCase):
+    def a_a(self, phase):
+        doc = document()
+        doc["control"] = "a_a"
+        doc["candidate"]["workloads"]["closed-baseline"]["samples"] = shifted(100.0, 1.0, cv_pct=2, phase=phase)
+        return doc
+
+    def test_calibration_summarizes_control_runs_and_cross_run_drift(self):
+        budgets = test_budgets(slos=[])
+        summary = COMPARE["calibrate"]([("aa1", self.a_a(1)), ("aa2", self.a_a(4)), ("aa3", self.a_a(7))], budgets)
+        self.assertEqual(summary["control_rates"]["runs"], 3)
+        self.assertEqual(summary["control_rates"]["false_fail"], 0.0)
+        self.assertEqual(len(summary["cross_run_fixed_baseline"]["pairs"]), 6)
+        series = summary["series"]["workload.closed-baseline.duration_seconds"]
+        for key in ("sigma_log_median", "supported_margin", "min_samples_for_margin", "max_cv"):
+            self.assertIn(key, series)
+        self.assertIsNotNone(summary["pooled_uncorrected_p"]["ks_uniform_p"])
+
+    def test_calibration_refuses_non_control_runs(self):
+        with self.assertRaisesRegex(COMPARE["CompareError"], "not an A/A control"):
+            COMPARE["calibrate"]([("ab", document())], test_budgets(slos=[]))
 
 
 if __name__ == "__main__":

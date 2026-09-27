@@ -1,35 +1,56 @@
 #!/usr/bin/env python3
 """Compare base vs candidate performance evidence. Fail closed.
 
-E3 ships the comparator, not calibrated SLOs (those are E4). This program
-never treats missing data, mismatched provenance, undersampled series, or a
-statistically insignificant delta as equivalence. Correctness/completion
-failures abort before any speed comparison.
+This program never treats missing data, mismatched provenance, undersampled
+series, or a statistically insignificant delta as equivalence.
+Correctness/completion failures abort before any speed comparison.
 
 Input is a JSON comparison document (schema_version 1) with `base` and
 `candidate` sides, each carrying provenance, correctness, and metric
 families (workloads, benchmarks, browser, bundle, system).
 
+The decision rule is E4's, loaded from test/performance/budgets.json
+(`--budgets`; the file must carry a reviewed `changes` entry for its current
+values or the comparator refuses it). Per series: a Hodges-Lehmann ratio with
+a one-sided Moses bound (non-inferiority against the series' allowed
+degradation) and one-sided Mann-Whitney tests, Holm-corrected per family.
+Absolute SLOs are checked on the candidate. `--baseline` adds a second
+verdict against the versioned fixed baseline (cumulative regression); a
+missing baseline or one from a different runner/setup is inconclusive, never
+silently compared. `--attempt N` places the run in the bounded rerun policy.
+See apply_budgets() and the budgets file for the full rule. E3's uncorrected
+per-series verdicts stay in the report as `uncorrected_verdict` /
+`uncorrected_overall`.
+
 Exit status:
-  0  conclusive non-regression: overall is faster or no_significant_difference
-  1  usage or schema error
+  0  pass: every series non-inferior within budget and SLOs met; overall is
+     no_significant_difference, faster (state tradeoffs), or within_budget
+     (a significant slowdown bounded inside its allowed degradation)
+  1  usage or schema error, including unreviewed budget values
   2  fail-closed: correctness failed, instrumented image, or missing required data
-  3  inconclusive (mismatched environments, undersampled, noisy)
-  4  conclusive slower
+  3  inconclusive (rerun required) or inconclusive_unresolved (rerun budget
+     exhausted, or not fixable by a rerun: mismatched environment, missing or
+     mismatched fixed baseline, undersampled SLO). A strict gate blocks on both.
+  4  slower (material regression vs base or fixed baseline) or slo_breach
+
+Other modes: `--record-baseline OUT` writes the fixed baseline from a run
+whose target-base verdict passed; `--calibrate DOC...` summarizes same-code
+A/A control runs (false-positive rates, pooled variance, cross-run drift);
+`--bundle-dir` runs the bundle-size check.
 
 Stdout is the JSON report. Human summary goes to stderr.
 
 Two report sections are informational only and never change a verdict or the
 exit status: `multiplicity` (how many series were tested at alpha and how
-many significant results chance alone predicts) and each metric's
-`diagnostics.extreme_samples` (robust z-scores that point at the sample to
-attribute). The aggregation/multiple-comparison policy and any outlier rule
-are E4 decisions (Q2/Q5), not this comparator's.
+many significant results chance alone predicts, uncorrected) and each
+metric's `diagnostics.extreme_samples` (robust z-scores that point at the
+sample to attribute). No outlier is ever removed.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import math
@@ -285,16 +306,15 @@ def _phi(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-def mann_whitney(a, b):
-    """Two-sided Mann-Whitney U (normal approximation, tie-corrected).
+def _mann_whitney_core(a, b):
+    """Rank sums for Mann-Whitney U: (u1, u2, mean_u, sigma).
 
-    Returns (u1, u2, p). u1 is the base-sample statistic (large when base
-    values tend to exceed candidate values). Direction of a change must be
-    taken from u1 vs u2, not from the means.
+    u1 is the base-sample statistic (large when base values tend to exceed
+    candidate values); sigma is tie-corrected. None when a side is empty.
     """
     n1, n2 = len(a), len(b)
     if n1 == 0 or n2 == 0:
-        return None, None, None
+        return None
     combined = [(float(x), 0) for x in a] + [(float(y), 1) for y in b]
     combined.sort(key=lambda t: t[0])
     ranks = [0.0] * len(combined)
@@ -319,13 +339,45 @@ def mann_whitney(a, b):
     var = n1 * n2 * (n + 1) / 12.0
     if n > 1 and ties_term:
         var -= n1 * n2 * ties_term / (12.0 * n * (n - 1))
-    if var <= 0:
+    sigma = math.sqrt(var) if var > 0 else 0.0
+    return u1, u2, mean_u, sigma
+
+
+def mann_whitney(a, b):
+    """Two-sided Mann-Whitney U (normal approximation, tie-corrected).
+
+    Returns (u1, u2, p). u1 is the base-sample statistic (large when base
+    values tend to exceed candidate values). Direction of a change must be
+    taken from u1 vs u2, not from the means.
+    """
+    core = _mann_whitney_core(a, b)
+    if core is None:
+        return None, None, None
+    u1, u2, mean_u, sigma = core
+    if sigma <= 0:
         return u1, u2, 1.0
-    sigma = math.sqrt(var)
     u = min(u1, u2)
     z = (abs(u - mean_u) - 0.5) / sigma
     p = 2.0 * (1.0 - _phi(z))
     return u1, u2, min(1.0, max(0.0, p))
+
+
+def mann_whitney_one_sided(a, b):
+    """One-sided Mann-Whitney p-values (p_b_greater, p_b_less).
+
+    p_b_greater is small when the second sample tends to exceed the first.
+    Normal approximation with tie and continuity correction; all-tied data
+    yields (1.0, 1.0).
+    """
+    core = _mann_whitney_core(a, b)
+    if core is None:
+        return None, None
+    _u1, u2, mean_u, sigma = core
+    if sigma <= 0:
+        return 1.0, 1.0
+    greater = 1.0 - _phi((u2 - mean_u - 0.5) / sigma)
+    less = _phi((u2 - mean_u + 0.5) / sigma)
+    return min(1.0, max(0.0, greater)), min(1.0, max(0.0, less))
 
 
 def hodges_lehmann(a, b):
@@ -1085,7 +1137,761 @@ def benchstat_text(metric_results, multiplicity=None):
     return "\n".join(lines) + "\n"
 
 
-def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=ALPHA):
+# ---------------------------------------------------------------------------
+# E4 budgeted decision rule (test/performance/budgets.json)
+# ---------------------------------------------------------------------------
+#
+# The per-series Mann-Whitney verdicts above stay in the report as
+# `uncorrected_verdict`. When budgets are supplied the decision is:
+#
+#   1. Correctness/completion, provenance and harness identity fail closed
+#      before any speed comparison (unchanged).
+#   2. Each series is matched to the first budget rule (fnmatch on its id)
+#      of its family. No rule -> fail closed.
+#   3. Per series: the Hodges-Lehmann location shift on log values (a ratio)
+#      with a distribution-free Moses confidence bound, and one-sided
+#      Mann-Whitney p-values for "worse" and "better".
+#   4. Per family: Holm step-down on the one-sided p-values at
+#      alpha_family = alpha / (families with an informative series). Holm is
+#      valid under arbitrary dependence, so series that share a process
+#      (benchmarks) cannot fail the family on one uncorrected p-value.
+#   5. Per series verdict:
+#        undersampled or bound not computable      -> inconclusive
+#        Holm-significant worse AND point > 1+margin -> slower (material)
+#        CV above the rule's max_cv                  -> inconclusive (noisy)
+#        upper bound <= 1+margin (non-inferior):
+#            Holm-significant better                 -> faster
+#            Holm-significant worse (within margin)  -> within_budget
+#            otherwise                               -> no_significant_difference
+#        otherwise (bound not established)           -> inconclusive
+#      Passing requires EVERY series to be non-inferior (an intersection-union
+#      test, valid at the per-series level without correction). The
+#      non-inferiority level is split across the allowed attempts up front,
+#      so bounded reruns cannot shop for a pass.
+#   6. Absolute SLOs are checked on the candidate side only.
+#   7. The same rule runs against the versioned fixed baseline with its own
+#      margins; a provenance mismatch there is inconclusive, never compared.
+#   8. The worst verdict wins: fail > slower > slo_breach > inconclusive >
+#      within_budget > faster > no_significant_difference. An inconclusive
+#      result carries the bounded rerun state; exhausted or non-rerunnable
+#      inconclusive evidence becomes `inconclusive_unresolved` (exit 3), which
+#      a strict gate must treat as blocking.
+
+DEFAULT_BUDGETS = Path(__file__).resolve().parents[1] / "test/performance/budgets.json"
+DEFAULT_BASELINE = Path(__file__).resolve().parents[1] / "test/performance/baseline.json"
+BUDGETS_SCHEMA_VERSION = 1
+BASELINE_SCHEMA_VERSION = 1
+BUDGETED_FAMILIES = ("workload", "benchmark", "browser", "system")
+# Budget sections whose values are covered by the reviewed-changes digest.
+BUDGET_VALUE_KEYS = ("decision", "families", "slos", "bundle", "rerun_policy", "fixed_baseline")
+VERDICT_RANK = {
+    "no_significant_difference": 1,
+    "faster": 2,
+    "within_budget": 3,
+    "inconclusive": 4,
+    "slo_breach": 5,
+    "slower": 6,
+    "fail": 7,
+}
+PASS_VERDICTS = ("no_significant_difference", "faster", "within_budget")
+# Fixed-baseline evidence is comparable only on the same runner, toolchain,
+# workload catalog, settings, and benchmark harness.
+FIXED_BASELINE_MUST_MATCH = (
+    "host_id",
+    "platform",
+    "go_version",
+    "catalog_sha256",
+    "settings_sha256",
+    "benchmark_harness_sha256",
+)
+_NORMAL = statistics.NormalDist()
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def budget_values_sha256(budgets):
+    """Digest of every enforced budget value (not descriptions or the log)."""
+    body = {key: budgets.get(key) for key in BUDGET_VALUE_KEYS}
+    return hashlib.sha256(canonical_json(body).encode()).hexdigest()
+
+
+def _positive_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def validate_budgets(budgets):
+    """Raise CompareError unless budgets are complete and reviewed."""
+    if not isinstance(budgets, dict):
+        raise CompareError("budgets must be an object")
+    if budgets.get("schema_version") != BUDGETS_SCHEMA_VERSION:
+        raise CompareError(
+            f"budgets schema_version={budgets.get('schema_version')!r}, want {BUDGETS_SCHEMA_VERSION}"
+        )
+    decision = budgets.get("decision")
+    if not isinstance(decision, dict):
+        raise CompareError("budgets.decision is missing")
+    for key in ("alpha", "alpha_non_inferiority"):
+        value = decision.get(key)
+        if not _positive_number(value) or value >= 0.5:
+            raise CompareError(f"budgets.decision.{key} must be in (0, 0.5)")
+    families = budgets.get("families")
+    if not isinstance(families, dict):
+        raise CompareError("budgets.families is missing")
+    for family in BUDGETED_FAMILIES:
+        body = families.get(family)
+        if not isinstance(body, dict) or not isinstance(body.get("rules"), list) or not body["rules"]:
+            raise CompareError(f"budgets.families.{family}.rules is missing or empty")
+        for index, rule in enumerate(body["rules"]):
+            where = f"budgets.families.{family}.rules[{index}]"
+            if not isinstance(rule, dict) or not isinstance(rule.get("match"), str) or not rule["match"]:
+                raise CompareError(f"{where}.match is missing")
+            for key in ("max_relative_degradation", "fixed_baseline_max_relative_degradation", "max_cv"):
+                if not _positive_number(rule.get(key)):
+                    raise CompareError(f"{where}.{key} must be a positive number")
+            if type(rule.get("min_samples")) is not int or rule["min_samples"] < 3:
+                raise CompareError(f"{where}.min_samples must be an integer >= 3")
+            if not isinstance(rule.get("rationale"), str) or not rule["rationale"].strip():
+                raise CompareError(f"{where}.rationale is missing")
+        if body["rules"][-1]["match"] != f"{ 'bench' if family == 'benchmark' else family}.*":
+            raise CompareError(f"budgets.families.{family} must end with a catch-all rule")
+    slos = budgets.get("slos")
+    if not isinstance(slos, list):
+        raise CompareError("budgets.slos must be a list")
+    seen = set()
+    for index, slo in enumerate(slos):
+        where = f"budgets.slos[{index}]"
+        if not isinstance(slo, dict) or not isinstance(slo.get("id"), str) or slo["id"] in seen:
+            raise CompareError(f"{where}.id is missing or duplicated")
+        seen.add(slo["id"])
+        sources = [key for key in ("series", "workload", "bundle") if key in slo]
+        if len(sources) != 1:
+            raise CompareError(f"{where} must name exactly one of series, workload, bundle")
+        if "workload" in slo and not isinstance(slo.get("field"), str):
+            raise CompareError(f"{where}.field is required with workload")
+        if slo.get("statistic") not in ("p90", "max", "min", "all", "value"):
+            raise CompareError(f"{where}.statistic must be p90, max, min, all or value")
+        bounds = [key for key in ("max", "min", "equals") if key in slo]
+        if len(bounds) != 1:
+            raise CompareError(f"{where} must set exactly one of max, min, equals")
+        if not isinstance(slo.get("rationale"), str) or not slo["rationale"].strip():
+            raise CompareError(f"{where}.rationale is missing")
+    bundle = budgets.get("bundle")
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("max_relative_growth"), dict):
+        raise CompareError("budgets.bundle.max_relative_growth is missing")
+    for key in BUNDLE_KEYS:
+        growth = bundle["max_relative_growth"].get(key)
+        if not isinstance(growth, dict) or not _positive_number(growth.get("target_base")) or \
+                not _positive_number(growth.get("fixed_baseline")):
+            raise CompareError(f"budgets.bundle.max_relative_growth.{key} needs target_base and fixed_baseline")
+    policy = budgets.get("rerun_policy")
+    if not isinstance(policy, dict) or type(policy.get("max_reruns")) is not int or policy["max_reruns"] < 0:
+        raise CompareError("budgets.rerun_policy.max_reruns must be a non-negative integer")
+    if not isinstance(policy.get("between_attempts"), list) or not policy["between_attempts"]:
+        raise CompareError("budgets.rerun_policy.between_attempts must say what changes between attempts")
+    fixed = budgets.get("fixed_baseline")
+    if not isinstance(fixed, dict) or fixed.get("must_match") != list(FIXED_BASELINE_MUST_MATCH):
+        raise CompareError(f"budgets.fixed_baseline.must_match must be {list(FIXED_BASELINE_MUST_MATCH)}")
+    if not isinstance(budgets.get("calibration"), dict) or not budgets["calibration"].get("runner"):
+        raise CompareError("budgets.calibration.runner is missing: no promotion before calibration evidence")
+    changes = budgets.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise CompareError("budgets.changes must record every reviewed budget change")
+    for index, change in enumerate(changes):
+        where = f"budgets.changes[{index}]"
+        if not isinstance(change, dict):
+            raise CompareError(f"{where} must be an object")
+        for key in ("date", "rationale", "evidence", "reviewed_in", "values_sha256"):
+            if not isinstance(change.get(key), str) or not change[key].strip():
+                raise CompareError(f"{where}.{key} is missing")
+    latest = changes[-1]["values_sha256"]
+    actual = budget_values_sha256(budgets)
+    if latest != actual:
+        raise CompareError(
+            "budget values differ from the last reviewed change: add a budgets.changes entry with "
+            f"rationale, evidence, reviewed_in and values_sha256={actual}"
+        )
+    return budgets
+
+
+def load_budgets(path):
+    return validate_budgets(load_json(path))
+
+
+def rule_for(budgets, family, metric_id):
+    body = (budgets.get("families") or {}).get(family)
+    if not isinstance(body, dict):
+        return None
+    for rule in body.get("rules") or []:
+        if fnmatch.fnmatchcase(metric_id, rule["match"]):
+            return rule
+    return None
+
+
+def nearest_rank(xs, pct):
+    ys = sorted(float(x) for x in xs)
+    if not ys:
+        return math.nan
+    rank = max(1, math.ceil(pct / 100.0 * len(ys)))
+    return ys[rank - 1]
+
+
+def moses_shift_bounds(a, b, alpha):
+    """Hodges-Lehmann shift of b over a with one-sided Moses bounds at alpha.
+
+    Returns (hl, lower, upper). Each bound alone has coverage >= 1 - alpha
+    (normal approximation for the order-statistic index, rounded down, so the
+    interval errs wide). Bounds are None when the samples are too small to
+    exclude even one pairwise difference at this alpha.
+    """
+    diffs = sorted(float(y) - float(x) for x in a for y in b)
+    n1, n2 = len(a), len(b)
+    if not diffs:
+        return math.nan, None, None
+    hl = percentile(diffs, 50)
+    z = _NORMAL.inv_cdf(1.0 - alpha)
+    count = len(diffs)
+    c = math.floor(count / 2.0 - z * math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12.0))
+    if c < 1:
+        return hl, None, None
+    return hl, diffs[c - 1], diffs[count - c]
+
+
+def degradation_estimate(a, b, lower_is_better, alpha):
+    """Degradation ratio (candidate relative to reference; > 1 is worse).
+
+    Positive samples use log values, so the shift is a ratio. Samples with
+    zero or negative values use shifts relative to the reference median.
+    Returns None when neither transform is defined.
+    """
+    if all(x > 0 for x in a) and all(y > 0 for y in b):
+        ta = [math.log(x) for x in a]
+        tb = [math.log(y) for y in b]
+        to_ratio = math.exp
+        transform = "log_ratio"
+    else:
+        med = statistics.median(a)
+        if med == 0:
+            return None
+        ta = [x / abs(med) for x in a]
+        tb = [y / abs(med) for y in b]
+
+        def to_ratio(shift):
+            return 1.0 + shift
+
+        transform = "shift_over_reference_median"
+    hl, lower, upper = moses_shift_bounds(ta, tb, alpha)
+    if not lower_is_better:
+        hl = -hl
+        lower, upper = (None if upper is None else -upper), (None if lower is None else -lower)
+    return {
+        "transform": transform,
+        "point": to_ratio(hl),
+        "lower": None if lower is None else to_ratio(lower),
+        "upper": None if upper is None else to_ratio(upper),
+    }
+
+
+def holm_adjust(pvalues):
+    """Holm step-down adjusted p-values for {key: p}."""
+    ordered = sorted(pvalues.items(), key=lambda item: (item[1], item[0]))
+    m = len(ordered)
+    adjusted = {}
+    running = 0.0
+    for index, (key, p) in enumerate(ordered):
+        running = max(running, min(1.0, (m - index) * p))
+        adjusted[key] = running
+    return adjusted
+
+
+def evaluate_series(metric_id, reference, candidate, rule, margin, alpha_ni):
+    """Statistics for one series under one budget rule (no verdict yet)."""
+    a = list(reference.get("samples") or [])
+    b = list(candidate.get("samples") or [])
+    result = {
+        "id": metric_id,
+        "family": candidate.get("family") or reference.get("family"),
+        "phase": candidate.get("phase") or reference.get("phase"),
+        "rule": None if rule is None else rule["match"],
+        "max_relative_degradation": margin,
+        "min_samples": None if rule is None else rule["min_samples"],
+        "max_cv": None if rule is None else rule["max_cv"],
+        "n_reference": len(a),
+        "n_candidate": len(b),
+        "cv_reference": cv(a) if a else None,
+        "cv_candidate": cv(b) if b else None,
+        "degradation": None,
+        "p_worse": None,
+        "p_better": None,
+        "status": "ok",
+        "reasons": [],
+    }
+    if rule is None:
+        result["status"] = "fail"
+        result["reasons"].append(f"no budget rule matches {metric_id}")
+        return result
+    direction = candidate.get("lower_is_better")
+    if direction is None or reference.get("lower_is_better") is None:
+        result["status"] = "fail"
+        result["reasons"].append(
+            candidate.get("direction_error") or reference.get("direction_error") or
+            f"unknown metric direction for {metric_id}"
+        )
+        return result
+    result["lower_is_better"] = direction
+    if not a or not b:
+        result["status"] = "fail"
+        result["reasons"].append("missing data: one or both sides have no samples")
+        return result
+    if len(a) < rule["min_samples"] or len(b) < rule["min_samples"]:
+        result["status"] = "undersampled"
+        result["reasons"].append(
+            f"undersampled: reference n={len(a)} candidate n={len(b)} min_samples={rule['min_samples']}"
+        )
+        return result
+    if stdev(a) == 0 and stdev(b) == 0 and mean(a) == mean(b):
+        result["status"] = "degenerate"
+        result["degradation"] = {"transform": "constant", "point": 1.0, "lower": 1.0, "upper": 1.0}
+        result["reasons"].append("both sides constant and equal")
+        return result
+    estimate = degradation_estimate(a, b, direction, alpha_ni)
+    if estimate is None:
+        result["status"] = "undersampled"
+        result["reasons"].append("reference median is zero: no relative bound is defined")
+        return result
+    result["degradation"] = estimate
+    if estimate["upper"] is None:
+        result["status"] = "undersampled"
+        result["reasons"].append(
+            f"n={len(a)}+{len(b)} cannot bound the shift at one-sided alpha {alpha_ni:.4g}"
+        )
+        return result
+    greater, less = mann_whitney_one_sided(a, b)
+    worse, better = (greater, less) if direction else (less, greater)
+    result["p_worse"] = worse
+    result["p_better"] = better
+    return result
+
+
+def classify_family(results, alpha_family):
+    """Holm per family, then a verdict for every series (mutates results)."""
+    informative = [r for r in results if r["status"] == "ok"]
+    worse = holm_adjust({r["id"]: r["p_worse"] for r in informative})
+    better = holm_adjust({r["id"]: r["p_better"] for r in informative})
+    for r in results:
+        r["alpha_family"] = alpha_family
+        if r["status"] == "fail":
+            r["verdict"] = "fail"
+            continue
+        if r["status"] == "undersampled":
+            r["verdict"] = "inconclusive"
+            continue
+        if r["status"] == "degenerate":
+            r["verdict"] = "no_significant_difference"
+            continue
+        r["holm_p_worse"] = worse[r["id"]]
+        r["holm_p_better"] = better[r["id"]]
+        estimate = r["degradation"]
+        allowed = 1.0 + r["max_relative_degradation"]
+        worse_sig = r["holm_p_worse"] < alpha_family
+        better_sig = r["holm_p_better"] < alpha_family
+        noisy = max(r["cv_reference"], r["cv_candidate"]) > r["max_cv"]
+        if worse_sig and estimate["point"] > allowed:
+            r["verdict"] = "slower"
+            r["reasons"].append(
+                f"material regression: degradation {estimate['point']:.4f} > allowed {allowed:.4f} "
+                f"with Holm p={r['holm_p_worse']:.4g} < {alpha_family:.4g}"
+            )
+        elif noisy:
+            r["verdict"] = "inconclusive"
+            r["reasons"].append(
+                f"noisy: cv reference={r['cv_reference']:.3f} candidate={r['cv_candidate']:.3f} "
+                f"max_cv={r['max_cv']}"
+            )
+        elif estimate["upper"] <= allowed:
+            if better_sig:
+                r["verdict"] = "faster"
+                r["reasons"].append(
+                    f"improvement: degradation {estimate['point']:.4f} with Holm p={r['holm_p_better']:.4g}"
+                )
+            elif worse_sig:
+                r["verdict"] = "within_budget"
+                r["reasons"].append(
+                    f"significant slowdown bounded within budget: upper {estimate['upper']:.4f} <= {allowed:.4f}"
+                )
+            else:
+                r["verdict"] = "no_significant_difference"
+                r["reasons"].append(
+                    f"non-inferior: upper bound {estimate['upper']:.4f} <= allowed {allowed:.4f}; "
+                    "not significant after Holm"
+                )
+        else:
+            r["verdict"] = "inconclusive"
+            r["reasons"].append(
+                f"non-inferiority not established: upper bound {estimate['upper']:.4f} > allowed {allowed:.4f}"
+            )
+    return results
+
+
+def worst(verdicts):
+    verdicts = list(verdicts)
+    if not verdicts:
+        return None
+    return max(verdicts, key=lambda v: VERDICT_RANK[v])
+
+
+def geometric_mean(values):
+    values = [v for v in values if v and v > 0]
+    if not values:
+        return None
+    return math.exp(sum(math.log(v) for v in values) / len(values))
+
+
+def budgeted_comparison(reference_metrics, candidate_metrics, budgets, margin_key, alpha_ni, families_in_scope=None):
+    """Apply the rule to every candidate series against a reference."""
+    decision = budgets["decision"]
+    by_family = {}
+    series = []
+    ids = sorted(set(reference_metrics) | set(candidate_metrics))
+    for metric_id in ids:
+        left = reference_metrics.get(metric_id)
+        right = candidate_metrics.get(metric_id)
+        family = (right or left or {}).get("family")
+        if families_in_scope is not None and family not in families_in_scope:
+            continue
+        rule = rule_for(budgets, family, metric_id)
+        margin = None if rule is None else rule[margin_key]
+        if left is None or right is None:
+            missing_side = "reference" if left is None else "candidate"
+            result = {
+                "id": metric_id,
+                "family": family,
+                "rule": None if rule is None else rule["match"],
+                "status": "fail",
+                "reasons": [f"missing data: series absent from the {missing_side}"],
+            }
+        elif left.get("phase") != right.get("phase"):
+            result = {
+                "id": metric_id,
+                "family": family,
+                "rule": None if rule is None else rule["match"],
+                "status": "fail",
+                "reasons": [f"cold/warm phase mismatch reference={left.get('phase')!r} candidate={right.get('phase')!r}"],
+            }
+        else:
+            result = evaluate_series(metric_id, left, right, rule, margin, alpha_ni)
+        by_family.setdefault(family, []).append(result)
+        series.append(result)
+    tested = [f for f, rs in by_family.items() if any(r["status"] == "ok" for r in rs)]
+    alpha_family = decision["alpha"] / max(1, len(tested))
+    families = {}
+    for family, results in sorted(by_family.items(), key=lambda item: str(item[0])):
+        classify_family(results, alpha_family)
+        counts = {}
+        for r in results:
+            counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        uncorrected = sum(
+            1 for r in results
+            if r.get("p_worse") is not None and min(r["p_worse"], r["p_better"]) < decision["alpha"]
+        )
+        families[family] = {
+            "verdict": worst(r["verdict"] for r in results),
+            "series": len(results),
+            "counts": dict(sorted(counts.items())),
+            "uncorrected_significant": uncorrected,
+            "geomean_degradation": geometric_mean(
+                (r.get("degradation") or {}).get("point") for r in results
+            ),
+        }
+    verdict = worst(r["verdict"] for r in series) or "inconclusive"
+    reasons = [
+        f"{r['id']}: {'; '.join(r['reasons'])}"
+        for r in series
+        if r["verdict"] not in PASS_VERDICTS
+    ]
+    if not series:
+        reasons = ["no comparable series"]
+    return {
+        "verdict": verdict,
+        "reasons": reasons,
+        "alpha_family": alpha_family,
+        "families": families,
+        "series": series,
+    }
+
+
+def bundle_growth(reference, candidate, budgets, key):
+    """Deterministic relative bundle growth against a budget (no statistics)."""
+    out = {"verdict": "no_significant_difference", "reasons": [], "growth": {}}
+    limits = budgets["bundle"]["max_relative_growth"]
+    if not isinstance(reference, dict) or not reference:
+        return {"verdict": "fail", "reasons": ["missing data: reference bundle"], "growth": {}}
+    if not isinstance(candidate, dict) or not candidate:
+        return {"verdict": "fail", "reasons": ["missing data: candidate bundle"], "growth": {}}
+    for name in BUNDLE_KEYS:
+        old, new = reference.get(name), candidate.get(name)
+        if not isinstance(old, (int, float)) or not isinstance(new, (int, float)) or old <= 0:
+            continue
+        growth = (new - old) / old
+        allowed = limits[name][key]
+        out["growth"][name] = {"reference": old, "candidate": new, "relative": growth, "allowed": allowed}
+        if growth > allowed:
+            out["verdict"] = "slower"
+            out["reasons"].append(f"bundle {name} grew {growth:+.2%} > allowed {allowed:.2%}")
+    if not out["growth"]:
+        return {"verdict": "fail", "reasons": ["missing data: no comparable bundle sizes"], "growth": {}}
+    return out
+
+
+def _slo_values(slo, candidate_side, candidate_metrics):
+    """Candidate values for an SLO, or None when its source was not measured."""
+    if "series" in slo:
+        body = candidate_metrics.get(slo["series"])
+        return None if body is None else list(body.get("samples") or [])
+    if "bundle" in slo:
+        value = (candidate_side.get("bundle") or {}).get(slo["bundle"])
+        return None if value is None else [value]
+    body = (candidate_side.get("workloads") or {}).get(slo["workload"])
+    if not isinstance(body, dict):
+        return None
+    values = []
+    for sample in body.get("samples") or []:
+        if not isinstance(sample, dict) or slo["field"] not in sample:
+            return None
+        values.append(sample[slo["field"]])
+    return values
+
+
+def evaluate_slos(budgets, candidate_side, candidate_metrics):
+    results = []
+    for slo in budgets.get("slos") or []:
+        entry = {"id": slo["id"], "statistic": slo["statistic"], "verdict": "pass", "reasons": []}
+        for key in ("series", "workload", "field", "bundle", "max", "min", "equals", "unit"):
+            if key in slo:
+                entry[key] = slo[key]
+        values = _slo_values(slo, candidate_side, candidate_metrics)
+        if values is None:
+            entry["verdict"] = "not_evaluated"
+            entry["reasons"].append("source was not measured in this run")
+            results.append(entry)
+            continue
+        min_samples = slo.get("min_samples", 1)
+        entry["n"] = len(values)
+        if len(values) < min_samples:
+            entry["verdict"] = "inconclusive"
+            entry["reasons"].append(f"undersampled: n={len(values)} min_samples={min_samples}")
+            results.append(entry)
+            continue
+        if "equals" in slo:
+            bad = [v for v in values if v != slo["equals"]]
+            entry["observed"] = sorted({str(v) for v in values})
+            if bad:
+                entry["verdict"] = "breach"
+                entry["reasons"].append(f"{len(bad)} of {len(values)} samples != {slo['equals']!r}")
+            results.append(entry)
+            continue
+        try:
+            numbers = [float(v) for v in values]
+        except (TypeError, ValueError):
+            entry["verdict"] = "fail"
+            entry["reasons"].append("non-numeric SLO samples")
+            results.append(entry)
+            continue
+        statistic = slo["statistic"]
+        if statistic == "p90":
+            # The 90th-percentile worst sample: the high tail against a
+            # ceiling, the low tail against a floor (nearest rank, so n=10
+            # excludes exactly the single worst sample).
+            if "min" in slo:
+                observed = -nearest_rank([-x for x in numbers], 90)
+            else:
+                observed = nearest_rank(numbers, 90)
+        elif statistic == "min":
+            observed = min(numbers)
+        elif statistic == "max":
+            observed = max(numbers)
+        elif "min" in slo:  # all/value against a floor: the lowest sample
+            observed = min(numbers)
+        else:  # all/value against a ceiling or equality: the highest sample
+            observed = max(numbers)
+        entry["observed"] = observed
+        if "max" in slo and observed > slo["max"]:
+            entry["verdict"] = "breach"
+            entry["reasons"].append(f"{statistic}={observed:.6g} > max {slo['max']}")
+        if "min" in slo and observed < slo["min"]:
+            entry["verdict"] = "breach"
+            entry["reasons"].append(f"{statistic}={observed:.6g} < min {slo['min']}")
+        results.append(entry)
+    verdicts = [r["verdict"] for r in results]
+    if "fail" in verdicts:
+        verdict = "fail"
+    elif "breach" in verdicts:
+        verdict = "slo_breach"
+    elif "inconclusive" in verdicts:
+        verdict = "inconclusive"
+    else:
+        verdict = "no_significant_difference"
+    return {
+        "verdict": verdict,
+        "reasons": [f"SLO {r['id']}: {'; '.join(r['reasons'])}" for r in results if r["verdict"] in ("fail", "breach", "inconclusive")],
+        "results": results,
+        "not_evaluated": [r["id"] for r in results if r["verdict"] == "not_evaluated"],
+    }
+
+
+def baseline_side_metrics(baseline):
+    metrics = {}
+    for metric_id, body in (baseline.get("metrics") or {}).items():
+        if not isinstance(body, dict) or not isinstance(body.get("samples"), list):
+            raise CompareError(f"baseline metric {metric_id} has no samples")
+        metrics[metric_id] = {
+            "samples": [float(x) for x in body["samples"]],
+            "outcomes": ["passed"] * len(body["samples"]),
+            "family": body.get("family"),
+            "phase": body.get("phase"),
+            "lower_is_better": body.get("lower_is_better"),
+        }
+    return metrics
+
+
+def fixed_baseline_comparison(baseline, baseline_error, candidate, candidate_metrics, required_families, budgets, alpha_ni):
+    """Cumulative-regression verdict against the versioned fixed baseline."""
+    if baseline_error:
+        return {
+            "verdict": "inconclusive",
+            "rerun_eligible": False,
+            "reasons": [baseline_error],
+        }
+    if baseline.get("schema_version") != BASELINE_SCHEMA_VERSION:
+        return {
+            "verdict": "inconclusive",
+            "rerun_eligible": False,
+            "reasons": [f"fixed baseline schema_version={baseline.get('schema_version')!r}, want {BASELINE_SCHEMA_VERSION}"],
+        }
+    base_prov = baseline.get("provenance") if isinstance(baseline.get("provenance"), dict) else {}
+    cand_prov = candidate.get("provenance") if isinstance(candidate.get("provenance"), dict) else {}
+    mismatched = []
+    for field in FIXED_BASELINE_MUST_MATCH:
+        if field == "benchmark_harness_sha256" and "benchmark" not in required_families:
+            continue
+        if base_prov.get(field) in (None, "") or base_prov.get(field) != cand_prov.get(field):
+            mismatched.append(
+                f"fixed baseline provenance.{field} differs: baseline={base_prov.get(field)!r} "
+                f"candidate={cand_prov.get(field)!r}"
+            )
+    summary = {
+        "baseline_git_sha": base_prov.get("git_sha"),
+        "baseline_recorded_at": baseline.get("recorded_at"),
+    }
+    if mismatched:
+        summary.update({
+            "verdict": "inconclusive",
+            "rerun_eligible": False,
+            "reasons": mismatched + ["refusing to compare against a baseline from a different runner or setup; re-record it with a reviewed budgets change"],
+        })
+        return summary
+    in_scope = [f for f in required_families if f in BUDGETED_FAMILIES]
+    if not in_scope:
+        in_scope = sorted({m.get("family") for m in candidate_metrics.values()} & set(BUDGETED_FAMILIES))
+    missing_families = [f for f in required_families if f != "bundle" and f not in (baseline.get("required_families") or [])]
+    if missing_families:
+        summary.update({
+            "verdict": "inconclusive",
+            "rerun_eligible": False,
+            "reasons": [f"fixed baseline did not record required families {missing_families}"],
+        })
+        return summary
+    try:
+        reference = baseline_side_metrics(baseline)
+    except CompareError as err:
+        summary.update({"verdict": "inconclusive", "rerun_eligible": False, "reasons": [str(err)]})
+        return summary
+    result = budgeted_comparison(
+        reference, candidate_metrics, budgets, "fixed_baseline_max_relative_degradation", alpha_ni, set(in_scope)
+    )
+    rerun_eligible = True
+    for series in result["series"]:
+        if series["verdict"] == "fail" and any("absent from the reference" in r for r in series["reasons"]):
+            # A new series needs a re-recorded baseline, not a rerun.
+            series["verdict"] = "inconclusive"
+            series["reasons"].append("re-record the fixed baseline to include this series")
+            rerun_eligible = False
+    result["verdict"] = worst(s["verdict"] for s in result["series"]) or "inconclusive"
+    result["reasons"] = [
+        f"{s['id']}: {'; '.join(s['reasons'])}" for s in result["series"] if s["verdict"] not in PASS_VERDICTS
+    ]
+    if "bundle" in required_families:
+        bundle = bundle_growth(baseline.get("bundle") or {}, candidate.get("bundle") or {}, budgets, "fixed_baseline")
+        result["bundle"] = bundle
+        result["verdict"] = worst([result["verdict"], bundle["verdict"]])
+        result["reasons"].extend(bundle["reasons"])
+    summary.update(result)
+    summary["rerun_eligible"] = rerun_eligible
+    return summary
+
+
+def rerun_state(verdict, rerun_eligible, attempt, policy):
+    allowed = policy["max_reruns"] + 1
+    state = {
+        "attempt": attempt,
+        "max_reruns": policy["max_reruns"],
+        "attempts_allowed": allowed,
+        "rerun_on": "inconclusive",
+        "between_attempts": policy["between_attempts"],
+        "pooling": policy.get("pooling"),
+    }
+    if verdict != "inconclusive":
+        state["status"] = "resolved"
+        state["rerun_required"] = False
+    elif not rerun_eligible:
+        state["status"] = "unresolved_not_rerunnable"
+        state["rerun_required"] = False
+    elif attempt < allowed:
+        state["status"] = "rerun_required"
+        state["rerun_required"] = True
+        state["next_attempt"] = attempt + 1
+    else:
+        state["status"] = "exhausted"
+        state["rerun_required"] = False
+    state["exhausted"] = state["status"] in ("exhausted", "unresolved_not_rerunnable")
+    return state
+
+
+def optimization_claim(target):
+    faster = [s["id"] for s in target["series"] if s.get("verdict") == "faster"]
+    if not faster:
+        return None
+    tradeoffs = sorted(
+        (
+            (s["degradation"]["point"], s["id"])
+            for s in target["series"]
+            if s.get("degradation") and s["degradation"]["point"] > 1.0 and s["id"] not in faster
+        ),
+        reverse=True,
+    )
+    return {
+        "improved_series": faster,
+        "tradeoff_candidates": [{"id": i, "degradation": p} for p, i in tradeoffs],
+        "note": (
+            "An optimization claim must name its tradeoffs: the series listed here moved in "
+            "the worse direction (not necessarily significantly). Neutral performance is a valid result."
+        ),
+    }
+
+
+def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=ALPHA,
+            budgets=None, baseline=None, baseline_error=None, attempt=1):
+    """Compare a document. Without budgets this is E3's uncorrected rule;
+    with budgets the E4 decision rule sets `overall` (see apply_budgets)."""
+    report = _compare_uncorrected(doc, min_samples, max_cv, alpha)
+    if budgets is None:
+        report.pop("_internal", None)
+        return report
+    return apply_budgets(report, budgets, baseline, baseline_error, attempt)
+
+
+def _compare_uncorrected(doc, min_samples, max_cv, alpha):
     if not isinstance(doc, dict):
         raise CompareError("comparison document must be an object")
     if doc.get("schema_version") != SCHEMA_VERSION:
@@ -1172,6 +1978,14 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
             "min_samples": min_samples,
             "max_cv": max_cv,
             "alpha": alpha,
+            "_internal": {
+                "base": base,
+                "candidate": candidate,
+                "base_metrics": base_metrics,
+                "candidate_metrics": cand_metrics,
+                "fail_reasons": list(fail_reasons),
+                "mismatched": list(prov["mismatched"]),
+            },
         }
         return report
 
@@ -1240,16 +2054,202 @@ def compare(doc, min_samples=DEFAULT_MIN_SAMPLES, max_cv=DEFAULT_MAX_CV, alpha=A
         "min_samples": min_samples,
         "max_cv": max_cv,
         "alpha": alpha,
+        "_internal": {
+            "base": base,
+            "candidate": candidate,
+            "base_metrics": base_metrics,
+            "candidate_metrics": cand_metrics,
+            "fail_reasons": [],
+            "mismatched": list(prov["mismatched"]),
+        },
     }
     return report
+
+
+def apply_budgets(report, budgets, baseline, baseline_error, attempt):
+    """Replace the uncorrected overall verdict with the budgeted decision."""
+    internal = report.pop("_internal")
+    base = internal["base"]
+    candidate = internal["candidate"]
+    base_metrics = internal["base_metrics"]
+    cand_metrics = internal["candidate_metrics"]
+    policy = budgets["rerun_policy"]
+    allowed = policy["max_reruns"] + 1
+    if type(attempt) is not int or attempt < 1 or attempt > allowed:
+        raise CompareError(
+            f"attempt must be between 1 and {allowed} (rerun_policy.max_reruns={policy['max_reruns']})"
+        )
+    decision_cfg = budgets["decision"]
+    alpha_ni = decision_cfg["alpha_non_inferiority"] / allowed
+    required = report["required_families"]
+    uncorrected_overall = report["overall"]
+
+    if internal["fail_reasons"]:
+        target = {
+            "verdict": "fail",
+            "reasons": list(report["reasons"]),
+            "families": {},
+            "series": [],
+        }
+        slos = {
+            "verdict": "not_evaluated",
+            "reasons": ["correctness/provenance failed closed"],
+            "results": [],
+            "not_evaluated": [],
+        }
+        fixed = {"verdict": "not_evaluated", "reasons": ["correctness/provenance failed closed"]}
+    else:
+        target = budgeted_comparison(base_metrics, cand_metrics, budgets, "max_relative_degradation", alpha_ni)
+        target["rerun_eligible"] = True
+        if base.get("bundle") or candidate.get("bundle") or "bundle" in required:
+            bundle = bundle_growth(base.get("bundle") or {}, candidate.get("bundle") or {}, budgets, "target_base")
+            target["bundle"] = bundle
+            target["verdict"] = worst([target["verdict"], bundle["verdict"]])
+            target["reasons"].extend(bundle["reasons"])
+        if internal["mismatched"]:
+            # Different environments: no series verdict is meaningful, and a
+            # rerun on the same mismatched pair cannot fix it.
+            target["verdict"] = "fail" if target["verdict"] == "fail" else "inconclusive"
+            target["reasons"] = list(internal["mismatched"]) + target["reasons"]
+            target["rerun_eligible"] = False
+        slos = evaluate_slos(budgets, candidate, cand_metrics)
+        noisy = [s["id"] for s in target.get("series") or []
+                 if any(reason.startswith("noisy:") for reason in s.get("reasons") or [])]
+        if slos["verdict"] == "slo_breach" and noisy:
+            # The same run shows host contention (series over their max_cv),
+            # so an absolute-ceiling breach is not attributable to the
+            # candidate yet: rerun instead of failing on runner noise. A
+            # breach on a quiet run is terminal.
+            slos["verdict"] = "inconclusive"
+            slos["rerun_eligible"] = True
+            slos["reasons"] = [
+                f"{reason} (on a noisy run: {', '.join(noisy)}; rerun before treating it as a breach)"
+                for reason in slos["reasons"]
+            ]
+        if baseline is None and baseline_error is None:
+            fixed = {
+                "verdict": "not_requested",
+                "reasons": ["no --baseline supplied; the strict gate requires one"],
+            }
+        else:
+            fixed = fixed_baseline_comparison(
+                baseline, baseline_error, candidate, cand_metrics, required, budgets, alpha_ni
+            )
+
+    parts = [("target_base", target), ("slos", slos)]
+    # A passing fixed-baseline verdict never upgrades the overall result (an
+    # optimization claim is about this change against its base); any other
+    # fixed-baseline verdict can only make it worse.
+    if fixed["verdict"] not in ("not_requested", "not_evaluated") + PASS_VERDICTS:
+        parts.append(("fixed_baseline", fixed))
+    overall = worst(part["verdict"] for _, part in parts if part["verdict"] in VERDICT_RANK)
+    rerun_eligible = True
+    for name, part in parts:
+        if part["verdict"] != "inconclusive":
+            continue
+        if not part.get("rerun_eligible", False):
+            # An undersampled SLO or a mismatched environment is not fixed by
+            # repeating the same run.
+            rerun_eligible = False
+    reruns = rerun_state(overall, rerun_eligible, attempt, policy)
+    if overall == "inconclusive" and reruns["exhausted"]:
+        overall = "inconclusive_unresolved"
+    reasons = []
+    for name, part in parts:
+        if part["verdict"] not in PASS_VERDICTS:
+            reasons.extend(f"{name}: {reason}" for reason in part.get("reasons") or [])
+    if overall in PASS_VERDICTS and not reasons:
+        reasons = {
+            "no_significant_difference": [
+                "every series is non-inferior within its budget and no change is significant after Holm; "
+                "this is a bounded non-inferiority result, not equivalence"
+            ],
+            "faster": [
+                "every series is non-inferior; some improve significantly after Holm (state the tradeoffs)"
+            ],
+            "within_budget": ["a significant slowdown is bounded within its allowed degradation"],
+        }[overall]
+    if reruns["status"] == "rerun_required":
+        reasons.append(
+            f"inconclusive on attempt {attempt} of {allowed}: rerun required "
+            f"({'; '.join(policy['between_attempts'])})"
+        )
+    elif overall == "inconclusive_unresolved":
+        reasons.append(
+            f"inconclusive_unresolved after attempt {attempt} of {allowed} ({reruns['status']}); "
+            "a strict gate must block"
+        )
+
+    series_by_id = {s["id"]: s for s in target.get("series") or []}
+    for metric in report["metrics"]:
+        metric["uncorrected_verdict"] = metric["verdict"]
+        budgeted = series_by_id.get(metric["id"])
+        if budgeted is not None:
+            metric["verdict"] = budgeted["verdict"]
+            metric["budget"] = {
+                key: budgeted.get(key)
+                for key in (
+                    "rule", "max_relative_degradation", "min_samples", "max_cv", "degradation",
+                    "p_worse", "p_better", "holm_p_worse", "holm_p_better", "alpha_family", "reasons",
+                )
+            }
+    report["uncorrected_overall"] = uncorrected_overall
+    report["overall"] = overall
+    report["reasons"] = reasons
+    report["decision"] = {
+        "rule": "budgeted",
+        "budgets_values_sha256": budget_values_sha256(budgets),
+        "budgets_version": budgets["changes"][-1].get("version"),
+        "attempt": attempt,
+        "alpha": decision_cfg["alpha"],
+        "alpha_non_inferiority_total": decision_cfg["alpha_non_inferiority"],
+        "alpha_non_inferiority_per_attempt": alpha_ni,
+        "target_base": target,
+        "fixed_baseline": fixed,
+        "slos": slos,
+        "optimization_claim": optimization_claim(target) if target.get("series") else None,
+    }
+    report["reruns"] = reruns
+    report["strict_gate"] = {
+        "blocking": EXIT_BY_OVERALL.get(overall, 2) != 0 or fixed["verdict"] == "not_requested",
+        "fixed_baseline_evaluated": fixed["verdict"] not in ("not_requested", "not_evaluated"),
+        "note": (
+            "inconclusive and inconclusive_unresolved block the strict gate; so does a run "
+            "without the fixed-baseline comparison"
+        ),
+    }
+    if report["speed_compared"]:
+        report["benchstat"] = benchstat_text(report["metrics"], report["multiplicity"]) + decision_text(report)
+    return report
+
+
+def decision_text(report):
+    decision = report["decision"]
+    lines = [
+        f"budgeted decision (attempt {decision['attempt']}/{report['reruns']['attempts_allowed']}): "
+        f"target_base={decision['target_base']['verdict']} "
+        f"fixed_baseline={decision['fixed_baseline']['verdict']} slos={decision['slos']['verdict']} "
+        f"-> {report['overall']}",
+    ]
+    for family, body in (decision["target_base"].get("families") or {}).items():
+        geo = body.get("geomean_degradation")
+        geo_s = "n/a" if geo is None else f"{geo:.4f}"
+        lines.append(
+            f"  {family}: {body['verdict']} series={body['series']} counts={body['counts']} "
+            f"uncorrected_significant={body['uncorrected_significant']} geomean_degradation={geo_s}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 EXIT_BY_OVERALL = {
     "faster": 0,
     "no_significant_difference": 0,
+    "within_budget": 0,
     "fail": 2,
     "inconclusive": 3,
+    "inconclusive_unresolved": 3,
     "slower": 4,
+    "slo_breach": 4,
 }
 
 
@@ -1282,17 +2282,307 @@ def merge_sides(base_path, candidate_path, benchmark_evidence_path=None):
     return doc
 
 
+def ks_uniform_p(pvalues):
+    """Asymptotic Kolmogorov-Smirnov p-value for uniformity on [0, 1]."""
+    xs = sorted(float(p) for p in pvalues)
+    n = len(xs)
+    if n == 0:
+        return None
+    d = max(max((i + 1) / n - x, x - i / n) for i, x in enumerate(xs))
+    lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * d
+    total = 0.0
+    for k in range(1, 101):
+        term = 2.0 * (-1) ** (k - 1) * math.exp(-2.0 * k * k * lam * lam)
+        total += term
+        if abs(term) < 1e-12:
+            break
+    return min(1.0, max(0.0, total))
+
+
+def calibrate(docs, budgets, confidence_z=2.878):
+    """Summarize same-code control runs under the budgets (E4 evidence).
+
+    `docs` is a list of (label, comparison document). Every document must be
+    an A/A control (`control: a_a`, one image on both sides). The summary
+    reports each run's budgeted verdict, the observed control false-positive
+    rates, pooled per-series variance, the smallest sample size and margin the
+    variance supports, and cross-run drift: every ordered pair of different
+    runs' candidate sides compared under the fixed-baseline margins, which is
+    what a non-interleaved fixed baseline sees.
+    """
+    allowed = budgets["rerun_policy"]["max_reruns"] + 1
+    alpha_ni = budgets["decision"]["alpha_non_inferiority"] / allowed
+    z_ni = _NORMAL.inv_cdf(1.0 - alpha_ni)
+    runs = []
+    pooled_p = []
+    per_series = {}
+    candidates = []
+    for label, doc in docs:
+        if doc.get("control") != "a_a":
+            raise CompareError(f"{label} is not an A/A control run (control={doc.get('control')!r})")
+        report = compare(doc, budgets=budgets)
+        target = report["decision"]["target_base"]
+        informative = [
+            m for m in report["metrics"]
+            if m.get("p_value") is not None and not is_degenerate(m)
+        ]
+        pooled_p.extend(m["p_value"] for m in informative)
+        runs.append({
+            "label": label,
+            "overall": report["overall"],
+            "target_base": target["verdict"],
+            "slos": report["decision"]["slos"]["verdict"],
+            "uncorrected_overall": report["uncorrected_overall"],
+            "series": len(target.get("series") or []),
+            "families": {
+                family: {
+                    "verdict": body["verdict"],
+                    "counts": body["counts"],
+                    "uncorrected_significant": body["uncorrected_significant"],
+                    "geomean_degradation": body["geomean_degradation"],
+                }
+                for family, body in (target.get("families") or {}).items()
+            },
+            "uncorrected_significant": sum(1 for m in informative if m["p_value"] < budgets["decision"]["alpha"]),
+            "min_uncorrected_p": min((m["p_value"] for m in informative), default=None),
+            "non_pass_series": [
+                {"id": s["id"], "verdict": s["verdict"], "reasons": s["reasons"]}
+                for s in target.get("series") or []
+                if s["verdict"] not in PASS_VERDICTS
+            ],
+            "slo_results": [
+                {"id": s["id"], "verdict": s["verdict"], "observed": s.get("observed")}
+                for s in report["decision"]["slos"]["results"]
+            ],
+        })
+        for s in target.get("series") or []:
+            entry = per_series.setdefault(s["id"], {
+                "family": s.get("family"), "rule": s.get("rule"),
+                "margin": s.get("max_relative_degradation"), "cv": [], "upper": [], "point": [],
+                "sigma_log": [],
+            })
+            for key in ("cv_reference", "cv_candidate"):
+                if s.get(key) is not None:
+                    entry["cv"].append(s[key])
+            if s.get("degradation") and s["degradation"].get("upper") is not None:
+                entry["upper"].append(s["degradation"]["upper"])
+                entry["point"].append(s["degradation"]["point"])
+        base_metrics = expand_side_metrics(doc["base"])
+        cand_metrics = expand_side_metrics(doc["candidate"])
+        for metric_id, body in cand_metrics.items():
+            entry = per_series.get(metric_id)
+            if entry is None:
+                continue
+            for side_metrics in (base_metrics, cand_metrics):
+                samples = (side_metrics.get(metric_id) or {}).get("samples") or []
+                if len(samples) > 2 and all(x > 0 for x in samples):
+                    logs = [math.log(x) for x in samples]
+                    med = statistics.median(logs)
+                    mad = statistics.median(abs(x - med) for x in logs)
+                    entry["sigma_log"].append({"sd": stdev(logs), "mad_sigma": 1.4826 * mad, "n": len(samples)})
+        candidates.append((label, doc))
+
+    series_summary = {}
+    for metric_id, entry in sorted(per_series.items()):
+        sds = sorted(s["sd"] for s in entry["sigma_log"])
+        robust = sorted(s["mad_sigma"] for s in entry["sigma_log"])
+        ns = [s["n"] for s in entry["sigma_log"]]
+        summary = {
+            "family": entry["family"],
+            "rule": entry["rule"],
+            "margin": entry["margin"],
+            "runs": len(entry["upper"]),
+            "max_cv": max(entry["cv"]) if entry["cv"] else None,
+            "median_cv": statistics.median(entry["cv"]) if entry["cv"] else None,
+            "max_upper": max(entry["upper"]) if entry["upper"] else None,
+            "points": [round(p, 5) for p in entry["point"]],
+        }
+        if sds and ns:
+            # Pooled log-scale sigma: the median side, and the worst side.
+            sigma = statistics.median(sds)
+            sigma_hi = sds[-1]
+            n = min(ns)
+            se = 1.05 * sigma * math.sqrt(2.0 / n)
+            summary.update({
+                "sigma_log_median": sigma,
+                "sigma_log_max": sigma_hi,
+                "sigma_log_robust_median": statistics.median(robust) if robust else None,
+                "n": n,
+                "expected_null_upper": math.exp(z_ni * se),
+                # Margin the median variance supports with the A/A upper bound
+                # exceeding it at most ~0.2% of the time per series.
+                "supported_margin": math.exp((z_ni + confidence_z) * se) - 1.0,
+                # Smallest n at which the expected A/A upper bound uses at most
+                # half of the budgeted margin.
+                "min_samples_for_margin": (
+                    None if not entry["margin"] or sigma == 0 else
+                    max(3, math.ceil(2.0 * (2.0 * z_ni * 1.05 * sigma / math.log1p(entry["margin"])) ** 2))
+                ),
+            })
+        series_summary[metric_id] = summary
+
+    pairs = []
+    for i, (label_a, doc_a) in enumerate(candidates):
+        for j, (label_b, doc_b) in enumerate(candidates):
+            if i == j:
+                continue
+            reference = expand_side_metrics(doc_a["candidate"])
+            candidate = expand_side_metrics(doc_b["candidate"])
+            result = budgeted_comparison(
+                reference, candidate, budgets, "fixed_baseline_max_relative_degradation", alpha_ni
+            )
+            worst_upper = max(
+                ((s["degradation"]["upper"], s["id"]) for s in result["series"]
+                 if s.get("degradation") and s["degradation"].get("upper") is not None),
+                default=(None, None),
+            )
+            pairs.append({
+                "reference": label_a,
+                "candidate": label_b,
+                "verdict": result["verdict"],
+                "worst_upper": worst_upper[0],
+                "worst_upper_series": worst_upper[1],
+                "non_pass_series": [
+                    {"id": s["id"], "verdict": s["verdict"], "reasons": s["reasons"]}
+                    for s in result["series"] if s["verdict"] not in PASS_VERDICTS
+                ],
+            })
+
+    def rate(items, predicate):
+        return None if not items else sum(1 for item in items if predicate(item)) / len(items)
+
+    return {
+        "schema_version": 1,
+        "budgets_values_sha256": budget_values_sha256(budgets),
+        "alpha_non_inferiority_per_attempt": alpha_ni,
+        "runs": runs,
+        "control_rates": {
+            "runs": len(runs),
+            "false_fail": rate(runs, lambda r: r["target_base"] in ("slower", "fail")),
+            "inconclusive": rate(runs, lambda r: r["target_base"] == "inconclusive"),
+            "pass": rate(runs, lambda r: r["target_base"] in PASS_VERDICTS),
+            "uncorrected_any_significant": rate(runs, lambda r: r["uncorrected_significant"] > 0),
+            "uncorrected_overall_not_nsd": rate(runs, lambda r: r["uncorrected_overall"] != "no_significant_difference"),
+        },
+        "pooled_uncorrected_p": {
+            "count": len(pooled_p),
+            "below_alpha": sum(1 for p in pooled_p if p < budgets["decision"]["alpha"]),
+            "ks_uniform_p": ks_uniform_p(pooled_p),
+            "note": "two-sided uncorrected Mann-Whitney p-values of informative series; tie/continuity correction makes them conservative",
+        },
+        "cross_run_fixed_baseline": {
+            "pairs": pairs,
+            "false_fail": rate(pairs, lambda p: p["verdict"] in ("slower", "fail")),
+            "inconclusive": rate(pairs, lambda p: p["verdict"] == "inconclusive"),
+            "pass": rate(pairs, lambda p: p["verdict"] in PASS_VERDICTS),
+        },
+        "series": series_summary,
+    }
+
+
+def summary_stats(samples):
+    ys = sorted(float(x) for x in samples)
+    med = statistics.median(ys)
+    return {
+        "n": len(ys),
+        "median": med,
+        "mad": statistics.median(abs(y - med) for y in ys),
+        "iqr": percentile(ys, 75) - percentile(ys, 25),
+        "p95": nearest_rank(ys, 95),
+        "p99": nearest_rank(ys, 99),
+        "mean": mean(ys),
+        "cv": cv(ys),
+        "min": ys[0],
+        "max": ys[-1],
+    }
+
+
+def record_baseline(doc, report, runner=None, settings=None, recorded_at=None, source=None):
+    """Build baseline.json from a passing run's candidate side.
+
+    Refuses a run whose correctness, provenance or target-base verdict did
+    not pass, an instrumented image, or an image this run did not build.
+    """
+    decision = report.get("decision") or {}
+    target = decision.get("target_base") or {}
+    if report.get("overall") == "fail" or target.get("verdict") not in PASS_VERDICTS:
+        raise CompareError(
+            f"refusing to record a fixed baseline from a run whose target-base verdict is "
+            f"{target.get('verdict')!r} (overall {report.get('overall')!r})"
+        )
+    candidate = doc["candidate"]
+    prov = candidate.get("provenance") or {}
+    if prov.get("instrumented") is not False:
+        raise CompareError("refusing to record a fixed baseline from an instrumented image")
+    if prov.get("built_by_this_run") is not True:
+        raise CompareError("refusing to record a fixed baseline from an image this run did not build")
+    required = list(doc.get("required_families") or [])
+    metrics = {}
+    for metric_id, body in sorted(expand_side_metrics(candidate).items()):
+        if body.get("family") not in BUDGETED_FAMILIES or not body.get("samples"):
+            continue
+        entry = {
+            "family": body["family"],
+            "phase": body.get("phase"),
+            "lower_is_better": body.get("lower_is_better"),
+        }
+        entry.update(summary_stats(body["samples"]))
+        entry["samples"] = list(body["samples"])
+        metrics[metric_id] = entry
+    fields = REQUIRED_PROVENANCE + ("built_by_this_run", "benchmark_harness_sha256", "benchmark_repeats")
+    return {
+        "schema_version": BASELINE_SCHEMA_VERSION,
+        "description": (
+            "Versioned FIXED performance baseline (E4). The comparator repeats its budgeted "
+            "rule against these samples to expose cumulative regression that a target-base "
+            "comparison cannot see. It is comparable only on the recorded runner and setup "
+            "(budgets.fixed_baseline.must_match); anything else is inconclusive. Re-record it "
+            "only with a reviewed budgets change."
+        ),
+        "recorded_at": recorded_at or doc.get("measured_at"),
+        "source": source or {},
+        "provenance": {field: prov.get(field) for field in fields if field in prov},
+        "runner": runner or {},
+        "settings": settings or doc.get("settings") or {},
+        "required_families": required,
+        "report": {
+            "overall": report.get("overall"),
+            "target_base": target.get("verdict"),
+            "budgets_values_sha256": decision.get("budgets_values_sha256"),
+        },
+        "metrics": metrics,
+        "bundle": {key: (candidate.get("bundle") or {}).get(key) for key in BUNDLE_KEYS
+                   if key in (candidate.get("bundle") or {})},
+    }
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input", nargs="?", help="comparison document JSON")
     parser.add_argument("--input", dest="input_flag", help="comparison document JSON")
     parser.add_argument("--base", help="base side JSON (used with --candidate)")
     parser.add_argument("--candidate", help="candidate side JSON (used with --base)")
     parser.add_argument("--benchmark-evidence", help="comparison JSON carrying the shared benchmark harness and sampling manifest for --base/--candidate")
     parser.add_argument("--output", "-o", help="write the JSON report to this path as well as stdout")
-    parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
-    parser.add_argument("--max-cv", type=float, default=DEFAULT_MAX_CV)
-    parser.add_argument("--alpha", type=float, default=ALPHA)
+    parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES,
+                        help="uncorrected (E3) per-series rule only; budgets set the decision")
+    parser.add_argument("--max-cv", type=float, default=DEFAULT_MAX_CV,
+                        help="uncorrected (E3) per-series rule only; budgets set the decision")
+    parser.add_argument("--alpha", type=float, default=ALPHA,
+                        help="uncorrected (E3) per-series rule only; budgets set the decision")
+    parser.add_argument("--budgets", default=str(DEFAULT_BUDGETS),
+                        help="budgets.json that sets the decision rule (default: %(default)s)")
+    parser.add_argument("--baseline",
+                        help="fixed baseline JSON for the cumulative-regression verdict; a missing file is inconclusive")
+    parser.add_argument("--attempt", type=int, default=1,
+                        help="1-based attempt number under budgets.rerun_policy (default 1)")
+    parser.add_argument("--record-baseline", metavar="OUT",
+                        help="write a fixed baseline from this run's candidate side (target-base verdict must pass)")
+    parser.add_argument("--runner-json", help="runner identity JSON recorded into --record-baseline")
+    parser.add_argument("--settings-json", help="CAESIUM_PERF_* settings JSON recorded into --record-baseline")
+    parser.add_argument("--recorded-at", help="timestamp recorded into --record-baseline")
+    parser.add_argument("--calibrate", nargs="+", metavar="COMPARISON",
+                        help="summarize same-code A/A control comparison documents under the budgets (E4 evidence)")
     parser.add_argument(
         "--bundle-dir",
         help="evaluate a dist/assets directory against largest-chunk AND total-route-asset budgets",
@@ -1304,6 +2594,19 @@ def main(argv=None):
         json.dump(result, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0 if result["ok"] else 2
+
+    if args.calibrate:
+        try:
+            budgets = load_budgets(args.budgets)
+            summary = calibrate([(path, load_json(path)) for path in args.calibrate], budgets)
+        except CompareError as err:
+            sys.stderr.write(f"error: {err}\n")
+            return 1
+        encoded = json.dumps(summary, indent=2) + "\n"
+        sys.stdout.write(encoded)
+        if args.output:
+            Path(args.output).write_text(encoded)
+        return 0
 
     try:
         if args.base or args.candidate:
@@ -1319,9 +2622,38 @@ def main(argv=None):
             doc = load_json(path)
             if "base" not in doc or "candidate" not in doc:
                 raise CompareError("comparison document must contain base and candidate")
+        budgets = load_budgets(args.budgets)
+        baseline = None
+        baseline_error = None
+        if args.baseline and not args.record_baseline:
+            if not Path(args.baseline).is_file():
+                baseline_error = f"fixed baseline is missing: {args.baseline}"
+            else:
+                try:
+                    baseline = load_json(args.baseline)
+                except CompareError as err:
+                    baseline_error = f"fixed baseline is unreadable: {err}"
+                if baseline is not None and not isinstance(baseline, dict):
+                    baseline, baseline_error = None, "fixed baseline must be an object"
         report = compare(
-            doc, min_samples=args.min_samples, max_cv=args.max_cv, alpha=args.alpha
+            doc, min_samples=args.min_samples, max_cv=args.max_cv, alpha=args.alpha,
+            budgets=budgets, baseline=baseline, baseline_error=baseline_error, attempt=args.attempt,
         )
+        if args.record_baseline:
+            runner = load_json(args.runner_json) if args.runner_json else None
+            settings = load_json(args.settings_json) if args.settings_json else None
+            source = {
+                "comparison_sha256": hashlib.sha256(canonical_json(doc).encode()).hexdigest(),
+                "base_git_sha": ((doc.get("base") or {}).get("provenance") or {}).get("git_sha"),
+                "control": doc.get("control"),
+            }
+            recorded = record_baseline(doc, report, runner, settings, args.recorded_at, source)
+            Path(args.record_baseline).write_text(json.dumps(recorded, indent=2) + "\n")
+            sys.stderr.write(
+                f"recorded fixed baseline {args.record_baseline}: {len(recorded['metrics'])} series from "
+                f"{recorded['provenance'].get('git_sha')}\n"
+            )
+            return 0
     except CompareError as err:
         sys.stderr.write(f"error: {err}\n")
         return 1

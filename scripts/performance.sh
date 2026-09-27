@@ -32,11 +32,32 @@
 #   CAESIUM_PERF_BROWSER=0                   run ui/e2e/performance.spec.ts (default 0)
 #   CAESIUM_PERF_BUNDLE=1                    run check-bundle-size.mjs (default 1)
 #   CAESIUM_PERF_KEEP=1                      leave owned containers in place
+#   CAESIUM_PERF_HOST_ID=<stable runner id>  runner identity (default hostname|os|arch)
 #
 # A/A control: set CAESIUM_PERF_BASE_SHA to the candidate SHA. The run builds
 # one release image and measures it on both sides with the unchanged decision
 # rule, which estimates this host's false-positive and noisy rate. The
 # comparison document records "control": "a_a".
+#
+# E4 budgets and bounded reruns: the comparator judges every attempt with
+# test/performance/budgets.json (CAESIUM_PERF_BUDGETS) against the base AND
+# against the versioned fixed baseline test/performance/baseline.json
+# (CAESIUM_PERF_BASELINE; `none` skips it, which the report's strict_gate marks
+# as blocking). A live invocation is a gate run: attempt N runs in
+# $CAESIUM_PERF_ARTIFACTS/attempt-N as ID-aN. Only an `inconclusive` attempt
+# whose report says rerun_required is repeated, at most
+# budgets.rerun_policy.max_reruns times. A rerun starts the server phases with
+# the other side (candidate first on even attempts), uses fresh processes and
+# artifacts, and reuses only images an earlier attempt of this gate run built
+# (verified by image ID). Samples are never pooled across attempts. Every
+# attempt's report is kept; gate.json summarizes them and the exit status is the
+# last attempt's (3 with overall=inconclusive_unresolved once the rerun budget
+# is exhausted, which a strict gate must treat as blocking).
+#   CAESIUM_PERF_ATTEMPT=N     run exactly one attempt N (no rerun loop)
+#
+# Record the fixed baseline from a finished attempt whose target-base verdict
+# passed (candidate side; its runner identity comes from observations/host.json):
+#   bash scripts/performance.sh baseline-record "$CAESIUM_PERF_ARTIFACTS/attempt-1" [out.json]
 #
 # Per-sample attribution evidence (not compared): every server's log
 # ($side/server-logs/<phase>-<repeat>.log), a container/image docker events
@@ -278,10 +299,114 @@ if [[ "${1:-}" == "compare" ]]; then
   INPUT="${1:-$ARTIFACTS/comparison.json}"
   [[ -f "$INPUT" ]] || die "comparison document not found: $INPUT"
   require_cmd python3
+  BUDGETS="${CAESIUM_PERF_BUDGETS:-$ROOT/test/performance/budgets.json}"
+  BASELINE="${CAESIUM_PERF_BASELINE:-$ROOT/test/performance/baseline.json}"
+  compare_args=(--budgets "$BUDGETS" --attempt "${CAESIUM_PERF_ATTEMPT:-1}")
+  if [[ "$BASELINE" != "none" ]]; then
+    compare_args+=(--baseline "$BASELINE")
+  fi
   python3 "$ROOT/scripts/compare-performance.py" \
     --input "$INPUT" \
-    --output "$ARTIFACTS/report.json"
+    --output "$ARTIFACTS/report.json" \
+    "${compare_args[@]}"
   exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# baseline-record: write the versioned fixed baseline from a finished attempt.
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "baseline-record" ]]; then
+  shift
+  SRC="${1:-}"
+  [[ -n "$SRC" && -f "$SRC/comparison.json" ]] || die "baseline-record needs a finished attempt directory containing comparison.json"
+  [[ -f "$SRC/observations/host.json" ]] || die "baseline-record needs $SRC/observations/host.json (runner identity)"
+  OUT="${2:-$ROOT/test/performance/baseline.json}"
+  require_cmd python3
+  python3 "$ROOT/scripts/compare-performance.py" \
+    --input "$SRC/comparison.json" \
+    --budgets "${CAESIUM_PERF_BUDGETS:-$ROOT/test/performance/budgets.json}" \
+    --runner-json "$SRC/observations/host.json" \
+    --record-baseline "$OUT"
+  exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# Gate run: bounded reruns of whole attempts (only on a rerun-eligible
+# inconclusive). CAESIUM_PERF_ATTEMPT=N skips the loop and runs one attempt.
+# ---------------------------------------------------------------------------
+run_attempt() {
+  CAESIUM_PERF_ATTEMPT="$1" \
+  CAESIUM_PERF_ARTIFACTS="$2" \
+  CAESIUM_PERF_PRIOR_ATTEMPT="$3" \
+  CAESIUM_PERF_ID="$GATE_ID-a$1" \
+  CAESIUM_PERF_BUDGETS="$BUDGETS_PATH" \
+    bash "$ROOT/scripts/performance.sh"
+}
+
+# --- gate loop begin (scripts/test_performance_harness.py runs this block) ---
+run_gate() {
+  local attempt=1 prior="" dir rc rerun
+  : >"$GATE_ROOT/attempts.tsv"
+  while :; do
+    dir="$GATE_ROOT/attempt-$attempt"
+    log "gate attempt $attempt of $((MAX_RERUNS + 1)): $dir"
+    rc=0
+    run_attempt "$attempt" "$dir" "$prior" || rc=$?
+    printf '%s\t%s\t%s\n' "$attempt" "$rc" "$dir" >>"$GATE_ROOT/attempts.tsv"
+    [[ "$rc" -eq 3 ]] || break
+    rerun="$(python3 -c 'import json,sys; print(str(bool(json.load(open(sys.argv[1])).get("reruns", {}).get("rerun_required"))).lower())' "$dir/report.json" 2>/dev/null || echo false)"
+    [[ "$rerun" == "true" && "$attempt" -le "$MAX_RERUNS" ]] || break
+    log "attempt $attempt is inconclusive and rerun-eligible; rerunning (at most $MAX_RERUNS reruns)"
+    prior="$dir"
+    attempt=$((attempt + 1))
+  done
+  python3 - "$GATE_ROOT" "$MAX_RERUNS" <<'GATE'
+import json, pathlib, sys
+root, max_reruns = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+attempts = []
+for line in (root / "attempts.tsv").read_text().splitlines():
+    number, rc, path = line.split("\t", 2)
+    report = {}
+    try:
+        report = json.loads(pathlib.Path(path, "report.json").read_text())
+    except Exception:
+        pass
+    attempts.append({
+        "attempt": int(number),
+        "exit_code": int(rc),
+        "artifacts": path,
+        "overall": report.get("overall"),
+        "reruns": report.get("reruns"),
+    })
+final = attempts[-1]
+(root / "gate.json").write_text(json.dumps({
+    "schema_version": 1,
+    "max_reruns": max_reruns,
+    "attempts": attempts,
+    "final": {"attempt": final["attempt"], "exit_code": final["exit_code"], "overall": final["overall"]},
+    "note": "every attempt is judged on its own samples; only a rerun-eligible inconclusive is repeated",
+}, indent=2) + "\n")
+GATE
+  return "$rc"
+}
+# --- gate loop end ---
+
+if [[ -z "${CAESIUM_PERF_ATTEMPT:-}" ]]; then
+  require_cmd python3
+  require_env CAESIUM_PERF_ID
+  require_env CAESIUM_PERF_ARTIFACTS
+  GATE_ID="$CAESIUM_PERF_ID"
+  if [[ ! "$GATE_ID" =~ ^[a-z0-9]([a-z0-9-]{0,34}[a-z0-9])?$ ]]; then
+    die "CAESIUM_PERF_ID must be a lowercase DNS-1123 name of at most 36 characters (attempts append -aN), got '$GATE_ID'"
+  fi
+  GATE_ROOT="$(mkdir -p "$CAESIUM_PERF_ARTIFACTS" && cd "$CAESIUM_PERF_ARTIFACTS" && pwd)"
+  BUDGETS_PATH="${CAESIUM_PERF_BUDGETS:-$ROOT/test/performance/budgets.json}"
+  MAX_RERUNS="$(python3 -c 'import runpy,sys; c=runpy.run_path(sys.argv[1]); print(c["load_budgets"](sys.argv[2])["rerun_policy"]["max_reruns"])' \
+    "$ROOT/scripts/compare-performance.py" "$BUDGETS_PATH")" || die "cannot load a reviewed rerun_policy from $BUDGETS_PATH"
+  rc=0
+  run_gate || rc=$?
+  log "gate finished: exit $rc after $(wc -l <"$GATE_ROOT/attempts.tsv" | tr -d ' ') attempt(s); summary $GATE_ROOT/gate.json"
+  exit "$rc"
 fi
 
 # ---------------------------------------------------------------------------
@@ -326,6 +451,16 @@ KEEP="${CAESIUM_PERF_KEEP:-0}"
 API_KEY="${CAESIUM_MANUAL_TRIGGER_API_KEY:-perf-test-key}"
 TASK_IMAGE="${CAESIUM_PERF_TASK_IMAGE:-alpine:3.23}"
 PERF_PORT="${CAESIUM_PERF_PORT:-18080}"
+ATTEMPT="${CAESIUM_PERF_ATTEMPT:-1}"
+[[ "$ATTEMPT" =~ ^[1-9][0-9]*$ ]] || die "CAESIUM_PERF_ATTEMPT must be a positive integer, got '$ATTEMPT'"
+PRIOR_ATTEMPT="${CAESIUM_PERF_PRIOR_ATTEMPT:-}"
+BUDGETS="${CAESIUM_PERF_BUDGETS:-$ROOT/test/performance/budgets.json}"
+BASELINE="${CAESIUM_PERF_BASELINE:-$ROOT/test/performance/baseline.json}"
+# Reruns re-interleave: even attempts start every server phase with the
+# candidate. (Benchmarks keep their fixed ABBA pairing, which the comparator
+# validates.)
+ORDER_FLIP=$(( (ATTEMPT + 1) % 2 ))
+if [[ "$ORDER_FLIP" -eq 1 ]]; then FIRST_SIDE=candidate; else FIRST_SIDE=base; fi
 
 NETWORK="caesium-perf-$ID"
 OWNED=()
@@ -389,7 +524,10 @@ if docker ps --format '{{.Names}}' | grep -Eq '^caesium-server'; then
   log "WARNING: shared host allowed; competing load is not isolated"
 fi
 
-HOST_ID="$(printf '%s|%s|%s' "$(hostname)" "$(uname -s)" "$(uname -m)")"
+# A runner whose hostname is network-assigned (macOS without a fixed HostName
+# reports whatever DHCP/mDNS gives it) sets a stable CAESIUM_PERF_HOST_ID; the
+# fixed baseline refuses any comparison across host IDs.
+HOST_ID="${CAESIUM_PERF_HOST_ID:-$(printf '%s|%s|%s' "$(hostname)" "$(uname -s)" "$(uname -m)")}"
 case "$(uname -m)" in
   aarch64|arm64) DOCKER_ARCH="arm64" ;;
   x86_64|amd64) DOCKER_ARCH="amd64" ;;
@@ -405,11 +543,36 @@ try:
     loadavg = os.getloadavg()
 except OSError:
     loadavg = None
-try:
-    docker = subprocess.check_output(["docker", "version", "--format", "{{.Server.Version}}"], text=True).strip()
-except Exception as err:
-    docker = f"unavailable: {err}"
+def run(*cmd):
+    try:
+        return subprocess.check_output(list(cmd), text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception as err:
+        return f"unavailable: {err}"
+docker = run("docker", "version", "--format", "{{.Server.Version}}")
+if platform.system() == "Darwin":
+    cpu_model = run("sysctl", "-n", "machdep.cpu.brand_string")
+    memory = run("sysctl", "-n", "hw.memsize")
+    os_version = "macOS " + platform.mac_ver()[0]
+else:
+    cpu_model = next((line.split(":", 1)[1].strip() for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines()
+                      if line.lower().startswith(("model name", "cpu model"))), "unknown") \
+        if pathlib.Path("/proc/cpuinfo").is_file() else "unknown"
+    memory = str(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) if hasattr(os, "sysconf") else "unknown"
+    os_version = platform.platform()
+docker_vm = run("docker", "info", "--format", "{{.OperatingSystem}}|{{.KernelVersion}}|{{.NCPU}}|{{.MemTotal}}")
+vm = docker_vm.split("|") if docker_vm.count("|") == 3 else [docker_vm, "", "", ""]
+co_tenants = [
+    line for line in run("docker", "ps", "--format", "{{.Names}}\t{{.Image}}").splitlines()
+    if line and not line.startswith("unavailable")
+]
 pathlib.Path(art, "observations", "host.json").write_text(json.dumps({
+    "cpu_model": cpu_model,
+    "cpu_count": os.cpu_count(),
+    "memory_bytes": int(memory) if memory.isdigit() else memory,
+    "os_version": os_version,
+    "docker_platform_name": run("docker", "version", "--format", "{{.Server.Platform.Name}}"),
+    "docker_vm": {"os": vm[0], "kernel": vm[1], "ncpu": vm[2], "memory_bytes": vm[3]},
+    "co_tenant_containers": co_tenants,
     "hostname": socket.gethostname(),
     "platform": platform.platform(),
     "machine": platform.machine(),
@@ -435,7 +598,7 @@ SETTINGS_SHA="$(printf '%s\n' \
   "instrumented=false" \
   | python3 -c "import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())")"
 
-log "id=$ID base=$BASE_SHA candidate=$CANDIDATE_SHA artifacts=$ARTIFACTS workloads=$WORKLOADS repeats=$REPEATS"
+log "id=$ID attempt=$ATTEMPT first_side=$FIRST_SIDE base=$BASE_SHA candidate=$CANDIDATE_SHA artifacts=$ARTIFACTS workloads=$WORKLOADS repeats=$REPEATS"
 
 # ---------------------------------------------------------------------------
 # Per-SHA builders. just tag=$sha build-release depends on builder with that
@@ -471,9 +634,28 @@ build_release() {
   return 0
 }
 
+# A rerun reuses only an image the previous attempt of this gate run recorded
+# as built, and only when its image ID is unchanged.
+prior_built() {
+  local side="$1" image="$2" id
+  [[ -n "$PRIOR_ATTEMPT" && -f "$PRIOR_ATTEMPT/comparison.json" ]] || return 1
+  id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" || return 1
+  python3 - "$PRIOR_ATTEMPT/comparison.json" "$side" "$id" <<'PRIOR'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+prov = (doc.get(sys.argv[2]) or {}).get("provenance") or {}
+sys.exit(0 if prov.get("built_by_this_run") is True and prov.get("image_id") == sys.argv[3] else 1)
+PRIOR
+}
+
 CANDIDATE_BUILT="supplied"
 if docker image inspect "$CANDIDATE_IMAGE" >/dev/null 2>&1; then
-  log "image $CANDIDATE_IMAGE already present; recording as supplied"
+  if prior_built candidate "$CANDIDATE_IMAGE"; then
+    CANDIDATE_BUILT=built
+    log "image $CANDIDATE_IMAGE was built by $PRIOR_ATTEMPT of this gate run; reusing it"
+  else
+    log "image $CANDIDATE_IMAGE already present; recording as supplied"
+  fi
 else
   GIT_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
   if [[ -n "$(git -C "$ROOT" status --porcelain)" && "$ALLOW_UNVERIFIED" != "1" ]]; then
@@ -498,7 +680,12 @@ if [[ "$BASE_SHA" == "$CANDIDATE_SHA" && "$BASE_IMAGE" == "$CANDIDATE_IMAGE" ]];
   BASE_BUILT="$CANDIDATE_BUILT"
   log "A/A control: base and candidate are both $CANDIDATE_SHA; both sides run $CANDIDATE_IMAGE"
 elif docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-  log "image $BASE_IMAGE already present; recording as supplied"
+  if [[ -n "${PRIOR_ATTEMPT:-}" ]] && prior_built base "$BASE_IMAGE"; then
+    BASE_BUILT=built
+    log "image $BASE_IMAGE was built by $PRIOR_ATTEMPT of this gate run; reusing it"
+  else
+    log "image $BASE_IMAGE already present; recording as supplied"
+  fi
 else
   BASE_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/caesium-perf-base.XXXXXX")"
   git -C "$ROOT" worktree add --detach "$BASE_WORKTREE" "$BASE_SHA"
@@ -751,7 +938,7 @@ if [[ "$RUN_LOAD" == "1" ]]; then
 
   r=1
   while [[ "$r" -le "$REPEATS" ]]; do
-    if (( r % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
+    if (( (r + ORDER_FLIP) % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
     for side in "${order[@]}"; do
       image="$BASE_IMAGE"
       [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
@@ -772,7 +959,7 @@ if [[ "$RUN_LOAD" == "1" ]]; then
   # runs Playwright, then stops — so host drift is shared.
   r=1
   while [[ "$r" -le "$REPEATS" ]]; do
-    if (( r % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
+    if (( (r + ORDER_FLIP) % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
     for side in "${order[@]}"; do
       image="$BASE_IMAGE"
       [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
@@ -820,7 +1007,7 @@ fi
 if [[ "$RUN_LOAD" != "1" && "$RUN_BROWSER" == "1" ]]; then
   r=1
   while [[ "$r" -le "$REPEATS" ]]; do
-    if (( r % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
+    if (( (r + ORDER_FLIP) % 2 == 1 )); then order=(base candidate); else order=(candidate base); fi
     for side in "${order[@]}"; do
       image="$BASE_IMAGE"
       [[ "$side" == "candidate" ]] && image="$CANDIDATE_IMAGE"
@@ -864,8 +1051,10 @@ export BASE_GO_VERSION CANDIDATE_GO_VERSION BASE_BUILDER_ID CANDIDATE_BUILDER_ID
 export BASE_TOOLCHAIN CANDIDATE_TOOLCHAIN
 export RUN_LOAD RUN_BENCH RUN_BROWSER RUN_BUNDLE
 export BENCH_HARNESS_MANIFEST REPEATS
+export WORKLOADS TASK_IMAGE ATTEMPT FIRST_SIDE
 python3 - <<'PY'
 import json, os, pathlib, re
+import datetime
 
 art = pathlib.Path(os.environ["ARTIFACTS"])
 
@@ -993,11 +1182,28 @@ def workload_samples(side, phase):
         exit_code = int(exit_path.read_text().strip()) if exit_path.is_file() else None
         outcome = "failed"
         duration = None
+        extras = {}
         if isinstance(report, dict):
             outcome = report.get("outcome") or "failed"
             duration = report.get("duration_seconds")
             if exit_code not in (None, 0) and outcome == "passed":
                 outcome = "failed"
+            # Values the driver already measured, carried for absolute SLOs
+            # (never compared as series).
+            latency = report.get("latency") if isinstance(report.get("latency"), dict) else {}
+            throughput = report.get("throughput") if isinstance(report.get("throughput"), dict) else {}
+            backlog = report.get("backlog") if isinstance(report.get("backlog"), dict) else {}
+            counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
+            for field, value in (
+                ("latency_p50_seconds", latency.get("p50_seconds")),
+                ("latency_p99_seconds", latency.get("p99_seconds")),
+                ("completed_per_second", throughput.get("completed_per_second")),
+                ("sustained_verdict", throughput.get("verdict")),
+                ("backlog_slope_per_second", backlog.get("slope_per_second")),
+                ("unreconciled", counts.get("unreconciled")),
+            ):
+                if value is not None:
+                    extras[field] = value
         key = f"{workload}.{phase}"
         out.setdefault(key, {"phase": phase, "samples": []})
         out[key]["samples"].append({
@@ -1006,6 +1212,7 @@ def workload_samples(side, phase):
             "duration_seconds": duration,
             "exit_code": exit_code,
             "repeat": repeat,
+            **extras,
         })
     return out
 
@@ -1104,6 +1311,18 @@ if os.environ.get("RUN_BUNDLE") == "1":
 
 doc = {
     "schema_version": 1,
+    "measured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    "settings": {
+        "workloads": os.environ.get("WORKLOADS"),
+        "repeats": int(os.environ["REPEATS"]),
+        "task_image": os.environ.get("TASK_IMAGE"),
+        "load": os.environ.get("RUN_LOAD") == "1",
+        "bench": os.environ.get("RUN_BENCH") == "1",
+        "browser": os.environ.get("RUN_BROWSER") == "1",
+        "bundle": os.environ.get("RUN_BUNDLE") == "1",
+        "attempt": int(os.environ.get("ATTEMPT") or 1),
+        "server_phase_first_side": os.environ.get("FIRST_SIDE") or "base",
+    },
     "required_families": families,
     "control": "a_a" if os.environ.get("AA_CONTROL") == "1" else None,
     "benchmark_harness": bench_harness,
@@ -1128,7 +1347,15 @@ doc = {
 (art / "comparison.json").write_text(json.dumps(doc, indent=2) + "\n")
 PY
 
+compare_args=(--budgets "$BUDGETS" --attempt "$ATTEMPT")
+if [[ "$BASELINE" != "none" ]]; then
+  compare_args+=(--baseline "$BASELINE")
+fi
+set +e
 python3 "$ROOT/scripts/compare-performance.py" \
   --input "$ARTIFACTS/comparison.json" \
-  --output "$ARTIFACTS/report.json"
-exit $?
+  --output "$ARTIFACTS/report.json" \
+  "${compare_args[@]}"
+rc=$?
+set -e
+exit "$rc"
