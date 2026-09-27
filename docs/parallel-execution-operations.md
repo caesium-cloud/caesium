@@ -28,6 +28,8 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_DATABASE_SHARDS` | `1` | Number of dqlite hot write shards. Values greater than `1` are Phase 4 horizontal-scaling mode and require the internal dqlite backend. |
 | `CAESIUM_DATABASE_VOTERS` | `3` | Target dqlite voter count. Must be odd and at least 3. |
 | `CAESIUM_DATABASE_STANDBYS` | `3` | Target dqlite standby count for failover headroom. Extra nodes settle as spares. |
+| `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` | `1024` | Raft log entries between dqlite snapshots. Each snapshot writes a full copy of the database to disk. See [Raft log retention](#raft-log-retention). |
+| `CAESIUM_DATABASE_SNAPSHOT_TRAILING` | `2048` | Raft log entries each node keeps, in memory and on disk, behind its latest snapshot. Must be at least 4 and at least `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD`. See [Raft log retention](#raft-log-retention). |
 | `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
 | `CAESIUM_WAKEUP_FANOUT_MODE` | `full` | Wakeup fanout strategy: `full` for every peer, or `gossip` for large clusters. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
@@ -112,6 +114,20 @@ Set the same `CAESIUM_DATABASE_VOTERS` and `CAESIUM_DATABASE_STANDBYS` values on
 Distributed wakeups use the dqlite cluster membership list, not `CAESIUM_DATABASE_NODES`, so spare workers receive wakeup hints after they join. Set the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` on every node. The sender uses `Authorization: Bearer <token>` and receivers reject missing or incorrect tokens.
 
 `CAESIUM_DATABASE_SHARDS=1` keeps every table in the catalog database. Higher shard counts open `caesium_hot_XX` databases on the same dqlite cluster and route run lifecycle rows by job run ID. See [database-sharding.md](database-sharding.md) for the table map and router contract.
+
+### Raft log retention
+
+Every node that replicates the Raft log (voters and standbys) keeps each retained log entry in memory as well as in segment files under `CAESIUM_DATABASE_PATH`. An entry is one committed transaction's changed database pages, so a catalog write can be well over 100 KB. A node takes a snapshot every `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` entries and then releases every entry more than `CAESIUM_DATABASE_SNAPSHOT_TRAILING` entries behind it. Between snapshots a node therefore holds between `TRAILING` and `TRAILING + THRESHOLD` entries. When a node restarts it loads everything retained on disk back into memory.
+
+Caesium sets these explicitly. dqlite's built-in trailing of 8192 bounds the log at 9,216 entries. The F2 lifecycle qualification measured 77–137 KB catalog entries, which puts that bound near 1.26 GB. At that size the retained log alone pushed a voter to its 1 GiB memory limit. The defaults of `1024`/`2048` bound the log at 3,072 entries (about 421 MB at 137 KB per entry) and keep dqlite's default snapshot frequency.
+
+The trade-offs:
+
+- **Lower `TRAILING`** means less memory and disk per node. A follower that falls more than `TRAILING` entries behind the leader's latest snapshot, for example during a long restart, is then caught up by a full snapshot install, which sends the whole database, instead of by log replication.
+- **Lower `THRESHOLD`** also lowers the bound, but the node snapshots more often, and each snapshot writes the whole database to disk.
+- **Raising either** increases the worst-case memory and disk by the entry size of your write mix times the added entries. Size the pod memory limit for `(TRAILING + THRESHOLD) × largest typical transaction` on top of the process base.
+
+Both values are per node and do not need to match across the cluster. A changed value takes effect when the node starts. After you lower `TRAILING`, the first start still loads what the previous setting retained, and the log shrinks at the next snapshot.
 
 ## Rollout Procedure (Distributed Mode)
 

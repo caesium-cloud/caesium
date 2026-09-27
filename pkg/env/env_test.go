@@ -21,6 +21,10 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), 1, Variables().DatabaseShards)
 	assert.Equal(s.T(), 3, Variables().DatabaseVoters)
 	assert.Equal(s.T(), 3, Variables().DatabaseStandbys)
+	assert.Equal(s.T(), DefaultDatabaseSnapshotThreshold, Variables().DatabaseSnapshotThreshold)
+	assert.Equal(s.T(), DefaultDatabaseSnapshotTrailing, Variables().DatabaseSnapshotTrailing)
+	assert.Equal(s.T(), 1024, Variables().DatabaseSnapshotThreshold)
+	assert.Equal(s.T(), 2048, Variables().DatabaseSnapshotTrailing)
 	assert.Equal(s.T(), 15*time.Second, Variables().WorkerPollInterval)
 	assert.Equal(s.T(), "full", Variables().WakeupFanoutMode)
 	assert.Equal(s.T(), 8*time.Hour, Variables().AuthSessionIdleTTL)
@@ -158,6 +162,40 @@ func (s *EnvTestSuite) TestContractDeprecationWindowValidatedOnlyWhenEnforcement
 	err := Process()
 	s.Require().Error(err)
 	assert.Contains(s.T(), err.Error(), "CAESIUM_CONTRACT_DEPRECATION_WINDOW")
+}
+
+func (s *EnvTestSuite) TestDatabaseSnapshotParamsOverrides() {
+	s.T().Setenv("CAESIUM_DATABASE_SNAPSHOT_THRESHOLD", "512")
+	s.T().Setenv("CAESIUM_DATABASE_SNAPSHOT_TRAILING", "512")
+	s.Require().NoError(Process())
+	assert.Equal(s.T(), 512, Variables().DatabaseSnapshotThreshold)
+	assert.Equal(s.T(), 512, Variables().DatabaseSnapshotTrailing)
+}
+
+func (s *EnvTestSuite) TestDatabaseSnapshotParamsValidation() {
+	for _, tc := range []struct {
+		name, threshold, trailing, want string
+	}{
+		{"zero threshold", "0", "2048", "CAESIUM_DATABASE_SNAPSHOT_THRESHOLD must be between 1 and"},
+		{"negative threshold", "-5", "2048", "CAESIUM_DATABASE_SNAPSHOT_THRESHOLD must be between 1 and"},
+		{"threshold beyond C unsigned", "4294967296", "4294967296", "CAESIUM_DATABASE_SNAPSHOT_THRESHOLD must be between 1 and"},
+		{"trailing below dqlite floor", "1", "3", "CAESIUM_DATABASE_SNAPSHOT_TRAILING must be between 4 and"},
+		{"trailing below threshold", "1024", "512", "CAESIUM_DATABASE_SNAPSHOT_TRAILING (512) must be greater than or equal to CAESIUM_DATABASE_SNAPSHOT_THRESHOLD (1024)"},
+	} {
+		s.Run(tc.name, func() {
+			s.T().Setenv("CAESIUM_DATABASE_SNAPSHOT_THRESHOLD", tc.threshold)
+			s.T().Setenv("CAESIUM_DATABASE_SNAPSHOT_TRAILING", tc.trailing)
+			err := Process()
+			s.Require().Error(err)
+			assert.Contains(s.T(), err.Error(), tc.want)
+		})
+	}
+}
+
+func (s *EnvTestSuite) TestDatabaseSnapshotParamsIgnoredForPostgres() {
+	s.T().Setenv("CAESIUM_DATABASE_TYPE", "postgres")
+	s.T().Setenv("CAESIUM_DATABASE_SNAPSHOT_THRESHOLD", "0")
+	assert.NoError(s.T(), Process())
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {

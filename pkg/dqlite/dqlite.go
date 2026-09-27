@@ -15,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dbtrace"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	godqlite "github.com/canonical/go-dqlite/v3"
 	dqliteapp "github.com/canonical/go-dqlite/v3/app"
 	"github.com/canonical/go-dqlite/v3/client"
 	_ "github.com/mattn/go-sqlite3"
@@ -161,29 +162,68 @@ func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...any
 	}
 
 	vars := env.Variables()
+	opts, err := nativeAppOptions(vars, logFunc)
+	if err != nil {
+		return nil, err
+	}
 
 	// A StatefulSet pod keeps its PVC across replacement but not its IP, while
 	// dqlite records the node's advertised address inside that PVC. openNativeApp
 	// reconciles a data directory created at a different address and puts this
 	// node back in the raft configuration before waiting on readiness (#493).
-	dqApp, err := openNativeApp(
-		ctx,
-		vars.DatabasePath,
-		vars.NodeAddress,
-		vars.DatabaseNodes,
-		dqliteapp.WithAddress(vars.NodeAddress),
-		dqliteapp.WithCluster(vars.DatabaseNodes),
-		dqliteapp.WithVoters(vars.DatabaseVoters),
-		dqliteapp.WithStandBys(vars.DatabaseStandbys),
-		dqliteapp.WithLogFunc(logFunc),
-		dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
-	)
+	dqApp, err := openNativeApp(ctx, vars.DatabasePath, vars.NodeAddress, vars.DatabaseNodes, opts...)
 	if err != nil {
 		return nil, err
 	}
 
 	currentApp.Store(dqApp)
 	return dqApp, nil
+}
+
+// nativeAppOptions is the single option set every start of the local dqlite
+// node uses, including the restarts openNativeApp performs while repairing a
+// changed address.
+func nativeAppOptions(vars env.Environment, logFunc func(client.LogLevel, string, ...any)) ([]dqliteapp.Option, error) {
+	params, err := snapshotParams(vars.DatabaseSnapshotThreshold, vars.DatabaseSnapshotTrailing)
+	if err != nil {
+		return nil, err
+	}
+	return []dqliteapp.Option{
+		dqliteapp.WithAddress(vars.NodeAddress),
+		dqliteapp.WithCluster(vars.DatabaseNodes),
+		dqliteapp.WithVoters(vars.DatabaseVoters),
+		dqliteapp.WithStandBys(vars.DatabaseStandbys),
+		dqliteapp.WithLogFunc(logFunc),
+		dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
+		dqliteapp.WithSnapshotParams(params),
+	}, nil
+}
+
+// snapshotParams bounds the Raft log this node retains. dqlite holds every
+// retained entry in memory until a snapshot releases it (and loads everything
+// retained on disk when it restarts), so without explicit parameters the node
+// ran with dqlite's trailing 8192 entries, a bound of ~1.26 GB at the catalog
+// write sizes F2 measured. See env.DefaultDatabaseSnapshotTrailing for the
+// budget and the trade-off: a follower that falls more than trailing entries
+// behind the leader's latest snapshot is caught up by a full snapshot install.
+//
+// The strategy is static on purpose. dqlite's dynamic strategy trims only the
+// in-memory log; segment files on disk — and so what a restarting node loads
+// back into memory — still follow the trailing count.
+func snapshotParams(threshold, trailing int) (godqlite.SnapshotParams, error) {
+	if threshold == 0 && trailing == 0 {
+		// A zero Environment (env.Process never ran) must not silently fall
+		// back to dqlite's unbounded-by-memory defaults.
+		threshold, trailing = env.DefaultDatabaseSnapshotThreshold, env.DefaultDatabaseSnapshotTrailing
+	}
+	if err := env.ValidateDatabaseSnapshotParams(threshold, trailing); err != nil {
+		return godqlite.SnapshotParams{}, fmt.Errorf("dqlite: %w", err)
+	}
+	return godqlite.SnapshotParams{
+		Threshold: uint64(threshold),
+		Trailing:  uint64(trailing),
+		Strategy:  godqlite.TrailingStrategyStatic,
+	}, nil
 }
 
 func dqliteLogFields(level client.LogLevel, msg string) []any {
