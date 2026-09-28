@@ -25,23 +25,25 @@ W7 made the console journey pass a live kind proof (#581). It attributed and
 removed E3's harness noise, adding an A/A control, and recorded a conclusive
 comparison (#584). It also bounded dqlite's retained Raft log with explicit
 snapshot parameters (#585), after which F2's snapshot catch-up passed twice
-under the 1Gi cap. D3 and E3 are accepted. The F2 cluster qualification is
-still incomplete: ordinal-0 rejoin (#582) and isolated rollback are blocked.
-Calibrated budgets remain planned.
+under the 1Gi cap. D3 and E3 are accepted. W8 fixed ordinal-0 rejoin (#591,
+closes #582), recorded the isolated rollback outcome on an isolated volume
+copy (#590) and calibrated performance budgets with a fixed baseline (#589);
+the merged-tree cluster qualification then passed (`lifecycle-w8acc-00d65c9a`),
+so F2 is accepted. Budgets are calibrated for the recorded local runner only
+(Q2 open); no performance lane exists in CI yet.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
 dependencies**: G7 wired the `merge_group` trigger and candidate-identity
 checks on the existing aggregate. W5 added **no jobs and no `ci-ok`
 dependencies** either: `TestCore`, the coverage collector and
-`scripts/performance.sh` are local commands. W6 and W7 also added **no jobs
+`scripts/performance.sh` are local commands. W6, W7 and W8 also added **no jobs
 or aggregate dependencies**: the C3 validator, F2 cluster runner, D3
-`cluster-recovery` project and E3 comparator remain standalone. None of these
-waves changed
-repository settings:
-`ci-ok` is still absent from master's required status checks, so that
-promotion gates `v*` publication rather than PR merge, and `merge_group` is
-dormant until a ruleset exists. See §1 and "Early evidence lane and the
+`cluster-recovery` project, E3 comparator and E4 budgets remain standalone. W1–W7
+changed no repository settings. W8 did, on 2026-09-28 with the CODEOWNER's
+explicit go-ahead (Q6): `ci-ok` is now a required status check on master and
+ruleset 24123341 ("master merge queue") is active, so every merge goes through
+the queue and `merge_group` fires live. See §1 and "Early evidence lane and the
 promoted gate" / "Candidate identity and merge-group wiring" in §4.
 
 ## 1. Required-to-merge checks
@@ -70,7 +72,18 @@ absent, foreign or hollow report fails the gate. `helm-lint` is in the set
 because it is `early-evidence`'s unconditional producer — without it a chart
 failure would surface only indirectly, as `early-evidence=skipped`.
 
-**`ci-ok` is not enforced at merge today.** Read at execution time on
+**Since 2026-09-28 (distributed-testing W8, Q6) `ci-ok` is enforced at merge.**
+master's required contexts are the eight listed below plus `ci-ok`
+(`strict: false` unchanged, one CODEOWNER review, `enforce_admins: false`), and
+branch ruleset 24123341 "master merge queue" is active: target
+`~DEFAULT_BRANCH`, a `merge_queue` rule (ALLGREEN grouping, squash, up to five
+entries built and merged, 60-minute check timeout, 5-minute minimum wait) plus
+`required_status_checks: ci-ok`; repository admins may bypass via pull request
+only. Merges into master now go through the queue, `merge_group` runs live, and
+the first queued run is the W8 N-1 sync PR. The paragraph below is the
+pre-W8 state, kept for history.
+
+**`ci-ok` was not enforced at merge before W8.** Read at execution time on
 2026-09-14, master's protection lists eight required contexts — `lint`,
 `unit-test`, `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`,
 `build-and-integration-test`, `build-and-integration-test-agent-auth` — with
@@ -285,8 +298,8 @@ Triggers: `pull_request` to `master`, `push` to `master`, `v*` tags, and
 run CI (the PR event covers them). A `concurrency` group cancels superseded
 PR runs and keys `pull_request` / `merge_group` into disjoint namespaces
 (`pr-<number>` vs `mergegroup-<head_sha>`) so a queued run cannot share a
-slot with, or be cancelled by, a PR run. No merge queue exists today, so
-`merge_group` has never fired — see "Candidate identity and merge-group
+slot with, or be cancelled by, a PR run. A merge queue has existed since 2026-09-28 (W8, ruleset 24123341), so
+`merge_group` now fires on every queued merge — see "Candidate identity and merge-group
 wiring" in this section.
 
 Each compiled artifact is produced once per architecture and loaded by
@@ -1182,7 +1195,7 @@ critical path (`changes` start to `ci-ok`) is ~13 min; the full matrix
 including optional Helm shards is ~17.3 min. `strict: true` costs one extra
 ~13-minute required-set rerun each time master advances during review.
 A merge queue costs one extra ~13-minute run per merged PR (or per batch).
-G7's recommendation to the CODEOWNER, not applied: add `ci-ok` to required
+G7's recommendation to the CODEOWNER (applied in W8 on 2026-09-28: `ci-ok` required, then ruleset 24123341 with a merge queue): add `ci-ok` to required
 contexts first, then either `strict: true` or a `merge_queue` ruleset
 targeting `master`. `allow_update_branch: true` is optional and only
 relevant while protection stays non-strict.
@@ -1592,8 +1605,63 @@ after truncation was exactly 2,048 entries.
   `helm-pod-replacement-test`, `early-evidence`, podman, arm64 and `ci-ok`.
 
 Artifacts (ephemeral): `/tmp/caesium-w7g-f2-run1/`, `/tmp/caesium-w7g-f2-run2/`,
-`/tmp/caesium-w7g-b3/`. F2 stays unchecked on ordinal-0 rejoin (#582) and
-isolated rollback.
+`/tmp/caesium-w7g-b3/`. F2 stayed unchecked at W7 on ordinal-0 rejoin (#582) and
+isolated rollback; W8 resolved both below.
+
+**W8-α / W8-β: ordinal-0 rejoin and isolated rollback (#591, #590).**
+[#591](https://github.com/caesium-cloud/caesium/pull/591) merged at
+`8120dd7e` and closes
+[#582](https://github.com/caesium-cloud/caesium/issues/582). The chart's
+`peer-discovery` init container now mounts the data volume read-only; for
+ordinal 0 with no `info.yaml` it TCP-probes every other ordinal's dqlite port
+through the headless Service (which publishes not-ready addresses) for up to
+`peerDiscovery.probeSeconds` (default 20 s) and seeds `CAESIUM_DATABASE_NODES`
+only if a peer answers, so a fresh install (including the v0.1.0 image) still
+bootstraps while a disk-loss replacement joins under a fresh node ID. It also
+writes `/etc/caesium/database-bootstrap-peers`, exported as
+`CAESIUM_DATABASE_BOOTSTRAP_PEERS`; a node with no identity and no seeds
+probes those peers for up to 10 s before it would bootstrap
+(`pkg/dqlite` `freshNodeJoinSeeds`, four loopback tests). go-dqlite's role
+adjustment demotes the stale `BootstrapID` entry to spare; nothing removes it.
+Operator guidance: [kubernetes-deployment.md](kubernetes-deployment.md)
+("Replacing a member whose volume was lost"). Residual risks: disk loss while
+every other member is unreachable still bootstraps; stale spares accumulate;
+a replacement that receives exactly the old pod IP is untested.
+[#590](https://github.com/caesium-cloud/caesium/pull/590) merged at
+`d690d65e`. Right after the upgrade is verified and before any destructive
+case, all three candidate containers are frozen together with `ctr task pause`
+(about 1.9 s), read-only helper pods hash and copy each PVC, the main cluster
+is re-proved with the `PostStorage` runner phase, and the copy is restored
+byte-identically into fresh PVCs in `<id>-rollback` behind a NetworkPolicy
+whose isolation is proved by dialling (eight main targets time out from the
+copy's namespace; the copy's listener times out from the main runner). Only
+then does the chart install v0.1.0 there. The case is `recorded-outcome`,
+never pass/fail; it is `blocked` only when the copy, isolation proof or
+observation itself failed. Set `CAESIUM_LIFECYCLE_KEEP=1` to keep the copy
+namespace. Review hardening (`cd4beee7`): member existence and addresses come
+from one final pod listing with timeouts, every created member needs an
+`http_outcome` (`answered <code>`, `connection_refused`, `timeout`,
+`transport_error`; `not_probed` blocks the case), the frozen copy runs in
+per-member workers under `CAESIUM_LIFECYCLE_ROLLBACK_COPY_TIMEOUT` (default
+180 s), and EXIT/INT/TERM/HUP handlers thaw every paused member (even with
+`KEEP=1`) before recording `blocked`; `scripts/test_lifecycle_rollback.py`
+covers these with stubbed kubectl/ctr/helm. The ordinal-0 checker
+(`40f39f40`) is pure (`test/lifecycle/ordinal_zero_membership_test.go`) and
+passes only when every member's view has exactly the three live voters and
+every stale entry is absent or non-voting.
+
+| Run | Head | Duration | Cases | Notes |
+| --- | --- | --- | --- | --- |
+| `lifecycle-w8a-c1` / `c2` (#591) | `0e49f91a` | 843 s / 804 s | 9 pass, rollback blocked | ordinal 0 rejoined as `11881950894534075505` / `5396041916851386528`; `caesium-1` answered the probe |
+| `lifecycle-w8b-b87a270d63` / `0772c6fad6` (#590) | tree `dc5948d2` | 1,100 s each | 8 pass, rollback recorded, ordinal-0 blocked | rollback phase about 325 s; v0.1.0 exit 1, CrashLoopBackOff in about 62 s |
+| `lifecycle-w8a-r1-74fb0a` (#591 review) | `40f39f40` | 807 s | 9 pass, rollback blocked | stricter checker: voters exactly the three live members, both stale entries `spare` |
+| `lifecycle-w8b-r1-fbbe76d2` (#590 review) | `cd4beee7` | ~18 min | 7 pass, rollback recorded, ordinal-0 blocked, mixed-version blocked | freeze 1.748 s under the 180 s watchdog; the mixed-version block is an `AfterUpgrade` timing race seen in no other W8 run |
+| `lifecycle-w8acc-d00a9506` (pre-review acceptance) | tree `935e34c1` | 1,170 s | 9 pass + rollback recorded, `result=pass` | ordinal 0 rejoined as `12164296190534606329` |
+| `lifecycle-w8acc-00d65c9a` (acceptance) | tree `1c4915ab` = master `710f450a` + #591 `2b8f28ee` + #590 `cd4beee7` | 1,164 s | **9 pass + rollback recorded, `result=pass`** | ordinal 0 rejoined as `4503361827053324425`, voters exactly the three live members, stale entries `spare`; v0.1.0 refused start on the `info.yaml` address mismatch, freeze 1.576 s |
+
+Merged master `d690d65e` differs from the qualified tree `1c4915ab` only by #589's files (`scripts/compare-performance.py`, `scripts/performance.sh`, their tests and `test/performance/*`) and this plan document; every lifecycle, chart and `pkg/dqlite` file is byte-identical. F2 is checked. It remains a local command, not a CI job or a
+supported rollback guarantee; the same `CAESIUM_LIFECYCLE_MODE=cluster`
+invocation above reproduces it.
 
 ### Fenced core failures (distributed-testing W5/B3)
 
@@ -1833,7 +1901,8 @@ A/A mode: set `CAESIUM_PERF_BASE_SHA` to the candidate SHA. One image is then
 measured on both sides and the report records `"control": "a_a"`. The
 comparator adds informational `multiplicity` and `extreme_samples` sections.
 They never change a verdict or the exit code; the decision rule (α 0.05,
-max CV 0.3, 5 minimum samples) is unchanged.
+max CV 0.3, 5 minimum samples) was unchanged at W7 and is superseded by
+W8-γ's budgets below.
 
 Live runs, each 10 repeats of `closed-baseline` with load, benchmarks, browser
 and bundle. The A/B runs compare against W4 `45994929`, using the base image
@@ -1850,10 +1919,79 @@ and bundle. The A/B runs compare against W4 `45994929`, using the base image
 E3 is checked. With 24 informative metrics at uncorrected α 0.05, and with
 benchmark false positives clustering because the benchmarks share a process,
 a single run's conclusiveness is partly chance. The aggregation, bounded-rerun
-and calibrated-budget policy is E4's (Q2 / Q5). Do not run `just lint` or
+and calibrated-budget policy is delivered by W8-γ (#589) below. Do not run `just lint` or
 `just unit-test` concurrently with a measured `performance.sh` run; they
 visibly perturb the benchmark phase. The `ec893213` 32.5 s cold repeat remains
-unattributed. This is not a CI job or a calibrated SLO.
+unattributed. This is not a CI job; the calibrated budgets follow.
+
+**W8-γ: calibrated budgets, fixed baseline and bounded reruns (#589).**
+[#589](https://github.com/caesium-cloud/caesium/pull/589) merged at
+`3186bbfa`. `scripts/compare-performance.py` now decides from
+`test/performance/budgets.json` (`--budgets`; schema 1, version 1) instead of
+the uncorrected per-series rule, which is kept in the report as
+`uncorrected_verdict`. Each series gets a Hodges–Lehmann log-ratio with a
+one-sided Moses non-inferiority bound at α 0.05 split across the three allowed
+attempts, and a run passes only when every series passes. `slower` needs a
+Holm-significant one-sided Mann–Whitney result per family and a point estimate
+beyond the margin; `within_budget` is a significant but bounded slowdown and
+exits 0; undersampled, noisy (`max_cv`) or unbounded series are inconclusive.
+Absolute SLOs are a nearest-rank p90 over 10 samples on the candidate; bundle
+ceilings stay in lockstep with `ui/scripts/check-bundle-size.mjs` (unit-tested).
+`--baseline test/performance/baseline.json` adds a second `fixed_baseline`
+verdict for cumulative regression; it is refused as inconclusive unless
+`host_id`, platform, Go version, catalog, settings and benchmark harness all
+match. Every budget value change needs a `changes` entry (rationale, evidence,
+`reviewed_in`, `values_sha256`); the comparator and a git-history test enforce
+it. `--calibrate` reproduces the calibration statistics from A/A documents and
+(review round `d028727c`) refuses any document whose two sides differ in
+`git_sha`, `image_id`, `image_ref`, `cli_digest`, `builder_image_id`,
+`toolchain_id` or `go_version`. The same round made a measured workload with a
+missing SLO field fail closed (exit 2, `strict_gate.blocking=true`; an
+unselected workload stays `not_evaluated`), rejected non-finite SLO
+observations, and made the report writer refuse NaN/Infinity.
+
+`scripts/performance.sh` is now a gate run: only a rerun-eligible
+`inconclusive` attempt is repeated, at most `rerun_policy.max_reruns` (2)
+times, re-interleaved (candidate first on even attempts), with fresh processes
+and only images an earlier attempt built. Samples are never pooled across
+attempts; every attempt's report is kept and `gate.json` summarizes them.
+Exhaustion, or a cause a rerun cannot fix, ends as `inconclusive_unresolved`
+(exit 3), which a strict gate must treat as blocking. New knobs:
+`CAESIUM_PERF_BUDGETS`, `CAESIUM_PERF_BASELINE` (`none` skips it and the
+report's `strict_gate` marks that blocking), `CAESIUM_PERF_ATTEMPT=N` (one
+attempt, no loop), `CAESIUM_PERF_HOST_ID` (pins the runner identity; the
+default derives from the network hostname, which changed between W7 and W8).
+Record a baseline from a finished, non-regressing attempt:
+
+```sh
+CAESIUM_PERF_HOST_ID='caesium-perf-m5max-dd|Darwin|arm64' \
+  bash scripts/performance.sh baseline-record "$CAESIUM_PERF_ARTIFACTS/attempt-1" test/performance/baseline.json
+```
+
+Calibration on the recorded runner (Apple M5 Max, macOS 27.0, Docker Desktop
+4.91 / engine 29.8, 8-vCPU LinuxKit VM, linux/arm64, go1.27.1; runner ID
+`caesium-perf-m5max-dd|Darwin|arm64`; every run held the host lane):
+
+| Run | Kind | Workloads (10 repeats) | Lane | Budgeted verdict | E3 uncorrected |
+| --- | --- | --- | --- | --- | --- |
+| `perf-w8g-aa1` | A/A `710f450a` | closed-baseline + bench + browser + bundle (42 series) | 26 min | no_significant_difference | no_significant_difference |
+| `perf-w8g-aa2` | A/A | same | 26 min | no_significant_difference | faster (1 p < 0.05) |
+| `perf-w8g-aa3` | A/A | same | 26 min | no_significant_difference | faster (2 p < 0.05) |
+| `perf-w8g-aa4` | A/A, load only | open-tiny-sustained, open-api-read-mix | 70 min | exit 2 (fail closed) | `open-api-read-mix` failed require-sustained in 12/20 warm samples on identical code → [#588](https://github.com/caesium-cloud/caesium/issues/588); open-tiny-sustained 60/60 |
+| `perf-w8g-ab` | A/B `710f450a` → `c0bb70f8` | closed-baseline + bench + browser + bundle | 26 min | no_significant_difference, attempt 1, 15/15 SLOs | no_significant_difference |
+
+Under the final rule the A/A false-fail and inconclusive rates were 0/3 and
+0/3; pooled 72 informative p-values had 3 below 0.05 (KS uniformity p 0.19);
+cross-run pairs 6/6 pass (worst upper bound 1.17). Margins are the worst
+observed per-side log SD times (z_NI + z_0.995), rounded up to 5 % with a 5 %
+floor: benchmark ns/op 10–20 %, browser 5–25 %, closed-baseline cold 10 % and
+warm 25 %, open-tiny duration 5 %; `max_cv` is max(0.10, 2 × the largest A/A
+CV); `min_samples` is 10. The A/B was neutral, as expected for a harness-only
+candidate; no optimization is claimed. **Q2 limitation:** nothing here is an
+isolated or hosted runner. The budgets and baseline are valid only on the
+runner above; before G6 promotes a performance lane, the promoted runner needs
+A/A recalibration, a re-recorded baseline and a reviewed budgets change. Do not
+run any other Docker work concurrently with a measured run.
 
 ### Checker-strength mutation validator (distributed-testing W6/C3)
 
