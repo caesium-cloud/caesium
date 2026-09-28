@@ -13,6 +13,14 @@ gates `early` to be reported `pass` with its required fault-activation
 observations, and re-runs the fail-closed scenario checker over it. An absent,
 unreadable, foreign or hollow report fails the gate.
 
+distributed-testing G6 extends that exact rule to every promoted system-suite
+lane in `EVIDENCE_LANES` (F4 standalone lifecycle, C2 fuzzing, C3 mutation
+validator, G2 coverage): each lane uploads one report for its own
+manifest gate, the workflow passes it as `--lane-evidence job=path`, and a
+selected lane whose report is absent, foreign, hollow or failing fails the
+gate. Lanes in `UNPROMOTED_LANES` (the nightly set and any lane demoted from
+the merge budget) never block a merge and are listed as such on every run.
+
 distributed-testing G7 -- candidate identity and base freshness (Q6):
 
 Whenever the caller supplies ANY of `--candidate-sha`/`--event-name`/
@@ -82,14 +90,43 @@ SELECTORS = {
     # chart failure reports as itself instead of as a skipped consumer.
     "helm-lint": (),
     "early-evidence": ("go", "helm", "ci"),
+    # distributed-testing G6 promoted system-suite lanes. Each selector is the
+    # lane job's own `if:` (scripts/test_ci.py pins the two together).
+    "lifecycle-standalone": ("go", "ci"),
+    "generated-fuzz": ("go", "ci"),
+    "generated-oracles": ("go", "ci"),
+    "coverage-ratchets": ("go", "ui", "ci"),
 }
 
-# The promoted lane and the manifest gate its evidence must satisfy.
+# The first promoted lane and the manifest gate its evidence must satisfy
+# (G5). Its report still arrives through `--evidence-report`.
 EVIDENCE_JOB = "early-evidence"
 EVIDENCE_GATE = "early"
 
+# Every promoted evidence lane and its manifest gate. A green job result is
+# never enough for any of them: the lane's own report must bind to this run's
+# candidate SHA and pass `check-test-evidence.py --require <gate> --strict`.
+EVIDENCE_LANES = {
+    EVIDENCE_JOB: EVIDENCE_GATE,
+    "lifecycle-standalone": "lifecycle",
+    "generated-fuzz": "generated-fuzz",
+    "generated-oracles": "generated-oracles",
+    "coverage-ratchets": "coverage",
+}
 
-def gated_scenarios(manifest):
+# Lanes that exist in the workflow but do not block a merge. Printed on every
+# run so an unpromoted lane can never be mistaken for merge evidence.
+UNPROMOTED_LANES = {
+    "lifecycle-cluster": "nightly set (W8 decision record): F2 cluster lifecycle qualification",
+    "console-recovery": "nightly set (W8 decision record): D3 console cluster-recovery journey",
+    "performance-gate": "nightly set (W8 decision record): E4 performance gate; advisory until "
+                        "the hosted runner is calibrated",
+    "core-robustness-nightly": "nightly set, demoted from the merge budget: B3 TestCore (with the "
+                               "testfault-instrumented server) measured 16m30s on the PR path",
+}
+
+
+def gated_scenarios(manifest, gate=EVIDENCE_GATE):
     """Manifest rows the evidence gate requires. An empty set is not a pass."""
     scenarios = manifest.get("scenarios")
     if not isinstance(scenarios, list):
@@ -98,7 +135,7 @@ def gated_scenarios(manifest):
         item for item in scenarios
         if isinstance(item, dict)
         and item.get("id")
-        and EVIDENCE_GATE in (item.get("gates") or [])
+        and gate in (item.get("gates") or [])
     ]
 
 
@@ -121,9 +158,9 @@ def _fault_problem(scenario, result):
     return None
 
 
-def verify_evidence(report_path, manifest_path, candidate_sha):
-    """Fail closed on absent, foreign or hollow early-gate evidence."""
-    label = f"{EVIDENCE_JOB} evidence"
+def verify_evidence(report_path, manifest_path, candidate_sha, job=EVIDENCE_JOB, gate=EVIDENCE_GATE):
+    """Fail closed on absent, foreign or hollow evidence for one lane gate."""
+    label = f"{job} evidence"
     if not report_path:
         return [f"{label}: no --evidence-report was passed to the gate"]
     if not candidate_sha:
@@ -144,9 +181,9 @@ def verify_evidence(report_path, manifest_path, candidate_sha):
         return [f"{label}: report {report_path} must be an object"]
 
     problems = []
-    required = gated_scenarios(manifest)
+    required = gated_scenarios(manifest, gate)
     if not required:
-        problems.append(f"{label}: gate {EVIDENCE_GATE!r} has no registered scenarios")
+        problems.append(f"{label}: gate {gate!r} has no registered scenarios")
     reported_sha = report.get("candidate_sha")
     if reported_sha != candidate_sha:
         problems.append(
@@ -173,7 +210,7 @@ def verify_evidence(report_path, manifest_path, candidate_sha):
             sys.executable, str(CHECKER),
             "--manifest", str(manifest_path),
             "--report", str(report_path),
-            "--require", EVIDENCE_GATE,
+            "--require", gate,
             "--strict",
         ],
         capture_output=True,
@@ -191,7 +228,7 @@ def verify_evidence(report_path, manifest_path, candidate_sha):
 # an unrecognized trigger cannot be assumed to carry the invariants (a real
 # prospective-merge `github.sha`, a meaningful base/head pair) this gate
 # depends on.
-RECOGNIZED_EVENTS = ("pull_request", "merge_group", "push")
+RECOGNIZED_EVENTS = ("pull_request", "merge_group", "push", "workflow_dispatch")
 
 # Events that name a base/head pair a caller must supply.
 _BASE_HEAD_EVENTS = ("pull_request", "merge_group")
@@ -328,6 +365,10 @@ def parse_args(argv):
     parser.add_argument("jobs", nargs="*", help="required job names, matching ci.yml `needs`")
     parser.add_argument("--evidence-report", default=None, help="evidence report JSON the promoted lane uploaded")
     parser.add_argument(
+        "--lane-evidence", action="append", default=[], metavar="JOB=PATH",
+        help="report a promoted G6 lane uploaded (repeat once per lane in EVIDENCE_LANES)",
+    )
+    parser.add_argument(
         "--evidence-manifest",
         default=str(SCRIPTS.parent / "test/contracts/scenarios.json"),
         help="committed scenario manifest",
@@ -461,13 +502,42 @@ def main(argv=None) -> int:
             print(freshness_message)
             _write_step_summary(freshness_message)
 
-    if EVIDENCE_JOB in required:
-        if deselected.get(EVIDENCE_JOB):
-            print(f"ci-ok: {EVIDENCE_JOB} was deselected by the path filters; no evidence required")
+    lane_reports = {}
+    for item in args.lane_evidence:
+        job, sep, path = item.partition("=")
+        if not sep or not job or not path:
+            failed.append(f"malformed --lane-evidence {item!r}; want JOB=PATH")
+            continue
+        if job not in EVIDENCE_LANES or job == EVIDENCE_JOB:
+            failed.append(f"--lane-evidence names {job!r}, which is not a promoted G6 evidence lane")
+            continue
+        if job in lane_reports:
+            failed.append(f"--lane-evidence names {job!r} more than once")
+            continue
+        lane_reports[job] = path
+
+    for job, gate in EVIDENCE_LANES.items():
+        if job not in required:
+            continue
+        if deselected.get(job):
+            print(f"ci-ok: {job} was deselected by the path filters; no evidence required")
+            continue
+        if job == EVIDENCE_JOB:
+            report = args.evidence_report
         else:
-            failed.extend(verify_evidence(
-                args.evidence_report, args.evidence_manifest, args.candidate_sha,
-            ))
+            report = lane_reports.get(job)
+            if report is None:
+                failed.append(f"{job} evidence: no --lane-evidence {job}=PATH was passed to the gate")
+                continue
+        failed.extend(verify_evidence(
+            report, args.evidence_manifest, args.candidate_sha, job=job, gate=gate,
+        ))
+
+    unpromoted = [name for name in UNPROMOTED_LANES if name not in required]
+    if unpromoted:
+        print("ci-ok: not merge-blocking (unpromoted; nightly or dispatch evidence only):")
+        for name in unpromoted:
+            print(f"  {name}: {UNPROMOTED_LANES[name]}")
 
     if failed:
         print("ci-ok failed: " + ", ".join(failed), file=sys.stderr)

@@ -30,6 +30,10 @@ CI_OK = runpy.run_path(str(ROOT / "scripts/ci-ok.py"))
 SELECTORS = CI_OK["SELECTORS"]
 EVIDENCE_JOB = CI_OK["EVIDENCE_JOB"]
 EVIDENCE_GATE = CI_OK["EVIDENCE_GATE"]
+EVIDENCE_LANES = CI_OK["EVIDENCE_LANES"]
+UNPROMOTED_LANES = CI_OK["UNPROMOTED_LANES"]
+# distributed-testing G6 promoted lanes (every evidence lane but G5's).
+G6_LANES = {job: gate for job, gate in EVIDENCE_LANES.items() if job != EVIDENCE_JOB}
 RECOGNIZED_EVENTS = CI_OK["RECOGNIZED_EVENTS"]
 VERIFY_CANDIDATE_IDENTITY = CI_OK["verify_candidate_identity"]
 VERIFY_BASE_FRESHNESS = CI_OK["verify_base_freshness"]
@@ -43,19 +47,19 @@ CANDIDATE_BASE_SHA = "base0000" + "0" * 32
 CANDIDATE_HEAD_SHA = "head0000" + "0" * 32
 
 
-def gated_scenarios(manifest=None):
+def gated_scenarios(manifest=None, gate=EVIDENCE_GATE):
     return [item for item in (manifest or MANIFEST)["scenarios"]
-            if EVIDENCE_GATE in (item.get("gates") or [])]
+            if gate in (item.get("gates") or [])]
 
 
-def evidence_report(sha=CANDIDATE_SHA, digest=CANDIDATE_DIGEST):
+def evidence_report(sha=CANDIDATE_SHA, digest=CANDIDATE_DIGEST, gate=EVIDENCE_GATE):
     """A report of the shape the lane uploads, rebuilt from the real manifest.
 
     Every observed value is echoed from the committed manifest row, so this
     fixture cannot drift away from what the gate demands.
     """
     scenarios = []
-    for item in gated_scenarios():
+    for item in gated_scenarios(gate=gate):
         evidence = item.get("evidence") or {}
         entry = {
             "id": item["id"],
@@ -89,19 +93,44 @@ def evidence_report(sha=CANDIDATE_SHA, digest=CANDIDATE_DIGEST):
     }
 
 
+_LANE_REPORT_DIR = tempfile.TemporaryDirectory()
+_LANE_REPORTS = {}
+
+
+def honest_lane_reports(sha=CANDIDATE_SHA):
+    """One honest report per promoted G6 lane, shaped like its upload."""
+    if sha not in _LANE_REPORTS:
+        root = Path(_LANE_REPORT_DIR.name) / sha
+        reports = {}
+        for job, gate in G6_LANES.items():
+            path = root / job / "evidence.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(evidence_report(sha=sha, gate=gate)))
+            reports[job] = path
+        _LANE_REPORTS[sha] = reports
+    return dict(_LANE_REPORTS[sha])
+
+
 def gate_command(report, manifest=MANIFEST_PATH, sha=CANDIDATE_SHA, jobs=None,
                   event_name="pull_request", base_sha=CANDIDATE_BASE_SHA,
                   head_sha=CANDIDATE_HEAD_SHA, current_base_sha="",
-                  candidate_parents=f"{CANDIDATE_BASE_SHA} {CANDIDATE_HEAD_SHA}"):
+                  candidate_parents=f"{CANDIDATE_BASE_SHA} {CANDIDATE_HEAD_SHA}",
+                  lane_reports=None):
     # Defaults describe a well-formed pull_request candidate identity --
     # including two matching git parents, [base, head] -- so every existing
     # evidence-focused test keeps exercising exactly the evidence wiring it
     # did before G7 added these flags; tests that care about identity/
-    # freshness/parents override the relevant keyword.
+    # freshness/parents override the relevant keyword. G6's promoted lanes
+    # get honest reports for the tested SHA unless a test passes its own.
+    lanes = honest_lane_reports(sha) if lane_reports is None else lane_reports
+    lane_args = []
+    for job, path in lanes.items():
+        lane_args += ["--lane-evidence", f"{job}={path}"]
     return [
         sys.executable, str(ROOT / "scripts/ci-ok.py"),
         "--evidence-report", str(report),
         "--evidence-manifest", str(manifest),
+        *lane_args,
         "--candidate-sha", sha,
         "--event-name", event_name,
         "--base-sha", base_sha,
@@ -691,6 +720,15 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(any(name.startswith("builder-") for name in loads))
 
 
+def recipe_body(name):
+    """The body of one justfile recipe (header line through the next blank line)."""
+    text = (ROOT / "justfile").read_text()
+    match = re.search(rf"^{re.escape(name)}(?:\s[^\n]*)?:[^\n]*\n(.*?)(?=\n\S|\Z)", text, re.S | re.M)
+    if match is None:
+        raise AssertionError(f"justfile has no recipe {name!r}")
+    return match.group(1)
+
+
 def change_filters():
     return yaml.safe_load(next(
         step["with"]["filters"] for step in JOBS["changes"]["steps"] if step.get("id") == "filter"
@@ -822,12 +860,18 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
         # B2 made the runner selection configurable (CAESIUM_ROBUSTNESS_RUN) so the
         # targeted-fault tests can share the harness. The early-evidence lane must
         # still run EXACTLY the registered selector: the script's default is the
-        # owner-crash pattern, that pattern is what reaches the runner, and neither
-        # the workflow nor the justfile overrides it.
+        # owner-crash pattern, that pattern is what reaches the runner, and
+        # nothing on the early-evidence path overrides it. G6's core-robustness
+        # recipe is the ONE place that sets it, to exactly '^TestCore$'.
         self.assertIn('RUN_PATTERN="${CAESIUM_ROBUSTNESS_RUN:-^TestOwnerCrash\\$}"', runner)
         self.assertIn('"-test.run", "${RUN_PATTERN}"', runner)
-        for path in (".github/workflows/ci.yml", "justfile"):
-            self.assertNotIn("CAESIUM_ROBUSTNESS_RUN", (ROOT / path).read_text(), path)
+        self.assertNotIn("CAESIUM_ROBUSTNESS_RUN", (ROOT / ".github/workflows/ci.yml").read_text())
+        justfile = (ROOT / "justfile").read_text()
+        for recipe in ("robustness-test", "robustness-runner", "early-evidence", "check-evidence",
+                       "integration-test-sql-budget"):
+            self.assertNotIn("CAESIUM_ROBUSTNESS_RUN", recipe_body(recipe), recipe)
+        self.assertEqual(justfile.count("CAESIUM_ROBUSTNESS_RUN"), 1)
+        self.assertIn("CAESIUM_ROBUSTNESS_RUN='^TestCore$'", recipe_body("core-robustness"))
         # Required subtests are declared per selection and enforced by one loop; a
         # registered selector missing from the owner-crash branch, or a loop that no
         # longer dies on a missing PASS line, would let the lane go green hollow.
@@ -1064,7 +1108,8 @@ class CandidateIdentityUnitTests(unittest.TestCase):
     """Pure-function coverage for G7's identity/staleness checks (no subprocess)."""
 
     def test_recognized_events_match_the_workflows_declared_triggers(self):
-        self.assertEqual(set(RECOGNIZED_EVENTS), {"pull_request", "merge_group", "push"})
+        self.assertEqual(set(RECOGNIZED_EVENTS),
+                         {"pull_request", "merge_group", "push", "workflow_dispatch"})
         self.assertEqual(set(TRIGGERS), set(RECOGNIZED_EVENTS))
 
     def test_identity_requires_event_name_and_candidate_sha(self):
@@ -1079,9 +1124,11 @@ class CandidateIdentityUnitTests(unittest.TestCase):
 
     def test_identity_rejects_an_unrecognized_event(self):
         self.assertEqual(
-            VERIFY_CANDIDATE_IDENTITY("workflow_dispatch", "sha", "", ""),
-            ["candidate identity: unrecognized event 'workflow_dispatch'"],
+            VERIFY_CANDIDATE_IDENTITY("schedule", "sha", "", ""),
+            ["candidate identity: unrecognized event 'schedule'"],
         )
+        # G6: a dispatch is push-like -- no base/head pair to require.
+        self.assertEqual(VERIFY_CANDIDATE_IDENTITY("workflow_dispatch", "sha", "", ""), [])
 
     def test_identity_requires_base_and_head_for_pull_request_and_merge_group(self):
         for event in ("pull_request", "merge_group"):
@@ -1235,7 +1282,13 @@ class CandidateIdentityGateTests(unittest.TestCase):
         self.assertIn("no --event-name", self.gate(1, event_name=""))
 
     def test_unrecognized_event_fails_closed(self):
-        self.assertIn("unrecognized event", self.gate(1, event_name="workflow_dispatch"))
+        self.assertIn("unrecognized event", self.gate(1, event_name="schedule"))
+
+    def test_workflow_dispatch_needs_no_base_or_head(self):
+        # G6: a dispatched nightly/push-equivalent run is push-like.
+        output = self.gate(0, event_name="workflow_dispatch", base_sha="", head_sha="",
+                           candidate_parents="")
+        self.assertIn("ci-ok passed", output)
 
     def test_pull_request_missing_base_or_head_fails_closed(self):
         self.assertIn("missing --base-sha", self.gate(1, base_sha=""))
@@ -1375,6 +1428,9 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
         self.assertIn("github.event.pull_request.number", group)
         self.assertIn("github.event.merge_group.head_sha", group)
         self.assertIn("github.event_name == 'merge_group'", group)
+        # G6: every dispatch gets its own group, so a nightly or calibration
+        # dispatch never queues behind (or cancels) another run.
+        self.assertIn("github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id)", group)
         # cancel-in-progress must never apply to a merge_group run.
         self.assertEqual(WORKFLOW["concurrency"]["cancel-in-progress"],
                           "${{ github.event_name == 'pull_request' }}")
@@ -1566,6 +1622,464 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
         head = argv[argv.index("--head-sha") + 1]
         self.assertIn("github.event.pull_request.head.sha", head)
         self.assertIn("github.event.merge_group.head_sha", head)
+
+
+class SystemSuiteLaneWiringTests(unittest.TestCase):
+    """distributed-testing G6: each promoted system-suite lane is its own job,
+    off the existing image artifacts, with its own manifest gate and report."""
+
+    # job -> (recipe invocation, image artifacts it loads)
+    LANES = {
+        "lifecycle-standalone": ("lifecycle-standalone", {"builder-amd64", "product-amd64"}),
+        "generated-fuzz": ("generated-fuzz", {"builder-amd64"}),
+        "generated-oracles": ("generated-oracles", {"builder-amd64"}),
+        "coverage-ratchets": ("coverage-ratchets", {"builder-amd64"}),
+    }
+
+    def gate_argv(self):
+        step = next(step for step in JOBS["ci-ok"]["steps"] if step.get("name") == "Evaluate merge gate")
+        return shlex.split(step["run"].replace("\\\n", " "))
+
+    def test_every_promoted_lane_is_wired_and_classified(self):
+        self.assertEqual(set(G6_LANES), set(self.LANES))
+        needs = JOBS["ci-ok"]["needs"]
+        for job in G6_LANES:
+            with self.subTest(job=job):
+                self.assertIn(job, JOBS)
+                self.assertIn(job, needs)
+                self.assertIn(job, SELECTORS)
+                self.assertNotIn(job, UNPROMOTED_LANES)
+                # Runs in parallel with early-evidence: it never waits on it.
+                self.assertNotIn("early-evidence", JOBS[job]["needs"])
+                self.assertIn("changes", JOBS[job]["needs"])
+                # The required wrapper contexts keep their G5 meaning.
+                for wrapper in ("build-and-integration-test", "build-and-integration-test-agent-auth"):
+                    self.assertNotIn(job, JOBS[wrapper]["needs"])
+
+    def test_lane_gates_have_registered_manifest_rows(self):
+        for job, gate in G6_LANES.items():
+            with self.subTest(job=job, gate=gate):
+                rows = gated_scenarios(gate=gate)
+                self.assertTrue(rows, f"gate {gate!r} has no manifest rows")
+                for row in rows:
+                    self.assertEqual(row["status"], "proven", row["id"])
+                # The recipe validates the SAME gate ci-ok re-validates.
+                body = recipe_body(self.LANES[job][0].split()[0])
+                self.assertIn(f"--require {gate} --strict", body)
+                self.assertIn(f"--gate {gate}", body)
+
+    def test_lane_runs_its_recipe_off_loaded_images_and_never_a_compile_job(self):
+        for job, (invocation, artifacts) in self.LANES.items():
+            with self.subTest(job=job):
+                steps = JOBS[job]["steps"]
+                loads = {step["with"]["name"] for step in steps
+                         if step.get("uses") == "./.github/actions/load-docker-images"}
+                self.assertEqual(loads, artifacts)
+                runs = [step["run"] for step in steps if f"just tag=${{{{ env.IMAGE_TAG }}}}-amd64 {invocation}" in step.get("run", "")]
+                self.assertEqual(len(runs), 1, job)
+                self.assertEqual(JOBS[job]["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+                self.assertFalse([step for step in steps if "docker/build-push-action" in str(step.get("uses", ""))])
+
+    def test_lane_uploads_its_report_even_on_failure(self):
+        for job in G6_LANES:
+            with self.subTest(job=job):
+                steps = JOBS[job]["steps"]
+                report = next(step for step in steps if step.get("with", {}).get("name") == f"{job}-evidence")
+                self.assertEqual(report["uses"], "actions/upload-artifact@v7")
+                self.assertEqual(report["if"], "always()")
+                self.assertEqual(report["with"]["if-no-files-found"], "error")
+                self.assertEqual(report["with"]["path"], f".tmp/lane-evidence/{job}/*.json")
+
+    def test_ci_ok_downloads_and_revalidates_every_lane_report(self):
+        steps = JOBS["ci-ok"]["steps"]
+        gate = next(step for step in steps if step.get("name") == "Evaluate merge gate")
+        argv = self.gate_argv()
+        passed = {}
+        for index, item in enumerate(argv):
+            if item == "--lane-evidence":
+                job, _, path = argv[index + 1].partition("=")
+                passed[job] = path
+        self.assertEqual(set(passed), set(G6_LANES))
+        for job, path in passed.items():
+            with self.subTest(job=job):
+                download = next(step for step in steps
+                                if step.get("uses", "").startswith("actions/download-artifact")
+                                and step.get("with", {}).get("name") == f"{job}-evidence")
+                self.assertEqual(download["if"], f"needs.{job}.result == 'success'")
+                self.assertLess(steps.index(download), steps.index(gate))
+                self.assertEqual(str(Path(path).parent), download["with"]["path"])
+                self.assertEqual(Path(path).name, "evidence.json")
+                self.assertIn(job, argv)
+
+    def test_lanes_select_their_code_fixture_build_and_workflow_changes(self):
+        common = [
+            ("internal/run/store.go", "code"),
+            ("test/contracts/scenarios.json", "scenario manifest"),
+            ("go.mod", "dependency"),
+            ("build/Dockerfile.robustness", "image"),
+            ("justfile", "recipe"),
+            ("scripts/collect-lane-evidence.py", "artifact consumer"),
+            (".github/workflows/ci.yml", "workflow"),
+        ]
+        specific = {
+            "lifecycle-standalone": [("test/lifecycle/standalone_test.go", "lane test code"),
+                                     ("test/lifecycle/versions.json", "version matrix"),
+                                     ("scripts/lifecycle-tests.sh", "lane runner")],
+            "generated-fuzz": [("internal/run/descriptor_fuzz_test.go", "fuzz target"),
+                               ("scripts/fuzz-tests.sh", "lane runner")],
+            "generated-oracles": [("test/model/oracle_regression_test.go", "oracle"),
+                                  ("test/model/testdata/mutations/lost-ack.patch", "mutation"),
+                                  ("scripts/validate-test-oracles.sh", "lane runner")],
+            "coverage-ratchets": [("ui/src/main.tsx", "browser journey"),
+                                  ("scripts/coverage-ratchet.json", "ratchet"),
+                                  ("build/Dockerfile.coverage", "coverage image")],
+        }
+        for job in G6_LANES:
+            selectors = job_selectors(job)
+            self.assertEqual(selectors, set(SELECTORS[job]), job)
+            for path, reason in common + specific[job]:
+                with self.subTest(job=job, path=path, reason=reason):
+                    self.assertTrue(selected_groups(path) & selectors, path)
+            for path in ("docs/ci.md", "README.md", "docs/exec-plans/active/distributed-testing.md"):
+                with self.subTest(job=job, path=path):
+                    self.assertFalse(selected_groups(path) & selectors, path)
+
+    def test_integration_subpackages_are_compiled_explicitly_with_the_tag(self):
+        # The precompiled ./test runner does not contain subpackage tests; each
+        # subpackage lane compiles its own runner with -tags=integration.
+        robustness = (ROOT / "build/Dockerfile.robustness").read_text()
+        self.assertIn("go test -tags=integration -c ./test/robustness", robustness)
+        lifecycle = (ROOT / "scripts/lifecycle-tests.sh").read_text()
+        self.assertIn("go test -tags=integration -c ./test/lifecycle", lifecycle)
+        self.assertIn("CAESIUM_LIFECYCLE_BUILDER_IMAGE", JOBS["lifecycle-standalone"]["steps"][-3]["run"])
+
+    def test_standalone_lifecycle_binds_the_supplied_image_to_its_producer(self):
+        images = JOBS["images"]["steps"]
+        record = next(step for step in images if step.get("name") == "Record release image identity")
+        upload = next(step for step in images if step.get("with", {}).get("name") == "image-ids-amd64")
+        self.assertLess(images.index(record), images.index(upload))
+        self.assertIn("caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64", record["run"])
+        steps = JOBS["lifecycle-standalone"]["steps"]
+        download = next(step for step in steps if step.get("with", {}).get("name") == "image-ids-amd64")
+        run = next(step for step in steps if "lifecycle-standalone" in step.get("run", ""))
+        self.assertLess(steps.index(download), steps.index(run))
+        self.assertIn("CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID=\"$expected\"", run["run"])
+        self.assertIn("CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1", run["run"])
+        body = recipe_body("lifecycle-standalone")
+        # An override without its producer's id is refused by the recipe.
+        self.assertIn("needs CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID", body)
+        self.assertIn('--expected-image-id "$expected"', body)
+
+    def test_coverage_diff_uses_the_events_own_base(self):
+        steps = JOBS["coverage-ratchets"]["steps"]
+        diff = next(step for step in steps if step.get("name") == "Changed Go paths of the tested change")
+        self.assertEqual(
+            diff["env"]["DIFF_BASE_SHA"],
+            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
+        )
+        self.assertIn("CAESIUM_COVERAGE_CHANGED_PATHS=", diff["run"])
+        self.assertIn("CAESIUM_COVERAGE_DIFF_BASE=", diff["run"])
+        self.assertIn("-- '*.go'", diff["run"])
+        self.assertNotIn("if", diff)
+
+    def test_every_lane_recipe_refuses_a_foreign_or_dirty_candidate(self):
+        check = recipe_body("lane-candidate-check")
+        self.assertIn("git status --porcelain", check)
+        self.assertIn('!= "$head"', check)
+        text = (ROOT / "justfile").read_text()
+        for recipe in ("core-robustness", "lifecycle-standalone", "generated-fuzz", "generated-oracles",
+                       "coverage-ratchets", "lifecycle-cluster", "console-recovery", "performance-gate"):
+            with self.subTest(recipe=recipe):
+                header = re.search(rf"^{re.escape(recipe)}(?:\s[^\n]*)?:([^\n]*)$", text, re.M)
+                self.assertIsNotNone(header, recipe)
+                self.assertIn("lane-candidate-check", header.group(1))
+
+
+class SystemSuiteLaneGateTests(unittest.TestCase):
+    """G6 promoted lanes fail closed in ci-ok exactly like early-evidence."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.early = self.dir / "early.json"
+        self.early.write_text(json.dumps(evidence_report()))
+
+    def lanes(self, **overrides):
+        """Honest reports for every lane, with per-lane replacements."""
+        reports = {}
+        for job, gate in G6_LANES.items():
+            path = self.dir / job / "evidence.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            value = overrides.get(job, evidence_report(gate=gate))
+            if value is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(json.dumps(value))
+            reports[job] = path
+        return reports
+
+    def run_gate(self, expected, needs=None, lane_reports=None, enabled=FLAGS, argv_patch=None):
+        command = gate_command(self.early, lane_reports=self.lanes() if lane_reports is None else lane_reports)
+        if argv_patch:
+            command = argv_patch(command)
+        result = subprocess.run(
+            command,
+            env={**os.environ,
+                 "NEEDS_JSON": json.dumps(results(selected_outputs(enabled)) if needs is None else needs)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result.stdout + result.stderr
+
+    def test_honest_lane_reports_pass_and_unpromoted_lanes_are_listed(self):
+        output = self.run_gate(0)
+        self.assertIn("ci-ok passed", output)
+        self.assertIn("not merge-blocking", output)
+        for name in UNPROMOTED_LANES:
+            self.assertIn(f"  {name}: ", output)
+
+    def test_bad_job_results_fail_closed(self):
+        for job in G6_LANES:
+            for status in ("failure", "cancelled", "skipped", "timed_out", None):
+                with self.subTest(job=job, status=status):
+                    needs = results(selected_outputs(FLAGS))
+                    if status is None:
+                        del needs[job]
+                    else:
+                        needs[job]["result"] = status
+                    self.assertIn(f"{job}={status or 'missing'}", self.run_gate(1, needs=needs))
+
+    def test_deselected_lane_owes_no_report(self):
+        needs = results(selected_outputs(("ui",)))
+        reports = self.lanes(**{job: None for job in G6_LANES if job != "coverage-ratchets"})
+        output = self.run_gate(0, needs=needs, lane_reports=reports, enabled=("ui",))
+        for job in G6_LANES:
+            if job == "coverage-ratchets":
+                continue
+            self.assertIn(f"ci-ok: {job} was deselected by the path filters", output)
+
+    def test_absent_foreign_or_hollow_report_fails_closed(self):
+        for job, gate in G6_LANES.items():
+            with self.subTest(job=job, case="absent"):
+                self.assertIn(f"{job} evidence:", self.run_gate(1, lane_reports=self.lanes(**{job: None})))
+                self.assertIn("produced no evidence", self.run_gate(1, lane_reports=self.lanes(**{job: None})))
+            with self.subTest(job=job, case="foreign"):
+                self.assertIn("not the tested candidate",
+                              self.run_gate(1, lane_reports=self.lanes(**{job: evidence_report(sha="e" * 40, gate=gate)})))
+            with self.subTest(job=job, case="hollow"):
+                report = evidence_report(gate=gate)
+                missing = report["scenarios"].pop()["id"]
+                self.assertIn(f"scenario {missing!r} is missing",
+                              self.run_gate(1, lane_reports=self.lanes(**{job: report})))
+            with self.subTest(job=job, case="failed"):
+                report = evidence_report(gate=gate)
+                report["scenarios"][0]["status"] = "fail"
+                self.assertIn("status 'fail'", self.run_gate(1, lane_reports=self.lanes(**{job: report})))
+            with self.subTest(job=job, case="another lane's report"):
+                other = next(g for j, g in G6_LANES.items() if j != job)
+                self.assertIn(f"{job} evidence",
+                              self.run_gate(1, lane_reports=self.lanes(**{job: evidence_report(gate=other)})))
+
+    def test_merge_group_candidate_gets_the_same_lane_verdicts(self):
+        """The merge queue runs the promoted lanes on the queue's own head: the
+        selectors, evidence binding and fail-closed rules are event-agnostic,
+        so what passes on pull_request passes on merge_group and a foreign or
+        missing lane report fails it too. (merge_group has never fired on this
+        repository; this is the static proof, like G7's.)"""
+        head = CANDIDATE_SHA
+        def gate(lanes, expected):
+            result = subprocess.run(
+                gate_command(self.early, lane_reports=lanes, event_name="merge_group",
+                             base_sha=CANDIDATE_BASE_SHA, head_sha=head,
+                             current_base_sha=CANDIDATE_BASE_SHA, candidate_parents=""),
+                env={**os.environ, "NEEDS_JSON": json.dumps(results(selected_outputs(FLAGS)))},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            return result.stdout + result.stderr
+        self.assertIn("ci-ok passed", gate(self.lanes(), 0))
+        for job, lane_gate in G6_LANES.items():
+            with self.subTest(job=job):
+                foreign = self.lanes(**{job: evidence_report(sha="e" * 40, gate=lane_gate)})
+                self.assertIn("not the tested candidate", gate(foreign, 1))
+                self.assertIn("produced no evidence", gate(self.lanes(**{job: None}), 1))
+        # The lane jobs themselves carry no event-specific condition or input.
+        for job in G6_LANES:
+            self.assertNotIn("event_name", JOBS[job]["if"])
+            self.assertNotIn("inputs.", JOBS[job]["if"])
+            self.assertEqual(JOBS[job]["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+            for step in JOBS[job]["steps"]:
+                self.assertNotIn("event_name", step.get("if", "") or "")
+
+    def test_missing_or_malformed_lane_flags_fail_closed(self):
+        reports = self.lanes()
+        for job in G6_LANES:
+            with self.subTest(job=job, case="flag omitted"):
+                partial = {name: path for name, path in reports.items() if name != job}
+                self.assertIn(f"no --lane-evidence {job}=PATH", self.run_gate(1, lane_reports=partial))
+        self.assertIn("malformed --lane-evidence",
+                      self.run_gate(1, argv_patch=lambda argv: argv + ["--lane-evidence", "no-equals-sign"]))
+        self.assertIn("not a promoted G6 evidence lane",
+                      self.run_gate(1, argv_patch=lambda argv: argv + ["--lane-evidence", "lifecycle-cluster=x.json"]))
+        self.assertIn("not a promoted G6 evidence lane",
+                      self.run_gate(1, argv_patch=lambda argv: argv + ["--lane-evidence", f"{EVIDENCE_JOB}=x.json"]))
+        job, path = next(iter(reports.items()))
+        self.assertIn("more than once",
+                      self.run_gate(1, argv_patch=lambda argv: argv + ["--lane-evidence", f"{job}={path}"]))
+
+
+class NightlyLaneTests(unittest.TestCase):
+    """G6's nightly set: dispatchable now, never merge evidence, G4 schedules it."""
+
+    NIGHTLY = {
+        # job -> (input token, recipe invocation substring, recipe, manifest gate)
+        "lifecycle-cluster": ("cluster-lifecycle", "just lifecycle-cluster", "lifecycle-cluster",
+                              "nightly-cluster-lifecycle"),
+        "console-recovery": ("console-recovery", "console-recovery", "console-recovery", "nightly-console"),
+        "performance-gate": ("performance", "just performance-gate", "performance-gate", "nightly-performance"),
+        "core-robustness-nightly": ("core-robustness", "core-robustness nightly-core", "core-robustness",
+                                    "nightly-core"),
+    }
+
+    def run_set_step(self, event, nightly):
+        step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
+        values = {name: "" for name in ("GO", "UI", "HELM", "REAGENTS", "CI")}
+        env = {**os.environ, "EVENT": event, "NIGHTLY": nightly, **values}
+        with tempfile.TemporaryDirectory() as tmp:
+            output_file = Path(tmp) / "output"
+            env["GITHUB_OUTPUT"] = str(output_file)
+            script = Path(tmp) / "step.sh"
+            script.write_text(step["run"])
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                                    env=env, capture_output=True, text=True)
+            parsed = {}
+            if output_file.exists():
+                for line in output_file.read_text().splitlines():
+                    key, _, value = line.partition("=")
+                    parsed[key] = value
+            return result.returncode, result.stderr, parsed
+
+    def test_dispatch_trigger_and_inputs(self):
+        self.assertIn("workflow_dispatch", TRIGGERS)
+        inputs = TRIGGERS["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["nightly"]["default"], "")
+        self.assertEqual(inputs["performance-mode"]["options"], ["advisory", "enforcing"])
+        self.assertEqual(inputs["performance-mode"]["default"], "advisory")
+        self.assertEqual(inputs["performance-runs"]["default"], "[1]")
+        # G4 owns the schedule file; G6 must not create it.
+        self.assertFalse((ROOT / ".github/workflows/testing-qualification.yml").exists())
+        self.assertNotIn("schedule", TRIGGERS)
+
+    def test_nightly_jobs_run_only_when_named_and_never_gate_a_merge(self):
+        for job, (token, invocation, recipe, gate) in self.NIGHTLY.items():
+            with self.subTest(job=job):
+                condition = JOBS[job]["if"]
+                self.assertEqual(condition,
+                                 f"contains(format(',{{0}},', inputs.nightly), ',{token},') || "
+                                 "contains(format(',{0},', inputs.nightly), ',all,')")
+                self.assertNotIn("needs.changes.outputs", condition)
+                self.assertEqual(JOBS[job]["needs"], ["changes"])
+                self.assertNotIn(job, JOBS["ci-ok"]["needs"])
+                self.assertNotIn(job, JOBS["publish"]["needs"])
+                self.assertNotIn(job, SELECTORS)
+                self.assertIn(job, UNPROMOTED_LANES)
+                runs = [step["run"] for step in JOBS[job]["steps"] if invocation in step.get("run", "")]
+                self.assertEqual(len(runs), 1)
+                rows = [row for row in MANIFEST["scenarios"] if gate in row["gates"]]
+                if job == "performance-gate":
+                    # Advisory until the hosted runner is calibrated: the row is
+                    # registered but ungated, so nothing can report it passed.
+                    self.assertEqual(rows, [])
+                    e4 = next(row for row in MANIFEST["scenarios"] if row["id"] == "e4-performance-gate")
+                    self.assertEqual(e4["gates"], [])
+                    self.assertEqual(e4["status"], "unproven")
+                else:
+                    self.assertTrue(rows, gate)
+                    self.assertTrue(all(row["status"] == "proven" for row in rows))
+                    body = recipe_body(recipe)
+                    self.assertTrue(f"--require {gate} --strict" in body
+                                    or ('--require "{{ gate }}" --strict' in body and gate in invocation), gate)
+                report = next(step for step in JOBS[job]["steps"]
+                              if step.get("with", {}).get("name", "").startswith(f"{job}-evidence"))
+                self.assertEqual(report["if"], "always()")
+                self.assertEqual(report["with"]["if-no-files-found"], "error")
+                self.assertGreaterEqual(report["with"]["retention-days"], 30)
+
+    def test_nightly_dispatch_deselects_the_pr_matrix_and_rejects_unknown_lanes(self):
+        code, _, parsed = self.run_set_step("workflow_dispatch", "cluster-lifecycle,performance")
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed, {k: "false" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
+        code, _, parsed = self.run_set_step("workflow_dispatch", "all")
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed["images"], "false")
+        code, stderr, _ = self.run_set_step("workflow_dispatch", "cluster-lifecycle,typo")
+        self.assertNotEqual(code, 0)
+        self.assertIn("unknown nightly lane 'typo'", stderr)
+        # An empty selection is a push-equivalent full run.
+        code, _, parsed = self.run_set_step("workflow_dispatch", "")
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed, {k: "true" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
+        # The token list in the set step is exactly the nightly jobs' tokens.
+        step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
+        tokens = re.search(r"\n\s+(all\|[^)]*)\)", step["run"]).group(1).split("|")
+        self.assertEqual(set(tokens), {"all"} | {entry[0] for entry in self.NIGHTLY.values()})
+
+    def test_nightly_dispatch_satisfies_ci_ok_with_everything_deselected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = selected_outputs(())
+            needs = results(outputs)
+            result = subprocess.run(
+                gate_command(Path(tmp) / "absent.json", event_name="workflow_dispatch", base_sha="",
+                             head_sha="", candidate_parents="", lane_reports={}),
+                env={**os.environ, "NEEDS_JSON": json.dumps(needs)}, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nightly_core_deploys_the_instrumented_server_and_requires_every_b3_row(self):
+        steps = JOBS["core-robustness-nightly"]["steps"]
+        build = next(step for step in steps if "robustness-instrumented" in step.get("run", ""))
+        run = next(step for step in steps if "core-robustness nightly-core" in step.get("run", ""))
+        self.assertLess(steps.index(build), steps.index(run))
+        self.assertIn("CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE=\"caesiumcloud/caesium:${{ github.sha }}-testfault\"",
+                      run["run"])
+        self.assertIn("--target instrumented-server", recipe_body("robustness-instrumented"))
+        rows = {row["id"] for row in MANIFEST["scenarios"] if "nightly-core" in row["gates"]}
+        b3 = {row["id"] for row in MANIFEST["scenarios"] if row["owner_item"] == "B3"}
+        self.assertEqual(rows, b3)
+        self.assertIn("b3-durable-event-before-delivery-crash", rows)
+        # The instrumented case is never part of a release-image gate.
+        durable = next(row for row in MANIFEST["scenarios"] if row["id"] == "b3-durable-event-before-delivery-crash")
+        self.assertEqual(durable["gates"], ["nightly-core"])
+
+    def test_performance_runs_on_a_stable_fleet_identity(self):
+        job = JOBS["performance-gate"]
+        self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-24.04|x86_64")
+        self.assertEqual(job["strategy"]["matrix"]["run"], "${{ fromJSON(inputs.performance-runs || '[1]') }}")
+        body = recipe_body("performance-gate")
+        for setting in ("CAESIUM_PERF_WORKLOADS=\"${CAESIUM_PERF_WORKLOADS:-closed-baseline}\"",
+                        "CAESIUM_PERF_REPEATS=\"${CAESIUM_PERF_REPEATS:-10}\"",
+                        "CAESIUM_PERF_BROWSER=\"${CAESIUM_PERF_BROWSER:-1}\"",
+                        "CAESIUM_PERF_BUNDLE=\"${CAESIUM_PERF_BUNDLE:-1}\""):
+            self.assertIn(setting, body)
+        # Advisory mode still fails when no gate record or evidence exists.
+        self.assertIn("no gate record or evidence was produced", body)
+
+    def test_every_workflow_job_is_classified(self):
+        preexisting_optional = {
+            "helm-integration-test", "podman-integration-test", "integration-extra",
+            "integration-arm64", "helm-pod-replacement-test", "reagents-arm64",
+        }
+        structural = {"ci-ok", "publish", "build-and-integration-test", "build-and-integration-test-agent-auth"}
+        for job in JOBS:
+            with self.subTest(job=job):
+                self.assertTrue(
+                    job in JOBS["ci-ok"]["needs"] or job in UNPROMOTED_LANES
+                    or job in preexisting_optional or job in structural,
+                    f"{job} is neither merge-blocking nor labelled unpromoted",
+                )
+        for job in UNPROMOTED_LANES:
+            self.assertIn(job, JOBS)
 
 
 class IntegrationRunnerTests(unittest.TestCase):

@@ -1245,6 +1245,407 @@ check-evidence:
 
 early-evidence: integration-test-sql-budget robustness-test check-evidence
 
+# --------------------------------------------------------------------------
+# System-suite lanes (distributed-testing G6). Each recipe runs one complete
+# suite, reduces its own artifacts to scenario evidence with
+# scripts/collect-lane-evidence.py and validates that report against the
+# committed manifest with check-test-evidence.py --require <gate> --strict.
+# Artifacts land under $CAESIUM_LANE_EVIDENCE_DIR/<lane>/ (default
+# .tmp/lane-evidence/<lane>/); `evidence.json` there is the lane report that
+# CI uploads and `ci-ok` re-validates.
+#
+#   merge-blocking candidates (W8 decision record order of retention):
+#     just lifecycle-standalone  F4 v0.1.0 -> candidate single-node upgrade
+#     just generated-fuzz        C2 native fuzzing, short mode
+#     just generated-oracles     C3 checker-strength mutation validator
+#     just coverage-ratchets     G2 coverage collection against the ratchets
+#   nightly set (workflow_dispatch now; scheduled by G4 later):
+#     just core-robustness       B3 fenced TestCore (demoted: over the budget)
+#     just lifecycle-cluster     F2 persistent three-voter qualification
+#     just console-recovery      D3 console journey across an owner crash
+#     just performance-gate      E4 performance gate (advisory until the
+#                                 runner is calibrated)
+#
+# Every recipe needs a clean, committed candidate: CANDIDATE_SHA (default
+# HEAD) must be HEAD. Hold the host Docker lane lock for any local run.
+# --------------------------------------------------------------------------
+
+lane_evidence_dir := env("CAESIUM_LANE_EVIDENCE_DIR", repo_dir + "/.tmp/lane-evidence")
+fuzz_seconds := env("CAESIUM_FUZZ_SECONDS", "10s")
+lifecycle_prev_image := env("CAESIUM_LIFECYCLE_PREV_IMAGE", "caesiumcloud/caesium:v0.1.0")
+lifecycle_kind_image := env("CAESIUM_LIFECYCLE_KIND_IMAGE", "kindest/node:v1.33.1")
+
+# Refuse to run a lane anywhere but a clean checkout of the named candidate.
+lane-candidate-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    head="$(git rev-parse HEAD)"
+    if [ "{{ candidate_sha }}" != "$head" ]; then
+        echo "CANDIDATE_SHA {{ candidate_sha }} is not this checkout's HEAD $head" >&2
+        exit 2
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        git status --porcelain | head -40 >&2
+        echo "system-suite lanes need a clean, committed candidate" >&2
+        exit 2
+    fi
+
+# Server image built with the `testfault` tag (B2's durable-event hook), on top
+# of the release and runner images. Only the nightly core lane deploys it.
+robustness-instrumented: robustness-runner
+    {{ container_cli }} build --platform {{ platform }} \
+        --build-arg BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }} \
+        --build-arg CAESIUM_IMAGE={{ local_image_ref }}:{{ tag }} \
+        --target instrumented-server \
+        -t {{ local_image_ref }}:{{ tag }}-testfault \
+        -f build/Dockerfile.robustness .
+
+# B3 fenced core suite (nightly; demoted from the merge budget by measurement).
+# Set CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE (see robustness-instrumented) to add
+# the durable-event crash subtest that gate nightly-core requires.
+core-robustness gate="nightly-core": lane-candidate-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/core-robustness"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane"
+    status=0
+    # robustness-test also writes an owner-crash fragment; keep it inside this
+    # lane's directory so the early-evidence fragments are never overwritten.
+    CAESIUM_ROBUSTNESS_RUN='^TestCore$' \
+    CAESIUM_EVIDENCE_DIR="$lane/harness" \
+    CAESIUM_ROBUSTNESS_ARTIFACTS="$lane/robustness" \
+        just tag={{ tag }} robustness-test || status=$?
+    if ! python3 scripts/collect-lane-evidence.py core \
+            --artifacts "$lane/robustness" \
+            --candidate-sha "{{ candidate_sha }}" \
+            --out "$lane/core.json"; then
+        echo "core-robustness: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate "{{ gate }}" \
+        --out "$lane/evidence.json" "$lane/core.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require "{{ gate }}" --strict || status=1
+    exit "$status"
+
+# F4 single-node previous-release upgrade qualification. Locally the harness
+# builds the candidate itself from this clean checkout (built-by-this-run).
+# CI instead supplies the release image its `images` job built from the same
+# commit, sets CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1 (recorded by the
+# script) and passes the producer-recorded image id as
+# CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID; the collector fails the row unless the
+# qualified image is exactly that one.
+lifecycle-standalone: lane-candidate-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/lifecycle-standalone"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/artifacts"
+    sha="{{ candidate_sha }}"
+    candidate="${CAESIUM_LIFECYCLE_CANDIDATE_IMAGE:-caesiumcloud/caesium:$sha}"
+    expected="${CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID:-}"
+    if [ "${CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE:-0}" = "1" ] && [ -z "$expected" ]; then
+        echo "an overridden (supplied) candidate needs CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID from its producer" >&2
+        exit 2
+    fi
+    id="${CAESIUM_LIFECYCLE_ID:-lifecycle-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+    status=0
+    CANDIDATE_SHA="$sha" \
+    CAESIUM_LIFECYCLE_ID="$id" \
+    CAESIUM_LIFECYCLE_ARTIFACTS="$lane/artifacts" \
+    CAESIUM_LIFECYCLE_PREV_IMAGE="{{ lifecycle_prev_image }}" \
+    CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="$candidate" \
+        bash scripts/lifecycle-tests.sh || status=$?
+    args=()
+    if [ -n "$expected" ]; then args+=(--expected-image-id "$expected"); fi
+    if ! python3 scripts/collect-lane-evidence.py lifecycle --mode standalone \
+            --artifacts "$lane/artifacts" --candidate-sha "$sha" ${args[@]+"${args[@]}"} \
+            --out "$lane/lifecycle.json"; then
+        echo "lifecycle-standalone: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate lifecycle \
+        --out "$lane/evidence.json" "$lane/lifecycle.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require lifecycle --strict || status=1
+    exit "$status"
+
+# C2 native fuzz targets in short mode (CAESIUM_FUZZ_SECONDS per target,
+# default 10s) plus the -race renewal repeat matrix, inside builder-full.
+# scripts/fuzz-tests.sh runs `caesium-builder:latest-full`; a CI tag is
+# retagged to that name first so the script uses the loaded image.
+generated-fuzz: lane-candidate-check builder-full
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/generated-fuzz"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/fuzz"
+    builder="{{ local_builder_ref }}:{{ tag }}-full"
+    if [ "{{ tag }}" != "latest" ]; then
+        {{ container_cli }} tag "$builder" "{{ local_builder_ref }}:latest-full"
+    fi
+    builder_id="$({{ container_cli }} image inspect --format '{{ "{{.Id}}" }}' "$builder")"
+    echo "{{ candidate_sha }}" >"$lane/fuzz/candidate-sha.txt"
+    # CAESIUM_FUZZ_GOCACHE names a Go build/fuzz cache kept between runs (CI
+    # restores it with actions/cache). Go's cache is content-addressed: a
+    # stale entry can only miss, never stand in for changed source. The
+    # script's GOCACHE is $CAESIUM_FUZZ_ARTIFACT_DIR/gocache.
+    seed="${CAESIUM_FUZZ_GOCACHE:-}"
+    if [ -n "$seed" ] && [ -d "$seed" ]; then
+        mv "$seed" "$lane/fuzz/gocache"
+    fi
+    status=0
+    CAESIUM_FUZZ_SECONDS="{{ fuzz_seconds }}" \
+    CAESIUM_FUZZ_ARTIFACT_DIR="$lane/fuzz" \
+        sh scripts/fuzz-tests.sh || status=$?
+    # The container writes as root; on a Linux host hand the artifacts back to
+    # this user before touching them.
+    {{ container_cli }} run --rm --platform {{ platform }} -v "$lane/fuzz:/fuzz-artifacts" "$builder" \
+        chown -R "$(id -u):$(id -g)" /fuzz-artifacts || status=1
+    # The GOCACHE is large and not evidence (the exported corpus is): keep it
+    # for the next run when asked to, otherwise drop it.
+    if [ -n "$seed" ]; then
+        rm -rf "$seed"
+        mv "$lane/fuzz/gocache" "$seed" || status=1
+    else
+        rm -rf "$lane/fuzz/gocache"
+    fi
+    if ! python3 scripts/collect-lane-evidence.py generated \
+            --fuzz-dir "$lane/fuzz" \
+            --candidate-sha "{{ candidate_sha }}" --builder-image-id "$builder_id" \
+            --out "$lane/fuzz.json"; then
+        echo "generated-fuzz: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate generated-fuzz \
+        --out "$lane/evidence.json" "$lane/fuzz.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require generated-fuzz --strict || status=1
+    exit "$status"
+
+# C3 checker-strength validator: candidate probes plus eight known-bad
+# mutations in an isolated clone, inside builder-full (bash and python3 are
+# added to the container for the validator's own tooling).
+generated-oracles: lane-candidate-check builder-full
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/generated-oracles"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane"
+    builder="{{ local_builder_ref }}:{{ tag }}-full"
+    builder_id="$({{ container_cli }} image inspect --format '{{ "{{.Id}}" }}' "$builder")"
+    status=0
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }} \
+        -e ORACLE_TEST_TIMEOUT_SECONDS \
+        "$builder" \
+        sh -c 'apk add --no-cache bash python3 >/dev/null && git config --global --add safe.directory "*" && bash scripts/validate-test-oracles.sh' \
+        2>&1 | tee "$lane/oracles.log" || status=1
+    if ! python3 scripts/collect-lane-evidence.py generated \
+            --oracle-log "$lane/oracles.log" \
+            --candidate-sha "{{ candidate_sha }}" --builder-image-id "$builder_id" \
+            --out "$lane/oracles.json"; then
+        echo "generated-oracles: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate generated-oracles \
+        --out "$lane/evidence.json" "$lane/oracles.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require generated-oracles --strict || status=1
+    exit "$status"
+
+generated-tests: generated-oracles generated-fuzz
+
+# G2 coverage collection against scripts/coverage-ratchet.json. The changed
+# Go paths come from CAESIUM_COVERAGE_CHANGED_PATHS (CI writes them from the
+# event's base) or, locally, the script's own merge-base with master.
+coverage-ratchets: lane-candidate-check builder
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/coverage-ratchets"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/artifacts"
+    sha="{{ candidate_sha }}"
+    id="${CAESIUM_COVERAGE_ID:-cov-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+    status=0
+    CANDIDATE_SHA="$sha" \
+    CAESIUM_COVERAGE_ID="$id" \
+    CAESIUM_COVERAGE_ARTIFACTS="$lane/artifacts" \
+    CAESIUM_BUILDER_IMAGE="${CAESIUM_BUILDER_IMAGE:-{{ local_builder_ref }}:{{ tag }}}" \
+        bash scripts/integration-coverage.sh collect || status=$?
+    if ! python3 scripts/collect-lane-evidence.py coverage \
+            --report "$lane/artifacts/report.json" --candidate-sha "$sha" \
+            --out "$lane/coverage.json"; then
+        echo "coverage-ratchets: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate coverage \
+        --out "$lane/evidence.json" "$lane/coverage.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require coverage --strict || status=1
+    exit "$status"
+
+# F2 persistent three-voter cluster qualification (nightly). Cluster mode
+# always builds and archive-verifies its own candidate from this checkout.
+lifecycle-cluster: lane-candidate-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane="{{ lane_evidence_dir }}/lifecycle-cluster"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/artifacts"
+    sha="{{ candidate_sha }}"
+    id="${CAESIUM_LIFECYCLE_ID:-lifecycle-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+    # Cluster mode refuses an artifact directory inside the candidate checkout.
+    work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/caesium-$id.XXXXXX")"
+    status=0
+    CANDIDATE_SHA="$sha" \
+    CAESIUM_LIFECYCLE_MODE=cluster \
+    CAESIUM_LIFECYCLE_ID="$id" \
+    CAESIUM_LIFECYCLE_ARTIFACTS="$work" \
+    CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:$sha" \
+    CAESIUM_LIFECYCLE_KIND_IMAGE="{{ lifecycle_kind_image }}" \
+        bash scripts/lifecycle-tests.sh || status=$?
+    # Keep the qualification and its observations; image archives, the
+    # compiled runner and kubeconfigs are neither evidence nor uploadable.
+    tar -C "$work" --exclude='*.tar' --exclude='kubeconfig*' --exclude='lifecycle.test' -cf - . \
+        | tar -C "$lane/artifacts" -xf - || status=1
+    rm -rf "$work"
+    if ! python3 scripts/collect-lane-evidence.py lifecycle --mode cluster \
+            --artifacts "$lane/artifacts" --candidate-sha "$sha" \
+            --out "$lane/lifecycle.json"; then
+        echo "lifecycle-cluster: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate nightly-cluster-lifecycle \
+        --out "$lane/evidence.json" "$lane/lifecycle.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require nightly-cluster-lifecycle --strict || status=1
+    exit "$status"
+
+# D3 console journey (nightly): B1's TestOwnerCrash on a kept kind cluster,
+# then the Playwright `cluster-recovery` project against it. The cluster is
+# always deleted afterwards; deletion never replaces the result.
+console-recovery: lane-candidate-check robustness-runner
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for cmd in kind kubectl helm python3 npx; do
+        command -v "$cmd" >/dev/null || { echo "required command not found: $cmd" >&2; exit 1; }
+    done
+    lane="{{ lane_evidence_dir }}/console-recovery"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/robustness"
+    art="$lane/robustness"
+    sha="{{ candidate_sha }}"
+    id="${CAESIUM_ROBUSTNESS_ID:-rb-d3-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+    cleanup() {
+        if [ -f "$art/owned-clusters.txt" ]; then
+            while read -r name; do
+                [ -n "$name" ] && kind delete cluster --name "$name" >/dev/null 2>&1 || true
+            done <"$art/owned-clusters.txt"
+        fi
+        kind delete cluster --name "$id" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    {{ container_cli }} pull --platform {{ platform }} {{ robustness_kind_image }}
+    {{ container_cli }} pull --platform {{ platform }} {{ robustness_task_image }}
+    status=0
+    CANDIDATE_SHA="$sha" \
+    CAESIUM_ROBUSTNESS_KEEP_CLUSTER=1 \
+    CAESIUM_ROBUSTNESS_ID="$id" \
+    CAESIUM_ROBUSTNESS_ARTIFACTS="$art" \
+    CAESIUM_ROBUSTNESS_IMAGE="{{ local_robustness_ref }}:{{ tag }}" \
+    CAESIUM_ROBUSTNESS_SERVER_IMAGE="{{ local_image_ref }}:{{ tag }}" \
+    CAESIUM_ROBUSTNESS_KIND_IMAGE="{{ robustness_kind_image }}" \
+    CAESIUM_ROBUSTNESS_TASK_IMAGE="{{ robustness_task_image }}" \
+        bash scripts/robustness.sh || status=$?
+    pw=99
+    if [ "$status" -eq 0 ]; then
+        secret="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+        pw=0
+        (cd ui && npm ci --prefer-offline >/dev/null && \
+            CAESIUM_ROBUSTNESS_ID="$id" \
+            CAESIUM_ROBUSTNESS_ARTIFACTS="$art" \
+            CAESIUM_ROBUSTNESS_TASK_IMAGE="caesium-robustness-task:$id" \
+            CAESIUM_ROBUSTNESS_SERVER_IMAGE="{{ local_image_ref }}:$sha" \
+            CAESIUM_AUTH_KEY_HASH_SECRET="$secret" \
+            npx playwright test --project=cluster-recovery e2e/cluster-recovery.spec.ts) || pw=$?
+        echo "console-recovery: Playwright exit $pw"
+        [ "$pw" -eq 0 ] || status=1
+    else
+        echo "console-recovery: the owner-crash precondition failed; the journey did not run" >&2
+    fi
+    python3 scripts/collect-evidence.py redact --artifacts "$art" || true
+    if ! python3 scripts/collect-lane-evidence.py console \
+            --artifacts "$art" --candidate-sha "$sha" --playwright-exit "$pw" \
+            --out "$lane/console.json"; then
+        echo "console-recovery: evidence could not be collected" >&2
+        status=1
+    fi
+    python3 scripts/collect-lane-evidence.py report --gate nightly-console \
+        --out "$lane/evidence.json" "$lane/console.json" || status=1
+    python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+        --report "$lane/evidence.json" --require nightly-console --strict || status=1
+    exit "$status"
+
+# E4 performance gate (nightly). Defaults reproduce the calibrated settings
+# (closed-baseline, 10 repeats, load + benchmarks + browser + bundle).
+# CAESIUM_PERF_BASE_SHA defaults to the candidate: a same-code A/A control that
+# still judges the candidate against the fixed baseline. mode=advisory keeps
+# the evidence and records the verdict (including the fixed baseline's
+# refusal on an uncalibrated runner) without failing; mode=enforcing requires
+# the e4 row to pass the nightly-performance gate. A missing gate record or
+# unreadable evidence fails in both modes.
+performance-gate mode="advisory": lane-candidate-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ mode }}" in advisory|enforcing) ;; *) echo "mode must be advisory or enforcing" >&2; exit 2 ;; esac
+    lane="{{ lane_evidence_dir }}/performance-gate"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane/artifacts"
+    sha="{{ candidate_sha }}"
+    id="${CAESIUM_PERF_ID:-perf-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+    status=0
+    CAESIUM_PERF_ID="$id" \
+    CAESIUM_PERF_ARTIFACTS="$lane/artifacts" \
+    CAESIUM_PERF_BASE_SHA="${CAESIUM_PERF_BASE_SHA:-$sha}" \
+    CAESIUM_PERF_CANDIDATE_SHA="$sha" \
+    CAESIUM_PERF_WORKLOADS="${CAESIUM_PERF_WORKLOADS:-closed-baseline}" \
+    CAESIUM_PERF_REPEATS="${CAESIUM_PERF_REPEATS:-10}" \
+    CAESIUM_PERF_BROWSER="${CAESIUM_PERF_BROWSER:-1}" \
+    CAESIUM_PERF_BUNDLE="${CAESIUM_PERF_BUNDLE:-1}" \
+        bash scripts/performance.sh || status=$?
+    echo "performance-gate: scripts/performance.sh exit $status"
+    collected=0
+    if python3 scripts/collect-lane-evidence.py performance \
+            --artifacts "$lane/artifacts" --candidate-sha "$sha" \
+            --out "$lane/performance.json"; then
+        collected=1
+        python3 scripts/collect-lane-evidence.py report --gate nightly-performance \
+            --out "$lane/evidence.json" "$lane/performance.json" || collected=0
+    fi
+    if [ "$collected" -ne 1 ]; then
+        echo "performance-gate: no gate record or evidence was produced" >&2
+        exit 1
+    fi
+    python3 -c 'import json, sys; row = json.load(open(sys.argv[1]))["scenarios"][0]; perf = row.get("performance") or {}; print("performance-gate: e4 row status=%s overall=%s verdicts=%s host_id=%s" % (row["status"], perf.get("overall"), perf.get("verdicts"), perf.get("host_id")))' "$lane/evidence.json"
+    if [ "{{ mode }}" = "enforcing" ]; then
+        python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+            --report "$lane/evidence.json" --require nightly-performance --strict || status=1
+        exit "$status"
+    fi
+    echo "performance-gate: advisory mode; the verdict above is recorded, not enforced"
+    exit 0
+
 # Spin up the local dev registry and configure the cluster's containerd to
 # pull from it via host.docker.internal. Idempotent. Targets Docker Desktop
 # Kubernetes; other clusters (Kind, Minikube) need different wiring.

@@ -365,11 +365,13 @@
       "contract_ids": [
         "DT-COMPLETE-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/stale_generation_complete: owner pause past the 30s run lease, stale /internal/complete 409, survivor with higher generation finishes the same run. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/stale_generation_complete: owner pause past the 30s run lease, stale /internal/complete 409, survivor with higher generation finishes the same run. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -429,11 +431,13 @@
       "contract_ids": [
         "DT-TERMINAL-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/terminal_no_regress: within-run terminal fencing. Across-retry fencing remains unresolved (DT-TERMINAL-01). Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/terminal_no_regress: within-run terminal fencing. Across-retry fencing remains unresolved (DT-TERMINAL-01). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -486,11 +490,13 @@
       "contract_ids": [
         "DT-RETRY-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/frozen_retry_recipe: 202 retry uses frozen task_runs image/command; rejected retry of a succeeded run does not alter state. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/frozen_retry_recipe: 202 retry uses frozen task_runs image/command; rejected retry of a succeeded run does not alter state. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -547,11 +553,13 @@
       "contract_ids": [
         "DT-DAG-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/fan_in_predecessors: join cannot start after only one predecessor; testdata/fan-in.job.yaml. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/fan_in_predecessors: join cannot start after only one predecessor; testdata/fan-in.job.yaml. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -608,11 +616,13 @@
       "contract_ids": [
         "DT-CANCEL-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/cancel_completion_race: concurrency replace 202 is not process-death ack; distinct histories retained. This base has no standalone active-run cancel REST route. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/cancel_completion_race: concurrency replace 202 is not process-death ack; distinct histories retained. This base has no standalone active-run cancel REST route. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -672,11 +682,13 @@
       "contract_ids": [
         "DT-AUTH-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/wrong_token_internal: valid cert, wrong bearer on /internal/dispatch and /internal/complete returns 401 with no mutation. Valid-token stale generation is TestCore/stale_generation_complete. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/wrong_token_internal: valid cert, wrong bearer on /internal/dispatch and /internal/complete returns 401 with no mutation. Valid-token stale generation is TestCore/stale_generation_complete. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request).",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -737,11 +749,13 @@
       "contract_ids": [
         "DT-QUORUM-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/quorum_loss_uncertain_write: 2-1 split; timeout is possibly committed, never a rejection (DT-QUORUM-01 U). Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/quorum_loss_uncertain_write: 2-1 split; timeout is possibly committed, never a rejection (DT-QUORUM-01 U). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -804,11 +818,13 @@
         "DT-OWNER-01",
         "DT-RECOVER-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "Same subtest as b3-stale-generation-complete. Pause must outlast CAESIUM_RUN_LEASE_TTL; missing activation cannot pass. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "Same subtest as b3-stale-generation-complete. Pause must outlast CAESIUM_RUN_LEASE_TTL; missing activation cannot pass. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -872,11 +888,13 @@
         "DT-QUORUM-01",
         "DT-ADMIT-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "Same subtest as b3-quorum-loss-uncertain-write. Majority of two voters progresses; minority mutations are possibly committed and reconciled by identity after heal. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "Same subtest as b3-quorum-loss-uncertain-write. Majority of two voters progresses; minority mutations are possibly committed and reconciled by identity after heal. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -938,11 +956,13 @@
         "DT-ADMIT-01",
         "DT-QUORUM-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/commit_before_response_loss composes B2's client-side interposer. A client timeout is never a rejection. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/commit_before_response_loss composes B2's client-side interposer. A client timeout is never a rejection. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -1002,11 +1022,13 @@
       "contract_ids": [
         "DT-EVENT-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/durable_event_before_delivery_crash arms B2's bus-publish-pause hook, kills that publisher, disarms survivors, and asserts durable replay. Skip/inconclusive without the instrumented image; never a pass. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/durable_event_before_delivery_crash arms B2's bus-publish-pause hook, kills that publisher, disarms survivors, and asserts durable replay. It runs only when the lane deploys the testfault-instrumented server image (CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE), which only the nightly core lane builds; `scripts/collect-lane-evidence.py core` emits this row only when the runner's own core_topology record says instrumented=true, so a release-image run reports it missing, never passed. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -1067,11 +1089,13 @@
       "contract_ids": [
         "DT-RECOVER-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/worker_unreachable_bench: network-error rejection and peer benching via real dispatch progress and caesium_dispatch_rejected_total; stalled_total is scraped but not required to increment (progress deadline is 10m). Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/worker_unreachable_bench: network-error rejection and peer benching via real dispatch progress and caesium_dispatch_rejected_total; stalled_total is scraped but not required to increment (progress deadline is 10m). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -1132,11 +1156,13 @@
       "contract_ids": [
         "DT-AUTH-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "B3",
-      "registered_by": "B3",
-      "gates": [],
-      "notes": "TestCore/invalid_mtls_peer: self-signed client cert fails the dedicated mTLS listener handshake; no task/state/effect mutation. Secrets are not persisted. Not proven without live kind evidence in this PR.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/invalid_mtls_peer: self-signed client cert fails the dedicated mTLS listener handshake; no task/state/effect mutation. Secrets are not persisted. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. The `internal_tls: provisioned` flag is not a pod env value: the collector reports it only when the retained record shows a valid cluster-CA client certificate completed a handshake on the dedicated mTLS listener (a 401 for the wrong bearer, or the 200 control request).",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -1197,11 +1223,13 @@
       "contract_ids": [
         "DT-RECOVER-01"
       ],
-      "status": "absent",
+      "status": "proven",
       "owner_item": "D3",
-      "registered_by": "D3",
-      "gates": [],
-      "notes": "Selector ui/e2e/cluster-recovery.spec.ts is the Playwright cluster-recovery project (not selected by ui-e2e or ui-e2e-auth). Live kind proof is orchestrator-owned and not yet recorded.",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-console"
+      ],
+      "notes": "Nightly lane: `just console-recovery` runs B1's TestOwnerCrash on a kept kind cluster, then the Playwright project cluster-recovery (ui/e2e/cluster-recovery.spec.ts, retries 0) against it. `scripts/collect-lane-evidence.py console` reads the spec's own d3-evidence.json: the fault must be recorded while the heading read running, the Console must converge on the durable status with the retained-log marker before and after reload, the evidence must carry no convergence issues and exactly one run row, and the Playwright exit status must be 0. Registered by G6; not per-PR proof.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -1306,6 +1334,537 @@
         "require_recorder": true,
         "artifact_identity": "integration-sql-work-budget",
         "min_samples": 1
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "b3-cancel-post-commit-fence",
+      "name": "Completion after a committed replace-cancel is fenced",
+      "selector": "TestCore/cancel_post_commit_fence",
+      "contract_ids": [
+        "DT-CANCEL-01",
+        "DT-COMPLETE-01"
+      ],
+      "status": "proven",
+      "owner_item": "B3",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-core"
+      ],
+      "notes": "TestCore/cancel_post_commit_fence starts the old owner's completion only after the replacement run's 202 committed, so it proves the durable post-cancel fence rather than transaction overlap (TestCore/cancel_completion_race covers the overlap). scripts/robustness.sh already requires its PASS line; G6 registers the row so the lane's evidence names it. Executed nightly by `just core-robustness nightly-core` with the instrumented server.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "control_plane_nodes": 1,
+        "worker_nodes": 3,
+        "voters": 3,
+        "standbys": 0,
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3"
+      },
+      "expected_observations": [
+        {
+          "id": "old_run_stays_cancelled",
+          "description": "The replaced run reads cancelled at the cancel and again after the late completion."
+        },
+        {
+          "id": "late_completion_fenced",
+          "description": "The old owner's post-commit completion is refused (409 terminal/claim fence) or its lease is proven absent."
+        },
+        {
+          "id": "replacement_is_a_distinct_history",
+          "description": "The replacement is a different run that succeeds; the 202 is not a process-death acknowledgement."
+        },
+        {
+          "id": "no_old_successor_after_replace",
+          "description": "The cancelled run starts no successor after the replace."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "robustness-core",
+        "min_samples": 1
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "post-cancel-completion",
+        "required_observations": [
+          "replacement_committed_before_completion",
+          "old_owner_completion_sent"
+        ]
+      }
+    },
+    {
+      "id": "f4-standalone-lifecycle",
+      "name": "Single-node v0.1.0 to candidate upgrade qualification",
+      "selector": "scripts/lifecycle-tests.sh (CAESIUM_LIFECYCLE_MODE=standalone)",
+      "contract_ids": [],
+      "category": "lifecycle-compatibility",
+      "status": "proven",
+      "owner_item": "F4",
+      "registered_by": "G6",
+      "gates": [
+        "lifecycle"
+      ],
+      "notes": "Executed by `just lifecycle-standalone` (scripts/lifecycle-tests.sh, standalone default mode). Every expected case of the qualification record is an observation: a case counts only when the record reports it pass (or recorded-outcome for the three recorded-outcome cases) under this run's lifecycle id, with result=pass. In CI the candidate is the image this workflow's `images` job built from the same github.sha; the script records it supplied/unverified with its explicit override, and `collect-lane-evidence.py lifecycle --expected-image-id` fails the row unless the qualified image id equals the loaded artifact's id. A local run that lets the script build the image records built-by-this-run instead.",
+      "topology": {
+        "kind": "docker-standalone",
+        "replicas": 1,
+        "persistence": true,
+        "engine": "docker",
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "local",
+        "owner": "disabled",
+        "surface": "http+cli"
+      },
+      "feature_flags": {
+        "CAESIUM_DATABASE_SHARDS": "1",
+        "CAESIUM_RUN_QUEUE_ENABLED": "true"
+      },
+      "expected_observations": [
+        {
+          "id": "previous-release-digest-pinned",
+          "description": "The pinned v0.1.0 image resolves to its recorded index digest."
+        },
+        {
+          "id": "candidate-image-provenance",
+          "description": "The candidate image is bound to candidate_sha (built by the run, or the workflow artifact the lane verified)."
+        },
+        {
+          "id": "runner-compiled-with-integration-tag",
+          "description": "./test/lifecycle is compiled explicitly with -tags=integration in the builder."
+        },
+        {
+          "id": "observation-validation-self-check",
+          "description": "The runner's observation validator accepts only complete container observations."
+        },
+        {
+          "id": "two-instances-coexist",
+          "description": "Two isolated harness instances coexist without reaching each other."
+        },
+        {
+          "id": "seed-previous-release",
+          "description": "v0.1.0 seeds jobs, history and queued work through its public surface."
+        },
+        {
+          "id": "previous-release-stopped-gracefully",
+          "description": "v0.1.0 stops gracefully with the queued row still pending."
+        },
+        {
+          "id": "assert1-candidate-healthy-and-migrated",
+          "description": "The candidate starts healthy on the retained volume and migrates it."
+        },
+        {
+          "id": "assert2-schema-migrated-additively",
+          "description": "The schema delta is additive and every pinned addition is present."
+        },
+        {
+          "id": "assert3-recorded-identities-readable",
+          "description": "Every pre-upgrade identity reads back through the candidate."
+        },
+        {
+          "id": "assert4-event-replay-from-explicit-cursor",
+          "description": "Pre-upgrade events replay as a set above an explicit cursor."
+        },
+        {
+          "id": "assert5-queued-row-reaches-a-started-run",
+          "description": "The queued row is dequeued by the candidate into a started run."
+        },
+        {
+          "id": "assert6-export-relints-and-diffs-clean",
+          "description": "Exported manifests re-lint and diff clean, JSON on stdout."
+        },
+        {
+          "id": "assert7-serving-build-is-the-candidate",
+          "description": "The serving container runs the candidate image."
+        },
+        {
+          "id": "recorded-in-flight-run-after-upgrade",
+          "description": "The run in flight at stop is recorded (recorded outcome, #553)."
+        },
+        {
+          "id": "candidate-never-exited-nonzero",
+          "description": "The candidate never exited nonzero or restarted after the upgrade."
+        },
+        {
+          "id": "supported-candidate-readdress",
+          "description": "The candidate re-addresses a sole member per #536."
+        },
+        {
+          "id": "unsupported-previous-release-readdress",
+          "description": "v0.1.0 at a changed address refuses to start (unsupported transition)."
+        },
+        {
+          "id": "recorded-rollback-previous-release-on-migrated-volume",
+          "description": "v0.1.0 on a migrated copy is recorded (recorded outcome)."
+        },
+        {
+          "id": "recorded-shard-count-change",
+          "description": "A shard-count change on a copy is recorded (recorded outcome)."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "lifecycle-standalone-qualification",
+        "min_samples": 20
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "f2-cluster-lifecycle",
+      "name": "Persistent three-voter cluster upgrade, replacement and recovery qualification",
+      "selector": "scripts/lifecycle-tests.sh (CAESIUM_LIFECYCLE_MODE=cluster)",
+      "contract_ids": [
+        "DT-RECOVER-01"
+      ],
+      "category": "lifecycle-compatibility",
+      "status": "proven",
+      "owner_item": "F2",
+      "registered_by": "G6",
+      "gates": [
+        "nightly-cluster-lifecycle"
+      ],
+      "notes": "Nightly lane (W8 decision record): `just lifecycle-cluster` runs scripts/lifecycle-tests.sh in cluster mode, which always builds and archive-verifies its own candidate from the clean checkout. Every expected case of cluster-qualification.json is an observation; rollback-recorded-outcome counts as a recorded outcome. Feature flags are read from the live StatefulSet manifest after the upgrade. Nightly results are broader evidence, not per-PR proof.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes",
+        "database_shards": 1
+      },
+      "mode": {
+        "execution": "distributed",
+        "owner": "enabled",
+        "surface": "http+cli"
+      },
+      "feature_flags": {
+        "CAESIUM_EXECUTION_MODE": "distributed",
+        "CAESIUM_RUN_OWNER_ENABLED": "true",
+        "CAESIUM_DATABASE_VOTERS": "3",
+        "CAESIUM_DATABASE_SHARDS": "1"
+      },
+      "expected_observations": [
+        {
+          "id": "previous-release-digest",
+          "description": "The pinned v0.1.0 image resolves to its recorded digest."
+        },
+        {
+          "id": "three-persistent-voters-before",
+          "description": "Three bound PVCs, distinct workers and three direct dqlite voters before the upgrade."
+        },
+        {
+          "id": "retained-history-and-raw-effects",
+          "description": "Pre-upgrade job/run/task ids, event sets and the raw effect ledger are retained."
+        },
+        {
+          "id": "mixed-version-dispatch-and-completion",
+          "description": "A protocol-2 mixed window dispatches and completes across versions."
+        },
+        {
+          "id": "rolling-upgrade-three-voters",
+          "description": "Three retained voters after the Helm rolling upgrade."
+        },
+        {
+          "id": "joining-ordinal-1-replacement",
+          "description": "A fresh ordinal-1 PVC and node id join every member's membership."
+        },
+        {
+          "id": "ordinal-0-disk-loss",
+          "description": "A disk-loss ordinal 0 rejoins under a fresh id (#582)."
+        },
+        {
+          "id": "snapshot-catch-up",
+          "description": "Survivors truncate past the stopped member, which catches up by snapshot."
+        },
+        {
+          "id": "storage-snapshot-restore",
+          "description": "A stopped-member storage copy restores byte-identically."
+        },
+        {
+          "id": "rollback-recorded-outcome",
+          "description": "v0.1.0 on an isolated crash-consistent copy is recorded (recorded outcome)."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "lifecycle-cluster-qualification",
+        "min_samples": 10
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "c2-native-fuzz",
+      "name": "Native fuzz targets explore beyond their seeds; renewal concurrency matrix passes",
+      "selector": "scripts/fuzz-tests.sh",
+      "contract_ids": [],
+      "category": "generated-tests",
+      "status": "proven",
+      "owner_item": "C2",
+      "registered_by": "G6",
+      "gates": [
+        "generated-fuzz"
+      ],
+      "notes": "Executed by `just generated-tests` inside the builder-full image (short mode: CAESIUM_FUZZ_SECONDS per target). Observations are parsed from the script's own summary.txt: declared/discovered target lists must agree, every declared target needs an OK line with execs above its seed baseline, no CRASH line, all three -cpu configurations of the -race repeat matrix must pass with a nonzero count, and each target's corpus must be exported. min_samples is the declared target count (8).",
+      "topology": {
+        "kind": "builder-container",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "hermetic",
+        "surface": "go-test"
+      },
+      "feature_flags": {},
+      "expected_observations": [
+        {
+          "id": "declared_targets_match_discovered",
+          "description": "go test -list discovery and the repo-wide sweep match the declared manifest."
+        },
+        {
+          "id": "every_target_explored_beyond_baseline",
+          "description": "Every declared target executed more inputs than its seed baseline."
+        },
+        {
+          "id": "no_fuzz_crashers",
+          "description": "No target reported a crasher."
+        },
+        {
+          "id": "concurrency_matrix_passed",
+          "description": "-race repeats at -cpu=1,2,4 each ran and passed a nonzero number of tests."
+        },
+        {
+          "id": "corpus_preserved",
+          "description": "Each target's corpus was exported to the artifact directory."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": false,
+        "require_recorder": true,
+        "artifact_identity": "generated-native-fuzz",
+        "min_samples": 8
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "c3-oracle-mutations",
+      "name": "Checkers reject eight known-bad mutations in an isolated checkout",
+      "selector": "scripts/validate-test-oracles.sh",
+      "contract_ids": [
+        "DT-COMPLETE-01",
+        "DT-DAG-01",
+        "DT-EVENT-01"
+      ],
+      "category": "checker-strength",
+      "status": "proven",
+      "owner_item": "C3",
+      "registered_by": "G6",
+      "gates": [
+        "generated-oracles"
+      ],
+      "notes": "Executed by `just generated-tests` (scripts/validate-test-oracles.sh inside the builder-full image). The candidate probes must pass and every `mutation=<name> bad_sha=<sha>` line must be followed by that mutant's named test failing with its oracle assertion marker; the validator refuses runtime/resource failures as evidence. min_samples is the mutation count (8).",
+      "topology": {
+        "kind": "builder-container",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "hermetic",
+        "surface": "go-test"
+      },
+      "feature_flags": {},
+      "expected_observations": [
+        {
+          "id": "candidate_probes_accept_the_candidate",
+          "description": "The model, history and robustness probes pass on the candidate."
+        },
+        {
+          "id": "known_bad_mutations_rejected",
+          "description": "Every known-bad mutation is rejected by its named test."
+        },
+        {
+          "id": "mutations_recorded_with_known_bad_sha",
+          "description": "Each mutation records its isolated known-bad commit and patch blob."
+        },
+        {
+          "id": "validator_completed",
+          "description": "The validator ran to its final PASS line."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": false,
+        "require_recorder": true,
+        "artifact_identity": "generated-oracle-mutations",
+        "min_samples": 8
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "g2-coverage-ratchets",
+      "name": "Integration and browser coverage with provenance meets the committed ratchets",
+      "selector": "scripts/integration-coverage.sh",
+      "contract_ids": [],
+      "category": "coverage",
+      "status": "proven",
+      "owner_item": "G2",
+      "registered_by": "G6",
+      "gates": [
+        "coverage"
+      ],
+      "notes": "Executed by `just coverage-ratchets` (scripts/integration-coverage.sh collect with scripts/coverage-ratchet.json and the tested change's Go paths). Observations come from the checker's own report.json: verdict pass, complete CLI/server/integration/browser profiles with provenance, the package ratchet applied, the apply-to-export write/read path covered, no uncovered changed paths under the committed max-zero diff policy, and no performance instrumentation.",
+      "topology": {
+        "kind": "docker-coverage-instrumented",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "local",
+        "surface": "http+cli+browser"
+      },
+      "feature_flags": {},
+      "expected_observations": [
+        {
+          "id": "coverage_verdict_pass",
+          "description": "scripts/check-coverage.py reports verdict pass."
+        },
+        {
+          "id": "profiles_complete_with_provenance",
+          "description": "CLI, server, integration and browser profiles are complete with matching provenance."
+        },
+        {
+          "id": "package_ratchet_applied",
+          "description": "The committed package floors were applied."
+        },
+        {
+          "id": "write_to_read_path_covered",
+          "description": "The apply-to-export request/write/read path is covered."
+        },
+        {
+          "id": "diff_ratchet_within_policy",
+          "description": "No changed Go path is uncovered under the committed diff policy."
+        },
+        {
+          "id": "performance_instrumentation_absent",
+          "description": "Coverage instrumentation stays out of performance artifacts."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": false,
+        "require_recorder": true,
+        "artifact_identity": "integration-coverage-ratchets",
+        "min_samples": 4
+      },
+      "fault_activation": {
+        "required": false,
+        "kind": "",
+        "required_observations": []
+      }
+    },
+    {
+      "id": "e4-performance-gate",
+      "name": "Base/candidate performance gate against the calibrated budgets and fixed baseline",
+      "selector": "scripts/performance.sh",
+      "contract_ids": [],
+      "category": "performance",
+      "status": "unproven",
+      "owner_item": "E4",
+      "registered_by": "G6",
+      "gates": [],
+      "notes": "Nightly lane: `just performance-gate` runs scripts/performance.sh with the E4 budgets (test/performance/budgets.json) and fixed baseline (test/performance/baseline.json). The row passes only when the final attempt resolved, the target-base, fixed-baseline and SLO verdicts all pass and the strict gate is non-blocking. Until the budgets and baseline are calibrated for the runner identity the lane records, the fixed baseline refuses the comparison as inconclusive and the lane runs in advisory mode: it keeps the evidence and records the refusal instead of claiming a pass.",
+      "topology": {
+        "kind": "docker-performance",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "local",
+        "surface": "http+cli+browser"
+      },
+      "feature_flags": {},
+      "expected_observations": [
+        {
+          "id": "gate_resolved",
+          "description": "The final attempt resolved (not inconclusive or inconclusive_unresolved)."
+        },
+        {
+          "id": "target_base_non_inferior",
+          "description": "The target-base comparison is non-inferior under the budgets."
+        },
+        {
+          "id": "fixed_baseline_non_inferior",
+          "description": "The versioned fixed-baseline comparison is non-inferior."
+        },
+        {
+          "id": "slos_pass",
+          "description": "Every absolute SLO passes on the candidate."
+        },
+        {
+          "id": "runner_identity_recorded",
+          "description": "The runner identity (CAESIUM_PERF_HOST_ID) is recorded."
+        },
+        {
+          "id": "uninstrumented_provenance",
+          "description": "Both sides are release-equivalent, uninstrumented and provenance-complete."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": false,
+        "require_recorder": true,
+        "artifact_identity": "performance-gate",
+        "min_samples": 5
       },
       "fault_activation": {
         "required": false,
