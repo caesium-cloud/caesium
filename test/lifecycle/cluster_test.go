@@ -882,181 +882,371 @@ func TestLifecycleClusterSeed(t *testing.T) {
 		Observations: map[string]any{"members": fx.Members, "leader": membership.Leader}})
 }
 
+// mixed-version-dispatch-and-completion (F2, H3 W9-δ).
+//
+// The host controller holds the rolling upgrade at exactly one upgraded
+// member: before the unchanged image-only `helm upgrade --wait` it sets the
+// live StatefulSet's rollingUpdate.partition to 2, so only caesium-2 is
+// replaced and caesium-0/1 keep their previous-release pods (see
+// lc_mixed_hold_* in scripts/lifecycle-tests.sh). This runner is started only
+// once that hold is verified, and the host releases the rollout after it
+// exits, so the observation no longer races the StatefulSet controller.
+//
+// Before the hold (W8) the runner polled a live rollout. In
+// lifecycle-w8b-r1-fbbe76d2 the window lasted 62 s (caesium-2 Ready 03:00:09,
+// caesium-0 deleted 03:01:11). The first attempt's task ran on the previous
+// member at 03:00:12, but its completion could not be persisted: from 03:00:15
+// every write through the leader failed with `database is locked` (and the
+// candidate's write connection with `cannot start a transaction within a
+// transaction`) until the previous-release leader itself was replaced, so the
+// 40 s completion wait expired and the remaining attempts ran after the window
+// had closed. Holding the window removes the timing dependency without
+// weakening the assertion: both crossing directions must be observed on one
+// stable set of pods, each with the same durable attempt, fenced owner
+// generation and raw completion nonce.
+const (
+	mixedCaseName            = "mixed-version-dispatch-and-completion"
+	mixedHeldCandidateMember = "caesium-2"
+	mixedWindowBudget        = 9 * time.Minute
+	mixedDirectionBudget     = 3 * time.Minute
+	mixedProbeBudget         = 90 * time.Second
+)
+
+var mixedPreviousMembers = []string{"caesium-0", "caesium-1"}
+
+type mixedHeldMember struct {
+	Name    string `json:"name"`
+	UID     string `json:"uid"`
+	IP      string `json:"ip"`
+	Node    string `json:"node"`
+	Image   string `json:"image"`
+	ImageID string `json:"image_id"`
+	Version string `json:"version"`
+	// Protocol is the /internal/capabilities protocol_version.
+	Protocol int       `json:"protocol_version"`
+	NodeID   string    `json:"node_id"`
+	Observed time.Time `json:"observed_at"`
+	member   cluster.Member
+}
+
+type mixedAttempt struct {
+	Direction     string    `json:"direction"`
+	TriggerMember string    `json:"trigger_member"`
+	RunID         string    `json:"run_id,omitempty"`
+	OwnerNode     string    `json:"owner_node,omitempty"`
+	OwnerVersion  string    `json:"owner_version,omitempty"`
+	WorkerNode    string    `json:"worker_node,omitempty"`
+	WorkerVersion string    `json:"worker_version,omitempty"`
+	Outcome       string    `json:"outcome"`
+	StartedAt     time.Time `json:"started_at"`
+	Seconds       float64   `json:"seconds"`
+}
+
+type mixedDirection struct {
+	Name         string
+	OwnerVersion string
+	Triggers     []string
+}
+
+// heldMixedWindow verifies the held topology directly from the Kubernetes API:
+// exactly three Ready members, caesium-2 recreated on the candidate image, and
+// caesium-0/1 still the pre-upgrade pods (fixture UIDs) on the previous image.
+func heldMixedWindow(ctx context.Context, fx clusterFixture, oldID, newID string) (map[string]mixedHeldMember, error) {
+	kube, err := cluster.InClusterClient()
+	if err != nil {
+		return nil, err
+	}
+	topo, err := cluster.DiscoverTopology(ctx, kube, fx.LifecycleID)
+	if err != nil {
+		return nil, fmt.Errorf("discover topology: %w", err)
+	}
+	if len(topo.Members) != 3 {
+		return nil, fmt.Errorf("held window has %d live caesium pods, want 3", len(topo.Members))
+	}
+	seeded := map[string]clusterMemberEvidence{}
+	for _, m := range fx.Members {
+		seeded[m.Name] = m
+	}
+	out := map[string]mixedHeldMember{}
+	for _, m := range topo.Members {
+		if !cluster.PodReady(&m.Pod) {
+			return nil, fmt.Errorf("%s is not Ready inside the held window", m.Name)
+		}
+		prior, ok := seeded[m.Name]
+		if !ok {
+			return nil, fmt.Errorf("%s is not a seeded member", m.Name)
+		}
+		held := mixedHeldMember{Name: m.Name, UID: m.UID, IP: m.IP, Node: m.Node, Image: m.Image,
+			ImageID: m.ImageID, Observed: time.Now().UTC(), member: m}
+		switch {
+		case cluster.ImageIDMatchesCandidate(m.ImageID, newID):
+			held.Version = "candidate"
+		case cluster.ImageIDMatchesCandidate(m.ImageID, oldID):
+			held.Version = "previous"
+		default:
+			return nil, fmt.Errorf("%s runs neither verified image: %s", m.Name, m.ImageID)
+		}
+		if m.Name == mixedHeldCandidateMember {
+			if held.Version != "candidate" || m.UID == prior.UID {
+				return nil, fmt.Errorf("%s was not recreated on the candidate (version=%s uid=%s seeded uid=%s)",
+					m.Name, held.Version, m.UID, prior.UID)
+			}
+		} else if held.Version != "previous" || m.UID != prior.UID {
+			return nil, fmt.Errorf("%s is not the seeded previous-release pod (version=%s uid=%s seeded uid=%s)",
+				m.Name, held.Version, m.UID, prior.UID)
+		}
+		out[m.Name] = held
+	}
+	for _, name := range append([]string{mixedHeldCandidateMember}, mixedPreviousMembers...) {
+		if _, ok := out[name]; !ok {
+			return nil, fmt.Errorf("held window lacks %s", name)
+		}
+	}
+	return out, nil
+}
+
+// probeMixedProtocols reads /internal/capabilities from every held member.
+// It returns (nil, reason) when a probe could not be made and records a
+// failed case when a member answers with a protocol other than 2.
+func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, window map[string]mixedHeldMember) (map[string]mixedHeldMember, string) {
+	t.Helper()
+	candidate := window[mixedHeldCandidateMember]
+	ic, err := cluster.MintInternalClient(ctx, h, candidate.member.HTTPBase(),
+		mustEnv(t, "CAESIUM_LIFECYCLE_INTERNAL_TOKEN"), mustEnv(t, "CAESIUM_LIFECYCLE_INTERNAL_TOKEN"))
+	if err != nil {
+		return nil, fmt.Sprintf("cannot authenticate protocol probe: %v", err)
+	}
+	probed := map[string]mixedHeldMember{}
+	for name, m := range window {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cluster.InternalBase(m.IP)+"/internal/capabilities", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+ic.Token)
+		resp, err := ic.HTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Sprintf("%s protocol probe: %v", name, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Sprintf("%s capabilities status %d: %s", name, resp.StatusCode, body)
+		}
+		var capability struct {
+			NodeID          string `json:"node_id"`
+			ProtocolVersion int    `json:"protocol_version"`
+		}
+		if err := json.Unmarshal(body, &capability); err != nil {
+			return nil, fmt.Sprintf("%s capabilities body: %v", name, err)
+		}
+		if capability.ProtocolVersion != 2 {
+			failClusterCase(t, mixedCaseName, "%s (%s) reports internal protocol %d; F1 permits a mixed window only at protocol 2",
+				name, m.Version, capability.ProtocolVersion)
+		}
+		m.Protocol, m.NodeID = capability.ProtocolVersion, capability.NodeID
+		probed[name] = m
+	}
+	return probed, ""
+}
+
+// attemptMixedCrossing triggers one held run through trigger's public API and
+// accepts it only when the lease owner has direction.OwnerVersion, the claimed
+// worker has the other version, and the same durable attempt, fenced owner
+// generation and raw nonce reach a succeeded terminal state.
+func attemptMixedCrossing(ctx context.Context, t *testing.T, fx clusterFixture, h *cluster.HTTP, readBase string,
+	window map[string]mixedHeldMember, direction mixedDirection, trigger mixedHeldMember) (cross map[string]any, a mixedAttempt) {
+	t.Helper()
+	a = mixedAttempt{Direction: direction.Name, TriggerMember: trigger.Name, StartedAt: time.Now().UTC()}
+	defer func() { a.Seconds = time.Since(a.StartedAt).Seconds() }()
+	byIP := map[string]mixedHeldMember{}
+	for _, m := range window {
+		byIP[m.IP] = m
+	}
+	tc := newClient(t)
+	tc.base = trigger.member.HTTPBase()
+	run, started, err := tc.triggerRun(ctx, fx.Jobs["inflight"].ID, nil)
+	if err != nil {
+		a.Outcome = "trigger failed: " + err.Error()
+		return nil, a
+	}
+	if !started {
+		a.Outcome = "trigger admitted to the queue instead of starting"
+		return nil, a
+	}
+	a.RunID = run.ID
+	startSeen := false
+	for until := time.Now().Add(15 * time.Second); time.Now().Before(until) && !startSeen; {
+		for _, event := range recorderEvents(t) {
+			startSeen = startSeen || event.RunID == run.ID && event.Kind == "start"
+		}
+		if !startSeen {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if !startSeen {
+		releaseRecordedRun(t, run.ID)
+		a.Outcome = "no raw start effect within 15s"
+		return nil, a
+	}
+	leaseCtx, cancelLease := context.WithTimeout(ctx, 15*time.Second)
+	lease, err := cluster.WaitLease(leaseCtx, h, readBase, run.ID, "")
+	cancelLease()
+	if err != nil {
+		releaseRecordedRun(t, run.ID)
+		a.Outcome = "run lease unobservable: " + err.Error()
+		return nil, a
+	}
+	live, err := h.GetRun(ctx, readBase, run.JobID, run.ID)
+	if err != nil || len(live.Tasks) != 1 {
+		releaseRecordedRun(t, run.ID)
+		a.Outcome = fmt.Sprintf("running projection unreadable or not one task: err=%v", err)
+		return nil, a
+	}
+	beforeTask, err := readClusterTaskProof(ctx, h, readBase, run.ID, live.Tasks[0].ID)
+	if err != nil || beforeTask.ClaimedBy == "" || beforeTask.RuntimeID == "" || beforeTask.ClaimAttempt < 1 ||
+		beforeTask.OwnerGeneration != lease.Generation ||
+		beforeTask.Attempt != live.Tasks[0].Attempt || beforeTask.Status != "running" {
+		releaseRecordedRun(t, run.ID)
+		a.Outcome = fmt.Sprintf("durable running attempt not proved before release: err=%v proof=%+v lease_generation=%d", err, beforeTask, lease.Generation)
+		return nil, a
+	}
+	a.OwnerNode, a.WorkerNode = lease.OwnerNode, beforeTask.ClaimedBy
+	owner, ownerOK := byIP[cluster.HostIP(lease.OwnerNode)]
+	worker, workerOK := byIP[cluster.HostIP(beforeTask.ClaimedBy)]
+	a.OwnerVersion, a.WorkerVersion = owner.Version, worker.Version
+	releaseRecordedRun(t, run.ID)
+	rc := newClient(t)
+	rc.base = readBase
+	final, err := rc.awaitRunStatus(ctx, run.JobID, run.ID, func(r apiRun) bool { return isTerminal(r.Status) }, 60*time.Second)
+	switch {
+	case err != nil:
+		a.Outcome = "run did not reach a terminal state within 60s after release: " + err.Error()
+		return nil, a
+	case final.Status != "succeeded" || len(final.Tasks) != 1 || final.Tasks[0].ID != live.Tasks[0].ID ||
+		final.Tasks[0].Attempt != beforeTask.Attempt:
+		a.Outcome = fmt.Sprintf("terminal run is not the released attempt: status=%s tasks=%d", final.Status, len(final.Tasks))
+		return nil, a
+	case !ownerOK || !workerOK:
+		a.Outcome = "lease owner or claimed worker is not a held member"
+		return nil, a
+	case owner.Version == worker.Version:
+		a.Outcome = "owner and worker ran the same version"
+		return nil, a
+	case owner.Version != direction.OwnerVersion:
+		a.Outcome = fmt.Sprintf("owner ran %s, direction needs a %s owner", owner.Version, direction.OwnerVersion)
+		return nil, a
+	}
+	afterTask, err := readClusterTaskProof(ctx, h, readBase, run.ID, beforeTask.TaskID)
+	if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
+		afterTask.ClaimAttempt != beforeTask.ClaimAttempt || afterTask.RuntimeID != beforeTask.RuntimeID ||
+		afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
+		afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
+		a.Outcome = fmt.Sprintf("terminal durable attempt or raw completion does not match: err=%v proof=%+v", err, afterTask)
+		return nil, a
+	}
+	a.Outcome = "crossed"
+	return map[string]any{"direction": direction.Name, "run_id": run.ID, "trigger_member": trigger.Name,
+		"owner_node": lease.OwnerNode, "owner_version": owner.Version, "owner_generation": lease.Generation,
+		"worker_node": beforeTask.ClaimedBy, "worker_version": worker.Version,
+		"task_before_release": beforeTask, "task_after_completion": afterTask,
+		"owner_member": owner, "worker_member": worker,
+		"terminal_status": final.Status, "raw_effect_nonce": afterTask.RecorderNonce}, a
+}
+
 func TestLifecycleClusterMixedWindow(t *testing.T) {
 	fx := clusterFixture{}
 	if !readJSON(t, "cluster-fixture.json", &fx) {
-		blockf(t, "mixed-version-dispatch-and-completion", "seed fixture missing")
+		blockf(t, mixedCaseName, "seed fixture missing")
 	}
-	kube, err := cluster.InClusterClient()
-	require.NoError(t, err)
-	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Minute)
+	var hold map[string]any
+	if !readJSON(t, "cluster-mixed-hold.json", &hold) || hold["held"] != true || hold["lifecycle_id"] != fx.LifecycleID ||
+		hold["updated_member"] != mixedHeldCandidateMember {
+		blockf(t, mixedCaseName, "host did not record a verified hold at exactly %s upgraded (cluster-mixed-hold.json)", mixedHeldCandidateMember)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), mixedWindowBudget)
 	defer cancel()
 	oldID := mustEnv(t, "CAESIUM_LIFECYCLE_PREVIOUS_IMAGE_ID")
 	newID := mustEnv(t, "CAESIUM_LIFECYCLE_CANDIDATE_IMAGE_ID")
-	var observed []map[string]any
-	lastProbeErr := ""
-	for ctx.Err() == nil {
-		topo, err := cluster.DiscoverTopology(ctx, kube, fx.LifecycleID)
-		if err == nil && len(topo.Members) == 3 {
-			var oldMembers, newMembers []cluster.Member
-			for _, m := range topo.Members {
-				if !cluster.PodReady(&m.Pod) {
-					continue
-				}
-				switch {
-				case cluster.ImageIDMatchesCandidate(m.ImageID, oldID):
-					oldMembers = append(oldMembers, m)
-				case cluster.ImageIDMatchesCandidate(m.ImageID, newID):
-					newMembers = append(newMembers, m)
-				}
-			}
-			if len(oldMembers) > 0 && len(newMembers) > 0 {
-				base := newMembers[0].HTTPBase()
-				h := cluster.NewHTTP(mustEnv(t, "CAESIUM_MANUAL_TRIGGER_API_KEY"))
-				ic, err := cluster.MintInternalClient(ctx, h, base, mustEnv(t, "CAESIUM_LIFECYCLE_INTERNAL_TOKEN"), mustEnv(t, "CAESIUM_LIFECYCLE_INTERNAL_TOKEN"))
-				if err != nil {
-					lastProbeErr = fmt.Sprintf("cannot authenticate protocol probe: %v", err)
-					time.Sleep(300 * time.Millisecond)
-					continue
-				}
-				caps := map[string]int{}
-				probeOK := true
-				for _, m := range append(oldMembers, newMembers...) {
-					req, err := http.NewRequestWithContext(ctx, http.MethodGet, cluster.InternalBase(m.IP)+"/internal/capabilities", nil)
-					if err != nil {
-						t.Fatal(err)
-					}
-					req.Header.Set("Authorization", "Bearer "+ic.Token)
-					resp, err := ic.HTTP.Do(req)
-					if err != nil {
-						lastProbeErr = fmt.Sprintf("%s protocol probe: %v", m.Name, err)
-						probeOK = false
-						break
-					}
-					body, _ := io.ReadAll(resp.Body)
-					resp.Body.Close()
-					if resp.StatusCode != http.StatusOK {
-						lastProbeErr = fmt.Sprintf("%s capabilities status %d: %s", m.Name, resp.StatusCode, body)
-						probeOK = false
-						break
-					}
-					var cap struct {
-						NodeID          string `json:"node_id"`
-						ProtocolVersion int    `json:"protocol_version"`
-					}
-					if err := json.Unmarshal(body, &cap); err != nil {
-						t.Fatal(err)
-					}
-					require.Equal(t, 2, cap.ProtocolVersion)
-					caps[m.Name] = cap.ProtocolVersion
-				}
-				if !probeOK {
-					time.Sleep(300 * time.Millisecond)
-					continue
-				}
-				observed = append(observed, map[string]any{"old": oldMembers, "new": newMembers, "protocol": caps, "at": time.Now().UTC()})
-				writeJSON(t, "cluster-mixed-window.json", observed)
-				versionByIP := map[string]string{}
-				memberByIP := map[string]cluster.Member{}
-				for _, m := range oldMembers {
-					versionByIP[m.IP] = "previous"
-					memberByIP[m.IP] = m
-				}
-				for _, m := range newMembers {
-					versionByIP[m.IP] = "candidate"
-					memberByIP[m.IP] = m
-				}
-				c := newClient(t)
-				c.base = base
-				for attempt := 0; attempt < 12 && ctx.Err() == nil; attempt++ {
-					// Hold one task so the specific dispatch attempt can be read
-					// before its raw effect and fenced owner completion.
-					run, started, err := c.triggerRun(ctx, fx.Jobs["inflight"].ID, nil)
-					if err != nil || !started {
-						continue
-					}
-					startSeen := false
-					for until := time.Now().Add(10 * time.Second); time.Now().Before(until) && !startSeen; {
-						for _, event := range recorderEvents(t) {
-							startSeen = startSeen || event.RunID == run.ID && event.Kind == "start"
-						}
-						if !startSeen {
-							time.Sleep(300 * time.Millisecond)
-						}
-					}
-					if !startSeen {
-						releaseRecordedRun(t, run.ID)
-						continue
-					}
-					leaseCtx, cancelLease := context.WithTimeout(ctx, 10*time.Second)
-					lease, err := cluster.WaitLease(leaseCtx, h, base, run.ID, "")
-					cancelLease()
-					if err != nil {
-						releaseRecordedRun(t, run.ID)
-						continue
-					}
-					live, err := h.GetRun(ctx, base, run.JobID, run.ID)
-					if err != nil || len(live.Tasks) != 1 {
-						releaseRecordedRun(t, run.ID)
-						continue
-					}
-					beforeTask, err := readClusterTaskProof(ctx, h, base, run.ID, live.Tasks[0].ID)
-					if err != nil || beforeTask.ClaimedBy == "" || beforeTask.RuntimeID == "" || beforeTask.ClaimAttempt < 1 ||
-						beforeTask.OwnerGeneration != lease.Generation ||
-						beforeTask.Attempt != live.Tasks[0].Attempt || beforeTask.Status != "running" {
-						releaseRecordedRun(t, run.ID)
-						continue
-					}
-					ownerIP := cluster.HostIP(lease.OwnerNode)
-					workerIP := cluster.HostIP(beforeTask.ClaimedBy)
-					ownerVersion, workerVersion := versionByIP[ownerIP], versionByIP[workerIP]
-					releaseRecordedRun(t, run.ID)
-					final, err := c.awaitRunStatus(ctx, run.JobID, run.ID,
-						func(r apiRun) bool { return isTerminal(r.Status) }, 40*time.Second)
-					if err != nil || final.Status != "succeeded" || len(final.Tasks) != 1 ||
-						final.Tasks[0].ID != live.Tasks[0].ID || final.Tasks[0].Attempt != beforeTask.Attempt ||
-						ownerVersion == "" || workerVersion == "" || ownerVersion == workerVersion {
-						continue
-					}
-					afterTask, err := readClusterTaskProof(ctx, h, base, run.ID, beforeTask.TaskID)
-					if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
-						afterTask.ClaimAttempt != beforeTask.ClaimAttempt || afterTask.RuntimeID != beforeTask.RuntimeID ||
-						afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
-						afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
-						continue
-					}
-					postTopo, err := cluster.DiscoverTopology(ctx, kube, fx.LifecycleID)
-					if err != nil {
-						continue
-					}
-					stable := true
-					for _, original := range []cluster.Member{memberByIP[ownerIP], memberByIP[workerIP]} {
-						post, ok := postTopo.ByName(original.Name)
-						stable = stable && ok && post.UID == original.UID && post.ImageID == original.ImageID
-					}
-					if !stable {
-						continue
-					}
-					cross := map[string]any{"run_id": run.ID, "owner_node": lease.OwnerNode,
-						"owner_version": ownerVersion, "owner_generation": lease.Generation,
-						"worker_node": beforeTask.ClaimedBy, "worker_version": workerVersion,
-						"task_before_release": beforeTask, "task_after_completion": afterTask,
-						"owner_member": memberByIP[ownerIP], "worker_member": memberByIP[workerIP],
-						"terminal_status": final.Status, "raw_effect_nonce": afterTask.RecorderNonce}
-					writeJSON(t, "cluster-mixed-crossing.json", cross)
-					writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusPass,
-						Detail:       "same task attempt and fenced owner generation dispatched and completed across protocol-2 image IDs; raw nonce persisted in terminal task output",
-						Observations: cross})
-					return
-				}
-				writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusBlocked,
-					Detail: "both protocol-2 images were observed, but no opposite-version lease owner, claimed worker and raw completion were jointly observed"})
-				return
-			}
+	h := cluster.NewHTTP(mustEnv(t, "CAESIUM_MANUAL_TRIGGER_API_KEY"))
+
+	// The candidate pod was Ready before Helm returned, but its internal mTLS
+	// listener and CA read can trail readiness; retry the probe, bounded.
+	var window map[string]mixedHeldMember
+	lastProbe := ""
+	for deadline := time.Now().Add(mixedProbeBudget); ctx.Err() == nil; {
+		held, err := heldMixedWindow(ctx, fx, oldID, newID)
+		if err != nil {
+			lastProbe = err.Error()
+		} else if probed, reason := probeMixedProtocols(ctx, t, h, held); reason != "" {
+			lastProbe = reason
+		} else {
+			window = probed
+			break
 		}
-		time.Sleep(300 * time.Millisecond)
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
 	}
-	blockf(t, "mixed-version-dispatch-and-completion", "no live mixed-version window with both protocol-2 members was observed; last probe: %s", lastProbeErr)
+	if window == nil {
+		blockf(t, mixedCaseName, "held mixed-version window with three protocol-2 members was not observable within %s; last probe: %s",
+			mixedProbeBudget, lastProbe)
+	}
+	writeJSON(t, "cluster-mixed-window.json", map[string]any{"start": window})
+	readBase := window[mixedHeldCandidateMember].member.HTTPBase()
+
+	directions := []mixedDirection{
+		{Name: "candidate-owner-previous-worker", OwnerVersion: "candidate", Triggers: []string{mixedHeldCandidateMember}},
+		{Name: "previous-owner-candidate-worker", OwnerVersion: "previous", Triggers: mixedPreviousMembers},
+	}
+	var attempts []mixedAttempt
+	crossings := map[string]map[string]any{}
+	for _, direction := range directions {
+		deadline := time.Now().Add(mixedDirectionBudget)
+		for n := 0; ctx.Err() == nil && time.Now().Before(deadline); n++ {
+			trigger := window[direction.Triggers[n%len(direction.Triggers)]]
+			cross, attempt := attemptMixedCrossing(ctx, t, fx, h, readBase, window, direction, trigger)
+			attempts = append(attempts, attempt)
+			writeJSON(t, "cluster-mixed-attempts.json", attempts)
+			t.Logf("mixed attempt %s via %s: run=%s owner=%s(%s) worker=%s(%s) %.1fs: %s", attempt.Direction,
+				attempt.TriggerMember, attempt.RunID, attempt.OwnerNode, attempt.OwnerVersion,
+				attempt.WorkerNode, attempt.WorkerVersion, attempt.Seconds, attempt.Outcome)
+			if cross != nil {
+				crossings[direction.Name] = cross
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if crossings[direction.Name] == nil {
+			last := "no attempt ran"
+			if len(attempts) > 0 {
+				last = attempts[len(attempts)-1].Outcome
+			}
+			blockf(t, mixedCaseName, "held window open, but no %s dispatch and completion was jointly observed within %s (%d attempts in cluster-mixed-attempts.json; last: %s)",
+				direction.Name, mixedDirectionBudget, len(attempts), last)
+		}
+	}
+
+	// Every crossing must have happened inside one held window: the same three
+	// pods, UIDs and image IDs at the end as at the start.
+	end, err := heldMixedWindow(ctx, fx, oldID, newID)
+	if err != nil {
+		blockf(t, mixedCaseName, "held window did not survive the observation: %v", err)
+	}
+	for name, first := range window {
+		last := end[name]
+		if last.UID != first.UID || last.ImageID != first.ImageID || last.IP != first.IP {
+			blockf(t, mixedCaseName, "%s changed inside the held window (uid %s→%s, image %s→%s)",
+				name, first.UID, last.UID, first.ImageID, last.ImageID)
+		}
+	}
+	writeJSON(t, "cluster-mixed-window.json", map[string]any{"start": window, "end": end})
+	cross := map[string]any{"hold": hold, "window_start": window, "window_end": end,
+		"crossings": crossings, "attempts": attempts}
+	writeJSON(t, "cluster-mixed-crossing.json", cross)
+	writeCase(t, caseRecord{Name: mixedCaseName, Status: statusPass,
+		Detail:       "inside a held window (caesium-2 candidate, caesium-0/1 previous, all protocol 2) the same task attempt and fenced owner generation dispatched and completed in both directions across the version boundary; raw nonces persisted in terminal task output",
+		Observations: cross})
 }
 
 func TestLifecycleClusterAfterUpgrade(t *testing.T) {
@@ -1378,12 +1568,16 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		Observations: map[string]any{"queued_run_id": queued.ID, "queued_row_id": fx.QueuedRow.ID,
 			"in_flight_run_id": fx.InFlight.ID, "predecessor_run_id": fx.Predecessor.ID}})
 	var crossing map[string]any
-	if !readJSON(t, "cluster-mixed-crossing.json", &crossing) {
-		writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusBlocked,
-			Detail: "no opposite-version lease owner, claimed worker, terminal run and raw completion effect were jointly observed"})
+	crossed := readJSON(t, "cluster-mixed-crossing.json", &crossing)
+	directions, _ := crossing["crossings"].(map[string]any)
+	_, forward := directions["candidate-owner-previous-worker"]
+	_, reverse := directions["previous-owner-candidate-worker"]
+	if !crossed || !forward || !reverse {
+		writeCase(t, caseRecord{Name: mixedCaseName, Status: statusBlocked,
+			Detail: "the held window did not record both opposite-version crossings (candidate owner with a previous worker, and previous owner with a candidate worker), each with a terminal run and raw completion effect"})
 	} else {
-		writeCase(t, caseRecord{Name: "mixed-version-dispatch-and-completion", Status: statusPass,
-			Detail:       "protocol-2 mixed window and opposite-version dispatch/completion were observed",
+		writeCase(t, caseRecord{Name: mixedCaseName, Status: statusPass,
+			Detail:       "held protocol-2 mixed window; opposite-version dispatch and completion observed in both directions",
 			Observations: crossing})
 	}
 }

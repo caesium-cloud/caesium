@@ -6,6 +6,14 @@ records cgroup anon/file (or cgroup v1 usage and stat), caesium RSS, and the
 existing GET /metrics Go heap and GC series. Absent series are recorded. This
 does not change the 1Gi limit, Raft retention, or snapshot pass rules except
 to refuse a pass when the samples themselves are missing.
+
+W9-δ (#583) adds per-sample native-memory attribution that never gates the
+case: /proc/<pid>/status RssAnon/RssFile, smaps_rollup, smaps regions grouped
+into the malloc heap, Go heap arenas, other anonymous mappings (by size) and
+file-backed mappings, established dqlite/HTTP TCP connections, the open fd
+count and the Go runtime's sys/heap/stack series. `attribute` joins those
+samples with the per-batch leader/other segment listings and reports each
+survivor's RSS minus its retained closed Raft segment bytes per batch.
 """
 
 from __future__ import annotations
@@ -24,7 +32,10 @@ from pathlib import Path
 
 
 MEMBERS = ("caesium-0", "caesium-1")
-REASONS = ("cadence", "apply-error")
+# post-batch is taken right after the per-batch file listings (round 0, never
+# an in-write sample) so attribution can pair RSS with retained segment bytes;
+# post-rejoin is the same pairing after the stopped member has caught up.
+REASONS = ("cadence", "apply-error", "post-batch", "post-rejoin")
 MEMORY_LIMIT = "1Gi"
 SOURCE = "kubectl-exec"
 GO_SERIES = {
@@ -33,6 +44,17 @@ GO_SERIES = {
     "last_gc_time_seconds": "go_memstats_last_gc_time_seconds",
 }
 PROCESS_START_SERIES = "process_start_time_seconds"
+# Recorded for attribution only; their absence is not a reading gap.
+GO_RUNTIME_SERIES = {
+    "sys_bytes": "go_memstats_sys_bytes",
+    "heap_sys_bytes": "go_memstats_heap_sys_bytes",
+    "heap_idle_bytes": "go_memstats_heap_idle_bytes",
+    "heap_released_bytes": "go_memstats_heap_released_bytes",
+    "stack_sys_bytes": "go_memstats_stack_sys_bytes",
+    "process_resident_memory_bytes": "process_resident_memory_bytes",
+}
+STATUS_KIB_FIELDS = ("VmRSS", "VmHWM", "RssAnon", "RssFile", "RssShmem", "VmData", "VmSwap")
+REGION_KEYS = ("vmas", "size_kb", "rss_kb", "anonymous_kb", "private_dirty_kb", "swap_kb")
 HEAP_GAP_KEYS = (
     "heap_alloc_bytes", "heap_inuse_bytes", "last_gc_time_seconds", "gc_duration_seconds",
 )
@@ -185,6 +207,86 @@ if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/stat" ]; then
   printf '%s\n' 'status=present'
   cat "${root}/proc/${pid}/stat" 2>/dev/null
   printf '\n'
+else
+  printf '%s\n' 'status=absent'
+fi
+
+# Attribution sections (#583). Each is optional: an unreadable file is
+# recorded as absent and never turns a sample into a reading gap.
+printf '%s\n' "--- section proc.smaps_rollup path=/proc/${pid}/smaps_rollup"
+if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/smaps_rollup" ]; then
+  printf '%s\n' 'status=present'
+  cat "${root}/proc/${pid}/smaps_rollup" 2>/dev/null
+  printf '\n'
+else
+  printf '%s\n' 'status=absent'
+fi
+# One line per region class. Go reserves its heap arenas at the 0x40<<32
+# (arm64) or 0xc0<<32 (amd64) hint, so a 10-hex-digit start address beginning
+# 40 or c0 is a Go arena; other anonymous mappings are musl malloc, cgo/C and
+# Go runtime side tables, split by mapping size.
+printf '%s\n' "--- section proc.smaps_regions path=/proc/${pid}/smaps"
+if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/smaps" ] && command -v awk >/dev/null 2>&1; then
+  printf '%s\n' 'status=present'
+  awk '
+function flush() {
+  if (cat != "") { vmas[cat]++; size[cat] += sz; rss[cat] += rs; anon[cat] += an; dirty[cat] += pd; swap[cat] += sw }
+  if (path == "" && cat != "" && sz >= 16384) big[++nbig] = sprintf("vma=%s perms=%s size_kb=%d rss_kb=%d anonymous_kb=%d", range, perms, sz, rs, an)
+}
+/^[0-9a-f]+-[0-9a-f]+ / {
+  flush(); sz = 0; rs = 0; an = 0; pd = 0; sw = 0; pending = 0
+  range = $1; perms = $2
+  path = (NF >= 6) ? $6 : ""
+  dash = index($1, "-"); first = substr($1, 1, 2)
+  if (path == "[heap]") cat = "heap"
+  else if (path ~ /^\[stack/) cat = "stack"
+  else if (path ~ /^\[/) cat = "special"
+  else if (path != "") cat = "file"
+  else if (dash == 11 && (first == "40" || first == "c0")) cat = "go_arena"
+  else { cat = "anon_lt_1m"; pending = 1 }
+  next
+}
+$1 == "Size:" {
+  sz = $2
+  if (pending) { if (sz >= 65536) cat = "anon_ge_64m"; else if (sz >= 1024) cat = "anon_1m_to_64m" }
+  next
+}
+$1 == "Rss:" { rs = $2; next }
+$1 == "Anonymous:" { an = $2; next }
+$1 == "Private_Dirty:" { pd = $2; next }
+$1 == "Swap:" { sw = $2; next }
+END {
+  flush()
+  for (c in vmas) printf "region=%s vmas=%d size_kb=%d rss_kb=%d anonymous_kb=%d private_dirty_kb=%d swap_kb=%d\n", c, vmas[c], size[c], rss[c], anon[c], dirty[c], swap[c]
+  for (i = 1; i <= nbig; i++) print big[i]
+}' "${root}/proc/${pid}/smaps" 2>/dev/null
+  printf '\n'
+else
+  printf '%s\n' 'status=absent'
+fi
+# Established sockets in the pod network namespace: dqlite (9001, 0x2329)
+# inbound are client and Raft connections served by this member; HTTP 8080
+# (0x1F90) inbound are API callers.
+printf '%s\n' "--- section net.tcp path=/proc/${pid}/net/tcp"
+if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/net/tcp" ] && command -v awk >/dev/null 2>&1; then
+  printf '%s\n' 'status=present'
+  cat "${root}/proc/${pid}/net/tcp" "${root}/proc/${pid}/net/tcp6" 2>/dev/null | awk '
+$1 ~ /:$/ && $4 == "01" {
+  est++
+  n = split($2, l, ":"); m = split($3, r, ":")
+  if (l[n] == "2329") din++
+  if (r[m] == "2329") dout++
+  if (l[n] == "1F90") hin++
+}
+END { printf "established=%d dqlite_inbound=%d dqlite_outbound=%d http_inbound=%d\n", est, din, dout, hin }'
+  printf '\n'
+else
+  printf '%s\n' 'status=absent'
+fi
+printf '%s\n' "--- section proc.fd_count path=/proc/${pid}/fd"
+if [ -n "$pid" ] && [ -r "${root}/proc/${pid}/fd" ] && fds=$(ls "${root}/proc/${pid}/fd" 2>/dev/null); then
+  printf '%s\n' 'status=present'
+  printf '%s\n' "$fds" | grep -c .
 else
   printf '%s\n' 'status=absent'
 fi
@@ -439,6 +541,87 @@ def parse_rss(sections: dict) -> dict:
     }
 
 
+KIB_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):\s+(\d+)\s+kB\s*$")
+REGION_LINE_RE = re.compile(r"^region=(?P<name>[a-z0-9_]+)((?:\s+[a-z_]+=\d+)+)\s*$")
+# Every anonymous mapping of 16 MiB or more, so one growing mapping is visible.
+LARGE_VMA_RE = re.compile(r"^vma=(?P<start>[0-9a-f]+)-(?P<end>[0-9a-f]+)\s+perms=(?P<perms>\S+)((?:\s+[a-z_]+=\d+)+)\s*$")
+NET_LINE_RE = re.compile(r"^((?:[a-z_]+=\d+\s*)+)$")
+
+
+def _kib_fields(body: str) -> dict:
+    values = {}
+    for line in body.splitlines():
+        match = KIB_LINE_RE.match(line.strip())
+        if match:
+            values[match.group(1)] = int(match.group(2))
+    return values
+
+
+def parse_attribution(sections: dict) -> dict:
+    """Optional native-memory attribution; gaps here never gate a case."""
+    gaps = []
+    status_section = _present_section(sections, "proc.status")
+    status_kib = {}
+    threads = None
+    if status_section is not None:
+        body = status_section.get("body") or ""
+        all_kib = _kib_fields(body)
+        status_kib = {key: all_kib.get(key) for key in STATUS_KIB_FIELDS}
+        match = re.search(r"^Threads:\s*(\d+)\s*$", body, re.MULTILINE)
+        threads = int(match.group(1)) if match else None
+        for key in ("RssAnon", "RssFile"):
+            if status_kib.get(key) is None:
+                gaps.append(f"status {key}")
+    else:
+        gaps.append("proc.status")
+    rollup_section = _present_section(sections, "proc.smaps_rollup")
+    rollup = _kib_fields((rollup_section or {}).get("body") or "")
+    if not rollup:
+        gaps.append("smaps_rollup")
+    regions = {}
+    large = []
+    region_section = _present_section(sections, "proc.smaps_regions")
+    for line in ((region_section or {}).get("body") or "").splitlines():
+        match = REGION_LINE_RE.match(line.strip())
+        if match:
+            values = dict(pair.split("=", 1) for pair in match.group(2).split())
+            regions[match.group("name")] = {key: int(values.get(key, 0)) for key in REGION_KEYS}
+            continue
+        match = LARGE_VMA_RE.match(line.strip())
+        if match:
+            values = dict(pair.split("=", 1) for pair in match.group(4).split())
+            large.append({"start": match.group("start"), "end": match.group("end"),
+                          "perms": match.group("perms"),
+                          **{key: int(values.get(key, 0)) for key in ("size_kb", "rss_kb", "anonymous_kb")}})
+    if not regions:
+        gaps.append("smaps_regions")
+    net = {}
+    net_section = _present_section(sections, "net.tcp")
+    for line in ((net_section or {}).get("body") or "").splitlines():
+        match = NET_LINE_RE.match(line.strip())
+        if match:
+            net = {key: int(value) for key, value in (pair.split("=", 1) for pair in match.group(1).split())}
+    if not net:
+        gaps.append("net.tcp")
+    fd_count = None
+    fd_section = _present_section(sections, "proc.fd_count")
+    fd_text = ((fd_section or {}).get("body") or "").strip()
+    if re.fullmatch(r"\d+", fd_text):
+        fd_count = int(fd_text)
+    else:
+        gaps.append("proc.fd_count")
+    return {
+        "status_kib": status_kib,
+        "threads": threads,
+        "smaps_rollup_kib": rollup,
+        "smaps_regions": regions,
+        "large_anon_vmas": large,
+        "net": net,
+        "fd_count": fd_count,
+        "gaps": gaps,
+    }
+
+
 def _labels(text: str | None) -> dict:
     if not text:
         return {}
@@ -540,6 +723,11 @@ def parse_go_metrics(section: dict | None) -> dict:
     if not start["present"]:
         missing.append(PROCESS_START_SERIES)
     record["absent_series"] = missing
+    runtime = {}
+    for key, name in GO_RUNTIME_SERIES.items():
+        item = _series_value(parsed, name)
+        runtime[key] = item.get("value") if item.get("present") else None
+    record["runtime"] = runtime
     return record
 
 
@@ -631,6 +819,7 @@ def build_sample(*, member: str, timestamp: str, reason: str, batch: int, lifecy
         "cgroup": cgroup,
         "process_rss": rss,
         "go": go_metrics,
+        "attribution": parse_attribution(sections),
     }
 
 
@@ -886,10 +1075,196 @@ def cmd_finish(argv: list[str]) -> int:
     return code
 
 
+
+# --- #583 attribution ---------------------------------------------------------
+CLOSED_SEGMENT_RE = re.compile(r"(?:^|/)(\d{16})-(\d{16})$")
+OPEN_SEGMENT_RE = re.compile(r"(?:^|/)open-\d+$")
+SNAPSHOT_RE = re.compile(r"(?:^|/)snapshot-\d+-\d+-\d+$")
+
+
+def parse_file_listing(text: str) -> dict:
+    """Sum an `ls -ln` listing of the dqlite data directory by file class.
+
+    Closed segments are the retained Raft log that raft also holds in memory
+    (an upper bound, because memory is trimmed per entry while disk segments
+    are deleted whole). Open segments and snapshots are reported separately.
+    """
+    closed = open_bytes = snapshot = 0
+    closed_count = 0
+    first = last = None
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 9 or not fields[0].startswith("-") or not fields[4].isdigit():
+            continue
+        name, size = fields[-1], int(fields[4])
+        match = CLOSED_SEGMENT_RE.search(name)
+        if match:
+            closed += size
+            closed_count += 1
+            start, end = int(match.group(1)), int(match.group(2))
+            first = start if first is None else min(first, start)
+            last = end if last is None else max(last, end)
+        elif OPEN_SEGMENT_RE.search(name):
+            open_bytes += size
+        elif SNAPSHOT_RE.search(name):
+            snapshot += size
+    return {"closed_segment_bytes": closed, "closed_segments": closed_count,
+            "first_retained_index": first, "last_closed_index": last,
+            "open_segment_bytes": open_bytes, "snapshot_bytes": snapshot}
+
+
+def _batch_sample(samples: list[dict], member: str, batch: int) -> dict | None:
+    """Prefer the post-batch sample taken right after the listings; runs that
+    predate it fall back to the last in-write cadence sample of the batch."""
+    rows = [s for s in samples if s.get("member") == member and s.get("batch") == batch
+            and s.get("readings_ok")]
+    paired = [s for s in rows if s.get("reason") == "post-batch"]
+    cadence = [s for s in rows if s.get("reason") == "cadence"]
+    chosen = paired or cadence
+    if not chosen:
+        return None
+    return max(chosen, key=lambda s: (int(s.get("round") or 0), s.get("timestamp") or ""))
+
+
+def _kib(value) -> int | None:
+    return None if value is None else int(value) * 1024
+
+
+def attribute(art: Path, lifecycle_id: str, http_target: str) -> dict:
+    logs = art / "cluster-logs"
+    samples = load_samples(logs / "snapshot-memory-samples.jsonl", lifecycle_id)
+    rows = []
+    batches = sorted(int(m.group(1)) for m in (re.fullmatch(r"leader-after-batch-(\d{2})\.json", p.name)
+                                                for p in logs.glob("leader-after-batch-*.json")) if m)
+    for batch in batches:
+        leader = json.loads((logs / f"leader-after-batch-{batch:02d}.json").read_text()).get("name")
+        listings = {}
+        for prefix, name in (("leader", leader), ("other", "caesium-1" if leader == "caesium-0" else "caesium-0")):
+            listing = logs / f"{prefix}-after-batch-{batch:02d}-snapshot-files.txt"
+            listings[name] = parse_file_listing(listing.read_text()) if listing.is_file() else None
+        for member in MEMBERS:
+            sample = _batch_sample(samples, member, batch)
+            files = listings.get(member)
+            row = {"batch": batch, "member": member,
+                   "role": "leader" if member == leader else "follower",
+                   "http_target": member == http_target, "files": files, "sample": None}
+            if sample is not None and files is not None:
+                attribution = sample.get("attribution") or {}
+                status = attribution.get("status_kib") or {}
+                rss = (sample.get("process_rss") or {}).get("rss_bytes")
+                rss_anon = _kib(status.get("RssAnon"))
+                go = sample.get("go") or {}
+                runtime = go.get("runtime") or {}
+                retained = files["closed_segment_bytes"]
+                row["sample"] = {
+                    "timestamp": sample.get("timestamp"), "round": sample.get("round"),
+                    "reason": sample.get("reason"),
+                    "rss_bytes": rss, "rss_anon_bytes": rss_anon,
+                    "rss_file_bytes": _kib(status.get("RssFile")),
+                    "cgroup_memory_current_bytes": (sample.get("cgroup") or {}).get("memory_current_bytes"),
+                    "retained_log_bytes": retained,
+                    "rss_minus_retained_log_bytes": None if rss is None else rss - retained,
+                    "anon_minus_retained_log_bytes": None if rss_anon is None else rss_anon - retained,
+                    "go_heap_inuse_bytes": (go.get("heap_inuse_bytes") or {}).get("value"),
+                    "go_sys_bytes": runtime.get("sys_bytes"),
+                    "smaps_regions_kib": {name: region.get("rss_kb") for name, region in
+                                          (attribution.get("smaps_regions") or {}).items()},
+                    "large_anon_vmas": attribution.get("large_anon_vmas") or [],
+                    "net": attribution.get("net") or {},
+                    "fd_count": attribution.get("fd_count"),
+                    "threads": attribution.get("threads"),
+                }
+            rows.append(row)
+    summary = {}
+    for member in MEMBERS:
+        series = [row for row in rows if row["member"] == member and row["sample"] is not None
+                  and row["sample"]["rss_minus_retained_log_bytes"] is not None]
+        if not series:
+            summary[member] = {"measured_batches": 0}
+            continue
+        values = [row["sample"]["rss_minus_retained_log_bytes"] for row in series]
+        increments = [b - a for a, b in zip(values, values[1:])]
+        first, last = series[0]["sample"], series[-1]["sample"]
+        region_delta = {}
+        for name in sorted(set(first["smaps_regions_kib"]) | set(last["smaps_regions_kib"])):
+            before, after = first["smaps_regions_kib"].get(name), last["smaps_regions_kib"].get(name)
+            if before is not None and after is not None:
+                region_delta[name] = (after - before) * 1024
+        summary[member] = {
+            "measured_batches": len(series),
+            "first_batch": series[0]["batch"], "last_batch": series[-1]["batch"],
+            "roles": sorted({row["role"] for row in series}),
+            "http_target": member == http_target,
+            "rss_minus_retained_log_first_bytes": values[0],
+            "rss_minus_retained_log_last_bytes": values[-1],
+            "rss_minus_retained_log_delta_bytes": values[-1] - values[0],
+            "rss_minus_retained_log_max_bytes": max(values),
+            "increments_bytes": increments,
+            "last_three_increments_bytes": increments[-3:],
+            "rss_anon_delta_bytes": (None if first["rss_anon_bytes"] is None or last["rss_anon_bytes"] is None
+                                     else last["rss_anon_bytes"] - first["rss_anon_bytes"]),
+            "retained_log_delta_bytes": last["retained_log_bytes"] - first["retained_log_bytes"],
+            "smaps_region_rss_delta_bytes": region_delta,
+            "dqlite_inbound_first_last": [first["net"].get("dqlite_inbound"), last["net"].get("dqlite_inbound")],
+            "fd_count_first_last": [first["fd_count"], last["fd_count"]],
+        }
+    post_rejoin = {}
+    for member in MEMBERS:
+        rows_after = [s for s in samples if s.get("member") == member and s.get("reason") == "post-rejoin"
+                      and s.get("readings_ok")]
+        listing = logs / f"post-rejoin-{member}-files.txt"
+        if not rows_after or not listing.is_file():
+            continue
+        sample = rows_after[-1]
+        files = parse_file_listing(listing.read_text())
+        rss = (sample.get("process_rss") or {}).get("rss_bytes")
+        residual = None if rss is None else rss - files["closed_segment_bytes"]
+        last = summary.get(member, {}).get("rss_minus_retained_log_last_bytes")
+        post_rejoin[member] = {
+            "timestamp": sample.get("timestamp"), "rss_bytes": rss, "files": files,
+            "rss_minus_retained_log_bytes": residual,
+            "change_from_last_batch_bytes": None if residual is None or last is None else residual - last,
+            "smaps_regions_kib": {name: region.get("rss_kb") for name, region in
+                                  ((sample.get("attribution") or {}).get("smaps_regions") or {}).items()},
+            "large_anon_vmas": (sample.get("attribution") or {}).get("large_anon_vmas") or [],
+        }
+    return {"kind": "caesium-snapshot-memory-residual", "lifecycle_id": lifecycle_id,
+            "http_target": http_target, "memory_limit": MEMORY_LIMIT,
+            "method": "per member and batch, the last in-write cadence sample's RSS minus that member's "
+                      "retained closed Raft segment bytes from the listing taken after the batch",
+            "batches": batches, "rows": rows, "summary": summary, "post_rejoin": post_rejoin}
+
+
+def cmd_attribute(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="lifecycle-memory-sample.py attribute")
+    parser.add_argument("--artifact-root", required=True, type=Path)
+    parser.add_argument("--lifecycle-id", required=True)
+    parser.add_argument("--http-target", default="caesium-0", choices=MEMBERS)
+    parser.add_argument("--dest", required=True, type=Path)
+    args = parser.parse_args(argv)
+    document = attribute(args.artifact_root, args.lifecycle_id, args.http_target)
+    args.dest.parent.mkdir(parents=True, exist_ok=True)
+    args.dest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    mib = lambda value: "-" if value is None else f"{value / 1048576:.0f}"
+    for member, item in document["summary"].items():
+        if not item.get("measured_batches"):
+            sys.stdout.write(f"{member}: no measured batch\n")
+            continue
+        sys.stdout.write(
+            f"{member} ({'/'.join(item['roles'])}{', HTTP target' if item['http_target'] else ''}): "
+            f"RSS - retained log {mib(item['rss_minus_retained_log_first_bytes'])} -> "
+            f"{mib(item['rss_minus_retained_log_last_bytes'])} MiB over batches "
+            f"{item['first_batch']}..{item['last_batch']}\n")
+    for member, item in document["post_rejoin"].items():
+        sys.stdout.write(f"{member} after rejoin: RSS - retained log {mib(item['rss_minus_retained_log_bytes'])} MiB "
+                         f"({mib(item['change_from_last_batch_bytes'])} MiB from the last batch)\n")
+    return 0 if document["batches"] else 2
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         sys.stderr.write(
-            "usage: lifecycle-memory-sample.py emit-probe|sample|finish\n")
+            "usage: lifecycle-memory-sample.py emit-probe|sample|finish|attribute\n")
         return 2
     command = argv[1]
     if command == "emit-probe":
@@ -901,6 +1276,8 @@ def main(argv: list[str]) -> int:
         return cmd_sample(argv[2:])
     if command == "finish":
         return cmd_finish(argv[2:])
+    if command == "attribute":
+        return cmd_attribute(argv[2:])
     sys.stderr.write(f"unknown command {command}\n")
     return 2
 
