@@ -27,18 +27,32 @@ Exit status:
      no_significant_difference, faster (state tradeoffs), or within_budget
      (a significant slowdown bounded inside its allowed degradation)
   1  usage or schema error, including unreviewed budget values
-  2  fail-closed: correctness failed, instrumented image, or missing required data
+  2  fail-closed: correctness failed, instrumented image, or missing required
+     data, including missing or invalid SLO evidence (below)
   3  inconclusive (rerun required) or inconclusive_unresolved (rerun budget
      exhausted, or not fixable by a rerun: mismatched environment, missing or
      mismatched fixed baseline, undersampled SLO). A strict gate blocks on both.
   4  slower (material regression vs base or fixed baseline) or slo_breach
 
+SLO evidence fails closed. An SLO whose source was not selected for this run
+(a workload, series or bundle absent from the candidate) is `not_evaluated`.
+A workload that ran must carry the SLO's field in every sample: a sample
+without it is missing data, and the SLO (and the run) is `fail`, exit 2,
+never `not_evaluated`. Every numeric SLO observation must be a finite JSON
+number; NaN, Infinity, numeric strings and booleans are invalid evidence and
+also `fail`. Metric samples must be finite too (a non-finite sample is a
+schema error, exit 1).
+
 Other modes: `--record-baseline OUT` writes the fixed baseline from a run
 whose target-base verdict passed; `--calibrate DOC...` summarizes same-code
-A/A control runs (false-positive rates, pooled variance, cross-run drift);
-`--bundle-dir` runs the bundle-size check.
+A/A control runs (false-positive rates, pooled variance, cross-run drift) and
+refuses any document whose two sides are not one build of one source
+(A_A_IDENTITY), whatever its `control` label says; `--bundle-dir` runs the
+bundle-size check.
 
-Stdout is the JSON report. Human summary goes to stderr.
+Stdout is the JSON report. Human summary goes to stderr. Every JSON this
+program writes is strict JSON: a non-finite number (an undefined delta or CV)
+is written as null, never as NaN or Infinity.
 
 Two report sections are informational only and never change a verdict or the
 exit status: `multiplicity` (how many series were tested at alpha and how
@@ -418,6 +432,22 @@ def load_json(path):
         raise CompareError(f"{path} is not JSON: {err}") from err
 
 
+def is_finite_number(value):
+    """A real JSON number: not a bool, not a string, not NaN or +/-Infinity."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def sample_float(value, where="sample"):
+    """float(value), refusing anything that is not a finite number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as err:
+        raise CompareError(f"{where} is not a number: {value!r}") from err
+    if not math.isfinite(number):
+        raise CompareError(f"{where} is not a finite number: {value!r}")
+    return number
+
+
 def coerce_samples(value):
     """Accept a list of numbers, or a list of dicts with `value` or a known key."""
     if value is None:
@@ -428,22 +458,16 @@ def coerce_samples(value):
     outcomes = []
     for item in value:
         if isinstance(item, (int, float)) and not isinstance(item, bool):
-            samples.append(float(item))
+            samples.append(sample_float(item))
             outcomes.append("passed")
             continue
         if not isinstance(item, dict):
             raise CompareError(f"sample entries must be numbers or objects, got {type(item).__name__}")
         outcomes.append(str(item.get("outcome") or item.get("status") or "passed"))
-        if "value" in item:
-            samples.append(float(item["value"]))
-        elif "ns_per_op" in item:
-            samples.append(float(item["ns_per_op"]))
-        elif "duration_seconds" in item:
-            samples.append(float(item["duration_seconds"]))
-        elif "ms" in item:
-            samples.append(float(item["ms"]))
-        elif "bytes" in item:
-            samples.append(float(item["bytes"]))
+        for key in ("value", "ns_per_op", "duration_seconds", "ms", "bytes"):
+            if key in item:
+                samples.append(sample_float(item[key], f"sample {key}"))
+                break
         else:
             raise CompareError(f"sample object has no numeric value: {sorted(item)}")
     return samples, outcomes
@@ -1211,6 +1235,22 @@ def canonical_json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def json_safe(value):
+    """Replace non-finite floats (an undefined delta or CV) with None."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def dump_json(value):
+    """Strict JSON for every document this program writes: never NaN/Infinity."""
+    return json.dumps(json_safe(value), indent=2, allow_nan=False) + "\n"
+
+
 def budget_values_sha256(budgets):
     """Digest of every enforced budget value (not descriptions or the log)."""
     body = {key: budgets.get(key) for key in BUDGET_VALUE_KEYS}
@@ -1645,22 +1685,33 @@ def bundle_growth(reference, candidate, budgets, key):
 
 
 def _slo_values(slo, candidate_side, candidate_metrics):
-    """Candidate values for an SLO, or None when its source was not measured."""
+    """(values, missing) for an SLO, or None only when its source was not selected.
+
+    None means the run did not measure the source at all (an absent series,
+    bundle or workload), so the SLO is not_evaluated. A workload that ran is
+    evidence the SLO must judge: `missing` lists the 1-based samples that lack
+    the field, and the caller fails the SLO closed on any of them rather than
+    judging the rest or skipping it.
+    """
     if "series" in slo:
         body = candidate_metrics.get(slo["series"])
-        return None if body is None else list(body.get("samples") or [])
+        return None if body is None else (list(body.get("samples") or []), [])
     if "bundle" in slo:
         value = (candidate_side.get("bundle") or {}).get(slo["bundle"])
-        return None if value is None else [value]
-    body = (candidate_side.get("workloads") or {}).get(slo["workload"])
-    if not isinstance(body, dict):
+        return None if value is None else ([value], [])
+    workloads = candidate_side.get("workloads") or {}
+    if slo["workload"] not in workloads:
         return None
+    body = workloads[slo["workload"]]
+    samples = body.get("samples") if isinstance(body, dict) else None
     values = []
-    for sample in body.get("samples") or []:
-        if not isinstance(sample, dict) or slo["field"] not in sample:
-            return None
-        values.append(sample[slo["field"]])
-    return values
+    missing = []
+    for index, sample in enumerate(samples if isinstance(samples, list) else [], start=1):
+        if not isinstance(sample, dict) or sample.get(slo["field"]) is None:
+            missing.append(index)
+        else:
+            values.append(sample[slo["field"]])
+    return values, missing
 
 
 def evaluate_slos(budgets, candidate_side, candidate_metrics):
@@ -1670,12 +1721,38 @@ def evaluate_slos(budgets, candidate_side, candidate_metrics):
         for key in ("series", "workload", "field", "bundle", "max", "min", "equals", "unit"):
             if key in slo:
                 entry[key] = slo[key]
-        values = _slo_values(slo, candidate_side, candidate_metrics)
-        if values is None:
+        found = _slo_values(slo, candidate_side, candidate_metrics)
+        if found is None:
             entry["verdict"] = "not_evaluated"
             entry["reasons"].append("source was not measured in this run")
             results.append(entry)
             continue
+        values, missing = found
+        if missing:
+            # The workload ran, so an absent field is missing evidence, not an
+            # unselected source: fail closed instead of judging a subset.
+            entry["verdict"] = "fail"
+            entry["n"] = len(values) + len(missing)
+            entry["reasons"].append(
+                f"missing data: workload {slo['workload']} ran but {len(missing)} of {entry['n']} "
+                f"samples lack {slo['field']} (samples {missing})"
+            )
+            results.append(entry)
+            continue
+        if "equals" not in slo:
+            invalid = [(index, value) for index, value in enumerate(values, start=1)
+                       if not is_finite_number(value)]
+            if invalid:
+                entry["verdict"] = "fail"
+                entry["n"] = len(values)
+                shown = ", ".join(f"sample {index}={value!r}" for index, value in invalid[:5])
+                more = f" and {len(invalid) - 5} more" if len(invalid) > 5 else ""
+                entry["reasons"].append(
+                    f"invalid data: {len(invalid)} of {len(values)} observations are not finite "
+                    f"JSON numbers ({shown}{more})"
+                )
+                results.append(entry)
+                continue
         min_samples = slo.get("min_samples", 1)
         entry["n"] = len(values)
         if len(values) < min_samples:
@@ -1691,13 +1768,7 @@ def evaluate_slos(budgets, candidate_side, candidate_metrics):
                 entry["reasons"].append(f"{len(bad)} of {len(values)} samples != {slo['equals']!r}")
             results.append(entry)
             continue
-        try:
-            numbers = [float(v) for v in values]
-        except (TypeError, ValueError):
-            entry["verdict"] = "fail"
-            entry["reasons"].append("non-numeric SLO samples")
-            results.append(entry)
-            continue
+        numbers = [float(v) for v in values]  # validated finite above
         statistic = slo["statistic"]
         if statistic == "p90":
             # The 90th-percentile worst sample: the high tail against a
@@ -1746,7 +1817,7 @@ def baseline_side_metrics(baseline):
         if not isinstance(body, dict) or not isinstance(body.get("samples"), list):
             raise CompareError(f"baseline metric {metric_id} has no samples")
         metrics[metric_id] = {
-            "samples": [float(x) for x in body["samples"]],
+            "samples": [sample_float(x, f"baseline metric {metric_id} sample") for x in body["samples"]],
             "outcomes": ["passed"] * len(body["samples"]),
             "family": body.get("family"),
             "phase": body.get("phase"),
@@ -2299,11 +2370,49 @@ def ks_uniform_p(pvalues):
     return min(1.0, max(0.0, total))
 
 
+# Provenance proving that both sides of an A/A control are one build of one
+# source. compare() deliberately lets these differ (that is what an A/B is),
+# so the `control` label alone never establishes the same-code premise.
+A_A_IDENTITY = (
+    "git_sha",
+    "image_id",
+    "image_ref",
+    "cli_digest",
+    "builder_image_id",
+    "toolchain_id",
+    "go_version",
+)
+
+
+def a_a_identity_issues(doc):
+    """Why a document is not a same-build A/A control (empty when it is)."""
+    if not isinstance(doc, dict):
+        return ["comparison document must be an object"]
+    issues = []
+    if doc.get("control") != "a_a":
+        issues.append(f"control={doc.get('control')!r}, want 'a_a'")
+    provs = {}
+    for label in ("base", "candidate"):
+        side = doc.get(label)
+        prov = side.get("provenance") if isinstance(side, dict) else None
+        provs[label] = prov if isinstance(prov, dict) else {}
+    base, cand = provs["base"], provs["candidate"]
+    for field in A_A_IDENTITY:
+        left, right = base.get(field), cand.get(field)
+        if left in (None, "") or right in (None, ""):
+            issues.append(f"provenance.{field} is missing (base={left!r} candidate={right!r})")
+        elif left != right:
+            issues.append(f"provenance.{field} differs: base={left!r} candidate={right!r}")
+    return issues
+
+
 def calibrate(docs, budgets, confidence_z=2.878):
     """Summarize same-code control runs under the budgets (E4 evidence).
 
     `docs` is a list of (label, comparison document). Every document must be
-    an A/A control (`control: a_a`, one image on both sides). The summary
+    an A/A control: `control: a_a` AND one build of one source on both sides
+    (A_A_IDENTITY). Any document that is not is refused before anything is
+    pooled, so an A/B can never be counted as runner noise. The summary
     reports each run's budgeted verdict, the observed control false-positive
     rates, pooled per-series variance, the smallest sample size and margin the
     variance supports, and cross-run drift: every ordered pair of different
@@ -2317,9 +2426,17 @@ def calibrate(docs, budgets, confidence_z=2.878):
     pooled_p = []
     per_series = {}
     candidates = []
+    refused = []
     for label, doc in docs:
-        if doc.get("control") != "a_a":
-            raise CompareError(f"{label} is not an A/A control run (control={doc.get('control')!r})")
+        issues = a_a_identity_issues(doc)
+        if issues:
+            refused.append(f"{label} is not an A/A control run: {'; '.join(issues)}")
+    if refused:
+        raise CompareError(
+            "refusing calibration evidence (an A/A control measures one build of one source on "
+            "both sides): " + " | ".join(refused)
+        )
+    for label, doc in docs:
         report = compare(doc, budgets=budgets)
         target = report["decision"]["target_base"]
         informative = [
@@ -2591,8 +2708,7 @@ def main(argv=None):
 
     if args.bundle_dir:
         result = evaluate_bundle_dir(args.bundle_dir)
-        json.dump(result, sys.stdout, indent=2)
-        sys.stdout.write("\n")
+        sys.stdout.write(dump_json(result))
         return 0 if result["ok"] else 2
 
     if args.calibrate:
@@ -2602,7 +2718,7 @@ def main(argv=None):
         except CompareError as err:
             sys.stderr.write(f"error: {err}\n")
             return 1
-        encoded = json.dumps(summary, indent=2) + "\n"
+        encoded = dump_json(summary)
         sys.stdout.write(encoded)
         if args.output:
             Path(args.output).write_text(encoded)
@@ -2648,7 +2764,7 @@ def main(argv=None):
                 "control": doc.get("control"),
             }
             recorded = record_baseline(doc, report, runner, settings, args.recorded_at, source)
-            Path(args.record_baseline).write_text(json.dumps(recorded, indent=2) + "\n")
+            Path(args.record_baseline).write_text(dump_json(recorded))
             sys.stderr.write(
                 f"recorded fixed baseline {args.record_baseline}: {len(recorded['metrics'])} series from "
                 f"{recorded['provenance'].get('git_sha')}\n"
@@ -2658,7 +2774,7 @@ def main(argv=None):
         sys.stderr.write(f"error: {err}\n")
         return 1
 
-    encoded = json.dumps(report, indent=2) + "\n"
+    encoded = dump_json(report)
     sys.stdout.write(encoded)
     if args.output:
         Path(args.output).write_text(encoded)

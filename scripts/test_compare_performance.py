@@ -1695,7 +1695,12 @@ class BudgetDecisionTests(unittest.TestCase):
         # every sampled family: exactly the same-code control case.
         doc = document()
         for label, phase in (("base", 0), ("candidate", 5)):
-            doc[label]["workloads"] = {"closed-baseline.warm": {"phase": "warm", "samples": shifted(2.2, 1.0, cv_pct=7, phase=phase)}}
+            # Per-sample driver fields, as scripts/performance.sh records them:
+            # a measured workload must carry every SLO field it is judged on.
+            doc[label]["workloads"] = {"closed-baseline.warm": {"phase": "warm", "samples": [
+                {"value": v, "outcome": "passed", "latency_p99_seconds": 1.5}
+                for v in shifted(2.2, 1.0, cv_pct=7, phase=phase)
+            ]}}
             doc[label]["benchmarks"] = {
                 name: {"ns_per_op": shifted(center, 1.0, cv_pct=3, phase=phase + i),
                        "bytes_per_op": [400.0] * 10, "allocs_per_op": [12.0] * 10}
@@ -2013,10 +2018,22 @@ class FixedBaselineTests(unittest.TestCase):
             self.assertEqual(recorded["source"]["base_git_sha"], "a" * 40)
 
 
+def a_a_document():
+    """One build of one source on both sides, as performance.sh records an A/A control."""
+    prov = provenance("candidate")
+    doc = document(side("base", provenance=dict(prov)), side("candidate", provenance=dict(prov)))
+    doc["control"] = "a_a"
+    manifest = doc["benchmark_harness"]
+    manifest["base_overlay_paths"] = []
+    for entry in manifest["files"]:
+        entry["overlaid"] = False
+        entry["base_original_sha256"] = entry["sha256"]
+    return doc
+
+
 class CalibrationTests(unittest.TestCase):
     def a_a(self, phase):
-        doc = document()
-        doc["control"] = "a_a"
+        doc = a_a_document()
         doc["candidate"]["workloads"]["closed-baseline"]["samples"] = shifted(100.0, 1.0, cv_pct=2, phase=phase)
         return doc
 
@@ -2034,6 +2051,183 @@ class CalibrationTests(unittest.TestCase):
     def test_calibration_refuses_non_control_runs(self):
         with self.assertRaisesRegex(COMPARE["CompareError"], "not an A/A control"):
             COMPARE["calibrate"]([("ab", document())], test_budgets(slos=[]))
+
+    def test_the_a_a_fixture_is_a_passing_same_build_control(self):
+        doc = a_a_document()
+        self.assertEqual(COMPARE["a_a_identity_issues"](doc), [])
+        self.assertEqual(budgeted(doc)["overall"], "no_significant_difference")
+
+    def test_calibration_refuses_a_mislabeled_a_b_document(self):
+        # The A/B fixture (different git_sha, image and ref per side) labelled
+        # a_a: compare() accepts different builds, so only the identity check
+        # keeps a real product change out of the control rates and variance.
+        budgets = test_budgets(slos=[])
+        mislabeled = document()
+        mislabeled["control"] = "a_a"
+        with self.assertRaisesRegex(COMPARE["CompareError"], "provenance.git_sha differs") as caught:
+            COMPARE["calibrate"]([("aa1", self.a_a(1)), ("mislabeled", mislabeled)], budgets)
+        self.assertIn("mislabeled is not an A/A control run", str(caught.exception))
+        self.assertIn("provenance.image_id differs", str(caught.exception))
+        self.assertNotIn("aa1 is not", str(caught.exception))
+        with tempfile.TemporaryDirectory() as tmp:
+            budgets_path = Path(tmp) / "budgets.json"
+            budgets_path.write_text(json.dumps(budgets))
+            good = Path(tmp) / "aa1.json"
+            good.write_text(json.dumps(self.a_a(1)))
+            bad = Path(tmp) / "mislabeled.json"
+            bad.write_text(json.dumps(mislabeled))
+            proc = run_cli("--budgets", str(budgets_path), "--calibrate", str(good), str(bad))
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stdout, "")  # nothing summarized, nothing pooled
+            self.assertIn("image_id differs", proc.stderr)
+            proc = run_cli("--budgets", str(budgets_path), "--calibrate", str(good))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["control_rates"]["runs"], 1)
+
+    def test_every_identity_field_must_match_and_be_present(self):
+        budgets = test_budgets(slos=[])
+        for field in COMPARE["A_A_IDENTITY"]:
+            for value, want in (("sha256:" + "99" * 32, f"provenance.{field} differs"),
+                                (None, f"provenance.{field} is missing")):
+                with self.subTest(field=field, value=value):
+                    doc = a_a_document()
+                    doc["candidate"]["provenance"][field] = value
+                    with self.assertRaisesRegex(COMPARE["CompareError"], want):
+                        COMPARE["calibrate"]([("aa", doc)], budgets)
+
+    def test_calibration_refuses_a_same_build_document_without_the_label(self):
+        doc = a_a_document()
+        del doc["control"]
+        with self.assertRaisesRegex(COMPARE["CompareError"], "control=None, want 'a_a'"):
+            COMPARE["calibrate"]([("unlabelled", doc)], test_budgets(slos=[]))
+
+
+def strict_json(text):
+    """Parse as standard JSON: NaN/Infinity tokens are an error."""
+    def refuse(token):
+        raise ValueError(f"non-standard JSON constant {token}")
+    return json.loads(text, parse_constant=refuse)
+
+
+def slo_workload_doc(latency=3.8, duration=3.9):
+    """A closed-baseline warm run as performance.sh assembles it, workload family only."""
+    doc = workload_only([], [])
+    doc["required_families"] = ["workload"]
+    for label in ("base", "candidate"):
+        doc[label]["workloads"] = {"closed-baseline.warm": {"phase": "warm", "samples": [
+            {"value": v, "outcome": "passed", "duration_seconds": v, "exit_code": 0, "repeat": i + 1,
+             "latency_p99_seconds": latency + 0.01 * (i % 3)}
+            for i, v in enumerate(shifted(duration, 1.0, phase=0 if label == "base" else 5))
+        ]}}
+    return doc
+
+
+class SloEvidenceTests(unittest.TestCase):
+    """PR #589 review: SLO evidence fails closed through the full comparator CLI,
+    judged with the committed budgets and a matching fixed baseline."""
+
+    def cli(self, doc):
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = slo_workload_doc(latency=1.0)
+            reference["candidate"]["provenance"]["built_by_this_run"] = True
+            baseline = Path(tmp) / "baseline.json"
+            recorded = run_cli("--budgets", str(BUDGETS_PATH), "--record-baseline", str(baseline),
+                               input_doc=reference)
+            self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            proc = run_cli("--budgets", str(BUDGETS_PATH), "--baseline", str(baseline), input_doc=doc)
+        report = strict_json(proc.stdout)
+        self.assertEqual(report["decision"]["fixed_baseline"]["verdict"], "no_significant_difference")
+        self.assertTrue(report["strict_gate"]["fixed_baseline_evaluated"])
+        slos = {r["id"]: r for r in report["decision"]["slos"]["results"]}
+        return proc, report, slos
+
+    def test_a_measured_workload_missing_an_slo_field_fails_closed(self):
+        proc, report, slos = self.cli(slo_workload_doc(latency=1.0))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(slos["closed-baseline-warm-latency-p99"]["verdict"], "pass")
+        self.assertFalse(report["strict_gate"]["blocking"])
+
+        # Ten warm samples over the 3.5 s ceiling breach it.
+        doc = slo_workload_doc(latency=3.8)
+        proc, report, slos = self.cli(doc)
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+        self.assertEqual(report["overall"], "slo_breach")
+        self.assertEqual(slos["closed-baseline-warm-latency-p99"]["verdict"], "breach")
+
+        # One sample of the measured workload without the field is missing
+        # evidence: never not_evaluated, never a pass on the other nine.
+        del doc["candidate"]["workloads"]["closed-baseline.warm"]["samples"][4]["latency_p99_seconds"]
+        proc, report, slos = self.cli(doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(report["overall"], "fail")
+        self.assertTrue(report["strict_gate"]["blocking"])
+        latency = slos["closed-baseline-warm-latency-p99"]
+        self.assertEqual(latency["verdict"], "fail")
+        self.assertIn("1 of 10 samples lack latency_p99_seconds (samples [5])", latency["reasons"][0])
+        self.assertNotIn("closed-baseline-warm-latency-p99", report["decision"]["slos"]["not_evaluated"])
+        # The same field set to null is missing too.
+        doc["candidate"]["workloads"]["closed-baseline.warm"]["samples"][4]["latency_p99_seconds"] = None
+        proc, report, slos = self.cli(doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(slos["closed-baseline-warm-latency-p99"]["verdict"], "fail")
+
+        # A workload the run did not select is still only not_evaluated.
+        for unselected in ("closed-baseline-cold-latency-p99", "open-tiny-sustained-warm-latency-p99",
+                           "open-tiny-sustained-warm-sustained"):
+            self.assertEqual(slos[unselected]["verdict"], "not_evaluated")
+            self.assertIn(unselected, report["decision"]["slos"]["not_evaluated"])
+
+    def test_non_finite_or_non_numeric_slo_observations_fail_closed(self):
+        for bad in (float("nan"), "NaN", float("inf"), -float("inf"), "Infinity", "3.8", True):
+            with self.subTest(bad=bad):
+                # Every sample is otherwise well inside the ceiling, so only
+                # the invalid observations can fail the run.
+                doc = slo_workload_doc(latency=1.0)
+                for sample in doc["candidate"]["workloads"]["closed-baseline.warm"]["samples"]:
+                    sample["latency_p99_seconds"] = bad
+                proc, report, slos = self.cli(doc)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(report["overall"], "fail")
+                self.assertTrue(report["strict_gate"]["blocking"])
+                latency = slos["closed-baseline-warm-latency-p99"]
+                self.assertEqual(latency["verdict"], "fail")
+                self.assertNotIn("observed", latency)
+                self.assertIn("10 of 10 observations are not finite JSON numbers", latency["reasons"][0])
+        # A single non-finite observation fails even where p90 would drop it.
+        doc = slo_workload_doc(latency=1.0)
+        doc["candidate"]["workloads"]["closed-baseline.warm"]["samples"][0]["latency_p99_seconds"] = float("inf")
+        proc, report, slos = self.cli(doc)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(slos["closed-baseline-warm-latency-p99"]["verdict"], "fail")
+
+    def test_non_finite_metric_samples_are_a_schema_error(self):
+        for bad in (float("nan"), float("inf"), "NaN"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(COMPARE["CompareError"], "not a finite number"):
+                    COMPARE["coerce_samples"]([1.0, {"value": bad}])
+        doc = slo_workload_doc(latency=1.0)
+        doc["candidate"]["workloads"]["closed-baseline.warm"]["samples"][2]["value"] = float("nan")
+        proc = run_cli("--budgets", str(BUDGETS_PATH), input_doc=doc)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("not a finite number", proc.stderr)
+
+    def test_report_writer_never_emits_nan_or_infinity(self):
+        self.assertEqual(
+            strict_json(COMPARE["dump_json"]({"a": float("nan"), "b": [float("inf"), -float("inf")], "c": 1.5})),
+            {"a": None, "b": [None, None], "c": 1.5},
+        )
+        # A zero-mean base makes delta_pct undefined (inf in memory).
+        doc = document()
+        doc["base"]["system"] = {"cpu_pct": [0.0] * 10}
+        doc["candidate"]["system"] = {"cpu_pct": [1.0] * 10}
+        with tempfile.TemporaryDirectory() as tmp:
+            budgets = Path(tmp) / "budgets.json"
+            budgets.write_text(json.dumps(test_budgets(slos=[])))
+            proc = run_cli("--budgets", str(budgets), input_doc=doc)
+        self.assertNotIn("Infinity", proc.stdout)
+        self.assertNotIn("NaN", proc.stdout)
+        metric = [m for m in strict_json(proc.stdout)["metrics"] if m["id"] == "system.cpu_pct"][0]
+        self.assertIsNone(metric["delta_pct"])
 
 
 if __name__ == "__main__":
