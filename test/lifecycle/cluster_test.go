@@ -1444,17 +1444,6 @@ func TestLifecycleClusterJoiningOrdinalOne(t *testing.T) {
 			"new_volume": replaced.VolumeName, "new_pod_uid": replaced.UID}})
 }
 
-// dqliteBootstrapID is go-dqlite's fixed ID for the node that bootstraps a
-// cluster (dqlite.BootstrapID). Repeated here so the runner needs no cgo.
-const dqliteBootstrapID uint64 = 3297041220608546238
-
-type ordinalZeroView struct {
-	Name    string   `json:"name"`
-	Address string   `json:"address"`
-	Leader  string   `json:"leader"`
-	Members []string `json:"members"`
-}
-
 // TestLifecycleClusterOrdinalZeroLoss qualifies #582: after caesium-0 loses its
 // PVC while caesium-1/2 keep running, the replacement must join the existing
 // cluster as a new member rather than bootstrap a divergent one. Every member's
@@ -1520,54 +1509,64 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 		failClusterCase(t, name, "fresh info.yaml address %s is not the pod's dqlite address %s", info.Address, fresh.DqliteAddr())
 	}
 
-	// Role adjustment runs on the leader every 30 s, so the new member's
-	// promotion and the stale entry's demotion settle after Ready. Poll for a
-	// bounded window and judge the last complete observation.
+	// Role adjustment runs on the leader every 30 s: it promotes the new
+	// member, then demotes the lost member's still-voting entry. Poll for a
+	// bounded window and judge the last complete observation, so a stale entry
+	// that never stops voting fails the case instead of passing it.
+	liveAddrs := make([]string, 0, len(topo.Members))
+	for _, m := range topo.Members {
+		liveAddrs = append(liveAddrs, m.DqliteAddr())
+	}
+	staleIDs := []uint64{oldZero.DqliteID, dqliteBootstrapID, old["caesium-1"].DqliteID}
 	var views []ordinalZeroView
-	var lastErr error
-	settled := false
+	var membership ordinalZeroMembership
+	var settleErr, rpcErr error
 	deadline := time.Now().Add(3 * time.Minute)
-	for !settled && time.Now().Before(deadline) {
-		views, lastErr = nil, nil
+	for {
+		var round []ordinalZeroView
+		rpcErr = nil
 		for _, m := range topo.Members {
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			leader, members, err := cluster.QueryNode(ctx, m.DqliteAddr())
 			cancel()
 			if err != nil || leader == nil {
-				lastErr = fmt.Errorf("%s: leader=%v err=%v", m.Name, leader, err)
+				rpcErr = fmt.Errorf("%s: leader=%v err=%v", m.Name, leader, err)
 				break
 			}
-			view := ordinalZeroView{Name: m.Name, Address: m.DqliteAddr(), Leader: fmt.Sprintf("%d/%s", leader.ID, leader.Address)}
-			for _, member := range members {
-				view.Members = append(view.Members, fmt.Sprintf("%d/%s/%s", member.ID, member.Address, strings.ToLower(member.Role.String())))
+			round = append(round, newOrdinalZeroView(m.Name, m.DqliteAddr(), *leader, members))
+		}
+		if rpcErr == nil {
+			views = round
+			membership, settleErr = ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), liveAddrs, staleIDs)
+			if settleErr == nil {
+				break
 			}
-			sort.Strings(view.Members)
-			views = append(views, view)
 		}
-		if lastErr == nil {
-			settled = ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), topo) == nil
+		if !time.Now().Before(deadline) {
+			break
 		}
-		if !settled {
-			time.Sleep(5 * time.Second)
-		}
+		time.Sleep(5 * time.Second)
+	}
+	if views == nil {
+		blockf(t, name, "direct dqlite RPC unanswered after 3m: %v", rpcErr)
+	}
+	if membership.StaleEntries == nil {
+		membership.StaleEntries = []ordinalZeroEntry{}
 	}
 	evidence["direct_cluster_views"] = views
-	if lastErr != nil {
-		blockf(t, name, "direct dqlite RPC unanswered after 3m: %v", lastErr)
+	evidence["voter_addresses"] = membership.VoterAddresses
+	evidence["stale_entries"] = membership.StaleEntries
+	if rpcErr != nil {
+		evidence["last_rpc_error"] = rpcErr.Error()
 	}
-	if err := ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), topo); err != nil {
-		writeCase(t, caseRecord{Name: name, Status: statusFail, Detail: err.Error(), Observations: evidence})
-		t.Fatalf("FAIL %s: %v", name, err)
+	if settleErr != nil {
+		writeCase(t, caseRecord{Name: name, Status: statusFail, Detail: settleErr.Error(), Observations: evidence})
+		t.Fatalf("FAIL %s: %v", name, settleErr)
 	}
-
-	// Record what happened to the lost member's entry.
-	stale := "absent"
-	for _, entry := range views[0].Members {
-		if strings.HasPrefix(entry, fmt.Sprintf("%d/", oldZero.DqliteID)) {
-			stale = entry
-		}
+	stale := make([]string, 0, len(membership.StaleEntries))
+	for _, e := range membership.StaleEntries {
+		stale = append(stale, fmt.Sprintf("%d/%s/%s", e.ID, e.Address, e.Role))
 	}
-	evidence["stale_entry"] = stale
 
 	// The fixture must read the same through the fresh node as through the
 	// survivors. A divergent node would serve its own empty database here.
@@ -1584,43 +1583,9 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	}
 	writeCase(t, caseRecord{Name: name, Status: statusPass,
 		Detail: fmt.Sprintf("fresh ordinal 0 joined as new node %d at %s; every member's direct Cluster RPC agrees on one leader and one membership; "+
-			"retained runs read identically through caesium-0 and survivors; stale entry: %s", info.ID, fresh.DqliteAddr(), stale),
+			"voters are exactly the three live members; retained runs read identically through caesium-0 and survivors; "+
+			"non-voting stale entries: %v", info.ID, fresh.DqliteAddr(), stale),
 		Observations: evidence})
-}
-
-// ordinalZeroSettled reports why the observed direct Cluster RPC views do not
-// yet show one cluster that the fresh node joined as a voter.
-func ordinalZeroSettled(views []ordinalZeroView, freshID uint64, freshAddr string, topo cluster.Topology) error {
-	if len(views) != len(topo.Members) || len(views) == 0 {
-		return fmt.Errorf("observed %d of %d members", len(views), len(topo.Members))
-	}
-	for _, v := range views {
-		if v.Leader != views[0].Leader {
-			return fmt.Errorf("%s reports leader %s but %s reports %s", v.Name, v.Leader, views[0].Name, views[0].Leader)
-		}
-		if strings.Join(v.Members, ",") != strings.Join(views[0].Members, ",") {
-			return fmt.Errorf("%s membership %v differs from %s membership %v", v.Name, v.Members, views[0].Name, views[0].Members)
-		}
-	}
-	want := fmt.Sprintf("%d/%s/voter", freshID, freshAddr)
-	found, liveVoters := false, 0
-	for _, entry := range views[0].Members {
-		if entry == want {
-			found = true
-		}
-		for _, m := range topo.Members {
-			if strings.HasSuffix(entry, "/"+m.DqliteAddr()+"/voter") {
-				liveVoters++
-			}
-		}
-	}
-	if !found {
-		return fmt.Errorf("fresh node %s is not a voter in the shared membership %v", want, views[0].Members)
-	}
-	if liveVoters != len(topo.Members) {
-		return fmt.Errorf("%d of %d live members are voters: %v", liveVoters, len(topo.Members), views[0].Members)
-	}
-	return nil
 }
 
 // The stopped-member snapshot experiment must inspect the actual surviving
