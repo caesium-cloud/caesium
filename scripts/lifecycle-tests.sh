@@ -54,6 +54,9 @@
 #       established — a pre-existing/supplied image, or a build from a dirty
 #       working tree. Without it such a run is BLOCKED, not qualified.
 #   CAESIUM_LIFECYCLE_KEEP=1   leave owned resources in place for debugging.
+#   CAESIUM_LIFECYCLE_ROLLBACK_COPY_TIMEOUT=180 (cluster mode) seconds the
+#       frozen rollback copy may take before every paused member is thawed and
+#       rollback-recorded-outcome is recorded blocked.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1083,9 +1086,189 @@ EOF
     [[ -s "$out" ]] || rc=1
     return "$rc"
   }
+  # The freeze must end even when a copy stalls or the controller is
+  # signalled. Every copy worker runs under one absolute deadline and is killed
+  # with its process group when that passes. From the first pause until the
+  # thaw, EXIT/INT/TERM/HUP first resume every container a pause was issued to
+  # (a pause that timed out may still have frozen its cgroup), then hand over
+  # to the handler that was installed before the freeze, so the global cleanup
+  # still runs. The thaw never consults CAESIUM_LIFECYCLE_KEEP: a kept cluster
+  # is left running, not frozen.
+  LC_RB_COPY_TIMEOUT="${CAESIUM_LIFECYCLE_ROLLBACK_COPY_TIMEOUT:-180}"
+  LC_RB_FROZEN=0 LC_RB_ARMED=0 LC_RB_THAW_OK=0 LC_RB_THAW_REASON="" LC_RB_COPY_FAILURE=""
+  LC_RB_PREV_EXIT="" LC_RB_PREV_INT="" LC_RB_PREV_TERM="" LC_RB_PREV_HUP="" LC_RB_DEFERRED_SIG=""
+  LC_RB_PAUSE_ISSUED=(0 0 0) LC_RB_COPY_PID=(0 0 0)
+  # <member> <deadline-epoch>: member's frozen copy in the background. The
+  # python worker (so $! is the worker) owns the kubectl exec's process group
+  # and kills it at the deadline (exit 124) or when it is itself signalled.
+  lc_rollback_spawn_copy() {
+    local n="$1"
+    python3 - "$2" "$LC_RB_DIR/copy-$n.sha256" "$LC_RB_DIR/copy-$n.err" \
+      kubectl --kubeconfig "$LC_KUBE" --namespace "$LC_ID" exec "lifecycle-rb-src-$n" -c storage -- sh -c \
+      'set -eo pipefail; cd /data; find . -type f -exec sha256sum {} \; | sort >/tmp/live.sha256
+       tar -cf - -C /data . | tar -xpf - -C /snap
+       cd /snap; find . -type f -exec sha256sum {} \; | sort >/tmp/copy.sha256
+       cmp /tmp/live.sha256 /tmp/copy.sha256 >&2; cat /tmp/copy.sha256' <<'PY' &
+import os,signal,subprocess,sys,time
+deadline=float(sys.argv[1]);command=sys.argv[4:]
+out=open(sys.argv[2],'wb');err=open(sys.argv[3],'ab')
+def note(msg):
+  err.write((msg+'\n').encode());err.flush()
+try:process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True)
+except OSError as error:
+  note(f'copy worker could not start: {error}');raise SystemExit(127)
+def stop_group():
+  # macOS answers EPERM, not ESRCH, once only zombies remain in the group.
+  for sig,grace in ((signal.SIGTERM,2),(signal.SIGKILL,0)):
+    try:os.killpg(process.pid,sig)
+    except (ProcessLookupError,PermissionError):return
+    time.sleep(grace)
+def on_signal(signum,frame):
+  note(f'copy worker stopped by signal {signum}; killed its process group');stop_group();os._exit(128+signum)
+signal.signal(signal.SIGTERM,on_signal);signal.signal(signal.SIGINT,on_signal)
+try:raise SystemExit(process.wait(timeout=max(0.0,deadline-time.time())))
+except subprocess.TimeoutExpired:pass
+note('frozen copy passed its deadline; killed its process group')
+stop_group()
+try:process.wait(timeout=3)
+except subprocess.TimeoutExpired:note('copy process did not reap after group SIGKILL')
+raise SystemExit(124)
+PY
+    LC_RB_COPY_PID[n]=$!
+  }
+  # <spec printed by trap -p>: the handler command, empty when none/ignored.
+  # shellcheck disable=SC2329  # reached only from the trap handlers below
+  lc_rollback_trap_cmd() {
+    [[ -n "$1" ]] || return 0
+    eval "set -- $1"
+    printf '%s' "$3"
+  }
+  # Saved through files: trap -p inside $(...) is shell-version dependent.
+  lc_rollback_arm_thaw() {
+    local sig
+    for sig in EXIT INT TERM HUP; do
+      trap -p "$sig" >"$LC_RB_DIR/pre-freeze-trap-$sig.txt"
+    done
+    LC_RB_PREV_EXIT="$(cat "$LC_RB_DIR/pre-freeze-trap-EXIT.txt")"
+    LC_RB_PREV_INT="$(cat "$LC_RB_DIR/pre-freeze-trap-INT.txt")"
+    LC_RB_PREV_TERM="$(cat "$LC_RB_DIR/pre-freeze-trap-TERM.txt")"
+    LC_RB_PREV_HUP="$(cat "$LC_RB_DIR/pre-freeze-trap-HUP.txt")"
+    trap 'lc_rollback_on_exit' EXIT
+    trap 'lc_rollback_on_signal INT' INT
+    trap 'lc_rollback_on_signal TERM' TERM
+    trap 'lc_rollback_on_signal HUP' HUP
+    LC_RB_ARMED=1
+  }
+  # <signal>: the `trap -p` spec that was installed before the freeze.
+  lc_rollback_prev_trap() {
+    case "$1" in
+      EXIT) printf '%s' "$LC_RB_PREV_EXIT" ;;
+      INT) printf '%s' "$LC_RB_PREV_INT" ;;
+      TERM) printf '%s' "$LC_RB_PREV_TERM" ;;
+      HUP) printf '%s' "$LC_RB_PREV_HUP" ;;
+    esac
+  }
+  lc_rollback_disarm_thaw() {
+    local sig spec
+    [[ "$LC_RB_ARMED" == 1 ]] || return 0
+    LC_RB_ARMED=0
+    for sig in EXIT INT TERM HUP; do
+      spec="$(lc_rollback_prev_trap "$sig")"
+      if [[ -n "$spec" ]]; then eval "$spec"; else trap - "$sig"; fi
+    done
+    # A signal held back during the thaw now reaches its pre-freeze handler.
+    if [[ -n "$LC_RB_DEFERRED_SIG" ]]; then
+      sig="$LC_RB_DEFERRED_SIG"
+      LC_RB_DEFERRED_SIG=""
+      kill -s "$sig" "$$"
+    fi
+  }
+  lc_rollback_thaw_summary() {
+    local n issued=""
+    for n in 0 1 2; do
+      if [[ "${LC_RB_PAUSE_ISSUED[n]}" == 1 ]]; then issued="$issued caesium-$n"; fi
+    done
+    if [[ -z "$issued" ]]; then printf 'no member was paused'
+    elif [[ "$LC_RB_THAW_OK" == 1 ]]; then printf 'thaw (%s) resumed and verified RUNNING:%s' "$LC_RB_THAW_REASON" "$issued"
+    else printf 'thaw (%s) could NOT verify RUNNING for every paused member of:%s' "$LC_RB_THAW_REASON" "$issued"
+    fi
+  }
+  # <reason>. Idempotent: stops the copy workers, resumes every container a
+  # pause was issued to, and verifies each RUNNING (one retry).
+  lc_rollback_thaw() {
+    local reason="$1" n rc=0
+    [[ "$LC_RB_FROZEN" == 1 ]] || return 0
+    LC_RB_FROZEN=0
+    LC_RB_THAW_REASON="$reason"
+    # A second signal must not abandon the thaw half way; hold it until the
+    # pre-freeze handlers are restored.
+    trap 'LC_RB_DEFERRED_SIG=INT' INT
+    trap 'LC_RB_DEFERRED_SIG=TERM' TERM
+    trap 'LC_RB_DEFERRED_SIG=HUP' HUP
+    lc_rollback_mark "thaw begin: $reason" || true
+    for n in 0 1 2; do
+      if [[ "${LC_RB_COPY_PID[n]}" != 0 ]]; then kill -TERM "${LC_RB_COPY_PID[n]}" 2>/dev/null || true; fi
+    done
+    for n in 0 1 2; do
+      [[ "${LC_RB_PAUSE_ISSUED[n]}" == 1 ]] || continue
+      lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/resume-$n.txt" task resume "${LC_RB_CID[n]}" || true
+      lc_rollback_mark "resumed caesium-$n" || true
+    done
+    lc_rollback_mark "thawed: $reason" || true
+    for n in 0 1 2; do
+      [[ "${LC_RB_PAUSE_ISSUED[n]}" == 1 ]] || continue
+      if ! lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" RUNNING "$LC_RB_DIR/resumed-state-$n.txt"; then
+        lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/resume-retry-$n.txt" task resume "${LC_RB_CID[n]}" || true
+        lc_rollback_mark "resume retried caesium-$n" || true
+        lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" RUNNING "$LC_RB_DIR/resumed-state-$n.txt" || rc=1
+      fi
+    done
+    if [[ "$rc" == 0 ]]; then LC_RB_THAW_OK=1; else LC_RB_THAW_OK=0; fi
+    lc_rollback_mark "thaw end rc=$rc" || true
+    return "$rc"
+  }
+  # shellcheck disable=SC2329  # trap handler (lc_rollback_arm_thaw)
+  lc_rollback_on_signal() {
+    local sig="$1" spec cmd status=130
+    case "$sig" in TERM) status=143 ;; HUP) status=129 ;; esac
+    lc_rollback_thaw "signal $sig"
+    lc_case rollback-recorded-outcome blocked \
+      "controller received SIG$sig during the frozen three-member copy; $(lc_rollback_thaw_summary); nothing was observed" \
+      >/dev/null 2>&1 || true
+    spec="$(lc_rollback_prev_trap "$sig")"
+    LC_RB_DEFERRED_SIG=""
+    lc_rollback_disarm_thaw
+    # Default disposition terminates; the restored EXIT handler still runs.
+    [[ -n "$spec" ]] || exit "$status"
+    cmd="$(lc_rollback_trap_cmd "$spec")"
+    [[ -n "$cmd" ]] || return 0
+    eval "$cmd"
+  }
+  # shellcheck disable=SC2329  # trap handler (lc_rollback_arm_thaw)
+  lc_rollback_on_exit() {
+    local rc=$? cmd
+    set +e
+    lc_rollback_thaw "controller exit status $rc"
+    lc_case rollback-recorded-outcome blocked \
+      "controller exited (status $rc) during the frozen three-member copy; $(lc_rollback_thaw_summary); nothing was observed" \
+      >/dev/null 2>&1
+    cmd="$(lc_rollback_trap_cmd "$LC_RB_PREV_EXIT")"
+    LC_RB_DEFERRED_SIG=""
+    lc_rollback_disarm_thaw
+    if [[ -n "$cmd" ]]; then
+      (exit "$rc")
+      eval "$cmd"
+    fi
+    exit "$rc"
+  }
   # Freeze all three members, copy every PVC while frozen, always thaw.
   lc_rollback_copy() {
-    local n rc=0 pids=() copy_rc
+    local n rc=0 copy_rc deadline timed_out="" failed=""
+    LC_RB_COPY_FAILURE="pre-freeze setup (member lookup or source helper pods) failed; nothing was paused"
+    [[ "$LC_RB_COPY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || {
+      LC_RB_COPY_FAILURE="CAESIUM_LIFECYCLE_ROLLBACK_COPY_TIMEOUT must be a positive number of seconds"
+      return 1
+    }
     for n in 0 1 2; do
       LC_RB_NODE[n]="$(lc_ns get pod "caesium-$n" -o jsonpath='{.spec.nodeName}')" || return 1
       LC_RB_CID[n]="$(lc_ns get pod "caesium-$n" -o jsonpath='{.status.containerStatuses[?(@.name=="caesium")].containerID}')" || return 1
@@ -1097,39 +1280,49 @@ EOF
       [[ "$(lc_ns get pod "lifecycle-rb-src-$n" -o jsonpath='{.spec.nodeName}')" == "${LC_RB_NODE[n]}" ]] || return 1
     done
     lc_ns get pods -o json >"$LC_RB_DIR/main-pods-before-freeze.json" || return 1
-    lc_rollback_mark "freeze begin"
+    LC_RB_COPY_FAILURE="" LC_RB_THAW_REASON="" LC_RB_THAW_OK=0
+    LC_RB_PAUSE_ISSUED=(0 0 0) LC_RB_COPY_PID=(0 0 0)
+    LC_RB_FROZEN=1
+    lc_rollback_arm_thaw
+    lc_rollback_mark "freeze begin (copy deadline ${LC_RB_COPY_TIMEOUT}s)"
     for n in 0 1 2; do
+      LC_RB_PAUSE_ISSUED[n]=1
       lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/pause-$n.txt" task pause "${LC_RB_CID[n]}" || rc=1
       lc_rollback_mark "paused caesium-$n rc=$rc"
     done
     for n in 0 1 2; do
       lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" PAUSED "$LC_RB_DIR/paused-state-$n.txt" || rc=1
     done
+    [[ "$rc" == 0 ]] || LC_RB_COPY_FAILURE="pause error: not every member was verified PAUSED (see pause-*.txt, paused-state-*.txt)"
     if [[ "$rc" == 0 ]]; then
-      for n in 0 1 2; do
-        lc_ns exec "lifecycle-rb-src-$n" -c storage -- sh -c \
-          'set -eo pipefail; cd /data; find . -type f -exec sha256sum {} \; | sort >/tmp/live.sha256
-           tar -cf - -C /data . | tar -xpf - -C /snap
-           cd /snap; find . -type f -exec sha256sum {} \; | sort >/tmp/copy.sha256
-           cmp /tmp/live.sha256 /tmp/copy.sha256 >&2; cat /tmp/copy.sha256' \
-          >"$LC_RB_DIR/copy-$n.sha256" 2>"$LC_RB_DIR/copy-$n.err" &
-        pids[n]=$!
-      done
+      deadline=$(( $(date +%s) + LC_RB_COPY_TIMEOUT ))
+      for n in 0 1 2; do lc_rollback_spawn_copy "$n" "$deadline"; done
       for n in 0 1 2; do
         copy_rc=0
-        wait "${pids[n]}" || copy_rc=$?
+        wait "${LC_RB_COPY_PID[n]}" || copy_rc=$?
+        LC_RB_COPY_PID[n]=0
         printf 'frozen copy exit=%s\n' "$copy_rc" >>"$LC_RB_DIR/copy-$n.err"
-        [[ "$copy_rc" == 0 && -s "$LC_RB_DIR/copy-$n.sha256" ]] || rc=1
+        if [[ "$copy_rc" == 124 ]]; then timed_out="$timed_out caesium-$n"
+        elif [[ "$copy_rc" != 0 || ! -s "$LC_RB_DIR/copy-$n.sha256" ]]; then failed="$failed caesium-$n(exit $copy_rc)"
+        fi
       done
+      if [[ -n "$timed_out" ]]; then
+        rc=1 LC_RB_COPY_FAILURE="timeout: the frozen copy passed its ${LC_RB_COPY_TIMEOUT}s deadline on$timed_out"
+      elif [[ -n "$failed" ]]; then
+        rc=1 LC_RB_COPY_FAILURE="copy error on$failed (see copy-*.err)"
+      fi
       lc_rollback_mark "frozen copies complete rc=$rc"
     fi
-    for n in 0 1 2; do
-      lc_rollback_ctr "${LC_RB_NODE[n]}" "$LC_RB_DIR/resume-$n.txt" task resume "${LC_RB_CID[n]}" || true
-      lc_rollback_mark "resumed caesium-$n"
-    done
-    for n in 0 1 2; do
-      lc_rollback_task_state "${LC_RB_NODE[n]}" "${LC_RB_CID[n]}" RUNNING "$LC_RB_DIR/resumed-state-$n.txt" || rc=1
-    done
+    # A signal whose pre-freeze handler returned instead of exiting has
+    # already thawed; the copy it interrupted is not evidence.
+    if [[ "$LC_RB_THAW_REASON" == signal* ]]; then
+      rc=1 LC_RB_COPY_FAILURE="interrupted by $LC_RB_THAW_REASON"
+    fi
+    lc_rollback_thaw "${LC_RB_COPY_FAILURE:-frozen copies complete}" || true
+    lc_rollback_disarm_thaw
+    if [[ "$LC_RB_THAW_OK" != 1 ]]; then
+      rc=1 LC_RB_COPY_FAILURE="${LC_RB_COPY_FAILURE:-thaw}: not every paused member was verified RUNNING after the thaw"
+    fi
     lc_rollback_mark "freeze end rc=$rc"
     if [[ "$rc" == 0 ]]; then
       for n in 0 1 2; do
@@ -1333,7 +1526,7 @@ PY
   }
   # Install the pinned previous release on the copy and watch it, bounded.
   lc_rollback_observe() {
-    local rc=0 n start=$SECONDS poll=0 targets="" ip
+    local rc=0 n start=$SECONDS poll=0 targets="" ip state listed=0 attempt
     helm install caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_RB_NS" \
       --values "$LC_VALUES" --set image.tag=v0.1.0 >"$LC_RB_DIR/helm-install.log" 2>&1 || rc=$?
     printf '%s\n' "$rc" >"$LC_RB_DIR/helm-install-exit.txt"
@@ -1370,17 +1563,51 @@ sys.exit(0 if done else 1)
 PY
     done
     lc_rollback_mark "observation window closed after $((SECONDS - start))s, $poll polls"
-    lc_rb get pods -o json >"$LC_RB_DIR/rollback-pods.json" 2>&1 || rc=1
+    # One pod listing is the API read that says which members the StatefulSet
+    # created and at which address each listens. A failed read is missing
+    # evidence, never "not created": every member's existence stays unknown,
+    # nothing is probed and the record blocks.
+    for attempt in 1 2 3; do
+      if lc_rb --request-timeout=20s get pods -o json >"$LC_RB_DIR/rollback-pods.json" \
+          2>>"$LC_RB_DIR/rollback-pods.err"; then
+        listed=1
+        break
+      fi
+      sleep 2
+    done
+    if [[ "$listed" != 1 ]]; then
+      rc=1
+      rm -f "$LC_RB_DIR/rollback-pods.json"
+    fi
     lc_rb get statefulset caesium -o json >"$LC_RB_DIR/rollback-statefulset.json" 2>&1 || rc=1
     lc_rb get events --sort-by=.metadata.creationTimestamp -o wide >"$LC_RB_DIR/rollback-events.txt" 2>&1 || true
+    # addresses.txt: "<member> created <pod IP or ->" or "<member> never_created",
+    # one line per member, from that listing only.
+    : >"$LC_RB_DIR/addresses.txt"
+    if [[ "$listed" == 1 ]]; then
+      LC_RB_DIR="$LC_RB_DIR" python3 - >"$LC_RB_DIR/addresses.txt" 2>>"$LC_RB_DIR/rollback-pods.err" <<'PY' || rc=1
+import json,os,pathlib
+d=pathlib.Path(os.environ['LC_RB_DIR'])
+items={p['metadata']['name']:p for p in json.loads((d/'rollback-pods.json').read_text())['items']}
+for n in range(3):
+  pod=items.get(f'caesium-{n}')
+  if pod is None:print(f'caesium-{n} never_created')
+  else:print(f'caesium-{n} created',pod.get('status',{}).get('podIP') or '-')
+PY
+    fi
     for n in 0 1 2; do
-      if lc_rb get pod "caesium-$n" >/dev/null 2>&1; then
-        lc_rb logs "caesium-$n" -c caesium --timestamps=true --tail=-1 >"$LC_RB_DIR/caesium-$n.log" 2>"$LC_RB_DIR/caesium-$n.log.err" || true
-        lc_rb logs "caesium-$n" -c caesium --previous --timestamps=true --tail=-1 \
-          >"$LC_RB_DIR/caesium-$n-previous.log" 2>"$LC_RB_DIR/caesium-$n-previous.log.err" || true
-        ip="$(lc_rb get pod "caesium-$n" -o jsonpath='{.status.podIP}')"
-        [[ -n "$ip" ]] && targets="$targets,caesium-$n=http://$ip:8080"
-      fi
+      state="" ip=""
+      read -r _ state ip <<<"$(grep -m1 "^caesium-$n " "$LC_RB_DIR/addresses.txt" || true)"
+      case "$state" in
+        never_created) continue ;;
+        created) ;;
+        *) rc=1; continue ;;
+      esac
+      lc_rb logs "caesium-$n" -c caesium --timestamps=true --tail=-1 >"$LC_RB_DIR/caesium-$n.log" 2>"$LC_RB_DIR/caesium-$n.log.err" || true
+      lc_rb logs "caesium-$n" -c caesium --previous --timestamps=true --tail=-1 \
+        >"$LC_RB_DIR/caesium-$n-previous.log" 2>"$LC_RB_DIR/caesium-$n-previous.log.err" || true
+      # A created member without an address cannot be probed: blocked, not refused.
+      if [[ -n "$ip" && "$ip" != - ]]; then targets="$targets,caesium-$n=http://$ip:8080"; else rc=1; fi
     done
     if [[ -n "$targets" ]]; then
       lc_rollback_probe rb http "${targets#,}" "$LC_RB_DIR/http.json" || rc=1
@@ -1408,8 +1635,10 @@ PY
   # recorded outcome.
   lc_rollback_record() {
     local reason="$1" detail
-    detail="$(LC_RB_DIR="$LC_RB_DIR" LC_RB_NS="$LC_RB_NS" LC_REASON="$reason" LC_PREV="$LC_PREV" python3 - <<'PY'
-import hashlib,json,os,pathlib,re,sys
+    detail="$(LC_RB_DIR="$LC_RB_DIR" LC_RB_NS="$LC_RB_NS" LC_REASON="$reason" LC_PREV="$LC_PREV" \
+      LC_RB_COPY_TIMEOUT="$LC_RB_COPY_TIMEOUT" LC_RB_THAW_REASON="$LC_RB_THAW_REASON" \
+      LC_RB_THAW_OK="$LC_RB_THAW_OK" LC_RB_COPY_FAILURE="$LC_RB_COPY_FAILURE" python3 - <<'PY'
+import datetime,hashlib,json,os,pathlib,re,sys
 d=pathlib.Path(os.environ['LC_RB_DIR']);reason=os.environ['LC_REASON']
 def text(name,limit=None):
   p=d/name
@@ -1443,7 +1672,16 @@ for n in range(3):
     'restored_manifest_equals_copy':m is not None and m==r,
     'post_run_info_yaml':text(f'post-run-info-{n}.yaml'),
     'post_run_changed_files':changed}
-freeze=[t for t in timeline if t['event'].startswith(('freeze','paused','resumed'))]
+freeze=[t for t in timeline if t['event'].startswith(('freeze','paused','resumed','thaw'))]
+def first_at(prefix):
+  hit=next((t['at'] for t in timeline if t['event'].startswith(prefix)),None)
+  return datetime.datetime.fromisoformat(hit) if hit else None
+frozen_at,thawed_at=first_at('freeze begin'),first_at('thawed')
+freeze_summary={'deadline_s':int(os.environ['LC_RB_COPY_TIMEOUT']) if os.environ['LC_RB_COPY_TIMEOUT'].isdigit() else None,
+  'duration_s':round((thawed_at-frozen_at).total_seconds(),3) if frozen_at and thawed_at else None,
+  'measured':'first pause issued to last resume returned (timeline "freeze begin" to "thawed")',
+  'thaw_reason':os.environ['LC_RB_THAW_REASON'] or None,'thaw_verified_running':os.environ['LC_RB_THAW_OK']=='1',
+  'copy_failure':os.environ['LC_RB_COPY_FAILURE'] or None}
 pods_before=js('main-pods-before-freeze.json') or {};pods_after=js('main-pods-after-freeze.json') or {}
 def restarts(doc):
   out={}
@@ -1458,37 +1696,77 @@ main={'before_freeze':restarts(pods_before),'after_freeze':restarts(pods_after),
   'baseline':js('main-baseline.json')}
 isolation=js('isolation.json')
 pods=js('rollback-pods.json') or {}
+# Existence and address come from the one final pod listing (addresses.txt);
+# an unread listing leaves existence unknown, which is never "not created".
+addresses={}
+for line in (text('addresses.txt') or '').splitlines():
+  f=line.split()
+  if len(f)>=2 and f[1] in ('created','never_created'):
+    addresses[f[0]]={'existence':f[1],'pod_ip':f[2] if len(f)>2 and f[2]!='-' else None,
+      'source':'final rollback-namespace pod listing'}
+probed={m.get('member'):m for m in (js('http.json') or {}).get('members',[])}
+pod_rows=[json.loads(l) for l in (text('timeline-pods.jsonl') or '').splitlines() if l.strip()]
+seen_in_window=set()
+for row in pod_rows:seen_in_window.update(row.get('members',{}))
+def http_outcome(m):
+  # answered <code> | connection_refused | timeout | transport_error | not_probed
+  if m is None:return 'not_probed','the HTTP probe produced no record for this member (it failed or never ran)'
+  reads={k:(m.get(k) or {}) for k in ('health','health_ready')}
+  codes=[r['status'] for r in reads.values() if r.get('status')]
+  if codes:return f'answered {codes[0]}',{k:r.get('status') for k,r in reads.items()}
+  errors=[r.get('error') or 'neither a status nor an error was recorded' for r in reads.values()]
+  if all('connection refused' in e for e in errors):return 'connection_refused',errors[0]
+  if any(re.search(r'timeout|deadline exceeded',e,re.I) for e in errors):return 'timeout',errors
+  return 'transport_error',errors
 members={}
+# Before helm ran (an earlier stage blocked) there is nothing to observe.
+installed=text('helm-install-exit.txt') is not None
 for n in range(3):
   name=f'caesium-{n}'
+  addr=addresses.get(name)
+  existence=addr['existence'] if addr else ('unknown' if installed else 'not_installed')
   pod=next((p for p in pods.get('items',[]) if p['metadata']['name']==name),None)
-  cur=text(f'{name}.log',65536);prev=text(f'{name}-previous.log',65536)
-  rec={'created':pod is not None}
-  if pod is not None:
-    st=[s for s in pod.get('status',{}).get('containerStatuses',[]) if s.get('name')=='caesium']
-    s=st[0] if st else {}
-    exits=[x.get('terminated',{}).get('exitCode') for x in (s.get('state',{}),s.get('lastState',{})) if 'terminated' in x]
-    logs='\n'.join(x for x in (cur,prev) if x)
-    rec.update({'node':pod.get('spec',{}).get('nodeName'),'pod_ip':pod.get('status',{}).get('podIP'),
-      'phase':pod.get('status',{}).get('phase'),'ready':bool(s.get('ready')),
-      'restart_count':s.get('restartCount'),'state':s.get('state'),'last_state':s.get('lastState'),
-      'image':s.get('image'),'image_id':s.get('imageID'),'exit_codes':exits,
-      'key_log_lines':[l for l in logs.splitlines()
-        if re.search(r'does not match|error|fatal|panic|refus|level=warn',l,re.I)][:20],
-      'log':cur,'previous_log':prev})
-    if not logs.strip():problems.append(f'{name}: no process log captured')
-    answered=False
-    for m in (js('http.json') or {}).get('members',[]):
-      if m.get('member')==name:
-        rec['http']=m
-        answered=any((m.get(k) or {}).get('status') for k in ('health','health_ready'))
-    rec['http_answered']=answered
-    running='running' in (s.get('state') or {})
-    if not answered and not exits:problems.append(f'{name}: neither an HTTP answer nor a container exit code was observed')
-    if not answered and running and s.get('restartCount',0)==0:
-      problems.append(f'{name}: running container returned only transport errors')
+  rec={'existence':existence,'created':existence=='created'}
   members[name]=rec
-if not members['caesium-0']['created']:problems.append('caesium-0 was never created by the rollback StatefulSet')
+  if existence=='not_installed':continue
+  if existence=='unknown':
+    problems.append(f'{name}: the final pod listing was not read, so whether the rollback StatefulSet created it was not observed')
+    continue
+  if existence=='never_created':
+    if name in seen_in_window:problems.append(f'{name}: listed during the observation window but absent from the final pod listing')
+    continue
+  if pod is None:
+    problems.append(f'{name}: address record and pod listing disagree')
+    continue
+  cur=text(f'{name}.log',65536);prev=text(f'{name}-previous.log',65536)
+  st=[s for s in pod.get('status',{}).get('containerStatuses',[]) if s.get('name')=='caesium']
+  s=st[0] if st else {}
+  exits=[x.get('terminated',{}).get('exitCode') for x in (s.get('state',{}),s.get('lastState',{})) if 'terminated' in x]
+  logs='\n'.join(x for x in (cur,prev) if x)
+  rec.update({'address':addr,'node':pod.get('spec',{}).get('nodeName'),'pod_ip':pod.get('status',{}).get('podIP'),
+    'phase':pod.get('status',{}).get('phase'),'ready':bool(s.get('ready')),
+    'restart_count':s.get('restartCount'),'state':s.get('state'),'last_state':s.get('lastState'),
+    'image':s.get('image'),'image_id':s.get('imageID'),'exit_codes':exits,
+    'key_log_lines':[l for l in logs.splitlines()
+      if re.search(r'does not match|error|fatal|panic|refus|level=warn',l,re.I)][:20],
+    'log':cur,'previous_log':prev})
+  if not logs.strip():problems.append(f'{name}: no process log captured')
+  if addr['pod_ip']:
+    outcome,why=http_outcome(probed.get(name))
+  else:
+    outcome,why='not_probed','the final pod listing gave the member no pod IP, so no HTTP probe could run'
+  if name in probed:rec['http']=probed[name]
+  rec['http_outcome']=outcome;rec['http_outcome_detail']=why
+  answered=outcome.startswith('answered')
+  rec['http_answered']=answered
+  if outcome=='not_probed':
+    problems.append(f'{name}: http not_probed ({why}); an unobserved HTTP surface is not an outcome')
+  running='running' in (s.get('state') or {})
+  if outcome!='not_probed' and not answered and not exits:
+    problems.append(f'{name}: neither an HTTP answer nor a container exit code was observed')
+  if outcome!='not_probed' and not answered and running and s.get('restartCount',0)==0:
+    problems.append(f'{name}: running container returned only transport errors')
+if members['caesium-0']['existence']=='never_created':problems.append('caesium-0 was never created by the rollback StatefulSet')
 for name,c in copy.items():
   if not (c['paused_verified'] and c['resumed_verified'] and c['restored_manifest_equals_copy'] and c['files']):
     if not reason:problems.append(f'{name}: copy was not verified')
@@ -1496,11 +1774,11 @@ sts=js('rollback-statefulset.json') or {}
 obs={'isolated_namespace':os.environ['LC_RB_NS'],'previous_image':os.environ['LC_PREV'],
   'consistency':'all three candidate containers frozen together (containerd cgroup freezer); '
     'live bytes hashed while frozen equal the copy; crash-consistent incl. page-cache writes, not a clean shutdown',
-  'timeline':timeline,'freeze_timeline':freeze,'copy':copy,'main_cluster_after_copy':main,
+  'timeline':timeline,'freeze':freeze_summary,'freeze_timeline':freeze,'copy':copy,'main_cluster_after_copy':main,
   'isolation':isolation,
   'helm_install_exit':(text('helm-install-exit.txt') or '').strip() or None,
   'statefulset_status':sts.get('status'),'members':members,
-  'pod_timeline':[json.loads(l) for l in (text('timeline-pods.jsonl') or '').splitlines() if l.strip()],
+  'pod_timeline':pod_rows,
   'problems':problems}
 created=[n for n,m in members.items() if m['created']]
 parts=[]
@@ -1508,10 +1786,11 @@ for n in created:
   m=members[n]
   line=m['key_log_lines'][0] if m.get('key_log_lines') else 'no error line'
   parts.append(f"{n}: ready={m.get('ready')} restarts={m.get('restart_count')} exit_codes={m.get('exit_codes')} "
-    f"http_answered={m.get('http_answered')}; first error/warn line: {line[:240]}")
-never=[n for n,m in members.items() if not m['created']]
+    f"http={m.get('http_outcome')}; first error/warn line: {line[:240]}")
+never=[n for n,m in members.items() if m['existence']=='never_created']
 summary=(f"{os.environ['LC_PREV']} on an isolated crash-consistent copy of the candidate-migrated three-member volumes: "
-  +'; '.join(parts)+(f"; never created: {', '.join(never)}" if never else ''))
+  +'; '.join(parts)+(f"; never created: {', '.join(never)}" if never else '')
+  +(f"; freeze {freeze_summary['duration_s']}s" if freeze_summary['duration_s'] is not None else ''))
 obs['summary']=summary
 (d/'rollback-observations.json').write_text(json.dumps(obs,indent=2)+'\n')
 print(('BLOCKED ' + '; '.join(problems)) if problems else summary)
@@ -1547,7 +1826,9 @@ PY
     rm -rf "$LC_RB_DIR"
     mkdir -p "$LC_RB_DIR"
     lc_rollback_mark "rollback case begin"
-    if ! lc_rollback_copy; then reason="frozen three-member copy failed or was unverifiable; see cluster-logs/rollback/copy-*.err and *-state-*.txt"; fi
+    if ! lc_rollback_copy; then
+      reason="frozen three-member copy blocked: ${LC_RB_COPY_FAILURE:-copy artifacts unreadable after the thaw}; $(lc_rollback_thaw_summary) (see cluster-logs/rollback/copy-*.err and *-state-*.txt)"
+    fi
     for n in 0 1 2; do
       lc_ns delete pod "lifecycle-rb-src-$n" --ignore-not-found=true --wait=true --timeout=120s \
         >>"$LC_RB_DIR/kubectl.log" 2>&1 || true
