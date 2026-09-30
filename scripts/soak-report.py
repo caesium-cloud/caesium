@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
+import secrets
 import shlex
 import sys
 from pathlib import Path
@@ -54,8 +56,16 @@ TOLERANCES = {
     "goroutines": "last post-drain go_goroutines <= baseline + max(40, 50% of baseline)",
     "fds": "last post-drain open FDs (/proc/1/fd) <= baseline + max(16, 25% of baseline)",
     "fd_stability": "post-drain open FDs max - min <= 8",
-    "containers": "after drain and a grace covering kubelet's one-minute container GC, no task container or task pod carrying this run's ownership token remains (running or exited), and no task container runs at all",
+    "containers": "after drain and a grace covering kubelet's one-minute container GC, no task container or task pod carrying this run's ownership token remains (running or exited), and no task container runs at all; every kind node's container listing, the task pod listing and every task container's inspect must be observed (exit 0, parseable output), or the check is blocked",
+    "process_identity": "every post-drain sample of a member carries a pod UID, container ID and restart count, identical across the post-drain series (kills and replacements before the drain are allowed); a missing identity blocks, and a change fails, because no fault is scheduled after the drain and a crash or OOM restart would reset the readings",
 }
+
+# The one supported seed range. Generation, validation and the record all use
+# it: at most 18 decimal digits, inside the runner's int64
+# (strconv.ParseInt(..., 10, 64) in test/robustness/exploratory_test.go).
+SEED_MIN = 1
+SEED_MAX = 10**18 - 1
+SEED_RE = re.compile(r"[0-9]{1,18}")
 
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 METRIC_NAMES = (
@@ -98,7 +108,10 @@ def cmd_init(a) -> int:
         "soak_id": a.soak_id,
         "cluster": a.soak_id,
         "candidate_sha": a.candidate_sha,
-        "seed": int(a.seed),
+        # A generated seed is recorded as generated; an invalid supplied one
+        # is null (source "invalid") and the controller refuses the run.
+        "seed": int(a.seed) if a.seed else None,
+        "seed_source": a.seed_source,
         "profile": a.profile,
         "duration": a.duration or "",
         "started_at": now(),
@@ -124,6 +137,51 @@ def cmd_set(a) -> int:
         except ValueError:
             record[key] = raw
     write_json(path, record)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# seed
+# ---------------------------------------------------------------------------
+
+
+def seed_error(raw: str) -> str:
+    return f"CAESIUM_SOAK_SEED {raw[:40]!r} must be an integer from {SEED_MIN} to {SEED_MAX}"
+
+
+def validate_seed(raw: str) -> tuple[int | None, str]:
+    """Return (seed, "") for a supported seed, else (None, why)."""
+    if not SEED_RE.fullmatch(raw):
+        return None, seed_error(raw)
+    value = int(raw)
+    if not SEED_MIN <= value <= SEED_MAX:
+        return None, seed_error(raw)
+    return value, ""
+
+
+def generate_seed() -> int:
+    return SEED_MIN + secrets.randbelow(SEED_MAX - SEED_MIN + 1)
+
+
+def resolve_seed(raw: str | None) -> dict:
+    """The seed a run uses: CAESIUM_SOAK_SEED when set, else a generated one.
+
+    A generated seed goes through the same validator as a supplied one, so the
+    controller can never refuse a seed it generated itself.
+    """
+    if not raw:
+        seed, err = validate_seed(str(generate_seed()))
+        return {"seed": seed, "source": "generated", "error": err}
+    seed, err = validate_seed(raw)
+    return {"seed": seed, "source": "invalid" if err else "supplied", "error": err}
+
+
+def cmd_seed(a) -> int:
+    """Print SEED/SEED_SOURCE/SEED_ERROR shell assignments from CAESIUM_SOAK_SEED."""
+    got = resolve_seed(os.environ.get("CAESIUM_SOAK_SEED", ""))
+    print(f"SEED={shlex.quote('' if got['seed'] is None else str(got['seed']))}")
+    print(f"SEED_SOURCE={shlex.quote(got['source'])}")
+    print(f"SEED_ERROR={shlex.quote(got['error'])}")
     return 0
 
 
@@ -308,27 +366,39 @@ def cmd_sample_parse(a) -> int:
     return 0
 
 
+def is_task_container(c: dict, namespace: str) -> bool:
+    labels = c.get("labels") or {}
+    return labels.get("io.kubernetes.pod.namespace") == namespace and labels.get("io.kubernetes.container.name") == "atom"
+
+
 def summarise_containers(ps_by_node: dict, inspect_by_id: dict, namespace: str, token: str, task_pods: list) -> dict:
-    """ps_by_node: node -> `crictl ps -a -o json`; inspect_by_id: id -> `crictl inspect` JSON."""
+    """ps_by_node: node -> `crictl ps -a -o json`; inspect_by_id: id -> `crictl inspect` JSON.
+
+    Ownership is read only from an observed inspect: a task container whose
+    inspect is absent (None) is unverified, never "unowned".
+    """
     nodes = {}
-    owned_running, owned_total, task_running = [], [], []
+    owned_running, owned_total, task_running, unverified = [], [], [], []
     for node, ps in sorted(ps_by_node.items()):
-        counts = {"containers": 0, "task_containers": 0, "owned": 0, "owned_running": 0, "unowned_task": 0}
+        counts = {"containers": 0, "task_containers": 0, "owned": 0, "owned_running": 0, "unowned_task": 0, "unverified": 0}
         for c in (ps or {}).get("containers", []) or []:
             counts["containers"] += 1
+            if not is_task_container(c, namespace):
+                continue
             labels = c.get("labels") or {}
-            if labels.get("io.kubernetes.pod.namespace") != namespace:
-                continue
-            if labels.get("io.kubernetes.container.name") != "atom":
-                continue
             counts["task_containers"] += 1
             cid = c.get("id", "")
             state = c.get("state", "")
             running = state == "CONTAINER_RUNNING"
-            env = container_env(inspect_by_id.get(cid) or {})
             ident = {"node": node, "id": cid[:13], "pod": labels.get("io.kubernetes.pod.name", ""), "state": state}
             if running:
                 task_running.append(ident)
+            inspect = inspect_by_id.get(cid)
+            if inspect is None:
+                counts["unverified"] += 1
+                unverified.append(ident)
+                continue
+            env = container_env(inspect)
             if env.get("CAESIUM_SOAK_OWNER") == token:
                 counts["owned"] += 1
                 owned_total.append(ident)
@@ -343,14 +413,23 @@ def summarise_containers(ps_by_node: dict, inspect_by_id: dict, namespace: str, 
         "owned_task_containers": owned_total[:50],
         "owned_running": owned_running[:50],
         "task_running": task_running[:50],
+        "unverified_task_containers": unverified[:50],
         "task_pods": task_pods[:50],
         "counts": {
             "owned_task_containers": len(owned_total),
             "owned_running": len(owned_running),
             "task_running": len(task_running),
+            "unverified_task_containers": len(unverified),
             "task_pods": len(task_pods),
         },
     }
+
+
+def container_env_observed(inspect: dict) -> bool:
+    """Whether a `crictl inspect` document carries an environment to read ownership from."""
+    info = inspect.get("info") or {}
+    return isinstance((info.get("config") or {}).get("envs"), list) or isinstance(
+        ((info.get("runtimeSpec") or {}).get("process") or {}).get("env"), list)
 
 
 def container_env(inspect: dict) -> dict:
@@ -369,12 +448,41 @@ def container_env(inspect: dict) -> dict:
 def task_container_ids(ps: dict, namespace: str) -> list[str]:
     out = []
     for c in (ps or {}).get("containers", []) or []:
-        labels = c.get("labels") or {}
-        if labels.get("io.kubernetes.pod.namespace") == namespace and labels.get("io.kubernetes.container.name") == "atom":
+        if is_task_container(c, namespace):
             cid = str(c.get("id", ""))
-            if re.fullmatch(r"[0-9a-f]{12,64}", cid):
+            if CONTAINER_ID_RE.fullmatch(cid):
                 out.append(cid)
     return out
+
+
+CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+
+
+def load_evidence(path: Path, shape) -> tuple[dict | None, str]:
+    """One collected observation: (document, "") or (None, why it is missing).
+
+    take_inventory (soak-tests.sh) writes <file>.rc, the command's exit code,
+    after the command finishes. An observation counts only when that exit code
+    is 0 and the output parses to the expected shape: a failed, interrupted or
+    empty collection is missing evidence, never an empty inventory.
+    """
+    name = path.name
+    if not path.exists():
+        return None, f"{name}: not collected"
+    try:
+        rc = Path(str(path) + ".rc").read_text().strip()
+    except OSError:
+        return None, f"{name}: no exit code recorded (collection failed or was interrupted)"
+    if rc != "0":
+        try:
+            err = " ".join(Path(str(path) + ".err").read_text().split())[:200]
+        except OSError:
+            err = ""
+        return None, f"{name}: command exited {rc or '?'}" + (f" ({err})" if err else "")
+    doc = read_json(path)
+    if not isinstance(doc, dict) or not shape(doc):
+        return None, f"{name}: output is empty or not the expected JSON"
+    return doc, ""
 
 
 def cmd_task_container_ids(a) -> int:
@@ -384,15 +492,35 @@ def cmd_task_container_ids(a) -> int:
 
 
 def cmd_containers_parse(a) -> int:
+    """Summarise one inventory. Nodes are counted by SUCCESSFUL listings, and a
+    failed or unparseable listing, pod list or task-container inspect is a
+    recorded evidence gap that blocks post_drain_containers."""
     base = Path(a.dir)
-    ps_by_node, inspect_by_id = {}, {}
+    ps_by_node, inspect_by_id, gaps = {}, {}, []
     for f in sorted(base.glob(f"{a.label}--ps--*.json")):
-        ps_by_node[f.stem.split("--ps--", 1)[1]] = read_json(f, {})
-    for f in sorted(base.glob(f"{a.label}--inspect--*.json")):
-        doc = read_json(f, {})
-        cid = ((doc or {}).get("status") or {}).get("id") or f.stem.split("--inspect--", 1)[1]
-        inspect_by_id[cid] = doc
-    pods_doc = read_json(base / f"{a.label}--pods.json", {}) or {}
+        doc, why = load_evidence(f, lambda d: isinstance(d.get("containers"), list))
+        if doc is None:
+            gaps.append(why)
+            continue
+        ps_by_node[f.stem.split("--ps--", 1)[1]] = doc
+    if a.expect_nodes and len(ps_by_node) != a.expect_nodes:
+        gaps.insert(0, f"inventoried {len(ps_by_node)} nodes successfully, expected {a.expect_nodes}")
+    for ps in ps_by_node.values():
+        for c in ps["containers"]:
+            if not is_task_container(c, a.namespace):
+                continue
+            cid = str(c.get("id", ""))
+            if CONTAINER_ID_RE.fullmatch(cid):
+                doc, why = load_evidence(base / f"{a.label}--inspect--{cid}.json", container_env_observed)
+            else:
+                doc, why = None, f"task container id {cid[:20]!r} cannot be inspected"
+            inspect_by_id[cid] = doc
+            if doc is None:
+                gaps.append(f"ownership of task container {cid[:13]} unobservable: {why}")
+    pods_doc, why = load_evidence(base / f"{a.label}--pods.json", lambda d: isinstance(d.get("items"), list))
+    if pods_doc is None:
+        gaps.append(f"task pod list unobservable: {why}")
+        pods_doc = {}
     task_pods = []
     for p in pods_doc.get("items", []) or []:
         meta, status = p.get("metadata") or {}, p.get("status") or {}
@@ -404,9 +532,10 @@ def cmd_containers_parse(a) -> int:
         task_pods.append({"pod": meta.get("name", ""), "phase": status.get("phase", ""), "owned": owned,
                           "node": (p.get("spec") or {}).get("nodeName", "")})
     summary = summarise_containers(ps_by_node, inspect_by_id, a.namespace, a.token, task_pods)
-    summary.update({"label": a.label, "taken_at": now(), "nodes_inventoried": sorted(ps_by_node)})
-    if a.expect_nodes and len(ps_by_node) != a.expect_nodes:
-        summary["error"] = f"inventoried {len(ps_by_node)} nodes, expected {a.expect_nodes}"
+    summary.update({"label": a.label, "taken_at": now(), "nodes_inventoried": sorted(ps_by_node),
+                    "evidence_gaps": gaps[:50]})
+    if gaps:
+        summary["error"] = "; ".join(gaps[:10]) + (f" (+{len(gaps) - 10} more)" if len(gaps) > 10 else "")
     write_json(base / f"{a.label}.json", summary)
     print(json.dumps({"counts": summary["counts"], "error": summary.get("error", "")}, sort_keys=True))
     return 0
@@ -419,8 +548,8 @@ def cmd_containers_parse(a) -> int:
 
 def judge_resources(baseline: dict | None, post: list[dict]) -> tuple[dict, dict]:
     """Return (resources check, fds check) from the baseline and post-drain samples."""
-    res = {"name": "post_drain_resources", "tolerance": [TOLERANCES[k] for k in ("rss_growth", "rss_stability", "rss_limit", "heap_inuse", "goroutines")], "members": {}}
-    fds = {"name": "post_drain_fds", "tolerance": [TOLERANCES["fds"], TOLERANCES["fd_stability"]], "members": {}}
+    res = {"name": "post_drain_resources", "tolerance": [TOLERANCES[k] for k in ("rss_growth", "rss_stability", "rss_limit", "heap_inuse", "goroutines", "process_identity")], "members": {}}
+    fds = {"name": "post_drain_fds", "tolerance": [TOLERANCES["fds"], TOLERANCES["fd_stability"], TOLERANCES["process_identity"]], "members": {}}
     if not baseline or not baseline.get("members"):
         res.update(status="blocked", detail="no baseline resource sample")
         fds.update(status="blocked", detail="no baseline resource sample")
@@ -435,6 +564,26 @@ def judge_resources(baseline: dict | None, post: list[dict]) -> tuple[dict, dict
         if base.get("errors") or any(m is None or m.get("errors") for m in series):
             blocked.append(f"{pod}: incomplete sample ({base.get('errors')}, {[m.get('errors') if m else 'absent' for m in series]})")
             continue
+        # Stabilization is only meaningful for ONE process: the post-drain
+        # series must share a pod UID, container ID and restart count. The
+        # baseline may differ (planned kills and replacements precede the
+        # drain); the first post-drain sample is the reference.
+        idents = [process_identity(m) for m in series]
+        missing = [i for i, ident in enumerate(idents, 1) if ident is None]
+        if missing:
+            blocked.append(f"{pod}: post-drain sample(s) {missing} carry no pod UID/container ID/restart count, "
+                           "so the series cannot be shown to describe one process")
+            continue
+        if len(set(idents)) > 1:
+            seen = [{"uid": u, "container_id": c, "restart_count": r} for u, c, r in idents]
+            msg = (f"{pod}: restarted during the fault-free post-drain window {seen}; "
+                   "its readings describe fresh processes and cannot show stabilization")
+            res["members"][pod] = {"post_drain_identities": seen}
+            fds["members"][pod] = {"post_drain_identities": seen}
+            res_fail.append(msg)
+            fd_fail.append(msg)
+            continue
+        uid, container_id, restart_count = idents[0]
         rss = [m["vmrss_bytes"] for m in series]
         last = series[-1]
 
@@ -468,6 +617,7 @@ def judge_resources(baseline: dict | None, post: list[dict]) -> tuple[dict, dict
             "memory_limit_mib": round(limit / MIB, 1) if limit else None,
             "process_restarted_since_baseline": base.get("container_id") != last.get("container_id")
             or base.get("uid") != last.get("uid"),
+            "post_drain_identity": {"uid": uid, "container_id": container_id, "restart_count": restart_count},
         }
         res["members"][pod] = member
         if post_native > rss_bound:
@@ -506,14 +656,22 @@ def judge_resources(baseline: dict | None, post: list[dict]) -> tuple[dict, dict
     return res, fds
 
 
+def process_identity(m: dict) -> tuple | None:
+    """(pod UID, container ID, restart count) of a sample, or None when any is missing."""
+    uid, cid, restarts = m.get("uid"), m.get("container_id"), m.get("restart_count")
+    if not uid or not cid or not isinstance(restarts, int) or isinstance(restarts, bool):
+        return None
+    return str(uid), str(cid), restarts
+
+
 def judge_containers(inv: dict | None, baseline: dict | None) -> dict:
     check = {"name": "post_drain_containers", "tolerance": TOLERANCES["containers"]}
     if not inv:
         check.update(status="blocked", detail="no post-drain container inventory")
         return check
-    if inv.get("error"):
-        check.update(status="blocked", detail=inv["error"], inventory=inv.get("counts"))
-        return check
+    # A violation proven by observed evidence fails even when other evidence is
+    # missing; otherwise any evidence gap blocks (never an empty inventory).
+    gaps = inv.get("error", "")
     c = inv.get("counts") or {}
     owned_pods = [p for p in inv.get("task_pods", []) if p.get("owned")]
     check["inventory"] = c
@@ -528,7 +686,9 @@ def judge_containers(inv: dict | None, baseline: dict | None) -> dict:
     if owned_pods:
         fails.append(f"{len(owned_pods)} owned task pods retained after drain: {owned_pods[:10]}")
     if fails:
-        check.update(status="fail", detail="; ".join(fails))
+        check.update(status="fail", detail="; ".join(fails) + (f"; evidence also incomplete: {gaps}" if gaps else ""))
+    elif gaps:
+        check.update(status="blocked", detail=gaps)
     else:
         check.update(status="pass", detail="no owned task container or pod remains; nothing task-side is running")
     return check
@@ -682,8 +842,11 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("init")
     for flag in ("artifacts", "soak-id", "candidate-sha", "seed", "profile"):
         p.add_argument("--" + flag, required=True)
+    p.add_argument("--seed-source", default="supplied", choices=("supplied", "generated", "invalid"))
     p.add_argument("--duration", default="")
     p.set_defaults(fn=cmd_init)
+    p = sub.add_parser("seed")
+    p.set_defaults(fn=cmd_seed)
     p = sub.add_parser("set")
     p.add_argument("--artifacts", required=True)
     p.add_argument("pairs", nargs="+")

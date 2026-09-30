@@ -22,7 +22,9 @@
 # Inputs:
 #   CAESIUM_SOAK_ARTIFACTS  (required) directory outside this checkout, or a git-ignored one inside it.
 #   CAESIUM_SOAK_PROFILE    short (default) | nightly — test/robustness/workloads/<profile>.json.
-#   CAESIUM_SOAK_SEED       integer; generated and recorded when unset. The seed
+#   CAESIUM_SOAK_SEED       integer from 1 to 999999999999999999 (10^18 - 1);
+#                           generated in that range and recorded as generated
+#                           when unset (soak-report.py owns the range). The seed
 #                           reproduces the PLAN; OS scheduling is not
 #                           reproducible, so the ACTUAL fault schedule is kept
 #                           in fault-schedule.jsonl and soak.json.
@@ -57,6 +59,9 @@
 # deletion). None of them is power-loss qualification.
 #
 # `bash scripts/soak-tests.sh --self-test` runs the hermetic helper checks only.
+# `bash scripts/soak-tests.sh --print-seed` resolves CAESIUM_SOAK_SEED exactly
+# as a run would (generating one when unset) and prints it: exit 0, or 3 for a
+# seed a run would refuse. Nothing is created.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -71,6 +76,22 @@ now_ms() { python3 -c 'import datetime;print(datetime.datetime.now(datetime.time
 if [[ "${1:-}" == "--self-test" ]]; then
   python3 "$HOSTLOGIC" self-test
   python3 -m unittest discover -s "$ROOT/scripts" -p 'test_soak_report.py'
+  exit 0
+fi
+
+# Sets SEED, SEED_SOURCE (supplied|generated|invalid) and SEED_ERROR from
+# CAESIUM_SOAK_SEED. Generation, validation and the recorded seed share the one
+# range in soak-report.py, so a generated seed is never refused.
+resolve_seed() {
+  local out
+  out="$(python3 "$REPORT" seed)" || return 2
+  eval "$out"
+}
+
+if [[ "${1:-}" == "--print-seed" ]]; then
+  resolve_seed || { log "ERROR: could not resolve CAESIUM_SOAK_SEED"; exit 2; }
+  if [[ -n "$SEED_ERROR" ]]; then log "BLOCKED (inputs): $SEED_ERROR"; exit 3; fi
+  printf 'seed=%s source=%s\n' "$SEED" "$SEED_SOURCE"
   exit 0
 fi
 
@@ -93,7 +114,7 @@ esac
 
 SOAK_ID="${CAESIUM_SOAK_ID:-soak-$(python3 -c 'import secrets;print(secrets.token_hex(5))')}"
 PROFILE="${CAESIUM_SOAK_PROFILE:-short}"
-SEED="${CAESIUM_SOAK_SEED:-$(python3 -c 'import secrets;print(secrets.randbits(62))')}"
+resolve_seed || { log "ERROR: could not resolve CAESIUM_SOAK_SEED"; exit 2; }
 DURATION="${CAESIUM_SOAK_DURATION:-}"
 KIND_IMAGE="${CAESIUM_SOAK_KIND_IMAGE:-kindest/node:v1.36.1}"
 TASK_IMAGE_SRC="${CAESIUM_SOAK_TASK_IMAGE:-alpine:3.23}"
@@ -115,12 +136,11 @@ mkdir -p "$ART/records" "$ART/samples" "$ART/containers" "$LOGS"
 : >"$ART/phases.txt"
 
 # The placeholder is written before any input is judged, so even a refused
-# invocation leaves a record that says why; an invalid seed is recorded as 0
-# and refused just below.
-SEED_RECORDED=0
-if [[ "$SEED" =~ ^[0-9]{1,18}$ ]]; then SEED_RECORDED="$SEED"; fi
+# invocation leaves a record that says why. It carries the seed this run uses,
+# supplied or generated, with its source; an invalid supplied seed is recorded
+# as null (source "invalid") and refused just below.
 python3 "$REPORT" init --artifacts "$ART" --soak-id "$SOAK_ID" --candidate-sha "$CANDIDATE_SHA" \
-  --seed "$SEED_RECORDED" --profile "$PROFILE" --duration "$DURATION"
+  --seed "$SEED" --seed-source "$SEED_SOURCE" --profile "$PROFILE" --duration "$DURATION"
 
 phase() { printf '%s=%s\n' "$1" "$2" >>"$ART/phases.txt"; }
 record_set() { python3 "$REPORT" set --artifacts "$ART" "$@" >/dev/null; }
@@ -194,7 +214,7 @@ trap 'exit 143' TERM
 # ---------------------------------------------------------------------------
 [[ "$SOAK_ID" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || blocked inputs "invalid CAESIUM_SOAK_ID $SOAK_ID"
 [[ "$PROFILE" == short || "$PROFILE" == nightly ]] || blocked inputs "CAESIUM_SOAK_PROFILE must be short or nightly"
-[[ "$SEED" =~ ^[0-9]{1,18}$ ]] || blocked inputs "CAESIUM_SOAK_SEED must be a non-negative integer below 10^18"
+[[ -z "$SEED_ERROR" ]] || blocked inputs "$SEED_ERROR"
 if [[ -n "$DURATION" ]]; then
   [[ "$DURATION" =~ ^([0-9]+(h|m|s))+$ ]] || blocked inputs "CAESIUM_SOAK_DURATION must be a Go duration such as 30m or 1h"
 fi
@@ -535,15 +555,29 @@ print(json.dumps({"uid":p["metadata"]["uid"],"node":p["spec"].get("nodeName","")
   python3 "$REPORT" sample-parse --dir "$ART/samples" --label "$label"
 }
 
+# Runs one inventory command: stdout to <out>, stderr to <out>.err, and its
+# exit code to <out>.rc, written last. soak-report.py counts an observation
+# only when <out>.rc says 0 and <out> parses, so a failed, interrupted or empty
+# collection is missing evidence, never an empty inventory.
+collect() {
+  local out="$1" rc=0
+  shift
+  rm -f "$out" "$out.rc" "$out.err"
+  "$@" >"$out" 2>"$out.err" || rc=$?
+  printf '%s\n' "$rc" >"$out.rc"
+  return "$rc"
+}
+
 take_inventory() {
-  local label="$1" node id
+  local label="$1" node id ps
   for node in "${KIND_NODES[@]}"; do
-    docker exec "$node" crictl ps -a -o json >"$ART/containers/$label--ps--$node.json" 2>"$LOGS/crictl-$label-$node.err" || continue
-    for id in $(python3 "$REPORT" task-container-ids --file "$ART/containers/$label--ps--$node.json" --namespace "$NS"); do
-      docker exec "$node" crictl inspect "$id" >"$ART/containers/$label--inspect--$id.json" 2>/dev/null || true
+    ps="$ART/containers/$label--ps--$node.json"
+    collect "$ps" docker exec "$node" crictl ps -a -o json || continue
+    for id in $(python3 "$REPORT" task-container-ids --file "$ps" --namespace "$NS"); do
+      collect "$ART/containers/$label--inspect--$id.json" docker exec "$node" crictl inspect "$id" || true
     done
   done
-  kc_ns get pods -l cloud.caesium -o json >"$ART/containers/$label--pods.json" 2>/dev/null || true
+  collect "$ART/containers/$label--pods.json" kc_ns get pods -l cloud.caesium -o json || true
   python3 "$REPORT" containers-parse --dir "$ART/containers" --label "$label" --namespace "$NS" \
     --token "$OWNER_TOKEN" --expect-nodes "${#KIND_NODES[@]}"
 }

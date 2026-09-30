@@ -6,12 +6,14 @@ A missing record or sample is blocked, never a pass.
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).with_name("soak-report.py")
@@ -78,13 +80,23 @@ class Fixture:
         self.record("drain", {"key": "drain", "status": status, "soak_id": self.soak_id, "seed": self.seed,
                               "observations": {"admitted_runs": 30, "final_statuses": {"succeeded": 30}}})
 
-    def sample(self, label, **per_pod):
+    def sample(self, label, meta=None, **per_pod):
+        """meta: pod -> the .pod.json document (identity) for that pod, replacing the default."""
         for pod in ("caesium-0", "caesium-1", "caesium-2"):
             kw = per_pod.get(pod, {})
             (self.art / "samples" / f"{label}--{pod}.txt").write_text(sample_text(**kw))
-            (self.art / "samples" / f"{label}--{pod}.pod.json").write_text(json.dumps(
-                {"uid": pod + "-uid", "container_id": "containerd://" + pod, "restart_count": 0}))
+            ident = {"uid": pod + "-uid", "container_id": "containerd://" + pod, "restart_count": 0}
+            if meta and pod in meta:
+                ident = meta[pod]
+            (self.art / "samples" / f"{label}--{pod}.pod.json").write_text(
+                ident if isinstance(ident, str) else json.dumps(ident))
         soak.main(["sample-parse", "--dir", str(self.art / "samples"), "--label", label])
+
+    @staticmethod
+    def observed(path, doc, rc=0):
+        """Write one collected observation as take_inventory does: output, then its exit code."""
+        path.write_text(json.dumps(doc))
+        Path(str(path) + ".rc").write_text(f"{rc}\n")
 
     def inventory(self, label, containers=(), pods=()):
         c = self.art / "containers"
@@ -94,13 +106,16 @@ class Fixture:
                 "io.kubernetes.pod.namespace": "soak-t1", "io.kubernetes.container.name": "atom",
                 "io.kubernetes.pod.name": "task-" + cid[:4]}})
             env = [{"key": "CAESIUM_SOAK_OWNER", "value": "tok" if owned else "other"}]
-            (c / f"{label}--inspect--{cid}.json").write_text(json.dumps({"status": {"id": cid}, "info": {"config": {"envs": env}}}))
+            self.observed(c / f"{label}--inspect--{cid}.json", {"status": {"id": cid}, "info": {"config": {"envs": env}}})
         ps["containers"].append({"id": "f" * 64, "state": "CONTAINER_RUNNING", "labels": {
             "io.kubernetes.pod.namespace": "soak-t1", "io.kubernetes.container.name": "caesium"}})
         for node in ("n-control-plane", "n-worker", "n-worker2", "n-worker3"):
-            (c / f"{label}--ps--{node}.json").write_text(json.dumps(ps if node == "n-worker" else {"containers": []}))
-        (c / f"{label}--pods.json").write_text(json.dumps({"items": list(pods)}))
-        soak.main(["containers-parse", "--dir", str(c), "--label", label, "--namespace", "soak-t1",
+            self.observed(c / f"{label}--ps--{node}.json", ps if node == "n-worker" else {"containers": []})
+        self.observed(c / f"{label}--pods.json", {"items": list(pods)})
+        self.reparse(label)
+
+    def reparse(self, label="post-drain"):
+        soak.main(["containers-parse", "--dir", str(self.art / "containers"), "--label", label, "--namespace", "soak-t1",
                    "--token", "tok", "--expect-nodes", "4"])
 
     def passing(self):
@@ -262,6 +277,103 @@ class SoakReportTest(unittest.TestCase):
                    "--namespace", "soak-t1", "--token", "tok", "--expect-nodes", "4"])
         self.assertEqual(self.fx.finalize()[1]["scenarios"]["post_drain_containers"]["status"], "blocked")
 
+    # -- PR #597 review: missing inventory evidence blocks --------------------
+
+    def test_emptied_container_listings_and_pod_list_are_blocked(self):
+        """Reviewer's case: all four post-drain ps files and the pod list emptied."""
+        self.fx.passing()
+        c = self.fx.art / "containers"
+        for f in list(c.glob("post-drain--ps--*.json")) + [c / "post-drain--pods.json"]:
+            f.write_text("")
+        self.fx.reparse()
+        rc, doc = self.fx.finalize()
+        self.assertEqual((rc, doc["result"]), (1, "blocked"))
+        check = doc["scenarios"]["post_drain_containers"]
+        self.assertEqual(check["status"], "blocked", check["detail"])
+        self.assertIn("inventoried 0 nodes successfully, expected 4", check["detail"])
+
+    def test_emptied_pod_list_alone_is_blocked(self):
+        self.fx.passing()
+        (self.fx.art / "containers" / "post-drain--pods.json").write_text("")
+        self.fx.reparse()
+        rc, doc = self.fx.finalize()
+        self.assertEqual((rc, doc["result"]), (1, "blocked"))
+        self.assertIn("task pod list unobservable", doc["scenarios"]["post_drain_containers"]["detail"])
+
+    def test_failed_or_unfinished_collection_is_blocked(self):
+        self.fx.passing()
+        ps = self.fx.art / "containers" / "post-drain--ps--n-worker2.json"
+        Path(str(ps) + ".rc").write_text("1\n")
+        Path(str(ps) + ".err").write_text("crictl: connection refused\n")
+        self.fx.reparse()
+        check = self.fx.finalize()[1]["scenarios"]["post_drain_containers"]
+        self.assertEqual(check["status"], "blocked")
+        self.assertIn("command exited 1 (crictl: connection refused)", check["detail"])
+        Path(str(ps) + ".rc").unlink()
+        self.fx.reparse()
+        check = self.fx.finalize()[1]["scenarios"]["post_drain_containers"]
+        self.assertEqual(check["status"], "blocked")
+        self.assertIn("no exit code recorded", check["detail"])
+
+    def test_owned_exited_container_with_emptied_inspect_is_blocked(self):
+        """Reviewer's case: an exited owned task container whose inspect is empty."""
+        self.fx.passing()
+        for cid, owned in (("a" * 64, True), ("c" * 64, False)):
+            self.fx.inventory("post-drain", containers=[(cid, "CONTAINER_EXITED", owned)])
+            (self.fx.art / "containers" / f"post-drain--inspect--{cid}.json").write_text("")
+            self.fx.reparse()
+            rc, doc = self.fx.finalize()
+            check = doc["scenarios"]["post_drain_containers"]
+            self.assertEqual((rc, check["status"]), (1, "blocked"), check["detail"])
+            self.assertIn(f"ownership of task container {cid[:13]} unobservable", check["detail"])
+            self.assertEqual(check["inventory"]["unverified_task_containers"], 1)
+
+    def test_running_task_container_fails_even_without_its_inspect(self):
+        self.fx.passing()
+        self.fx.inventory("post-drain", containers=[("d" * 64, "CONTAINER_RUNNING", True)])
+        (self.fx.art / "containers" / f"post-drain--inspect--{'d' * 64}.json").unlink()
+        self.fx.reparse()
+        check = self.fx.finalize()[1]["scenarios"]["post_drain_containers"]
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("evidence also incomplete", check["detail"])
+
+    # -- PR #597 review: one process across the post-drain series -------------
+
+    def test_post_drain_restarts_are_not_certified(self):
+        """Reviewer's case: three distinct container IDs with restart counts 1, 2, 3."""
+        self.fx.passing()
+        for i in (1, 2, 3):
+            self.fx.sample(f"post-drain-{i}", meta={"caesium-1": {
+                "uid": "caesium-1-uid", "container_id": f"containerd://fresh-{i}", "restart_count": i}})
+        rc, doc = self.fx.finalize()
+        self.assertEqual((rc, doc["result"]), (1, "fail"))
+        for name in ("post_drain_resources", "post_drain_fds"):
+            check = doc["scenarios"][name]
+            self.assertEqual(check["status"], "fail", name)
+            self.assertIn("caesium-1: restarted during the fault-free post-drain window", check["detail"])
+
+    def test_missing_post_drain_identity_is_blocked(self):
+        for broken in ({}, {"uid": "caesium-0-uid", "container_id": "containerd://caesium-0", "restart_count": None}, ""):
+            with self.subTest(broken=broken):
+                self.fx.passing()
+                self.fx.sample("post-drain-2", meta={"caesium-0": broken})
+                rc, doc = self.fx.finalize()
+                self.assertEqual((rc, doc["result"]), (1, "blocked"))
+                for name in ("post_drain_resources", "post_drain_fds"):
+                    self.assertEqual(doc["scenarios"][name]["status"], "blocked", name)
+                    self.assertIn("caesium-0: post-drain sample(s) [2] carry no pod UID", doc["scenarios"][name]["detail"])
+
+    def test_replacement_before_the_drain_is_allowed(self):
+        self.fx.passing()
+        fresh = {"uid": "caesium-2-uid-new", "container_id": "containerd://replaced", "restart_count": 1}
+        for i in (1, 2, 3):
+            self.fx.sample(f"post-drain-{i}", meta={"caesium-2": fresh})
+        rc, doc = self.fx.finalize()
+        self.assertEqual((rc, doc["result"]), (0, "pass"), doc["detail"])
+        m = doc["scenarios"]["post_drain_resources"]["members"]["caesium-2"]
+        self.assertTrue(m["process_restarted_since_baseline"])
+        self.assertEqual(m["post_drain_identity"]["container_id"], "containerd://replaced")
+
     def test_fault_schedule_is_retained_in_order(self):
         self.fx.passing()
         for action in ("cordon", "kill", "restart"):
@@ -271,6 +383,67 @@ class SoakReportTest(unittest.TestCase):
         doc = self.fx.finalize()[1]
         self.assertEqual([(e["seq"], e["action"]) for e in doc["fault_schedule"]], [(0, "cordon"), (1, "kill"), (2, "restart")])
         self.assertTrue(all(e["finished_at"].endswith("Z") for e in doc["fault_schedule"]))
+
+
+class SeedTest(unittest.TestCase):
+    """PR #597 review: generation, validation and the record share one range."""
+
+    def test_generated_seed_boundaries_pass_the_validator(self):
+        span = soak.SEED_MAX - soak.SEED_MIN + 1
+        for draw, want in ((0, soak.SEED_MIN), (span - 1, soak.SEED_MAX)):
+            with mock.patch.object(soak.secrets, "randbelow", return_value=draw) as rb:
+                got = soak.resolve_seed("")
+            rb.assert_called_once_with(span)
+            self.assertEqual(got, {"seed": want, "source": "generated", "error": ""})
+        self.assertEqual((soak.SEED_MIN, soak.SEED_MAX), (1, 10**18 - 1))
+        # randbits(62) drew this before the fix; it is outside the range.
+        self.assertIsNone(soak.validate_seed("1152921504606846976")[0])
+
+    def test_supplied_seed_range(self):
+        for raw, want in (("1", 1), ("999999999999999999", 10**18 - 1), ("007", 7), ("314159", 314159)):
+            self.assertEqual(soak.resolve_seed(raw), {"seed": want, "source": "supplied", "error": ""}, raw)
+        for raw in ("0", "1000000000000000000", "-5", "abc", " 42", "4611686018427387903"):
+            got = soak.resolve_seed(raw)
+            self.assertEqual((got["seed"], got["source"]), (None, "invalid"), raw)
+            self.assertIn("must be an integer from 1 to 999999999999999999", got["error"])
+
+    def test_placeholder_records_the_generated_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            soak.main(["init", "--artifacts", tmp, "--soak-id", "s", "--candidate-sha", "a" * 40,
+                       "--seed", str(soak.SEED_MAX), "--seed-source", "generated", "--profile", "short"])
+            doc = json.loads((Path(tmp) / "soak.json").read_text())
+            self.assertEqual((doc["seed"], doc["seed_source"], doc["result"]), (soak.SEED_MAX, "generated", "incomplete"))
+            soak.main(["init", "--artifacts", tmp, "--soak-id", "s", "--candidate-sha", "a" * 40,
+                       "--seed", "", "--seed-source", "invalid", "--profile", "short"])
+            doc = json.loads((Path(tmp) / "soak.json").read_text())
+            self.assertEqual((doc["seed"], doc["seed_source"]), (None, "invalid"))
+
+    def _print_seed(self, value=None):
+        env = {k: v for k, v in os.environ.items() if k != "CAESIUM_SOAK_SEED"}
+        if value is not None:
+            env["CAESIUM_SOAK_SEED"] = value
+        return subprocess.run(["bash", str(CONTROLLER), "--print-seed"], env=env, capture_output=True, text=True)
+
+    def test_controller_unset_seed_path_is_accepted(self):
+        """The controller's real seed path: unset (or empty) generates an accepted seed."""
+        for value in (None, "", None, None, None, None):
+            r = self._print_seed(value)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            m = re.fullmatch(r"seed=(\d+) source=generated\n", r.stdout)
+            self.assertIsNotNone(m, r.stdout)
+            self.assertTrue(soak.SEED_MIN <= int(m.group(1)) <= soak.SEED_MAX)
+        r = self._print_seed("999999999999999999")
+        self.assertEqual((r.returncode, r.stdout), (0, "seed=999999999999999999 source=supplied\n"))
+        r = self._print_seed("1000000000000000000")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("must be an integer from 1 to 999999999999999999", r.stdout)
+
+    def test_controller_uses_only_the_shared_seed_logic(self):
+        text = CONTROLLER.read_text()
+        self.assertNotIn("randbits", text)
+        self.assertNotIn("SEED_RECORDED", text)
+        self.assertIn('--seed "$SEED" --seed-source "$SEED_SOURCE"', text)
+        self.assertIn('[[ -z "$SEED_ERROR" ]] || blocked inputs "$SEED_ERROR"', text)
 
 
 class RequestHandlingTest(unittest.TestCase):
@@ -320,6 +493,15 @@ class RequestHandlingTest(unittest.TestCase):
 class ControllerShapeTest(unittest.TestCase):
     def test_controller_parses(self):
         subprocess.run(["bash", "-n", str(CONTROLLER)], check=True)
+
+    def test_inventory_commands_record_their_exit_code(self):
+        text = CONTROLLER.read_text()
+        body = text[text.index("take_inventory() {"):]
+        body = body[:body.index("\n}\n")]
+        for cmd in ("crictl ps -a -o json", "crictl inspect", "get pods -l cloud.caesium -o json"):
+            line = next(l for l in body.splitlines() if cmd in l)
+            self.assertRegex(line.strip(), r"^collect ", f"{cmd} must run through collect (exit code sidecar)")
+        self.assertIn('printf \'%s\\n\' "$rc" >"$out.rc"', text)
 
     def test_controller_owns_and_deletes_only_its_cluster(self):
         text = CONTROLLER.read_text()
