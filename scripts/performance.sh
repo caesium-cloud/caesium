@@ -505,6 +505,9 @@ cleanup() {
   done
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   if [[ -n "$BASE_WORKTREE" && -d "$BASE_WORKTREE" ]]; then
+    # Containers (UI build, benchmarks) write into the base checkout as root; on a
+    # Linux runner hand those files back first or neither removal can delete them.
+    [[ -n "${BUILDER_IMAGE:-}" ]] && docker run --rm -v "$BASE_WORKTREE:/w" "$BUILDER_IMAGE" chown -R "$(id -u):$(id -g)" /w >/dev/null 2>&1 || true
     git -C "$ROOT" worktree remove --force "$BASE_WORKTREE" >/dev/null 2>&1 || rm -rf "$BASE_WORKTREE"
   fi
   rm -f "$ARTIFACTS/.binary-under-check" "$ROOT/.tmp/caesium-load-driver-perf"
@@ -778,7 +781,7 @@ if [[ "$RUN_LOAD" == "1" ]]; then
   docker run --rm --platform "$DOCKER_PLATFORM" \
     -v "$ROOT:/bld/caesium" -w /bld/caesium \
     "$BUILDER_IMAGE" \
-    go build -trimpath -o /bld/caesium/.tmp/caesium-load-driver-perf ./test/load
+    go build -buildvcs=false -trimpath -o /bld/caesium/.tmp/caesium-load-driver-perf ./test/load
   cp "$ROOT/.tmp/caesium-load-driver-perf" "$DRIVER"
   chmod +x "$DRIVER"
 fi
@@ -1194,6 +1197,22 @@ def workload_samples(side, phase):
             throughput = report.get("throughput") if isinstance(report.get("throughput"), dict) else {}
             backlog = report.get("backlog") if isinstance(report.get("backlog"), dict) else {}
             counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
+            # The concurrent public read mix (E2 api_reads). The driver reports
+            # status "ok" whenever a mix was CONFIGURED, even if every read
+            # failed, so that status only selects the workloads that ran a mix;
+            # success is judged from the accounting carried below. A configured
+            # mix whose accounting is incomplete gets no error ratio, and an
+            # SLO on it then fails closed as missing evidence.
+            reads = report.get("api_reads") if isinstance(report.get("api_reads"), dict) else {}
+            if reads.get("status") != "ok":
+                reads = {}
+            offered, succeeded = reads.get("offered"), reads.get("ok")
+            error_ratio = None
+            if (isinstance(offered, int) and not isinstance(offered, bool) and offered > 0
+                    and isinstance(succeeded, int) and not isinstance(succeeded, bool) and 0 <= succeeded <= offered):
+                # Every offered read that did not complete with a 2xx: HTTP
+                # errors, transport failures and the driver's own drops.
+                error_ratio = (offered - succeeded) / offered
             for field, value in (
                 ("latency_p50_seconds", latency.get("p50_seconds")),
                 ("latency_p99_seconds", latency.get("p99_seconds")),
@@ -1201,6 +1220,13 @@ def workload_samples(side, phase):
                 ("sustained_verdict", throughput.get("verdict")),
                 ("backlog_slope_per_second", backlog.get("slope_per_second")),
                 ("unreconciled", counts.get("unreconciled")),
+                ("api_read_p50_seconds", reads.get("p50_seconds")),
+                ("api_read_p99_seconds", reads.get("p99_seconds")),
+                ("api_reads_offered", reads.get("offered")),
+                ("api_reads_ok", reads.get("ok")),
+                ("api_reads_failed", reads.get("failed")),
+                ("api_reads_dropped", reads.get("dropped")),
+                ("api_read_error_ratio", error_ratio),
             ):
                 if value is not None:
                     extras[field] = value
