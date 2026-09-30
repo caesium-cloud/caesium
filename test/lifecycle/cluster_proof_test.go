@@ -5,13 +5,19 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -453,4 +459,277 @@ func TestReconcileRetainedAttemptEffects(t *testing.T) {
 			require.Error(t, reconcileRetainedAttemptEffects(seed, candidate, baseline, rawEvents, taskEvents))
 		})
 	}
+}
+
+// mixedFakeRun scripts one held run: the lease owner and claimed worker (dqlite
+// addresses of held members), the terminal status after release, and whether
+// the durable attempt is re-claimed on another runtime before it terminates.
+type mixedFakeRun struct {
+	owner, worker string
+	status        string
+	reclaim       bool
+}
+
+type mixedFakeState struct {
+	mixedFakeRun
+	id, task, durable, nonce, pod string
+	released                      bool
+}
+
+// mixedFake answers the public API, the dqlite query endpoint and the raw
+// effect recorder for scripted held runs, in trigger order.
+type mixedFake struct {
+	jobID  string
+	script []mixedFakeRun
+	mu     sync.Mutex
+	runs   []*mixedFakeState
+}
+
+func (f *mixedFake) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	f.serve(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+func (f *mixedFake) find(text string) *mixedFakeState {
+	for _, run := range f.runs {
+		if strings.Contains(text, run.id) {
+			return run
+		}
+	}
+	return nil
+}
+
+func (f *mixedFake) rawEvent(run *mixedFakeState, kind string) recorder.Event {
+	raw, _ := json.Marshal(rawAttemptEffect{RunID: run.id, Step: "hold", Nonce: run.nonce, PodName: run.pod, Event: kind})
+	return recorder.Event{RunID: run.id, Step: "hold", Kind: kind, Nonce: run.nonce, Raw: string(raw)}
+}
+
+func (f *mixedFake) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	reply := func(status int, v any) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/jobs/"+f.jobID+"/run":
+		if len(f.runs) == len(f.script) {
+			http.Error(w, "script exhausted", http.StatusInternalServerError)
+			return
+		}
+		n := len(f.runs)
+		run := &mixedFakeState{mixedFakeRun: f.script[n], id: uuid.NewString(), task: uuid.NewString(),
+			durable: uuid.NewString(), nonce: fmt.Sprintf("nonce-%d", n), pod: fmt.Sprintf("task-pod-%d", n)}
+		f.runs = append(f.runs, run)
+		reply(http.StatusAccepted, map[string]any{"id": run.id, "job_id": f.jobID, "status": "running"})
+	case r.URL.Host == "lifecycle-recorder:8090" && r.URL.Path == "/records":
+		events := []recorder.Event{}
+		for _, run := range f.runs {
+			events = append(events, f.rawEvent(run, "start"))
+			if run.released && run.status == "succeeded" {
+				events = append(events, f.rawEvent(run, "complete"))
+			}
+		}
+		reply(http.StatusOK, events)
+	case r.URL.Host == "lifecycle-recorder:8090" && r.URL.Path == "/release":
+		run := f.find(r.URL.RawQuery)
+		if run == nil {
+			http.Error(w, "unknown run", http.StatusNotFound)
+			return
+		}
+		run.released = true
+		reply(http.StatusOK, map[string]string{"status": "released"})
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/database/query":
+		var body struct {
+			SQL string `json:"sql"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		run := f.find(body.SQL)
+		switch {
+		case run == nil:
+			http.Error(w, "unknown run", http.StatusBadRequest)
+		case strings.Contains(body.SQL, "FROM run_leases"):
+			reply(http.StatusOK, map[string]any{"row_count": 1, "rows": [][]any{{run.id, run.owner, 3, "2026-09-30T00:00:00Z"}}})
+		case strings.Contains(body.SQL, "FROM task_runs"):
+			status, claim, runtime := "running", 1, run.pod
+			var output any
+			if run.released {
+				status = run.status
+				if run.reclaim {
+					claim, runtime = 2, run.pod+"-reclaimed"
+				}
+				if status == "succeeded" {
+					output = fmt.Sprintf(`{"recorder_nonce":%q,"recorder_pod":%q}`, run.nonce, runtime)
+				}
+			}
+			reply(http.StatusOK, map[string]any{"row_count": 1, "rows": [][]any{
+				{run.durable, run.id, run.task, run.worker, 3, 1, claim, runtime, status, output}}})
+		default:
+			http.Error(w, "unexpected query", http.StatusBadRequest)
+		}
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/"+f.jobID+"/runs/"):
+		run := f.find(r.URL.Path)
+		if run == nil {
+			http.Error(w, "unknown run", http.StatusNotFound)
+			return
+		}
+		status := "running"
+		if run.released {
+			status = run.status
+		}
+		reply(http.StatusOK, map[string]any{"id": run.id, "job_id": f.jobID, "status": status,
+			"tasks": []map[string]any{{"id": run.task, "task_id": run.task, "status": status, "attempt": 1}}})
+	default:
+		http.Error(w, "unexpected request "+r.Method+" "+r.URL.String(), http.StatusNotFound)
+	}
+}
+
+// runMixedScript drives the real observation loop and attemptMixedCrossing
+// against a scripted held window and returns the observation, the case record
+// it decided, and the record as written to the artifacts directory.
+func runMixedScript(t *testing.T, script []mixedFakeRun) (mixedObservation, caseRecord, caseRecord) {
+	t.Helper()
+	const (
+		candidate = "10.0.0.2"
+		previous0 = "10.0.0.10"
+		previous1 = "10.0.0.11"
+	)
+	t.Setenv("CAESIUM_LIFECYCLE_ARTIFACTS", t.TempDir())
+	t.Setenv("CAESIUM_LIFECYCLE_ID", "lifecycle-hermetic-mixed")
+	t.Setenv("CAESIUM_LIFECYCLE_BASE_URL", "http://"+candidate+":8080")
+	fake := &mixedFake{jobID: uuid.NewString(), script: script}
+	prev := http.DefaultTransport
+	http.DefaultTransport = fake
+	t.Cleanup(func() { http.DefaultTransport = prev })
+
+	member := func(name, ip, version string) mixedHeldMember {
+		return mixedHeldMember{Name: name, IP: ip, Version: version, member: cluster.Member{Name: name, IP: ip}}
+	}
+	window := map[string]mixedHeldMember{
+		"caesium-2": member("caesium-2", candidate, "candidate"),
+		"caesium-0": member("caesium-0", previous0, "previous"),
+		"caesium-1": member("caesium-1", previous1, "previous"),
+	}
+	fx := clusterFixture{Jobs: map[string]jobFixture{"inflight": {ID: fake.jobID}}}
+	h := cluster.NewHTTP("manual-key")
+	readBase := window[mixedHeldCandidateMember].member.HTTPBase()
+	ctx := t.Context()
+	logged := 0
+	obs := observeMixedDirections(ctx, mixedDirections, 20*time.Second, time.Millisecond,
+		func(direction mixedDirection, n int) (map[string]any, mixedAttempt) {
+			trigger := window[direction.Triggers[n%len(direction.Triggers)]]
+			return attemptMixedCrossing(ctx, t, fx, h, readBase, window, direction, trigger)
+		},
+		func(attempts []mixedAttempt) { logged = len(attempts) })
+	require.Equal(t, len(obs.Attempts), logged, "every attempt is logged as it happens")
+	require.Len(t, fake.runs, len(obs.Attempts), "every attempt triggered exactly one scripted run")
+
+	rec := mixedCaseRecord(obs, mixedDirections)
+	writeCase(t, rec)
+	var written caseRecord
+	raw, err := os.ReadFile(filepath.Join(artifactsDir(t), "cases", sanitize(mixedCaseName)+".json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &written))
+	return obs, rec, written
+}
+
+func mixedVerdicts(obs mixedObservation) []mixedVerdict {
+	out := make([]mixedVerdict, 0, len(obs.Attempts))
+	for _, a := range obs.Attempts {
+		out = append(out, a.Verdict)
+	}
+	return out
+}
+
+const (
+	mixedFakeCandidate = "10.0.0.2:9001"
+	mixedFakePrevious0 = "10.0.0.10:9001"
+	mixedFakePrevious1 = "10.0.0.11:9001"
+)
+
+func TestMixedCrossingPassesBothDirections(t *testing.T) {
+	obs, rec, written := runMixedScript(t, []mixedFakeRun{
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious0, status: "succeeded"},
+		{owner: mixedFakePrevious0, worker: mixedFakeCandidate, status: "succeeded"},
+	})
+	require.Equal(t, []mixedVerdict{mixedCrossed, mixedCrossed}, mixedVerdicts(obs))
+	require.Empty(t, obs.Failures)
+	require.Len(t, obs.Crossings, 2)
+	require.Equal(t, statusPass, rec.Status)
+	require.Equal(t, statusPass, written.Status)
+}
+
+// #596 review: a proved cross-version run that fails is a demonstrated failure.
+// Neither a later success in the same shape nor the opposite crossing may turn
+// the case into a pass, and the failed direction is not retried.
+func TestMixedCrossingFailureThenSuccessFailsCase(t *testing.T) {
+	obs, rec, written := runMixedScript(t, []mixedFakeRun{
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious0, status: "failed"},
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious0, status: "succeeded"},
+		{owner: mixedFakePrevious0, worker: mixedFakeCandidate, status: "succeeded"},
+	})
+	require.False(t, t.Failed())
+	// The failed candidate-owner direction stops; its next scripted run lands
+	// on the previous-owner direction as an opposite-direction success.
+	require.Equal(t, []mixedVerdict{mixedFailed, mixedRetry, mixedCrossed}, mixedVerdicts(obs))
+	failure := obs.Attempts[0]
+	require.True(t, failure.CrossVersion)
+	require.Equal(t, "candidate", failure.OwnerVersion)
+	require.Equal(t, "previous", failure.WorkerVersion)
+	require.Equal(t, "failed", failure.ObservedStatus)
+	require.Contains(t, failure.Outcome, "proved cross-version run ended failed")
+	require.Equal(t, []mixedAttempt{failure}, obs.Failures)
+	require.NotContains(t, obs.Crossings, "candidate-owner-previous-worker")
+	require.Contains(t, obs.Crossings, "previous-owner-candidate-worker")
+
+	require.Equal(t, statusFail, rec.Status)
+	require.Equal(t, statusFail, written.Status)
+	require.Contains(t, written.Detail, failure.RunID)
+	require.Contains(t, written.Detail, `observed status "failed"`)
+
+	// AfterUpgrade re-derives the case from the crossing evidence; even with
+	// both directions crossed there, it must keep the held window's failure.
+	writeJSON(t, "cluster-mixed-crossing.json", map[string]any{"crossings": map[string]any{
+		"candidate-owner-previous-worker": map[string]any{}, "previous-owner-candidate-worker": map[string]any{}},
+		"failures": obs.Failures})
+	kept, write := mixedCaseAfterUpgrade(t)
+	require.False(t, write)
+	require.Equal(t, statusFail, kept.Status)
+	require.NoError(t, os.Remove(filepath.Join(artifactsDir(t), "cases", sanitize(mixedCaseName)+".json")))
+	rederived, write := mixedCaseAfterUpgrade(t)
+	require.True(t, write)
+	require.Equal(t, statusFail, rederived.Status)
+}
+
+func TestMixedCrossingRetriesSameVersionFailure(t *testing.T) {
+	obs, rec, written := runMixedScript(t, []mixedFakeRun{
+		{owner: mixedFakePrevious0, worker: mixedFakePrevious1, status: "failed"},
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious1, status: "succeeded"},
+		{owner: mixedFakePrevious1, worker: mixedFakeCandidate, status: "succeeded"},
+	})
+	require.Equal(t, []mixedVerdict{mixedRetry, mixedCrossed, mixedCrossed}, mixedVerdicts(obs))
+	require.False(t, obs.Attempts[0].CrossVersion)
+	require.Equal(t, "failed", obs.Attempts[0].ObservedStatus)
+	require.Equal(t, "owner and worker ran the same version", obs.Attempts[0].Outcome)
+	require.Empty(t, obs.Failures)
+	require.Equal(t, statusPass, rec.Status)
+	require.Equal(t, statusPass, written.Status)
+}
+
+func TestMixedCrossingChangedDurableAttemptFailsCase(t *testing.T) {
+	obs, rec, written := runMixedScript(t, []mixedFakeRun{
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious0, status: "succeeded", reclaim: true},
+		{owner: mixedFakeCandidate, worker: mixedFakePrevious0, status: "succeeded"},
+		{owner: mixedFakePrevious0, worker: mixedFakeCandidate, status: "succeeded"},
+	})
+	require.Equal(t, []mixedVerdict{mixedFailed, mixedRetry, mixedCrossed}, mixedVerdicts(obs))
+	require.True(t, obs.Attempts[0].CrossVersion)
+	require.Equal(t, "succeeded", obs.Attempts[0].ObservedStatus)
+	require.Contains(t, obs.Attempts[0].Outcome, "changed its durable attempt")
+	require.Equal(t, statusFail, rec.Status)
+	require.Equal(t, statusFail, written.Status)
+	require.Contains(t, written.Detail, "changed its durable attempt")
 }

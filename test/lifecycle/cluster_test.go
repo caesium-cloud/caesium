@@ -929,23 +929,43 @@ type mixedHeldMember struct {
 	member   cluster.Member
 }
 
+// mixedVerdict classifies one held-window attempt. Only a proved
+// cross-version run can cross or fail; every other attempt is retried.
+type mixedVerdict string
+
+const (
+	mixedRetry   mixedVerdict = "retry"
+	mixedCrossed mixedVerdict = "crossed"
+	mixedFailed  mixedVerdict = "failed"
+)
+
 type mixedAttempt struct {
-	Direction     string    `json:"direction"`
-	TriggerMember string    `json:"trigger_member"`
-	RunID         string    `json:"run_id,omitempty"`
-	OwnerNode     string    `json:"owner_node,omitempty"`
-	OwnerVersion  string    `json:"owner_version,omitempty"`
-	WorkerNode    string    `json:"worker_node,omitempty"`
-	WorkerVersion string    `json:"worker_version,omitempty"`
-	Outcome       string    `json:"outcome"`
-	StartedAt     time.Time `json:"started_at"`
-	Seconds       float64   `json:"seconds"`
+	Direction     string `json:"direction"`
+	TriggerMember string `json:"trigger_member"`
+	RunID         string `json:"run_id,omitempty"`
+	OwnerNode     string `json:"owner_node,omitempty"`
+	OwnerVersion  string `json:"owner_version,omitempty"`
+	WorkerNode    string `json:"worker_node,omitempty"`
+	WorkerVersion string `json:"worker_version,omitempty"`
+	// CrossVersion is set once the lease owner and the claimed worker of the
+	// running durable attempt are held members on different releases.
+	CrossVersion   bool         `json:"cross_version"`
+	ObservedStatus string       `json:"observed_status,omitempty"`
+	Verdict        mixedVerdict `json:"verdict"`
+	Outcome        string       `json:"outcome"`
+	StartedAt      time.Time    `json:"started_at"`
+	Seconds        float64      `json:"seconds"`
 }
 
 type mixedDirection struct {
 	Name         string
 	OwnerVersion string
 	Triggers     []string
+}
+
+var mixedDirections = []mixedDirection{
+	{Name: "candidate-owner-previous-worker", OwnerVersion: "candidate", Triggers: []string{mixedHeldCandidateMember}},
+	{Name: "previous-owner-candidate-worker", OwnerVersion: "previous", Triggers: mixedPreviousMembers},
 }
 
 // heldMixedWindow verifies the held topology directly from the Kubernetes API:
@@ -1049,15 +1069,26 @@ func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, win
 	return probed, ""
 }
 
-// attemptMixedCrossing triggers one held run through trigger's public API and
-// accepts it only when the lease owner has direction.OwnerVersion, the claimed
-// worker has the other version, and the same durable attempt, fenced owner
-// generation and raw nonce reach a succeeded terminal state.
+// attemptMixedCrossing triggers one held run through trigger's public API.
+// The run is a proved cross-version execution once its lease owner and the
+// claimed worker of its running durable attempt are held members on different
+// releases. From then on it either crosses, when the same durable attempt,
+// fenced owner generation and raw nonce reach succeeded, or it fails: any other
+// terminal status, a replaced or re-claimed durable attempt, or a missing raw
+// completion is a demonstrated mixed-version failure (mixedFailed) that the
+// caller records and never retries away. An attempt that never reached that
+// proof, a same-version dispatch, a proved run still in flight when the wait
+// closes, an unreadable terminal proof and a proved success in the other
+// direction are retried (mixedRetry).
 func attemptMixedCrossing(ctx context.Context, t *testing.T, fx clusterFixture, h *cluster.HTTP, readBase string,
 	window map[string]mixedHeldMember, direction mixedDirection, trigger mixedHeldMember) (cross map[string]any, a mixedAttempt) {
 	t.Helper()
-	a = mixedAttempt{Direction: direction.Name, TriggerMember: trigger.Name, StartedAt: time.Now().UTC()}
+	a = mixedAttempt{Direction: direction.Name, TriggerMember: trigger.Name, Verdict: mixedRetry, StartedAt: time.Now().UTC()}
 	defer func() { a.Seconds = time.Since(a.StartedAt).Seconds() }()
+	failed := func(format string, args ...any) (map[string]any, mixedAttempt) {
+		a.Verdict, a.Outcome = mixedFailed, fmt.Sprintf(format, args...)
+		return nil, a
+	}
 	byIP := map[string]mixedHeldMember{}
 	for _, m := range window {
 		byIP[m.IP] = m
@@ -1114,43 +1145,146 @@ func attemptMixedCrossing(ctx context.Context, t *testing.T, fx clusterFixture, 
 	owner, ownerOK := byIP[cluster.HostIP(lease.OwnerNode)]
 	worker, workerOK := byIP[cluster.HostIP(beforeTask.ClaimedBy)]
 	a.OwnerVersion, a.WorkerVersion = owner.Version, worker.Version
+	a.CrossVersion = ownerOK && workerOK && owner.Version != worker.Version
 	releaseRecordedRun(t, run.ID)
 	rc := newClient(t)
 	rc.base = readBase
 	final, err := rc.awaitRunStatus(ctx, run.JobID, run.ID, func(r apiRun) bool { return isTerminal(r.Status) }, 60*time.Second)
+	a.ObservedStatus = final.Status
 	switch {
-	case err != nil:
-		a.Outcome = "run did not reach a terminal state within 60s after release: " + err.Error()
-		return nil, a
-	case final.Status != "succeeded" || len(final.Tasks) != 1 || final.Tasks[0].ID != live.Tasks[0].ID ||
-		final.Tasks[0].Attempt != beforeTask.Attempt:
-		a.Outcome = fmt.Sprintf("terminal run is not the released attempt: status=%s tasks=%d", final.Status, len(final.Tasks))
-		return nil, a
 	case !ownerOK || !workerOK:
 		a.Outcome = "lease owner or claimed worker is not a held member"
 		return nil, a
-	case owner.Version == worker.Version:
+	case !a.CrossVersion:
 		a.Outcome = "owner and worker ran the same version"
 		return nil, a
-	case owner.Version != direction.OwnerVersion:
-		a.Outcome = fmt.Sprintf("owner ran %s, direction needs a %s owner", owner.Version, direction.OwnerVersion)
+	case err != nil:
+		a.Outcome = "proved cross-version run still in flight 60s after release: " + err.Error()
 		return nil, a
+	case final.Status != "succeeded":
+		return failed("proved cross-version run ended %s (error %q)", final.Status, final.Error)
+	case len(final.Tasks) != 1 || final.Tasks[0].ID != live.Tasks[0].ID || final.Tasks[0].Attempt != beforeTask.Attempt:
+		return failed("proved cross-version run succeeded, but its terminal projection is not the released attempt (task %s attempt %d; %d terminal tasks)",
+			live.Tasks[0].ID, beforeTask.Attempt, len(final.Tasks))
 	}
 	afterTask, err := readClusterTaskProof(ctx, h, readBase, run.ID, beforeTask.TaskID)
-	if err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
+	switch {
+	case errors.Is(err, errTaskProofUnavailable):
+		a.Outcome = "terminal durable attempt unreadable: " + err.Error()
+		return nil, a
+	case err != nil || afterTask.ID != beforeTask.ID || afterTask.Attempt != beforeTask.Attempt ||
 		afterTask.ClaimAttempt != beforeTask.ClaimAttempt || afterTask.RuntimeID != beforeTask.RuntimeID ||
 		afterTask.ClaimedBy != beforeTask.ClaimedBy || afterTask.OwnerGeneration != lease.Generation ||
-		afterTask.Status != "succeeded" || !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)) {
-		a.Outcome = fmt.Sprintf("terminal durable attempt or raw completion does not match: err=%v proof=%+v", err, afterTask)
+		afterTask.Status != "succeeded":
+		return failed("proved cross-version run changed its durable attempt: err=%v before=%+v after=%+v lease_generation=%d",
+			err, beforeTask, afterTask, lease.Generation)
+	case !rawCompletionMatchesTask(run.ID, afterTask, recorderEvents(t)):
+		return failed("proved cross-version run succeeded without the raw completion of its durable attempt: proof=%+v", afterTask)
+	case owner.Version != direction.OwnerVersion:
+		a.Outcome = fmt.Sprintf("owner ran %s, direction needs a %s owner (the opposite crossing succeeded)", owner.Version, direction.OwnerVersion)
 		return nil, a
 	}
-	a.Outcome = "crossed"
+	a.Verdict, a.Outcome = mixedCrossed, "crossed"
 	return map[string]any{"direction": direction.Name, "run_id": run.ID, "trigger_member": trigger.Name,
 		"owner_node": lease.OwnerNode, "owner_version": owner.Version, "owner_generation": lease.Generation,
 		"worker_node": beforeTask.ClaimedBy, "worker_version": worker.Version,
 		"task_before_release": beforeTask, "task_after_completion": afterTask,
 		"owner_member": owner, "worker_member": worker,
 		"terminal_status": final.Status, "raw_effect_nonce": afterTask.RecorderNonce}, a
+}
+
+// mixedObservation is everything one held-window observation saw.
+type mixedObservation struct {
+	Budget    time.Duration
+	Attempts  []mixedAttempt
+	Crossings map[string]map[string]any
+	// Failures are proved cross-version runs that failed. The first one
+	// decides the case; no later crossing, in either direction, clears it.
+	Failures []mixedAttempt
+}
+
+// observeMixedDirections tries each direction until it crosses, a proved
+// cross-version run fails, or the direction's budget closes. A failure stops
+// that direction's retries; the next direction is still observed so the record
+// carries evidence for both.
+func observeMixedDirections(ctx context.Context, directions []mixedDirection, budget, pause time.Duration,
+	attempt func(direction mixedDirection, n int) (map[string]any, mixedAttempt), logged func([]mixedAttempt)) mixedObservation {
+	obs := mixedObservation{Budget: budget, Crossings: map[string]map[string]any{}}
+	for _, direction := range directions {
+		deadline := time.Now().Add(budget)
+		for n := 0; ctx.Err() == nil && time.Now().Before(deadline); n++ {
+			cross, a := attempt(direction, n)
+			obs.Attempts = append(obs.Attempts, a)
+			logged(obs.Attempts)
+			if a.Verdict == mixedFailed {
+				obs.Failures = append(obs.Failures, a)
+				break
+			}
+			if a.Verdict == mixedCrossed && cross != nil {
+				obs.Crossings[direction.Name] = cross
+				break
+			}
+			time.Sleep(pause)
+		}
+	}
+	return obs
+}
+
+// mixedCaseRecord decides the case from one observation; the caller attaches
+// the window evidence. A proved cross-version failure outranks both a later
+// crossing and a direction that never crossed.
+func mixedCaseRecord(obs mixedObservation, directions []mixedDirection) caseRecord {
+	if len(obs.Failures) > 0 {
+		f := obs.Failures[0]
+		return caseRecord{Name: mixedCaseName, Status: statusFail, Detail: fmt.Sprintf(
+			"proved cross-version run %s (%s owner %s, %s worker %s; attempted for %s via %s) observed status %q: %s (%d proved failure(s), %d attempts in cluster-mixed-attempts.json)",
+			f.RunID, f.OwnerVersion, f.OwnerNode, f.WorkerVersion, f.WorkerNode, f.Direction, f.TriggerMember,
+			f.ObservedStatus, f.Outcome, len(obs.Failures), len(obs.Attempts))}
+	}
+	for _, direction := range directions {
+		if obs.Crossings[direction.Name] != nil {
+			continue
+		}
+		last := "no attempt ran"
+		for _, a := range obs.Attempts {
+			if a.Direction == direction.Name {
+				last = a.Outcome
+			}
+		}
+		return caseRecord{Name: mixedCaseName, Status: statusBlocked, Detail: fmt.Sprintf(
+			"held window open, but no %s dispatch and completion was jointly observed within %s (%d attempts in cluster-mixed-attempts.json; last: %s)",
+			direction.Name, obs.Budget, len(obs.Attempts), last)}
+	}
+	return caseRecord{Name: mixedCaseName, Status: statusPass,
+		Detail: "inside a held window (caesium-2 candidate, caesium-0/1 previous, all protocol 2) the same task attempt and fenced owner generation dispatched and completed in both directions across the version boundary; raw nonces persisted in terminal task output"}
+}
+
+// mixedCaseAfterUpgrade re-derives the case from the held observation once the
+// rollout finished. It never replaces a failed record the held window wrote.
+func mixedCaseAfterUpgrade(t *testing.T) (rec caseRecord, write bool) {
+	t.Helper()
+	var held caseRecord
+	if readJSON(t, filepath.Join("cases", sanitize(mixedCaseName)+".json"), &held) && held.Status == statusFail &&
+		held.LifecycleID == envOr("CAESIUM_LIFECYCLE_ID", "") {
+		return held, false
+	}
+	var crossing map[string]any
+	crossed := readJSON(t, "cluster-mixed-crossing.json", &crossing)
+	directions, _ := crossing["crossings"].(map[string]any)
+	failures, _ := crossing["failures"].([]any)
+	_, forward := directions["candidate-owner-previous-worker"]
+	_, reverse := directions["previous-owner-candidate-worker"]
+	switch {
+	case len(failures) > 0:
+		return caseRecord{Name: mixedCaseName, Status: statusFail, Observations: crossing,
+			Detail: "cluster-mixed-crossing.json records a proved cross-version run that failed inside the held window"}, true
+	case !crossed || !forward || !reverse:
+		return caseRecord{Name: mixedCaseName, Status: statusBlocked,
+			Detail: "the held window did not record both opposite-version crossings (candidate owner with a previous worker, and previous owner with a candidate worker), each with a terminal run and raw completion effect"}, true
+	}
+	return caseRecord{Name: mixedCaseName, Status: statusPass,
+		Detail:       "held protocol-2 mixed window; opposite-version dispatch and completion observed in both directions",
+		Observations: crossing}, true
 }
 
 func TestLifecycleClusterMixedWindow(t *testing.T) {
@@ -1195,36 +1329,31 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 	writeJSON(t, "cluster-mixed-window.json", map[string]any{"start": window})
 	readBase := window[mixedHeldCandidateMember].member.HTTPBase()
 
-	directions := []mixedDirection{
-		{Name: "candidate-owner-previous-worker", OwnerVersion: "candidate", Triggers: []string{mixedHeldCandidateMember}},
-		{Name: "previous-owner-candidate-worker", OwnerVersion: "previous", Triggers: mixedPreviousMembers},
-	}
-	var attempts []mixedAttempt
-	crossings := map[string]map[string]any{}
-	for _, direction := range directions {
-		deadline := time.Now().Add(mixedDirectionBudget)
-		for n := 0; ctx.Err() == nil && time.Now().Before(deadline); n++ {
+	obs := observeMixedDirections(ctx, mixedDirections, mixedDirectionBudget, time.Second,
+		func(direction mixedDirection, n int) (map[string]any, mixedAttempt) {
 			trigger := window[direction.Triggers[n%len(direction.Triggers)]]
 			cross, attempt := attemptMixedCrossing(ctx, t, fx, h, readBase, window, direction, trigger)
-			attempts = append(attempts, attempt)
-			writeJSON(t, "cluster-mixed-attempts.json", attempts)
-			t.Logf("mixed attempt %s via %s: run=%s owner=%s(%s) worker=%s(%s) %.1fs: %s", attempt.Direction,
+			t.Logf("mixed attempt %s via %s: run=%s owner=%s(%s) worker=%s(%s) status=%s %.1fs: %s: %s", attempt.Direction,
 				attempt.TriggerMember, attempt.RunID, attempt.OwnerNode, attempt.OwnerVersion,
-				attempt.WorkerNode, attempt.WorkerVersion, attempt.Seconds, attempt.Outcome)
-			if cross != nil {
-				crossings[direction.Name] = cross
-				break
-			}
-			time.Sleep(time.Second)
+				attempt.WorkerNode, attempt.WorkerVersion, attempt.ObservedStatus, attempt.Seconds, attempt.Verdict, attempt.Outcome)
+			return cross, attempt
+		},
+		func(attempts []mixedAttempt) { writeJSON(t, "cluster-mixed-attempts.json", attempts) })
+	rec := mixedCaseRecord(obs, mixedDirections)
+	cross := map[string]any{"hold": hold, "window_start": window, "crossings": obs.Crossings,
+		"attempts": obs.Attempts, "failures": obs.Failures}
+	if rec.Status != statusPass {
+		// A proved cross-version failure is decisive and a missing direction
+		// is blocked; both keep everything observed, including the end window.
+		if end, err := heldMixedWindow(ctx, fx, oldID, newID); err != nil {
+			cross["window_end_error"] = err.Error()
+		} else {
+			cross["window_end"] = end
 		}
-		if crossings[direction.Name] == nil {
-			last := "no attempt ran"
-			if len(attempts) > 0 {
-				last = attempts[len(attempts)-1].Outcome
-			}
-			blockf(t, mixedCaseName, "held window open, but no %s dispatch and completion was jointly observed within %s (%d attempts in cluster-mixed-attempts.json; last: %s)",
-				direction.Name, mixedDirectionBudget, len(attempts), last)
-		}
+		writeJSON(t, "cluster-mixed-crossing.json", cross)
+		rec.Observations = cross
+		writeCase(t, rec)
+		t.Fatalf("%s %s: %s", strings.ToUpper(rec.Status), mixedCaseName, rec.Detail)
 	}
 
 	// Every crossing must have happened inside one held window: the same three
@@ -1241,12 +1370,10 @@ func TestLifecycleClusterMixedWindow(t *testing.T) {
 		}
 	}
 	writeJSON(t, "cluster-mixed-window.json", map[string]any{"start": window, "end": end})
-	cross := map[string]any{"hold": hold, "window_start": window, "window_end": end,
-		"crossings": crossings, "attempts": attempts}
+	cross["window_end"] = end
 	writeJSON(t, "cluster-mixed-crossing.json", cross)
-	writeCase(t, caseRecord{Name: mixedCaseName, Status: statusPass,
-		Detail:       "inside a held window (caesium-2 candidate, caesium-0/1 previous, all protocol 2) the same task attempt and fenced owner generation dispatched and completed in both directions across the version boundary; raw nonces persisted in terminal task output",
-		Observations: cross})
+	rec.Observations = cross
+	writeCase(t, rec)
 }
 
 func TestLifecycleClusterAfterUpgrade(t *testing.T) {
@@ -1567,18 +1694,8 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		Detail: "pre-upgrade job/run/task IDs and event tuple sets retained; in-flight raw ledger reconciled; queued row drained",
 		Observations: map[string]any{"queued_run_id": queued.ID, "queued_row_id": fx.QueuedRow.ID,
 			"in_flight_run_id": fx.InFlight.ID, "predecessor_run_id": fx.Predecessor.ID}})
-	var crossing map[string]any
-	crossed := readJSON(t, "cluster-mixed-crossing.json", &crossing)
-	directions, _ := crossing["crossings"].(map[string]any)
-	_, forward := directions["candidate-owner-previous-worker"]
-	_, reverse := directions["previous-owner-candidate-worker"]
-	if !crossed || !forward || !reverse {
-		writeCase(t, caseRecord{Name: mixedCaseName, Status: statusBlocked,
-			Detail: "the held window did not record both opposite-version crossings (candidate owner with a previous worker, and previous owner with a candidate worker), each with a terminal run and raw completion effect"})
-	} else {
-		writeCase(t, caseRecord{Name: mixedCaseName, Status: statusPass,
-			Detail:       "held protocol-2 mixed window; opposite-version dispatch and completion observed in both directions",
-			Observations: crossing})
+	if rec, write := mixedCaseAfterUpgrade(t); write {
+		writeCase(t, rec)
 	}
 }
 
