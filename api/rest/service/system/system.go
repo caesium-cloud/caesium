@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,11 @@ const (
 )
 
 type Node struct {
+	// ID is the dqlite node ID of a raft member, as a decimal string: IDs are
+	// random 64-bit values that JSON numbers cannot carry exactly. It is empty
+	// for entries that are not raft members (seeds, historical workers). It is
+	// what `DELETE /v1/system/nodes/:id` takes.
+	ID      string   `json:"id,omitempty"`
 	Address string   `json:"address"`
 	Arch    string   `json:"arch"`
 	Role    NodeRole `json:"role"`
@@ -104,6 +110,7 @@ func (s *Service) Nodes() ([]Node, error) {
 	log.Debug("discovered dqlite nodes", "count", len(view.Members), "observed", view.Observed)
 
 	type entry struct {
+		id           uint64
 		role         NodeRole
 		leader       bool
 		reachability clustersvc.Reachability
@@ -113,6 +120,7 @@ func (s *Service) Nodes() ([]Node, error) {
 	addrMap := make(map[string]entry)
 	for _, m := range view.Members {
 		addrMap[m.Address] = entry{
+			id:           m.ID,
 			role:         roleFromCluster(m.Role),
 			leader:       m.Leader,
 			reachability: m.Reachability,
@@ -161,7 +169,12 @@ func (s *Service) Nodes() ([]Node, error) {
 			busy = &count
 		}
 
+		var id string
+		if e.id != 0 {
+			id = strconv.FormatUint(e.id, 10)
+		}
 		nodes = append(nodes, Node{
+			ID:           id,
 			Address:      addr,
 			Arch:         runtime.GOARCH,
 			Role:         e.role,

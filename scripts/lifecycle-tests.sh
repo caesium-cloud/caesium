@@ -2474,6 +2474,67 @@ PY
       lc_case storage-snapshot-restore blocked "consistent copy, pre-start SHA-256 comparison, local-only read, negative control or rejoin failed; inspect cluster-logs/*sha256 and pre-start-restored-info.yaml"
     fi
 
+    # H1 (#582 follow-up): remove a disk-loss replacement's stale raft entry
+    # with the documented operator command, run inside a live follower through
+    # kubectl exec exactly as an operator would, against the plan the runner
+    # wrote once the replacement settled. The leader and a live voter go first
+    # and must be refused; then every stale entry, retrying a retryable refusal
+    # (a configuration change or election in flight, a lost voter not yet
+    # demoted) every 5 s for up to 90 s. Each attempt's exit code, stdout and
+    # stderr are captured apart; the runner's *Removed phase judges them.
+    lc_remove_stale_members() {
+      local stage="$1" plan dir executor kind id rc n=0 attempt
+      plan="$LC_ART/cluster-$stage-removal-plan.json"
+      dir="$LC_ART/cluster-logs/$stage-removal"
+      rm -rf "$dir" "$LC_ART/cluster-$stage-removal-host.json"
+      mkdir -p "$dir"
+      [[ -s "$plan" ]] || return 1
+      LC_ID="$LC_ID" python3 - "$plan" "$dir/targets.txt" <<'PY' || return 1
+import json,os,sys
+p=json.load(open(sys.argv[1]))
+if p.get('lifecycle_id')!=os.environ['LC_ID']:raise SystemExit('removal plan belongs to another lifecycle id')
+rows=[('control-leader',p['leader']['id']),('control-voter',p['voter']['id'])]+[('stale',x['id']) for x in p['stale']]
+if not p['stale']:raise SystemExit('removal plan names no stale entry')
+with open(sys.argv[2],'w') as out:
+  out.write(p['executor']+'\n')
+  for kind,node in rows:
+    if not node.isdigit():raise SystemExit(f'bad node id {node!r}')
+    out.write(f'{kind} {node}\n')
+PY
+      executor="$(head -n 1 "$dir/targets.txt")"
+      [[ "$executor" =~ ^caesium-[0-9]+$ ]] || return 1
+      while read -r kind id; do
+        for attempt in {1..18}; do
+          n=$((n + 1))
+          rc=0
+          lc_ns --request-timeout=120s exec "$executor" -c caesium -- /bin/caesium system nodes remove "$id" --json \
+            --server http://127.0.0.1:8080 >"$dir/$n.stdout" 2>"$dir/$n.stderr" </dev/null || rc=$?
+          printf '%s %s %s %s %s\n' "$n" "$kind" "$id" "$rc" "$attempt" >>"$dir/attempts.txt"
+          [[ "$kind" == stale && "$rc" != 0 ]] || break
+          python3 - "$dir/$n.stdout" <<'PY' || break
+import json,sys
+try:answer=json.load(open(sys.argv[1]))
+except Exception:raise SystemExit(1)
+raise SystemExit(0 if answer.get('status')=='refused' and answer.get('retryable') is True else 1)
+PY
+          sleep 5
+        done
+      done < <(tail -n +2 "$dir/targets.txt")
+      LC_ID="$LC_ID" python3 - "$dir" "$stage" "$executor" "$LC_ART/cluster-$stage-removal-host.json" <<'PY' || return 1
+import json,os,pathlib,sys
+d=pathlib.Path(sys.argv[1]);attempts=[]
+for line in (d/'attempts.txt').read_text().splitlines():
+  n,kind,node,rc,_=line.split()
+  attempts.append({'n':int(n),'kind':kind,'id':node,'rc':int(rc),
+    'stdout':(d/f'{n}.stdout').read_text(errors='replace'),
+    'stderr':(d/f'{n}.stderr').read_text(errors='replace')})
+pathlib.Path(sys.argv[4]).write_text(json.dumps({'lifecycle_id':os.environ['LC_ID'],'stage':sys.argv[2],
+  'executor':sys.argv[3],'attempts':attempts},indent=2)+'\n')
+PY
+      lc_ns cp "$LC_ART/cluster-$stage-removal-host.json" \
+        "lifecycle-runner:/artifacts/cluster-$stage-removal-host.json" -c runner
+    }
+
     # Fresh-PVC joining member: PVC deletion is requested while the old pod
     # still holds it, then pod deletion releases the protection finalizer. The
     # StatefulSet must create a new claim/PV; UID and PV identity are checked
@@ -2484,6 +2545,7 @@ PY
       done
     else
     LC_JOIN_RC=0
+    rm -f "$LC_ART/cluster-ordinal1-removal-plan.json" "$LC_ART/cluster-ordinal1-removal-host.json"
     LC_OLD1_UID="$(lc_ns get pod caesium-1 -o jsonpath='{.metadata.uid}')"
     lc_ns delete pvc data-caesium-1 --wait=false >/dev/null || LC_JOIN_RC=$?
     lc_ns delete pod caesium-1 --wait=false >/dev/null || LC_JOIN_RC=$?
@@ -2498,8 +2560,15 @@ PY
       lc_phase JoiningOrdinalOne "$LC_CAND_ID" "$(lc_base)" || LC_JOIN_RC=$?
     fi
     lc_copy_runner_artifacts || true
+    # H1: the settled runner phase planned the stale entry's removal; the host
+    # runs the operator command and the runner then judges every member's view.
+    if [[ "$LC_JOIN_RC" == 0 ]]; then
+      lc_remove_stale_members ordinal1 || LC_JOIN_RC=$?
+      lc_phase JoiningOrdinalOneRemoved "$LC_CAND_ID" "$(lc_base)" || LC_JOIN_RC=$?
+      lc_copy_runner_artifacts || true
+    fi
     if [[ "$LC_JOIN_RC" != 0 ]]; then
-      lc_case joining-ordinal-1-replacement blocked "fresh-PVC ordinal-1 pod or direct membership proof failed; inspect JoiningOrdinalOne.log, PVC/PV and pod events"
+      lc_case joining-ordinal-1-replacement blocked "fresh-PVC ordinal-1 pod, direct membership proof, or stale-entry removal failed; inspect JoiningOrdinalOne.log, cluster-logs/ordinal1-removal/, JoiningOrdinalOneRemoved.log, PVC/PV and pod events"
     fi
 
     # Ordinal 0 is intentionally last: before #582 replacing its PVC created an
@@ -2513,6 +2582,7 @@ PY
     # that must not be reported as a pod that never became Ready.
     LC_ZERO_READY_RC=0
     LC_ZERO_RC=0
+    rm -f "$LC_ART/cluster-ordinal0-removal-plan.json" "$LC_ART/cluster-ordinal0-removal-host.json"
     LC_OLD0_UID="$(lc_ns get pod caesium-0 -o jsonpath='{.metadata.uid}')"
     lc_ns delete pvc data-caesium-0 --wait=false >/dev/null || LC_ZERO_READY_RC=$?
     lc_ns delete pod caesium-0 --wait=false >/dev/null || LC_ZERO_READY_RC=$?
@@ -2560,12 +2630,18 @@ PY
       lc_ns cp "$LC_ART/cluster-ordinal0-host.json" lifecycle-runner:/artifacts/cluster-ordinal0-host.json -c runner || LC_ZERO_RC=$?
       lc_phase OrdinalZeroLoss "$LC_CAND_ID" "$(lc_base)" || LC_ZERO_RC=$?
       lc_copy_runner_artifacts || true
+      # H1: remove the stale entry the rejoin left behind, then judge it.
+      if [[ "$LC_ZERO_RC" == 0 ]]; then
+        lc_remove_stale_members ordinal0 || LC_ZERO_RC=$?
+        lc_phase OrdinalZeroRemoved "$LC_CAND_ID" "$(lc_base)" || LC_ZERO_RC=$?
+        lc_copy_runner_artifacts || true
+      fi
     fi
     if [[ ! -f "$LC_ART/cases/ordinal-0-disk-loss.json" ]]; then
       if [[ "$LC_ZERO_READY_RC" != 0 ]]; then
         lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement pod was not recreated or did not become Ready; runner not started; inspect ordinal0-pod.json, ordinal0-pvc.json and caesium-0-current.log"
       elif [[ "$LC_ZERO_RC" != 0 ]]; then
-        lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement was Ready but the host-evidence copy or OrdinalZeroLoss runner failed before recording a case; see OrdinalZeroLoss.log"
+        lc_case ordinal-0-disk-loss blocked "ordinal-0 replacement was Ready but the host-evidence copy, OrdinalZeroLoss runner, stale-entry removal or OrdinalZeroRemoved runner failed before recording a case; see OrdinalZeroLoss.log, cluster-logs/ordinal0-removal/ and OrdinalZeroRemoved.log"
       fi
     fi
     fi

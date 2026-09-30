@@ -1438,17 +1438,23 @@ func TestLifecycleClusterJoiningOrdinalOne(t *testing.T) {
 		require.Len(t, liveVoters, 3, "not all three live members are voters")
 		require.GreaterOrEqual(t, voterCount, 3)
 	}
-	writeCase(t, caseRecord{Name: "joining-ordinal-1-replacement", Status: statusPass,
-		Detail: "fresh PVC and node ID joined every member's direct Cluster RPC; old member entry remains",
-		Observations: map[string]any{"old_node_id": old["caesium-1"].DqliteID, "old_volume": old["caesium-1"].Volume,
-			"new_volume": replaced.VolumeName, "new_pod_uid": replaced.UID}})
+	// H1: the lost member's entry is removed with the operator command before
+	// the case is judged (stale_member_removal_test.go); this phase proves the
+	// entry was demoted and plans that removal.
+	settleForStaleRemoval(t, "joining-ordinal-1-replacement", "ordinal1", topo, replaced.DqliteAddr(),
+		[]uint64{old["caesium-1"].DqliteID},
+		"fresh PVC and node ID joined every member's direct Cluster RPC; the lost member's entry was demoted to non-voting",
+		map[string]any{"old_node_id": old["caesium-1"].DqliteID, "old_volume": old["caesium-1"].Volume,
+			"new_volume": replaced.VolumeName, "new_pod_uid": replaced.UID})
 }
 
 // TestLifecycleClusterOrdinalZeroLoss qualifies #582: after caesium-0 loses its
 // PVC while caesium-1/2 keep running, the replacement must join the existing
 // cluster as a new member rather than bootstrap a divergent one. Every member's
 // direct Cluster RPC, including the fresh node's own, must show one cluster
-// with one leader, and the fixture must read the same through caesium-0.
+// with one leader, and the fixture must read the same through caesium-0. The
+// case record is written by TestLifecycleClusterOrdinalZeroRemoved, after the
+// host removed the stale entry with the operator command (H1).
 func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	const name = "ordinal-0-disk-loss"
 	fx := clusterFixture{}
@@ -1581,11 +1587,13 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 		}
 		evidence["system_nodes_"+m.Name] = json.RawMessage(raw)
 	}
-	writeCase(t, caseRecord{Name: name, Status: statusPass,
-		Detail: fmt.Sprintf("fresh ordinal 0 joined as new node %d at %s; every member's direct Cluster RPC agrees on one leader and one membership; "+
+	// H1: the case is judged by TestLifecycleClusterOrdinalZeroRemoved once the
+	// host has removed the stale entries with the operator command.
+	writeStaleRemovalPlan(t, name, "ordinal0", topo, views, staleIDs,
+		fmt.Sprintf("fresh ordinal 0 joined as new node %d at %s; every member's direct Cluster RPC agrees on one leader and one membership; "+
 			"voters are exactly the three live members; retained runs read identically through caesium-0 and survivors; "+
-			"non-voting stale entries: %v", info.ID, fresh.DqliteAddr(), stale),
-		Observations: evidence})
+			"non-voting stale entries before removal: %v", info.ID, fresh.DqliteAddr(), stale),
+		evidence)
 }
 
 // The stopped-member snapshot experiment must inspect the actual surviving

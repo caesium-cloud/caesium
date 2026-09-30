@@ -127,6 +127,9 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		// invisible to any test that runs with auth off. The hold-release route
 		// shipped that way once; this row is the regression guard.
 		{"POST", "/v1/datasets/holds/:id/release", models.RoleOperator},
+		// Stale dqlite member removal (#582 follow-up) changes raft membership:
+		// admin only, never an operator.
+		{"DELETE", "/v1/system/nodes/:id", models.RoleAdmin},
 	}
 
 	for _, tt := range tests {

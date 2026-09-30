@@ -132,3 +132,33 @@ func TestNodesDegradesWhenEnrichmentFails(t *testing.T) {
 	require.Nil(t, nodes[0].WorkersBusy)
 	require.Equal(t, clustersvc.Reachable, nodes[0].Reachability)
 }
+
+// TestNodesCarryTheRaftIDAsAString pins the field `caesium system nodes remove`
+// takes: raft members carry their dqlite node ID as a decimal string (IDs are
+// random 64-bit values beyond what a JSON number holds exactly), and entries
+// that are not raft members carry none.
+func TestNodesCarryTheRaftIDAsAString(t *testing.T) {
+	members := []clustersvc.Member{
+		{ID: 3297041220608546238, Address: "10.244.0.8:9001", Role: clustersvc.RoleVoter, Leader: true, Reachability: clustersvc.Reachable},
+		{ID: 18446744073709551615, Address: "10.244.0.9:9001", Role: clustersvc.RoleSpare, Reachability: clustersvc.Unreachable},
+	}
+	svc := &Service{
+		ctx:      context.Background(),
+		snapshot: func() clustersvc.View { return clusteredView(members...) },
+		enrich: func(context.Context) (nodeUsage, error) {
+			return nodeUsage{historical: []string{"10.0.0.99:9001"}}, nil
+		},
+		timeout: time.Second,
+	}
+
+	nodes, err := svc.Nodes()
+	require.NoError(t, err)
+	byAddr := map[string]Node{}
+	for _, n := range nodes {
+		byAddr[n.Address] = n
+	}
+	require.Equal(t, "3297041220608546238", byAddr["10.244.0.8:9001"].ID)
+	require.Equal(t, "18446744073709551615", byAddr["10.244.0.9:9001"].ID)
+	require.Equal(t, RoleSpare, byAddr["10.244.0.9:9001"].Role)
+	require.Empty(t, byAddr["10.0.0.99:9001"].ID, "a historical worker is not a raft member")
+}

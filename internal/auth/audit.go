@@ -44,7 +44,10 @@ const (
 	ActionCacheDelete        = "cache.delete"
 	ActionLogLevel           = "log.set_level"
 	ActionDBQuery            = "database.query"
-	ActionWebhookDenied      = "webhook.denied"
+	// ActionClusterMemberRemove records a stale dqlite member removed through
+	// DELETE /v1/system/nodes/:id.
+	ActionClusterMemberRemove = "cluster.member_remove"
+	ActionWebhookDenied       = "webhook.denied"
 
 	ActionNotificationChannelCreate = "notification_channel.create"
 	ActionNotificationChannelUpdate = "notification_channel.update"

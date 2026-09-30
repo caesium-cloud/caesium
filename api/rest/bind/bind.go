@@ -188,6 +188,10 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger)
 	{
 		g.GET("/system/nodes", system.Nodes)
 		g.GET("/system/features", system.Features)
+		// Admin-only removal of the stale raft entry a disk-loss replacement
+		// leaves behind (#582 follow-up). pkg/dqlite refuses everything but a
+		// non-voting member that no longer answers.
+		g.DELETE("/system/nodes/:id", system.RemoveNode)
 	}
 
 	// server logs
