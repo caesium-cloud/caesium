@@ -115,6 +115,22 @@ def core_records():
     }
 
 
+def reconcile_minority_identities(records):
+    """The minority attempts carry a recorded run id each, read back after heal.
+
+    The live W6 record above never got that far: both timed-out triggers
+    returned no run id, so runQuorumLoss wrote `unknown_possibly_committed`.
+    """
+    record = records["quorum_loss_uncertain_write"]
+    for index, attempt in enumerate(record["attempts"]):
+        attempt["RunID"] = f"run-minority-{index}"
+    record["reconciled"] = [
+        {"deadline": deadline, "outcome": "possibly_committed", "status": 0,
+         "present": True, "status_after_heal": "succeeded"}
+        for deadline in ("5s", "15s")
+    ]
+
+
 def core_events():
     runs = ["run-terminal", "run-retry", "run-rejected", "run-fanin", "run-token", "run-mtls", "run-first",
             "run-second", "run-pc1", "run-pc2", "run-loss", "run-heal", "run-stale", "run-bench",
@@ -176,13 +192,71 @@ class CoreFragmentTests(unittest.TestCase):
         return {item["id"]: item for item in json.loads(out.read_text())["scenarios"]}
 
     def test_instrumented_run_satisfies_the_core_gate(self):
-        result, out = self.collect()
+        result, out = self.collect(mutate=reconcile_minority_identities)
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = self.rows(out)
         self.assertEqual(len(rows), 14)
         self.assertTrue(all(row["status"] == "pass" for row in rows.values()))
+        for sid in ("b3-quorum-loss-uncertain-write", "b3-split-heal-2-1"):
+            self.assertEqual(rows[sid]["reconciliation"],
+                             {"identities": ["reconciled", "reconciled"], "reconciled": 2, "unresolved": 0})
+        quorum = rows["b3-quorum-loss-uncertain-write"]
+        self.assertIn("post_heal_identity_reconciliation", quorum["observations"])
+        self.assertIn("identified_mutation_sent_during_fault", quorum["fault_activation"]["observations"])
         checked = check(self.report(out, "nightly-core"), "nightly-core")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_unknown_write_identities_stay_inconclusive_after_heal(self):
+        # The unchanged fixture: both timed-out minority triggers returned no
+        # run id, so nothing was reconciled by identity after healing.
+        result, out = self.collect()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.rows(out)
+        quorum, split = rows["b3-quorum-loss-uncertain-write"], rows["b3-split-heal-2-1"]
+        for row in (quorum, split):
+            self.assertEqual(row["status"], "inconclusive")
+            self.assertEqual(row["reconciliation"], {
+                "identities": ["unknown_possibly_committed", "unknown_possibly_committed"],
+                "reconciled": 0, "unresolved": 2,
+            })
+            self.assertNotIn("fault_healed_before_final_read", row["fault_activation"]["observations"])
+        # The possibly-committed classification is preserved...
+        self.assertIn("timeout_recorded_as_possibly_committed", quorum["observations"])
+        self.assertIn("no_rejection_inferred_from_client_timeout", quorum["observations"])
+        self.assertIn("minority_write_possibly_committed", split["observations"])
+        # ...but no reconciliation is claimed for it.
+        self.assertNotIn("post_heal_identity_reconciliation", quorum["observations"])
+        self.assertNotIn("identified_mutation_sent_during_fault", quorum["fault_activation"]["observations"])
+        self.assertNotIn("quorum_restored_after_heal", split["observations"])
+        others = [row for sid, row in rows.items() if sid not in (quorum["id"], split["id"])]
+        self.assertTrue(all(row["status"] == "pass" for row in others))
+        checked = check(self.report(out, "nightly-core"), "nightly-core")
+        self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+        output = checked.stdout + checked.stderr
+        for sid in ("b3-quorum-loss-uncertain-write", "b3-split-heal-2-1"):
+            self.assertIn(f"insufficient-samples={sid}", output)
+
+    def test_one_unresolved_identity_withholds_the_reconciliation(self):
+        def mutate(records):
+            reconcile_minority_identities(records)
+            record = records["quorum_loss_uncertain_write"]
+            record["attempts"][1]["RunID"] = ""
+            record["reconciled"][1] = {"deadline": "15s", "outcome": "possibly_committed", "status": 0,
+                                       "identity": "unknown_possibly_committed"}
+        result, out = self.collect(mutate=mutate)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        quorum = self.rows(out)["b3-quorum-loss-uncertain-write"]
+        self.assertEqual(quorum["status"], "inconclusive")
+        self.assertEqual(quorum["reconciliation"]["identities"], ["reconciled", "unknown_possibly_committed"])
+        self.assertNotIn("post_heal_identity_reconciliation", quorum["observations"])
+        self.assertEqual(check(self.report(out, "nightly-core"), "nightly-core").returncode, 1)
+
+    def test_failed_quorum_subtest_stays_failed_with_unresolved_identities(self):
+        result, out = self.collect(outcomes={"quorum_loss_uncertain_write": "FAIL"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.rows(out)
+        self.assertEqual(rows["b3-quorum-loss-uncertain-write"]["status"], "fail")
+        self.assertEqual(rows["b3-split-heal-2-1"]["status"], "fail")
 
     def test_release_image_run_omits_the_instrumented_row(self):
         result, out = self.collect(instrumented=False)

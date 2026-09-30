@@ -149,22 +149,54 @@ def _timeouts_possibly_committed(record):
     return bool(transport) and all(a.get("Outcome") == "possibly_committed" for a in transport)
 
 
-def _post_heal_reconciled(record):
+# What runQuorumLoss records for a minority mutation whose timed-out trigger
+# returned no run id: still possibly committed, but never reconciled.
+UNRESOLVED_IDENTITY = "unknown_possibly_committed"
+
+
+def _identity_reconciled(attempt, entry):
+    """A run id recorded during the fault and read back after healing."""
+    return (
+        _nonempty(attempt.get("RunID"))
+        and entry.get("identity") != UNRESOLVED_IDENTITY
+        and entry.get("present") is True
+        and _nonempty(entry.get("status_after_heal"))
+    )
+
+
+def _reconciliation(record):
+    """Each minority attempt paired with its post-heal entry, or None if malformed."""
     attempts = record.get("attempts")
     reconciled = record.get("reconciled")
     if not isinstance(attempts, list) or not isinstance(reconciled, list):
-        return False
+        return None
     if len(reconciled) != len(attempts) or not reconciled:
-        return False
-    for entry in reconciled:
-        if not isinstance(entry, dict):
-            return False
-        if entry.get("present") is True and _nonempty(entry.get("status_after_heal")):
-            continue
-        if entry.get("identity") == "unknown_possibly_committed":
-            continue
-        return False
-    return True
+        return None
+    if not all(isinstance(item, dict) for item in attempts + reconciled):
+        return None
+    return [(attempt, entry, _identity_reconciled(attempt, entry))
+            for attempt, entry in zip(attempts, reconciled)]
+
+
+def _post_heal_reconciled(record):
+    # DT-QUORUM-01 reconciles by recorded identities: an unresolved identity is
+    # not a reconciliation, however it is classified.
+    pairs = _reconciliation(record)
+    return pairs is not None and all(ok for _, _, ok in pairs)
+
+
+def _reconciliation_summary(record):
+    """The per-attempt identity classification carried into the fragment."""
+    pairs = _reconciliation(record) or []
+    identities = [
+        "reconciled" if ok else (entry.get("identity") if _nonempty(entry.get("identity")) else "unreconciled")
+        for _, entry, ok in pairs
+    ]
+    return {
+        "identities": identities,
+        "reconciled": sum(1 for _, _, ok in pairs if ok),
+        "unresolved": sum(1 for _, _, ok in pairs if not ok),
+    }
 
 
 def _kill_proven(record):
@@ -207,7 +239,7 @@ class CoreRow:
     """One manifest row, its TestCore subtest and how its evidence is read."""
 
     def __init__(self, sid, subtest, observations, fault=None, instrumented_only=False,
-                 samples="events", extra_flags=None):
+                 samples="events", extra_flags=None, reconciles=False):
         self.sid = sid
         self.subtest = subtest
         self.observations = observations          # {observation_id: fn(record, section)}
@@ -215,6 +247,7 @@ class CoreRow:
         self.instrumented_only = instrumented_only
         self.samples = samples
         self.extra_flags = extra_flags            # fn(record) -> dict
+        self.reconciles = reconciles              # rests on post-heal identity reconciliation
 
 
 CORE_ROWS = (
@@ -389,11 +422,11 @@ CORE_ROWS = (
         "post_heal_identity_reconciliation": lambda r, s: _post_heal_reconciled(r),
     }, fault=("minority-isolation", {
         "two_voters_unreachable": lambda r, s: _minority_isolated(r, s),
-        "identified_mutation_sent_during_fault": lambda r, s: (
-            isinstance(r.get("attempts"), list) and bool(r.get("attempts"))
-        ),
+        # Identified means the run id the fault-time attempt recorded is the
+        # one read back after healing, not merely that a request was sent.
+        "identified_mutation_sent_during_fault": lambda r, s: _post_heal_reconciled(r),
         "fault_healed_before_final_read": lambda r, s: _post_heal_reconciled(r),
-    })),
+    }), reconciles=True),
     CoreRow("b3-split-heal-2-1", "quorum_loss_uncertain_write", {
         "majority_progresses_during_split": lambda r, s: _eq(r.get("majority_final"), "succeeded"),
         "minority_write_possibly_committed": lambda r, s: _timeouts_possibly_committed(r),
@@ -403,7 +436,7 @@ CORE_ROWS = (
         "minority_isolated_from_both_peers": lambda r, s: _minority_isolated(r, s),
         "majority_mutation_during_fault": lambda r, s: _nonempty(r.get("majority_run")),
         "fault_healed_before_final_read": lambda r, s: _post_heal_reconciled(r),
-    })),
+    }), reconciles=True),
     CoreRow("b3-durable-event-before-delivery-crash", "durable_event_before_delivery_crash", {
         "durable_event_committed_before_kill": lambda r, s: (
             _get(r, "row_while_held", "BusPending") is True
@@ -519,6 +552,13 @@ def build_core(artifacts, candidate_sha):
         if row.extra_flags:
             entry["feature_flags"].update(row.extra_flags(record))
         entry["status"] = _status(outcome)
+        if row.reconciles:
+            summary = _reconciliation_summary(record)
+            entry["reconciliation"] = summary
+            if summary["unresolved"] and entry["status"] != "fail":
+                # A possibly-committed write nobody read back after healing is
+                # neither a pass nor a rejection.
+                entry["status"] = "inconclusive"
         scenarios.append(entry)
     fragment = BASE._fragment(sha, digest, scenarios)
     fragment["instrumented"] = instrumented
