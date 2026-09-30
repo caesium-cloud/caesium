@@ -25,11 +25,21 @@ type runResponse struct {
 	// today the data circuit breaker's upstream-hold gate.
 	SkipReason string            `json:"skip_reason,omitempty"`
 	Tasks      []runTaskResponse `json:"tasks"`
+	// CacheHits/ExecutedTasks/TotalTasks are read from both the list endpoint
+	// (GET .../runs) and the detail endpoint (GET .../runs/:run_id) so tests
+	// can reconcile the two directly (issue #489: the list used to report
+	// these as measured zeros).
+	CacheHits     int `json:"cache_hits"`
+	ExecutedTasks int `json:"executed_tasks"`
+	TotalTasks    int `json:"total_tasks"`
 }
 
 type runTaskResponse struct {
 	ID               string                    `json:"id"`
 	Status           string                    `json:"status"`
+	RuntimeID        string                    `json:"runtime_id,omitempty"`
+	ClaimedBy        string                    `json:"claimed_by,omitempty"`
+	ClaimAttempt     int                       `json:"claim_attempt"`
 	Priority         int                       `json:"priority"`
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`

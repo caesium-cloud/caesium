@@ -35,3 +35,22 @@ func TestContractSummarySortsContractsDeterministically(t *testing.T) {
 		contractSummary(steps),
 	)
 }
+
+func TestLintServerFlagValueTracksBareNormalization(t *testing.T) {
+	flag := lintCmd.Flags().Lookup("server")
+	if flag == nil {
+		t.Fatal("--server flag is not registered")
+	}
+
+	original := lintServer
+	t.Cleanup(func() { lintServer = original })
+
+	lintServer = lintBareServerMarker
+	if got := flag.Value.String(); got != lintBareServerMarker {
+		t.Fatalf("bare --server Value.String() = %q, want marker %q", got, lintBareServerMarker)
+	}
+	lintServer = defaultLintServer
+	if got := flag.Value.String(); got != defaultLintServer {
+		t.Fatalf("normalized bare --server Value.String() = %q, want %q", got, defaultLintServer)
+	}
+}

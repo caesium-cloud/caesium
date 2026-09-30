@@ -46,8 +46,11 @@ type DatasetDerivation struct {
 	// evaluated against, as a JSON object keyed by consumed dataset name.
 	ConsumedWatermarks datatypes.JSON `gorm:"type:json" json:"consumed_watermarks,omitempty"`
 
-	// RunID is the derived run for a `derived` decision; nil for a skip. A soft
-	// reference (no FK) so run pruning never cascades into the audit trail.
+	// RunID is the run this decision points at: the run it derived for a
+	// `derived` decision, or — for `skipped_active_run` — the already-running run
+	// that is covering this dataset, so "why didn't this derive" answers itself.
+	// Nil for every other skip. A soft reference (no FK) so run pruning never
+	// cascades into the audit trail.
 	RunID *uuid.UUID `gorm:"type:uuid;index" json:"run_id,omitempty"`
 
 	// CreatedAt is the decision time (append-only; rows are never updated).

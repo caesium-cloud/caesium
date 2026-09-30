@@ -26,7 +26,9 @@ var namedParamPattern = regexp.MustCompile(`:[^/]+`)
 
 // skipPaths lists exact paths that never require authentication.
 var skipPaths = map[string]bool{
-	"/health": true,
+	"/health":       true,
+	"/health/ready": true,
+	"/health/live":  true,
 }
 
 var publicAuthPaths = map[string]bool{

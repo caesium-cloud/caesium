@@ -304,6 +304,47 @@ The lease is `CAESIUM_RUN_QUEUE_CLAIM_STALE_AFTER` (default `2m`); the reaper
 and the queue view share it, so a row shown as `stale` is exactly a row the
 reaper is about to release.
 
+### Starting runs from other systems: outcomes and idempotency
+
+`POST /v1/jobs/:id/run` answers every accepted start with `202` and a JSON body
+whose `outcome` field says what the concurrency policy and data circuit breaker
+decided:
+
+| `outcome` | Body | Meaning |
+|-----------|------|---------|
+| `created` | The run itself (`id`, `status`, `tasks`, …) plus `outcome` | A run was created and is executing. |
+| `queued` | `{outcome, job_id, queue_id}` | `strategy: queue` parked the start; the dequeuer creates the run when a slot frees. |
+| `skipped` | `{outcome, job_id, reason, run_id?}` | Nothing will execute. `reason` is `max_concurrency` (`strategy: skip`) or `dataset_hold` (a consumed dataset is held; `run_id` names the terminal `skipped` run the hold recorded). |
+| `dropped` | `{outcome, job_id, queue_id}` | Only on an idempotent retry: the start was queued, but its queue entry was cancelled or evicted before it ran. |
+
+`strategy: fail` still refuses with `409`, and a paused job with `409`.
+
+A caller that retries (an orchestrator activity, a CI job, anything
+at-least-once) should send an `Idempotency-Key` header, up to 255 bytes, scoped
+to the job. The first request with a key is admitted normally and its outcome
+recorded in the same transaction as the run. A later request with the same key
+and the same `params`/`priority` returns that outcome instead of starting
+another run, with the header `Idempotent-Replayed: true`:
+
+- a `created` start returns the run as it is now, so a retry after it finished
+  sees its terminal status;
+- a `queued` start returns `queued` until the dequeuer promotes it, and then the
+  promoted run (`created`), so re-posting the same key is how a caller resolves a
+  queued start to its run ID;
+- a `skipped` start stays `skipped`: one key is one admission decision, and
+  freeing the slot later does not turn a retry into a run.
+
+Concurrent requests with the same key resolve to one admission. The same key
+with different `params` or `priority` is refused with `422`. A refusal (`409`)
+records nothing, so retrying it with the same key re-attempts admission. A paused
+job still answers a retry of a start admitted before the pause.
+
+The CLI exposes the same contract. `caesium run start --idempotency-key <key>`
+prints the run ID on stdout, including when the key matched an earlier start.
+A queued start prints nothing on stdout and exits `0`; a skipped or dropped start
+exits non-zero. See [temporal.md](temporal.md) for driving runs from a Temporal
+workflow.
+
 ## Freshness-Driven Scheduling
 
 A cron expression is a guess about when data will have arrived. Freshness-driven scheduling inverts that: steps declare the datasets they produce and consume plus a freshness SLO on each output, and Caesium derives execution from data arrival and staleness — run when upstream data has arrived and my output is stale against its SLO, skip when nothing changed, and surface `stale-upstream` (an observable state with a reason) instead of a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. Enable it with `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed via the `GET /v1/datasets*` REST surface and the Console freshness view.
@@ -386,7 +427,7 @@ Enable server-side checks with `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `CAESIUM_C
 
 Operator surfaces:
 
-- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs. Findings are scoped to the linted job set — the linted jobs plus their direct producers and consumers on the server — so an unrelated breaking pair elsewhere on a shared server does not fail the lint, while a break the linted jobs participate in does.
+- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs. Use `--server https://caesium.example` or `--server=https://caesium.example` to select a target; bare `--server` uses `http://localhost:8080`. Findings are scoped to the linted job set — the linted jobs plus their direct producers and consumers on the server — so an unrelated breaking pair elsewhere on a shared server does not fail the lint, while a break the linted jobs participate in does.
 - `caesium contract check --path jobs/ [--json]` runs the contract-only server check.
 - `caesium contract graph [--dataset ns/name] [--json]` and `GET /v1/contracts/graph` expose the derived graph; the Console `/contracts` view renders the same graph.
 - `POST /v1/jobdefs/diff` includes per-job `contractFindings`; the Console JobDefs diff tab renders compatible/unknown/breaking badges with named consumers and teams.
@@ -645,8 +686,10 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 
 ## Diffing Job Definitions
 
-- Use `caesium job diff --path <dir>` to preview creates, updates, and deletes between local manifests and the database.
-- Use `caesium job apply --path <dir>` to persist definitions into the database.
+- Use `caesium job diff --path <dir> --server <url>` to preview creates and updates in the fields the server JobSpec projection compares, not a byte-equal apply (`metadata.schemaValidation`, timeouts, `dependsOn`/`next`, and retries are persisted by apply but omitted from the projection). `--server` defaults to `http://localhost:8080`, matching apply.
+- Jobs present on the server but missing from `--path` are prune candidates. They appear as deletes only with `--prune`; without `--prune` they are listed under "Would delete if --prune" and do not fail the command.
+- `--json` writes versioned JSON to stdout (logs stay on stderr). Exit status 0 means no in-scope changes in the diffed fields; nonzero means in-scope creates/updates (and deletes only when `--prune` is set), or a parse/validation/request error.
+- Use `caesium job apply --path <dir> --server <url>` to persist definitions.
 - Add `--force` to override provenance conflicts when the existing active job was imported from a different source.
 - Add `--prune` to retire active jobs that were previously imported from the same source but are no longer present in the manifest set.
 - `caesium job apply` preserves task and callback ordering during reconciliation using stable importer positions rather than rewriting creation timestamps.

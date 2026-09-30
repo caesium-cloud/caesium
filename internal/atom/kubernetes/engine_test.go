@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -12,15 +13,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 func (s *KubernetesTestSuite) TestNewEngine() {
-	engine := NewEngine(
+	engine, err := NewEngine(
 		context.Background(),
 		fake.NewClientset().CoreV1(),
 	)
+	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), engine)
+}
+
+// TestNewEngineNoConfigReturnsError proves the config-load failure path
+// (no kubeconfig, no in-cluster config) returns a clean, actionable error
+// instead of panicking — the root cause of #479 (caesium dev --once panicked
+// with an unrecovered Go panic on an unreachable kubernetes engine).
+func (s *KubernetesTestSuite) TestNewEngineNoConfigReturnsError() {
+	orig := getKubernetesCore
+	defer func() { getKubernetesCore = orig }()
+	getKubernetesCore = func(string) (corev1.CoreV1Interface, error) {
+		return nil, fmt.Errorf("no configuration has been provided")
+	}
+
+	engine, err := NewEngine(context.Background())
+	assert.Nil(s.T(), engine)
+	if assert.Error(s.T(), err) {
+		assert.Contains(s.T(), err.Error(), "kubernetes engine unavailable")
+		// Must name the setting this constructor actually reads
+		// (CAESIUM_KUBERNETES_CONFIG) rather than the standard KUBECONFIG
+		// env var, which clientcmd.BuildConfigFromFlags never consults here.
+		assert.Contains(s.T(), err.Error(), "CAESIUM_KUBERNETES_CONFIG")
+		assert.NotContains(s.T(), err.Error(), "KUBECONFIG",
+			"KUBECONFIG has no effect on this code path and must not be recommended")
+	}
 }
 
 func (s *KubernetesTestSuite) TestGet() {
@@ -317,6 +347,223 @@ func (s *KubernetesTestSuite) TestCreateError() {
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after the docker/podman orphan-cleanup fix, a SIGINT
+// landing WHILE the pod-create API request itself is in flight could still
+// orphan a pod — the API server may persist it before the client sees a
+// cancellation error, and Create would return with no handle at all to
+// clean up. The fake backend cancels the engine's context from inside its
+// Create handler (simulating the server completing the request at the
+// exact moment SIGINT arrives) and then reports success, proving Create
+// still definitively completes the allocation call, notices the
+// cancellation afterward, and deletes the pod it just learned the name of
+// rather than leaking it. The pod's name isn't known ahead of time (a
+// client-generated UUID suffix), so the Delete expectation is registered
+// from inside the Create callback once the actual name is known.
+func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test", "cmd"},
+	}
+
+	backend.
+		On("Create", mock.AnythingOfType("*v1.Pod")).
+		Run(func(args mock.Arguments) {
+			pod := args.Get(0).(*v1.Pod)
+			backend.On("Delete", pod.Name).Return()
+			cancel()
+		}).
+		Return()
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: context.Background()}
+	req := &atom.EngineCreateRequest{Name: testAtomID, Image: testImage, Command: []string{"test"}}
+
+	backend.On("Create", mock.AnythingOfType("*v1.Pod")).Run(func(args mock.Arguments) {
+		pod := args.Get(0).(*v1.Pod)
+		backend.On("Delete", pod.Name).Return(nil)
+	}).Return(context.DeadlineExceeded)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestCreateAlreadyCancelledSkipsAPI() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	backend := &mockKubernetesBackend{}
+	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+
+	pod, err := engine.Create(&atom.EngineCreateRequest{Name: testAtomID, Image: testImage})
+	s.Nil(pod)
+	s.ErrorIs(err, context.Canceled)
+	backend.AssertNotCalled(s.T(), "Create", mock.Anything)
+}
+
+type delayedCreateDelete struct {
+	name        string
+	options     metav1.DeleteOptions
+	hasDeadline bool
+	err         error
+}
+
+type delayedCreateBackend struct {
+	kubernetesBackend
+	entered     chan string
+	release     chan struct{}
+	deletes     chan delayedCreateDelete
+	createErr   error
+	deleteCount atomic.Int32
+	persisted   atomic.Bool
+}
+
+func (b *delayedCreateBackend) Create(_ context.Context, pod *v1.Pod, _ metav1.CreateOptions) (*v1.Pod, error) {
+	b.entered <- pod.Name
+	<-b.release
+	if b.createErr != nil {
+		return nil, b.createErr
+	}
+	return pod, nil
+}
+
+func (b *delayedCreateBackend) Delete(ctx context.Context, name string, options metav1.DeleteOptions) error {
+	_, hasDeadline := ctx.Deadline()
+	var err error
+	if !b.persisted.Load() {
+		err = apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, name)
+	} else {
+		b.persisted.Store(false)
+	}
+	b.deleteCount.Add(1)
+	b.deletes <- delayedCreateDelete{name: name, options: options, hasDeadline: hasDeadline, err: err}
+	return err
+}
+
+// A Pod can be scheduled as soon as the API persists it, even when the
+// response is held in flight. The deadline must start deletion before that
+// response arrives. A second deletion after the response covers the opposite
+// ordering, where the first deletion found no Pod yet.
+func (s *KubernetesTestSuite) TestCreateDeadlineDeletesBeforeDelayedResponse() {
+	for _, tc := range []struct {
+		name        string
+		createErr   error
+		latePersist bool
+	}{
+		{name: "pod already persisted"},
+		{
+			name:        "pod persisted after early NotFound",
+			latePersist: true,
+		},
+		{
+			name:        "create response fails after early NotFound",
+			createErr:   context.DeadlineExceeded,
+			latePersist: true,
+		},
+	} {
+		s.Run(tc.name, func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			backend := &delayedCreateBackend{
+				entered:   make(chan string, 1),
+				release:   make(chan struct{}),
+				deletes:   make(chan delayedCreateDelete, 64),
+				createErr: tc.createErr,
+			}
+			backend.persisted.Store(!tc.latePersist)
+			defer func() {
+				select {
+				case <-backend.release:
+				default:
+					close(backend.release)
+				}
+			}()
+			engine := &kubernetesEngine{backend: backend, ctx: ctx}
+			result := make(chan error, 1)
+			go func() {
+				_, err := engine.Create(&atom.EngineCreateRequest{Name: testAtomID, Image: testImage})
+				result <- err
+			}()
+
+			var podName string
+			select {
+			case podName = <-backend.entered:
+			case <-time.After(5 * time.Second):
+				s.T().Fatal("Create did not reach the API")
+			}
+			cancel()
+			select {
+			case deleted := <-backend.deletes:
+				s.Equal(podName, deleted.name)
+				s.True(deleted.hasDeadline, "cleanup API call must be bounded")
+				s.Require().NotNil(deleted.options.GracePeriodSeconds)
+				s.Equal(int64(1), *deleted.options.GracePeriodSeconds)
+				if tc.latePersist {
+					s.True(apierrors.IsNotFound(deleted.err))
+				} else {
+					s.NoError(deleted.err)
+				}
+			case <-time.After(5 * time.Second):
+				s.T().Fatal("deadline did not delete the pod before Create returned")
+			}
+			if tc.latePersist {
+				// The first delete saw no Pod. The API persists it now but
+				// still withholds its Create response: retry must delete it
+				// before the response is released.
+				backend.persisted.Store(true)
+				deadline := time.After(5 * time.Second)
+				deletedLatePod := false
+				for !deletedLatePod {
+					select {
+					case deleted := <-backend.deletes:
+						s.Equal(podName, deleted.name)
+						deletedLatePod = deleted.err == nil
+					case <-deadline:
+						s.T().Fatal("late Pod was not deleted while Create remained pending")
+					}
+				}
+			}
+			select {
+			case <-result:
+				s.T().Fatal("Create returned before the held API response was released")
+			default:
+			}
+			close(backend.release)
+			select {
+			case deleted := <-backend.deletes:
+				s.Equal(podName, deleted.name, "reconciliation must use the same unique Pod name")
+			case <-time.After(5 * time.Second):
+				s.T().Fatal("Create did not reconcile a possible late Pod")
+			}
+			select {
+			case err := <-result:
+				s.ErrorIs(err, context.Canceled)
+			case <-time.After(5 * time.Second):
+				s.T().Fatal("Create did not finish after the API response")
+			}
+			wantDeletes := int32(2)
+			if tc.latePersist {
+				wantDeletes++
+			}
+			s.GreaterOrEqual(backend.deleteCount.Load(), wantDeletes)
+		})
+	}
+}
+
 func (s *KubernetesTestSuite) TestStop() {
 	req := &atom.EngineStopRequest{
 		ID: testAtomID,
@@ -327,7 +574,26 @@ func (s *KubernetesTestSuite) TestStop() {
 		Return()
 
 	assert.Nil(s.T(), s.engine.Stop(req))
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	s.True(backend.lastDeleteHasDeadline, "the Kubernetes API call must be bounded even when callers request immediate container termination")
+	s.Nil(backend.lastDeleteOptions.GracePeriodSeconds, "ordinary graceful stop retains the pod's configured grace period")
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationForeground, *backend.lastDeleteOptions.PropagationPolicy)
+	backend.AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestForceStopKeepsKubeletTerminationAcknowledgement() {
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	backend.On("Delete", testAtomID).Return()
+
+	s.Require().NoError(s.engine.Stop(&atom.EngineStopRequest{ID: testAtomID, Force: true}))
+	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Equal(int64(1), *backend.lastDeleteOptions.GracePeriodSeconds,
+		"a force stop must shorten grace without immediately erasing a potentially running pod from the API")
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
+	s.True(backend.lastDeleteHasDeadline)
+	backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestStopError() {
@@ -355,6 +621,12 @@ func (s *KubernetesTestSuite) TestStopTimeout() {
 		Return()
 
 	assert.NotNil(s.T(), s.engine.Stop(req))
+	backend := s.engine.backend.(*mockKubernetesBackend)
+	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Equal(int64(1), *backend.lastDeleteOptions.GracePeriodSeconds)
+	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
+	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
+	s.True(backend.lastDeleteHasDeadline, "cleanup must be bounded independently of the expired task context")
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 

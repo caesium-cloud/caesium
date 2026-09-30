@@ -17,6 +17,7 @@ import {
 import { AtomLogo } from "@/components/brand/atom-logo";
 import { INCIDENT_EVENT_TYPES, isAwaitingApproval } from "@/features/incidents/incident-utils";
 import { useNavCounts } from "@/features/jobs/useNavCounts";
+import { deriveQuorumView, type QuorumView } from "@/features/system/quorum";
 import { useClusterHealth, type ClusterHealthState } from "@/features/system/useClusterHealth";
 import { api } from "@/lib/api";
 import { events } from "@/lib/events";
@@ -42,6 +43,11 @@ const STATE_META: Record<
     label: "Degraded",
     dot: "bg-warning animate-gold-pulse",
     copy: "Investigating one or more checks",
+  },
+  unavailable: {
+    label: "Unavailable",
+    dot: "bg-danger animate-pulse",
+    copy: "Quorum lost — cluster cannot serve writes",
   },
   incident: {
     label: "Incident",
@@ -81,7 +87,15 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
   const queryClient = useQueryClient();
   const counts = useNavCounts();
   const health = useClusterHealth();
-  const stateMeta = STATE_META[health.state];
+  const quorum = deriveQuorumView(health.raw?.checks?.cluster, { stale: health.stale });
+  // The cluster's own liveness is the most specific thing the footer can say.
+  // "All systems nominal" beside a dead replica is what issue #494 reported.
+  const stateMeta =
+    health.stale
+      ? { ...STATE_META.unknown, copy: "Health data is stale" }
+      : quorum.status === "available" || quorum.status === "unreported"
+      ? STATE_META[health.state]
+      : { ...STATE_META[health.state], copy: quorum.detail };
   const { data: features } = useQuery({
     queryKey: ["system-features"],
     queryFn: api.getSystemFeatures,
@@ -186,8 +200,10 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
 
       <ClusterFooter
         state={health.state}
+        reported={health.raw !== null}
         uptimeSeconds={health.uptimeSeconds}
         stateMeta={stateMeta}
+        quorum={quorum}
       />
     </aside>
   );
@@ -195,12 +211,26 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
 
 interface ClusterFooterProps {
   state: ClusterHealthState;
+  /** A health response arrived, whatever it said. */
+  reported: boolean;
   uptimeSeconds: number | null;
   stateMeta: (typeof STATE_META)[ClusterHealthState];
+  quorum: QuorumView;
 }
 
-function ClusterFooter({ state, uptimeSeconds, stateMeta }: ClusterFooterProps) {
-  if (state === "unknown") {
+const QUORUM_DOT: Record<QuorumView["tone"], string> = {
+  ok: "bg-success",
+  warn: "bg-warning",
+  danger: "bg-danger",
+  muted: "bg-text-4",
+};
+
+function ClusterFooter({ state, reported, uptimeSeconds, stateMeta, quorum }: ClusterFooterProps) {
+  // Hide the footer only when no health response arrived at all. The server
+  // also reports an overall status of "unknown" — meaning it is answering but
+  // could not determine cluster liveness — and that must stay visible rather
+  // than silently removing the cluster panel.
+  if (state === "unknown" && !reported) {
     return null;
   }
   return (
@@ -216,6 +246,18 @@ function ClusterFooter({ state, uptimeSeconds, stateMeta }: ClusterFooterProps) 
             {stateMeta.label}
           </dd>
         </div>
+        {quorum.status !== "unreported" && (
+          <div className="flex items-center justify-between">
+            <dt className="text-text-3">Quorum</dt>
+            <dd
+              className="flex items-center gap-1.5 font-mono tabular-nums text-text-2"
+              data-testid="sidebar-quorum"
+            >
+              <span className={cn("inline-block h-2 w-2 rounded-full", QUORUM_DOT[quorum.tone])} />
+              {quorum.label}
+            </dd>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <dt className="text-text-3">Uptime</dt>
           <dd className="font-mono tabular-nums text-text-2">{formatUptime(uptimeSeconds)}</dd>

@@ -435,6 +435,63 @@ export interface HealthCheckResult {
   count?: number;
 }
 
+/** Observed liveness of a cluster member. `unknown` is never healthy. */
+export type Reachability = "reachable" | "unreachable" | "unknown";
+
+/** Quorum availability, derived from probed voters — never from membership size. */
+export type QuorumStatus = "available" | "degraded" | "unavailable" | "unknown";
+
+export interface ClusterMember {
+  address: string;
+  id?: number;
+  role: string;
+  leader: boolean;
+  reachability: Reachability;
+  latency_ms?: number;
+}
+
+/**
+ * Quorum separates configured membership (`total_voters`) from what actually
+ * answered a probe (`reachable_voters`). Rendering the former as the latter is
+ * what let a crashed replica display as "quorum 3/3" (issue #494).
+ */
+export interface Quorum {
+  status: QuorumStatus;
+  total_voters: number;
+  reachable_voters: number;
+  unreachable_voters: number;
+  unknown_voters: number;
+  required_voters: number;
+  available: boolean;
+  degraded: boolean;
+  leader_address?: string;
+}
+
+/**
+ * Liveness across EVERY member, including the standbys and spares that quorum
+ * arithmetic deliberately ignores. A dead non-voter cannot cost the cluster its
+ * majority, but it is still a dead node and must not read as operational.
+ */
+export interface NodeSummary {
+  status: QuorumStatus;
+  total: number;
+  reachable: number;
+  unreachable: number;
+  unknown: number;
+}
+
+export interface ClusterCheck {
+  status: string;
+  clustered: boolean;
+  quorum: Quorum;
+  nodes?: NodeSummary;
+  members: ClusterMember[];
+  /** False until the first liveness probe completes; liveness is unknown until then. */
+  observed: boolean;
+  observed_at?: string;
+  stale?: boolean;
+}
+
 export interface HealthResponse {
   status: string;
   uptime: number;
@@ -443,13 +500,19 @@ export interface HealthResponse {
     active_runs?: HealthCheckResult;
     triggers?: HealthCheckResult;
     nodes?: HealthCheckResult;
+    cluster?: ClusterCheck;
   };
 }
 
 export interface Node {
   address: string;
   arch: string;
-  workers_busy: number;
+  role?: string;
+  leader?: boolean;
+  reachability?: Reachability;
+  latency_ms?: number;
+  /** Null when the server could not read the count within its budget. */
+  workers_busy: number | null;
   workers_total: number;
 }
 
@@ -1117,6 +1180,25 @@ export class ApiError extends Error {
 
 type ErrorKindMapper = (status: number, message: string) => ApiErrorKind | undefined;
 
+/**
+ * Deadline for the health-polling surface.
+ *
+ * `fetch` has no timeout of its own: a stalled connection leaves the request
+ * pending forever, React Query keeps serving the last successful response, and
+ * the console would go on rendering a cluster snapshot taken before whatever
+ * stalled the connection. Five seconds is comfortably longer than a healthy
+ * response and far shorter than the 15s poll, so a stalled poll fails and
+ * becomes visible instead of freezing the page on stale good news.
+ */
+export const HEALTH_REQUEST_TIMEOUT_MS = 5_000;
+
+/** An abort signal that fires after ms, plus the cleanup for its timer. */
+function timeoutSignal(ms: number): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => clearTimeout(timer) };
+}
+
 async function request<T>(
   endpoint: string,
   options?: RequestInit,
@@ -1162,6 +1244,34 @@ async function requestURL<T>(
   }
 
   return JSON.parse(text) as T;
+}
+
+/**
+ * Like `request`, but also returns the response headers — for the one class
+ * of endpoint (today: GET /v1/jobs/:id/runs) that carries pagination
+ * metadata on headers rather than in the JSON body, to keep the body
+ * backward compatible for every caller that already decodes it as a bare
+ * array/object.
+ */
+async function requestWithHeaders<T>(endpoint: string): Promise<{ data: T; headers: Headers }> {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const headers = withAuthHeaders({ "Content-Type": "application/json" });
+
+  const response = await fetch(url, { credentials: "include", headers });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new ApiError(401, "Authentication required", "authentication_required");
+  }
+
+  if (!response.ok) {
+    const message = parseErrorMessage(await response.text());
+    throw new ApiError(response.status, message, classifyApiError(response.status, message));
+  }
+
+  const text = await response.text();
+  const data = (text ? JSON.parse(text) : undefined) as T;
+  return { data, headers: response.headers };
 }
 
 // requestText fetches a non-JSON body verbatim. GET /v1/jobs/:id/manifest
@@ -1291,13 +1401,93 @@ export interface JobRunsQuery {
   offset?: number;
 }
 
+/**
+ * One page of a job's run history, plus the pagination metadata the server
+ * carries on `X-Caesium-Total-Count` / `X-Caesium-Next-Offset` response
+ * headers rather than in the (backward-compatible, bare-array) body — see
+ * api/rest/controller/job/run/list.go. A caller that needs the WHOLE history
+ * must use `getAllJobRuns`; reading `runs` here as "the runs" for an
+ * unparameterized job with more than the default page size is the same
+ * truncation shape `getAllPartitions` exists to prevent.
+ */
+export interface JobRunsPage {
+  runs: JobRun[];
+  total: number;
+  nextOffset: number | null;
+}
+
+/**
+ * The result of walking a job's entire run history via `getAllJobRuns`.
+ * `truncated` is true when the walk stopped at the client-side safety cap
+ * (`jobRunsMaxRows`) with more history left on the server — a caller MUST
+ * check it and say so rather than rendering `runs` as if it were complete.
+ */
+export interface AllJobRunsResult {
+  runs: JobRun[];
+  /** Total run count the server reported on the last page read. */
+  total: number;
+  truncated: boolean;
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
-  getJobRuns: (jobId: string, query?: JobRunsQuery) => {
-    const params = queryString({ limit: query?.limit, offset: query?.offset });
-    const suffix = params ? `?${params}` : "";
-    return request<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  /** One page of a job's runs. See `JobRunsPage`; use `getAllJobRuns` for the whole history. */
+  getJobRuns: (jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> => fetchJobRunsPage(jobId, query),
+  /**
+   * Every run for a job, assembled by following the endpoint's
+   * `X-Caesium-Next-Offset` cursor to the end of the list — the header
+   * counterpart of `getAllPartitions`. Use this (not `getJobRuns`) wherever
+   * the console previously relied on the endpoint being unbounded, e.g. the
+   * job detail page's Runs tab.
+   *
+   * The underlying list is offset-paginated over a NEWEST-FIRST order that
+   * can mutate between requests: a run created while this walk is in flight
+   * shifts every older run's offset by one, so the next page can re-return
+   * an entry the previous page already returned. Rows are deduplicated by id
+   * as they're collected rather than dropped, at the cost of the walk not
+   * being a perfectly consistent point-in-time snapshot — the server has no
+   * keyset/cursor contract to make it one, and re-seeing a run you already
+   * have is a far smaller correctness problem than silently losing one.
+   *
+   * `jobRunsMaxRows` is a deliberate cap, not a bug — the same safety valve
+   * `getAllPartitions` applies to a fan-out group, so one console tab can
+   * never trigger an unbounded number of requests against a job with
+   * pathological history. `truncated` on the result says so explicitly
+   * instead of quietly rendering a partial list as complete.
+   */
+  getAllJobRuns: async (jobId: string): Promise<AllJobRunsResult> => {
+    const runs: JobRun[] = [];
+    const seenIDs = new Set<string>();
+    let offset = 0;
+    let total = 0;
+    let truncated = false;
+
+    for (;;) {
+      const page = await fetchJobRunsPage(jobId, { limit: jobRunsPageSize, offset: offset || undefined });
+      total = page.total;
+      for (const run of page.runs) {
+        if (seenIDs.has(run.id)) continue;
+        seenIDs.add(run.id);
+        runs.push(run);
+      }
+
+      const next = page.nextOffset;
+      // null is the end of the list — and is also what a server that
+      // predates pagination sends (no header at all), which correctly
+      // degrades to a single read.
+      if (next === null) break;
+      // A cursor that fails to advance would spin forever; stop and let the
+      // total-vs-collected gap be visible instead.
+      if (next <= offset) break;
+      offset = next;
+      if (runs.length >= jobRunsMaxRows) {
+        truncated = true;
+        break;
+      }
+    }
+
+    return { runs, total, truncated };
   },
   getJobQueue: (jobId: string) => request<RunQueueItem[]>(`/jobs/${encodeURIComponent(jobId)}/queue`),
   cancelQueuedRun: (jobId: string, queueId: string) =>
@@ -1388,7 +1578,17 @@ export const api = {
       `${datasetPath(namespace, name)}/derivations${query ? `?${query}` : ""}`,
     );
   },
-  getSystemNodes: () => request<Node[]>("/system/nodes"),
+  getSystemNodes: async (): Promise<Node[]> => {
+    // Bounded for the same reason as the health poll: this endpoint is
+    // authenticated, and its key lookup is a leader-dependent read, so it is
+    // the request most likely to stall during a cluster outage.
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      return await request<Node[]>("/system/nodes", { signal: deadline.signal });
+    } finally {
+      deadline.done();
+    }
+  },
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
   getContractGraph: (query: ContractGraphQuery = {}) => {
     const params = queryString({ dataset: query.dataset });
@@ -1481,14 +1681,23 @@ export const api = {
    */
   getHealthStatus: async (): Promise<HealthResponse> => {
     const headers = withAuthHeaders({ "Content-Type": "application/json" });
-    const response = await fetch("/health", { credentials: "include", headers });
-    if (response.status === 401) {
-      clearApiKey();
-      throw new ApiError(401, "Authentication required", "authentication_required");
+    const deadline = timeoutSignal(HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch("/health", {
+        credentials: "include",
+        headers,
+        signal: deadline.signal,
+      });
+      if (response.status === 401) {
+        clearApiKey();
+        throw new ApiError(401, "Authentication required", "authentication_required");
+      }
+      const text = await response.text();
+      if (!text) throw new ApiError(response.status, "Empty health response");
+      return JSON.parse(text) as HealthResponse;
+    } finally {
+      deadline.done();
     }
-    const text = await response.text();
-    if (!text) throw new ApiError(response.status, "Empty health response");
-    return JSON.parse(text) as HealthResponse;
   },
   getDatabaseSchema: () => request<DatabaseSchemaResponse>("/database/schema"),
   queryDatabase: (body: DatabaseQueryRequest) =>
@@ -1583,6 +1792,35 @@ export const api = {
       { method: "POST" },
     ),
 };
+
+/** One page of a job's runs. See `api.getJobRuns` / `api.getAllJobRuns`. */
+async function fetchJobRunsPage(jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> {
+  const params = queryString({ limit: query?.limit, offset: query?.offset });
+  const suffix = params ? `?${params}` : "";
+  const { data, headers } = await requestWithHeaders<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  const totalHeader = headers.get("X-Caesium-Total-Count");
+  const nextHeader = headers.get("X-Caesium-Next-Offset");
+  const runs = data ?? [];
+  return {
+    runs,
+    total: totalHeader !== null ? Number(totalHeader) : runs.length,
+    nextOffset: nextHeader !== null ? Number(nextHeader) : null,
+  };
+}
+
+/**
+ * Per-request page size for `getAllJobRuns`. The server caps `limit` at 1000;
+ * 500 stays well inside that while halving the round trips of the server
+ * default (mirrors `partitionPageSize`'s reasoning).
+ */
+const jobRunsPageSize = 500;
+
+/**
+ * Hard stop for `getAllJobRuns`'s page walk, matching `partitionMaxRows`: a
+ * runaway walk following a cursor that never terminates stops here instead of
+ * fetching forever.
+ */
+const jobRunsMaxRows = 10_000;
 
 /** One page of a fanned task's instances. See `api.getPartitions`. */
 function fetchPartitionPage(

@@ -127,6 +127,17 @@ For trigger chaining, match lifecycle events from `source: caesium`, for example
 
 Use `metadata.priority` to order pending work when the cluster is saturated. Valid values are `high`, `normal`, and `low`. Priority is ordering only; it does not preempt running tasks.
 
+`metadata.taskTimeout` limits each execution attempt. A zero or omitted value
+inherits `CAESIUM_TASK_TIMEOUT` (whose default `0` disables the task deadline).
+`metadata.runTimeout` limits the whole execution window; zero or omitted means
+no run deadline. Caesium records both values when it creates the run's task
+rows, so a later `job apply` changes new runs only. Reopened terminal runs keep
+the recorded limits and receive a fresh run-timeout window; owner or worker
+failover within an active run keeps the original absolute deadline. When either
+deadline expires, Caesium force-stops the exact Docker, Podman, or Kubernetes
+atom and persists a failed task. A run deadline also fails every unfinished
+task in the run, including pending and retry-waiting work.
+
 Use `metadata.concurrency` to control new runs of the same job when prior runs are still active:
 
 ```yaml
@@ -332,7 +343,7 @@ Set `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `fail` on the server; the empty defau
 
 Operator loop:
 
-- `caesium job lint --server` and `caesium contract check --path jobs/ [--json]` check local manifests against persisted jobs. Both scope their findings to the linted job set plus its direct producers and consumers, so an unrelated break elsewhere on a shared server does not fail them.
+- `caesium job lint --server` and `caesium contract check --path jobs/ [--json]` check local manifests against persisted jobs. Use `job lint --server https://caesium.example` or `job lint --server=https://caesium.example` to select a server; bare `--server` uses `http://localhost:8080`. Both scope their findings to the linted job set plus its direct producers and consumers, so an unrelated break elsewhere on a shared server does not fail them.
 - `caesium contract graph [--dataset ns/name] [--json]`, `GET /v1/contracts/graph`, and the Console `/contracts` route show the derived graph.
 - `POST /v1/jobdefs/diff` returns per-job `contractFindings`; the Console JobDefs diff tab shows compatible/unknown/breaking badges with named consumers and teams.
 - Intentional breaks use `caesium job apply --allow-breaking dataset=<name> --reason ...`. The acknowledgement is digest-scoped; producer and consumer applies warn during the deprecation window, then re-block after expiry because the window is evaluated at check time. The Console apply flow requires an ack reason before sending that request.
@@ -553,7 +564,7 @@ caesium job lint --path jobs/           # Validate YAML schemas and DAG topology
 caesium job preview --path job.yaml     # ASCII DAG visualization
 caesium dev --once --path job.yaml      # Run job locally against Docker
 caesium dev --path job.yaml             # Watch mode — re-run on file save
-caesium job diff --path jobs/           # Preview creates/updates/deletes vs server
+caesium job diff --path jobs/           # Preview creates/updates vs server (add --prune for deletes)
 caesium job apply --path jobs/          # Deploy definitions to running server
 caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots

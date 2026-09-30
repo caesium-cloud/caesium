@@ -146,18 +146,11 @@ These features open Caesium to new use cases and larger organizations.
 
 ### 3.1 Multi-Tenancy & Namespace Isolation
 
-**Current state**: Single-tenant. All jobs, runs, and resources share a flat namespace.
+**Status**: Planned — active exec plan [`exec-plans/active/identity-and-access.md`](exec-plans/active/identity-and-access.md); design of record [`superpowers/specs/2026-09-16-identity-and-access-design.md`](superpowers/specs/2026-09-16-identity-and-access-design.md) (drafted 2026-09-16).
 
-**Target state**: Logical namespaces isolate teams' jobs, runs, and resources. Per-namespace quotas limit concurrent runs, CPU, and memory. The UI supports scoped views. An audit log tracks who changed what, when.
+**Current state**: Single-tenant. All jobs, runs, and resources share a flat namespace; authorization is a global four-role ladder keyed per route; SSO users cannot be scoped; SSO admins cannot manage API keys; users have no lifecycle; no SSO path has end-to-end coverage.
 
-**Implementation plan**:
-1. Add `namespace` field to `metadata` in job definitions (default: `default`)
-2. Add `Namespace` column to `Job`, `Trigger`, and related models
-3. Scope all API queries by namespace (header or query param)
-4. Per-namespace quotas: `CAESIUM_NAMESPACE_QUOTAS` env var (JSON)
-5. Namespace-scoped UI views with a namespace switcher
-6. Audit log table: `audit_events(namespace, actor, action, resource, diff, timestamp)`
-7. Cross-namespace trigger references (controlled, explicit opt-in)
+**Target state**: A flat `metadata.namespace` declared on every job and carried by every job-owned resource; namespace-scoped grants (`role @ namespace`, `*` cluster-wide) for SSO users and API keys, resolved per request from one policy-as-code file that also declares each namespace's Kubernetes target, secret allow-list and run quota; bounded-staleness IdP group refresh; user administration; a Keycloak CI lane; a namespace switcher and Access page in the Console; and `caesium login` for an SSO-backed CLI credential. The seven-step sketch that lived here is superseded by the spec; the audit log it asked for shipped with SSO and gains a namespace column.
 
 ### 3.2 Approval Gates & Human-in-the-Loop
 
@@ -198,7 +191,7 @@ steps:
 2. UI form generator that renders appropriate inputs per parameter type
 3. Shareable trigger URLs: `GET /ui/jobs/:alias/trigger` renders the form
 4. Slack integration: slash command `/caesium run <alias>`, status notifications via webhook callbacks
-5. Read-only vs. operator role distinction (view runs vs. trigger runs vs. edit definitions)
+5. Read-only vs. operator role distinction (view runs vs. trigger runs vs. edit definitions) — shipped as the `viewer < runner < operator < admin` ladder; per-namespace grants are §3.1's plan
 
 ### 3.4 Live DAG Debugging & Run Diff
 
@@ -284,7 +277,7 @@ Plan 4 runs only if the arc still has momentum after Plan 3 and is explicitly no
 | **P2** | 2.3 SLA management | Genuinely unique. No orchestrator does this well. *Parked 2026-09-05 (see §2.3); breach detection shipped, ETA folds into Phase 5 Plan 4.* |
 | **P2** | 2.4 UI refresh | Visual identity + primitive consolidation. Phased so foundations land first and propagate automatically. |
 | **P2** | 2.5 Cost tracking | FinOps for pipelines. Large scope but high value. |
-| **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. |
+| **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. **Planned** — exec plan `exec-plans/active/identity-and-access.md` (2026-09-16). |
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
@@ -319,7 +312,7 @@ Features that were previously on the roadmap and are now shipped:
 
 ## Related Documents
 
-- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — W1 contract decisions, honest load reports and browser diagnostics; W2's first real owner-crash robustness regression, integration SQL-work budget and fail-closed scenario evidence validator; and W3's `early-evidence` CI lane (now a fail-closed `ci-ok` dependency), pure reference models with generated property tests, developer-journey CLI scenarios, browser accessibility/visual/scale/recovery coverage and the F1 lifecycle decision are merged; `ci-ok` is not yet a required status check, so the new gate blocks `v*` publication rather than merge, and partitions, upgrade qualification, Console fault journeys and calibrated performance budgets remain planned; operating guidance in [ci.md](ci.md)
+- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — W1–W6 implementation merged. W7 accepted D3, whose console owner-crash journey passed live on kind (#581), and E3, whose harness noise was removed and whose comparison came out conclusive (#584). W7 also bounded dqlite's retained Raft log (#585); F2's snapshot catch-up then passed twice under 1Gi. W8 fixed ordinal-0 rejoin (#591, closes #582), recorded the isolated rollback outcome (#590) and calibrated performance budgets with a fixed baseline on the recorded local runner (#589); the merged-tree cluster qualification passed, so E4 and F2 are accepted. The W8 closure interview resolved Q1/Q2/Q5/Q6 (hosted runners only, ≤15-minute PR budget, approved budgets rule, `ci-ok` required with an active merge queue). 24 of 31 items are checked; G6, single-host F3, hosted G4 and four follow-up items (H1–H4) remain for W9. Operating guidance: [ci.md](ci.md).
 - [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel (re-scored 2026-09-05)
 - [Closed-Loop Orchestration — The Arc](exec-plans/active/closed-loop-arc.md) — the Phase 5 umbrella: program-level source of truth sequencing Plans 0–4 and the closing "tell it" wave
 - [Exec Plan: Trust the Substrate](exec-plans/completed/trust-the-substrate.md) — Plan 0 of the arc: known-bug fixes, widened auth-enabled integration lane, CI gating, `v0.1.0` with a downloadable CLI, dead-scaffolding removal, unfiled follow-ups filed

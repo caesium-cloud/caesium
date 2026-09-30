@@ -83,6 +83,27 @@ describe('EventManager', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('a stream that never opens is unhealthy so polling can resume', () => {
+    events.connect();
+    const es = MockEventSource.instances[0];
+    es.onerror?.();
+    expect(events.isHealthy()).toBe(false);
+  });
+
+  it('repeated errors after an open stop counting as healthy', () => {
+    events.connect();
+    const first = MockEventSource.instances[0];
+    first.onopen?.();
+    expect(events.isHealthy()).toBe(true);
+    first.onerror?.();
+    expect(events.isHealthy()).toBe(true);
+    vi.advanceTimersByTime(3000);
+    MockEventSource.instances.at(-1)?.onerror?.();
+    vi.advanceTimersByTime(3000);
+    MockEventSource.instances.at(-1)?.onerror?.();
+    expect(events.isHealthy()).toBe(false);
+  });
+
   it('disconnect closes EventSource', () => {
     events.connect();
     const es = MockEventSource.instances[0];

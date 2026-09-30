@@ -776,6 +776,10 @@ func (s *DockerTestSuite) TestCreateError() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+// TestCreateStartError also proves the #480/round-3 orphan-cleanup fix: once
+// ContainerCreate has allocated a container, a subsequent failure (here,
+// ContainerStart) must stop+remove it rather than just returning the error
+// with no handle to clean up later.
 func (s *DockerTestSuite) TestCreateStartError() {
 	req := &atom.EngineCreateRequest{
 		Image:   testImage,
@@ -794,11 +798,206 @@ func (s *DockerTestSuite) TestCreateStartError() {
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerStart", req.Name).
 		Return(fmt.Errorf("invalid container id"))
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStop", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerRemove", req.Name).
+		Return(nil)
 
 	c, err := s.engine.Create(req)
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), c)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateGetError covers the exact scenario a round-3 adversarial review
+// caught: ContainerStart succeeds but the immediately following Get
+// (ContainerInspect) fails — the shape of a SIGINT landing in that window
+// during `caesium dev --once`. Before the fix, Create returned the error
+// with no atom.Atom handle, so nothing else in the system ever learned the
+// already-started container's ID to stop it — an orphan despite #480.
+func (s *DockerTestSuite) TestCreateGetError() {
+	req := &atom.EngineCreateRequest{
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", req.Name).
+		Return(fmt.Errorf("context canceled"))
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStop", req.Name).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerRemove", req.Name).
+		Return(nil)
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+// TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
+// finding: even after TestCreateStartError/TestCreateGetError's fix, a
+// SIGINT landing WHILE the ContainerCreate request itself is in flight could
+// still orphan a container — the daemon may commit it before the client
+// sees a cancellation error, and Create would return with no ID at all to
+// clean up. The fake backend cancels the engine's context from inside its
+// ContainerCreate handler (simulating the daemon completing the request at
+// the exact moment SIGINT arrives) and then reports success, proving Create
+// still definitively completes the allocation call, notices the
+// cancellation afterward, and removes the container it just learned about
+// rather than leaking it.
+func (s *DockerTestSuite) TestCreateCancelledDuringCreateRequest() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{
+		backend:            backend,
+		ctx:                ctx,
+		subpathHelperImage: subPathHelperImage,
+	}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).
+		Run(func(mock.Arguments) { cancel() }).
+		Return()
+	backend.On("ContainerStop", testAtomID).Return(nil)
+	backend.On("ContainerRemove", testAtomID).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation, not a spurious success, once it notices the caller gave up")
+	backend.AssertExpectations(s.T())
+}
+
+// TestCreateDeadlineDuringCreateRequest covers the other ambiguous outcome:
+// Docker may persist a deterministically named container, then let the
+// detached create request expire before its response reaches Caesium. The
+// parent context is still active, so this must clean by name while returning
+// the original deadline error.
+func (s *DockerTestSuite) TestCreateDeadlineDuringCreateRequest() {
+	req := &atom.EngineCreateRequest{Name: "deadline", Image: testImage, Command: []string{"test"}}
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{backend: backend, ctx: context.Background(), subpathHelperImage: subPathHelperImage}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).Return(context.DeadlineExceeded)
+	backend.On("ContainerStop", req.Name).Return(nil)
+	backend.On("ContainerRemove", req.Name).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
+}
+
+// TestCreateCancelledDuringSubPathHelperCreation covers a round-5
+// adversarial-review finding: the subPath helper container's OWN
+// ContainerCreate call ran on the cancellable context, registering its
+// removal defer only after a successful response — completely unprotected
+// by the main-container cleanup TestCreateCancelledDuringCreateRequest
+// proves, since ensureVolumeSubPaths runs BEFORE that main container is
+// ever created. The fake backend cancels the engine's context from inside
+// the HELPER's ContainerCreate handler itself (simulating SIGINT landing
+// exactly there) and reports success, proving ensureVolumeSubPath still
+// definitively completes the helper's allocation call, notices the
+// cancellation afterward, and removes the helper it just learned about —
+// and Create never reaches the main container's own ContainerCreate at all.
+func (s *DockerTestSuite) TestCreateCancelledDuringSubPathHelperCreation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{
+		backend:            backend,
+		ctx:                ctx,
+		subpathHelperImage: subPathHelperImage,
+	}
+
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{{
+				Name:    "tfstate",
+				Type:    container.VolumeMountTypeVolume,
+				Source:  "tfstate-vol",
+				Target:  "/state",
+				SubPath: "stack-a",
+			}},
+		},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ClientVersion").Return("1.47")
+	backend.On("ImageInspect", subPathHelperImage).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", subPathHelperImage).Return()
+
+	helperNameMatcher := mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, "caesium-subpath-init-")
+	})
+	backend.
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, helperNameMatcher).
+		Run(func(mock.Arguments) { cancel() }).
+		Return()
+	backend.On("ContainerStop", testAtomID).Return(nil)
+	backend.On("ContainerRemove", testAtomID).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.Canceled,
+		"Create must report the cancellation and never reach the main container's own allocation")
+	backend.AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateDeadlineDuringSubPathHelperCreation() {
+	backend := &mockDockerBackend{}
+	engine := &dockerEngine{backend: backend, ctx: context.Background(), subpathHelperImage: subPathHelperImage}
+	req := &atom.EngineCreateRequest{
+		Name: testContainerName, Image: testImage, Command: []string{"run"},
+		Spec: container.Spec{ResolvedVolumeMounts: []container.VolumeMount{{
+			Name: "tfstate", Type: container.VolumeMountTypeVolume, Source: "tfstate-vol", Target: "/state", SubPath: "stack-a",
+		}}},
+	}
+
+	backend.On("ImageInspect", req.Image).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", req.Image).Return()
+	backend.On("ClientVersion").Return("1.47")
+	backend.On("ImageInspect", subPathHelperImage).Return(errdefs.NotFound(io.EOF))
+	backend.On("ImagePull", subPathHelperImage).Return()
+	helperNameMatcher := mock.MatchedBy(func(name string) bool { return strings.HasPrefix(name, "caesium-subpath-init-") })
+	backend.On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, helperNameMatcher).Return(context.DeadlineExceeded)
+	backend.On("ContainerStop", helperNameMatcher).Return(nil)
+	backend.On("ContainerRemove", helperNameMatcher).Return(nil)
+
+	c, err := engine.Create(req)
+	assert.Nil(s.T(), c)
+	assert.ErrorIs(s.T(), err, context.DeadlineExceeded)
+	backend.AssertExpectations(s.T())
 }
 
 func (s *DockerTestSuite) TestStop() {

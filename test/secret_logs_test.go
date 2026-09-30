@@ -65,9 +65,23 @@ steps:
 	s.Equal(http.StatusNoContent, pendingResp.StatusCode)
 	s.Equal("pending", pendingResp.Header.Get("X-Caesium-Log-State"))
 
-	liveResp, err := s.doRequest(http.MethodGet,
-		fmt.Sprintf("%s/v1/jobs/%s/runs/%s/logs?task_id=%s", s.caesiumURL, job.ID, runID, successID), nil)
-	s.Require().NoError(err)
+	// A distributed claim marks the task running before the executor prepares
+	// its scrubbed log generation. Wait only through that documented pending
+	// window; a terminal/empty response or a retained-only stream still fails.
+	liveURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/logs?task_id=%s", s.caesiumURL, job.ID, runID, successID)
+	readyDeadline := time.Now().Add(30 * time.Second)
+	var liveResp *http.Response
+	for {
+		liveResp, err = s.doRequest(http.MethodGet, liveURL, nil)
+		s.Require().NoError(err)
+		if liveResp.StatusCode != http.StatusNoContent {
+			break
+		}
+		_ = liveResp.Body.Close()
+		s.Require().Equal("pending", liveResp.Header.Get("X-Caesium-Log-State"))
+		s.Require().True(time.Now().Before(readyDeadline), "timed out waiting for the live scrubbed log stream")
+		time.Sleep(50 * time.Millisecond)
+	}
 	liveBody, err := io.ReadAll(liveResp.Body)
 	_ = liveResp.Body.Close()
 	s.Require().NoError(err)

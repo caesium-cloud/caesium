@@ -1,0 +1,462 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClusterCheck, ClusterMember, HealthResponse, Node, Reachability } from "@/lib/api";
+import { api } from "@/lib/api";
+import { SystemPage } from "../SystemPage";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, to }: { children: ReactNode; to?: string }) => <a href={to ?? "#"}>{children}</a>,
+}));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return {
+    ...actual,
+    api: {
+      getSystemNodes: vi.fn(),
+      getSystemFeatures: vi.fn(),
+      getHealthStatus: vi.fn(),
+      pruneCache: vi.fn(),
+    },
+  };
+});
+
+const mocked = vi.mocked(api);
+
+function member(address: string, reachability: Reachability, leader = false): ClusterMember {
+  return { address, role: "voter", leader, reachability, latency_ms: 2 };
+}
+
+function node(address: string, reachability: Reachability, leader = false): Node {
+  return { address, arch: "arm64", role: "voter", leader, reachability, workers_busy: 0, workers_total: 4 };
+}
+
+function cluster(overrides: Partial<ClusterCheck> = {}): ClusterCheck {
+  return {
+    status: "healthy",
+    clustered: true,
+    observed: true,
+    members: [
+      member("10.244.0.8:9001", "reachable", true),
+      member("10.244.0.9:9001", "reachable"),
+      member("10.244.0.10:9001", "reachable"),
+    ],
+    quorum: {
+      status: "available",
+      total_voters: 3,
+      reachable_voters: 3,
+      unreachable_voters: 0,
+      unknown_voters: 0,
+      required_voters: 2,
+      available: true,
+      degraded: false,
+      leader_address: "10.244.0.8:9001",
+    },
+    nodes: { status: "available", total: 3, reachable: 3, unreachable: 0, unknown: 0 },
+    observed_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function health(clusterCheck: ClusterCheck, status = "healthy"): HealthResponse {
+  return {
+    status,
+    uptime: 60_000_000_000,
+    checks: {
+      database: { status: "healthy", latency_ms: 1 },
+      active_runs: { status: "healthy", count: 0 },
+      triggers: { status: "healthy", count: 2 },
+      nodes: { status: clusterCheck.status, count: clusterCheck.quorum.reachable_voters },
+      cluster: clusterCheck,
+    },
+  };
+}
+
+function show(cachedHealth?: HealthResponse, updatedAt?: number) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  if (cachedHealth) {
+    client.setQueryData(["cluster-health"], {
+      response: cachedHealth,
+      observedAt: cachedHealth.checks?.cluster?.observed_at ?? null,
+      observedSince: updatedAt ?? Date.now(),
+    }, { updatedAt });
+  }
+  const tree = (
+    <QueryClientProvider client={client}>
+      <SystemPage />
+    </QueryClientProvider>
+  );
+  const rendered = render(tree);
+  return { ...rendered, client, rerender: () => rendered.rerender(tree) };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocked.getSystemFeatures.mockResolvedValue({
+    database_console_enabled: false,
+    log_console_enabled: false,
+    agent_remediation_enabled: false,
+    freshness_enabled: false,
+    contract_enforcement_enabled: false,
+  });
+  mocked.pruneCache.mockResolvedValue({ pruned: 0 });
+});
+
+describe("SystemPage cluster health", () => {
+  it("shows a full quorum and an operational banner when every voter answers", async () => {
+    mocked.getHealthStatus.mockResolvedValue(health(cluster()));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("3/3"));
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("operational");
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "ok");
+    expect(screen.getByText("All systems operational")).toBeInTheDocument();
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("3/3");
+  });
+
+  // Issue #494: three configured replicas, one crashed, still rendered
+  // "All systems operational" and "Quorum 3/3".
+  it("shows 2/3 and a degraded banner when a replica is unreachable", async () => {
+    const degraded = cluster({
+      status: "degraded",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "reachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "degraded",
+        total_voters: 3,
+        reachable_voters: 2,
+        unreachable_voters: 1,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: true,
+        degraded: true,
+        leader_address: "10.244.0.8:9001",
+      },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(degraded, "degraded"));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "unreachable"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("2/3"));
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("degraded");
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("2/3");
+
+    // The dead replica is still listed, flagged unreachable rather than green.
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    const dead = rows.find((r) => r.dataset.address === "10.244.0.10:9001");
+    expect(dead?.dataset.reachability).toBe("unreachable");
+    expect(within(dead as HTMLElement).getByText("Unreachable")).toBeInTheDocument();
+
+    // The Nodes health check is no longer unconditionally green.
+    const nodesRow = screen
+      .getAllByTestId("health-check-row")
+      .find((r) => r.dataset.check === "Nodes");
+    expect(nodesRow?.dataset.tone).toBe("warn");
+  });
+
+  // Review P2: a crashed standby never enters the voter arithmetic, so the
+  // page kept saying "All systems operational" beside an unreachable member.
+  it("degrades for an unreachable standby while quorum stays 3/3", async () => {
+    const standbyDown = cluster({
+      status: "degraded",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "reachable"),
+        member("10.244.0.10:9001", "reachable"),
+        { address: "10.244.0.11:9001", role: "standby", leader: false, reachability: "unreachable" },
+      ],
+      nodes: { status: "degraded", total: 4, reachable: 3, unreachable: 1, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(standbyDown, "degraded"));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+      { address: "10.244.0.11:9001", arch: "arm64", role: "standby", leader: false, reachability: "unreachable", workers_busy: 0, workers_total: 4 },
+    ]);
+
+    show();
+
+    // Quorum is still honestly reported as a full voter majority...
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("3/3"));
+    const quorumRow = screen
+      .getAllByTestId("health-check-row")
+      .find((r) => r.dataset.check === "Quorum");
+    expect(quorumRow?.dataset.tone).toBe("ok");
+
+    // ...but the page must not call that operational.
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("degraded");
+    expect(screen.getByText("Degraded — 3 of 4 cluster nodes reachable")).toBeInTheDocument();
+
+    const nodesRow = screen
+      .getAllByTestId("health-check-row")
+      .find((r) => r.dataset.check === "Nodes");
+    expect(nodesRow?.dataset.tone).toBe("warn");
+    expect(nodesRow).toHaveTextContent("3/4 nodes reachable");
+
+    const dead = screen
+      .getAllByTestId("cluster-node-row")
+      .find((r) => r.dataset.address === "10.244.0.11:9001");
+    expect(dead?.dataset.reachability).toBe("unreachable");
+  });
+
+  it("shows an outage when quorum is lost", async () => {
+    const lost = cluster({
+      status: "unavailable",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "unreachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "unavailable",
+        total_voters: 3,
+        reachable_voters: 1,
+        unreachable_voters: 2,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: false,
+        degraded: true,
+        leader_address: "",
+      },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(lost, "unavailable"));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "unreachable"),
+      node("10.244.0.10:9001", "unreachable"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("1/3"));
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("unavailable");
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "danger");
+    expect(screen.getByTestId("quorum-detail")).toHaveTextContent("Quorum lost");
+  });
+
+  // Review round 4: /v1/system/nodes is authenticated and its key lookup is a
+  // leader-dependent read, so it stalls during exactly the outage /health keeps
+  // reporting. The page used to render reachability from the stale cached node
+  // array, putting green rows underneath an unavailable banner.
+  it("renders current liveness even when the node query never resolves", async () => {
+    const lost = cluster({
+      status: "unavailable",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "unreachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "unavailable",
+        total_voters: 3,
+        reachable_voters: 1,
+        unreachable_voters: 2,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: false,
+        degraded: true,
+        leader_address: "",
+      },
+      nodes: { status: "degraded", total: 3, reachable: 1, unreachable: 2, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(lost, "unavailable"));
+    // The protected node query hangs for the whole test, exactly as it does
+    // while the auth key lookup waits for a raft leader.
+    mocked.getSystemNodes.mockImplementation(() => new Promise<Node[]>(() => {}));
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("1/3"));
+
+    // Rows still render, from the health observation.
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    const byAddress = Object.fromEntries(rows.map((r) => [r.dataset.address, r]));
+    expect(byAddress["10.244.0.8:9001"].dataset.reachability).toBe("reachable");
+    expect(byAddress["10.244.0.9:9001"].dataset.reachability).toBe("unreachable");
+    expect(byAddress["10.244.0.10:9001"].dataset.reachability).toBe("unreachable");
+    expect(rows.every((r) => r.dataset.livenessCurrent === "true")).toBe(true);
+
+    // No green row underneath an outage banner.
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "danger");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("1/3");
+  });
+
+  it("does not let a stale node query outvote a newer health observation", async () => {
+    const degraded = cluster({
+      status: "degraded",
+      members: [
+        member("10.244.0.8:9001", "reachable", true),
+        member("10.244.0.9:9001", "reachable"),
+        member("10.244.0.10:9001", "unreachable"),
+      ],
+      quorum: {
+        status: "degraded",
+        total_voters: 3,
+        reachable_voters: 2,
+        unreachable_voters: 1,
+        unknown_voters: 0,
+        required_voters: 2,
+        available: true,
+        degraded: true,
+        leader_address: "10.244.0.8:9001",
+      },
+      nodes: { status: "degraded", total: 3, reachable: 2, unreachable: 1, unknown: 0 },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(degraded, "degraded"));
+    // Cached from before the crash: every node still looks reachable.
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("2/3"));
+
+    const dead = screen
+      .getAllByTestId("cluster-node-row")
+      .find((r) => r.dataset.address === "10.244.0.10:9001");
+    expect(dead?.dataset.reachability).toBe("unreachable");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("2/3");
+  });
+
+  // Review round 5: when /health stops answering the hook returns raw: null,
+  // but React Query keeps serving the cached node array. That used to be read
+  // as a "no raft cluster" deployment, restoring the cached reachability as
+  // current — green rows beside a "Health check failed" banner.
+  it("stops showing cached liveness as current once health polling fails", async () => {
+    const healthy = cluster();
+    mocked.getHealthStatus.mockResolvedValueOnce(health(healthy));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    const { rerender, client } = show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("3/3"));
+
+    // Health goes away; the node query keeps serving its cached array.
+    mocked.getHealthStatus.mockRejectedValue(new Error("network down"));
+    await client.invalidateQueries({ queryKey: ["cluster-health"] });
+    rerender();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "danger"),
+    );
+    expect(screen.getByText(/API unreachable/)).toBeInTheDocument();
+
+    // Identities survive, liveness does not.
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
+  });
+
+  // A pending refetch preserves React Query's cached response. All health
+  // indicators must expire even though the request has not errored.
+  it("stops showing a cached healthy observation as green once it goes stale", async () => {
+    const frozen = cluster();
+    mocked.getHealthStatus.mockImplementation(() => new Promise(() => {}));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "reachable", true),
+      node("10.244.0.9:9001", "reachable"),
+      node("10.244.0.10:9001", "reachable"),
+    ]);
+
+    const { client } = show(health(frozen), Date.now() - 10 * 60_000);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("system-health-badge")).toHaveTextContent("stale"),
+    );
+    expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.dataset.tone !== "ok")).toBe(true);
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.textContent?.includes("Observation stale"))).toBe(true);
+
+    // Quorum and per-node liveness are unknown, not the cached green values.
+    expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3");
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
+
+    const rows = screen.getAllByTestId("cluster-node-row");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.dataset.reachability === "unknown")).toBe(true);
+    expect(rows.every((r) => r.dataset.livenessCurrent === "false")).toBe(true);
+
+    expect(client.getQueryState(["cluster-health"])?.fetchStatus).toBe("fetching");
+  });
+
+  it("keeps a repeated server observation stale after a successful poll", async () => {
+    const frozen = cluster();
+    mocked.getHealthStatus.mockResolvedValue(health(frozen));
+    mocked.getSystemNodes.mockResolvedValue([]);
+
+    const { client } = show(health(frozen), Date.now() - 10 * 60_000);
+    await waitFor(() => expect(mocked.getHealthStatus).toHaveBeenCalled());
+    await waitFor(() => expect(client.getQueryState(["cluster-health"])?.fetchStatus).toBe("idle"));
+
+    expect(screen.getByTestId("system-health-badge")).toHaveTextContent("stale");
+    expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3");
+    expect(screen.getAllByTestId("health-check-row").every((r) => r.dataset.tone !== "ok")).toBe(true);
+  });
+
+  it("never renders unobserved liveness as green", async () => {
+    const unobserved = cluster({
+      status: "unknown",
+      observed: false,
+      members: [],
+      quorum: {
+        status: "unknown",
+        total_voters: 3,
+        reachable_voters: 0,
+        unreachable_voters: 0,
+        unknown_voters: 3,
+        required_voters: 2,
+        available: false,
+        degraded: false,
+      },
+    });
+    mocked.getHealthStatus.mockResolvedValue(health(unobserved, "unknown"));
+    mocked.getSystemNodes.mockResolvedValue([
+      node("10.244.0.8:9001", "unknown"),
+      node("10.244.0.9:9001", "unknown"),
+      node("10.244.0.10:9001", "unknown"),
+    ]);
+
+    show();
+
+    await waitFor(() => expect(screen.getByTestId("quorum-count")).toHaveTextContent("?/3"));
+    expect(screen.getByTestId("system-health-banner")).not.toHaveAttribute("data-tone", "ok");
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getByTestId("system-nodes-kpi")).toHaveTextContent("?/3");
+  });
+});

@@ -168,13 +168,13 @@ func TestStartParamsEnricherRefreshesOnQueuePromotion(t *testing.T) {
 }
 
 // TestQueuePromotionKeepsTheDerivationDedupe is the regression for a duplicate
-// freshness run. hasActiveOrQueuedRun recognises work it already scheduled by
-// comparing exactly two params (sameDerivationParams): _derived_from_dataset and
-// _consumed_watermarks. Promotion deletes the run_queue row, so the running row
-// is the only thing left to match against — and when the enricher's refresh
-// shared that key it overwrote the derivation view, the match failed, and the
-// next tick derived a second run for work already in flight. The start-time view
-// having its own key is what keeps the match.
+// freshness run. coveringRun recognises work it already scheduled by comparing
+// _consumed_watermarks — the input view the derivation evaluated.
+// Promotion deletes the run_queue row, so the running row is the only thing left
+// to match against — and when the enricher's refresh shared that key it
+// overwrote the derivation view, the match failed, and the next tick derived a
+// second run for work already in flight. The start-time view having its own key
+// is what keeps the match.
 func TestQueuePromotionKeepsTheDerivationDedupe(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
@@ -224,13 +224,16 @@ func TestQueuePromotionKeepsTheDerivationDedupe(t *testing.T) {
 	// only the running job_runs row remains for the dedupe to see.
 	seedRunningRun(t, db, jobID, promoted)
 
-	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunAdmitter{t: t, db: db}})
-	active, err := eval.hasActiveOrQueuedRun(ctx, jobID, derivation)
+	eval := NewEvaluator(Config{DB: db, RunStore: &fakeRunStarter{t: t, db: db}})
+	covering, err := eval.coveringRun(ctx, jobID, derivation, time.Time{}, nil)
 	if err != nil {
-		t.Fatalf("hasActiveOrQueuedRun: %v", err)
+		t.Fatalf("coveringRun: %v", err)
 	}
-	if !active {
+	if covering == nil {
 		t.Fatal("the promoted run no longer matches its derivation view; freshness would derive a duplicate")
+	}
+	if covering.id == nil {
+		t.Fatal("a running row must report its run id so the skip can be linked to it")
 	}
 }
 

@@ -1,0 +1,7 @@
+diff --git a/test/model/run.go b/test/model/run.go
+--- a/test/model/run.go
++++ b/test/model/run.go
+@@ -467 +467,2 @@
+-		if Succeeded(s) {
++		if Succeeded(s) {
++			r.ack.JobID = ""

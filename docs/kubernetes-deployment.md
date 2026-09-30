@@ -79,6 +79,70 @@ kubectl exec caesium-1 -- cat /etc/caesium/database-nodes
 kubectl exec caesium-2 -- cat /etc/caesium/database-nodes
 ```
 
+### Quorum health
+
+`/health` reports raft membership and liveness separately, under
+`checks.cluster`. Membership is what the cluster was configured with;
+liveness is what actually answered a bounded dqlite RPC:
+
+```bash
+kubectl port-forward service/caesium 8080:8080
+curl -s http://127.0.0.1:8080/health | jq '.status, .checks.cluster.quorum'
+```
+
+```json
+{
+  "status": "degraded",
+  "total_voters": 3,
+  "reachable_voters": 2,
+  "unreachable_voters": 1,
+  "required_voters": 2,
+  "available": true,
+  "degraded": true,
+  "leader_address": "10.244.0.8:9001"
+}
+```
+
+- `available` — a majority of voters answered, so the cluster can serve writes.
+- `degraded` — it is serving with less than full redundancy, or redundancy could
+  not be confirmed.
+- `status: "unavailable"` — fewer voters answered than a majority requires.
+- `status: "unknown"` — liveness could not be determined. This is never
+  reported as healthy.
+
+The console's `/system` page renders `reachable_voters / total_voters`, so a
+two-of-three cluster shows as `2/3` and DEGRADED rather than as fully
+operational.
+
+### Probe endpoints
+
+The **body** describes the cluster. The **HTTP status code** describes only this
+replica, which is why the two Kubernetes probes point at different endpoints:
+
+| Endpoint | Question | Probe | Fails when |
+| --- | --- | --- | --- |
+| `/health/ready` | Can this replica serve? | readiness, startup | its own database check fails (503) |
+| `/health/live` | Is this process running? | liveness | never, while it answers HTTP |
+| `/health` | Both, for the console | — | same as `/health/ready` |
+
+The split matters during a partition. A replica whose dqlite traffic is cut off
+from its peers sees a quorum loss locally while the others carry on serving. It
+must leave the Service endpoints — otherwise traffic keeps arriving at a node
+that cannot answer — but it must *not* be restarted: restarting cures a
+deadlocked process, never a dependency, and cannot restore a raft majority.
+
+`/health/live` therefore touches no dependency at all, and `/health/ready`
+returns 503 whenever this node cannot serve, whatever the cluster looks like.
+The degraded or unavailable quorum assessment is present in the body either way,
+so the console can explain an outage that the status code alone cannot.
+
+Both probe endpoints are unauthenticated, like `/health`.
+
+Liveness is probed in the background and served from a short-lived cache, so
+`/health` never blocks on cluster RPCs. `checks.cluster.observed_at` carries the
+observation time and `checks.cluster.stale` marks a result older than the
+refresh interval.
+
 ## Configuration Reference
 
 All settings are in `helm/caesium/values.yaml`.
@@ -106,6 +170,7 @@ All settings are in `helm/caesium/values.yaml`.
 | `config.databaseType` | `internal` (dqlite) or `postgres` | `internal` |
 | `config.databaseDSN` | PostgreSQL DSN when using `postgres` | `""` |
 | `config.extraEnv` | Extra env vars injected into pod spec | `[]` |
+| `peerDiscovery.probeSeconds` | How long ordinal 0 with an empty data directory probes the other ordinals before bootstrapping a new cluster | `20` |
 | `persistence.enabled` | Enable PVC-backed dqlite storage | `true` |
 | `persistence.storageClass` | StorageClass name (empty = cluster default) | `""` |
 | `persistence.accessModes` | PVC access modes | `[ReadWriteOnce]` |
@@ -202,6 +267,87 @@ The full field shape is in
 - With `StatefulSet` + PVCs enabled, each ordinal gets a stable volume.
 - For backup/restore, snapshot or back up the PVCs using your storage platform tooling.
 - If `persistence.enabled=false`, all data is ephemeral and lost on pod restart/recreation.
+
+### Pod replacement and the dqlite node address
+
+A StatefulSet pod keeps its identity and its PVC when it is replaced — by a
+`helm upgrade`, a node drain, an eviction or a reschedule — but Kubernetes never
+promises it the same pod IP. The chart advertises each node to dqlite as
+`$(POD_IP):9001`, and dqlite records that address in `info.yaml` inside the data
+directory, so a replacement pod normally comes back with a data directory that
+disagrees with its own address.
+
+Caesium reconciles this on startup: it rewrites the persisted identity to the
+current address, keeping the node ID, and then corrects a multi-member cluster's
+raft configuration through the leader so the other members dial the address the
+pod actually has. A sole member instead recovers its local raft configuration
+after checking that no peer is reachable. If membership cannot be verified or
+repaired, startup fails and the rollout waits rather than accepting reduced
+quorum. The migration is logged as
+`dqlite node address changed since this data directory was created; migrating`,
+followed by
+`dqlite cluster membership updated to this node's current address`. No manual
+step is needed and the volume must not be discarded.
+
+The address cannot simply be pinned to the pod's stable headless-service DNS
+name: dqlite binds its raft listener to the advertised address, and
+`dqlite_node_set_bind_address` accepts only a numeric IP.
+
+Two limits are worth knowing:
+
+- Replace pods **one at a time** and let the StatefulSet return to full
+  readiness in between, which is what a normal rolling upgrade does. The
+  repair runs through the cluster leader, so it needs a quorum of members
+  still reachable at their recorded addresses.
+- If every member's IP changes at once while the cluster is down, no member can
+  reach another and the repair has nothing to talk to. Recover by restoring
+  from a volume snapshot.
+
+### Replacing a member whose volume was lost
+
+Replacing a pod with an **empty** PVC (the disk was lost, or the PVC was
+deleted) is a different case: the node has no identity to keep, so it joins the
+cluster as a **new member** with a fresh dqlite node ID and receives the data
+by snapshot from the leader. No manual step is needed.
+
+For ordinals 1 and up this was always the case: the `peer-discovery` init
+container seeds ordinal *N* with ordinals `0..N-1`. Ordinal 0 is special
+because it is also the member that bootstraps a brand new cluster, so the init
+container decides between the two (#582):
+
+- If `/var/lib/caesium/dqlite/info.yaml` exists, ordinal 0 is an existing
+  member restarting and nothing is probed.
+- Otherwise it TCP-probes the dqlite port of every other ordinal through the
+  headless Service (which publishes not-ready addresses) for up to
+  `peerDiscovery.probeSeconds` (default 20 s). If any answers, a cluster
+  already exists and ordinal 0 is seeded with the other ordinals, so it joins.
+  On a new install the other ordinals do not exist yet, nothing answers, and
+  ordinal 0 bootstraps after the window. A new install's first start of
+  ordinal 0 is therefore up to that much slower.
+- Caesium itself repeats the check (`CAESIUM_DATABASE_BOOTSTRAP_PEERS`, set by
+  the chart to the other ordinals): a node with an empty data directory and no
+  seeds probes those peers for up to 10 s more and joins if any answers. It
+  logs either
+  `this node has no dqlite identity but a bootstrap peer answered; joining the existing cluster as a new member instead of bootstrapping`
+  or
+  `no dqlite bootstrap peer answered within the probe window; bootstrapping a new cluster`.
+
+The lost member's old entry is not removed. It stays in the raft configuration
+under its old node ID (for the original ordinal 0 that is dqlite's bootstrap
+ID) at the old pod address. go-dqlite's role adjustment promotes the new member
+to voter and demotes the unreachable old entry to a spare, so the cluster is
+back to three live voters and the stale spare has no vote. It is harmless but
+is listed by `GET /v1/system/nodes` and direct dqlite `Cluster` calls.
+
+Residual risks:
+
+- If ordinal 0 loses its disk while **every** other member is unreachable at
+  once (for example, all pods are being rescheduled), both probes find nothing
+  and ordinal 0 bootstraps an empty cluster of its own. Replace one member at a
+  time and do not delete ordinal 0's PVC while the other members are down.
+- If the replacement pod is given exactly the old pod's IP, raft refuses the
+  join because the stale entry holds that address; the pod stays not Ready
+  instead of serving a divergent database. Deleting the pod again gets a new IP.
 
 ## Air-Gapped Deployment Notes
 

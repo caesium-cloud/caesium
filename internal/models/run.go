@@ -58,15 +58,21 @@ type JobRun struct {
 	// the DAG and silently change what the run computes. A column is inert to
 	// hashing, which is what "bypass the gate, change nothing else" requires. It
 	// is never set by a job definition — only by the approval executor.
-	SchemaGateOverride bool       `gorm:"not null;default:false" json:"schema_gate_override,omitempty"`
-	StartedAt          time.Time  `gorm:"not null" json:"started_at"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"`
-	CreatedAt          time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt          time.Time  `gorm:"not null" json:"updated_at"`
-	Tasks              []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
-	CacheHits          int        `gorm:"-" json:"cache_hits"`
-	ExecutedTasks      int        `gorm:"-" json:"executed_tasks"`
-	TotalTasks         int        `gorm:"-" json:"total_tasks"`
+	SchemaGateOverride bool      `gorm:"not null;default:false" json:"schema_gate_override,omitempty"`
+	StartedAt          time.Time `gorm:"not null" json:"started_at"`
+	// TimeoutStartedAt anchors metadata.runTimeout for the current execution
+	// window. Unlike StartedAt (the historical creation time), an explicit run
+	// retry advances this field so the retried work receives a fresh timeout
+	// budget without rewriting run history. Existing rows fall back to
+	// StartedAt when this nullable migration field is absent.
+	TimeoutStartedAt *time.Time `json:"-"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
+	Tasks            []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	CacheHits        int        `gorm:"-" json:"cache_hits"`
+	ExecutedTasks    int        `gorm:"-" json:"executed_tasks"`
+	TotalTasks       int        `gorm:"-" json:"total_tasks"`
 }
 
 type TaskRun struct {

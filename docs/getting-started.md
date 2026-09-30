@@ -30,6 +30,24 @@ just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs t
 
 On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`.
 
+`caesium dev --once` (step 3) needs the host Docker/Podman socket. The wrapper resolves it at invocation time: `DOCKER_HOST` when it is a `unix://` path, then `CAESIUM_SOCK`, then Docker Desktop's `$HOME/.docker/run/docker.sock` if present, then `/var/run/docker.sock` (or the Podman socket when `CAESIUM_PODMAN=true`). Override with:
+
+```bash
+export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock
+# or
+export CAESIUM_SOCK=$HOME/.docker/run/docker.sock
+```
+
+If the socket is missing, `dev` exits with an error rather than starting a CLI container that cannot talk to Docker. `job lint` and `--help` still run without the socket.
+
+Kubernetes jobs also need cluster credentials. If `KUBECONFIG` is set, that file is used; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config`. The wrapper flattens file-referenced certs/keys into the mounted copy and sets `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` so `caesium dev` Kubernetes steps load it. This shares the selected host credentials with the CLI container.
+
+**Host `kubectl` is required when a kubeconfig is selected**; the wrapper uses its offline `config view --raw --flatten` parser, including normal YAML comments and quoting. Without a kubeconfig, host `kubectl` is not needed.
+
+Each invocation mounts its own mode-600 file in a mode-700 temporary directory. The wrapper forwards termination signals and removes that directory after the container exits, including failed commands.
+
+Host socket ownership does not describe the Docker Desktop VM: the wrapper probes the mounted socket from inside the CLI container and falls back to root when your uid cannot write it. On a root-owned Linux `docker.sock` it may run as root or add the socket's group; files written into `$PWD` may then be root-owned.
+
 The `caesiumcloud/caesium:v0.1.0` image used above is also pullable by
 digest, if you want to pin exactly what you run:
 `caesiumcloud/caesium@sha256:2e6996f965ab7899ac3f2d80a7607e26a96ff607d24baf8566033d6d7aa73917` (the `v0.1.0` multi-arch manifest; per-arch digests in `docs/ci.md` § `v0.1.0` image digests).

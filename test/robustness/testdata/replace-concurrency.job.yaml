@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: __ALIAS__
+  labels:
+    caesium-robustness: core-cancel
+  concurrency:
+    maxRuns: 1
+    strategy: replace
+trigger:
+  type: http
+  configuration:
+    path: robustness-core-cancel-__ALIAS__
+steps:
+  - name: block
+    type: task
+    engine: kubernetes
+    image: __TASK_IMAGE__
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        RECORDER=http://robustness-recorder:8090
+        STEP=block
+        NONCE="$(cat /proc/sys/kernel/random/uuid)"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"start\"}" "${RECORDER}/start"
+        i=0
+        while [ "$i" -lt 180 ]; do
+          if wget -qO- "${RECORDER}/wait?run_id=${CAESIUM_RUN_ID}" | grep -q released; then
+            wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"complete\"}" "${RECORDER}/effect" >/dev/null || true
+            exit 0
+          fi
+          i=$((i + 1))
+          sleep 1
+        done
+        exit 1
+    next:
+      - successor
+  - name: successor
+    type: task
+    engine: kubernetes
+    image: __TASK_IMAGE__
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        RECORDER=http://robustness-recorder:8090
+        STEP=successor
+        NONCE="$(cat /proc/sys/kernel/random/uuid)"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"start\"}" "${RECORDER}/start"
+        wget -qO- --header='Content-Type: application/json' --post-data="{\"run_id\":\"${CAESIUM_RUN_ID}\",\"step\":\"${STEP}\",\"nonce\":\"${NONCE}\",\"event\":\"complete\"}" "${RECORDER}/effect"
+    dependsOn:
+      - block

@@ -95,6 +95,20 @@ describe("TaskDetailPanel", () => {
     expect(panel).toHaveStyle({ width: "1080px" });
   });
 
+  it("names the close button and resize handle", () => {
+    renderPanel(
+      <TaskDetailPanel
+        taskId="task-1"
+        jobId="job-1"
+        runId="run-1"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Close task panel" })).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: "Resize task panel" })).toBeInTheDocument();
+  });
+
   it("renders structured logs without wrapping and explains log state badges", async () => {
     mockFetch.mockImplementationOnce(() =>
       Promise.resolve(

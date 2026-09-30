@@ -459,8 +459,26 @@ function normalizeExpectedStatuses(status: string | string[] | undefined): Set<s
   return new Set(Array.isArray(status) ? status : [status]);
 }
 
+// latestRun picks the most-recently-created run by comparing created_at
+// (tie-broken by id, matching the server's own ORDER BY) rather than by
+// array position. GET /v1/jobs/:id/runs is a client-facing contract, not an
+// implementation detail this helper should hardcode an assumption about:
+// the endpoint moved from oldest-first/unbounded to newest-first/paginated
+// (issue #499), and a position-based pick (`runs.at(-1)` / `runs[0]`) would
+// need updating again on the next ordering change. Comparing timestamps
+// stays correct either way.
 function latestRun(runs: E2ERun[]): E2ERun | undefined {
-  return runs.at(-1);
+  if (runs.length === 0) {
+    return undefined;
+  }
+  return runs.reduce((latest, run) => {
+    const runTime = Date.parse(run.created_at);
+    const latestTime = Date.parse(latest.created_at);
+    if (runTime !== latestTime) {
+      return runTime > latestTime ? run : latest;
+    }
+    return run.id > latest.id ? run : latest;
+  });
 }
 
 async function delay(ms: number): Promise<void> {

@@ -1,81 +1,445 @@
 package job
 
 import (
+	"bytes"
 	"cmp"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"strings"
 
-	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
-	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 )
 
-var (
-	diffPaths []string
+const (
+	defaultDiffServer    = "http://localhost:8080"
+	jobDiffJSONVersion   = 1
+	jobDiffWouldPruneHdr = "Would delete if --prune"
 )
+
+var (
+	diffPaths  []string
+	diffServer string
+	diffAPIKey string
+	diffJSON   bool
+	diffPrune  bool
+
+	diffHTTPClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
+)
+
+var errJobDiffInScope = errors.New("in-scope job definition changes")
 
 var diffCmd = &cobra.Command{
 	Use:   "diff",
-	Short: "Show changes between job definitions and the database",
+	Short: "Show changes between local job definitions and the server",
+	Long: `Compare job definition manifests against a Caesium server via POST /v1/jobdefs/diff,
+using the same --server / --api-key authentication as job apply.
+
+The comparison uses the fields the server JobSpec projection compares, not a
+byte-equal apply. Creates and updates therefore reflect in-scope changes in
+those diffed fields only (for example metadata.schemaValidation, timeouts,
+dependsOn/next, and retries can change without appearing here).
+
+By default the output is what a non-pruning apply would do for those fields:
+creates and updates for jobs in --path. Jobs present on the server but missing
+from --path are prune candidates. They are listed as deletes only with --prune;
+without --prune they appear under "Would delete if --prune" and do not fail
+the command.
+
+--json writes versioned JSON to stdout (logs stay on stderr).
+
+Exit status:
+  0  no in-scope changes in the diffed fields (creates/updates, and deletes only when --prune is set)
+  1  in-scope changes, or a parse / validation / request error`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx := cmd.Context()
-		desired, err := jobdiff.LoadDefinitions(diffPaths)
+		cmd.SilenceUsage = true
+
+		defs, err := collectDefinitions(diffPaths)
+		if err != nil {
+			return fmt.Errorf("load job definitions: %w", err)
+		}
+		if len(defs) == 0 {
+			return errors.New("no job definitions selected")
+		}
+		if err := rejectDuplicateAliases(defs); err != nil {
+			return err
+		}
+
+		server := strings.TrimSuffix(diffServer, "/")
+		apiKey := cliutil.ResolveAPIKey(cmd, diffAPIKey, cliutil.APIKeyEnvVar)
+		resp, err := sendDiffRequest(cmd.Context(), server, apiKey, defs)
 		if err != nil {
 			return err
 		}
 
-		specs, err := jobdiff.LoadDatabaseSpecs(ctx, db.Connection())
-		if err != nil {
+		scoped := scopeJobDiff(resp, diffPrune)
+		if diffJSON {
+			if err := writeJobDiffJSON(cmd, scoped); err != nil {
+				return err
+			}
+		} else if err := renderJobDiff(cmd, scoped); err != nil {
 			return err
 		}
 
-		result := jobdiff.Compare(desired, specs)
-		printDiff(cmd, result)
+		if err := jobDiffInScopeError(scoped); err != nil {
+			cmd.SilenceErrors = true
+			return err
+		}
 		return nil
 	},
 }
 
 func init() {
-	diffCmd.Flags().StringSliceVarP(&diffPaths, "path", "p", nil, "Paths to job definition files or directories")
+	diffCmd.Flags().StringSliceVarP(&diffPaths, "path", "p", nil, "Paths to job definition files or directories (default: current directory)")
+	diffCmd.Flags().StringVar(&diffServer, "server", defaultDiffServer, "Caesium server base URL")
+	diffCmd.Flags().StringVar(&diffAPIKey, "api-key", "", "API key for authentication (prefer "+cliutil.APIKeyEnvVar+"; --api-key is visible in process listings)")
+	diffCmd.Flags().BoolVar(&diffJSON, "json", false, "Print versioned JSON to stdout")
+	diffCmd.Flags().BoolVar(&diffPrune, "prune", false, "Treat server jobs missing from --path as in-scope deletes (matches job apply --prune)")
 }
 
-func printDiff(cmd *cobra.Command, diff jobdiff.Diff) {
-	out := cmd.OutOrStdout()
+type jobDiffRequest struct {
+	Definitions []schema.Definition `json:"definitions"`
+}
 
-	if diff.Empty() {
-		writeLine(cmd, out, "No changes detected.\n")
-		return
-	}
+type jobDiffResponse struct {
+	Added    []json.RawMessage `json:"added"`
+	Removed  []json.RawMessage `json:"removed"`
+	Modified []json.RawMessage `json:"modified"`
+}
 
-	if len(diff.Creates) > 0 {
-		writeLine(cmd, out, "Creates:\n")
-		slices.SortFunc(diff.Creates, func(a, b jobdiff.JobSpec) int { return cmp.Compare(a.Alias, b.Alias) })
-		for _, spec := range diff.Creates {
-			writeLine(cmd, out, "  - %s\n", spec.Alias)
+type scopedJobDiff struct {
+	Added      []json.RawMessage
+	Modified   []json.RawMessage
+	Removed    []json.RawMessage
+	WouldPrune []json.RawMessage
+}
+
+type jobDiffJSON struct {
+	Version    int               `json:"version"`
+	Added      []json.RawMessage `json:"added"`
+	Modified   []json.RawMessage `json:"modified"`
+	Removed    []json.RawMessage `json:"removed"`
+	WouldPrune []json.RawMessage `json:"wouldPrune,omitempty"`
+}
+
+type jobDiffAlias struct {
+	Alias            string           `json:"alias"`
+	Diff             string           `json:"diff"`
+	ContractFindings []jobDiffFinding `json:"contractFindings,omitempty"`
+}
+
+// jobDiffFinding is the CLI projection of POST /v1/jobdefs/diff contractFindings
+// (api/rest/service/contract.Finding). Text output must surface at least verdict,
+// the consumer (to), and the affected key; JSON keeps the raw objects.
+type jobDiffFinding struct {
+	EdgeID    string `json:"edgeId,omitempty"`
+	EdgeClass string `json:"edgeClass,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Verdict   string `json:"verdict"`
+}
+
+func rejectDuplicateAliases(defs []schema.Definition) error {
+	seen := make(map[string]struct{}, len(defs))
+	for i := range defs {
+		alias := defs[i].Metadata.Alias
+		if _, exists := seen[alias]; exists {
+			return fmt.Errorf("duplicate job alias %q", alias)
 		}
-		writeLine(cmd, out, "\n")
+		seen[alias] = struct{}{}
+	}
+	return nil
+}
+
+func sendDiffRequest(ctx context.Context, server, apiKey string, defs []schema.Definition) (*jobDiffResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := json.Marshal(jobDiffRequest{Definitions: defs})
+	if err != nil {
+		return nil, err
 	}
 
-	if len(diff.Updates) > 0 {
-		writeLine(cmd, out, "Updates:\n")
-		slices.SortFunc(diff.Updates, func(a, b jobdiff.Update) int { return cmp.Compare(a.Alias, b.Alias) })
-		for _, upd := range diff.Updates {
-			writeLine(cmd, out, "  - %s\n", upd.Alias)
-			diffText := indent(upd.Diff, "    ")
-			writeLine(cmd, out, "%s\n", diffText)
-		}
-		writeLine(cmd, out, "\n")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server+"/v1/jobdefs/diff", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	if len(diff.Deletes) > 0 {
-		writeLine(cmd, out, "Deletes:\n")
-		slices.SortFunc(diff.Deletes, func(a, b jobdiff.JobSpec) int { return cmp.Compare(a.Alias, b.Alias) })
-		for _, spec := range diff.Deletes {
-			writeLine(cmd, out, "  - %s\n", spec.Alias)
+	resp, err := diffHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading job diff response: %w", err)
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("job diff failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return decodeJobDiffResponse(body)
+}
+
+func decodeJobDiffResponse(body []byte) (*jobDiffResponse, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, fmt.Errorf("job diff response was empty")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return nil, fmt.Errorf("job diff response was not valid JSON: %w", err)
+	}
+	for _, key := range []string{"added", "modified", "removed"} {
+		v, ok := raw[key]
+		if !ok {
+			return nil, fmt.Errorf("job diff response missing %s", key)
+		}
+		v = bytes.TrimSpace(v)
+		if len(v) == 0 || bytes.Equal(v, []byte("null")) || v[0] != '[' {
+			return nil, fmt.Errorf("job diff response %s must be an array", key)
 		}
 	}
+	var diffResp jobDiffResponse
+	if err := json.Unmarshal(trimmed, &diffResp); err != nil {
+		return nil, fmt.Errorf("job diff response was not valid JSON: %w", err)
+	}
+	return &diffResp, nil
+}
+
+func emptyRaw(items []json.RawMessage) []json.RawMessage {
+	if items == nil {
+		return []json.RawMessage{}
+	}
+	return items
+}
+
+func scopeJobDiff(resp *jobDiffResponse, prune bool) scopedJobDiff {
+	if resp == nil {
+		resp = &jobDiffResponse{}
+	}
+	out := scopedJobDiff{
+		Added:    emptyRaw(resp.Added),
+		Modified: emptyRaw(resp.Modified),
+		Removed:  []json.RawMessage{},
+	}
+	removed := emptyRaw(resp.Removed)
+	if prune {
+		out.Removed = removed
+	} else {
+		out.WouldPrune = removed
+	}
+	return out
+}
+
+func (s scopedJobDiff) inScope() bool {
+	return len(s.Added) > 0 || len(s.Modified) > 0 || len(s.Removed) > 0
+}
+
+func (s scopedJobDiff) jsonOutput() jobDiffJSON {
+	out := jobDiffJSON{
+		Version:  jobDiffJSONVersion,
+		Added:    emptyRaw(s.Added),
+		Modified: emptyRaw(s.Modified),
+		Removed:  emptyRaw(s.Removed),
+	}
+	if len(s.WouldPrune) > 0 {
+		out.WouldPrune = s.WouldPrune
+	}
+	return out
+}
+
+func jobDiffInScopeError(scoped scopedJobDiff) error {
+	if !scoped.inScope() {
+		return nil
+	}
+	var parts []string
+	if n := len(scoped.Added); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to create", n))
+	}
+	if n := len(scoped.Modified); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to update", n))
+	}
+	if n := len(scoped.Removed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to delete", n))
+	}
+	return fmt.Errorf("%w (%s)", errJobDiffInScope, strings.Join(parts, ", "))
+}
+
+func writeJobDiffJSON(cmd *cobra.Command, scoped scopedJobDiff) error {
+	payload, err := json.MarshalIndent(scoped.jsonOutput(), "", "  ")
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), string(payload)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
+	if !scoped.inScope() && len(scoped.WouldPrune) == 0 {
+		return writeCmdOut(cmd, "No changes detected.\n")
+	}
+
+	wrote := false
+	if !scoped.inScope() {
+		if err := writeCmdOut(cmd, "No changes detected.\n"); err != nil {
+			return err
+		}
+		wrote = true
+	}
+
+	if len(scoped.Added) > 0 {
+		if err := writeCmdOut(cmd, "Creates:\n"); err != nil {
+			return err
+		}
+		for _, spec := range sortedRawByAlias(scoped.Added) {
+			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
+				return err
+			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
+		}
+		if err := writeCmdOut(cmd, "\n"); err != nil {
+			return err
+		}
+		wrote = true
+	}
+
+	if len(scoped.Modified) > 0 {
+		if err := writeCmdOut(cmd, "Updates:\n"); err != nil {
+			return err
+		}
+		for _, spec := range sortedRawByAlias(scoped.Modified) {
+			alias, diffText := rawAlias(spec), rawDiff(spec)
+			if err := writeCmdOut(cmd, "  - %s\n", alias); err != nil {
+				return err
+			}
+			if strings.TrimSpace(diffText) != "" {
+				if err := writeCmdOut(cmd, "%s\n", indent(diffText, "    ")); err != nil {
+					return err
+				}
+			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
+		}
+		if err := writeCmdOut(cmd, "\n"); err != nil {
+			return err
+		}
+		wrote = true
+	}
+
+	if len(scoped.Removed) > 0 {
+		if err := writeCmdOut(cmd, "Deletes:\n"); err != nil {
+			return err
+		}
+		for _, spec := range sortedRawByAlias(scoped.Removed) {
+			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
+				return err
+			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
+		}
+		wrote = true
+	}
+
+	if len(scoped.WouldPrune) > 0 {
+		if wrote {
+			if err := writeCmdOut(cmd, "\n"); err != nil {
+				return err
+			}
+		}
+		if err := writeCmdOut(cmd, "%s:\n", jobDiffWouldPruneHdr); err != nil {
+			return err
+		}
+		for _, spec := range sortedRawByAlias(scoped.WouldPrune) {
+			if err := writeCmdOut(cmd, "  - %s\n", rawAlias(spec)); err != nil {
+				return err
+			}
+			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func renderJobDiffFindings(cmd *cobra.Command, findings []jobDiffFinding) error {
+	for _, finding := range findings {
+		if err := writeCmdOut(cmd, "      - %s\n", formatJobDiffFinding(finding)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatJobDiffFinding(finding jobDiffFinding) string {
+	path := dashIfEmpty(finding.Path)
+	if key := strings.TrimSpace(finding.Key); key != "" {
+		path = path + " " + key
+	}
+	return fmt.Sprintf("%s: %s -> %s [%s] %s %s: %s",
+		dashIfEmpty(finding.Verdict),
+		dashIfEmpty(finding.From),
+		dashIfEmpty(finding.To),
+		dashIfEmpty(finding.EdgeClass),
+		dashIfEmpty(finding.Kind),
+		path,
+		dashIfEmpty(finding.Detail),
+	)
+}
+
+func rawAlias(raw json.RawMessage) string {
+	var spec jobDiffAlias
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return ""
+	}
+	return spec.Alias
+}
+
+func rawDiff(raw json.RawMessage) string {
+	var spec jobDiffAlias
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return ""
+	}
+	return spec.Diff
+}
+
+func rawFindings(raw json.RawMessage) []jobDiffFinding {
+	var spec jobDiffAlias
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return nil
+	}
+	return spec.ContractFindings
+}
+
+func sortedRawByAlias(items []json.RawMessage) []json.RawMessage {
+	out := append([]json.RawMessage(nil), items...)
+	slices.SortFunc(out, func(a, b json.RawMessage) int {
+		return cmp.Compare(rawAlias(a), rawAlias(b))
+	})
+	return out
 }
 
 func indent(s, prefix string) string {
@@ -84,10 +448,4 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + lines[i]
 	}
 	return strings.Join(lines, "\n")
-}
-
-func writeLine(cmd *cobra.Command, w io.Writer, format string, args ...any) {
-	if _, err := fmt.Fprintf(w, format, args...); err != nil {
-		cmd.PrintErrf("write output: %v\n", err)
-	}
 }

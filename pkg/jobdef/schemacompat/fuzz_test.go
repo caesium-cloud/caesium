@@ -52,6 +52,35 @@ func FuzzCompare(f *testing.F) {
 
 		_ = Compare(oldSchema, newSchema)
 		_ = Satisfies(newSchema, oldSchema)
+
+		// Reflexivity: a schema is always compatible with itself under
+		// Compare. Every one of compareSchema's six sub-comparisons
+		// (compareRequired, compareTypes, compareEnums,
+		// compareAdditionalProperties, compareRelaxableConstraints,
+		// compareAddedOptionalProperties) computes both sides from the SAME
+		// map when old==new, so each one's own equality/subset check is
+		// satisfied trivially and never reaches a Breaking branch; the
+		// walker's "cannot prove this construct" escape hatch
+		// (scanUnsupported, validateSchema) always reports VerdictUnknown,
+		// never VerdictBreaking, regardless. So Compare(s, s) must never
+		// contain a breaking finding for ANY schema this fuzzer can produce,
+		// valid or not — an invariant of the walker itself, not a property
+		// that requires well-formed input, so no seed is narrowed to reach
+		// it.
+		//
+		// The same claim does NOT hold for Satisfies(s, s): a schema that
+		// requires a field outside "properties" while also declaring
+		// additionalProperties: false is self-contradictory (nothing can ever
+		// satisfy it, including itself), and Satisfies correctly reports that
+		// as breaking even reflexively — so no Satisfies(s, s) property is
+		// asserted here.
+		for _, s := range []map[string]any{oldSchema, newSchema} {
+			for _, finding := range Compare(s, s) {
+				if finding.Verdict == VerdictBreaking {
+					t.Fatalf("Compare(s, s) reported a schema as breaking against itself: %+v\nschema=%v", finding, s)
+				}
+			}
+		}
 	})
 }
 

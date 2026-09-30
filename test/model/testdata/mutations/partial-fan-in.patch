@@ -1,0 +1,6 @@
+diff --git a/test/robustness/corelogic.go b/test/robustness/corelogic.go
+--- a/test/robustness/corelogic.go
++++ b/test/robustness/corelogic.go
+@@ -211 +211 @@
+-	for _, pred := range predecessors {
++	for _, pred := range predecessors[:1] {

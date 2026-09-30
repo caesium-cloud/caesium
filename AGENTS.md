@@ -33,7 +33,7 @@ caesium job lint --path jobs/           # Validate schemas and DAG
 caesium job preview --path job.yaml     # ASCII DAG visualization
 caesium dev --once --path job.yaml      # Run locally against Docker
 caesium dev --path job.yaml             # Watch mode — re-run on save
-caesium job diff --path jobs/           # Preview changes vs server
+caesium job diff --path jobs/           # Preview creates/updates vs server (add --prune for deletes)
 caesium job apply --path jobs/          # Deploy to server
 ```
 

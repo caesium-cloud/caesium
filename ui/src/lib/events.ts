@@ -18,6 +18,8 @@ class EventManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private filters: Record<string, string> = {};
   private connected = false;
+  private opened = false;
+  private errorsSinceOpen = 0;
   private lastEventAt = 0;
   private lastErrorAt = 0;
 
@@ -40,6 +42,8 @@ class EventManager {
 
     this.eventSource.onopen = () => {
       this.connected = true;
+      this.opened = true;
+      this.errorsSinceOpen = 0;
       this.emitConnection();
     };
 
@@ -66,6 +70,7 @@ class EventManager {
 
     this.eventSource.onerror = () => {
       this.connected = false;
+      this.errorsSinceOpen += 1;
       this.lastErrorAt = Date.now();
       this.emitConnection();
       this.eventSource?.close();
@@ -112,6 +117,9 @@ class EventManager {
       }
       return true;
     }
+    // EventSource cannot send an API-key bearer. A stream that never opens,
+    // or that keeps erroring, must not stay "healthy" or the console stops polling.
+    if (!this.opened || this.errorsSinceOpen >= 3) return false;
     return Date.now() - this.lastErrorAt < 10000;
   }
 
@@ -125,6 +133,8 @@ class EventManager {
       this.reconnectTimer = null;
     }
     this.connected = false;
+    this.opened = false;
+    this.errorsSinceOpen = 0;
     this.emitConnection();
   }
 

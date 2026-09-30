@@ -24,6 +24,18 @@ const (
 	ActionKill    = "kill"
 	ActionRestart = "restart"
 	ActionDone    = "done"
+
+	// B2 host-controller actions. Pause/resume freeze a real member process
+	// externally; partition/heal install and remove external network rules
+	// inside the owned kind node containers. Each is acknowledged with its own
+	// raw evidence (a `ctr tasks list` table, an iptables counter listing), so
+	// activation and heal are observed, never inferred from an exit status.
+	ActionPause     = "pause"
+	ActionResume    = "resume"
+	ActionPartition = "partition"
+	ActionHeal      = "heal"
+	ActionCounters  = "counters"
+	ActionTaskState = "task-state"
 )
 
 type HostRequest struct {
@@ -34,6 +46,9 @@ type HostRequest struct {
 	OwnerContainerID string `json:"owner_container_id"`
 	RunID            string `json:"run_id,omitempty"`
 	RequestedAt      string `json:"requested_at"`
+	// Params carries action-specific arguments (partition endpoints, ports,
+	// rule tag). It is additive: the actions B1 shipped ignore it.
+	Params map[string]string `json:"params,omitempty"`
 }
 
 type HostAck struct {
@@ -120,6 +135,13 @@ func RequestHost(ctx context.Context, kube *kubernetes.Clientset, ns string, req
 	data["owner_kind_node"] = req.OwnerKindNode
 	data["owner_container_id"] = req.OwnerContainerID
 	data["run_id"] = req.RunID
+	if len(req.Params) > 0 {
+		raw, err := json.Marshal(req.Params)
+		if err != nil {
+			return HostAck{}, err
+		}
+		data["params"] = string(raw)
+	}
 	if err := putConfigMap(ctx, kube, ns, RequestConfigMap, data); err != nil {
 		return HostAck{}, fmt.Errorf("write host request: %w", err)
 	}

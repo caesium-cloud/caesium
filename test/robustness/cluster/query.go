@@ -1,0 +1,339 @@
+//go:build integration
+
+package cluster
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Query runs one read-only SQL statement through POST /v1/database/query.
+func (h *HTTP) Query(ctx context.Context, base, sql string, limit int) (QueryResponse, []byte, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	status, raw, err := h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/database/query", map[string]any{
+		"sql":   sql,
+		"limit": limit,
+	})
+	if err != nil {
+		return QueryResponse{}, raw, err
+	}
+	if status != http.StatusOK {
+		return QueryResponse{}, raw, fmt.Errorf("query status %d: %s", status, truncate(raw, 1024))
+	}
+	var resp QueryResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return QueryResponse{}, raw, fmt.Errorf("decode query: %w", err)
+	}
+	return resp, raw, nil
+}
+
+// RetryRun posts POST /v1/jobs/:id/runs/:run_id/retry and returns the status
+// and body so a 409 can be distinguished from a transport error.
+func (h *HTTP) RetryRun(ctx context.Context, base, jobID, runID string) (status int, run Run, raw []byte, err error) {
+	jid, err := uuid.Parse(jobID)
+	if err != nil {
+		return 0, Run{}, nil, fmt.Errorf("job id is not a uuid: %w", err)
+	}
+	rid, err := uuid.Parse(runID)
+	if err != nil {
+		return 0, Run{}, nil, fmt.Errorf("run id is not a uuid: %w", err)
+	}
+	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+jid.String()+"/runs/"+rid.String()+"/retry", map[string]any{})
+	if err != nil {
+		return status, Run{}, raw, err
+	}
+	if status == http.StatusAccepted {
+		if err := json.Unmarshal(raw, &run); err != nil {
+			return status, Run{}, raw, fmt.Errorf("retry 202 body is not a run: %w", err)
+		}
+	}
+	return status, run, raw, nil
+}
+
+// RetryPartition posts the targeted partition retry route.
+func (h *HTTP) RetryPartition(ctx context.Context, base, jobID, runID, taskID string, index int) (status int, raw []byte, err error) {
+	jid, err := uuid.Parse(jobID)
+	if err != nil {
+		return 0, nil, err
+	}
+	rid, err := uuid.Parse(runID)
+	if err != nil {
+		return 0, nil, err
+	}
+	tid, err := uuid.Parse(taskID)
+	if err != nil {
+		return 0, nil, err
+	}
+	url := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry",
+		strings.TrimRight(base, "/"), jid, rid, tid, index)
+	return h.Do(ctx, http.MethodPost, url, map[string]any{})
+}
+
+// Metrics scrapes GET /metrics from one member.
+func (h *HTTP) Metrics(ctx context.Context, base string) (string, error) {
+	status, raw, err := h.Do(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/metrics", nil)
+	if err != nil {
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("metrics status %d: %s", status, truncate(raw, 512))
+	}
+	return string(raw), nil
+}
+
+// TriggerRunRaw posts a trigger without treating a non-202 as a hard error.
+func (h *HTTP) TriggerRunRaw(ctx context.Context, base, jobID string) (status int, raw []byte, err error) {
+	id, err := uuid.Parse(jobID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("job id is not a uuid: %w", err)
+	}
+	return h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+}
+
+// WithTimeout returns a shallow copy using a client with the given timeout.
+func (h *HTTP) WithTimeout(d time.Duration) *HTTP {
+	if d <= 0 {
+		d = 15 * time.Second
+	}
+	return &HTTP{Client: &http.Client{Timeout: d}, ManualKey: h.ManualKey}
+}
+
+// TaskRecipe contains frozen recipe fields and claim evidence on a task_runs row.
+type TaskRecipe struct {
+	ID              string
+	TaskID          string
+	Status          string
+	Image           string
+	Command         string
+	ClaimedBy       string
+	Attempt         int
+	ClaimAttempt    int
+	OwnerGeneration int64
+	ResultDigest    string
+	OutputDigest    string
+}
+
+// QueryTaskRecipes reads frozen recipe fields for one run.
+func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]TaskRecipe, error) {
+	id, err := uuid.Parse(runID)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to interpolate an unvalidated run id %q: %w", runID, err)
+	}
+	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation, result, output FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
+	resp, _, err := h.Query(ctx, base, sql, 200)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Limit != 200 || resp.Truncated || resp.RowCount != len(resp.Rows) || len(resp.Rows) > resp.Limit {
+		return nil, fmt.Errorf("inconclusive: task_runs query page is incomplete or malformed: limit=%d rows=%d reported=%d truncated=%t",
+			resp.Limit, len(resp.Rows), resp.RowCount, resp.Truncated)
+	}
+	out := make([]TaskRecipe, 0, len(resp.Rows))
+	for _, row := range resp.Rows {
+		if len(row) < 11 {
+			return nil, fmt.Errorf("task_runs row has %d columns, want 11", len(row))
+		}
+		rowID, err := queryUUID(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.id: %w", err)
+		}
+		taskID, err := queryUUID(row[1])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.task_id for %s: %w", rowID, err)
+		}
+		resultDigest, err := queryCellDigest(row[9])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.result for %s: %w", rowID, err)
+		}
+		outputDigest, err := queryCellDigest(row[10])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.output for %s: %w", rowID, err)
+		}
+		out = append(out, TaskRecipe{
+			ID:              rowID,
+			TaskID:          taskID,
+			Status:          fmt.Sprint(row[2]),
+			Image:           fmt.Sprint(row[3]),
+			Command:         fmt.Sprint(row[4]),
+			ClaimedBy:       fmt.Sprint(row[5]),
+			Attempt:         int(int64From(row[6])),
+			ClaimAttempt:    int(int64From(row[7])),
+			OwnerGeneration: int64From(row[8]),
+			ResultDigest:    resultDigest,
+			OutputDigest:    outputDigest,
+		})
+	}
+	return out, nil
+}
+
+// ResolveUnfannedTaskRecipe maps a public GET /runs/:id task projection to its
+// one durable task_runs row. The public projection uses the catalog task ID as
+// Task.ID even for an unfanned step; it is not the task_runs primary key.
+// Requiring exactly one row for TaskID prevents that projection from hiding a
+// duplicate instance, and all public fields must agree with the durable row.
+func ResolveUnfannedTaskRecipe(public Task, recipes []TaskRecipe) (TaskRecipe, error) {
+	if public.ID == "" || public.TaskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task has no identity: %+v", public)
+	}
+	match, err := UniqueTaskRecipeForTaskID(public.TaskID, recipes)
+	if err != nil {
+		return TaskRecipe{}, err
+	}
+	if public.ID != public.TaskID && public.ID != match.ID {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public task ID %s is neither catalog ID nor durable instance ID %s", public.ID, match.ID)
+	}
+	if !strings.EqualFold(public.Status, match.Status) || public.ClaimedBy != match.ClaimedBy ||
+		public.Attempt != match.Attempt || public.Image != match.Image {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: public/durable task disagree: public=%+v durable=%+v", public, match)
+	}
+	return match, nil
+}
+
+// UniqueTaskRecipeForTaskID is only suitable for a known unfanned fixture.
+// It fails closed if a duplicate task_run exists for the catalog task.
+func UniqueTaskRecipeForTaskID(taskID string, recipes []TaskRecipe) (TaskRecipe, error) {
+	if taskID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: no catalog task identity")
+	}
+	var match TaskRecipe
+	count := 0
+	for _, recipe := range recipes {
+		if recipe.TaskID == taskID {
+			match = recipe
+			count++
+		}
+	}
+	if count != 1 || match.ID == "" {
+		return TaskRecipe{}, fmt.Errorf("inconclusive: catalog task %s maps to %d durable instances", taskID, count)
+	}
+	return match, nil
+}
+
+// queryCellDigest keeps NULL distinct from an empty string and rejects a cell
+// shape the read-only SQL endpoint does not produce for text/JSON columns.
+func queryCellDigest(value any) (string, error) {
+	var raw []byte
+	switch v := value.(type) {
+	case nil:
+		raw = []byte{0}
+	case string:
+		raw = append([]byte{1}, v...)
+	default:
+		return "", fmt.Errorf("unexpected text cell %T", value)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// QueryLeaseAbsent proves absence through a successful SQL read. QueryLease's
+// error alone cannot distinguish a deleted row from an unavailable database.
+func (h *HTTP) QueryLeaseAbsent(ctx context.Context, base, runID string) (bool, error) {
+	id, err := uuid.Parse(runID)
+	if err != nil {
+		return false, fmt.Errorf("lease query refused unvalidated run id %q: %w", runID, err)
+	}
+	sql := fmt.Sprintf("SELECT run_id FROM run_leases WHERE run_id = '%s'", id.String())
+	resp, _, err := h.Query(ctx, base, sql, 1)
+	if err != nil {
+		return false, err
+	}
+	if resp.RowCount != len(resp.Rows) || len(resp.Rows) > 1 {
+		return false, fmt.Errorf("lease query returned inconsistent row count: reported=%d actual=%d", resp.RowCount, len(resp.Rows))
+	}
+	if len(resp.Rows) == 0 {
+		return true, nil
+	}
+	if len(resp.Rows[0]) != 1 {
+		return false, fmt.Errorf("lease query returned %d columns, want 1", len(resp.Rows[0]))
+	}
+	rowID, err := queryUUID(resp.Rows[0][0])
+	if err != nil {
+		return false, fmt.Errorf("lease row identity: %w", err)
+	}
+	if rowID != id.String() {
+		return false, fmt.Errorf("lease row identity %s != %s", rowID, id)
+	}
+	return false, nil
+}
+
+// The database query endpoint can return SQLite UUID bytes as a 32-character
+// hex string, while the public run API encodes the same UUID with hyphens.
+// Reject anything that cannot be mapped to one unambiguous UUID.
+func queryUUID(value any) (string, error) {
+	raw, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected UUID cell %T (%v)", value, value)
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid UUID cell %q: %w", raw, err)
+	}
+	return id.String(), nil
+}
+
+// DecodeBlob turns a database/query cell into bytes. Binary columns that are
+// not valid UTF-8 are hex-encoded by the query surface.
+func DecodeBlob(v any) ([]byte, error) {
+	if v == nil {
+		return nil, fmt.Errorf("nil blob")
+	}
+	switch t := v.(type) {
+	case []byte:
+		return t, nil
+	case string:
+		return decodeMaybeHex(t)
+	default:
+		return decodeMaybeHex(fmt.Sprint(t))
+	}
+}
+
+func decodeMaybeHex(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty blob")
+	}
+	if len(s)%2 == 0 && isHex(s) {
+		if b, err := hex.DecodeString(s); err == nil {
+			return b, nil
+		}
+	}
+	return []byte(s), nil
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// EnvValue reads a container env var off the already-fetched pod spec. The
+// value is for in-memory use only and must not be written to records.
+func (m Member) EnvValue(name string) string {
+	for _, c := range m.Pod.Spec.Containers {
+		if c.Name != CaesiumContainer {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == name {
+				return e.Value
+			}
+		}
+	}
+	return ""
+}

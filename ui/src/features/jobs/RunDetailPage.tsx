@@ -237,7 +237,7 @@ export function RunDetailPage() {
   }, [run?.tasks]);
 
   const compareRuns = useMemo(() => {
-    return (jobRuns ?? [])
+    return (jobRuns?.runs ?? [])
       .filter((candidate) => candidate.id !== runId)
       .sort((a, b) => {
         const aTime = runSortTimestamp(a);

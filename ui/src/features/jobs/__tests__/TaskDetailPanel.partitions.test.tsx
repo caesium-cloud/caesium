@@ -205,6 +205,7 @@ describe("TaskDetailPanel partition table", () => {
 
     expect(within(table).queryByText("Fingerprint")).not.toBeInTheDocument();
     expect(within(table).queryByText("Depends on")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Filter partitions by status")).toBeInTheDocument();
   });
 
   it("shows fingerprint and depends-on columns only when a row is structured", async () => {

@@ -146,11 +146,11 @@
     --gold: 38 92% 56%;
     --gold-dim: 38 80% 42%;
 
-    /* Text levels */
+    /* Text levels — muted rungs stay ≥4.5:1 on card/graphite (WCAG AA). */
     --text-1: 210 40% 96%;
     --text-2: 220 14% 72%;
-    --text-3: 220 12% 50%;
-    --text-4: 220 14% 32%;
+    --text-3: 220 12% 66%;
+    --text-4: 220 12% 62%;
 
     /* Status semantic tokens */
     --success: 152 65% 45%;

@@ -1078,7 +1078,12 @@ none blocks W1.
    The re-cut adds four extra `run_queue` read sites that must exclude window
    rows (A1) — if that list grows again, that is the signal to split.
 3. **Global vs. per-job load ceiling** — parked with D1; per-namespace fairness
-   belongs to roadmap §3.1, not here.
+   belongs to roadmap §3.1, not here — now owned by Stream D of
+   `identity-and-access.md` (per-namespace `maxConcurrentRuns` enforced inside
+   `Store.admit` in `internal/run/store.go`, round-robin fairness in
+   `internal/runqueue/dequeuer.go`; window-scheduled runs must start through
+   `admit` so the namespace gate applies to them; whichever plan touches the
+   dequeuer first in a wave owns the file for that wave, the other rebases).
 4. **Quantile choice** — heavy-tailed jobs may want p99; B1's `HistorySource`
    should make the quantile a parameter so right-sizing (p99) and windows
    (p95) share the reader without sharing the number.

@@ -7,6 +7,7 @@ These records are retained for historical and design-rationale context. They are
 - [design-arm64-support.md](design-arm64-support.md) — Multi-architecture (amd64/arm64) build and CI infrastructure. **Shipped.** Live behavior: root `README.md`, `justfile`, and CI config.
 - [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md) — Helm chart design (StatefulSet peer discovery, headless services for dqlite RAFT, health probes, kind CI). **Shipped.** Live successor: [kubernetes-deployment.md](../kubernetes-deployment.md) and `helm/caesium/`.
 - [design-parallel-job-execution.md](design-parallel-job-execution.md) — Single-node worker pool plus distributed task-claiming design (Phases 1–3). **Shipped.** Live successor: [parallel-execution-operations.md](../parallel-execution-operations.md).
+- [design-sso-authentication.md](design-sso-authentication.md) — Native SSO (OIDC, SAML, LDAP) design: providers, dqlite sessions, CSRF, declarative group→role mapping (PRs #192–#203). **Shipped; superseded** as the design of record by `superpowers/specs/2026-09-16-identity-and-access-design.md` (namespaces, grants, policy-as-code, Keycloak, CLI login). Live successor: [sso-authentication.md](../sso-authentication.md).
 - [design-internal-mtls-auto-provisioning.md](design-internal-mtls-auto-provisioning.md) — Zero-operator-effort internal mTLS via catalog-mediated, leader-signed CA enrollment (PR #181). **Shipped.** Live behavior: `internal/dispatch/pki/`.
 
 ## Completed plans

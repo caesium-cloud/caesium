@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactElement } from "react";
+import { useMemo, useRef, useState, type FormEvent, type ReactElement } from "react";
 import { Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { isSchedulerOwnedParam } from "./rerun-params";
@@ -31,6 +31,7 @@ export function TriggerDialog({
 }: TriggerDialogProps) {
   const [paramLines, setParamLines] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   function handleOpenChange(next: boolean) {
     if (!next) {
@@ -63,8 +64,18 @@ export function TriggerDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      {trigger ? <DialogTrigger asChild>{trigger}</DialogTrigger> : null}
-      <DialogContent className="max-w-lg p-4 sm:rounded-lg sm:p-6">
+      {trigger ? (
+        <DialogTrigger asChild ref={triggerRef}>
+          {trigger}
+        </DialogTrigger>
+      ) : null}
+      <DialogContent
+        className="max-w-lg p-4 sm:rounded-lg sm:p-6"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          triggerRef.current?.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Trigger Job</DialogTitle>
           <DialogDescription>

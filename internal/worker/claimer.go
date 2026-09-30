@@ -239,16 +239,15 @@ func (c *Claimer) claimNextSingleStatementTx(tx *gorm.DB, now, leaseExpiry time.
 		return nil, uuid.Nil, err
 	}
 
-	// liveLeaseGuard returns SQL that is true only when the candidate task's run
-	// does NOT have a live (non-expired) run_leases row.  When no row exists
-	// (owner mode off, pre-owner runs) NOT EXISTS is always true, so ClaimNext
-	// behaves byte-identically to the no-owner-mode path.
+	// Memory coordination reserves every existing run lease for owner takeover.
+	// SQL coordination reserves only live leases and permits expired-lease
+	// recovery. No lease means the pull lane is available in either mode.
 	//
 	// The job_run_id column is stored as UUID on Postgres but as TEXT on
 	// SQLite/dqlite.  run_leases.run_id is always TEXT.  On Postgres we must
 	// cast to avoid a type-mismatch error; on SQLite the comparison works
 	// without any cast.
-	liveLeaseGuard, err := c.liveLeaseGuardSQL(tx.Name(), "tr")
+	liveLeaseGuard, liveLeaseArgs, err := c.liveLeaseGuardSQL(tx.Name(), "tr", now)
 	if err != nil {
 		return nil, uuid.Nil, err
 	}
@@ -296,8 +295,7 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 		now,
 	}
 	args = append(args, selectorArgs...)
-	// liveLeaseGuard binds one parameter: now (the live-lease expiry cutoff).
-	args = append(args, now)
+	args = append(args, liveLeaseArgs...)
 	args = append(args, string(run.TaskStatusPending), 0, now, now, string(run.StatusRunning))
 
 	var claimed claimedTaskRunRow
@@ -311,15 +309,6 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 	return &claimed.TaskRun, claimed.ClaimJobID, nil
 }
 
-// liveLeaseGuardSQL returns a NOT EXISTS predicate that is true when the
-// candidate task's run does NOT have a live (non-expired) run_leases row.
-// The single bound parameter is now (UTC), which must be appended to the args
-// slice immediately after the selector args and before any post-subquery args.
-//
-// Semantics:
-//   - No run_leases row           → NOT EXISTS true → claimable (owner mode off).
-//   - Live lease (expires_at > ?) → NOT EXISTS false → defer to owner's dispatch loop.
-//   - Expired lease               → NOT EXISTS true → claimable (recovery path).
 func (c *Claimer) fanOutMaxParallelSQL(dialect, trAlias, taskAlias string) (string, error) {
 	var extract string
 	switch dialect {
@@ -336,7 +325,9 @@ func (c *Claimer) fanOutMaxParallelSQL(dialect, trAlias, taskAlias string) (stri
 		") < " + extract + ")", nil
 }
 
-func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string) (string, error) {
+// liveLeaseGuardSQL reserves any existing lease for owner-memory takeover.
+// SQL coordination instead permits expired leases; only that mode binds now.
+func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string, now time.Time) (string, []any, error) {
 	// job_run_id is a native UUID column on Postgres; a text column on
 	// SQLite/dqlite.  run_leases.run_id is always TEXT.  Cast only on Postgres.
 	// Mirror nodeSelectorPredicateSQL: reject unknown dialects rather than
@@ -349,13 +340,16 @@ func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string) (string, error) 
 	case "postgres":
 		jobRunIDExpr = "CAST(" + tableAlias + ".job_run_id AS TEXT)"
 	default:
-		return "", fmt.Errorf("worker claimer: unsupported dialect %q for live-lease guard", dialect)
+		return "", nil, fmt.Errorf("worker claimer: unsupported dialect %q for live-lease guard", dialect)
+	}
+	if c.store.OwnerMemoryAdvancementEnabled() {
+		return "NOT EXISTS (SELECT 1 FROM run_leases rl WHERE rl.run_id = " + jobRunIDExpr + ")", nil, nil
 	}
 	return "NOT EXISTS (" +
 		"SELECT 1 FROM run_leases rl " +
 		"WHERE rl.run_id = " + jobRunIDExpr + " " +
 		"AND rl.lease_expires_at > ?" +
-		")", nil
+		")", []any{now}, nil
 }
 
 type claimedTaskRunRow struct {
@@ -464,26 +458,19 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				Select("id").
 				Where("status = ?", string(run.StatusRunning))
 
-			// liveLeaseGuard skips tasks belonging to a live-owned run — the
-			// owner's dispatch loop is responsible for re-dispatching them after a
-			// worker crash.  Resetting such a task here would race the owner,
-			// risking double-execution.
-			//
-			// liveLeaseGuardSQL generates "NOT EXISTS (SELECT 1 FROM run_leases rl
-			// WHERE rl.run_id = <job_run_id_expr> AND rl.lease_expires_at > ?)"
-			// and handles the Postgres UUID→TEXT cast internally via tableAlias.
-			// One bound parameter (now) is appended via liveLeaseArgs.
-			liveLeaseGuard, err := c.liveLeaseGuardSQL(tx.Name(), "task_runs")
+			// Owner-memory leases, including expired ones, reserve recovery for
+			// takeover. SQL mode defers only while the lease remains live.
+			liveLeaseGuard, liveLeaseArgs, err := c.liveLeaseGuardSQL(tx.Name(), "task_runs", now)
 			if err != nil {
 				return err
 			}
 
 			// Shared between the Find (to collect events) and the Updates (to
 			// reset claims) so the expiry criteria can't drift between them.
-			// liveLeaseGuard binds one parameter (now); it trails the three
-			// static args.
+			// Only SQL mode appends a live-lease expiry cutoff.
 			expiredWhere := "job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND " + liveLeaseGuard
-			expiredArgs := []any{runningRunIDs, string(run.TaskStatusRunning), now, now}
+			expiredArgs := []any{runningRunIDs, string(run.TaskStatusRunning), now}
+			expiredArgs = append(expiredArgs, liveLeaseArgs...)
 
 			var expired []models.TaskRun
 			if err := tx.Where(expiredWhere, expiredArgs...).Find(&expired).Error; err != nil {

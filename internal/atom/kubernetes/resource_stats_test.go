@@ -36,7 +36,8 @@ func TestResourceOOMUsesTerminationReasonAndHonorsGate(t *testing.T) {
 }
 
 func TestResourceStatsKubernetesUnavailableDoesNotFabricateZero(t *testing.T) {
-	engine := NewEngine(context.Background(), fake.NewClientset().CoreV1())
+	engine, err := NewEngine(context.Background(), fake.NewClientset().CoreV1())
+	require.NoError(t, err)
 	stats, err := engine.Stats(&atom.EngineStatsRequest{ID: "runtime"})
 	require.ErrorIs(t, err, atom.ErrStatsUnavailable)
 	require.Nil(t, stats.MemoryBytes)

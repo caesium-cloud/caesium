@@ -82,4 +82,28 @@ describe("Header", () => {
 
     await waitFor(() => expect(signOut).not.toBeDisabled());
   });
+
+  it("opens a notifications empty state and closes on Escape", () => {
+    render(<Header />);
+
+    const bell = screen.getByRole("button", { name: "Notifications" });
+    expect(bell).toHaveAttribute("aria-expanded", "false");
+    expect(bell).toHaveAttribute("aria-haspopup", "dialog");
+    expect(screen.queryByTestId("notifications-panel")).not.toBeInTheDocument();
+
+    fireEvent.click(bell);
+
+    expect(bell).toHaveAttribute("aria-expanded", "true");
+    const panel = screen.getByTestId("notifications-panel");
+    expect(panel).toBeVisible();
+    expect(panel).toHaveTextContent("/v1/notifications/channels");
+    expect(panel).toHaveTextContent("/v1/notifications/policies");
+    expect(panel).toHaveTextContent("no in-console alert inbox yet");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByTestId("notifications-panel")).not.toBeInTheDocument();
+    expect(bell).toHaveAttribute("aria-expanded", "false");
+    expect(bell).toHaveFocus();
+  });
 });

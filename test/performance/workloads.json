@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "description": "Versioned load-driver workload catalog. Each entry is a configuration BASE for test/load (the containerized Go load driver): `driver` maps real driver flag names to values, `requires` declares what the server under test must provide, and `expect` is the invariant set test/performance/load_test.go asserts on the driver's machine-readable JSON result. Entries in the `smoke` tier run by default; run the rest with CAESIUM_PERF_WORKLOADS=all or a comma-separated list. Sizing targets a laptop-class host shared with other work: the point is correct accounting and honest exit codes, not large numbers.",
+  "tiers": {
+    "smoke": "runs by default; bounded to a few minutes in total",
+    "extended": "opt-in shape coverage (wide/deep DAGs, queues, cache, read mix)"
+  },
+  "workloads": [
+    {
+      "name": "closed-baseline",
+      "tier": "smoke",
+      "description": "E1's completion-governed closed loop, kept in the catalog so the mode this driver started from stays covered. Every run must succeed and the metric samples must be complete.",
+      "requires": {},
+      "driver": {
+        "mode": "closed",
+        "jobs": 3,
+        "fan-out": 2,
+        "depth": 2,
+        "task-duration": "200ms",
+        "concurrency": 2,
+        "sample-rate": "1s",
+        "timeout": "6m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": false,
+        "min_succeeded": 3,
+        "max_duration_seconds": 360
+      },
+      "sustained_rationale": "Not applicable: closed mode is completion-governed, so there is no arrival plan to outrun."
+    },
+    {
+      "name": "open-tiny-sustained",
+      "tier": "smoke",
+      "description": "Tiny single-task runs offered open-loop at a rate the server can sustain, with a small SSE-subscriber and API-read mix alongside. Proves the full ledger reconciles, the backlog stays flat, and lifecycle intervals are derived from observed events.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 4,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "200ms",
+        "rate": 0.5,
+        "arrival-window": "40s",
+        "max-in-flight": 16,
+        "sample-rate": "1s",
+        "drain-timeout": "4m",
+        "poll-interval": "500ms",
+        "reconcile-workers": 8,
+        "require-sustained": true,
+        "subscribers": 2,
+        "api-read-rate": 2,
+        "lifecycle": true,
+        "timeout": "8m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 15,
+        "min_admitted": 15,
+        "max_unreconciled": 0,
+        "sustained_verdict": "sustained",
+        "require_lifecycle_ok": [
+          "admission_to_first_task_start",
+          "task_execution",
+          "run_terminal",
+          "read_admission_to_run_start",
+          "read_run_total",
+          "read_task_execution"
+        ],
+        "min_subscriber_events": 1,
+        "min_api_reads_ok": 30,
+        "max_cache_hit_ratio": 0.0,
+        "max_duration_seconds": 480
+      },
+      "sustained_rationale": "ON. Measured sustained on this host (peak 1, slope -0.008). This is the workload whose whole purpose is to prove a sustainable rate fully reconciles."
+    },
+    {
+      "name": "open-realistic-drain",
+      "tier": "smoke",
+      "description": "Realistic multi-second fan-out/join runs offered open-loop, then drained: arrivals stop and every admitted run must reach a terminal status inside the drain deadline with the backlog returning to zero.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 4,
+        "fan-out": 2,
+        "depth": 2,
+        "task-duration": "1s",
+        "rate": 0.5,
+        "arrival-window": "20s",
+        "max-in-flight": 8,
+        "sample-rate": "2s",
+        "drain-timeout": "4m",
+        "poll-interval": "500ms",
+        "lifecycle": true,
+        "timeout": "10m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 8,
+        "min_admitted": 8,
+        "max_unreconciled": 0,
+        "max_backlog_final": 0,
+        "require_drain_complete": true,
+        "max_cache_hit_ratio": 0.0,
+        "require_lifecycle_ok": [
+          "task_queue_wait",
+          "task_execution",
+          "run_terminal"
+        ],
+        "max_duration_seconds": 600
+      },
+      "sustained_rationale": "OFF by design. Its assertion is the stronger drain one (max_backlog_final 0 plus require_drain_complete), and the in-window rate is deliberately ABOVE what this host sustains so there is real backlog to drain. Gating on sustained would contradict the workload's purpose."
+    },
+    {
+      "name": "open-overload-bounded",
+      "tier": "smoke",
+      "description": "Deliberate overload: arrivals far outpace both the driver's in-flight cap and the job's concurrency policy. Overload must be COUNTED \u2014 as driver drops, server rejections or bare-202 skips \u2014 the ledger must still balance, nothing may be left unreconciled, and the driver must not hang.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 2,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "1s",
+        "rate": 25,
+        "arrival-window": "8s",
+        "max-in-flight": 2,
+        "late-budget": "50ms",
+        "sample-rate": "1s",
+        "drain-timeout": "3m",
+        "poll-interval": "500ms",
+        "concurrency-strategy": "skip",
+        "max-runs": 1,
+        "require-sustained": false,
+        "allow-run-failures": true,
+        "lifecycle": true,
+        "timeout": "8m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 150,
+        "min_overload_signal": 10,
+        "max_unreconciled": 0,
+        "max_duration_seconds": 480
+      },
+      "sustained_rationale": "OFF by design. Deliberate overload: the point is that drops, rejections and bare-202 skips are COUNTED and the driver does not hang. A sustained verdict here would mean the overload failed to happen."
+    },
+    {
+      "name": "open-wide-dag",
+      "tier": "extended",
+      "description": "Wide fan-out DAGs (one root, eight parallel lanes, one join) offered open-loop at a low rate.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 3,
+        "fan-out": 8,
+        "depth": 2,
+        "task-duration": "200ms",
+        "rate": 0.4,
+        "arrival-window": "20s",
+        "max-in-flight": 8,
+        "sample-rate": "2s",
+        "drain-timeout": "5m",
+        "poll-interval": "500ms",
+        "lifecycle": true,
+        "timeout": "12m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 6,
+        "min_admitted": 6,
+        "max_unreconciled": 0,
+        "require_lifecycle_ok": [
+          "task_execution",
+          "run_terminal"
+        ],
+        "max_duration_seconds": 720
+      },
+      "sustained_rationale": "OFF. Exists for wide-DAG lifecycle coverage, not for a rate claim. This host does not sustain 0.4 runs/s of 10-task DAGs (observed backlog_growing), and lowering the rate further would leave too few arrivals to measure. The verdict is still reported."
+    },
+    {
+      "name": "open-deep-dag",
+      "tier": "extended",
+      "description": "Deep DAGs (two lanes, six layers) offered open-loop, so the measured queue wait and execution intervals cover chained dependencies rather than a single step.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 3,
+        "fan-out": 2,
+        "depth": 6,
+        "task-duration": "200ms",
+        "rate": 0.4,
+        "arrival-window": "20s",
+        "max-in-flight": 8,
+        "sample-rate": "2s",
+        "drain-timeout": "5m",
+        "poll-interval": "500ms",
+        "lifecycle": true,
+        "timeout": "12m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 6,
+        "min_admitted": 6,
+        "max_unreconciled": 0,
+        "require_lifecycle_ok": [
+          "task_queue_wait",
+          "task_execution"
+        ],
+        "max_duration_seconds": 720
+      },
+      "sustained_rationale": "OFF. Same as open-wide-dag, for 12-task chained DAGs: shape coverage, not a rate claim. Verdict reported, not gated."
+    },
+    {
+      "name": "open-queue-concurrency",
+      "tier": "extended",
+      "description": "A single job with metadata.concurrency {maxRuns:1, strategy:queue} under an open-loop arrival rate it cannot absorb. Excess arrivals must come back as bare 202s (queued, no acknowledged run identity) and the server's own run census must account for the runs the dequeuer later started.",
+      "requires": {
+        "server_env": [
+          "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true"
+        ],
+        "reason": "queued runs are only ever started by the run-queue dequeuer"
+      },
+      "driver": {
+        "mode": "open",
+        "jobs": 1,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "1s",
+        "rate": 2,
+        "arrival-window": "15s",
+        "max-in-flight": 8,
+        "sample-rate": "1s",
+        "drain-timeout": "5m",
+        "poll-interval": "500ms",
+        "concurrency-strategy": "queue",
+        "max-runs": 1,
+        "allow-run-failures": true,
+        "lifecycle": true,
+        "timeout": "12m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 20,
+        "min_queued_or_skipped": 5,
+        "max_unreconciled": 0,
+        "max_queue_depth_final": 0,
+        "max_duration_seconds": 720
+      },
+      "sustained_rationale": "OFF by design, and now honestly measurable: queue depth is sampled into the in-window growth decision, so this workload WOULD read backlog_growing - correctly, because it deliberately overloads a one-slot queue. It gates on the queue draining to 0 instead."
+    },
+    {
+      "name": "open-cache-miss",
+      "tier": "extended",
+      "description": "Caching enabled with no warm-up, so every task in the arrival window is a first execution. Establishes the miss baseline the hit workload is compared against.",
+      "requires": {
+        "server_env": [
+          "CAESIUM_CACHE_ENABLED=true"
+        ],
+        "reason": "task caching must be enabled for a cache hit ratio to mean anything"
+      },
+      "driver": {
+        "mode": "open",
+        "jobs": 6,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "200ms",
+        "rate": 0.5,
+        "arrival-window": "12s",
+        "max-in-flight": 6,
+        "sample-rate": "2s",
+        "drain-timeout": "4m",
+        "poll-interval": "500ms",
+        "cache": "miss",
+        "lifecycle": true,
+        "timeout": "10m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 5,
+        "max_unreconciled": 0,
+        "max_cache_hit_ratio": 0.0,
+        "require_lifecycle_ok": [
+          "task_execution"
+        ],
+        "max_duration_seconds": 600
+      },
+      "sustained_rationale": "OFF. A 12 s window at sample-rate 2 s yields about 6 in-window samples, which is at the verdict's evidence floor; gating would yield inconclusive rather than information. It gates on the cache hit ratio."
+    },
+    {
+      "name": "open-cache-hit",
+      "tier": "extended",
+      "description": "Caching enabled with a completed warm-up run per job before the arrival window opens, so the window's tasks are cache hits. A cache hit starts no container, so the task-start lifecycle intervals must carry an explicit cache_hit_no_task_start unavailability marker rather than a zero.",
+      "requires": {
+        "server_env": [
+          "CAESIUM_CACHE_ENABLED=true"
+        ],
+        "reason": "task caching must be enabled for a cache hit to be possible"
+      },
+      "driver": {
+        "mode": "open",
+        "jobs": 3,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "200ms",
+        "rate": 0.5,
+        "arrival-window": "12s",
+        "max-in-flight": 6,
+        "sample-rate": "2s",
+        "drain-timeout": "4m",
+        "poll-interval": "500ms",
+        "cache": "hit",
+        "lifecycle": true,
+        "timeout": "10m",
+        "image": "alpine:3.23"
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 5,
+        "max_unreconciled": 0,
+        "min_cache_hit_ratio": 0.5,
+        "require_unavailable_reason": {
+          "read_task_execution": "cache_hit_no_task_start"
+        },
+        "max_duration_seconds": 600
+      },
+      "sustained_rationale": "OFF. Same sample-count floor as open-cache-miss; it gates on the hit ratio and on the explicit cache_hit_no_task_start unavailability marker."
+    },
+    {
+      "name": "open-api-read-mix",
+      "tier": "extended",
+      "description": "Execution traffic alongside a sustained public read mix and several SSE subscribers, so list/summary reads and event fan-out are inside the measured interval rather than beside it.",
+      "requires": {},
+      "driver": {
+        "mode": "open",
+        "jobs": 4,
+        "fan-out": 1,
+        "depth": 1,
+        "task-duration": "200ms",
+        "rate": 1,
+        "arrival-window": "20s",
+        "max-in-flight": 8,
+        "sample-rate": "1s",
+        "drain-timeout": "4m",
+        "poll-interval": "500ms",
+        "api-read-rate": 10,
+        "subscribers": 4,
+        "lifecycle": true,
+        "timeout": "10m",
+        "image": "alpine:3.23",
+        "require-sustained": true
+      },
+      "expect": {
+        "exit_code": 0,
+        "accounting_identity": true,
+        "min_offered": 15,
+        "max_unreconciled": 0,
+        "min_api_reads_ok": 100,
+        "min_subscriber_events": 4,
+        "min_subscriber_coverage": 0.9,
+        "max_duration_seconds": 600,
+        "sustained_verdict": "sustained"
+      },
+      "sustained_rationale": "ON. Measured sustained on this host (peak 4, slope 0.036) with a 10 reads/s read mix and 4 subscribers alongside, so it can carry a rate claim as well as a mix claim."
+    }
+  ]
+}

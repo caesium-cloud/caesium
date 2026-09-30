@@ -25,6 +25,7 @@ import (
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -284,6 +285,11 @@ type Store struct {
 	db         *gorm.DB
 	bus        event.Bus
 	eventStore *event.Store
+	// ownerInMemory is captured at construction on every node, including pull
+	// workers. A lease reserves primary terminal advancement for the owner in
+	// distributed memory mode; local and SQL owner-coordination modes retain
+	// their existing Store completion paths.
+	ownerInMemory bool
 
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
@@ -409,6 +415,10 @@ type RegisterTaskInput struct {
 type StartOptions struct {
 	Params   map[string]string
 	Priority string
+	// IdempotencyKey, when set, makes the start idempotent: a later start of
+	// the same job with the same key returns this start's outcome instead of
+	// admitting again. See start_idempotency.go.
+	IdempotencyKey string
 }
 
 type StartOption func(*StartOptions)
@@ -537,8 +547,12 @@ var (
 
 var (
 	ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
-	ErrRunSkipped        = errors.New("run: skipped by concurrency policy")
-	ErrRunQueued         = errors.New("run: queued by concurrency policy")
+	// ErrRunTerminal means the owner completion's guarded write observed a
+	// terminal JobRun in its own transaction. Unlike a claim mismatch on a
+	// running run, this proves the run-state fence preceded that write.
+	ErrRunTerminal = errors.New("run: terminal run fenced owner completion")
+	ErrRunSkipped  = errors.New("run: skipped by concurrency policy")
+	ErrRunQueued   = errors.New("run: queued by concurrency policy")
 	// ErrRunHeldUpstream is returned when the data circuit breaker's admission
 	// gate refuses a run because a dataset the job declares under
 	// datasets.consumes is held.
@@ -558,6 +572,38 @@ var (
 	// retry is refused because the job is paused. A human pause outranks an agent
 	// retry (design-agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
+)
+
+// RunCommittedError reports a start that FAILED after its run was already
+// committed and live: the row exists, run_started has been published and the
+// lease is taken, but the record could not be read back.
+//
+// It carries the exact run id so a caller can drive or finalize the run it
+// actually created. That identity matters: searching for "a matching running
+// run" instead would, during a leader change, let one node adopt and execute a
+// run another node created and is already executing.
+type RunCommittedError struct {
+	RunID uuid.UUID
+	JobID uuid.UUID
+	Err   error
+}
+
+func (e *RunCommittedError) Error() string {
+	return fmt.Sprintf("run: %s was committed but could not be read back: %v", e.RunID, e.Err)
+}
+
+func (e *RunCommittedError) Unwrap() error { return e.Err }
+
+// CommittedRunID reports the run a failed start already committed, if any.
+func CommittedRunID(err error) (uuid.UUID, bool) {
+	var committed *RunCommittedError
+	if errors.As(err, &committed) && committed.RunID != uuid.Nil {
+		return committed.RunID, true
+	}
+	return uuid.Nil, false
+}
+
+var (
 	// ErrPartitionNotRetryable is returned by RetryPartition when the addressed
 	// instance is terminal but not FAILED. The retryable set is documented at
 	// the guard in RetryPartition; controllers surface this as 409 with the
@@ -635,6 +681,8 @@ type admissionResult struct {
 	// transaction appended, for publication after commit.
 	heldBy     *models.DatasetHold
 	heldEvents []event.Event
+	// queueID is the run_queue row an admissionQueued decision wrote.
+	queueID uuid.UUID
 }
 
 type startRunRequest struct {
@@ -646,6 +694,16 @@ type startRunRequest struct {
 	priorityOverride string
 	fromQueue        bool
 	policyOnly       bool
+	// queueID is the run_queue row a fromQueue start is promoting, so the
+	// admission can resolve an idempotent start that was waiting on it.
+	queueID *uuid.UUID
+	// idempotencyKey makes this start idempotent (see start_idempotency.go);
+	// requestParams are the params as the caller sent them, before
+	// enrichment, which is what the key's request hash covers.
+	idempotencyKey string
+	requestParams  map[string]string
+	// result, when non-nil, receives the admission outcome.
+	result *StartResult
 }
 
 // storeBusyRetryBackoffs aliases the shared contention-retry schedule so
@@ -657,11 +715,37 @@ func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
 	}
+	vars := env.Variables()
 	return &Store{
-		db:          conn,
-		eventStore:  event.NewStore(conn),
-		startedRuns: make(map[uuid.UUID]struct{}),
+		db:            conn,
+		eventStore:    event.NewStore(conn),
+		startedRuns:   make(map[uuid.UUID]struct{}),
+		ownerInMemory: ownerMemoryAdvancementMode(vars),
 	}
+}
+
+func ownerMemoryAdvancementMode(vars env.Environment) bool {
+	return vars.RunOwnerEnabled && vars.RunOwnerInMemory &&
+		strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
+}
+
+// OwnerMemoryAdvancementEnabled returns the coordination mode captured when
+// this Store was constructed, so claim selection and completion share a policy.
+func (s *Store) OwnerMemoryAdvancementEnabled() bool {
+	return s != nil && s.ownerInMemory
+}
+
+// fenceSQLTerminalUpdate prevents a pull completion selected before the first
+// lease from advancing the SQL DAG after ownership moved to memory. An expired
+// lease still reserves that lane: its recovery is owner takeover, not SQL
+// advancement using the owner's stale predecessor counters. AcquireLease takes
+// the same JobRun lock, so a completion either commits before lease insertion
+// (and is replayed by recovery) or loses this predicate afterwards.
+func (s *Store) fenceSQLTerminalUpdate(query *gorm.DB, runID uuid.UUID) *gorm.DB {
+	if !s.ownerInMemory {
+		return query
+	}
+	return query.Where("NOT EXISTS (SELECT 1 FROM run_leases WHERE run_id = ?)", runID.String())
 }
 
 // WithLeaseStore enables run-owner lease writing.  Call this from startup
@@ -1068,12 +1152,13 @@ func (s *Store) replayPredecessorRefsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([
 func newStartRunModel(req startRunRequest) (*models.JobRun, error) {
 	now := time.Now().UTC()
 	model := &models.JobRun{
-		ID:        uuid.New(),
-		JobID:     req.jobID,
-		Status:    string(StatusRunning),
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               uuid.New(),
+		JobID:            req.jobID,
+		Status:           string(StatusRunning),
+		StartedAt:        now,
+		TimeoutStartedAt: &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if req.triggerID != nil {
 		model.TriggerID = *req.triggerID
@@ -1237,10 +1322,12 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
-		if err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth); err != nil {
+		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth)
+		if err != nil {
 			return result, err
 		}
 		result.decision = admissionQueued
+		result.queueID = queueID
 		return result, nil
 	case jobdefschema.ConcurrencyStrategyReplace:
 		cancelled, cancelEvents, err := s.cancelOldestActiveRunTx(tx, model.JobID)
@@ -1333,6 +1420,19 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	}
 	conn := s.db.WithContext(ctx)
 
+	// An idempotent start fingerprints the params as the caller sent them, so
+	// capture them before the enricher adds its own.
+	req.requestParams = req.params
+	if req.idempotencyKey != "" {
+		existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey)
+		if err == nil {
+			return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+
 	// Enrich before the model is built so the added params are marshalled into
 	// models.JobRun.Params and land with the INSERT (and with the run_queue row
 	// on the queued path), rather than being observed after the run is live.
@@ -1384,11 +1484,17 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				// the others and are published after commit; there is no
 				// run_started, because nothing started.
 				attemptEvents = append(attemptEvents, result.heldEvents...)
-				return nil
-			case admissionSkipped, admissionFailed, admissionQueued:
+				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+			case admissionSkipped, admissionQueued:
+				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+			case admissionFailed:
 				return nil
 			default:
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
+			}
+
+			if err := recordStartOutcomeTx(tx, req, model.ID, attemptAdmission); err != nil {
+				return err
 			}
 
 			evt, err := s.appendRunStartedEventTx(tx, model)
@@ -1412,7 +1518,22 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return err
 	}); err != nil {
+		if req.idempotencyKey != "" && sqlerr.IsUniqueConstraint(err) {
+			// A concurrent start with the same key committed first; this
+			// transaction (including anything admission did) rolled back.
+			// Answer with the winner's outcome.
+			if existing, loadErr := findStartIdempotency(conn, req.jobID, req.idempotencyKey); loadErr == nil {
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+			}
+		}
 		return nil, err
+	}
+
+	if req.result != nil {
+		outcome, reason, runID, queueID, ok := startOutcomeOf(model.ID, admission)
+		if ok {
+			*req.result = StartResult{Outcome: outcome, Reason: reason, RunID: runID, QueueID: queueID}
+		}
 	}
 
 	switch admission.decision {
@@ -1447,6 +1568,16 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		metrics.RunSkippedTotal.WithLabelValues(metricJobAlias(req.jobID, admission.jobAlias), reason).Inc()
 		return nil, ErrRunSkipped
 	case admissionFailed:
+		if req.idempotencyKey != "" {
+			// The run holding the slot may be this key's own: a concurrent
+			// start with the same key committed it (and its record, in the same
+			// transaction) after the up-front lookup. Every other outcome
+			// collides with that record on insert; a refusal inserts nothing,
+			// so look again before refusing.
+			if existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey); err == nil {
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+			}
+		}
 		return nil, ErrMaxConcurrentRunsReached
 	case admissionQueued:
 		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
@@ -1494,7 +1625,22 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		s.startedMu.Unlock()
 	}
 
-	return s.loadRunWithDB(conn, model.ID)
+	// The run is COMMITTED by this point: the row exists, run_started has been
+	// published, the lease is taken and callers drive the run from the record
+	// returned here. Reading it back on the CALLER's context would let a
+	// cancellation landing in this window turn a live run into
+	// (nil, context.Canceled) — the caller then neither executes nor finalizes
+	// it, and the row is stranded `running` with no tasks and no engine. Only
+	// the transaction above honours cancellation; this read is detached.
+	loaded, err := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), model.ID)
+	if err != nil {
+		// Still committed, still live. Report the failure with the run's exact
+		// identity so the caller can drive or finalize THAT run — never a
+		// look-alike found by searching, which on another node would mean
+		// executing someone else's run twice.
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Err: err}
+	}
+	return loaded, nil
 }
 
 // taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
@@ -1621,6 +1767,7 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 		params:           decodeRunParams(queued.Params),
 		priorityOverride: PriorityLabel(queued.Priority),
 		fromQueue:        true,
+		queueID:          &queued.ID,
 	})
 }
 
@@ -2742,6 +2889,12 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 		var attemptExpansion *FanOutExpansion
 
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			// Cache hits are terminal task writes too. Serialize them on the
+			// JobRun before reading or updating the TaskRun so run-timeout
+			// finalization and cache publication have one order on PostgreSQL.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			// taskRef is the caller's IMMUTABLE reference (a TaskRun primary key
@@ -2765,14 +2918,19 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return ErrTaskClaimMismatch
 			}
 			if IsTerminal(TaskStatus(taskRun.Status)) {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
 				return nil
 			}
 
 			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("id = ?", taskRun.ID)
+				Where("id = ? AND status NOT IN ?", taskRun.ID, terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
 
 			updates := map[string]any{
 				"status":                  string(TaskStatusCached),
@@ -2784,6 +2942,11 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				"cache_expires_at":        source.ExpiresAt,
 				"partition_retry_pending": false,
 			}
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
+			}
+			updates["terminal_sequence"] = seq
 			if len(output) > 0 {
 				encoded, marshalErr := json.Marshal(output)
 				if marshalErr != nil {
@@ -2803,10 +2966,14 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 			if resultUpdate.Error != nil {
 				return resultUpdate.Error
 			}
-			if enforceClaim && resultUpdate.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+			if resultUpdate.RowsAffected == 0 {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return nil
 			}
 			counts.addTaskRunStatus(1)
+			taskRun.TerminalSequence = seq
 
 			descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, catalogTaskID)
 			if err != nil {
@@ -3392,10 +3559,10 @@ func uuidSetValues(set map[uuid.UUID]struct{}) []uuid.UUID {
 // skipped fan-out instance was therefore invisible to a recovering owner and to
 // the terminal-row replay tail. Allocating MAX(terminal_sequence)+1 for the run
 // keeps the space monotonic and, because it is read inside the caller's
-// transaction, dense across the rows one transaction marks terminal. It can
-// never collide with an owner-allocated value: owner-managed runs return before
-// the SQL lane is reached (dispatch.go short-circuits on res.Owned), and taking
-// max+1 always exceeds anything already persisted.
+// transaction, dense across the rows one transaction marks terminal.
+// The caller must serialize allocation with the terminal write. Primary SQL
+// completion transactions hold the JobRun lock and are fenced once a memory
+// owner lease exists; owner completions retain their in-memory sequence cursor.
 func nextTerminalSequenceTx(tx *gorm.DB, runID uuid.UUID) (int64, error) {
 	var maxSeq int64
 	if err := tx.Model(&models.TaskRun{}).
@@ -3794,6 +3961,13 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 		var attemptExpansion *FanOutExpansion
 
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			// Serialize every completion with run finalization before
+			// touching the TaskRun. PostgreSQL READ COMMITTED can otherwise let a
+			// completion observe run=running, wait on the task row, and commit a
+			// stale success after the timeout transaction has made the run failed.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			status := taskStatusFromResult(result)
@@ -3847,6 +4021,9 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 					// cascade: a terminal task has already been accounted for, and in the
 					// replace-cancel case that motivates this the run is cancelled, so no
 					// successor should advance.
+					if enforceClaim {
+						return ErrTaskClaimMismatch
+					}
 					return nil
 				}
 				var jobRun models.JobRun
@@ -3869,12 +4046,21 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			} else {
 				updateQuery = updateQuery.Where("job_run_id = ? AND task_id = ?", runID, catalogTaskID)
 			}
+			updateQuery = updateQuery.
+				Where("status NOT IN ?", terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
 
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
+			}
 			updates := map[string]any{
 				"status":                  string(status),
+				"terminal_sequence":       seq,
 				"completed_at":            now,
 				"result":                  result,
 				"cache_hit":               false,
@@ -3918,10 +4104,14 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 			if resultUpdate.Error != nil {
 				return resultUpdate.Error
 			}
-			if enforceClaim && resultUpdate.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+			if resultUpdate.RowsAffected == 0 {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return nil
 			}
 			counts.addTaskRunStatus(1)
+			taskRun.TerminalSequence = seq
 
 			if status == TaskStatusFailed {
 				// A non-zero container exit arrives HERE, not on FailTaskClaimed:
@@ -4155,6 +4345,23 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 	return skippedTaskIDs, expansion, err
 }
 
+// ownerCompletionClaimMismatchTx distinguishes cancellation or other terminal
+// run state from a wrong claim at the same serialization point as the guarded
+// owner write. A later read outside this transaction could see cancellation
+// after an unrelated claim mismatch and falsely certify a cancellation fence.
+func ownerCompletionClaimMismatchTx(tx *gorm.DB, runID uuid.UUID) error {
+	var row struct{ Status string }
+	if err := tx.Model(&models.JobRun{}).Select("status").Where("id = ?", runID).Take(&row).Error; err != nil {
+		return fmt.Errorf("run: read status after owner completion claim mismatch: %w", err)
+	}
+	for _, terminal := range terminalRunStatuses() {
+		if row.Status == terminal {
+			return ErrRunTerminal
+		}
+	}
+	return ErrTaskClaimMismatch
+}
+
 // CompleteTaskOwner is the run-owner in-memory path's durable terminal write.
 // The owner has already advanced the DAG in memory (run.RunState), so this only
 // persists terminal rows — it does NOT decrement predecessors, evaluate trigger
@@ -4186,6 +4393,11 @@ func (s *Store) CompleteTaskOwner(
 		attemptEvents := make([]event.Event, 0, 8+len(skips))
 
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			// Match CompleteIfActive's JobRun-first lock order so a timeout and
+			// owner-memory completion have one serial outcome on PostgreSQL.
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			now := time.Now().UTC()
 
 			// Metrics for the completed task (mirrors completeTask).
@@ -4205,7 +4417,14 @@ func (s *Store) CompleteTaskOwner(
 			}
 			taskRun := *row
 			catalogTaskID := taskRun.TaskID
-			tq := tx.Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy)
+			// Owner completion is deliberately idempotent for an identical
+			// redelivery after the first write landed without an acknowledgement.
+			// Keep accepting that same claimed row, while the JobRun lock and
+			// running predicate below still reject every completion after run
+			// timeout finalization.
+			tq := tx.
+				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if err := tq.First(&taskRun).Error; err == nil {
 				// A terminal row and its companion skips/expansion committed
 				// atomically. Redelivery must not replace that outcome (the
@@ -4227,7 +4446,7 @@ func (s *Store) CompleteTaskOwner(
 					}
 				}
 			} else if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrTaskClaimMismatch
+				return ownerCompletionClaimMismatchTx(tx, runID)
 			} else {
 				return err
 			}
@@ -4265,12 +4484,13 @@ func (s *Store) CompleteTaskOwner(
 
 			res := tx.Model(&models.TaskRun{}).
 				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning)).
 				Updates(updates)
 			if res.Error != nil {
 				return res.Error
 			}
 			if res.RowsAffected == 0 {
-				return ErrTaskClaimMismatch
+				return ownerCompletionClaimMismatchTx(tx, runID)
 			}
 			counts.addTaskRunStatus(1)
 
@@ -4632,6 +4852,9 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+				return err
+			}
 			row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskRef)
 			if loadErr != nil {
 				if enforceClaim {
@@ -4640,18 +4863,28 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 				return loadErr
 			}
 			if IsTerminal(TaskStatus(row.Status)) {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
 				return nil
 			}
 			catalogTaskID := row.TaskID
 
 			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses())
+				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
+				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+			}
+			updateQuery = s.fenceSQLTerminalUpdate(updateQuery, runID)
+			seq, seqErr := nextTerminalSequenceTx(tx, runID)
+			if seqErr != nil {
+				return seqErr
 			}
 			resultUpdate := updateQuery.
 				Updates(map[string]any{
 					"status":                  string(TaskStatusFailed),
+					"terminal_sequence":       seq,
 					"completed_at":            now,
 					"error":                   errMsg,
 					"cache_hit":               false,
@@ -4671,6 +4904,7 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 			}
 			counts.addTaskRunStatus(1)
 			row.Status = string(TaskStatusFailed)
+			row.TerminalSequence = seq
 
 			// Apply the group's failurePolicy, emit this instance's task_failed
 			// event, and release the fanned step's cross-step successors once the
@@ -4860,6 +5094,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""
+	runTimedOut := IsRunDeadlineError(result)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
@@ -4878,9 +5113,13 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 		jobID         uuid.UUID
 		startedAt     time.Time
 		quarantine    bool
+		timedOutTasks []models.TaskRun
+		counts        dbWriteCounts
 	)
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 2)
+		var attemptTimedOutTasks []models.TaskRun
 		var (
 			attemptJobID      uuid.UUID
 			attemptStartedAt  time.Time
@@ -4922,15 +5161,30 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// waits on a dependency the engine has not resolved is stranded by
 			// a terminal run just the same, and RetryPartition already refuses
 			// the retries no engine could ever release.
-			var pending int64
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
-					runID, string(TaskStatusPending), true).
-				Count(&pending).Error; err != nil {
-				return err
+			if !runTimedOut {
+				var pending int64
+				if err := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+						runID, string(TaskStatusPending), true).
+					Count(&pending).Error; err != nil {
+					return err
+				}
+				if pending > 0 {
+					return ErrRunHasPendingWork
+				}
 			}
-			if pending > 0 {
-				return ErrRunHasPendingWork
+
+			// A genuine metadata.runTimeout expiry resolves every unfinished task
+			// in the same transaction as the run. Clearing claims makes the
+			// worker's liveness sweep cancel old binaries, while new workers share
+			// this absolute deadline and stop the exact atom themselves. Terminal
+			// completion predicates below reject any result racing this write.
+			if runTimedOut {
+				var timeoutErr error
+				attemptTimedOutTasks, timeoutErr = s.failUnfinishedTasksForRunTimeoutTx(tx, runID, errMsg, now, &attemptEvents, &counts)
+				if timeoutErr != nil {
+					return timeoutErr
+				}
 			}
 
 			// Read jobID + startedAt inside the same retried transaction so the
@@ -4969,6 +5223,9 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
 					return err
 				}
+				if runTimedOut {
+					counts.addEventInsert(1)
+				}
 				attemptEvents = append(attemptEvents, completionEvent)
 
 				terminalEvent := event.Event{
@@ -4982,6 +5239,9 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
 					return err
 				}
+				if runTimedOut {
+					counts.addEventInsert(1)
+				}
 				attemptEvents = append(attemptEvents, terminalEvent)
 			}
 
@@ -4992,6 +5252,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			jobID = attemptJobID
 			startedAt = attemptStartedAt
 			quarantine = attemptQuarantine
+			timedOutTasks = attemptTimedOutTasks
 		}
 		return txErr
 	})
@@ -5008,6 +5269,19 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// completion write has committed, so retries don't double-count. jobID and
 	// startedAt are guaranteed populated because the transaction succeeded.
 	jobIDStr := jobID.String()
+	counts.commit()
+	if !quarantine {
+		for _, task := range timedOutTasks {
+			if task.Quarantine {
+				continue
+			}
+			engine := string(task.Engine)
+			metrics.TaskRunsTotal.WithLabelValues(jobIDStr, task.TaskID.String(), engine, string(TaskStatusFailed)).Inc()
+			if task.StartedAt != nil {
+				metrics.TaskRunDurationSeconds.WithLabelValues(jobIDStr, engine, string(TaskStatusFailed)).Observe(now.Sub(*task.StartedAt).Seconds())
+			}
+		}
+	}
 	// Only decrement the active gauge if this process incremented it.
 	s.startedMu.Lock()
 	_, started := s.startedRuns[runID]
@@ -5025,6 +5299,53 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 
 	s.publishEvents(pendingEvents...)
 	return true, nil
+}
+
+// failUnfinishedTasksForRunTimeoutTx runs after the caller has finalized and
+// locked the JobRun. Each concrete unfinished row receives its own replay
+// sequence and failure event, without invoking ordinary task failure cascades.
+// Evidence and terminal rows are preserved; metrics are emitted after commit.
+func (s *Store) failUnfinishedTasksForRunTimeoutTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
+	var rows []models.TaskRun
+	if err := tx.Select("id", "task_id", "engine", "started_at", "quarantine").
+		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+		Order("created_at ASC, id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	seq, err := nextTerminalSequenceTx(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	transitioned := make([]models.TaskRun, 0, len(rows))
+	for _, row := range rows {
+		result := tx.Model(&models.TaskRun{}).
+			Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
+			Updates(map[string]any{
+				"status": string(TaskStatusFailed), "result": "failure", "error": errMsg,
+				"completed_at": now, "terminal_sequence": seq,
+				"claimed_by": "", "claim_expires_at": nil, "partition_retry_pending": false,
+			})
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			continue
+		}
+		counts.addTaskRunStatus(1)
+		if s.eventStore != nil {
+			evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskFailed, runID, &row, counts)
+			if err != nil {
+				return nil, err
+			}
+			*events = append(*events, *evt)
+		}
+		transitioned = append(transitioned, row)
+		seq++
+	}
+	return transitioned, nil
 }
 
 func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
@@ -5289,7 +5610,7 @@ func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
 	return count, err
 }
 
-func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) error {
+func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) (uuid.UUID, error) {
 	if priority <= 0 {
 		priority = PriorityNormalValue
 	}
@@ -5306,13 +5627,13 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON
 		CreatedAt: now,
 	}
 	if err := tx.Create(row).Error; err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	var depth int64
 	if err := tx.Model(&models.RunQueue{}).
 		Where("job_id = ? AND claimed_by = ''", jobID).
 		Count(&depth).Error; err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	if overflow := int(depth) - maxDepth; overflow > 0 {
 		if err := tx.Exec(`
@@ -5324,10 +5645,10 @@ WHERE id IN (
 	ORDER BY created_at ASC
 	LIMIT ?
 )`, jobID, overflow).Error; err != nil {
-			return err
+			return uuid.Nil, err
 		}
 	}
-	return nil
+	return row.ID, nil
 }
 
 func (s *Store) DequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
@@ -5491,7 +5812,60 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(runID)
 }
 
-func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
+// listCountToPageHook is a test seam invoked between List's total COUNT and
+// its page SELECT. Nil in production. It exists so a test can deterministically
+// reproduce a run committed in that window — the exact race a review caught:
+// two separate reads with no shared snapshot mean a run inserted after Count
+// but before Scan shifts the newest-first page, and comparing the page length
+// against the (now-stale) total can silently suppress next_offset even though
+// real older history still exists. See the limit+1 probe below, which is the
+// actual fix — this hook only lets a test PROVE the fix by forcing the race.
+var listCountToPageHook func()
+
+// List returns a page of a job's runs, newest first (created_at DESC, id DESC
+// as a deterministic tiebreak for runs created in the same instant), the
+// total row count, and whether more rows exist past this page.
+//
+// limit and offset are applied as given: bounds validation, defaulting, and
+// the documented page-size ceiling belong to the REST layer (see
+// runListPageBounds in api/rest/controller/job/run/list.go), which is what
+// actually rejects an out-of-range request with 400 instead of silently
+// clamping it. A limit <= 0 here means "no LIMIT clause", and hasMore is
+// always false in that case (an unbounded fetch has no continuation).
+//
+// hasMore is derived from the PAGE QUERY ITSELF — it fetches one row past
+// limit and reports hasMore when that extra row exists, trimming it back off
+// before converting results — rather than by comparing the page length
+// against total. total comes from a separate, earlier COUNT with no shared
+// read snapshot, so a run committed between the two statements can shift the
+// newest-first page enough that total's comparison alone would report no
+// more pages when older history in fact remains. The limit+1 probe answers
+// "is there another row after this page, right now, in this same read" and
+// is correct regardless of what total said a moment earlier; total itself is
+// still returned, but purely as the display count a client shows, never as
+// the truncation signal.
+//
+// cache_hits / executed_tasks / total_tasks are populated from the REAL
+// TaskRun rows belonging to the runs on THIS PAGE, not from
+// Preload("Tasks") — which is a silent no-op under Scan() (GORM does not
+// hydrate preloaded associations for Scan targets) and used to leave every
+// list entry reporting a measured zero while GET .../runs/:run_id, which
+// loads real rows via First(), reported the true count (issue #489).
+// Loading just the page's own task rows (bounded to however many runs the
+// page holds, never the job's whole history) and running them through the
+// same collapseFanOutGroups/summarizeTasks pipeline convertRunModel uses for
+// the detail endpoint guarantees the two agree, fan-out groups included.
+func (s *Store) List(jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
+	if err := s.db.Model(&models.JobRun{}).
+		Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
+		Count(&total).Error; err != nil {
+		return nil, 0, false, err
+	}
+
+	if listCountToPageHook != nil {
+		listCountToPageHook()
+	}
+
 	var results []struct {
 		models.JobRun
 		JobAlias     string
@@ -5499,32 +5873,94 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 		TriggerAlias string
 	}
 
-	err := s.db.Table("job_runs").
+	q := s.db.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
-		Order("job_runs.started_at ASC").
-		Preload("Tasks").
-		Scan(&results).Error
-
-	if err != nil {
-		return nil, err
+		Order("job_runs.created_at DESC, job_runs.id DESC")
+	if limit > 0 {
+		// Fetch one extra row so "is there more" is answered by this same
+		// query, not by a comparison against the (possibly now-stale) total
+		// counted above.
+		q = q.Limit(limit + 1)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	if err := q.Scan(&results).Error; err != nil {
+		return nil, 0, false, err
 	}
 
-	runs := make([]*JobRun, 0, len(results))
+	if limit > 0 && len(results) > limit {
+		hasMore = true
+		results = results[:limit]
+	}
+
+	runIDs := make([]uuid.UUID, 0, len(results))
 	for i := range results {
+		runIDs = append(runIDs, results[i].ID)
+	}
+	tasksByRun, err := s.pageTaskRunsByJobRunID(runIDs)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	runs = make([]*JobRun, 0, len(results))
+	for i := range results {
+		results[i].Tasks = tasksByRun[results[i].ID]
 		runValue, err := s.convertRunModel(&results[i].JobRun)
 		if err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 		runValue.JobAlias = results[i].JobAlias
 		runValue.TriggerType = results[i].TriggerType
 		runValue.TriggerAlias = results[i].TriggerAlias
+		// The list response stays a summary: full task rows are the detail
+		// endpoint's surface (GET .../runs/:run_id). Only the derived
+		// counters computed above — from the same real rows — are list
+		// surface, matching the shape clients already parse.
+		runValue.Tasks = []*TaskRun{}
 		runs = append(runs, runValue)
 	}
 
-	return runs, nil
+	return runs, total, hasMore, nil
+}
+
+// pageTaskRunsByJobRunID loads the TaskRun rows belonging to the given job
+// runs, keyed by job_run_id. Scoped to one List() page's run IDs rather than
+// the job's whole history, so a paged call costs one bounded indexed query
+// instead of an unbounded task_runs scan.
+// pageTaskRunsCounterColumns is every column convertRunTaskModel /
+// collapseFanOutGroups / summarizeTasks actually read to derive
+// cache_hits/executed_tasks/total_tasks: the group key (task_id), the status
+// vote (status, cache_hit), and id/job_run_id to address and bucket the row.
+// Deliberately NOT `SELECT *`: a TaskRun row also carries LogText (persisted
+// log snapshots up to 1 MiB each), execution descriptors, outputs, and
+// hash-input blobs — none of which summarizeTasks looks at, and all of which
+// convertRunModel's List() caller discards immediately after computing the
+// three counters (runValue.Tasks is reset to empty for list responses). A
+// full-column load here turned a 100-run page with a handful of tasks each
+// into materializing on the order of the executor's whole per-task log
+// ceiling, for every request.
+var pageTaskRunsCounterColumns = []string{"id", "job_run_id", "task_id", "status", "cache_hit"}
+
+func (s *Store) pageTaskRunsByJobRunID(runIDs []uuid.UUID) (map[uuid.UUID][]*models.TaskRun, error) {
+	out := make(map[uuid.UUID][]*models.TaskRun, len(runIDs))
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	var rows []*models.TaskRun
+	if err := s.db.
+		Select(pageTaskRunsCounterColumns).
+		Where("job_run_id IN ?", runIDs).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.JobRunID] = append(out[row.JobRunID], row)
+	}
+	return out, nil
 }
 
 func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
@@ -6437,11 +6873,13 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 // the declared concurrency nor replace-cancel a live run. On a full job it
 // returns ErrMaxConcurrentRunsReached and leaves the run terminal.
 func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
+	now := time.Now().UTC()
 	unconditional := func() error {
 		return tx.Model(jobRun).Updates(map[string]any{
-			"status":       string(StatusRunning),
-			"completed_at": nil,
-			"error":        "",
+			"status":             string(StatusRunning),
+			"timeout_started_at": now,
+			"completed_at":       nil,
+			"error":              "",
 		}).Error
 	}
 	if !admit || jobRun.Quarantine {
@@ -6461,7 +6899,7 @@ func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) e
 	// the same slot definition as new runs.
 	res := tx.Exec(`
 UPDATE job_runs
-SET status = ?, completed_at = NULL, error = ''
+SET status = ?, timeout_started_at = ?, completed_at = NULL, error = ''
 WHERE id = ?
 	AND status IN (?, ?)
 	AND (
@@ -6474,6 +6912,7 @@ WHERE id = ?
 			AND id <> ?
 	) < ?`,
 		string(StatusRunning),
+		now,
 		jobRun.ID,
 		string(StatusFailed), string(StatusSucceeded),
 		jobRun.JobID,

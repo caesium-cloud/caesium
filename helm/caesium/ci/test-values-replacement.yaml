@@ -1,0 +1,51 @@
+# Pod-replacement topology for issue #493: three replicas on internal dqlite,
+# one retained PVC per replica. Replacing a pod keeps its PVC but hands it a new
+# pod IP, which is exactly the address change dqlite persists in info.yaml.
+#
+# Test-only keys; not production secrets. Deliberately does NOT set podAntiAffinity
+# so the scenario runs on a single-node kind cluster.
+replicaCount: 3
+
+image:
+  repository: caesiumcloud/caesium
+  pullPolicy: IfNotPresent
+
+config:
+  logLevel: debug
+  extraEnv:
+    - name: CAESIUM_EXECUTION_MODE
+      value: distributed
+    - name: CAESIUM_DATABASE_SHARDS
+      value: "1"
+    - name: CAESIUM_DATABASE_VOTERS
+      value: "3"
+    - name: CAESIUM_DATABASE_STANDBYS
+      value: "0"
+    - name: CAESIUM_MANUAL_TRIGGER_API_KEY
+      value: caesium-replacement-manual-key
+    - name: CAESIUM_WORKER_POOL_SIZE
+      value: "2"
+
+kubernetes:
+  engine:
+    enabled: true
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: false

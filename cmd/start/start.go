@@ -3,6 +3,7 @@ package start
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -48,7 +49,9 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"gorm.io/gorm"
 )
 
 // dqliteDispatchPeerResolver returns a PeerLister that discovers all dqlite
@@ -70,6 +73,222 @@ func dqliteDispatchPeerResolver() dispatch.PeerLister {
 		}
 		return peers, nil
 	})
+}
+
+// derivedRunRetryBackoffs bounds the freshness launcher's two post-admission
+// reads: the job lookup and the pre-execution status fence. The run row is
+// already committed by the time the launcher runs, so a transient contention
+// error must neither cost the run nor be mistaken for an answer; a persistent
+// one must still terminalize it rather than spin forever.
+var derivedRunRetryBackoffs = []time.Duration{
+	50 * time.Millisecond,
+	250 * time.Millisecond,
+	time.Second,
+}
+
+// freshnessRunLauncher executes a freshness-derived run's DAG.
+//
+// The evaluator admits the run through the shared run store (the same
+// startRun → admit seam cron, HTTP, event and manual runs use) but cannot
+// execute it itself: internal/job depends on internal/freshness, so the
+// executor is injected here. This mirrors the run-queue dequeuer's launch path
+// and the manual-run controller: register nothing extra, hand the run id to
+// internal/job through the run context, and let job.Run build and dispatch the
+// DAG (it registers the run-cancel entry itself).
+func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
+	return newFreshnessRunLauncher(
+		store,
+		func(ctx context.Context, jobID uuid.UUID) (*models.Job, error) {
+			return jsvc.Service(ctx).Get(jobID)
+		},
+		func(ctx context.Context, j *models.Job, r *run.JobRun) error {
+			return job.New(
+				j,
+				job.WithRunStoreFactory(func() *run.Store { return store }),
+				job.WithParams(r.Params),
+			).Run(ctx)
+		},
+	)
+}
+
+// newFreshnessRunLauncher is freshnessRunLauncher with its job lookup and its
+// executor injected, so the post-admission failure path is testable without a
+// container runtime or the global database handle.
+func newFreshnessRunLauncher(
+	store *run.Store,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+	execute func(context.Context, *models.Job, *run.JobRun) error,
+) freshness.RunLauncher {
+	return func(ctx context.Context, r *run.JobRun) {
+		if r == nil {
+			return
+		}
+		// Detached from the evaluator's tick context on purpose: the run
+		// outlives the evaluation that derived it.
+		//
+		// Register the run's cancellation BEFORE the job lookup, not after.
+		// job.Run registers too — the registry holds a SET per run id, so both
+		// entries cancel the same work — but its registration is on the far side
+		// of loadDerivedRunJob's retry schedule. The admitted run is already
+		// visible to CancelRun and to the concurrency `replace` admission, so a
+		// cancel landing in that window would otherwise reach no registered
+		// context and the DAG would start anyway. This is the same reason the
+		// other kickoff sites register: to close the gap between the run row
+		// existing and Run being entered (internal/job/job.go).
+		cancelCtx, releaseCancel := job.RegisterRunCancel(context.WithoutCancel(ctx), r.ID)
+		runCtx := run.WithContext(cancelCtx, r.ID)
+		go func() {
+			defer releaseCancel()
+			launchDerivedRun(runCtx, store, r, loadJob, execute)
+		}()
+	}
+}
+
+// launchDerivedRun is the synchronous body of the freshness launcher.
+func launchDerivedRun(
+	ctx context.Context,
+	store *run.Store,
+	r *run.JobRun,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+	execute func(context.Context, *models.Job, *run.JobRun) error,
+) {
+	j, err := loadDerivedRunJob(ctx, r.JobID, loadJob)
+	if err != nil {
+		// The run row and its `derived` audit are already committed. job.Run —
+		// whose aborted-resume finalizer would normally terminalize a run that
+		// never reached an engine — is never entered on this path, so a bare
+		// log would leave exactly the stranded `running`-with-no-tasks row this
+		// launcher exists to prevent: the evaluator would then report
+		// skipped_active_run forever, and a maxRuns policy would refuse every
+		// later arrival. Finalize it here instead. CompleteIfActive is the
+		// conditional transition — it is a no-op on an already-terminal run.
+		log.Error("freshness: derived run could not load its job; failing the run",
+			"job_id", r.JobID, "run_id", r.ID, "error", err)
+		cause := fmt.Errorf("freshness: derived run could not load job %s: %w", r.JobID, err)
+		if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+			log.Error("freshness: derived run could not be finalized after a failed job lookup; leaving it for an operator",
+				"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+		}
+		return
+	}
+	// Fence before the engine: the run may have been cancelled or replaced while
+	// the lookup ran. job.Run resolves a run id from the context without
+	// checking its status, and RegisterTasks has no parent-status guard, so
+	// without this the local executor would launch containers for a cancelled
+	// run — the cancel reconciler stops them later, but a short task finishes
+	// its side effects first.
+	switch verdict, reason := derivedRunFence(ctx, store, r); verdict {
+	case fenceStop:
+		log.Info("freshness: derived run is no longer launchable; not executing",
+			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
+		return
+	case fenceUnresolved:
+		// Fail CLOSED. A cancellation that landed before this launcher
+		// registered is visible only in the row, so an unreadable status cannot
+		// be read as "still active" — that is precisely the case where
+		// proceeding executes a cancelled run. Terminalize conditionally so the
+		// run is not stranded either; if it was already cancelled this is a
+		// no-op, and if the database is this unwell the run could not have
+		// executed anyway.
+		log.Error("freshness: could not confirm a derived run is still active; failing it instead of executing",
+			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
+		cause := fmt.Errorf("freshness: could not confirm derived run %s is still active: %s", r.ID, reason)
+		if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+			log.Error("freshness: derived run could not be finalized after an unresolved status fence; leaving it for an operator",
+				"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+		}
+		return
+	}
+	if err := execute(ctx, j, r); err != nil {
+		log.Error("freshness: derived job run failure",
+			"job_id", r.JobID, "run_id", r.ID, "error", err)
+	}
+}
+
+// fenceVerdict is the pre-execution status fence's answer.
+type fenceVerdict int
+
+const (
+	// fenceLaunch means the run was CONFIRMED still active.
+	fenceLaunch fenceVerdict = iota
+	// fenceStop means the run is cancelled or otherwise terminal.
+	fenceStop
+	// fenceUnresolved means the run's status could not be established. It is
+	// deliberately distinct from fenceLaunch: "I could not check" is not
+	// "it is fine".
+	fenceUnresolved
+)
+
+// derivedRunFence decides whether an admitted derived run may still be handed
+// to an engine.
+//
+// Two independent checks, because they cover different windows: ctx.Err()
+// catches a cancellation delivered through the in-process registry, and the
+// store read catches one that landed BEFORE this launcher registered, or whose
+// run_cancelled event the non-blocking bus dropped (the reason
+// StartRunCancelReconciler exists at all). The store read is the only evidence
+// for that second window, so a transient failure to perform it is retried on a
+// bounded schedule and, if it never succeeds, reported as unresolved rather
+// than waved through.
+func derivedRunFence(ctx context.Context, store *run.Store, r *run.JobRun) (fenceVerdict, string) {
+	if err := ctx.Err(); err != nil {
+		return fenceStop, err.Error()
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		current, err := store.Get(r.ID)
+		switch {
+		case err != nil:
+			lastErr = err
+		case current == nil:
+			lastErr = fmt.Errorf("run %s not found", r.ID)
+		default:
+			switch current.Status {
+			case run.StatusCancelled, run.StatusSucceeded, run.StatusFailed, run.StatusSkipped:
+				return fenceStop, "run is " + string(current.Status)
+			}
+			return fenceLaunch, ""
+		}
+		// A row that is genuinely gone will not reappear; do not burn the
+		// schedule on it.
+		if errors.Is(lastErr, gorm.ErrRecordNotFound) || attempt >= len(derivedRunRetryBackoffs) {
+			return fenceUnresolved, lastErr.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return fenceStop, ctx.Err().Error()
+		case <-time.After(derivedRunRetryBackoffs[attempt]):
+		}
+	}
+}
+
+// loadDerivedRunJob reads the job behind an already-admitted derived run,
+// retrying on a bounded schedule so transient database contention does not
+// terminalize a run that is otherwise perfectly launchable.
+func loadDerivedRunJob(
+	ctx context.Context,
+	jobID uuid.UUID,
+	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
+) (*models.Job, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		j, err := loadJob(ctx, jobID)
+		if err == nil {
+			if j == nil {
+				return nil, fmt.Errorf("job %s not found", jobID)
+			}
+			return j, nil
+		}
+		lastErr = err
+		if errors.Is(err, gorm.ErrRecordNotFound) || attempt >= len(derivedRunRetryBackoffs) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(derivedRunRetryBackoffs[attempt]):
+		}
+	}
 }
 
 const (
@@ -234,6 +453,7 @@ func start(cmd *cobra.Command, args []string) error {
 			DB:                    conn,
 			Bus:                   bus,
 			RunStore:              runStore,
+			LaunchRun:             freshnessRunLauncher(runStore),
 			Interval:              vars.FreshnessEvalInterval,
 			MaxDerivationsPerTick: vars.FreshnessMaxDerivationsPerTick,
 			MaxTriggerDepth:       vars.MaxTriggerDepth,

@@ -22,12 +22,15 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent claimed tasks per node. |
 | `CAESIUM_WORKER_POLL_INTERVAL` | `15s` | Fallback poll cadence for new claimable tasks. Distributed wakeups should handle normal claim latency. |
 | `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts. |
-| `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
+| `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim; also caps each finished completion report during owner recovery (default `5m`). |
 | `CAESIUM_DATABASE_MAX_OPEN_CONNS` | `4` | Max SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_MAX_IDLE_CONNS` | `2` | Max idle SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_SHARDS` | `1` | Number of dqlite hot write shards. Values greater than `1` are Phase 4 horizontal-scaling mode and require the internal dqlite backend. |
 | `CAESIUM_DATABASE_VOTERS` | `3` | Target dqlite voter count. Must be odd and at least 3. |
 | `CAESIUM_DATABASE_STANDBYS` | `3` | Target dqlite standby count for failover headroom. Extra nodes settle as spares. |
+| `CAESIUM_DATABASE_BOOTSTRAP_PEERS` | `""` | Other members this node would have (`host:port,...`). Only read when the data directory is empty and `CAESIUM_DATABASE_NODES` is empty: the node probes these addresses for up to 10 s and joins their cluster as a new member if any answers, instead of bootstrapping a new cluster. The Helm chart sets it for ordinal 0. See [Kubernetes deployment](kubernetes-deployment.md#replacing-a-member-whose-volume-was-lost). |
+| `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` | `1024` | Raft log entries between dqlite snapshots. Each snapshot writes a full copy of the database to disk. See [Raft log retention](#raft-log-retention). |
+| `CAESIUM_DATABASE_SNAPSHOT_TRAILING` | `2048` | Raft log entries each node keeps, in memory and on disk, behind its latest snapshot. Must be at least 4 and at least `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD`. See [Raft log retention](#raft-log-retention). |
 | `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
 | `CAESIUM_WAKEUP_FANOUT_MODE` | `full` | Wakeup fanout strategy: `full` for every peer, or `gossip` for large clusters. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
@@ -35,6 +38,17 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
 | `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
+
+Job metadata can override the server task timeout with `taskTimeout` and set a
+whole-run deadline with `runTimeout`. These values are frozen when task rows are
+registered. A worker or run-owner takeover therefore uses the original absolute
+deadline rather than granting fresh time, while explicitly reopening a terminal
+run starts a new execution window under the same recorded limits. A run timeout
+atomically fails every unfinished task before late worker, owner, or cache-hit
+completion can publish successors.
+Kubernetes cleanup requests a one-second termination grace period. The pod
+remains visible while kubelet terminates it; Caesium does not use zero-grace API
+deletion as evidence that a container has stopped.
 
 ## Cancelling a Run Reaches the Container
 
@@ -81,10 +95,13 @@ Run-owner mode assigns each in-flight job run to a single owner node. The owner 
 
 **Security note:** mTLS on `/internal/dispatch` and `/internal/complete` is **recommended** for Phase A. The `CAESIUM_INTERNAL_WAKEUP_TOKEN` bearer-token is used for Phase A authentication. A startup warning is emitted if owner mode is on without mTLS material configured. Phase B will enforce mTLS as a hard requirement. Both endpoints require the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` as the existing wakeup endpoint.
 
+Finished completion reports keep their worker claim registered for renewal and claim-loss checks. Owner recovery retries retain the same result for at most one `CAESIUM_WORKER_LEASE_TTL` from the start of reporting, or until the run deadline or claim context ends earlier. If this window expires, the worker logs `completion retention expired`, releases its slot, and leaves recovery to the owner after lease expiry. It does not retry the finished atom or publish a task failure for a delivery timeout. Alternating recovery and contention replies do not reset the contention retry budget.
+
 **Recovery fallback:** If the owner node crashes, its run lease expires after `CAESIUM_RUN_LEASE_TTL` (default 30s). Tasks left with `claimed_by=""` are recovered by the existing `ClaimNext` path on any node. The `owner_generation=0` on legacy and flag-off rows ensures they remain mutable by any node.
 
 **New metrics:**
 - `caesium_complete_rejected_total{reason}` — counts `/internal/complete` rejections by fence violation type.
+  `reason="terminal_run"` is a permanent refusal after a run reaches a terminal state, including a cancellation that beats a completion. It is distinct from `task_not_running`, which the worker treats as a completion application error. An unreadable lease or run status returns retryable `503 owner_not_ready` and increments `caesium_complete_retryable_total{reason="owner_not_ready"}` instead of a fence-rejection counter.
 - `caesium_dispatch_stalled_total{reason}` — counts tasks that passed the dispatch progress deadline without any worker ever accepting them.
 - `caesium_run_lease_renewals_total` — counts batched run-lease renewal statements.
 - `caesium_run_leases_owned` — current number of run leases held by this node.
@@ -98,6 +115,20 @@ Set the same `CAESIUM_DATABASE_VOTERS` and `CAESIUM_DATABASE_STANDBYS` values on
 Distributed wakeups use the dqlite cluster membership list, not `CAESIUM_DATABASE_NODES`, so spare workers receive wakeup hints after they join. Set the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` on every node. The sender uses `Authorization: Bearer <token>` and receivers reject missing or incorrect tokens.
 
 `CAESIUM_DATABASE_SHARDS=1` keeps every table in the catalog database. Higher shard counts open `caesium_hot_XX` databases on the same dqlite cluster and route run lifecycle rows by job run ID. See [database-sharding.md](database-sharding.md) for the table map and router contract.
+
+### Raft log retention
+
+Every node that replicates the Raft log (voters and standbys) keeps each retained log entry in memory as well as in segment files under `CAESIUM_DATABASE_PATH`. An entry is one committed transaction's changed database pages, so a catalog write can be well over 100 KB. A node takes a snapshot every `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` entries and then releases every entry more than `CAESIUM_DATABASE_SNAPSHOT_TRAILING` entries behind it. Between snapshots a node therefore holds between `TRAILING` and `TRAILING + THRESHOLD` entries. When a node restarts it loads everything retained on disk back into memory.
+
+Caesium sets these explicitly. dqlite's built-in trailing of 8192 bounds the log at 9,216 entries. The F2 lifecycle qualification measured 77–137 KB catalog entries, which puts that bound near 1.26 GB. At that size the retained log alone pushed a voter to its 1 GiB memory limit. The defaults of `1024`/`2048` bound the log at 3,072 entries (about 421 MB at 137 KB per entry) and keep dqlite's default snapshot frequency.
+
+The trade-offs:
+
+- **Lower `TRAILING`** means less memory and disk per node. A follower that falls more than `TRAILING` entries behind the leader's latest snapshot, for example during a long restart, is then caught up by a full snapshot install, which sends the whole database, instead of by log replication.
+- **Lower `THRESHOLD`** also lowers the bound, but the node snapshots more often, and each snapshot writes the whole database to disk.
+- **Raising either** increases the worst-case memory and disk by the entry size of your write mix times the added entries. Size the pod memory limit for `(TRAILING + THRESHOLD) × largest typical transaction` on top of the process base.
+
+Both values are per node and do not need to match across the cluster. A changed value takes effect when the node starts. After you lower `TRAILING`, the first start still loads what the previous setting retained, and the log shrinks at the next snapshot.
 
 ## Rollout Procedure (Distributed Mode)
 

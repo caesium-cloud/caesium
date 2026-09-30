@@ -1,5 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, type AllowBreakingRequest, type ContractDiffFinding, type DiffResponse, type LintResponse } from "@/lib/api";
@@ -11,6 +10,8 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
+import { pendingApplyCount, summarizeDiffPreview } from "./diffPreview";
+import { GitSyncDialog } from "./GitSyncDialog";
 import { getJobDefRuntimeHints, type JobDefRuntimeHints } from "./runtimeHints";
 
 export const EXAMPLE_YAML = `apiVersion: v1
@@ -93,9 +94,9 @@ function contractStatusLabel(summary: string) {
 
 function collectContractFindings(diff: DiffResponse | null) {
   if (!diff) return [];
+  // Apply is non-pruning, so only added/modified findings gate the request.
   return dedupeContractFindings([
     ...(diff.added ?? []).flatMap((job) => job.contractFindings ?? []),
-    ...(diff.removed ?? []).flatMap((job) => job.contractFindings ?? []),
     ...(diff.modified ?? []).flatMap((job) => job.contractFindings ?? []),
   ]);
 }
@@ -198,9 +199,12 @@ export function JobDefsPage() {
   const [isLinting, setIsLinting] = useState(false);
   const [ackReason, setAckReason] = useState("");
   const latestYamlRef = useRef(EXAMPLE_YAML);
+  const baselineYamlRef = useRef(EXAMPLE_YAML);
   const yamlVersionRef = useRef(0);
   const validationSeqRef = useRef(0);
   const editorViewRef = useRef<EditorView | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadGenRef = useRef(0);
 
   const syncLatestYaml = useCallback((value: string) => {
     if (latestYamlRef.current !== value) {
@@ -265,11 +269,53 @@ export function JobDefsPage() {
   }, [syncLatestYaml]);
 
   const handleResetExample = useCallback(() => {
+    uploadGenRef.current += 1;
     syncLatestYaml(EXAMPLE_YAML);
     setYaml(EXAMPLE_YAML);
     setIsLinting(true);
     setAckReason("");
+    baselineYamlRef.current = EXAMPLE_YAML;
   }, [syncLatestYaml]);
+
+  const handleUploadClick = useCallback(() => {
+    uploadInputRef.current?.click();
+  }, []);
+
+  const handleUploadFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    const gen = ++uploadGenRef.current;
+
+    try {
+      const text = await readJobDefUpload(file);
+      if (gen !== uploadGenRef.current) return;
+      const current = currentEditorYaml();
+      if (current !== baselineYamlRef.current) {
+        const replace = window.confirm(
+          "Replace the current editor contents with this file? Unsaved changes will be lost.",
+        );
+        if (gen !== uploadGenRef.current) return;
+        if (!replace) return;
+      }
+      if (text === current) {
+        baselineYamlRef.current = text;
+        toast.success(`Loaded ${file.name}`);
+        return;
+      }
+      syncLatestYaml(text);
+      setYaml(text);
+      setIsLinting(true);
+      setAckReason("");
+      setTab("editor");
+      baselineYamlRef.current = text;
+      toast.success(`Loaded ${file.name}`);
+    } catch (err) {
+      if (gen !== uploadGenRef.current) return;
+      toast.error(err instanceof Error ? err.message : "Failed to read the selected file");
+    }
+  }, [currentEditorYaml, syncLatestYaml]);
 
   const handleTabChange = useCallback((value: string) => {
     setTab(value);
@@ -313,8 +359,8 @@ export function JobDefsPage() {
     : undefined;
 
   const applyMutation = useMutation({
-    mutationFn: () => api.applyJobDef(yaml, allowBreaking),
-    onSuccess: (data) => {
+    mutationFn: () => api.applyJobDef(currentEditorYaml(), allowBreaking),
+    onSuccess: async (data) => {
       toast.success(`Applied successfully (${data.applied} jobs)`);
       for (const warning of data.contract_warnings ?? []) {
         toast.warning(warning.message || `Contract warning for ${warning.subject}`);
@@ -324,8 +370,9 @@ export function JobDefsPage() {
       queryClient.invalidateQueries({ queryKey: ["atoms"] });
       queryClient.invalidateQueries({ queryKey: ["triggers"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
-      // re-trigger diff to clear changes
-      api.diffJobDef(yaml).then(dr => setDiffResult(dr)).catch(() => {});
+      const sourceYaml = currentEditorYaml();
+      const sourceVersion = syncLatestYaml(sourceYaml);
+      await runValidation(sourceYaml, sourceVersion);
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to apply job definition");
@@ -350,7 +397,7 @@ export function JobDefsPage() {
   });
 
   const lineCount = yaml.split("\n").length;
-  const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
+  const diffCount = pendingApplyCount(diffResult);
   const hasErrors = lintResult.errors && lintResult.errors.length > 0;
   const stepLabel = formatStepCount(lintResult.summary?.steps ?? 0);
   const contractSummary = lintResult.summary?.contracts?.trim() ?? "";
@@ -369,14 +416,39 @@ export function JobDefsPage() {
           </p>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".yaml,.yml,.job.yaml,text/yaml"
+            className="hidden"
+            data-testid="jobdefs-upload-input"
+            onChange={handleUploadFile}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="bg-transparent border-graphite/50 text-text-2"
+            data-testid="jobdefs-upload"
+            onClick={handleUploadClick}
+          >
             <Upload className="h-3.5 w-3.5 mr-1.5" />
             Upload
           </Button>
-          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
-            <GitBranch className="h-3.5 w-3.5 mr-1.5" />
-            Git sync
-          </Button>
+          <GitSyncDialog
+            trigger={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="bg-transparent border-graphite/50 text-text-2"
+                data-testid="jobdefs-git-sync"
+              >
+                <GitBranch className="h-3.5 w-3.5 mr-1.5" />
+                Git sync
+              </Button>
+            }
+          />
           {hasBreakingContractFindings && !hasMultipleBreakingSubjects && (
             <input
               aria-label="Breaking change acknowledgement reason"
@@ -429,7 +501,10 @@ export function JobDefsPage() {
             >
               Diff vs server
               {diffCount > 0 && !hasErrors && (
-                <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gold/20 text-gold">
+                <span
+                  data-testid="diff-tab-badge"
+                  className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gold/20 text-gold"
+                >
                   {diffCount}
                 </span>
               )}
@@ -629,8 +704,44 @@ steps:
           </Card>
         </div>
       </div>
+
     </div>
   );
+}
+
+const JOBDEF_UPLOAD_MAX_BYTES = 1024 * 1024;
+
+async function readJobDefUpload(file: File): Promise<string> {
+  if (file.size > JOBDEF_UPLOAD_MAX_BYTES) {
+    throw new Error("File is too large to load in the editor (max 1 MB)");
+  }
+
+  let text: string;
+  try {
+    text = await file.text();
+  } catch {
+    throw new Error("Could not read the selected file");
+  }
+
+  if (looksBinaryYaml(text)) {
+    throw new Error("File looks binary and cannot be loaded as YAML");
+  }
+
+  return text;
+}
+
+function looksBinaryYaml(text: string): boolean {
+  if (text.includes("\u0000")) return true;
+  const limit = Math.min(text.length, 8192);
+  let unusual = 0;
+  for (let i = 0; i < limit; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0xfffd) return true;
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      unusual += 1;
+    }
+  }
+  return limit > 0 && unusual / limit > 0.3;
 }
 
 function RuntimeHint({
@@ -694,51 +805,42 @@ function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contract
     );
   }
 
-  const added = diff.added || [];
-  const modified = diff.modified || [];
-  const removed = diff.removed || [];
-  const total = added.length + modified.length + removed.length;
+  const preview = summarizeDiffPreview(diff);
+  const { added, modified, pruneCandidates, pendingCount, pendingSummary, pruneSummary } = preview;
 
   return (
     <Card className="bg-midnight/30 border-graphite/50 overflow-hidden shadow-lg">
       <div className="px-4 py-3 border-b border-graphite/50 bg-obsidian/30 flex justify-between items-start sm:items-center flex-col sm:flex-row gap-2">
         <div>
           <div className="text-[13px] font-medium text-text-1">Diff vs server state</div>
-          <div className="text-[11px] text-text-3 mt-0.5">{total} {total === 1 ? "change" : "changes"} pending apply</div>
+          <div data-testid="diff-pending-summary" className="text-[11px] text-text-3 mt-0.5">{pendingSummary}</div>
         </div>
         <div className="flex gap-3 text-[11px] font-medium bg-obsidian/60 px-3 py-1.5 rounded-full border border-graphite/40">
           <span className="text-success flex items-center gap-1"><span className="text-[14px] leading-none">+</span> {added.length} added</span>
           <span className="text-gold flex items-center gap-1"><span className="text-[14px] leading-none">~</span> {modified.length} modified</span>
-          <span className="text-danger flex items-center gap-1"><span className="text-[14px] leading-none">-</span> {removed.length} removed</span>
         </div>
       </div>
       
       <div className="p-0">
-        {total === 0 ? (
+        {pendingCount === 0 ? (
           <div className="p-8 text-center text-text-3 text-sm">
-            Local definitions exactly match the server state.
+            No changes pending for the definitions in this editor.
           </div>
         ) : (
           <div className="font-mono text-xs leading-relaxed overflow-x-auto bg-void p-4">
             {added.map((a, i) => (
-              <div key={`a-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
+              <div
+                key={`a-${i}`}
+                data-testid="diff-pending-add"
+                data-alias={a.alias}
+                className="py-1.5 border-b border-graphite/20 last:border-0"
+              >
                 <div className="flex gap-3">
                   <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
                   <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
                   <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
                 </div>
                 <ContractFindingsList findings={a.contractFindings} contractTeams={contractTeams} />
-              </div>
-            ))}
-            
-            {removed.map((r, i) => (
-              <div key={`r-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
-                <div className="flex gap-3">
-                  <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
-                  <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
-                  <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
-                </div>
-                <ContractFindingsList findings={r.contractFindings} contractTeams={contractTeams} />
               </div>
             ))}
             
@@ -756,6 +858,21 @@ function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contract
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {pruneSummary && (
+          <div
+            data-testid="diff-prune-candidates"
+            className="border-t border-graphite/40 bg-obsidian/20 px-4 py-3 text-[11px] text-text-4"
+          >
+            <div>{pruneSummary}</div>
+            <ul className="mt-2 m-0 p-0 list-none flex flex-col gap-1 font-mono">
+              {pruneCandidates.map((job) => (
+                <li key={job.alias} data-testid="diff-prune-candidate" data-alias={job.alias}>
+                  {job.alias}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
       </div>

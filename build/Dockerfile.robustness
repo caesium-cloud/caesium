@@ -1,4 +1,5 @@
-# Robustness runner: compiled TestOwnerCrash plus the candidate CLI.
+# Robustness runner: compiled TestOwnerCrash/TestTargetedFaults plus the
+# candidate CLI. A second, separate target builds the INSTRUMENTED server.
 ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
 ARG CAESIUM_IMAGE=caesiumcloud/caesium:latest
 
@@ -25,3 +26,41 @@ RUN chmod 0755 /bin/robustness.test /bin/caesium && \
 USER 10001:10001
 WORKDIR /
 ENTRYPOINT ["/bin/robustness.test"]
+
+# --------------------------------------------------------------------------
+# Instrumented server (distributed-testing B2).
+#
+# The ONLY difference from the release server is `-tags testfault`, which
+# compiles in internal/testfault's build-tagged file. The release image is built
+# without it and gets the twin whose Enabled constant is false, so every call
+# site in internal/event/bus_dispatch.go is removed before linking and the
+# control has no symbol, string, env switch or listener in a shippable
+# artifact. `scripts/robustness.sh` asserts both directions against the built
+# binaries before it deploys anything.
+#
+# This target is never referenced by `just build`, `just build-release` or the
+# CI image lane: it exists only for the robustness harness, and the harness only
+# deploys it when CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE is set explicitly.
+#
+# The UI bundle is stubbed exactly as the runner stage stubs it: these servers
+# are driven over HTTP by an in-cluster test, never by a browser.
+# --------------------------------------------------------------------------
+FROM ${BUILDER_IMAGE} AS instrumented-compile
+WORKDIR /bld/caesium
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    mkdir -p ui/dist /out && touch ui/dist/index.html && \
+    go build -tags testfault -trimpath -ldflags="-s -w" -o /out/caesium ./
+# Fail the stage if the tag did not take effect, so an instrumented deployment
+# can never be silently inert.
+RUN grep -c -- 'caesium-testfault-control' /out/caesium >/dev/null || \
+    (echo "instrumented build is missing the fault-control marker" >&2; exit 1)
+
+FROM ${CAESIUM_IMAGE} AS instrumented-server
+USER 0:0
+COPY --from=instrumented-compile /out/caesium /bin/caesium
+RUN chmod 0755 /bin/caesium && test -x /bin/caesium
+USER 10001:10001
+WORKDIR /
+ENTRYPOINT ["/bin/caesium"]

@@ -440,6 +440,10 @@ func (w *Worker) drainInbound(ctx context.Context) error {
 // execCtx is the context passed to the executor (it carries dispatch metadata
 // for push-path tasks).
 func (w *Worker) startOnReservedSlot(execCtx context.Context, task *models.TaskRun) {
+	if meta, ok := dispatchMetaFrom(execCtx); ok {
+		meta.CompletionTimeout = w.leaseTTL
+		execCtx = withDispatchMeta(execCtx, meta)
+	}
 	// Per-task cancellation, derived from the worker's context: losing the
 	// claim (a cancelled run, or a lease reassigned to another node) must be
 	// able to stop THIS task without stopping the whole worker.

@@ -151,12 +151,11 @@ func TestHandleComplete_RunNotFound(t *testing.T) {
 		Status:          "succeeded",
 	}
 	w := postJSON(t, h.HandleComplete, req)
-	// No lease → IsOwner returns false → not_owner.
 	require.Equal(t, http.StatusConflict, w.Code)
 
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Contains(t, []string{ReasonNotOwner, ReasonMissingRun}, resp.Code)
+	require.Equal(t, ReasonMissingRun, resp.Code)
 }
 
 // TestHandleComplete_Malformed verifies that malformed JSON is rejected with

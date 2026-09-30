@@ -111,9 +111,28 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		return nil, err
 	}
 
+	// ContainerCreate itself runs against a bounded context detached from
+	// e.ctx's cancellation (see podmanClient.ContainerCreate) so it always
+	// reaches a definitive outcome; check e.ctx separately here.
 	created, err := e.backend.ContainerCreate(spec)
 	if err != nil {
+		if e.ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			// A caller cancellation or the detached request's own deadline
+			// leaves allocation ambiguous: Podman may have persisted the
+			// deterministic container name before its response reached us.
+			e.cleanupFailedCreate(spec.Name, err)
+			if e.ctx.Err() != nil {
+				return nil, e.ctx.Err()
+			}
+		}
 		return nil, err
+	}
+	if e.ctx.Err() != nil {
+		// ContainerCreate succeeded — the container exists — but the
+		// caller is no longer waiting for it. Remove it and report the
+		// cancellation, not a spurious success. See #480.
+		e.cleanupFailedCreate(created.ID, e.ctx.Err())
+		return nil, e.ctx.Err()
 	}
 
 	log.Info(
@@ -124,10 +143,35 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	)
 
 	if err = e.backend.ContainerStart(created.ID); err != nil {
+		e.cleanupFailedCreate(created.ID, err)
 		return nil, err
 	}
 
-	return e.Get(&atom.EngineGetRequest{ID: created.ID})
+	a, getErr := e.Get(&atom.EngineGetRequest{ID: created.ID})
+	if getErr != nil {
+		// A container ID has been allocated (and just started) but Create
+		// is about to fail — most commonly because the caller's context
+		// (e.g. a SIGINT-cancelled `caesium dev`) was cancelled in the
+		// window between ContainerStart succeeding and this inspect. Create
+		// returning an error with no atom.Atom handle means nothing else in
+		// the system ever learns this container's ID to stop it, so it
+		// would otherwise run forever. See #480.
+		e.cleanupFailedCreate(created.ID, getErr)
+		return nil, getErr
+	}
+	return a, nil
+}
+
+// cleanupFailedCreate best-effort stops and removes a container that was
+// successfully created — and possibly started — but whose Create call is
+// failing for an unrelated reason. Stop's underlying podman client calls
+// already detach from the caller's context (see podmanClient.ContainerStop/
+// ContainerRemove's context.WithoutCancel), so this is safe to call
+// regardless of why Create is failing, including a cancelled caller context.
+func (e *podmanEngine) cleanupFailedCreate(id string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: id, Force: true}); err != nil {
+		log.Warn("failed to clean up container after Create failed", "id", id, "cause", cause, "error", err)
+	}
 }
 
 func (e *podmanEngine) ensureImagePresent(imageRef string) error {

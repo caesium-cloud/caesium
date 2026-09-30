@@ -1,6 +1,8 @@
 package run
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // TestCompleteTaskOwner_WritesTerminalRowsWithoutAdvancing verifies the owner
@@ -103,6 +106,48 @@ func TestCompleteTaskOwner_ClaimMismatch(t *testing.T) {
 	// A completion from a node that does not hold the claim is rejected.
 	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil, nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
+	require.NotErrorIs(t, err, ErrRunTerminal, "a running run must not be certified as terminal")
+
+	// An unavailable status read cannot turn the same mismatch into either a
+	// terminal fence or an ordinary wrong-worker refusal.
+	statusReadErr := errors.New("injected run-status read failure")
+	const statusReadCallback = "test:owner_completion_status_read_failure"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(statusReadCallback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "job_runs" {
+			tx.AddError(statusReadErr)
+		}
+	}))
+	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil, nil)
+	require.ErrorIs(t, err, statusReadErr)
+	require.NotErrorIs(t, err, ErrRunTerminal)
+	require.NotErrorIs(t, err, ErrTaskClaimMismatch)
+	require.NoError(t, db.Callback().Query().Remove(statusReadCallback))
+
+	// CancelRun commits the run status and clears the task claim together. A
+	// completion that reaches its guarded write after that transaction must
+	// report the terminal fence and leave the cancelled rows untouched.
+	require.NoError(t, store.CancelRun(context.Background(), runRecord.ID))
+	var cancelledRun models.JobRun
+	require.NoError(t, db.First(&cancelledRun, "id = ?", runRecord.ID).Error)
+	var cancelledTask models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).First(&cancelledTask).Error)
+	require.Equal(t, string(StatusCancelled), cancelledRun.Status)
+	require.Equal(t, string(TaskStatusCancelled), cancelledTask.Status)
+	require.Empty(t, cancelledTask.ClaimedBy)
+	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "stale-success", "", "node-1",
+		map[string]string{"stale_output": "must-not-persist"}, nil, 1, 1, nil, nil)
+	require.ErrorIs(t, err, ErrRunTerminal)
+	require.NotErrorIs(t, err, ErrTaskClaimMismatch)
+	var afterRun models.JobRun
+	require.NoError(t, db.First(&afterRun, "id = ?", runRecord.ID).Error)
+	var afterTask models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).First(&afterTask).Error)
+	require.Equal(t, cancelledRun.Status, afterRun.Status)
+	require.Equal(t, cancelledTask.Status, afterTask.Status)
+	require.Equal(t, cancelledTask.ClaimedBy, afterTask.ClaimedBy)
+	require.Equal(t, cancelledTask.Result, afterTask.Result)
+	require.Equal(t, cancelledTask.Output, afterTask.Output)
+	require.Equal(t, cancelledTask.TerminalSequence, afterTask.TerminalSequence)
 }
 
 // TestClaimTaskForDispatch_TrustOwnerReadiness covers the in-memory-mode claim:

@@ -3,6 +3,8 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import type { AxeResults, NodeResult, Result } from "axe-core";
 import { applyAndRun, applyDefinitions, failOnUnexpectedPageErrors, findJobByAlias, loadFixtureDefinition } from "./helpers/fixtures";
 
+import { waitForFiniteAnimations } from "./helpers/animations";
+
 failOnUnexpectedPageErrors();
 
 /**
@@ -20,14 +22,11 @@ failOnUnexpectedPageErrors();
  * mirror (`task-log-plaintext`) and the DAG's own buttons/labels chrome
  * remain in scope.
  *
- * KNOWN_VIOLATIONS is a tracked baseline, not a pass: this run found real,
- * pre-existing critical/serious defects (systemic icon-only buttons with no
- * accessible name, and several `text-text-3`/`text-text-4`/`bg-graphite`/
- * `bg-cyan-glow` muted-token combinations below the 4.5:1 contrast ratio)
- * across product pages this D2 stream does not own (`ui/src/**` is out of
- * scope for this stream — see the coordination note in the dispatching
- * plan). Shrinking this baseline is a product-code PR; widening it without a
- * product-side justification is not.
+ * KNOWN_VIOLATIONS is a tracked baseline, not a pass. Named-control and
+ * dialog-focus defects from the original D2 scan are fixed in product code;
+ * remaining entries (if any) are still real. Shrinking this baseline is
+ * required when a defect is fixed; widening it without a product-side
+ * justification is not.
  *
  * The baseline is tracked per VIOLATING NODE, not per whole rule ID, so it
  * cannot silently swallow a newly-broken control under an already-known rule
@@ -78,15 +77,10 @@ failOnUnexpectedPageErrors();
 
 const CANVAS_EXCLUSIONS = ['.react-flow__renderer', '[data-testid="task-log-terminal"]'];
 
-/** Known-bad `fgColor` token families behind existing color-contrast debt (see file header; one representative sample per family). */
+/** Known-bad `fgColor` token families behind remaining color-contrast debt (see file header; one representative sample per family). */
 const KNOWN_CONTRAST_TOKENS = [
-  "#646d80",
-  "#3f4654",
-  "#707a8f",
-  "#464e5d",
-  // bg-cyan-glow "quick trigger" affordance — same pre-existing muted-token
-  // debt family called out in the file header, only reachable once enough
-  // concurrently-created triggers exist on the page for one to render it.
+  // Near-black on dark surfaces (void / midnight / primary-foreground). Not
+  // the muted text rungs; those were raised in dark theme to ≥4.5:1.
   "#0a0a12",
 ];
 
@@ -113,10 +107,10 @@ function colorIsKnownContrastToken(fgColor: string): boolean {
 
 /** `${ruleId}::${leaf-selector}` baselines — see file header for why only the leaf segment is tracked. */
 const KNOWN_VIOLATIONS: Record<string, string[]> = {
-  "jobs-list": ["select-name::select"],
-  "run-detail-with-task-panel": ["aria-prohibited-attr::.z-10", "button-name::.w-7"],
+  "jobs-list": [],
+  "run-detail-with-task-panel": [],
   "trigger-job-dialog": [],
-  "triggers-page": ["button-name::.w-7.h-7.hover\\:text-text-2", "button-name::.w-5"],
+  "triggers-page": [],
 };
 
 /** The innermost (rightmost, descendant-combinator-separated) selector segment of an axe `target` — see file header. */
@@ -176,6 +170,9 @@ async function assertNoNewViolations(page: Page, testInfo: TestInfo, label: stri
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .exclude(CANVAS_EXCLUSIONS);
   if (include) scan.include(include);
+  // Visible rows can still inherit AppShell's 500 ms entry fade, giving axe
+  // a transient composite foreground rather than the settled design token.
+  await waitForFiniteAnimations(page);
   const results: AxeResults = await scan.analyze();
 
   await testInfo.attach(`axe-${label}`, {
@@ -231,6 +228,53 @@ test("jobs list is keyboard-reachable and free of critical/serious violations", 
   const triggerButton = page.locator('[data-testid="job-row"] button[title="Trigger run"]').first();
   await triggerButton.focus();
   await expect(triggerButton).toBeFocused();
+});
+
+test("jobs contrast scans wait for finite fades and still reject settled defects", async ({ page, request }, testInfo) => {
+  await applyDefinitions(request, await loadFixtureDefinition("run-history.job.yaml"));
+  await page.goto("/jobs");
+  await expect(page.getByTestId("job-row").first()).toBeVisible();
+  await page.mouse.move(0, 0); // Non-hover card rows, as in the failed CI scan.
+  await waitForFiniteAnimations(page);
+
+  const ids = '[data-testid="job-row"] .font-mono.text-text-4';
+  await expect(page.locator(ids).first()).toBeVisible();
+  await page.locator("main").evaluate((main) => {
+    const fade = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
+    fade.pause();
+    fade.currentTime = 0;
+  });
+  try {
+    // A paused finite fade cannot be silently skipped or leave the scan hung.
+    await expect(waitForFiniteAnimations(page, 200)).rejects.toThrow();
+
+    let ready = false;
+    const waiting = waitForFiniteAnimations(page).then(() => { ready = true; });
+    await page.locator("main").evaluate((main) => {
+      main.getAnimations().forEach((animation) => animation.cancel());
+      const replacement = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
+      replacement.pause();
+      replacement.currentTime = 0;
+    });
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(ready, "a replacement finite fade must remain pending").toBe(false);
+    await page.locator("main").evaluate((main) => main.getAnimations().forEach((animation) => animation.finish()));
+    await waiting;
+    await expect(page.locator("main")).toHaveCSS("opacity", "1");
+    await assertNoNewViolations(page, testInfo, "jobs-list");
+
+    // Readiness does not excuse a genuinely bad settled foreground. Preserve
+    // the full scan and its 4.5:1 rule, including this concrete failed CI color.
+    await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.color = "#727886"; });
+    try {
+      await expect(assertNoNewViolations(page, testInfo, "jobs-list")).rejects.toThrow("NEW critical/serious axe violation");
+    } finally {
+      await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.removeProperty("color"); });
+    }
+  } finally {
+    // Failure diagnostics must not wait on the deliberately paused long fade.
+    await page.locator("main").evaluate((main) => main.getAnimations().forEach((animation) => animation.cancel()));
+  }
 });
 
 test("job detail run page (DAG + task panel) is free of critical/serious violations; Escape returns focus", async ({
@@ -309,19 +353,7 @@ test("Trigger Job dialog is a labeled, focus-trapped dialog reachable and dismis
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
-  // Closing must not leave the page permanently un-navigable from the
-  // keyboard: Tab from wherever focus landed must still reach a live,
-  // attached control. (This app's trigger button is a plain element outside
-  // Radix's own Dialog.Trigger primitive, and closing here in fact drops
-  // focus to <body> rather than restoring it to that button — a real, minor
-  // focus-management gap, reported rather than asserted away since fixing it
-  // is a `ui/src/**` product change outside this stream's scope. What must
-  // still hold is that the page recovers on the very next keypress.)
-  await page.keyboard.press("Tab");
-  const activeIsAttached = await page.evaluate(
-    () => document.activeElement !== null && document.activeElement !== document.body,
-  );
-  expect(activeIsAttached).toBe(true);
+  await expect(trigger).toBeFocused();
 });
 
 test("triggers page has no critical/serious accessibility violations", async ({ page, request }, testInfo) => {

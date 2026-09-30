@@ -65,25 +65,37 @@ test("network recovery selection retains every ordinary browser scenario", () =>
   const browserReport = path.join(uiRoot, "playwright-results.json");
   const reportBefore = existsSync(browserReport) ? readFileSync(browserReport) : undefined;
   const all = listedProjects();
-  expect([...all.keys()].sort()).toEqual(["auth", "default", "network-recovery"]);
+  expect([...all.keys()].sort()).toEqual(["auth", "cluster-recovery", "default", "network-recovery"]);
 
   const ordinary = all.get("default") ?? new Set<string>();
   const recovery = all.get("network-recovery") ?? new Set<string>();
   const auth = all.get("auth") ?? new Set<string>();
-  for (const membership of [ordinary, recovery, auth]) expect(membership.size).toBeGreaterThan(0);
+  const cluster = all.get("cluster-recovery") ?? new Set<string>();
+  for (const membership of [ordinary, recovery, auth, cluster]) expect(membership.size).toBeGreaterThan(0);
 
   expect(intersection(ordinary, recovery)).toEqual(new Set());
   expect(intersection(ordinary, auth)).toEqual(new Set());
+  expect(intersection(ordinary, cluster)).toEqual(new Set());
   expect(intersection(recovery, auth)).toEqual(new Set());
+  expect(intersection(recovery, cluster)).toEqual(new Set());
+  expect(intersection(auth, cluster)).toEqual(new Set());
   expect([...auth].every((identity) => identity.startsWith("auth/"))).toBe(true);
   expect([...union(ordinary, recovery)].some((identity) => identity.startsWith("auth/"))).toBe(false);
+  expect([...union(ordinary, recovery, auth)].some((identity) => identity.startsWith("cluster-recovery.spec.ts:"))).toBe(
+    false,
+  );
   expect([...recovery].every((identity) => identity.startsWith("network-recovery.spec.ts:"))).toBe(true);
+  expect([...cluster].every((identity) => identity.startsWith("cluster-recovery.spec.ts:"))).toBe(true);
 
   const selected = listedProjects("network-recovery");
   expect([...selected.keys()].sort()).toEqual(["default", "network-recovery"]);
   expect(selected.get("default")).toEqual(ordinary);
   expect(selected.get("network-recovery")).toEqual(recovery);
   expect(union(...selected.values())).toEqual(union(ordinary, recovery));
+
+  const selectedCluster = listedProjects("cluster-recovery");
+  expect([...selectedCluster.keys()].sort()).toEqual(["cluster-recovery"]);
+  expect(selectedCluster.get("cluster-recovery")).toEqual(cluster);
   const reportAfter = existsSync(browserReport) ? readFileSync(browserReport) : undefined;
   expect(reportAfter).toEqual(reportBefore);
-}, 60_000);
+}, 90_000);
