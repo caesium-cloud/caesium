@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -94,6 +95,9 @@ type waitOutcomeBackend struct {
 func (b *waitOutcomeBackend) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
 	return b.inspect(ctx)
 }
+func (b *waitOutcomeBackend) ContainerStatsOneShot(context.Context, string) (container.StatsResponseReader, error) {
+	return container.StatsResponseReader{}, atom.ErrStatsUnavailable
+}
 func (b *waitOutcomeBackend) ContainerWait(context.Context, string, container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	result := make(chan container.WaitResponse, 1)
 	result <- container.WaitResponse{StatusCode: 137}
@@ -156,6 +160,9 @@ func TestWaitCapturesLateOOMEvidenceWithoutInferringSIGKILL(t *testing.T) {
 			}
 			require.Equal(t, want, final.Result())
 			require.Equal(t, want == atom.ResourceFailure, final.(*Atom).ResourceOutcome().OOMKilled)
+			// A converged observation is known evidence, OOM or not; a replaced
+			// runtime cannot settle this attempt's verdict.
+			require.Equal(t, !tc.enabled || !tc.restarted, final.(*Atom).ResourceOutcome().OOMKnown)
 			if !tc.enabled {
 				require.Equal(t, 1, calls)
 			}
@@ -184,4 +191,126 @@ func TestWaitOutcomeReinspectionHonorsCancellation(t *testing.T) {
 	_, err := engine.Wait(&atom.EngineWaitRequest{ID: "runtime", Context: ctx})
 	require.ErrorIs(t, err, context.Canceled)
 	require.Less(t, time.Since(start), 500*time.Millisecond)
+}
+
+func shortenOOMWindow(t *testing.T, settle, poll, finalInspect time.Duration) {
+	t.Helper()
+	prevSettle, prevPoll, prevFinal := dockerOOMMetadataSettleTimeout, dockerOOMMetadataPollInterval, dockerOOMMetadataFinalInspectTimeout
+	dockerOOMMetadataSettleTimeout, dockerOOMMetadataPollInterval, dockerOOMMetadataFinalInspectTimeout = settle, poll, finalInspect
+	t.Cleanup(func() {
+		dockerOOMMetadataSettleTimeout, dockerOOMMetadataPollInterval, dockerOOMMetadataFinalInspectTimeout = prevSettle, prevPoll, prevFinal
+	})
+}
+
+// TestWaitKeepsOOMUnknownWhenConvergenceFails drives the real engine.Wait path
+// and the resource sampler: an initial exited/137/false snapshot is not a
+// verdict until a follow-up observation of the same attempt converges.
+func TestWaitKeepsOOMUnknownWhenConvergenceFails(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, env.Process()) })
+	t.Setenv("CAESIUM_RESOURCE_STATS_ENABLED", "true")
+	require.NoError(t, env.Process())
+	const settle = 200 * time.Millisecond
+	shortenOOMWindow(t, settle, 10*time.Millisecond, 100*time.Millisecond)
+	errDaemon := errors.New("docker daemon unavailable")
+	for _, tc := range []struct {
+		name string
+		// inWindow and postWindow answer follow-up inspects; the first inspect
+		// always returns the exited/137/false snapshot.
+		inWindow, postWindow  func(context.Context) (bool, error)
+		wantKnown, wantOOM    bool
+		wantResult            atom.Result
+		wantMultipleFollowUps bool
+	}{
+		{
+			name:                  "every follow-up inspect fails",
+			inWindow:              func(context.Context) (bool, error) { return false, errDaemon },
+			postWindow:            func(context.Context) (bool, error) { return false, errDaemon },
+			wantResult:            atom.Killed,
+			wantMultipleFollowUps: true,
+		},
+		{
+			name:     "post-window inspect hits its deadline",
+			inWindow: func(context.Context) (bool, error) { return false, nil },
+			postWindow: func(ctx context.Context) (bool, error) {
+				<-ctx.Done()
+				return false, ctx.Err()
+			},
+			wantResult:            atom.Killed,
+			wantMultipleFollowUps: true,
+		},
+		{
+			// The ordinary SIGKILL: Docker's settled record after the window is a
+			// known non-OOM verdict even when earlier polls failed.
+			name:                  "post-window inspect converges on SIGKILL",
+			inWindow:              func(context.Context) (bool, error) { return false, errDaemon },
+			postWindow:            func(context.Context) (bool, error) { return false, nil },
+			wantKnown:             true,
+			wantResult:            atom.Killed,
+			wantMultipleFollowUps: true,
+		},
+		{
+			name:       "late OOM transition after failed polls",
+			inWindow:   lateOOMAfterFailures(3, errDaemon),
+			postWindow: func(context.Context) (bool, error) { return false, errDaemon },
+			wantKnown:  true,
+			wantOOM:    true,
+			wantResult: atom.ResourceFailure,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var started time.Time
+			calls := 0
+			backend := &waitOutcomeBackend{inspect: func(ctx context.Context) (container.InspectResponse, error) {
+				calls++
+				state := &container.State{Status: "exited", ExitCode: 137, StartedAt: "original"}
+				if calls > 1 {
+					answer := tc.inWindow
+					if time.Since(started) >= settle {
+						answer = tc.postWindow
+					}
+					oom, err := answer(ctx)
+					if err != nil {
+						return container.InspectResponse{}, err
+					}
+					state.OOMKilled = oom
+				} else {
+					started = time.Now()
+				}
+				resp := newContainer("runtime", state)
+				resp.HostConfig = &container.HostConfig{Resources: container.Resources{Memory: 64 * 1024 * 1024}}
+				return resp, nil
+			}}
+			engine := &dockerEngine{ctx: context.Background(), backend: backend}
+			sampler := atom.StartResourceSampler(context.Background(), engine, "runtime", time.Hour)
+			final, err := engine.Wait(&atom.EngineWaitRequest{ID: "runtime", Context: context.Background()})
+			require.NoError(t, err)
+			require.Equal(t, tc.wantResult, final.Result())
+			require.Equal(t, 137, *final.ExitCode())
+			outcome := final.(*Atom).ResourceOutcome()
+			require.Equal(t, tc.wantKnown, outcome.OOMKnown)
+			require.Equal(t, tc.wantOOM, outcome.OOMKilled)
+			// Neither exit 137 nor the applied limit is inferred into an OOM.
+			summary := sampler.Stop(final)
+			require.Equal(t, tc.wantKnown, summary.OOMKnown)
+			require.Equal(t, tc.wantOOM, summary.OOMKilled)
+			if !tc.wantOOM {
+				require.Nil(t, summary.PeakMemoryBytes)
+				require.Equal(t, "none", summary.StatsSource)
+			}
+			if tc.wantMultipleFollowUps {
+				require.Greater(t, calls, 2)
+			}
+		})
+	}
+}
+
+func lateOOMAfterFailures(failures int, err error) func(context.Context) (bool, error) {
+	seen := 0
+	return func(context.Context) (bool, error) {
+		seen++
+		if seen <= failures {
+			return false, err
+		}
+		return true, nil
+	}
 }

@@ -13,6 +13,9 @@ import (
 type Atom struct {
 	atom.Atom
 	metadata container.InspectResponse
+	// oomUnresolved marks a wait outcome whose exit-137 OOM evidence could not
+	// converge; its false OOMKilled flag is not a verdict.
+	oomUnresolved bool
 }
 
 // ID returns the ID of the Atom. This ID is identical
@@ -74,7 +77,7 @@ func (c *Atom) ResourceOutcome() atom.ResourceOutcome {
 	if c.metadata.ContainerJSONBase == nil || c.metadata.State == nil {
 		return atom.ResourceOutcome{}
 	}
-	out := atom.ResourceOutcome{OOMKnown: true, OOMKilled: c.metadata.State.OOMKilled}
+	out := atom.ResourceOutcome{OOMKnown: !c.oomUnresolved || c.metadata.State.OOMKilled, OOMKilled: c.metadata.State.OOMKilled}
 	if c.metadata.HostConfig != nil && c.metadata.HostConfig.Memory > 0 {
 		value := c.metadata.HostConfig.Memory
 		out.MemoryLimitBytes = &value

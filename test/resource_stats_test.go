@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/containers/podman/v5/pkg/bindings"
 	podman "github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/domain/entities/types"
 	docker "github.com/docker/docker/api/types/container"
+	dockerevents "github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -49,6 +53,9 @@ type resourceFixtureRuntime struct {
 	cancel context.CancelFunc
 	docker *client.Client
 	ids    map[string]bool
+
+	oomMu      sync.Mutex
+	dockerOOMs map[string]bool
 }
 
 func (s *IntegrationTestSuite) resourceFixtureRuntime() *resourceFixtureRuntime {
@@ -57,7 +64,7 @@ func (s *IntegrationTestSuite) resourceFixtureRuntime() *resourceFixtureRuntime 
 		s.T().Skip("resource OOM fault injection is Docker/Podman; kind limits and live degradation are Plan2 H-2 after B2")
 	}
 	ctx, cancel := context.WithTimeout(s.T().Context(), 3*time.Minute)
-	r := &resourceFixtureRuntime{s: s, ctx: ctx, cancel: cancel, ids: map[string]bool{}}
+	r := &resourceFixtureRuntime{s: s, ctx: ctx, cancel: cancel, ids: map[string]bool{}, dockerOOMs: map[string]bool{}}
 	if s.engineType == "podman" {
 		var err error
 		r.ctx, err = bindings.NewConnection(ctx, os.Getenv("CAESIUM_PODMAN_URI"))
@@ -93,7 +100,7 @@ func (r *resourceFixtureRuntime) release(id, waitFile string, memoryMiB int64) {
 		r.s.Require().NoError(err)
 		r.s.Require().Equal(limit, inspect.HostConfig.Memory)
 		r.s.Require().Equal(limit, inspect.HostConfig.MemorySwap)
-
+		r.watchDockerOOM(id)
 	} else {
 		// Podman 4.9, the Ubuntu 24.04 CI server, applies a live update to the
 		// OCI runtime without rewriting the stored spec, so its inspect keeps
@@ -119,6 +126,69 @@ func (r *resourceFixtureRuntime) release(id, waitFile string, memoryMiB int64) {
 		r.s.Require().NoError(err)
 		r.s.Require().NoError(copyFile())
 	}
+}
+
+// watchDockerOOM records whether Docker itself publishes an OOM for id before
+// the workload is released. Docker sets State.OOMKilled and emits this event
+// from the same containerd TaskOOM notification, which containerd can drop when
+// an OOM-killed PID 1 exits and its cgroup is deleted first; the event tells
+// "the runtime never recorded an OOM" apart from "Caesium missed the runtime's
+// OOM record". Events returns once the daemon has registered the stream, and
+// the replay window covers anything published while it was being set up.
+func (r *resourceFixtureRuntime) watchDockerOOM(id string) {
+	r.s.T().Helper()
+	messages, errs := r.docker.Events(r.ctx, dockerevents.ListOptions{
+		Since: strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10),
+		Filters: filters.NewArgs(
+			filters.Arg("type", string(dockerevents.ContainerEventType)),
+			filters.Arg("container", id),
+			filters.Arg("event", string(dockerevents.ActionOOM)),
+		),
+	})
+	go func() {
+		for {
+			select {
+			case msg := <-messages:
+				if msg.Actor.ID == id && msg.Action == dockerevents.ActionOOM {
+					r.oomMu.Lock()
+					r.dockerOOMs[id] = true
+					r.oomMu.Unlock()
+				}
+			case <-errs:
+				return
+			case <-r.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (r *resourceFixtureRuntime) dockerPublishedOOM(id string) bool {
+	r.oomMu.Lock()
+	defer r.oomMu.Unlock()
+	return r.dockerOOMs[id]
+}
+
+// requireOOMVerdict asserts the persisted verdict for a workload the harness
+// drove past its injected limit, and reports whether it is an OOM. Caesium
+// must mirror the runtime's own record: an OOM the runtime recorded must be
+// persisted as an OOM resource_failure, while a Docker runtime that never
+// recorded one (see watchDockerOOM) must stay a plain kill rather than have OOM
+// inferred from exit 137 or the limit. Other engines must record the OOM.
+func (r *resourceFixtureRuntime) requireOOMVerdict(task resourceTaskObservation, limitMiB int64) bool {
+	s := r.s
+	s.T().Helper()
+	s.Require().NotNil(task.ExitCode)
+	s.Equal(137, *task.ExitCode)
+	if r.docker != nil && !task.OOMKilled && !r.dockerPublishedOOM(task.RuntimeID) {
+		s.T().Logf("docker published no OOM for runtime %s (oom_known=%t); the persisted verdict mirrors the runtime", task.RuntimeID, task.OOMKnown)
+		s.Equal("killed", task.Result)
+		return false
+	}
+	s.True(task.OOMKilled, "the runtime recorded an OOM, so the persisted verdict must carry it")
+	s.Equal("resource_failure", task.Result)
+	s.requireOOMMemoryObservation(task, limitMiB)
+	return task.OOMKilled
 }
 
 // requireInjectedLimit asserts the workload itself saw the harness's limit on
@@ -176,13 +246,9 @@ steps:
 			task := observation.Tasks[0]
 			s.requireInjectedLimit(s.taskLog(job.ID, runID, s.jobTaskIDByName(job.ID, "measure")), 64)
 			s.Require().NotNil(task.ExitCode)
-			s.Equal(tc.oom, task.OOMKilled)
 			if tc.oom {
 				s.Equal("failed", completed.Status)
-				s.Equal("resource_failure", task.Result)
-				s.Equal(137, *task.ExitCode)
-				s.requireOOMMemoryObservation(task, 64)
-				if s.authAPIKey != "" {
+				if runtime.requireOOMVerdict(task, 64) && s.authAPIKey != "" {
 					s.Require().Eventually(func() bool {
 						var list approvalIncidentList
 						if s.tryGetJSON("/v1/incidents?job_id="+job.ID, &list) != nil {
@@ -197,6 +263,7 @@ steps:
 					}, 15*time.Second, 100*time.Millisecond, "runtime OOM must classify oom, not transient_infra")
 				}
 			} else {
+				s.False(task.OOMKilled)
 				s.Equal("succeeded", completed.Status)
 				s.Equal(0, *task.ExitCode)
 				s.Equal("sampled", task.StatsSource)
@@ -334,11 +401,9 @@ steps:
 	s.Equal("succeeded", healthy.Status)
 	s.False(healthy.OOMKilled)
 	s.Equal("failed", oom.Status)
-	s.True(oom.OOMKilled)
-	s.Equal("resource_failure", oom.Result)
+	runtime.requireOOMVerdict(oom, 64)
 	s.Require().NotNil(healthy.PeakMemoryBytes)
 	s.GreaterOrEqual(*healthy.PeakMemoryBytes, int64(128*1024*1024))
-	s.requireOOMMemoryObservation(oom, 64)
 	if oom.PeakMemoryBytes != nil {
 		s.NotEqual(*healthy.PeakMemoryBytes, *oom.PeakMemoryBytes, "sibling outcomes must not overwrite one another")
 	}
