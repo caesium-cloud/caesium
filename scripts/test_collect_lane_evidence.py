@@ -42,15 +42,32 @@ def run(*args):
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
 
 
-def check(report, gate):
+QUORUM_ROWS = ("b3-quorum-loss-uncertain-write", "b3-split-heal-2-1")
+
+
+def check(report, gate, manifest=None):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "report.json"
         path.write_text(json.dumps(report))
+        manifest_path = MANIFEST
+        if manifest is not None:
+            manifest_path = Path(tmp) / "scenarios.json"
+            manifest_path.write_text(json.dumps(manifest))
         return subprocess.run(
-            [sys.executable, str(CHECKER), "--manifest", str(MANIFEST), "--report", str(path),
+            [sys.executable, str(CHECKER), "--manifest", str(manifest_path), "--report", str(path),
              "--require", gate, "--strict"],
             capture_output=True, text=True,
         )
+
+
+def quorum_rows_promoted():
+    """The committed manifest with the quorum-loss rows proven under nightly-core,
+    as they will be once TestCore records an identity for a timed-out mutation."""
+    manifest = json.loads(MANIFEST.read_text())
+    for row in manifest["scenarios"]:
+        if row["id"] in QUORUM_ROWS:
+            row["status"], row["gates"] = "proven", ["nightly-core"]
+    return manifest
 
 
 def core_records():
@@ -203,8 +220,12 @@ class CoreFragmentTests(unittest.TestCase):
         quorum = rows["b3-quorum-loss-uncertain-write"]
         self.assertIn("post_heal_identity_reconciliation", quorum["observations"])
         self.assertIn("identified_mutation_sent_during_fault", quorum["fault_activation"]["observations"])
-        checked = check(self.report(out, "nightly-core"), "nightly-core")
+        report = self.report(out, "nightly-core")
+        checked = check(report, "nightly-core")
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        # Reconciled identities would also satisfy the gate with the quorum rows promoted.
+        promoted = check(report, "nightly-core", quorum_rows_promoted())
+        self.assertEqual(promoted.returncode, 0, promoted.stdout + promoted.stderr)
 
     def test_unknown_write_identities_stay_inconclusive_after_heal(self):
         # The unchanged fixture: both timed-out minority triggers returned no
@@ -228,12 +249,21 @@ class CoreFragmentTests(unittest.TestCase):
         self.assertNotIn("post_heal_identity_reconciliation", quorum["observations"])
         self.assertNotIn("identified_mutation_sent_during_fault", quorum["fault_activation"]["observations"])
         self.assertNotIn("quorum_restored_after_heal", split["observations"])
-        others = [row for sid, row in rows.items() if sid not in (quorum["id"], split["id"])]
+        others = [row for sid, row in rows.items() if sid not in QUORUM_ROWS]
         self.assertTrue(all(row["status"] == "pass" for row in others))
-        checked = check(self.report(out, "nightly-core"), "nightly-core")
+        report = self.report(out, "nightly-core")
+        # The committed manifest does not claim the quorum rows, so the gate
+        # passes on the other rows without certifying them...
+        manifest = {row["id"]: row for row in json.loads(MANIFEST.read_text())["scenarios"]}
+        for sid in QUORUM_ROWS:
+            self.assertEqual((manifest[sid]["status"], manifest[sid]["gates"]), ("unproven", []))
+        committed = check(report, "nightly-core")
+        self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
+        # ...and this fixture can never certify them once they are promoted.
+        checked = check(report, "nightly-core", quorum_rows_promoted())
         self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
         output = checked.stdout + checked.stderr
-        for sid in ("b3-quorum-loss-uncertain-write", "b3-split-heal-2-1"):
+        for sid in QUORUM_ROWS:
             self.assertIn(f"insufficient-samples={sid}", output)
 
     def test_one_unresolved_identity_withholds_the_reconciliation(self):
@@ -249,7 +279,8 @@ class CoreFragmentTests(unittest.TestCase):
         self.assertEqual(quorum["status"], "inconclusive")
         self.assertEqual(quorum["reconciliation"]["identities"], ["reconciled", "unknown_possibly_committed"])
         self.assertNotIn("post_heal_identity_reconciliation", quorum["observations"])
-        self.assertEqual(check(self.report(out, "nightly-core"), "nightly-core").returncode, 1)
+        report = self.report(out, "nightly-core")
+        self.assertEqual(check(report, "nightly-core", quorum_rows_promoted()).returncode, 1)
 
     def test_failed_quorum_subtest_stays_failed_with_unresolved_identities(self):
         result, out = self.collect(outcomes={"quorum_loss_uncertain_write": "FAIL"})
@@ -295,7 +326,7 @@ class CoreFragmentTests(unittest.TestCase):
         self.assertEqual(rows["b3-invalid-mtls-peer"]["feature_flags"]["internal_tls"], "provisioned")
         self.assertNotIn("no_rejection_inferred_from_client_timeout",
                          rows["b3-quorum-loss-uncertain-write"]["observations"])
-        checked = check(self.report(out, "nightly-core"), "nightly-core")
+        checked = check(self.report(out, "nightly-core"), "nightly-core", quorum_rows_promoted())
         self.assertEqual(checked.returncode, 1)
         output = checked.stdout + checked.stderr
         for sid in ("b3-stale-generation-complete", "b3-wrong-token-internal", "b3-quorum-loss-uncertain-write"):

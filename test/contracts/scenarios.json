@@ -749,13 +749,11 @@
       "contract_ids": [
         "DT-QUORUM-01"
       ],
-      "status": "proven",
+      "status": "unproven",
       "owner_item": "B3",
       "registered_by": "G6",
-      "gates": [
-        "nightly-core"
-      ],
-      "notes": "TestCore/quorum_loss_uncertain_write: 2-1 split; timeout is possibly committed, never a rejection (DT-QUORUM-01 U). Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
+      "gates": [],
+      "notes": "TestCore/quorum_loss_uncertain_write: 2-1 split; timeout is possibly committed, never a rejection (DT-QUORUM-01 U). Registered by G6 and executed nightly by `just core-robustness nightly-core`, but unproven and ungated: runQuorumLoss records a timed-out minority mutation that returned no run id as `unknown_possibly_committed`, which is not a reconciliation by recorded identity, so `scripts/collect-lane-evidence.py core` reports this row inconclusive until test/robustness/core_recovery.go records an identity for it (PR #593 review).",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,
@@ -888,13 +886,11 @@
         "DT-QUORUM-01",
         "DT-ADMIT-01"
       ],
-      "status": "proven",
+      "status": "unproven",
       "owner_item": "B3",
       "registered_by": "G6",
-      "gates": [
-        "nightly-core"
-      ],
-      "notes": "Same subtest as b3-quorum-loss-uncertain-write. Majority of two voters progresses; minority mutations are possibly committed and reconciled by identity after heal. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6. Executed nightly by `just core-robustness nightly-core` with the instrumented server (scripts/robustness.sh with CAESIUM_ROBUSTNESS_RUN='^TestCore$') on an owned kind cluster of 1 control-plane + 3 workers with three persistent Helm replicas; `scripts/collect-lane-evidence.py core` reads each observation back from the subtest's retained record, the runner's PASS line and the recorder events. Registered by G6.",
+      "gates": [],
+      "notes": "Same subtest as b3-quorum-loss-uncertain-write. Majority of two voters progresses; minority mutations are possibly committed and reconciled by identity after heal. Registered by G6 and executed nightly by `just core-robustness nightly-core`, but unproven and ungated for the same reason as b3-quorum-loss-uncertain-write: no identity is recorded for a timed-out minority mutation, so the collector reports this row inconclusive.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,

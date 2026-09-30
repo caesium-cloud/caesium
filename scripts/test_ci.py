@@ -2046,7 +2046,13 @@ class NightlyLaneTests(unittest.TestCase):
         self.assertIn("--target instrumented-server", recipe_body("robustness-instrumented"))
         rows = {row["id"] for row in MANIFEST["scenarios"] if "nightly-core" in row["gates"]}
         b3 = {row["id"] for row in MANIFEST["scenarios"] if row["owner_item"] == "B3"}
-        self.assertEqual(rows, b3)
+        # The quorum-loss rows stay unproven, so ungated, until TestCore records
+        # an identity for a timed-out minority mutation (PR #593 review).
+        unreconciled = {"b3-quorum-loss-uncertain-write", "b3-split-heal-2-1"}
+        self.assertEqual(rows, b3 - unreconciled)
+        for row in MANIFEST["scenarios"]:
+            if row["id"] in unreconciled:
+                self.assertEqual((row["status"], row["gates"]), ("unproven", []), row["id"])
         self.assertIn("b3-durable-event-before-delivery-crash", rows)
         # The instrumented case is never part of a release-image gate.
         durable = next(row for row in MANIFEST["scenarios"] if row["id"] == "b3-durable-event-before-delivery-crash")
