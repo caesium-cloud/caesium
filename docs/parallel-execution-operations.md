@@ -128,6 +128,8 @@ The trade-offs:
 - **Lower `THRESHOLD`** also lowers the bound, but the node snapshots more often, and each snapshot writes the whole database to disk.
 - **Raising either** increases the worst-case memory and disk by the entry size of your write mix times the added entries. Size the pod memory limit for `(TRAILING + THRESHOLD) × largest typical transaction` on top of the process base.
 
+**A stopped voter costs the leader extra memory until it rejoins.** While a voter is stopped or unreachable, the leader keeps Raft replication buffers for it in memory beyond the bound above. The leader keeps them after its own log has been truncated past that voter, and releases them once the voter has caught up. In the F2 lifecycle soak, one of three voters was stopped and the defaults applied, with 77 KB updates. After its log truncated past the stopped voter, the leader's resident memory rose by about one entry per write. It levelled off roughly 250–300 MiB above the leader's own retained log, then fell by about 350 MiB when the voter rejoined. The remaining follower did not grow, and neither did the HTTP-serving member when it was not the leader. If a voter can stay down while writes continue, budget the leader for about `2 × (TRAILING + THRESHOLD) × largest typical transaction` on top of the process base.
+
 Both values are per node and do not need to match across the cluster. A changed value takes effect when the node starts. After you lower `TRAILING`, the first start still loads what the previous setting retained, and the log shrinks at the next snapshot.
 
 ## Rollout Procedure (Distributed Mode)

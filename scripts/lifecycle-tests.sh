@@ -343,6 +343,7 @@ PY
     "$LC_ART/candidate-image-node-imports.json" \
     "$LC_ART/manifest-normalized.diff" "$LC_ART/manifest-live-normalized.diff"
   rm -f "$LC_ART"/cluster-snapshot-update-batch-*.json
+  rm -f "$LC_ART/cluster-mixed-hold.json" "$LC_ART/cluster-mixed-attempts.json"
   rm -f "$LC_ART"/cluster-snapshot-disputed-batch-*.json
   mkdir -p "$LC_ART/cases" "$LC_ART/cluster-cases" "$LC_ART/cluster-logs"
   cp "$ROOT/test/lifecycle/versions.json" "$LC_ART/versions.json"
@@ -864,9 +865,139 @@ EOF
   LC_OLD_BASE="$(lc_base)"
   lc_phase Seed "$LC_PREV_IDS" "$LC_OLD_BASE" || cluster_die "previous-release cluster seed failed (see cluster-logs/Seed.log)"
   lc_copy_runner_artifacts
+  # ===========================================================================
+  # BEGIN lc_mixed_hold_* (F2 mixed-version window, H3 W9-δ)
+  #
+  # The chart leaves updateStrategy unset, so Kubernetes applies RollingUpdate
+  # with partition 0 and replaces caesium-2, then caesium-1, then caesium-0.
+  # Racing that rollout gave the runner a ~60 s mixed window; in
+  # lifecycle-w8b-r1-fbbe76d2 a write stall inside it outlasted the window (see
+  # TestLifecycleClusterMixedWindow). Instead, before the unchanged image-only
+  # `helm upgrade --wait`, the harness sets the live StatefulSet's
+  # rollingUpdate.partition to 2. The controller then replaces only caesium-2,
+  # and Helm's readiness wait honours the partition, so the mixed window stays
+  # open until the runner has observed dispatch and completion in both
+  # directions. The original strategy is then restored and the rest of the
+  # rollout proceeds exactly as shipped (OrderedReady, highest ordinal first).
+  # Helm never renders this field, so the rendered and installed manifests stay
+  # image-only. Evidence: cluster-logs/mixed-hold.json.
+  lc_mixed_hold_start() {
+    lc_ns get statefulset caesium -o json >"$LC_ART/cluster-logs/mixed-hold-sts-before.json" || return 1
+    LC_ART="$LC_ART" LC_ID="$LC_ID" python3 - <<'PY' || return 1
+import json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART'])
+sts=json.loads((art/'cluster-logs/mixed-hold-sts-before.json').read_text())
+strategy=sts.get('spec',{}).get('updateStrategy',{})
+partition=(strategy.get('rollingUpdate') or {}).get('partition',0)
+record={'lifecycle_id':os.environ['LC_ID'],'held':False,'partition':2,
+  'updated_member':'caesium-2','previous_members':['caesium-0','caesium-1'],
+  'original_update_strategy':strategy,'stages':{}}
+(art/'cluster-logs/mixed-hold.json').write_text(json.dumps(record,indent=2)+'\n')
+if strategy.get('type')!='RollingUpdate' or partition!=0 or sts.get('spec',{}).get('replicas')!=3:
+  raise SystemExit(f'StatefulSet is not the chart default RollingUpdate/partition 0 with 3 replicas: {strategy}')
+PY
+    lc_ns patch statefulset caesium --type=merge \
+      -p '{"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"partition":2}}}}' \
+      >"$LC_ART/cluster-logs/mixed-hold-patch.log" 2>&1
+  }
+  # Verify the hold from the Kubernetes API: partition 2, exactly one updated
+  # replica, caesium-2 recreated on the candidate at the update revision, and
+  # caesium-0/1 still the seeded pods on the previous release. Later stages
+  # must also see the same three pods as the after-helm stage.
+  lc_mixed_hold_verify() {
+    local stage="$1"
+    lc_ns get statefulset caesium -o json >"$LC_ART/cluster-logs/mixed-hold-sts-$stage.json" || return 1
+    lc_ns get pods -o json >"$LC_ART/cluster-logs/mixed-hold-pods-$stage.json" || return 1
+    LC_ART="$LC_ART" LC_STAGE="$stage" LC_PREV="$LC_PREV" LC_CAND="$CAESIUM_LIFECYCLE_CANDIDATE_IMAGE" python3 - <<'PY'
+import datetime,json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART']);stage=os.environ['LC_STAGE']
+path=art/'cluster-logs/mixed-hold.json';record=json.loads(path.read_text())
+sts=json.loads((art/f'cluster-logs/mixed-hold-sts-{stage}.json').read_text())
+pods={p['metadata']['name']:p for p in json.loads((art/f'cluster-logs/mixed-hold-pods-{stage}.json').read_text()).get('items',[])}
+seeded={m['name']:m for m in json.loads((art/'cluster-fixture.json').read_text())['members']}
+spec=sts.get('spec',{});status=sts.get('status',{})
+problems=[]
+if (spec.get('updateStrategy',{}).get('rollingUpdate') or {}).get('partition')!=2:problems.append('partition is not 2')
+if status.get('observedGeneration')!=sts.get('metadata',{}).get('generation'):problems.append('controller has not observed the upgraded spec')
+current=status.get('currentRevision');update=status.get('updateRevision')
+if not current or not update or current==update:problems.append(f'no pending revision (current={current} update={update})')
+if status.get('updatedReplicas')!=1:problems.append(f'updatedReplicas={status.get("updatedReplicas")}, want 1')
+if status.get('readyReplicas')!=3:problems.append(f'readyReplicas={status.get("readyReplicas")}, want 3')
+observed={}
+for name,want_revision,want_image in (('caesium-2',update,os.environ['LC_CAND']),
+    ('caesium-0',current,os.environ['LC_PREV']),('caesium-1',current,os.environ['LC_PREV'])):
+  pod=pods.get(name)
+  if pod is None:
+    problems.append(f'{name} missing');continue
+  meta=pod['metadata'];st=pod.get('status',{})
+  ready=any(c.get('type')=='Ready' and c.get('status')=='True' for c in st.get('conditions',[]))
+  images=[c.get('image') for c in pod.get('spec',{}).get('containers',[]) if c.get('name')=='caesium']
+  cs=[c for c in st.get('containerStatuses',[]) if c.get('name')=='caesium']
+  o={'uid':meta.get('uid'),'revision':meta.get('labels',{}).get('controller-revision-hash'),
+    'image':images[0] if images else None,'image_id':cs[0].get('imageID') if cs else None,
+    'ready':ready,'restart_count':cs[0].get('restartCount') if cs else None,
+    'pod_ip':st.get('podIP'),'terminating':bool(meta.get('deletionTimestamp'))}
+  observed[name]=o
+  if o['revision']!=want_revision:problems.append(f'{name} revision {o["revision"]}, want {want_revision}')
+  if o['image']!=want_image:problems.append(f'{name} image {o["image"]}, want {want_image}')
+  if not ready or o['terminating']:problems.append(f'{name} not Ready or terminating')
+  seeded_uid=seeded.get(name,{}).get('uid')
+  if name=='caesium-2' and o['uid']==seeded_uid:problems.append('caesium-2 was not recreated')
+  if name!='caesium-2' and o['uid']!=seeded_uid:problems.append(f'{name} was recreated inside the hold')
+if stage!='after-helm':
+  first=record['stages'].get('after-helm',{}).get('pods',{})
+  for name,o in observed.items():
+    if first.get(name,{}).get('uid')!=o['uid']:problems.append(f'{name} changed pod between after-helm and {stage}')
+record['stages'][stage]={'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  'current_revision':current,'update_revision':update,'updated_replicas':status.get('updatedReplicas'),
+  'ready_replicas':status.get('readyReplicas'),'pods':observed,'problems':problems}
+record['held']=not problems and (stage=='after-helm' or record.get('held') is True)
+path.write_text(json.dumps(record,indent=2)+'\n')
+raise SystemExit(1 if problems else 0)
+PY
+  }
+  # Restore the recorded strategy (returns 1 if that fails) and let the rollout
+  # finish as shipped (returns 2 if `rollout status` does not report success).
+  lc_mixed_release() {
+    local rollout_rc=0
+    if [[ -s "$LC_ART/cluster-logs/mixed-hold-sts-before.json" ]]; then
+      LC_ART="$LC_ART" python3 - <<'PY' || return 1
+import json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART'])
+original=json.loads((art/'cluster-logs/mixed-hold-sts-before.json').read_text())['spec']['updateStrategy']
+(art/'cluster-logs/mixed-release-patch.json').write_text(json.dumps({'spec':{'updateStrategy':original}})+'\n')
+PY
+      lc_ns patch statefulset caesium --type=merge --patch-file "$LC_ART/cluster-logs/mixed-release-patch.json" \
+        >"$LC_ART/cluster-logs/mixed-release.log" 2>&1 || return 1
+    fi
+    lc_run_timed 660 "$LC_ART/cluster-logs/mixed-release.log" kubectl --kubeconfig "$LC_KUBE" \
+      --namespace "$LC_ID" rollout status statefulset/caesium --timeout=600s || rollout_rc=$?
+    if [[ -s "$LC_ART/cluster-logs/mixed-hold-sts-before.json" ]]; then
+      lc_ns get statefulset caesium -o json >"$LC_ART/cluster-logs/mixed-release-sts-after.json" || return 1
+      LC_ART="$LC_ART" LC_ROLLOUT_RC="$rollout_rc" python3 - <<'PY' || return 1
+import datetime,json,os,pathlib
+art=pathlib.Path(os.environ['LC_ART']);path=art/'cluster-logs/mixed-hold.json'
+record=json.loads(path.read_text()) if path.exists() else {}
+sts=json.loads((art/'cluster-logs/mixed-release-sts-after.json').read_text())
+original=json.loads((art/'cluster-logs/mixed-hold-sts-before.json').read_text())['spec']['updateStrategy']
+restored=sts['spec'].get('updateStrategy')
+status=sts.get('status',{})
+record['release']={'released_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  'rollout_status_exit':int(os.environ['LC_ROLLOUT_RC']),
+  'restored_update_strategy':restored,'strategy_restored':restored==original,
+  'current_revision':status.get('currentRevision'),'update_revision':status.get('updateRevision'),
+  'updated_replicas':status.get('updatedReplicas'),'ready_replicas':status.get('readyReplicas')}
+path.write_text(json.dumps(record,indent=2)+'\n')
+raise SystemExit(0 if restored==original else 1)
+PY
+    fi
+    [[ "$rollout_rc" == 0 ]] || return 2
+  }
+  # END lc_mixed_hold_*
+  # ===========================================================================
   LC_MIXED_RC=0
-  lc_phase MixedWindow "$LC_PREV_IDS" "$LC_OLD_BASE" &
-  LC_MIXED_PID=$!
+  LC_HOLD_RC=0
+  lc_mixed_hold_start || LC_HOLD_RC=$?
   LC_HELM_RC=0
   helm upgrade caesium "$ROOT/helm/caesium" --kubeconfig "$LC_KUBE" --namespace "$LC_ID" \
     --values "$LC_VALUES" --set "image.tag=$LC_SHA" --wait --timeout 600s \
@@ -887,7 +1018,22 @@ diff=list(difflib.unified_diff(a.splitlines(),b.splitlines(),fromfile='installed
 if diff:raise SystemExit('\n'.join(diff[:60]))
 PY
   fi
-  wait "$LC_MIXED_PID" || LC_MIXED_RC=$?
+  if [[ "$LC_HOLD_RC" == 0 ]]; then
+    lc_mixed_hold_verify after-helm || LC_HOLD_RC=$?
+  fi
+  if [[ "$LC_HOLD_RC" == 0 ]]; then
+    lc_ns cp "$LC_ART/cluster-logs/mixed-hold.json" lifecycle-runner:/artifacts/cluster-mixed-hold.json -c runner \
+      >"$LC_ART/cluster-logs/mixed-hold-copy.log" 2>&1 || LC_HOLD_RC=$?
+  fi
+  if [[ "$LC_HOLD_RC" == 0 ]]; then
+    lc_phase MixedWindow "$LC_PREV_IDS" "$LC_OLD_BASE" || LC_MIXED_RC=$?
+    lc_mixed_hold_verify after-observation || LC_HOLD_RC=$?
+  else
+    LC_MIXED_RC=1
+  fi
+  LC_RELEASE_RC=0
+  lc_mixed_release || LC_RELEASE_RC=$?
+  [[ "$LC_RELEASE_RC" != 1 ]] || cluster_die "could not restore the StatefulSet update strategy after the mixed-version hold (see cluster-logs/mixed-release.log)"
   lc_ns get pods -o wide >"$LC_ART/cluster-logs/pods-after-upgrade.txt" 2>&1 || true
   lc_ns get pods -o json >"$LC_ART/cluster-pods-after-upgrade.json" 2>&1 || true
   for n in 0 1 2; do
@@ -959,7 +1105,11 @@ PY
   LC_AFTER_RC=0
   lc_phase AfterUpgrade "$LC_CAND_ID" "$(lc_base)" || LC_AFTER_RC=$?
   lc_copy_runner_artifacts || true
-  [[ "$LC_MIXED_RC" == 0 ]] || lc_case mixed-version-dispatch-and-completion blocked "mixed-window runner failed or could not observe protocol-2 peers"
+  if [[ "$LC_HOLD_RC" != 0 ]]; then
+    lc_case mixed-version-dispatch-and-completion blocked "the host could not hold, or keep, the rolling upgrade at exactly caesium-2 upgraded; see cluster-logs/mixed-hold.json"
+  elif [[ "$LC_MIXED_RC" != 0 ]]; then
+    lc_case mixed-version-dispatch-and-completion blocked "mixed-window runner failed inside the held window; see cluster-logs/MixedWindow.log and cluster-mixed-attempts.json"
+  fi
   if [[ "$LC_ADDRESS_BLOCKED" == 1 ]]; then
     lc_case rolling-upgrade-three-voters blocked "blocked-by-prerequisite: retained-PVC address mismatch persisted after #536; old address, new pod IP, exit 1 and process logs recorded" "$LC_ART/cluster-address-classification.json"
   elif [[ "$LC_INFO_RC" != 0 ]]; then
@@ -2201,7 +2351,37 @@ PY
     LC_MEM_SAMPLE_CAP=40
     LC_PHASE_PID=""
     LC_PHASE_DONE=""
+    # #583 soak (W9-δ): once both survivors have proved truncation, keep
+    # writing 500-update batches through batch CAESIUM_LIFECYCLE_SNAPSHOT_SOAK_BATCH
+    # (default 12, i.e. 7,400 acknowledged applies) under the same 1Gi cap, so a
+    # leader-only native residual has room to show. Every soak batch is still
+    # measured and must keep the truncation proof. 0 disables the soak.
+    LC_SNAP_SOAK_BATCH="${CAESIUM_LIFECYCLE_SNAPSHOT_SOAK_BATCH:-12}"
+    [[ "$LC_SNAP_SOAK_BATCH" =~ ^([0-9]|1[0-8])$ ]] \
+      || cluster_die "CAESIUM_LIFECYCLE_SNAPSHOT_SOAK_BATCH must be an integer 0..18"
+    LC_SNAP_FIRST_TRUNCATED=""
+    # Optional: place dqlite leadership on caesium-0 (the harness's HTTP write
+    # target) or caesium-1 before the writes, via the go-dqlite Transfer RPC.
+    LC_SNAP_PIN="${CAESIUM_LIFECYCLE_SNAPSHOT_LEADER:-}"
+    case "$LC_SNAP_PIN" in
+      ""|caesium-0|caesium-1) ;;
+      *) cluster_die "CAESIUM_LIFECYCLE_SNAPSHOT_LEADER must be empty, caesium-0 or caesium-1" ;;
+    esac
+    lc_phase_pin_leader() {
+      lc_ns exec pod/lifecycle-runner -c runner -- env \
+        CAESIUM_LIFECYCLE_ID="$LC_ID" CAESIUM_LIFECYCLE_ARTIFACTS=/artifacts \
+        CAESIUM_LIFECYCLE_PHASE=PinLeader CAESIUM_LIFECYCLE_PIN_LEADER="$1" \
+        /lifecycle.test -test.v -test.count=1 -test.run '^TestLifecycleClusterPinLeader$' -test.timeout=4m \
+        >"$LC_ART/cluster-logs/PinLeader.log" 2>&1
+    }
     lc_scale_two || LC_SNAP_RC=$?
+    if [[ "$LC_SNAP_RC" == 0 && -n "$LC_SNAP_PIN" ]]; then
+      if ! lc_phase_pin_leader "$LC_SNAP_PIN"; then
+        LC_SNAP_RC=1
+        LC_SNAP_REASON="could not place dqlite leadership on $LC_SNAP_PIN before the writes (see cluster-logs/PinLeader.log)"
+      fi
+      lc_copy_runner_artifacts || true
+    fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_phase SnapshotLeader "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
       cp "$LC_ART/cluster-logs/SnapshotLeader.log" "$LC_ART/cluster-logs/SnapshotLeader-before.log" || LC_SNAP_RC=$?
@@ -2250,6 +2430,9 @@ PY
         if [[ "$LC_SNAP_RC" == 0 ]]; then
           lc_files "$LC_LEADER" "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" || LC_SNAP_RC=$?
           lc_files "$LC_OTHER" "$LC_ART/cluster-logs/other-after-batch-$LC_BATCH_TAG-snapshot-files.txt" || LC_SNAP_RC=$?
+          # Paired with the listings above (no writes in between), so RSS minus
+          # retained segment bytes is not skewed by a mid-batch truncation.
+          lc_memory_sample_members post-batch "$LC_BATCH" 0 || true
         fi
         if [[ "$LC_SNAP_RC" != 0 ]]; then
           LC_SNAP_REASON="a survivor or its on-disk files became unobservable at batch $LC_BATCH_TAG"
@@ -2261,13 +2444,23 @@ PY
         case "$LC_PROGRESS_RC" in
           0)
             LC_SNAP_TRUNCATED=1
+            [[ -n "$LC_SNAP_FIRST_TRUNCATED" ]] || LC_SNAP_FIRST_TRUNCATED="$LC_BATCH"
+            if (( LC_BATCH < LC_SNAP_SOAK_BATCH )); then
+              continue
+            fi
             cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG.json" "$LC_ART/cluster-logs/leader-after.json" || LC_SNAP_RC=$?
             cp "$LC_ART/cluster-logs/leader-after-batch-$LC_BATCH_TAG-snapshot-files.txt" "$LC_ART/cluster-logs/leader-after-snapshot-files.txt" || LC_SNAP_RC=$?
             cp "$LC_ART/cluster-logs/other-after-batch-$LC_BATCH_TAG-snapshot-files.txt" "$LC_ART/cluster-logs/other-after-snapshot-files.txt" || LC_SNAP_RC=$?
             lc_snapshot_hashes "$LC_LEADER" "$LC_ART/cluster-logs/leader-before-rejoin-snapshots.sha256" || LC_SNAP_RC=$?
             break
             ;;
-          2) ;;
+          2)
+            if [[ -n "$LC_SNAP_FIRST_TRUNCATED" ]]; then
+              LC_SNAP_RC=1
+              LC_SNAP_REASON="truncation proved at batch $LC_SNAP_FIRST_TRUNCATED no longer held at soak batch $LC_BATCH_TAG"
+              break
+            fi
+            ;;
           3) LC_SNAP_RC=1; LC_SNAP_REASON="leader on-disk bytes reached the 1536 MiB snapshot workload cap at batch $LC_BATCH_TAG"; break ;;
           *) LC_SNAP_RC=1; LC_SNAP_REASON="snapshot evidence or survivor identity invalid at batch $LC_BATCH_TAG"; break ;;
         esac
@@ -2283,6 +2476,13 @@ PY
         lc_phase PostStorage "$LC_CAND_ID" "$(lc_base)" || LC_SNAP_RC=$?
         lc_copy_runner_artifacts || true
       fi
+      # #583: one more paired sample once the stopped member has caught up, to
+      # see whether survivor memory held for it is released. Evidence only.
+      if [[ "$LC_SNAP_RC" == 0 && "${LC_MEM_ACTIVE:-0}" == 1 ]]; then
+        lc_files caesium-0 "$LC_ART/cluster-logs/post-rejoin-caesium-0-files.txt" || true
+        lc_files caesium-1 "$LC_ART/cluster-logs/post-rejoin-caesium-1-files.txt" || true
+        lc_memory_sample_members post-rejoin "$LC_BATCH" 0 || true
+      fi
     fi
     if [[ "$LC_SNAP_RC" == 0 ]]; then
       lc_files caesium-2 "$LC_ART/cluster-logs/rejoined-member-files.txt" || LC_SNAP_RC=$?
@@ -2293,10 +2493,12 @@ PY
       if [[ -n "$LC_SNAP_EVIDENCE" && ! -s "$LC_SNAP_EVIDENCE" ]]; then LC_SNAP_EVIDENCE=""; fi
       lc_snapshot_case blocked "${LC_SNAP_REASON:-stopped member or rejoin failed}; inspect cluster-logs/snapshot-progress-batch-*.log and phase logs" "$LC_SNAP_EVIDENCE"
     else
-      LC_ART="$LC_ART" LC_SNAP_BATCH="$LC_BATCH" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
+      LC_ART="$LC_ART" LC_SNAP_BATCH="$LC_BATCH" LC_SNAP_FIRST_TRUNCATED="$LC_SNAP_FIRST_TRUNCATED" \
+        LC_SNAP_SOAK_BATCH="$LC_SNAP_SOAK_BATCH" python3 - <<'PY' && LC_SNAP_MEASURED=1 || LC_SNAP_MEASURED=0
 import json,pathlib,re,os
 base=pathlib.Path(os.environ['LC_ART'],'cluster-logs')
 batch=int(os.environ['LC_SNAP_BATCH'])
+first_truncated=int(os.environ['LC_SNAP_FIRST_TRUNCATED'])
 progress=[json.loads((base/f'snapshot-batch-{n:02d}.json').read_text()) for n in range(batch+1)]
 if any(p.get('batch')!=n or p.get('acknowledged_total_applies')!=1400+500*n for n,p in enumerate(progress)):
   raise SystemExit('missing or non-monotonic per-batch acknowledgement evidence')
@@ -2338,9 +2540,14 @@ other_after_snapshots=snapshots('other-after-snapshot-files.txt')
 rejoined=snapshots('rejoined-member-files.txt')
 leader_hashes=snapshot_hashes('leader-before-rejoin-snapshots.sha256')
 rejoined_hashes=snapshot_hashes('rejoined-member-snapshots.sha256')
+if not all(p.get('truncation_proved') for p in progress[first_truncated:]):
+  raise SystemExit('a soak batch lost the truncation proof')
 obs={'leader_before':json.loads((base/'leader-before.json').read_text()),
      'leader_after':json.loads((base/'leader-after.json').read_text()),
      'acknowledged_total_applies':progress[-1]['acknowledged_total_applies'],
+     'first_truncated_batch':first_truncated,
+     'first_truncated_total_applies':progress[first_truncated]['acknowledged_total_applies'],
+     'soak_batch':int(os.environ['LC_SNAP_SOAK_BATCH']),
      'batch_evidence':[f'snapshot-batch-{n:02d}.json' for n in range(batch+1)],
      'leader_file_bytes':progress[-1]['leader_file_bytes'],
      'leader_before_snapshot_indexes':before,'leader_after_snapshot_indexes':after,
@@ -2387,7 +2594,7 @@ obs['snapshot_install_inferred_from_two_survivor_log_gap']=True
 (base/'snapshot-threshold.json').write_text(json.dumps(obs,indent=2)+'\n')
 PY
       if [[ "$LC_SNAP_MEASURED" == 1 ]]; then
-        lc_snapshot_case pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_BATCH)) acknowledged applies; rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
+        lc_snapshot_case pass "both survivors truncated beyond stopped open-tail bound after $((1400 + 500 * LC_SNAP_FIRST_TRUNCATED)) acknowledged applies and kept it through $((1400 + 500 * LC_BATCH)) (soak batch $LC_BATCH); rejoined member retained a newer local snapshot and durable state" "$LC_ART/cluster-logs/snapshot-threshold.json"
       else
         LC_FINAL_EVIDENCE=""
         if [[ -s "$LC_ART/cluster-logs/snapshot-threshold.json" ]]; then
@@ -2396,6 +2603,15 @@ PY
         lc_snapshot_case blocked "snapshot/segment bytes did not prove both survivor log gaps and stopped-member snapshot catch-up; inspect cluster-logs/snapshot-threshold.json" "$LC_FINAL_EVIDENCE"
         LC_SNAP_RC=1
       fi
+    fi
+    # #583 attribution: per-survivor RSS minus retained closed Raft segment
+    # bytes per batch, with smaps regions and connection counts. Evidence
+    # only; it never changes the snapshot case.
+    if [[ "${LC_MEM_ACTIVE:-0}" == 1 ]]; then
+      python3 "$ROOT/scripts/lifecycle-memory-sample.py" attribute --artifact-root "$LC_ART" \
+        --lifecycle-id "$LC_ID" --http-target caesium-0 \
+        --dest "$LC_ART/cluster-logs/snapshot-memory-residual.json" \
+        >"$LC_ART/cluster-logs/snapshot-memory-residual.txt" 2>&1 || true
     fi
 
     # Storage-level restore: a stopped member's PVC is copied, erased,
@@ -2655,6 +2871,7 @@ PY
     LC_CAND_ID="$LC_CAND_ID" LC_CAND_SOURCE_ID="$LC_CAND_SOURCE_ID" \
     LC_PROVENANCE="$LC_PROVENANCE" LC_HELM_RC="$LC_HELM_RC" \
     LC_MIXED_RC="$LC_MIXED_RC" LC_AFTER_RC="$LC_AFTER_RC" LC_GET_RC="$LC_GET_RC" \
+    LC_HOLD_RC="$LC_HOLD_RC" LC_RELEASE_RC="$LC_RELEASE_RC" \
     LC_INFO_RC="$LC_INFO_RC" LC_ADDRESS_BLOCKED="$LC_ADDRESS_BLOCKED" LC_COPY_RC="$LC_COPY_RC" python3 - <<'PY'
 import datetime,json,os,pathlib
 art=pathlib.Path(os.environ['LC_ART']);doc=json.loads((art/'versions.json').read_text())
@@ -2676,6 +2893,8 @@ for name in expected:
   by.setdefault(name,{'name':name,'status':'blocked','lifecycle_id':os.environ['LC_ID'],
     'detail':'required case produced no record'})
 gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
+  'mixed_hold_exit':int(os.environ['LC_HOLD_RC']),
+  'mixed_release_rollout_exit':int(os.environ['LC_RELEASE_RC']),
   'after_upgrade_exit':int(os.environ['LC_AFTER_RC']),
   'helm_upgrade_exit':int(os.environ['LC_HELM_RC']),
   'live_manifest_exit':int(os.environ['LC_GET_RC']),
@@ -2685,6 +2904,9 @@ gates={'mixed_window_exit':int(os.environ['LC_MIXED_RC']),
 if gates['mixed_window_exit']!=0 and by['mixed-version-dispatch-and-completion']['status']=='pass':
   by['mixed-version-dispatch-and-completion']=dict(by['mixed-version-dispatch-and-completion'],status='blocked',
     detail='mixed-window process failed despite a runner pass record')
+if gates['mixed_hold_exit']!=0 and by['mixed-version-dispatch-and-completion']['status']=='pass':
+  by['mixed-version-dispatch-and-completion']=dict(by['mixed-version-dispatch-and-completion'],status='blocked',
+    detail='the held window was not verified before and after the runner observation')
 # The runner verifies installed manifest, addresses, pod state and direct Raft
 # membership before writing an upgrade pass. A Helm timeout or a later
 # retained-history assertion does not erase that already-observed result.
@@ -2694,7 +2916,8 @@ cases=[by[n] for n in expected]
 failed=[r['name'] for r in cases if not (r['status']=='pass' or
   (r['name']=='rollback-recorded-outcome' and r['status']=='recorded-outcome' and r.get('observations')))]
 failed_gates=[name for name,rc in gates.items() if rc!=0 and not (
-  name=='helm_upgrade_exit' and by['rolling-upgrade-three-voters']['status']=='pass')]
+  name in ('helm_upgrade_exit','mixed_release_rollout_exit') and
+  by['rolling-upgrade-three-voters']['status']=='pass')]
 record={'kind':'caesium-cluster-lifecycle-qualification','schema_version':1,
   'lifecycle_id':os.environ['LC_ID'],'pair':os.environ['LC_PAIR'],
   'candidate_sha':os.environ['LC_SHA'],'started_at':os.environ['LC_STARTED'],
