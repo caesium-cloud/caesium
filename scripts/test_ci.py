@@ -1,9 +1,11 @@
 """Regression checks for the CI gate, path selection and full-suite wiring."""
 
+import argparse
 import base64
 import copy
 import io
 import fnmatch
+import hashlib
 import itertools
 import json
 import os
@@ -11,6 +13,7 @@ from pathlib import Path
 import re
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +29,14 @@ JOBS = WORKFLOW["jobs"]
 # PyYAML parses the unquoted `on:` key as the boolean True (YAML 1.1), not the
 # string "on" -- this is the workflow's declared trigger map.
 TRIGGERS = WORKFLOW[True]
+# distributed-testing G4: the qualification lanes live once in a reusable
+# workflow, called by CI's release chain and by the nightly schedule.
+LANES_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/qualification-lanes.yml").read_text())
+LANE_JOBS = LANES_WORKFLOW["jobs"]
+NIGHTLY_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/testing-qualification.yml").read_text())
+NIGHTLY_JOBS = NIGHTLY_WORKFLOW["jobs"]
+QUALIFICATION = runpy.run_path(str(ROOT / "scripts/qualification-gate.py"))
+QUAL_LANES = QUALIFICATION["LANES"]
 CI_OK = runpy.run_path(str(ROOT / "scripts/ci-ok.py"))
 SELECTORS = CI_OK["SELECTORS"]
 EVIDENCE_JOB = CI_OK["EVIDENCE_JOB"]
@@ -1439,8 +1450,17 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
         self.assertEqual(WORKFLOW["env"]["IMAGE_TAG"],
                           "${{ github.ref_type == 'tag' && github.ref_name || github.sha }}")
 
-    def test_publish_stays_tag_only(self):
-        self.assertEqual(JOBS["publish"]["if"], "startsWith(github.ref, 'refs/tags/v')")
+    def test_publish_writes_only_on_a_tag(self):
+        # G4: a publish dry run walks the chain too, but every step that writes
+        # outside the run is skipped on it, and it binds no environment.
+        self.assertEqual(JOBS["publish"]["if"],
+                         "startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run")
+        self.assertEqual(JOBS["publish"]["environment"], "${{ !inputs.publish-dry-run && 'Docker' || '' }}")
+        writers = [step for step in JOBS["publish"]["steps"]
+                   if re.search(r"docker (login|push|manifest)|gh release|secrets\.", step.get("run", ""))]
+        self.assertEqual(len(writers), 4, [step.get("name") for step in writers])
+        for step in writers + [s for s in JOBS["publish"]["steps"] if "GITHUB_REF_NAME" in s.get("run", "")]:
+            self.assertEqual(step.get("if"), "${{ !inputs.publish-dry-run }}", step.get("name"))
 
     def test_event_name_appears_only_in_audited_locations(self):
         """Every job-level `if:` must be event-agnostic (drive purely off
@@ -1929,36 +1949,45 @@ class SystemSuiteLaneGateTests(unittest.TestCase):
                       self.run_gate(1, argv_patch=lambda argv: argv + ["--lane-evidence", f"{job}={path}"]))
 
 
+def run_changes_set_step(event, nightly, **extra):
+    """Execute the `changes` job's set step with the given dispatch inputs."""
+    step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
+    values = {name: "" for name in ("GO", "UI", "HELM", "REAGENTS", "CI")}
+    env = {**os.environ, "EVENT": event, "NIGHTLY": nightly, **values, **extra}
+    with tempfile.TemporaryDirectory() as tmp:
+        output_file = Path(tmp) / "output"
+        env["GITHUB_OUTPUT"] = str(output_file)
+        script = Path(tmp) / "step.sh"
+        script.write_text(step["run"])
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                                env=env, capture_output=True, text=True)
+        parsed = {}
+        if output_file.exists():
+            for line in output_file.read_text().splitlines():
+                key, _, value = line.partition("=")
+                parsed[key] = value
+        return result.returncode, result.stderr, parsed
+
+
+def lane_tokens(condition):
+    """The lane tokens a qualification-lanes.yml job `if:` selects on."""
+    return set(re.findall(r"',(\w[\w-]*),'\)", condition))
+
+
 class NightlyLaneTests(unittest.TestCase):
-    """G6's nightly set: dispatchable now, never merge evidence, G4 schedules it."""
+    """G6's nightly set, moved by G4 into the reusable qualification-lanes.yml:
+    dispatchable from CI, scheduled by testing-qualification.yml, never merge
+    evidence."""
 
-    NIGHTLY = {
-        # job -> (input token, recipe invocation substring, recipe, manifest gate)
-        "lifecycle-cluster": ("cluster-lifecycle", "just lifecycle-cluster", "lifecycle-cluster",
-                              "nightly-cluster-lifecycle"),
-        "console-recovery": ("console-recovery", "console-recovery", "console-recovery", "nightly-console"),
-        "performance-gate": ("performance", "just performance-gate", "performance-gate", "nightly-performance"),
-        "core-robustness-nightly": ("core-robustness", "core-robustness nightly-core", "core-robustness",
-                                    "nightly-core"),
+    # job -> (recipe invocation substring, recipe)
+    INVOCATIONS = {
+        "lifecycle-cluster": ("just lifecycle-cluster", "lifecycle-cluster"),
+        "console-recovery": ("console-recovery", "console-recovery"),
+        "performance-gate": ("just performance-gate", "performance-gate"),
+        "core-robustness-nightly": ("core-robustness nightly-core", "core-robustness"),
+        "fuzz-campaign": ("generated-fuzz", "generated-fuzz"),
+        "soak": ("just soak-tests", "soak-tests"),
     }
-
-    def run_set_step(self, event, nightly):
-        step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
-        values = {name: "" for name in ("GO", "UI", "HELM", "REAGENTS", "CI")}
-        env = {**os.environ, "EVENT": event, "NIGHTLY": nightly, **values}
-        with tempfile.TemporaryDirectory() as tmp:
-            output_file = Path(tmp) / "output"
-            env["GITHUB_OUTPUT"] = str(output_file)
-            script = Path(tmp) / "step.sh"
-            script.write_text(step["run"])
-            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
-                                    env=env, capture_output=True, text=True)
-            parsed = {}
-            if output_file.exists():
-                for line in output_file.read_text().splitlines():
-                    key, _, value = line.partition("=")
-                    parsed[key] = value
-            return result.returncode, result.stderr, parsed
 
     def test_dispatch_trigger_and_inputs(self):
         self.assertIn("workflow_dispatch", TRIGGERS)
@@ -1967,63 +1996,91 @@ class NightlyLaneTests(unittest.TestCase):
         self.assertEqual(inputs["performance-mode"]["options"], ["advisory", "enforcing"])
         self.assertEqual(inputs["performance-mode"]["default"], "advisory")
         self.assertEqual(inputs["performance-runs"]["default"], "[1]")
-        # G4 owns the schedule file; G6 must not create it.
-        self.assertFalse((ROOT / ".github/workflows/testing-qualification.yml").exists())
+        for name in ("publish-dry-run", "simulate-failed-qualification"):
+            self.assertEqual((inputs[name]["type"], inputs[name]["default"]), ("boolean", False), name)
+        # CI itself is never scheduled; testing-qualification.yml is.
         self.assertNotIn("schedule", TRIGGERS)
+        self.assertNotIn("workflow_call", TRIGGERS)
+
+    def test_registry_matches_the_reusable_workflow(self):
+        lanes = set(LANE_JOBS) - {"select", "results"}
+        self.assertEqual(lanes, set(QUAL_LANES))
+        self.assertEqual(lanes, set(self.INVOCATIONS))
+        for job, lane in QUAL_LANES.items():
+            with self.subTest(job=job):
+                self.assertEqual(lane_tokens(LANE_JOBS[job]["if"]), {lane.token, "all"})
 
     def test_nightly_jobs_run_only_when_named_and_never_gate_a_merge(self):
-        for job, (token, invocation, recipe, gate) in self.NIGHTLY.items():
+        for job, (invocation, recipe) in self.INVOCATIONS.items():
+            lane = QUAL_LANES[job]
             with self.subTest(job=job):
-                condition = JOBS[job]["if"]
+                condition = LANE_JOBS[job]["if"]
                 self.assertEqual(condition,
-                                 f"contains(format(',{{0}},', inputs.nightly), ',{token},') || "
-                                 "contains(format(',{0},', inputs.nightly), ',all,')")
-                self.assertNotIn("needs.changes.outputs", condition)
-                self.assertEqual(JOBS[job]["needs"], ["changes"])
-                self.assertNotIn(job, JOBS["ci-ok"]["needs"])
-                self.assertNotIn(job, JOBS["publish"]["needs"])
+                                 f"contains(format(',{{0}},', inputs.lanes), ',{lane.token},') || "
+                                 "contains(format(',{0},', inputs.lanes), ',all,')")
+                self.assertEqual(LANE_JOBS[job]["needs"], ["select"])
+                self.assertNotIn(job, JOBS)
                 self.assertNotIn(job, SELECTORS)
                 self.assertIn(job, UNPROMOTED_LANES)
-                runs = [step["run"] for step in JOBS[job]["steps"] if invocation in step.get("run", "")]
+                self.assertEqual(LANE_JOBS[job]["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+                runs = [step["run"] for step in LANE_JOBS[job]["steps"] if invocation in step.get("run", "")]
                 self.assertEqual(len(runs), 1)
-                rows = [row for row in MANIFEST["scenarios"] if gate in row["gates"]]
-                if job == "performance-gate":
-                    # Advisory until the hosted runner is calibrated: the row is
-                    # registered but ungated, so nothing can report it passed.
-                    self.assertEqual(rows, [])
-                    e4 = next(row for row in MANIFEST["scenarios"] if row["id"] == "e4-performance-gate")
-                    self.assertEqual(e4["gates"], [])
-                    self.assertEqual(e4["status"], "unproven")
+                gate = lane.gate
+                if gate is None:
+                    # Advisory: nothing in the manifest can report it passed.
+                    self.assertEqual(lane.role, QUALIFICATION["ADVISORY"])
+                    if job == "performance-gate":
+                        rows = [row for row in MANIFEST["scenarios"] if "nightly-performance" in row["gates"]]
+                        self.assertEqual(rows, [])
+                        e4 = next(row for row in MANIFEST["scenarios"] if row["id"] == "e4-performance-gate")
+                        self.assertEqual((e4["gates"], e4["status"]), ([], "unproven"))
                 else:
+                    rows = [row for row in MANIFEST["scenarios"] if gate in row["gates"]]
                     self.assertTrue(rows, gate)
                     self.assertTrue(all(row["status"] == "proven" for row in rows))
                     body = recipe_body(recipe)
                     self.assertTrue(f"--require {gate} --strict" in body
                                     or ('--require "{{ gate }}" --strict' in body and gate in invocation), gate)
-                report = next(step for step in JOBS[job]["steps"]
-                              if step.get("with", {}).get("name", "").startswith(f"{job}-evidence"))
+                report = next(step for step in LANE_JOBS[job]["steps"]
+                              if step.get("with", {}).get("name", "").startswith(lane.artifact))
                 self.assertEqual(report["if"], "always()")
                 self.assertEqual(report["with"]["if-no-files-found"], "error")
-                self.assertGreaterEqual(report["with"]["retention-days"], 30)
+                self.assertEqual(report["with"]["retention-days"], "${{ inputs.retention-days }}")
+        # No caller retains a lane's evidence for under 30 days.
+        self.assertGreaterEqual(LANES_WORKFLOW[True]["workflow_call"]["inputs"]["retention-days"]["default"], 30)
+        self.assertEqual(NIGHTLY_JOBS["qualification"]["with"]["retention-days"], 30)
+        self.assertEqual(JOBS["qualification"]["with"]["retention-days"],
+                         "${{ startsWith(github.ref, 'refs/tags/v') && 90 || 30 }}")
 
     def test_nightly_dispatch_deselects_the_pr_matrix_and_rejects_unknown_lanes(self):
-        code, _, parsed = self.run_set_step("workflow_dispatch", "cluster-lifecycle,performance")
+        code, _, parsed = run_changes_set_step("workflow_dispatch", "cluster-lifecycle,performance")
         self.assertEqual(code, 0)
         self.assertEqual(parsed, {k: "false" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
-        code, _, parsed = self.run_set_step("workflow_dispatch", "all")
+        code, _, parsed = run_changes_set_step("workflow_dispatch", "all")
         self.assertEqual(code, 0)
         self.assertEqual(parsed["images"], "false")
-        code, stderr, _ = self.run_set_step("workflow_dispatch", "cluster-lifecycle,typo")
+        code, stderr, _ = run_changes_set_step("workflow_dispatch", "cluster-lifecycle,typo")
         self.assertNotEqual(code, 0)
         self.assertIn("unknown nightly lane 'typo'", stderr)
         # An empty selection is a push-equivalent full run.
-        code, _, parsed = self.run_set_step("workflow_dispatch", "")
+        code, _, parsed = run_changes_set_step("workflow_dispatch", "")
         self.assertEqual(code, 0)
         self.assertEqual(parsed, {k: "true" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
-        # The token list in the set step is exactly the nightly jobs' tokens.
+        # The token list in the set step is exactly the registry's tokens.
         step = next(step for step in JOBS["changes"]["steps"] if step.get("id") == "set")
         tokens = re.search(r"\n\s+(all\|[^)]*)\)", step["run"]).group(1).split("|")
-        self.assertEqual(set(tokens), {"all"} | {entry[0] for entry in self.NIGHTLY.values()})
+        self.assertEqual(set(tokens), {"all"} | {lane.token for lane in QUAL_LANES.values()})
+
+    def test_reusable_select_job_refuses_unknown_lanes(self):
+        run = next(step["run"] for step in LANE_JOBS["select"]["steps"] if "run" in step)
+        self.assertEqual(run, 'python3 scripts/qualification-gate.py lanes --validate "$LANES"')
+        script = str(ROOT / "scripts/qualification-gate.py")
+        for selection, code in (("all", 0), ("soak,fuzz-campaign", 0), ("cluster-lifecycle,typo", 1),
+                                ("", 1), (",", 1)):
+            with self.subTest(selection=selection):
+                result = subprocess.run([sys.executable, script, "lanes", "--validate", selection],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
 
     def test_nightly_dispatch_satisfies_ci_ok_with_everything_deselected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2037,7 +2094,7 @@ class NightlyLaneTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_nightly_core_deploys_the_instrumented_server_and_requires_every_b3_row(self):
-        steps = JOBS["core-robustness-nightly"]["steps"]
+        steps = LANE_JOBS["core-robustness-nightly"]["steps"]
         build = next(step for step in steps if "robustness-instrumented" in step.get("run", ""))
         run = next(step for step in steps if "core-robustness nightly-core" in step.get("run", ""))
         self.assertLess(steps.index(build), steps.index(run))
@@ -2059,7 +2116,7 @@ class NightlyLaneTests(unittest.TestCase):
         self.assertEqual(durable["gates"], ["nightly-core"])
 
     def test_performance_runs_on_a_stable_fleet_identity(self):
-        job = JOBS["performance-gate"]
+        job = LANE_JOBS["performance-gate"]
         self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-24.04|x86_64")
         self.assertEqual(job["strategy"]["matrix"]["run"], "${{ fromJSON(inputs.performance-runs || '[1]') }}")
         body = recipe_body("performance-gate")
@@ -2070,13 +2127,73 @@ class NightlyLaneTests(unittest.TestCase):
             self.assertIn(setting, body)
         # Advisory mode still fails when no gate record or evidence exists.
         self.assertIn("no gate record or evidence was produced", body)
+        # The schedule never enforces an uncalibrated gate.
+        self.assertEqual(NIGHTLY_JOBS["qualification"]["with"]["performance-mode"], "advisory")
+
+    def test_fuzz_campaign_is_the_pr_recipe_at_the_long_budget(self):
+        job = LANE_JOBS["fuzz-campaign"]
+        run = next(step for step in job["steps"] if "generated-fuzz" in step.get("run", ""))
+        self.assertEqual(run["env"]["CAESIUM_FUZZ_SECONDS"], "${{ inputs.fuzz-seconds }}")
+        self.assertIn("just tag=${{ github.sha }} generated-fuzz", run["run"])
+        self.assertIn('fuzz_seconds := env("CAESIUM_FUZZ_SECONDS", "10s")', (ROOT / "justfile").read_text())
+        inputs = LANES_WORKFLOW[True]["workflow_call"]["inputs"]
+        self.assertEqual(inputs["fuzz-seconds"]["default"], "5m")
+        self.assertEqual(NIGHTLY_WORKFLOW[True]["workflow_dispatch"]["inputs"]["fuzz-seconds"]["default"], "5m")
+        # The PR lane's Go cache is restored, never overwritten by the campaign.
+        cache = [step for step in job["steps"] if "actions/cache" in step.get("uses", "")]
+        self.assertEqual([step["uses"] for step in cache], ["actions/cache/restore@v4"])
+        pr_cache = next(step for step in JOBS["generated-fuzz"]["steps"] if step.get("uses") == "actions/cache@v4")
+        self.assertEqual(cache[0]["with"]["key"], pr_cache["with"]["key"])
+        # The explored corpus is retained.
+        artifacts = next(step for step in job["steps"]
+                         if step.get("with", {}).get("name") == "fuzz-campaign-artifacts")
+        self.assertEqual(artifacts["with"]["path"], ".tmp/lane-evidence/generated-fuzz/")
+        self.assertIn('mkdir -p "$ARTIFACT_DIR/corpus/${target}-cache"', (ROOT / "scripts/fuzz-tests.sh").read_text())
+
+    def test_soak_is_scheduled_advisory_and_known_failing(self):
+        job = LANE_JOBS["soak"]
+        run = next(step for step in job["steps"] if "just soak-tests" in step.get("run", ""))
+        self.assertEqual(run["run"], "just soak-tests ${{ inputs.soak-profile || 'short' }} advisory")
+        self.assertEqual(run["env"], {"CAESIUM_SOAK_SEED": "${{ inputs.soak-seed }}",
+                                      "CAESIUM_SOAK_DURATION": "${{ inputs.soak-duration }}"})
+        lane = QUAL_LANES["soak"]
+        self.assertEqual((lane.role, lane.gate), (QUALIFICATION["ADVISORY"], None))
+        for finding in ("#598", "#599", "#600", "#601", "#602", "#603"):
+            self.assertIn(finding, lane.title)
+        self.assertIn("#598-#603", UNPROMOTED_LANES["soak"])
+        # Never publish-blocking: not a release lane, and not in the call CI's
+        # release chain makes.
+        self.assertNotIn("soak", QUALIFICATION["RELEASE_LANES"])
+        self.assertNotIn("soak", QUALIFICATION["RELEASE_LANE_SELECTION"].split(","))
+        # Credentials never reach an upload.
+        artifacts = next(step for step in job["steps"] if step.get("with", {}).get("name") == "soak-artifacts")
+        self.assertIn("!.tmp/lane-evidence/soak/kubeconfig*", artifacts["with"]["path"])
+        report = next(step for step in job["steps"] if step.get("with", {}).get("name") == "soak-evidence")
+        self.assertIn(".tmp/lane-evidence/soak/soak.json", report["with"]["path"])
+        self.assertIn(".tmp/lane-evidence/soak/fault-schedule.jsonl", report["with"]["path"])
+
+    def test_soak_recipe_records_a_verdict_and_fails_without_one(self):
+        text = (ROOT / "justfile").read_text()
+        self.assertRegex(text, r'(?m)^soak-tests profile="short" mode="advisory": lane-candidate-check$')
+        body = recipe_body("soak-tests")
+        self.assertIn('CAESIUM_SOAK_ARTIFACTS="$lane" CAESIUM_SOAK_PROFILE="{{ profile }}"', body)
+        self.assertIn("bash scripts/soak-tests.sh || status=$?", body)
+        self.assertIn('rm -f "$lane"/kubeconfig* "$lane/internal-token.txt"', body)
+        self.assertIn('result="$(python3 scripts/soak-report.py result --artifacts "$lane")"', body)
+        # pass exits 0; fail/blocked exit 0 only in advisory mode; anything
+        # else (no record, `incomplete`) is a harness error in both modes.
+        cases = re.search(r'case "\$result" in(.*?)\n    esac', body, re.S).group(1)
+        self.assertRegex(cases, r"pass\)\s+exit 0")
+        self.assertRegex(cases, r'fail\|blocked\)\s+if \[ "\{\{ mode \}\}" = "advisory" \]; then')
+        self.assertRegex(cases, r"\*\)\s+echo \"soak-tests: no verdict was recorded")
 
     def test_every_workflow_job_is_classified(self):
         preexisting_optional = {
             "helm-integration-test", "podman-integration-test", "integration-extra",
             "integration-arm64", "helm-pod-replacement-test", "reagents-arm64",
         }
-        structural = {"ci-ok", "publish", "build-and-integration-test", "build-and-integration-test-agent-auth"}
+        structural = {"ci-ok", "publish", "build-and-integration-test", "build-and-integration-test-agent-auth",
+                      "qualification", "release-qualification"}
         for job in JOBS:
             with self.subTest(job=job):
                 self.assertTrue(
@@ -2084,8 +2201,506 @@ class NightlyLaneTests(unittest.TestCase):
                     or job in preexisting_optional or job in structural,
                     f"{job} is neither merge-blocking nor labelled unpromoted",
                 )
+        self.assertEqual(set(UNPROMOTED_LANES), set(QUAL_LANES))
         for job in UNPROMOTED_LANES:
-            self.assertIn(job, JOBS)
+            self.assertIn(job, LANE_JOBS)
+
+
+def write_release_inputs(root, sha=CANDIDATE_SHA):
+    """Honest release-gate inputs: every required report and both CLI markers."""
+    evidence = Path(root) / "evidence"
+    for job, (artifact, gate) in QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"].items():
+        path = evidence / artifact / "evidence.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence_report(sha=sha, gate=gate)))
+    cli = Path(root) / "cli"
+    cli.mkdir(parents=True, exist_ok=True)
+    for arch, machine in QUALIFICATION["CLI_ARCHES"].items():
+        binary = cli / f"caesium-linux-{arch}"
+        binary.write_bytes(f"static caesium {arch}".encode())
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        (cli / f"caesium-linux-{arch}.smoke-ok").write_text(
+            f"binary=caesium-linux-{arch}\nsha256={digest}\nrunner_arch={machine}\nrunner_os=Linux\n")
+    return evidence, cli
+
+
+def release_needs(**overrides):
+    needs = {job: {"result": "success"} for job in QUALIFICATION["RELEASE_REQUIRED_JOBS"]}
+    for job, result in overrides.items():
+        if result is None:
+            needs.pop(job, None)
+        else:
+            needs[job] = {"result": result}
+    return needs
+
+
+def lane_results(**overrides):
+    out = {"select": {"result": "success"}}
+    for job in QUAL_LANES:
+        out[job] = {"result": "success" if job in QUALIFICATION["RELEASE_LANES"] else "skipped"}
+    for job, result in overrides.items():
+        if result is None:
+            out.pop(job, None)
+        else:
+            out[job] = {"result": result}
+    return out
+
+
+class ReleaseGateTests(unittest.TestCase):
+    """G4: `scripts/qualification-gate.py release`, the gate `publish` needs."""
+
+    def run_gate(self, root, sha=CANDIDATE_SHA, ref="refs/tags/v0.2.0", dry_run="false",
+                 needs=None, results_json=None, evidence=None, cli=None):
+        evidence = evidence or Path(root) / "evidence"
+        cli = cli or Path(root) / "cli"
+        env = {**os.environ,
+               "NEEDS_JSON": json.dumps(release_needs() if needs is None else needs),
+               "LANE_RESULTS_JSON": json.dumps(lane_results()) if results_json is None else results_json,
+               "GITHUB_STEP_SUMMARY": str(Path(root) / "summary.md")}
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/qualification-gate.py"), "release",
+             "--candidate-sha", sha, "--ref", ref, "--dry-run", dry_run,
+             "--evidence-dir", str(evidence), "--cli-dir", str(cli),
+             "--manifest", str(MANIFEST_PATH)],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_required_set_is_explicit_and_excludes_advisory_lanes(self):
+        q = QUALIFICATION
+        self.assertEqual(q["RELEASE_LANES"], ("lifecycle-cluster", "console-recovery", "core-robustness-nightly"))
+        self.assertEqual(q["RELEASE_LANE_SELECTION"], "cluster-lifecycle,console-recovery,core-robustness")
+        self.assertEqual(q["RELEASE_REQUIRED_JOBS"], ("changes", "ci-ok", "images", "images-arm64", "qualification"))
+        self.assertEqual({job: gate for job, (_, gate) in q["RELEASE_REQUIRED_EVIDENCE"].items()}, {
+            "lifecycle-standalone": "lifecycle",
+            "lifecycle-cluster": "nightly-cluster-lifecycle",
+            "console-recovery": "nightly-console",
+            "core-robustness-nightly": "nightly-core",
+        })
+        # F4 is also inside ci-ok's promoted set; the release gate re-checks it.
+        self.assertEqual(EVIDENCE_LANES["lifecycle-standalone"], "lifecycle")
+        self.assertEqual(set(q["NOT_REQUIRED_TO_PUBLISH"]), {"performance-gate", "soak", "fuzz-campaign"})
+        for gate in ("lifecycle", "nightly-cluster-lifecycle", "nightly-console", "nightly-core"):
+            self.assertTrue(gated_scenarios(gate=gate), gate)
+
+    def test_honest_release_inputs_allow_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            result = self.run_gate(tmp)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("publication allowed", result.stdout)
+            self.assertIn("not required to publish: soak", result.stdout)
+            self.assertIn("Release qualification: publication allowed", (Path(tmp) / "summary.md").read_text())
+            # A dry run on a branch is allowed through the same checks.
+            result = self.run_gate(tmp, ref="refs/heads/master", dry_run="true")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_only_a_tag_or_a_dry_run_can_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            for ref, dry_run in (("refs/heads/master", "false"), ("refs/tags/x1", "false"),
+                                 ("refs/tags/v0.2.0", "maybe")):
+                with self.subTest(ref=ref, dry_run=dry_run):
+                    result = self.run_gate(tmp, ref=ref, dry_run=dry_run)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("publication blocked", result.stderr)
+            result = self.run_gate(tmp, sha="v0.2.0")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("is not a full commit SHA", result.stderr)
+
+    def test_failed_cancelled_skipped_or_missing_jobs_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            for job in QUALIFICATION["RELEASE_REQUIRED_JOBS"]:
+                for result_value in ("failure", "cancelled", "skipped", None):
+                    with self.subTest(job=job, result=result_value):
+                        result = self.run_gate(tmp, needs=release_needs(**{job: result_value}))
+                        self.assertEqual(result.returncode, 1, result.stdout)
+                        self.assertIn(f"{job}={result_value or 'missing'}", result.stderr)
+            result = self.run_gate(tmp, needs="not-an-object")
+            self.assertEqual(result.returncode, 1)
+
+    def test_each_release_lane_result_is_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            for job in QUALIFICATION["RELEASE_LANES"]:
+                for result_value in ("failure", "skipped", None):
+                    with self.subTest(job=job, result=result_value):
+                        result = self.run_gate(tmp, results_json=json.dumps(lane_results(**{job: result_value})))
+                        self.assertEqual(result.returncode, 1, result.stdout)
+                        self.assertIn(f"release lane {job}={result_value or 'missing'}", result.stderr)
+            for raw in ("", "not json", "[]"):
+                with self.subTest(results=raw):
+                    self.assertEqual(self.run_gate(tmp, results_json=raw).returncode, 1)
+
+    def test_advisory_lanes_never_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            results_json = json.dumps(lane_results(**{"performance-gate": "failure", "soak": "failure",
+                                                      "fuzz-campaign": "cancelled"}))
+            result = self.run_gate(tmp, results_json=results_json)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_absent_foreign_or_failed_evidence_blocks(self):
+        for job, (artifact, gate) in QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"].items():
+            with self.subTest(job=job, case="absent"), tempfile.TemporaryDirectory() as tmp:
+                evidence, _ = write_release_inputs(tmp)
+                (evidence / artifact / "evidence.json").unlink()
+                result = self.run_gate(tmp)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{job} evidence: ", result.stderr)
+                self.assertIn("is absent", result.stderr)
+            with self.subTest(job=job, case="foreign"), tempfile.TemporaryDirectory() as tmp:
+                evidence, _ = write_release_inputs(tmp)
+                (evidence / artifact / "evidence.json").write_text(
+                    json.dumps(evidence_report(sha="f" * 40, gate=gate)))
+                result = self.run_gate(tmp)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("is not the tested candidate", result.stderr)
+            with self.subTest(job=job, case="failed"), tempfile.TemporaryDirectory() as tmp:
+                evidence, _ = write_release_inputs(tmp)
+                report = evidence_report(gate=gate)
+                report["scenarios"][0]["status"] = "fail"
+                (evidence / artifact / "evidence.json").write_text(json.dumps(report))
+                result = self.run_gate(tmp)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("want 'pass'", result.stderr)
+
+    def test_native_cli_gate_blocks_on_any_marker_defect(self):
+        def tamper(cli, arch, how):
+            binary = cli / f"caesium-linux-{arch}"
+            marker = cli / f"caesium-linux-{arch}.smoke-ok"
+            if how == "no-binary":
+                binary.unlink()
+            elif how == "no-marker":
+                marker.unlink()
+            elif how == "rebuilt":
+                binary.write_bytes(b"a different binary")
+            elif how == "emulated":
+                marker.write_text(marker.read_text().replace("runner_arch=", "runner_arch=emulated-"))
+            elif how == "renamed":
+                marker.write_text(marker.read_text().replace(f"binary=caesium-linux-{arch}", "binary=other"))
+        for arch in QUALIFICATION["CLI_ARCHES"]:
+            for how, message in (("no-binary", "is absent"), ("no-marker", "never smoke-tested"),
+                                 ("rebuilt", "!= binary sha256"), ("emulated", "not natively"),
+                                 ("renamed", "marker names binary")):
+                with self.subTest(arch=arch, how=how), tempfile.TemporaryDirectory() as tmp:
+                    _, cli = write_release_inputs(tmp)
+                    tamper(cli, arch, how)
+                    result = self.run_gate(tmp)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(f"native CLI {arch}", result.stderr)
+                    self.assertIn(message, result.stderr)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+    def test_simulated_failure_step_blocks_the_unchanged_gate(self):
+        steps = JOBS["release-qualification"]["steps"]
+        simulate = next(step for step in steps if step.get("name", "").startswith("Simulate a failed"))
+        with tempfile.TemporaryDirectory() as tmp:
+            write_release_inputs(tmp)
+            workdir = Path(tmp) / "work"
+            target = workdir / ".tmp/release/evidence"
+            shutil.copytree(Path(tmp) / "evidence", target)
+            script = Path(tmp) / "simulate.sh"
+            script.write_text(simulate["run"])
+            done = subprocess.run(["bash", "--noprofile", "--norc", str(script)], cwd=workdir,
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertIn("SIMULATION: f2-cluster-lifecycle rewritten", done.stdout)
+            result = self.run_gate(tmp, ref="refs/heads/master", dry_run="true", evidence=target)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("scenario 'f2-cluster-lifecycle' status 'fail', want 'pass'", result.stderr)
+
+
+class ReleaseQualificationWiringTests(unittest.TestCase):
+    """G4: the publish chain requires same-SHA release qualification."""
+
+    def test_publish_needs_the_gate_and_the_gate_needs_the_qualification(self):
+        self.assertIn("release-qualification", JOBS["publish"]["needs"])
+        self.assertIn("ci-ok", JOBS["publish"]["needs"])
+        gate = JOBS["release-qualification"]
+        self.assertEqual(gate["needs"], list(QUALIFICATION["RELEASE_REQUIRED_JOBS"]))
+        self.assertEqual(gate["if"],
+                         "always() && (startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run)")
+        # `publish` carries no status function, so GitHub's implicit success()
+        # skips it whenever the gate (or any other need) did not succeed.
+        self.assertNotRegex(JOBS["publish"]["if"], r"always\(\)|failure\(\)|cancelled\(\)")
+
+    def test_release_chain_runs_the_required_lanes_on_this_commit(self):
+        job = JOBS["qualification"]
+        self.assertEqual(job["uses"], "./.github/workflows/qualification-lanes.yml")
+        self.assertEqual(job["needs"], ["changes"])
+        self.assertEqual(job["if"],
+                         "inputs.nightly != '' || startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run")
+        self.assertEqual(job["with"]["lanes"],
+                         "${{ inputs.nightly != '' && inputs.nightly || '"
+                         + QUALIFICATION["RELEASE_LANE_SELECTION"] + "' }}")
+        self.assertEqual(job["permissions"], {"contents": "read"})
+        # Never a merge dependency.
+        self.assertNotIn("qualification", JOBS["ci-ok"]["needs"])
+        self.assertNotIn("release-qualification", JOBS["ci-ok"]["needs"])
+        for name in JOBS["ci-ok"]["needs"]:
+            self.assertNotIn("qualification", JOBS[name].get("needs") or [], name)
+
+    def test_gate_reads_the_downloaded_reports_and_cli(self):
+        steps = JOBS["release-qualification"]["steps"]
+        gate = next(step for step in steps if step.get("name") == "Evaluate release qualification")
+        self.assertEqual(gate["env"]["NEEDS_JSON"], "${{ toJSON(needs) }}")
+        self.assertEqual(gate["env"]["LANE_RESULTS_JSON"], "${{ needs.qualification.outputs.results }}")
+        self.assertEqual(gate["env"]["DRY_RUN"], "${{ inputs.publish-dry-run && 'true' || 'false' }}")
+        argv = shlex.split(gate["run"].replace("\\\n", " "))
+        self.assertEqual(argv[:3], ["python3", "scripts/qualification-gate.py", "release"])
+        flags = dict(zip(argv[3::2], argv[4::2]))
+        self.assertEqual(flags["--candidate-sha"], "$GITHUB_SHA")
+        self.assertEqual(flags["--ref"], "$GITHUB_REF")
+        downloads = {step["with"]["pattern"]: step for step in steps
+                     if step.get("uses", "").startswith("actions/download-artifact")}
+        self.assertEqual(downloads["*-evidence"]["with"]["path"], flags["--evidence-dir"])
+        self.assertEqual(downloads["release-cli-*"]["with"]["path"], flags["--cli-dir"])
+        self.assertTrue(downloads["release-cli-*"]["with"]["merge-multiple"])
+        for step in downloads.values():
+            self.assertLess(steps.index(step), steps.index(gate))
+        # Every required report and CLI artifact has a producer in this run.
+        uploads = {}
+        for job in list(JOBS.values()) + list(LANE_JOBS.values()):
+            for step in job.get("steps", []):
+                if step.get("uses") == "actions/upload-artifact@v7":
+                    uploads[step["with"]["name"]] = step["with"]["path"]
+        for artifact, _ in QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"].values():
+            self.assertTrue(fnmatch.fnmatchcase(artifact, "*-evidence"), artifact)
+            self.assertIn(artifact, uploads)
+        for arch in QUALIFICATION["CLI_ARCHES"]:
+            self.assertIn(f"/tmp/caesium-linux-{arch}.smoke-ok", uploads[f"release-cli-{arch}"])
+
+    def test_simulation_only_exists_in_a_dry_run_and_precedes_the_gate(self):
+        steps = JOBS["release-qualification"]["steps"]
+        simulate = next(step for step in steps if step.get("name", "").startswith("Simulate a failed"))
+        gate = next(step for step in steps if step.get("name") == "Evaluate release qualification")
+        self.assertEqual(simulate["if"], "inputs.publish-dry-run && inputs.simulate-failed-qualification")
+        self.assertLess(steps.index(simulate), steps.index(gate))
+        self.assertIn("lifecycle-cluster-evidence/evidence.json", simulate["run"])
+        row = next(row for row in MANIFEST["scenarios"] if row["id"] == "f2-cluster-lifecycle")
+        self.assertEqual(row["gates"], [QUAL_LANES["lifecycle-cluster"].gate])
+        # A tag push carries no inputs; the dry-run inputs exist only on dispatch.
+        self.assertNotIn("inputs", TRIGGERS["push"] or {})
+
+    def test_dispatch_inputs_fail_closed_on_conflicting_requests(self):
+        code, stderr, _ = run_changes_set_step("workflow_dispatch", "", SIMULATE_FAILED_QUALIFICATION="true",
+                                               PUBLISH_DRY_RUN="false")
+        self.assertNotEqual(code, 0)
+        self.assertIn("simulate-failed-qualification needs publish-dry-run", stderr)
+        code, stderr, _ = run_changes_set_step("workflow_dispatch", "all", PUBLISH_DRY_RUN="true")
+        self.assertNotEqual(code, 0)
+        self.assertIn("leave nightly empty", stderr)
+        # A dry run is a push-equivalent full run: nothing is path-deselected.
+        code, _, parsed = run_changes_set_step("workflow_dispatch", "", PUBLISH_DRY_RUN="true",
+                                               SIMULATE_FAILED_QUALIFICATION="true")
+        self.assertEqual(code, 0)
+        self.assertEqual(parsed, {k: "true" for k in ("go", "ui", "helm", "reagents", "ci", "images")})
+        # Pull request / merge group / push events never set either input.
+        code, _, parsed = run_changes_set_step("push", "", PUBLISH_DRY_RUN="", SIMULATE_FAILED_QUALIFICATION="")
+        self.assertEqual(code, 0)
+
+    def test_native_cli_smoke_and_checksum_gates_are_retained(self):
+        for job, arch in (("images", "amd64"), ("images-arm64", "arm64")):
+            runs = [step.get("run", "") for step in JOBS[job]["steps"]]
+            self.assertIn(f"scripts/ci-cli-smoke.sh /tmp/caesium-linux-{arch} {arch}", runs)
+        verify = next(step for step in JOBS["publish"]["steps"]
+                      if step.get("name") == "Verify CLI smoke markers and checksums")
+        # Runs on a tag AND on a dry run (no `if:`), before anything is pushed.
+        self.assertNotIn("if", verify)
+        for fragment in ('marker="${bin}.smoke-ok"', "sha256sum \"$bin\"", "SHA256SUMS"):
+            self.assertIn(fragment, verify["run"])
+        steps = JOBS["publish"]["steps"]
+        login = next(step for step in steps if step.get("name") == "Login to Docker Hub")
+        self.assertLess(steps.index(verify), steps.index(login))
+        smoke = (ROOT / "scripts/ci-cli-smoke.sh").read_text()
+        self.assertIn('echo "runner_arch=$(uname -m)"', smoke)
+        self.assertIn('echo "sha256=${sha}"', smoke)
+
+    def test_actionlint_covers_every_workflow(self):
+        commands = [line.strip() for step in JOBS["ci-config"]["steps"]
+                    for line in step.get("run", "").splitlines() if line.strip().startswith("actionlint ")]
+        self.assertEqual(len(commands), 1)
+        linted = set(commands[0].split()[1:])
+        self.assertEqual(linted, {".github/workflows/ci.yml", ".github/workflows/qualification-lanes.yml",
+                                  ".github/workflows/testing-qualification.yml"})
+        # Every called workflow is linted along with its callers.
+        called = {job["uses"][2:] for job in list(JOBS.values()) + list(NIGHTLY_JOBS.values()) if "uses" in job}
+        self.assertTrue(called <= linted, called - linted)
+
+
+class TestingQualificationWorkflowTests(unittest.TestCase):
+    """G4: the nightly schedule -- hosted only, never on PR/merge-queue events."""
+
+    def test_triggers_are_schedule_and_dispatch_only(self):
+        triggers = NIGHTLY_WORKFLOW[True]
+        self.assertEqual(set(triggers), {"schedule", "workflow_dispatch"})
+        for event in ("pull_request", "pull_request_target", "merge_group", "push", "workflow_call"):
+            self.assertNotIn(event, triggers)
+        crons = [entry["cron"] for entry in triggers["schedule"]]
+        self.assertEqual(len(crons), 1)
+        self.assertEqual(len(crons[0].split()), 5)
+        # The lanes workflow is only ever called.
+        self.assertEqual(set(LANES_WORKFLOW[True]), {"workflow_call"})
+
+    def test_concurrency_never_shares_or_cancels_with_ci(self):
+        nightly = NIGHTLY_WORKFLOW["concurrency"]
+        self.assertEqual(nightly["group"], "testing-qualification-${{ github.ref }}")
+        self.assertFalse(nightly["cancel-in-progress"])
+        # CI's groups all start with its own workflow name ("CI-...").
+        self.assertTrue(WORKFLOW["concurrency"]["group"].startswith("${{ github.workflow }}-"))
+        self.assertEqual(WORKFLOW["name"], "CI")
+        # A called workflow's own group would be evaluated in its caller's
+        # context and could deadlock against it.
+        self.assertNotIn("concurrency", LANES_WORKFLOW)
+
+    def test_schedules_every_lane_with_nightly_defaults(self):
+        call = NIGHTLY_JOBS["qualification"]
+        self.assertEqual(call["uses"], "./.github/workflows/qualification-lanes.yml")
+        self.assertEqual(call["with"]["lanes"], "${{ inputs.lanes || 'all' }}")
+        self.assertEqual(QUALIFICATION["selected_jobs"]("all"), list(QUAL_LANES))
+        dispatch = NIGHTLY_WORKFLOW[True]["workflow_dispatch"]["inputs"]
+        reusable = LANES_WORKFLOW[True]["workflow_call"]["inputs"]
+        self.assertEqual(dispatch["lanes"]["default"], "all")
+        for name in ("fuzz-seconds", "soak-profile", "soak-seed", "soak-duration", "performance-runs"):
+            with self.subTest(input=name):
+                self.assertEqual(dispatch[name]["default"], reusable[name]["default"])
+                self.assertIn(f"inputs.{name}", call["with"][name])
+        self.assertEqual(dispatch["soak-profile"]["options"], ["short", "nightly"])
+        # Every value the call passes is a declared input of the lanes workflow.
+        self.assertTrue(set(call["with"]) <= set(reusable))
+        self.assertTrue(set(JOBS["qualification"]["with"]) <= set(reusable))
+
+    def test_permissions_are_least_privilege(self):
+        self.assertEqual(NIGHTLY_WORKFLOW["permissions"], {"contents": "read"})
+        self.assertEqual(LANES_WORKFLOW["permissions"], {"contents": "read"})
+        self.assertEqual(NIGHTLY_JOBS["qualification"]["permissions"], {"contents": "read"})
+        self.assertEqual(NIGHTLY_JOBS["summary"]["permissions"], {"contents": "read", "issues": "write"})
+        for job in LANE_JOBS.values():
+            self.assertNotIn("permissions", job)
+
+    def test_one_summary_and_one_issue_comment_per_failing_scheduled_night(self):
+        summary = NIGHTLY_JOBS["summary"]
+        self.assertEqual(summary["needs"], ["qualification"])
+        self.assertEqual(summary["if"], "always()")
+        steps = summary["steps"]
+        fold = next(step for step in steps if step.get("id") == "fold")
+        self.assertEqual(fold["env"]["LANE_RESULTS_JSON"], "${{ needs.qualification.outputs.results }}")
+        self.assertIn("scripts/qualification-gate.py summary", fold["run"])
+        issue = next(step for step in steps if "gh issue" in step.get("run", ""))
+        self.assertEqual(issue["if"], "github.event_name == 'schedule' && steps.fold.outputs.failing != ''")
+        self.assertIn('title="Nightly qualification failures"', issue["run"])
+        self.assertIn("gh issue comment", issue["run"])
+        self.assertIn("gh issue create", issue["run"])
+        # event_name appears in exactly that step: dispatches never touch issues.
+        for job_name, job in NIGHTLY_JOBS.items():
+            self.assertNotIn("event_name", job.get("if") or "", job_name)
+            for step in job.get("steps", []) or []:
+                if "event_name" in (step.get("if") or ""):
+                    self.assertIs(step, issue)
+        fail = steps[-1]
+        self.assertEqual(fail["if"], "steps.fold.outputs.failing != ''")
+        self.assertLess(steps.index(issue), steps.index(fail))
+        download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact"))
+        self.assertEqual(download["with"]["pattern"], "*-evidence*")
+
+    def test_results_job_reports_every_lane(self):
+        results_job = LANE_JOBS["results"]
+        self.assertEqual(results_job["if"], "always()")
+        self.assertEqual(set(results_job["needs"]), set(LANE_JOBS) - {"results"})
+        self.assertEqual(LANES_WORKFLOW[True]["workflow_call"]["outputs"]["results"]["value"],
+                         "${{ jobs.results.outputs.needs }}")
+        for job in QUAL_LANES:
+            self.assertEqual(LANE_JOBS[job]["needs"], ["select"], job)
+
+
+class QualificationSummaryTests(unittest.TestCase):
+    """G4: the nightly fold names exactly the lanes that fail a night."""
+
+    def args(self, evidence, lanes="all", sha=CANDIDATE_SHA):
+        return argparse.Namespace(
+            lanes=lanes, candidate_sha=sha, evidence_dir=str(evidence), manifest=str(MANIFEST_PATH),
+            run_url="https://example.invalid/run/1", qualification_result="success", fuzz_seconds="5m",
+            soak_profile="short", triage_owner="@owner", codeowners="", markdown_out="",
+        )
+
+    def honest_night(self, root, sha=CANDIDATE_SHA):
+        evidence = Path(root)
+        for job, lane in QUAL_LANES.items():
+            if lane.gate:
+                path = evidence / lane.artifact / "evidence.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(evidence_report(sha=sha, gate=lane.gate)))
+        perf = evidence / "performance-gate-evidence-1" / "evidence.json"
+        perf.parent.mkdir(parents=True)
+        perf.write_text(json.dumps({"scenarios": [{"id": "e4-performance-gate", "status": "fail",
+                                                   "performance": {"overall": "inconclusive_unresolved"}}]}))
+        soak = evidence / "soak-evidence" / "soak.json"
+        soak.parent.mkdir(parents=True)
+        soak.write_text(json.dumps({"candidate_sha": sha, "result": "fail", "seed": 314159,
+                                    "seed_source": "generated", "profile": "short",
+                                    "failed_gates": ["post_drain_containers"]}))
+        results = {"select": {"result": "success"}, **{job: {"result": "success"} for job in QUAL_LANES}}
+        return evidence, results
+
+    def fold(self, args, results):
+        return QUALIFICATION["summarize"](args, json.dumps(results) if isinstance(results, dict) else results)
+
+    def test_known_failing_advisory_verdicts_keep_a_night_green(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            markdown, failing = self.fold(self.args(evidence), results)
+            self.assertEqual(failing, [])
+            self.assertIn("Nightly qualification: green", markdown)
+            self.assertIn("advisory: fail", markdown)
+            self.assertIn("seed 314159", markdown)
+            self.assertIn("CAESIUM_SOAK_SEED=314159 just soak-tests short advisory", markdown)
+            self.assertIn("inconclusive_unresolved", markdown)
+            self.assertIn("never proof for an individual PR", markdown)
+            self.assertIn("Triage owner: @owner", markdown)
+            self.assertIn("#598", markdown)
+
+    def test_a_failed_job_or_bad_evidence_fails_the_night(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            for job in QUAL_LANES:
+                with self.subTest(job=job):
+                    _, failing = self.fold(self.args(evidence), {**results, job: {"result": "failure"}})
+                    self.assertEqual(failing, [job])
+            (evidence / "console-recovery-evidence" / "evidence.json").write_text(
+                json.dumps(evidence_report(sha="f" * 40, gate="nightly-console")))
+            _, failing = self.fold(self.args(evidence), results)
+            self.assertEqual(failing, ["console-recovery"])
+
+    def test_advisory_lanes_without_a_verdict_fail_the_night(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            shutil.rmtree(evidence / "performance-gate-evidence-1")
+            (evidence / "soak-evidence" / "soak.json").write_text(
+                json.dumps({"candidate_sha": CANDIDATE_SHA, "result": "incomplete"}))
+            _, failing = self.fold(self.args(evidence), results)
+            self.assertEqual(failing, ["performance-gate", "soak"])
+
+    def test_missing_results_or_a_refused_selection_fail_the_night(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            _, failing = self.fold(self.args(evidence), "")
+            self.assertIn("results", failing)
+            _, failing = self.fold(self.args(evidence, lanes="typo"),
+                                   {"select": {"result": "failure"}, **{j: {"result": "skipped"} for j in QUAL_LANES}})
+            self.assertEqual(failing, ["select"])
+
+    def test_unselected_lanes_are_reported_not_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            results["soak"] = {"result": "skipped"}
+            markdown, failing = self.fold(self.args(evidence, lanes="cluster-lifecycle,fuzz-campaign"), results)
+            self.assertEqual(failing, [])
+            self.assertIn("| `soak` | not selected |", markdown)
+
+    def test_triage_owner_comes_from_codeowners(self):
+        owners = QUALIFICATION["codeowners_default"](ROOT / ".github/CODEOWNERS")
+        self.assertTrue(owners.startswith("@"), owners)
 
 
 class IntegrationRunnerTests(unittest.TestCase):

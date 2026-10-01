@@ -114,15 +114,24 @@ EVIDENCE_LANES = {
     "coverage-ratchets": "coverage",
 }
 
-# Lanes that exist in the workflow but do not block a merge. Printed on every
-# run so an unpromoted lane can never be mistaken for merge evidence.
+# Lanes that exist (since G4 in .github/workflows/qualification-lanes.yml,
+# called by the nightly schedule and by CI's release chain) but do not block a
+# merge. Printed on every run so an unpromoted lane can never be mistaken for
+# merge evidence. scripts/qualification-gate.py says which of them are
+# required to PUBLISH (F2, D3, B3 core) and which stay advisory.
 UNPROMOTED_LANES = {
-    "lifecycle-cluster": "nightly set (W8 decision record): F2 cluster lifecycle qualification",
-    "console-recovery": "nightly set (W8 decision record): D3 console cluster-recovery journey",
+    "lifecycle-cluster": "nightly set (W8 decision record): F2 cluster lifecycle qualification; "
+                         "required to publish",
+    "console-recovery": "nightly set (W8 decision record): D3 console cluster-recovery journey; "
+                        "required to publish",
     "performance-gate": "nightly set (W8 decision record): E4 performance gate; advisory until "
                         "the hosted runner is calibrated",
     "core-robustness-nightly": "nightly set, demoted from the merge budget: B3 TestCore (with the "
-                               "testfault-instrumented server) measured 16m30s on the PR path",
+                               "testfault-instrumented server) measured 16m30s on the PR path; "
+                               "required to publish",
+    "fuzz-campaign": "nightly set (G4): C2 native fuzz targets at the long per-target budget",
+    "soak": "nightly set (G4): F3 seeded single-host soak; advisory and known-failing on "
+            "#598-#603, never merge- or publish-blocking",
 }
 
 

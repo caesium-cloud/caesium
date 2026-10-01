@@ -18,20 +18,36 @@ on:
   merge_group:
     types: [checks_requested]
   # distributed-testing G6: the nightly system-suite set, runnable on demand
-  # until G4 schedules it (.github/workflows/testing-qualification.yml). A
-  # non-empty `nightly` runs ONLY the named lanes (every path output of
-  # `changes` is false, so the PR matrix and ci-ok's promoted lanes skip);
-  # an empty one is a push-equivalent full run. Nightly results are broader
-  # evidence, never per-PR proof.
+  # (G4 schedules it in .github/workflows/testing-qualification.yml; both call
+  # .github/workflows/qualification-lanes.yml). A non-empty `nightly` runs
+  # ONLY the named lanes (every path output of `changes` is false, so the PR
+  # matrix and ci-ok's promoted lanes skip); an empty one is a push-equivalent
+  # full run. Nightly results are broader evidence, never per-PR proof.
+  #
+  # distributed-testing G4: `publish-dry-run` runs the actual publish chain
+  # (push-equivalent full run + release qualification + release-qualification
+  # + publish) on the dispatched commit with every upload step skipped;
+  # `simulate-failed-qualification` additionally turns one release-required
+  # report into a failed qualification before the real gate reads it, to
+  # demonstrate that publication is blocked. Neither pushes or tags anything.
   workflow_dispatch:
     inputs:
       nightly:
         description: >-
-          Comma-separated nightly lanes: cluster-lifecycle, console-recovery,
-          performance, core-robustness (instrumented TestCore), or all.
+          Comma-separated qualification lanes: cluster-lifecycle,
+          console-recovery, core-robustness (instrumented TestCore),
+          fuzz-campaign, performance, soak, or all.
           Empty = push-equivalent full run.
         type: string
         default: ''
+      publish-dry-run:
+        description: Run the full publish chain on this commit with every upload/push step skipped.
+        type: boolean
+        default: false
+      simulate-failed-qualification:
+        description: With publish-dry-run, fail one release-required report before the gate reads it.
+        type: boolean
+        default: false
       performance-mode:
         description: advisory records the performance verdict; enforcing requires the calibrated gate to pass.
         type: choice
@@ -147,8 +163,21 @@ jobs:
           REAGENTS: ${{ steps.filter.outputs.reagents }}
           CI: ${{ steps.filter.outputs.ci }}
           NIGHTLY: ${{ inputs.nightly }}
+          PUBLISH_DRY_RUN: ${{ inputs.publish-dry-run }}
+          SIMULATE_FAILED_QUALIFICATION: ${{ inputs.simulate-failed-qualification }}
         run: |
           set -euo pipefail
+          # distributed-testing G4: the publish dry run is the release chain on
+          # a push-equivalent full run, so it cannot be combined with a nightly
+          # lane selection, and the simulated failure only exists inside it.
+          if [ "${SIMULATE_FAILED_QUALIFICATION:-}" = "true" ] && [ "${PUBLISH_DRY_RUN:-}" != "true" ]; then
+            echo "changes: simulate-failed-qualification needs publish-dry-run" >&2
+            exit 1
+          fi
+          if [ "${PUBLISH_DRY_RUN:-}" = "true" ] && [ -n "${NIGHTLY:-}" ]; then
+            echo "changes: publish-dry-run runs the release chain; leave nightly empty" >&2
+            exit 1
+          fi
           # distributed-testing G6: a workflow_dispatch that names nightly
           # lanes runs ONLY those lanes. Every path output is false, so the PR
           # matrix and ci-ok's promoted lanes are deselected (not failed). An
@@ -156,7 +185,7 @@ jobs:
           if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${NIGHTLY:-}" ]; then
             for lane in ${NIGHTLY//,/ }; do
               case "$lane" in
-                all|cluster-lifecycle|console-recovery|performance|core-robustness) ;;
+                all|cluster-lifecycle|console-recovery|core-robustness|fuzz-campaign|performance|soak) ;;
                 *)
                   echo "changes: unknown nightly lane '$lane' in '$NIGHTLY'" >&2
                   exit 1
@@ -243,7 +272,7 @@ jobs:
           echo "$RUNNER_TEMP/wrapper-kubectl" >> "$GITHUB_PATH"
       - name: Validate workflow and CI contracts
         run: |
-          actionlint .github/workflows/ci.yml
+          actionlint .github/workflows/ci.yml .github/workflows/qualification-lanes.yml .github/workflows/testing-qualification.yml
           python3 -m pip install PyYAML==6.0.3
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           bash scripts/test_helm_pod_replacement_membership.sh
@@ -1678,261 +1707,31 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Nightly set (distributed-testing G6, W8 decision record): not merge
-  # evidence. Each runs only when a workflow_dispatch names it in `nightly`
-  # (G4 schedules them later); each builds its own images from the dispatched
-  # commit, keeps its evidence and validates its registered manifest rows.
+  # Qualification lanes (distributed-testing G6/G4): not merge evidence. The
+  # lanes themselves live once in .github/workflows/qualification-lanes.yml;
+  # this job calls them for
+  #   - a `nightly=` dispatch (the named lanes; the PR matrix is deselected),
+  #   - the release chain: a `v*` tag push or a `publish-dry-run` dispatch runs
+  #     the release-required set on this very commit, which
+  #     `release-qualification` then re-validates before `publish` can run.
+  # The scheduled nightly is .github/workflows/testing-qualification.yml.
   # ---------------------------------------------------------------------------
-
-  # F2 persistent three-voter upgrade/replacement/recovery qualification.
-  lifecycle-cluster:
+  qualification:
     needs: [changes]
-    if: contains(format(',{0},', inputs.nightly), ',cluster-lifecycle,') || contains(format(',{0},', inputs.nightly), ',all,')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          sudo mv ./kubectl /usr/local/bin/kubectl
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.17.0
-      # Cluster mode verifies single-platform OCI image archives with
-      # `docker image inspect --platform` (Docker >= 28.1; the hosted image
-      # ships 28.0.4) and reads each archive's platform descriptor, which only
-      # the containerd image store writes. Upgrade from Docker's own apt
-      # repository when older, and switch the store, before any image exists.
-      - name: Docker engine with the containerd image store
-        run: |
-          set -euo pipefail
-          need=28.1
-          have="$(docker version --format '{{.Server.Version}}')"
-          echo "docker server $have"
-          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
-            sudo install -m 0755 -d /etc/apt/keyrings
-            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-            sudo chmod a+r /etc/apt/keyrings/docker.asc
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-              | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-            sudo apt-get update -q
-            sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
-          fi
-          conf=/etc/docker/daemon.json
-          if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
-          printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
-          sudo systemctl restart docker
-          docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
-          docker info --format '{{json .DriverStatus}}'
-      - name: Cluster lifecycle qualification
-        run: just lifecycle-cluster
-      - name: Upload lane report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: lifecycle-cluster-evidence
-          path: .tmp/lane-evidence/lifecycle-cluster/*.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Upload lane artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: lifecycle-cluster-artifacts
-          path: |
-            .tmp/lane-evidence/lifecycle-cluster/
-            !.tmp/lane-evidence/lifecycle-cluster/**/*.tar
-            !.tmp/lane-evidence/lifecycle-cluster/**/kubeconfig*
-            !.tmp/lane-evidence/lifecycle-cluster/**/lifecycle.test
-          if-no-files-found: warn
-          retention-days: 30
-
-  # B3 fenced core suite with the testfault-instrumented server (gate
-  # nightly-core requires every b3 row, the durable-event crash included).
-  # Demoted from the merge budget (W8 decision record order): the measured
-  # PR lane ended 16m30s after `changes` started, past the 15-minute path.
-  core-robustness-nightly:
-    needs: [changes]
-    if: contains(format(',{0},', inputs.nightly), ',core-robustness,') || contains(format(',{0},', inputs.nightly), ',all,')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          sudo mv ./kubectl /usr/local/bin/kubectl
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.17.0
-      - name: Build the release, runner and instrumented images
-        run: just tag=${{ github.sha }} robustness-instrumented
-      - name: Fenced core suite with the instrumented server
-        run: |
-          CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${{ github.sha }}-testfault" \
-            just tag=${{ github.sha }} core-robustness nightly-core
-      - name: Upload lane report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: core-robustness-nightly-evidence
-          path: .tmp/lane-evidence/core-robustness/*.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Upload lane artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: core-robustness-nightly-artifacts
-          path: .tmp/lane-evidence/core-robustness/
-          if-no-files-found: warn
-          retention-days: 30
-
-  # D3 console journey across a real owner crash (TestOwnerCrash on a kept
-  # cluster, then the Playwright cluster-recovery project).
-  console-recovery:
-    needs: [changes]
-    if: contains(format(',{0},', inputs.nightly), ',console-recovery,') || contains(format(',{0},', inputs.nightly), ',all,')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
-      - name: Install kind
-        run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          sudo mv ./kubectl /usr/local/bin/kubectl
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.17.0
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install Chromium for the console journey
-        working-directory: ui
-        run: |
-          npm ci --prefer-offline
-          npx playwright install --with-deps chromium
-      - name: Console cluster-recovery journey
-        run: just tag=${{ github.sha }} console-recovery
-      - name: Upload lane report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: console-recovery-evidence
-          path: .tmp/lane-evidence/console-recovery/*.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Upload lane artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: console-recovery-artifacts
-          path: |
-            .tmp/lane-evidence/console-recovery/
-            ui/test-results/
-            ui/playwright-report/
-          if-no-files-found: warn
-          retention-days: 30
-
-  # E4 performance gate. `performance-runs` fans out parallel runs on
-  # separate hosted runners (an A/A calibration set is [1,2,3]).
-  performance-gate:
-    needs: [changes]
-    if: contains(format(',{0},', inputs.nightly), ',performance,') || contains(format(',{0},', inputs.nightly), ',all,')
-    strategy:
-      fail-fast: false
-      matrix:
-        run: ${{ fromJSON(inputs.performance-runs || '[1]') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-      # A stable fleet identity: the hosted runner's hostname changes per job.
-      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-24.04|x86_64
-      CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          # performance.sh checks out the base SHA in a temporary worktree.
-          fetch-depth: 0
-      - uses: taiki-e/install-action@just
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Install Chromium for the browser series
-        working-directory: ui
-        run: |
-          npm ci --prefer-offline
-          npx playwright install --with-deps chromium
-      # scripts/performance.sh runs its builds as root inside the builder image
-      # on bind mounts of this checkout and of a temporary base worktree. On a
-      # Linux runner those belong to the runner uid, so git in the container
-      # refuses them ("dubious ownership", which fails Go's VCS stamping) and
-      # the host cannot clean the root-owned files the containers leave behind.
-      # Run the gate as root on a root-owned checkout -- the same single owner
-      # Docker Desktop presents on the calibrated Mac -- rather than change the
-      # script (not this stream's file; reported to its owner).
-      - name: Let the builder container own the checkout
-        run: |
-          set -euo pipefail
-          sudo chown -R 0:0 "$GITHUB_WORKSPACE"
-          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test -z "$(sudo git -C "$GITHUB_WORKSPACE" status --porcelain)"
-      - name: Performance gate
-        run: |
-          sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" \
-            just performance-gate ${{ inputs.performance-mode || 'advisory' }}
-          sudo chown -R "$(id -u):$(id -g)" .tmp/lane-evidence
-      - name: Upload lane report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: performance-gate-evidence-${{ matrix.run }}
-          path: .tmp/lane-evidence/performance-gate/*.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Upload lane artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: performance-gate-artifacts-${{ matrix.run }}
-          path: |
-            .tmp/lane-evidence/performance-gate/
-            !.tmp/lane-evidence/performance-gate/**/*.tar
-          if-no-files-found: warn
-          retention-days: 30
+    if: inputs.nightly != '' || startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run
+    permissions:
+      contents: read
+    uses: ./.github/workflows/qualification-lanes.yml
+    with:
+      # A non-empty `nightly` names its lanes; otherwise this is the release
+      # chain and runs exactly the release-required set
+      # (scripts/qualification-gate.py RELEASE_LANES; test_ci.py pins it).
+      lanes: ${{ inputs.nightly != '' && inputs.nightly || 'cluster-lifecycle,console-recovery,core-robustness' }}
+      # Release evidence outlives the nightly window.
+      retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 90 || 30 }}
+      performance-mode: ${{ inputs.performance-mode || 'advisory' }}
+      performance-base: ${{ inputs.performance-base || '' }}
+      performance-runs: ${{ inputs.performance-runs || '[1]' }}
 
   podman-integration-test:
     needs: [changes, images]
@@ -2192,10 +1991,77 @@ jobs:
             generated-oracles \
             coverage-ratchets
 
+  # distributed-testing G4: same-SHA release qualification in the actual
+  # publish chain, fail-closed. `publish` needs this job, so a failed, missing,
+  # foreign or hollow qualification blocks publication. The required set is
+  # scripts/qualification-gate.py RELEASE_REQUIRED: `ci-ok` (which already
+  # re-validates the promoted lanes, F4 standalone lifecycle among them), F4's
+  # report again under gate `lifecycle`, both native CLI smoke/checksum
+  # markers, and the three release-required lanes `qualification` ran on THIS
+  # commit (F2 cluster lifecycle, D3 console recovery, B3 core robustness),
+  # each bound to github.sha and re-validated under its own manifest gate.
+  # Performance and soak are advisory and never required to publish.
+  release-qualification:
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run)
+    needs: [changes, ci-ok, images, images-arm64, qualification]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # Every report this run uploaded, one directory per artifact. A lane that
+      # never ran leaves no directory, which the gate refuses as absent
+      # evidence; so a failed download is the gate's to judge, not this step's.
+      - name: Download this run's lane reports
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: '*-evidence'
+          path: .tmp/release/evidence
+      - name: Download the native CLI binaries and smoke markers
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-cli-*
+          path: .tmp/release/cli
+          merge-multiple: true
+      # DRY RUN ONLY: both inputs exist only on workflow_dispatch, so a tag
+      # push can never take this step. It rewrites the F2 cluster lifecycle
+      # report into a failed qualification -- the status the collector writes
+      # when F2 fails -- and the real gate below, unchanged, must then refuse.
+      - name: Simulate a failed release qualification (dry run only)
+        if: inputs.publish-dry-run && inputs.simulate-failed-qualification
+        run: |
+          set -euo pipefail
+          report=.tmp/release/evidence/lifecycle-cluster-evidence/evidence.json
+          if [ ! -f "$report" ]; then
+            echo "SIMULATION: $report is already absent; the gate refuses it as missing"
+            exit 0
+          fi
+          jq '(.scenarios[] | select(.id == "f2-cluster-lifecycle") | .status) = "fail"' "$report" >"$report.tmp"
+          mv "$report.tmp" "$report"
+          echo "SIMULATION: f2-cluster-lifecycle rewritten to status 'fail' in $report"
+      - name: Evaluate release qualification
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          LANE_RESULTS_JSON: ${{ needs.qualification.outputs.results }}
+          DRY_RUN: ${{ inputs.publish-dry-run && 'true' || 'false' }}
+        run: |
+          python3 scripts/qualification-gate.py release \
+            --candidate-sha "$GITHUB_SHA" \
+            --ref "$GITHUB_REF" \
+            --dry-run "$DRY_RUN" \
+            --evidence-dir .tmp/release/evidence \
+            --cli-dir .tmp/release/cli \
+            --manifest test/contracts/scenarios.json
+
+  # A `publish-dry-run` dispatch runs this job's verification steps (the
+  # native CLI smoke markers and checksums) and skips every step that logs in,
+  # pushes or creates a release; it also binds no deployment environment.
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run
     needs:
       - ci-ok
+      - release-qualification
       - lint
       - unit-test
       - unit-test-arm64
@@ -2214,13 +2080,17 @@ jobs:
       - helm-pod-replacement-test
       - podman-integration-test
     runs-on: ubuntu-24.04
-    environment: Docker
+    # A dry run evaluates to '' (no environment, so no deployment record and
+    # none of its secrets). The operand order matters: `cond && '' || x` would
+    # always yield x, because '' is falsy.
+    environment: ${{ !inputs.publish-dry-run && 'Docker' || '' }}
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
       - name: Verify chart appVersion matches the pushed tag
+        if: ${{ !inputs.publish-dry-run }}
         run: |
           grep -q "^appVersion: \"${GITHUB_REF_NAME}\"$" helm/caesium/Chart.yaml || {
             echo "helm/caesium/Chart.yaml appVersion does not equal the pushed tag ${GITHUB_REF_NAME}:"
@@ -2271,9 +2141,13 @@ jobs:
           done
           sha256sum caesium-linux-amd64 caesium-linux-arm64 > SHA256SUMS
           cat SHA256SUMS
+      # Everything below the verification steps writes outside this run; a
+      # publish dry run skips all of it.
       - name: Login to Docker Hub
+        if: ${{ !inputs.publish-dry-run }}
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
       - name: Push multi-arch manifest
+        if: ${{ !inputs.publish-dry-run }}
         run: |
           IMAGE_TAG=${{ env.IMAGE_TAG }}
           docker push caesiumcloud/caesium:${IMAGE_TAG}-amd64
@@ -2283,6 +2157,7 @@ jobs:
             caesiumcloud/caesium:${IMAGE_TAG}-arm64
           docker manifest push caesiumcloud/caesium:${IMAGE_TAG}
       - name: Push reagent multi-arch manifests
+        if: ${{ !inputs.publish-dry-run }}
         run: |
           IMAGE_TAG=${{ env.IMAGE_TAG }}
           for role in git-source tf-discover tf-warm tf-runner; do
@@ -2294,6 +2169,7 @@ jobs:
             docker manifest push caesiumcloud/$role:${IMAGE_TAG}
           done
       - name: Create GitHub Release
+        if: ${{ !inputs.publish-dry-run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2356,3 +2232,12 @@ jobs:
               --notes-file /tmp/release-notes.md \
               "${assets[@]}"
           fi
+      - name: Publish dry run (nothing pushed)
+        if: inputs.publish-dry-run
+        run: |
+          {
+            echo "### Publish dry run"
+            echo ""
+            echo "release-qualification passed and the CLI smoke markers and checksums above verified on \`${GITHUB_SHA}\`."
+            echo "Skipped (dry run): the chart/tag check, Docker Hub login, the caesium and reagent manifest pushes and the GitHub release."
+          } | tee -a "$GITHUB_STEP_SUMMARY"

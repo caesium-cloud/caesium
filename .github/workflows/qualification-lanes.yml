@@ -1,0 +1,475 @@
+name: Qualification lanes
+
+# distributed-testing G6/G4: the system-suite lanes that do not fit the
+# 15-minute merge budget (W8 decision record), defined ONCE and called from:
+#
+#   - .github/workflows/testing-qualification.yml -- the nightly schedule and
+#     its manual dispatch (every lane, retained evidence, one triage summary);
+#   - .github/workflows/ci.yml `qualification` -- (a) a `nightly=` dispatch of
+#     CI (the G6 interface) and (b) the release chain: on a `v*` tag push (or a
+#     `publish-dry-run` dispatch) it runs the release-required lanes on the
+#     tagged commit and `release-qualification` gates `publish` on them.
+#
+# Nothing here is merge evidence: `ci-ok` never depends on these jobs, and a
+# nightly result is broader evidence, never proof for an individual PR. Each
+# lane builds its own images from the calling run's commit (`github.sha`),
+# validates its own registered manifest rows and uploads `<lane>-evidence`
+# (the report) plus `<lane>-artifacts`. `results` hands every lane's job
+# result back to the caller as one JSON output.
+#
+# Lane classes (scripts/qualification-gate.py `LANES` is the registry and
+# scripts/test_ci.py pins this file to it):
+#   release-required  lifecycle-cluster, console-recovery, core-robustness-nightly
+#   nightly-required  fuzz-campaign (C2 targets at the long budget)
+#   advisory          performance-gate (E4: hosted fleet uncalibrated),
+#                     soak (F3: known-failing on #598-#603)
+# An advisory lane's job is green when it RECORDED a verdict; it fails only
+# when no verdict could be recorded (a harness error).
+#
+# No workflow-level concurrency: a called workflow's group would be evaluated
+# in the caller's context and could deadlock against it.
+on:
+  workflow_call:
+    inputs:
+      lanes:
+        description: >-
+          Comma-separated lanes: cluster-lifecycle, console-recovery,
+          core-robustness, fuzz-campaign, performance, soak, or all.
+        type: string
+        required: true
+      retention-days:
+        description: Days to keep every lane's evidence and artifacts.
+        type: number
+        default: 30
+      performance-mode:
+        type: string
+        default: advisory
+      performance-base:
+        type: string
+        default: ''
+      performance-runs:
+        type: string
+        default: '[1]'
+      fuzz-seconds:
+        description: Per-target -fuzztime for the long fuzz campaign (the PR lane uses 10s).
+        type: string
+        default: 5m
+      soak-profile:
+        description: F3 soak workload profile (short | nightly).
+        type: string
+        default: short
+      soak-seed:
+        description: F3 soak seed; empty generates one and records it in soak.json.
+        type: string
+        default: ''
+      soak-duration:
+        description: F3 soak schedule budget (Go duration); empty uses the profile's default.
+        type: string
+        default: ''
+    outputs:
+      results:
+        description: JSON object of every lane job's result (the `needs` of `results`).
+        value: ${{ jobs.results.outputs.needs }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Fails closed on a lane name nothing would run, instead of a silently empty
+  # (and therefore green) qualification.
+  select:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate the lane selection
+        env:
+          LANES: ${{ inputs.lanes }}
+        run: python3 scripts/qualification-gate.py lanes --validate "$LANES"
+
+  # F2 persistent three-voter upgrade/replacement/recovery qualification.
+  lifecycle-cluster:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',cluster-lifecycle,') || contains(format(',{0},', inputs.lanes), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      # Cluster mode verifies single-platform OCI image archives with
+      # `docker image inspect --platform` (Docker >= 28.1; the hosted image
+      # ships 28.0.4) and reads each archive's platform descriptor, which only
+      # the containerd image store writes. Upgrade from Docker's own apt
+      # repository when older, and switch the store, before any image exists.
+      - name: Docker engine with the containerd image store
+        run: |
+          set -euo pipefail
+          need=28.1
+          have="$(docker version --format '{{.Server.Version}}')"
+          echo "docker server $have"
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            sudo install -m 0755 -d /etc/apt/keyrings
+            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+              | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+          fi
+          conf=/etc/docker/daemon.json
+          if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
+          printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+          sudo systemctl restart docker
+          docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
+          docker info --format '{{json .DriverStatus}}'
+      - name: Cluster lifecycle qualification
+        run: just lifecycle-cluster
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-cluster-evidence
+          path: .tmp/lane-evidence/lifecycle-cluster/*.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-cluster-artifacts
+          path: |
+            .tmp/lane-evidence/lifecycle-cluster/
+            !.tmp/lane-evidence/lifecycle-cluster/**/*.tar
+            !.tmp/lane-evidence/lifecycle-cluster/**/kubeconfig*
+            !.tmp/lane-evidence/lifecycle-cluster/**/lifecycle.test
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # B3 fenced core suite with the testfault-instrumented server (gate
+  # nightly-core requires every b3 row, the durable-event crash included).
+  # Demoted from the merge budget (W8 decision record order): the measured
+  # PR lane ended 16m30s after `changes` started, past the 15-minute path.
+  core-robustness-nightly:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',core-robustness,') || contains(format(',{0},', inputs.lanes), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      - name: Build the release, runner and instrumented images
+        run: just tag=${{ github.sha }} robustness-instrumented
+      - name: Fenced core suite with the instrumented server
+        run: |
+          CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${{ github.sha }}-testfault" \
+            just tag=${{ github.sha }} core-robustness nightly-core
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-robustness-nightly-evidence
+          path: .tmp/lane-evidence/core-robustness/*.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-robustness-nightly-artifacts
+          path: .tmp/lane-evidence/core-robustness/
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # D3 console journey across a real owner crash (TestOwnerCrash on a kept
+  # cluster, then the Playwright cluster-recovery project).
+  console-recovery:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',console-recovery,') || contains(format(',{0},', inputs.lanes), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for the console journey
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      - name: Console cluster-recovery journey
+        run: just tag=${{ github.sha }} console-recovery
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-recovery-evidence
+          path: .tmp/lane-evidence/console-recovery/*.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-recovery-artifacts
+          path: |
+            .tmp/lane-evidence/console-recovery/
+            ui/test-results/
+            ui/playwright-report/
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # E4 performance gate. `performance-runs` fans out parallel runs on
+  # separate hosted runners (an A/A calibration set is [1,2,3]). ADVISORY:
+  # the hosted fleet spans several CPU models, so no fixed baseline is
+  # calibrated for it (G6 note); the lane records its verdict, never gates.
+  performance-gate:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',performance,') || contains(format(',{0},', inputs.lanes), ',all,')
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(inputs.performance-runs || '[1]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      # A stable fleet identity: the hosted runner's hostname changes per job.
+      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-24.04|x86_64
+      CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # performance.sh checks out the base SHA in a temporary worktree.
+          fetch-depth: 0
+      - uses: taiki-e/install-action@just
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for the browser series
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      # scripts/performance.sh runs its builds as root inside the builder image
+      # on bind mounts of this checkout and of a temporary base worktree. On a
+      # Linux runner those belong to the runner uid, so git in the container
+      # refuses them ("dubious ownership", which fails Go's VCS stamping) and
+      # the host cannot clean the root-owned files the containers leave behind.
+      # Run the gate as root on a root-owned checkout -- the same single owner
+      # Docker Desktop presents on the calibrated Mac -- rather than change the
+      # script (not this stream's file; reported to its owner).
+      - name: Let the builder container own the checkout
+        run: |
+          set -euo pipefail
+          sudo chown -R 0:0 "$GITHUB_WORKSPACE"
+          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test -z "$(sudo git -C "$GITHUB_WORKSPACE" status --porcelain)"
+      - name: Performance gate
+        run: |
+          sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" \
+            just performance-gate ${{ inputs.performance-mode || 'advisory' }}
+          sudo chown -R "$(id -u):$(id -g)" .tmp/lane-evidence
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-gate-evidence-${{ matrix.run }}
+          path: .tmp/lane-evidence/performance-gate/*.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-gate-artifacts-${{ matrix.run }}
+          path: |
+            .tmp/lane-evidence/performance-gate/
+            !.tmp/lane-evidence/performance-gate/**/*.tar
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # C2 native fuzz targets at the long budget (G4): the same recipe, discovery
+  # and grading as the PR lane `generated-fuzz` (10 s per target), with
+  # `fuzz-seconds` per target. The explored corpus (committed seeds plus the
+  # build-cache entries each target found) is retained as an artifact. The Go
+  # build cache is only RESTORED from the PR lane's key, never saved, so a
+  # nightly-explored corpus never leaks into what a PR lane fuzzes from.
+  fuzz-campaign:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',fuzz-campaign,') || contains(format(',{0},', inputs.lanes), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Restore the Go fuzz build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .tmp/fuzz-gocache
+          key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
+          restore-keys: |
+            fuzz-gocache-v1-amd64-
+      - name: Native fuzz targets (long budget)
+        env:
+          CAESIUM_FUZZ_SECONDS: ${{ inputs.fuzz-seconds }}
+        run: CAESIUM_FUZZ_GOCACHE="$PWD/.tmp/fuzz-gocache" just tag=${{ github.sha }} generated-fuzz
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-campaign-evidence
+          path: .tmp/lane-evidence/generated-fuzz/*.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-campaign-artifacts
+          path: .tmp/lane-evidence/generated-fuzz/
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # F3 seeded single-host soak (four-node kind cluster owned by the run, three
+  # persistent members, seeded fault/workload plan). ADVISORY and
+  # KNOWN-FAILING: every qualification run so far failed on product findings
+  # #598-#603, so `just soak-tests <profile> advisory` records the verdict in
+  # soak.json (pass/fail/blocked, seed, actual fault schedule) and fails only
+  # when no verdict was recorded. Never merge- or publish-blocking.
+  soak:
+    needs: [select]
+    if: contains(format(',{0},', inputs.lanes), ',soak,') || contains(format(',{0},', inputs.lanes), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      # Four kind nodes on one runner: raise the inotify limits kubelet and
+      # containerd exhaust at the hosted defaults.
+      - name: Raise inotify limits for a four-node kind cluster
+        run: sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512
+      - name: Seeded single-host soak (advisory)
+        env:
+          CAESIUM_SOAK_SEED: ${{ inputs.soak-seed }}
+          CAESIUM_SOAK_DURATION: ${{ inputs.soak-duration }}
+        run: just soak-tests ${{ inputs.soak-profile || 'short' }} advisory
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-evidence
+          path: |
+            .tmp/lane-evidence/soak/soak.json
+            .tmp/lane-evidence/soak/fault-schedule.jsonl
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-artifacts
+          path: |
+            .tmp/lane-evidence/soak/
+            !.tmp/lane-evidence/soak/kubeconfig*
+            !.tmp/lane-evidence/soak/internal-token.txt
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}
+
+  # Every lane's job result, handed to the caller as the `results` output so
+  # the nightly summary and the release gate read per-lane verdicts without
+  # any Actions API access.
+  results:
+    if: always()
+    needs:
+      - select
+      - lifecycle-cluster
+      - core-robustness-nightly
+      - console-recovery
+      - performance-gate
+      - fuzz-campaign
+      - soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      needs: ${{ steps.collect.outputs.needs }}
+    steps:
+      - id: collect
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          compact="$(jq -c 'with_entries(.value = {result: .value.result})' <<<"$NEEDS_JSON")"
+          echo "$compact"
+          echo "needs=$compact" >>"$GITHUB_OUTPUT"

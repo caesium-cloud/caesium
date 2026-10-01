@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PERF = ROOT / "test/performance"
 COMPARE = runpy.run_path(str(ROOT / "scripts/compare-performance.py"))
 LOCAL_BUDGETS = PERF / "budgets.json"
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+# The performance lane is defined once in the reusable qualification workflow
+# (distributed-testing G4), which CI and the nightly schedule both call.
+WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/qualification-lanes.yml").read_text())
 JOB = WORKFLOW["jobs"]["performance-gate"]
 
 
