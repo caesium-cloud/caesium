@@ -2342,12 +2342,20 @@ PY
     LC_SNAP_TRUNCATED=0
     LC_SNAP_REASON=""
     LC_SNAP_EVIDENCE=""
-    # 15s between rounds, 40 rounds: finite inside the 12m write-phase timeout.
+    # Memory watcher cadence (#604, see scripts/lifecycle-snapshot-phase.sh):
+    # 2s rounds until both survivors have two in-write samples for the batch,
+    # then 15s; at most 40 rounds per batch, finite inside the 12m write-phase
+    # timeout. A ~5s update batch and a ~25s one both get in-write samples.
     LC_MEM_ACTIVE=0
     LC_MEM_BATCHES=""
     LC_MEM_APPLY_BATCH=""
     LC_MEM_SEQ=0
-    LC_MEM_INTERVAL=15
+    LC_MEM_INTERVAL="${LC_MEM_INTERVAL:-15}"
+    LC_MEM_FAST_INTERVAL="${LC_MEM_FAST_INTERVAL:-2}"
+    LC_MEM_IN_WRITE_TARGET="${LC_MEM_IN_WRITE_TARGET:-2}"
+    [[ "$LC_MEM_INTERVAL" =~ ^[1-9][0-9]*$ && "$LC_MEM_FAST_INTERVAL" =~ ^[1-9][0-9]*$ \
+      && "$LC_MEM_IN_WRITE_TARGET" =~ ^[1-9][0-9]*$ ]] \
+      || cluster_die "LC_MEM_INTERVAL, LC_MEM_FAST_INTERVAL and LC_MEM_IN_WRITE_TARGET must be positive integers"
     LC_MEM_SAMPLE_CAP=40
     LC_PHASE_PID=""
     LC_PHASE_DONE=""

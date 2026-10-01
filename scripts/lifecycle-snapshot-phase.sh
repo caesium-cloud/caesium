@@ -1,5 +1,22 @@
 # Snapshot-write phase helpers for scripts/lifecycle-tests.sh.
 # Sourced, not executed. Tests source this file with lc_phase and lc_case stubs.
+#
+# Memory watcher cadence (#604). Each write batch runs in the background while
+# lc_memory_watch_phase samples both survivors. Round 0 is taken at once and
+# can land before the first catalog write, so the publisher never counts it;
+# a round from 1 on is an in-write sample. After the dqlite TCP_NODELAY fix a
+# 500-update batch takes about 5 s, shorter than one long-cadence wait, so the
+# watcher samples on the short cadence until every survivor has the target
+# number of in-write samples for the batch (asked of the publisher's own rule,
+# `lifecycle-memory-sample.py covered`), then on the long cadence. Once the
+# batch's done file exists no further member is sampled under an in-write
+# round; a batch that ends before its first in-write round stays a gap.
+# Knobs (environment, whole seconds; scripts/lifecycle-tests.sh sets them):
+#   LC_MEM_FAST_INTERVAL    short cadence until coverage (default 2)
+#   LC_MEM_IN_WRITE_TARGET  in-write samples per survivor per batch the short
+#                           cadence aims for (default 2; the publisher needs 1)
+#   LC_MEM_INTERVAL         long cadence once covered (default 15)
+#   LC_MEM_SAMPLE_CAP       rounds per batch, the hard bound (default 40)
 
 lc_stop_phase_group() {
   local pid="${1:-}"
@@ -40,23 +57,48 @@ lc_memory_sample_member() {
       --request-timeout=12s exec -i "$member" -c caesium -- sh -s || true
 }
 
+# An optional fourth argument names the batch's done file: once it exists the
+# remaining members are skipped, so a post-completion reading is never
+# recorded under an in-write round.
 lc_memory_sample_members() {
-  local reason="$1" batch="$2" round="$3" batch_tag member
+  local reason="$1" batch="$2" round="$3" until_file="${4:-}" batch_tag member
   printf -v batch_tag '%02d' "$batch"
   for member in caesium-0 caesium-1; do
+    [[ -n "$until_file" && -f "$until_file" ]] && break
     lc_memory_sample_member "$member" "$reason" "$batch" "$batch_tag" "$round" || true
   done
 }
 
+# True once both survivors hold LC_MEM_IN_WRITE_TARGET in-write samples for
+# the batch, by the same rule the publisher's finish applies.
+lc_memory_in_write_covered() {
+  python3 "$ROOT/scripts/lifecycle-memory-sample.py" covered \
+    --lifecycle-id "$LC_ID" \
+    --jsonl "$LC_ART/cluster-logs/snapshot-memory-samples.jsonl" \
+    --batch "$1" --min "${LC_MEM_IN_WRITE_TARGET:-2}" >/dev/null 2>&1
+}
+
 # Round 0 can land before catalog writes. Later rounds are the in-write samples.
 lc_memory_watch_phase() {
-  local batch="$1" samples=0 i
-  while [[ "$samples" -lt "$LC_MEM_SAMPLE_CAP" && ! -f "$LC_PHASE_DONE" ]]; do
-    lc_memory_sample_members cadence "$batch" "$samples" || true
-    samples=$((samples + 1))
+  local batch="$1" round=0 covered=0 interval i
+  while [[ "$round" -lt "${LC_MEM_SAMPLE_CAP:-40}" && ! -f "$LC_PHASE_DONE" ]]; do
+    if [[ "$round" == 0 ]]; then
+      lc_memory_sample_members cadence "$batch" 0 || true
+    else
+      lc_memory_sample_members cadence "$batch" "$round" "$LC_PHASE_DONE" || true
+    fi
+    round=$((round + 1))
     [[ -f "$LC_PHASE_DONE" ]] && break
+    if [[ "$covered" == 0 ]] && lc_memory_in_write_covered "$batch"; then
+      covered=1
+    fi
+    if [[ "$covered" == 1 ]]; then
+      interval="${LC_MEM_INTERVAL:-15}"
+    else
+      interval="${LC_MEM_FAST_INTERVAL:-2}"
+    fi
     i=0
-    while [[ "$i" -lt "$LC_MEM_INTERVAL" && ! -f "$LC_PHASE_DONE" ]]; do
+    while [[ "$i" -lt "$interval" && ! -f "$LC_PHASE_DONE" ]]; do
       sleep 1
       i=$((i + 1))
     done
