@@ -1554,9 +1554,62 @@ func assertRunUnchanged(t *testing.T, ctx context.Context, c *client, want runFi
 	gotTasks := got.fixture().Tasks
 	require.Lenf(t, gotTasks, len(want.Tasks), "the %s run %s changed its task-run count across the upgrade", label, want.ID)
 	for i := range want.Tasks {
-		require.Equalf(t, want.Tasks[i], gotTasks[i],
-			"the %s run %s task-run %s changed across the upgrade", label, want.ID, want.Tasks[i].ID)
+		problems := taskRunReadbackProblems(want.Tasks[i], gotTasks[i], want.Params)
+		require.Emptyf(t, problems, "the %s run %s task-run %s changed across the upgrade:\n  want %+v\n  got  %+v",
+			label, want.ID, want.Tasks[i].ID, want.Tasks[i], gotTasks[i])
+		if want.Tasks[i].ExitCode == nil && gotTasks[i].ExitCode != nil {
+			t.Logf("RECORDED (not a failure): the %s run %s task-run %s (%s) now projects exit_code %d, which the previous release persisted but never projected",
+				label, want.ID, want.Tasks[i].ID, want.Tasks[i].Status, *gotTasks[i].ExitCode)
+		}
 	}
+}
+
+// taskRunReadbackProblems compares one pre-upgrade task-run identity with its
+// post-upgrade read. Every field the previous release projected must read back
+// unchanged. exit_code is the one additive field: v0.1.0 persisted the column
+// but its run API never projected it, and resource-right-sizing W1-α (#449)
+// began projecting it. So a code the previous release exposed must neither
+// change nor disappear, while a code it did not expose may now appear, but
+// only as the value the recorded outcome implies: 0 for a succeeded task; for
+// a failed task the run's EXIT parameter (the only fixture step that fails
+// exits with it), or any nonzero code when the run has none; and no code at
+// all for a task that never ran to an exit (skipped).
+func taskRunReadbackProblems(want, got taskRunFixture, params map[string]string) []string {
+	var problems []string
+	wantRest, gotRest := want, got
+	wantRest.ExitCode, gotRest.ExitCode = nil, nil
+	if wantRest != gotRest {
+		problems = append(problems, fmt.Sprintf("recorded fields changed: want %+v, got %+v", wantRest, gotRest))
+	}
+	switch {
+	case want.ExitCode != nil:
+		if got.ExitCode == nil {
+			problems = append(problems, fmt.Sprintf("exit_code %d that the previous release projected disappeared", *want.ExitCode))
+		} else if *got.ExitCode != *want.ExitCode {
+			problems = append(problems, fmt.Sprintf("exit_code changed from %d to %d", *want.ExitCode, *got.ExitCode))
+		}
+	case got.ExitCode == nil:
+		// Not projected before, not projected now.
+	default:
+		code := *got.ExitCode
+		switch want.Status {
+		case "succeeded":
+			if code != 0 {
+				problems = append(problems, fmt.Sprintf("a succeeded task newly projects nonzero exit_code %d", code))
+			}
+		case "failed":
+			if expected, err := strconv.Atoi(params["EXIT"]); err == nil {
+				if code != expected {
+					problems = append(problems, fmt.Sprintf("a failed task newly projects exit_code %d, not the run's EXIT=%d", code, expected))
+				}
+			} else if code == 0 {
+				problems = append(problems, "a failed task newly projects exit_code 0")
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("a %s task never ran to an exit, yet newly projects exit_code %d", want.Status, code))
+		}
+	}
+	return problems
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,11 +2176,27 @@ func TestLifecycleObservationValidation(t *testing.T) {
 		ok = false
 	}
 
+	readbacks := taskRunReadbackSelfCheck()
+	for _, tc := range readbacks {
+		if !t.Run("task-run readback: "+tc.name, func(t *testing.T) {
+			problems := taskRunReadbackProblems(tc.want, tc.got, tc.params)
+			if tc.wantWord == "" {
+				require.Emptyf(t, problems, "an unchanged task-run read must not be rejected: %v", problems)
+				return
+			}
+			require.NotEmpty(t, problems, "a changed task-run read must be rejected")
+			require.Containsf(t, strings.Join(problems, " | "), tc.wantWord,
+				"rejection reason does not name the defect: %v", problems)
+		}) {
+			ok = false
+		}
+	}
+
 	status := statusPass
 	if !ok {
 		status = statusFail
 	}
-	n := len(cases) + 3
+	n := len(cases) + 3 + len(readbacks)
 	writeCase(t, caseRecord{
 		Name:            "observation-validation-self-check",
 		Status:          status,
@@ -2135,8 +2204,49 @@ func TestLifecycleObservationValidation(t *testing.T) {
 		Detail: fmt.Sprintf("%d fixtures: a complete container observation is accepted; unknown status, sentinel exit code, "+
 			"a swallowed log capture, a missing completeness flag and a missing timestamp are each rejected; "+
 			"RUNNING+transport-only HTTP is blocked, RUNNING+HTTP 404 is a recorded outcome, "+
-			"and an EXITED container is a recorded outcome even when the HTTP probe failed", n),
+			"and an EXITED container is a recorded outcome even when the HTTP probe failed; "+
+			"a task-run read is rejected when a projected field changes or an exit_code disappears, changes, "+
+			"or newly appears inconsistent with the recorded outcome", n),
 	})
+}
+
+type taskRunReadbackCase struct {
+	name     string
+	want     taskRunFixture
+	got      taskRunFixture
+	params   map[string]string
+	wantWord string
+}
+
+// taskRunReadbackSelfCheck pins assertRunUnchanged's comparison rule against
+// fixtures, so a relaxed rule fails the self-check before any server starts.
+func taskRunReadbackSelfCheck() []taskRunReadbackCase {
+	code := func(v int) *int { return &v }
+	with := func(f taskRunFixture, c *int) taskRunFixture { f.ExitCode = c; return f }
+	ok := taskRunFixture{ID: "t1", TaskID: "t1", Status: "succeeded", Attempt: 1,
+		StartedAt: "2026-10-01T00:00:00Z", CompletedAt: "2026-10-01T00:00:01Z"}
+	failed := ok
+	failed.Status, failed.Error = "failed", "unknown"
+	skipped := ok
+	skipped.Status, skipped.Error = "skipped", `trigger rule "all_success" not satisfied`
+	skipped.StartedAt, skipped.CompletedAt = "", ""
+	statusChanged := ok
+	statusChanged.Status = "failed"
+	exit7 := map[string]string{"EXIT": "7"}
+	return []taskRunReadbackCase{
+		{name: "identical without exit_code", want: ok, got: ok},
+		{name: "succeeded newly projects 0", want: ok, got: with(ok, code(0)), params: map[string]string{"EXIT": "0"}},
+		{name: "failed newly projects the run's EXIT", want: failed, got: with(failed, code(7)), params: exit7},
+		{name: "failed newly projects nonzero without EXIT", want: failed, got: with(failed, code(2))},
+		{name: "projected exit_code unchanged", want: with(failed, code(7)), got: with(failed, code(7)), params: exit7},
+		{name: "recorded field changed", want: ok, got: statusChanged, wantWord: "recorded fields changed"},
+		{name: "succeeded newly projects nonzero", want: ok, got: with(ok, code(1)), wantWord: "nonzero exit_code 1"},
+		{name: "failed newly projects another code", want: failed, got: with(failed, code(1)), params: exit7, wantWord: "not the run's EXIT=7"},
+		{name: "failed newly projects 0", want: failed, got: with(failed, code(0)), wantWord: "exit_code 0"},
+		{name: "skipped newly projects a code", want: skipped, got: with(skipped, code(0)), wantWord: "never ran to an exit"},
+		{name: "projected exit_code disappeared", want: with(ok, code(0)), got: ok, wantWord: "disappeared"},
+		{name: "projected exit_code changed", want: with(failed, code(7)), got: with(failed, code(1)), params: exit7, wantWord: "changed from 7 to 1"},
+	}
 }
 
 func TestLifecycleTransitionOutcomes(t *testing.T) {

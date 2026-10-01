@@ -2,22 +2,166 @@
   "schema_version": 1,
   "kind": "package-diff-ratchet",
   "source": "integration",
-  "measured_candidate_sha": "095ce649346800b28cb465e7544df45ca2bdc897",
+  "measured_candidate_sha": "f1092a59f5e33defbdd5004647c9bbb1df8de0d7",
   "baseline_refresh": {
-    "previous_measured_candidate_sha": "00ba7d99077210030a7cd1dce91ee4245fb337e8",
-    "reason": "Remeasured on master 095ce649 after already-merged #595 (stale-member removal) added pkg/dqlite/remove.go and the api/middleware audit mapping for DELETE /v1/system/nodes/:id, which increased both statement denominators; no covered statement was lost. On 095ce649 the unchanged journey covers api/middleware 34/445 (7.6%) and pkg/dqlite 351/1039 (33.8%). The same refresh adds `caesium system nodes list` and a refused not_a_member `caesium system nodes remove` to scripts/integration-coverage.sh; the floors below were measured with that journey on 095ce649's unchanged Go source, which brings pkg/dqlite to 390/1039 (37.5%). Covered-statement floors are retained or raised; the two lower percentage floors reflect the #595 additions, not lost observed paths. Browser profiles and first-attempt journeys are complete.",
+    "previous_measured_candidate_sha": "095ce649346800b28cb465e7544df45ca2bdc897",
+    "reason": "Remeasured on master f1092a59 after already-merged #449 (resource-right-sizing W1-\u03b1) added the default-off CAESIUM_RESOURCE_STATS_ENABLED paths (runtime resource samplers, OOM evidence, task-run and partition projections), which grew the statement denominators of the packages it touched (internal/atom/docker 385 -> 461, internal/run 7663 -> 7717, internal/job 2302 -> 2322, internal/worker 1757 -> 1776, internal/incident 1821 -> 1827, pkg/env 130 -> 132, internal/atom 0 -> 62) without taking any package below its floor; the unchanged journey reached none of the new paths, so the max-zero diff ratchet refused 18 changed files on master (run 36849067588). The same refresh enables CAESIUM_RESOURCE_STATS_ENABLED=true (100ms sampling) on the journey server, gives it the engine socket through --group-add while keeping UID 10001, and runs the applied fixture once with `caesium run start`, reading the run back over HTTP until it is terminal and through `caesium run partitions --json`; both reads must show a succeeded exit 0 with a sampled, nonzero peak-memory observation. That covers 7 of #449's 18 changed files; the 11 left are the Podman and Kubernetes engines, the remediation-gated incident pipeline and distributed-mode worker/owner code, which this single-node Docker local-mode journey cannot reach. The floors below were measured with that journey on f1092a59's unchanged Go source (two identical local lane runs; integration coverage 8.0 -> 12.7 %). No covered statement was lost and no percentage floor was lowered: 10 existing package floors are raised and 16 packages the journey now covers gain floors. Browser profiles and first-attempt journeys are complete.",
     "package_statement_counts": {
-      "github.com/caesium-cloud/caesium/api/middleware": {
-        "previous_covered": 34,
-        "previous_total": 442,
-        "covered": 34,
-        "total": 445
+      "github.com/caesium-cloud/caesium/api/rest/controller/job/run": {
+        "previous_covered": 0,
+        "previous_total": 624,
+        "covered": 122,
+        "total": 624
       },
-      "github.com/caesium-cloud/caesium/pkg/dqlite": {
-        "previous_covered": 341,
-        "previous_total": 863,
-        "covered": 390,
-        "total": 1039
+      "github.com/caesium-cloud/caesium/api/rest/manualparams": {
+        "previous_covered": 0,
+        "previous_total": 4,
+        "covered": 2,
+        "total": 4
+      },
+      "github.com/caesium-cloud/caesium/api/rest/service/atom": {
+        "previous_covered": 0,
+        "previous_total": 45,
+        "covered": 5,
+        "total": 45
+      },
+      "github.com/caesium-cloud/caesium/api/rest/service/job": {
+        "previous_covered": 56,
+        "previous_total": 220,
+        "covered": 57,
+        "total": 220
+      },
+      "github.com/caesium-cloud/caesium/api/rest/service/run": {
+        "previous_covered": 9,
+        "previous_total": 28,
+        "covered": 14,
+        "total": 28
+      },
+      "github.com/caesium-cloud/caesium/api/rest/service/task": {
+        "previous_covered": 0,
+        "previous_total": 39,
+        "covered": 13,
+        "total": 39
+      },
+      "github.com/caesium-cloud/caesium/api/rest/service/taskedge": {
+        "previous_covered": 0,
+        "previous_total": 45,
+        "covered": 16,
+        "total": 45
+      },
+      "github.com/caesium-cloud/caesium/cmd/run": {
+        "previous_covered": 83,
+        "previous_total": 784,
+        "covered": 200,
+        "total": 784
+      },
+      "github.com/caesium-cloud/caesium/internal/atom": {
+        "previous_covered": 0,
+        "previous_total": 0,
+        "covered": 45,
+        "total": 62
+      },
+      "github.com/caesium-cloud/caesium/internal/atom/docker": {
+        "previous_covered": 0,
+        "previous_total": 385,
+        "covered": 149,
+        "total": 461
+      },
+      "github.com/caesium-cloud/caesium/internal/cache": {
+        "previous_covered": 0,
+        "previous_total": 284,
+        "covered": 2,
+        "total": 284
+      },
+      "github.com/caesium-cloud/caesium/internal/callback": {
+        "previous_covered": 9,
+        "previous_total": 258,
+        "covered": 41,
+        "total": 258
+      },
+      "github.com/caesium-cloud/caesium/internal/event": {
+        "previous_covered": 70,
+        "previous_total": 326,
+        "covered": 153,
+        "total": 326
+      },
+      "github.com/caesium-cloud/caesium/internal/imagecheck": {
+        "previous_covered": 33,
+        "previous_total": 564,
+        "covered": 39,
+        "total": 564
+      },
+      "github.com/caesium-cloud/caesium/internal/incident": {
+        "previous_covered": 6,
+        "previous_total": 1821,
+        "covered": 10,
+        "total": 1827
+      },
+      "github.com/caesium-cloud/caesium/internal/job": {
+        "previous_covered": 18,
+        "previous_total": 2302,
+        "covered": 636,
+        "total": 2322
+      },
+      "github.com/caesium-cloud/caesium/internal/jobdef/runtime": {
+        "previous_covered": 8,
+        "previous_total": 132,
+        "covered": 16,
+        "total": 132
+      },
+      "github.com/caesium-cloud/caesium/internal/models": {
+        "previous_covered": 14,
+        "previous_total": 75,
+        "covered": 28,
+        "total": 75
+      },
+      "github.com/caesium-cloud/caesium/internal/notification": {
+        "previous_covered": 29,
+        "previous_total": 753,
+        "covered": 56,
+        "total": 753
+      },
+      "github.com/caesium-cloud/caesium/internal/ratelimit": {
+        "previous_covered": 0,
+        "previous_total": 124,
+        "covered": 13,
+        "total": 124
+      },
+      "github.com/caesium-cloud/caesium/internal/run": {
+        "previous_covered": 12,
+        "previous_total": 7663,
+        "covered": 988,
+        "total": 7717
+      },
+      "github.com/caesium-cloud/caesium/internal/trigger/event": {
+        "previous_covered": 44,
+        "previous_total": 577,
+        "covered": 157,
+        "total": 577
+      },
+      "github.com/caesium-cloud/caesium/internal/worker": {
+        "previous_covered": 1,
+        "previous_total": 1757,
+        "covered": 16,
+        "total": 1776
+      },
+      "github.com/caesium-cloud/caesium/pkg/env": {
+        "previous_covered": 57,
+        "previous_total": 130,
+        "covered": 59,
+        "total": 132
+      },
+      "github.com/caesium-cloud/caesium/pkg/jobdef": {
+        "previous_covered": 334,
+        "previous_total": 1409,
+        "covered": 351,
+        "total": 1409
+      },
+      "github.com/caesium-cloud/caesium/pkg/task": {
+        "previous_covered": 0,
+        "previous_total": 659,
+        "covered": 52,
+        "total": 659
       }
     }
   },
@@ -50,6 +194,10 @@
       "min_percent": 17.5,
       "min_statements_covered": 43
     },
+    "github.com/caesium-cloud/caesium/api/rest/controller/job/run": {
+      "min_percent": 19.6,
+      "min_statements_covered": 122
+    },
     "github.com/caesium-cloud/caesium/api/rest/controller/jobdef": {
       "min_percent": 16.8,
       "min_statements_covered": 32
@@ -62,17 +210,33 @@
       "min_percent": 0.5,
       "min_statements_covered": 1
     },
+    "github.com/caesium-cloud/caesium/api/rest/manualparams": {
+      "min_percent": 50.0,
+      "min_statements_covered": 2
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/atom": {
+      "min_percent": 11.1,
+      "min_statements_covered": 5
+    },
     "github.com/caesium-cloud/caesium/api/rest/service/contract": {
       "min_percent": 2.2,
       "min_statements_covered": 2
     },
     "github.com/caesium-cloud/caesium/api/rest/service/job": {
-      "min_percent": 25.5,
-      "min_statements_covered": 56
+      "min_percent": 25.9,
+      "min_statements_covered": 57
     },
     "github.com/caesium-cloud/caesium/api/rest/service/run": {
-      "min_percent": 32.1,
-      "min_statements_covered": 9
+      "min_percent": 50.0,
+      "min_statements_covered": 14
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/task": {
+      "min_percent": 33.3,
+      "min_statements_covered": 13
+    },
+    "github.com/caesium-cloud/caesium/api/rest/service/taskedge": {
+      "min_percent": 35.6,
+      "min_statements_covered": 16
     },
     "github.com/caesium-cloud/caesium/api/rest/service/trigger": {
       "min_percent": 11.1,
@@ -139,8 +303,8 @@
       "min_statements_covered": 15
     },
     "github.com/caesium-cloud/caesium/cmd/run": {
-      "min_percent": 10.6,
-      "min_statements_covered": 83
+      "min_percent": 25.5,
+      "min_statements_covered": 200
     },
     "github.com/caesium-cloud/caesium/cmd/start": {
       "min_percent": 29.2,
@@ -162,21 +326,33 @@
       "min_percent": 3.2,
       "min_statements_covered": 6
     },
+    "github.com/caesium-cloud/caesium/internal/atom": {
+      "min_percent": 72.6,
+      "min_statements_covered": 45
+    },
+    "github.com/caesium-cloud/caesium/internal/atom/docker": {
+      "min_percent": 32.3,
+      "min_statements_covered": 149
+    },
     "github.com/caesium-cloud/caesium/internal/auth": {
       "min_percent": 1.5,
       "min_statements_covered": 10
     },
+    "github.com/caesium-cloud/caesium/internal/cache": {
+      "min_percent": 0.7,
+      "min_statements_covered": 2
+    },
     "github.com/caesium-cloud/caesium/internal/callback": {
-      "min_percent": 3.5,
-      "min_statements_covered": 9
+      "min_percent": 15.9,
+      "min_statements_covered": 41
     },
     "github.com/caesium-cloud/caesium/internal/cluster": {
       "min_percent": 56.2,
       "min_statements_covered": 126
     },
     "github.com/caesium-cloud/caesium/internal/event": {
-      "min_percent": 21.5,
-      "min_statements_covered": 70
+      "min_percent": 46.9,
+      "min_statements_covered": 153
     },
     "github.com/caesium-cloud/caesium/internal/executor": {
       "min_percent": 18.2,
@@ -191,24 +367,24 @@
       "min_statements_covered": 4
     },
     "github.com/caesium-cloud/caesium/internal/imagecheck": {
-      "min_percent": 5.9,
-      "min_statements_covered": 33
+      "min_percent": 6.9,
+      "min_statements_covered": 39
     },
     "github.com/caesium-cloud/caesium/internal/incident": {
-      "min_percent": 0.3,
-      "min_statements_covered": 6
+      "min_percent": 0.5,
+      "min_statements_covered": 10
     },
     "github.com/caesium-cloud/caesium/internal/job": {
-      "min_percent": 0.8,
-      "min_statements_covered": 18
+      "min_percent": 27.4,
+      "min_statements_covered": 636
     },
     "github.com/caesium-cloud/caesium/internal/jobdef": {
       "min_percent": 44.5,
       "min_statements_covered": 691
     },
     "github.com/caesium-cloud/caesium/internal/jobdef/runtime": {
-      "min_percent": 6.1,
-      "min_statements_covered": 8
+      "min_percent": 12.1,
+      "min_statements_covered": 16
     },
     "github.com/caesium-cloud/caesium/internal/jobdef/secret": {
       "min_percent": 4.0,
@@ -223,28 +399,32 @@
       "min_statements_covered": 2
     },
     "github.com/caesium-cloud/caesium/internal/models": {
-      "min_percent": 18.7,
-      "min_statements_covered": 14
+      "min_percent": 37.3,
+      "min_statements_covered": 28
     },
     "github.com/caesium-cloud/caesium/internal/notification": {
-      "min_percent": 3.9,
-      "min_statements_covered": 29
+      "min_percent": 7.4,
+      "min_statements_covered": 56
+    },
+    "github.com/caesium-cloud/caesium/internal/ratelimit": {
+      "min_percent": 10.5,
+      "min_statements_covered": 13
     },
     "github.com/caesium-cloud/caesium/internal/run": {
-      "min_percent": 0.2,
-      "min_statements_covered": 12
+      "min_percent": 12.8,
+      "min_statements_covered": 988
     },
     "github.com/caesium-cloud/caesium/internal/trigger/event": {
-      "min_percent": 7.6,
-      "min_statements_covered": 44
+      "min_percent": 27.2,
+      "min_statements_covered": 157
     },
     "github.com/caesium-cloud/caesium/internal/trigger/http": {
       "min_percent": 0.4,
       "min_statements_covered": 1
     },
     "github.com/caesium-cloud/caesium/internal/worker": {
-      "min_percent": 0.1,
-      "min_statements_covered": 1
+      "min_percent": 0.9,
+      "min_statements_covered": 16
     },
     "github.com/caesium-cloud/caesium/pkg/db": {
       "min_percent": 45.4,
@@ -259,12 +439,12 @@
       "min_statements_covered": 390
     },
     "github.com/caesium-cloud/caesium/pkg/env": {
-      "min_percent": 43.0,
-      "min_statements_covered": 52
+      "min_percent": 44.7,
+      "min_statements_covered": 59
     },
     "github.com/caesium-cloud/caesium/pkg/jobdef": {
-      "min_percent": 23.7,
-      "min_statements_covered": 334
+      "min_percent": 24.9,
+      "min_statements_covered": 351
     },
     "github.com/caesium-cloud/caesium/pkg/jobdef/schemacompat": {
       "min_percent": 1.3,
@@ -289,6 +469,10 @@
     "github.com/caesium-cloud/caesium/pkg/ptr": {
       "min_percent": 12.5,
       "min_statements_covered": 1
+    },
+    "github.com/caesium-cloud/caesium/pkg/task": {
+      "min_percent": 7.9,
+      "min_statements_covered": 52
     }
   },
   "diff": {

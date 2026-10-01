@@ -2200,6 +2200,7 @@ jobs:
             caesiumcloud/caesium:${IMAGE_TAG}-arm64
           docker manifest push caesiumcloud/caesium:${IMAGE_TAG}
       - name: Push stress fixture multi-arch manifest
+        if: ${{ !inputs.publish-dry-run }}
         run: |
           IMAGE_TAG=${{ env.IMAGE_TAG }}
           docker push caesiumcloud/resource-stress:${IMAGE_TAG}-amd64
@@ -2291,5 +2292,5 @@ jobs:
             echo "### Publish dry run"
             echo ""
             echo "release-qualification passed and the CLI smoke markers and checksums above verified on \`${GITHUB_SHA}\`."
-            echo "Skipped (dry run): the chart/tag check, Docker Hub login, the caesium and reagent manifest pushes and the GitHub release."
+            echo "Skipped (dry run): the chart/tag check, Docker Hub login, the caesium, stress fixture and reagent manifest pushes and the GitHub release."
           } | tee -a "$GITHUB_STEP_SUMMARY"

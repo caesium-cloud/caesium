@@ -1458,7 +1458,15 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
         self.assertEqual(JOBS["publish"]["environment"], "${{ !inputs.publish-dry-run && 'Docker' || '' }}")
         writers = [step for step in JOBS["publish"]["steps"]
                    if re.search(r"docker (login|push|manifest)|gh release|secrets\.", step.get("run", ""))]
-        self.assertEqual(len(writers), 4, [step.get("name") for step in writers])
+        # Pin the writer set by name: a new writer must be added here
+        # deliberately (and inherit the dry-run guard), never slip in.
+        self.assertEqual([step.get("name") for step in writers], [
+            "Login to Docker Hub",
+            "Push multi-arch manifest",
+            "Push stress fixture multi-arch manifest",
+            "Push reagent multi-arch manifests",
+            "Create GitHub Release",
+        ])
         for step in writers + [s for s in JOBS["publish"]["steps"] if "GITHUB_REF_NAME" in s.get("run", "")]:
             self.assertEqual(step.get("if"), "${{ !inputs.publish-dry-run }}", step.get("name"))
 
