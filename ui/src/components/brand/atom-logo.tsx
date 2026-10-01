@@ -28,7 +28,7 @@ export function AtomLogo({ size = 40, animated = true, className, forceReducedMo
       const members = drawn.filter((_, i) => i % 3 === orbit);
       return <g key={angle} transform={`rotate(${angle} 256 256)`}>
         <g className={motionOff ? undefined : "atom-orbit"} style={motionOff ? undefined : {
-          transformOrigin: "256px 256px", animation: `cs-spin ${period}s linear infinite${orbit === 1 ? " reverse" : ""}`, animationDelay: `var(--cs-phase-${period}, 0ms)`,
+          transformOrigin: "256px 256px", animation: `cs-spin ${period}s linear infinite${orbit === 1 ? " reverse" : ""}`,
         }}>
           <ellipse cx="256" cy="256" rx="210" ry="70" fill="none" stroke={orbitColor} strokeWidth="3.5" strokeDasharray={quorum === "lost" ? "14 12" : undefined} />
           {members.map((voter, i) => {
@@ -47,6 +47,6 @@ export function AtomLogo({ size = 40, animated = true, className, forceReducedMo
     })}
     <circle cx="256" cy="256" r="20" fill={quorum === "lost" ? "hsl(var(--text-4))" : "hsl(var(--cyan))"}
       className={!motionOff && quorum === "ok" ? "atom-nucleus" : undefined}
-      style={!motionOff && quorum === "ok" ? { transformOrigin: "256px 256px", animation: "cs-nucleus 1s ease-out infinite", animationDelay: "var(--cs-phase, 0ms)" } : undefined} />
+      style={!motionOff && quorum === "ok" ? { transformOrigin: "256px 256px", animation: "cs-nucleus 1s ease-out infinite" } : undefined} />
   </svg>;
 }

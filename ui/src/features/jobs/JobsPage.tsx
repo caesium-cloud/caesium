@@ -107,7 +107,7 @@ function JobsPageInner() {
                 ? "Try clearing your filter or search term."
                 : "Apply a job definition to get started."
             }
-            action={<Button variant="outline" onClick={() => { if (search || statusFilter !== "all") { setSearch(""); setStatusFilter("all"); } else { window.location.assign("/jobdefs"); } }}>{search || statusFilter !== "all" ? "clear filters" : "apply a jobdef"}</Button>}
+            action={<Button variant="outline" onClick={() => { if (search || statusFilter !== "all") { setSearch(""); setStatusFilter("all"); } else { navigate({ to: "/jobdefs" }); } }}>{search || statusFilter !== "all" ? "clear filters" : "apply a jobdef"}</Button>}
             className="py-20"
           />
         ) : (
@@ -159,7 +159,6 @@ function JobsPageInner() {
                         <StatusBadge status="paused" variant="word" size="sm" />
                       )}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-text-3">{String(job.labels?.source ?? "manual")}</div>
                   </div>
 
                   {/* Status column */}

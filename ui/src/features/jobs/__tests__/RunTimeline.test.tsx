@@ -1,5 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act } from "@testing-library/react";
+import { Profiler } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { UTCClock, UTCClockProvider } from "@/components/ui/utc-clock";
 import type { JobTask, TaskRun } from "@/lib/api";
 import { RunTimeline } from "../RunTimeline";
 
@@ -50,6 +53,29 @@ const taskDefinitions: Record<string, JobTask> = {
 };
 
 describe("RunTimeline", () => {
+  it("keeps terminal unstarted tasks anchored to recorded times and does not tick", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+    const tasks = [makeTask({ task_id: "task-1", status: "failed", started_at: undefined, error: "image pull failed" }),
+      makeTask({ task_id: "task-2", status: "queued", started_at: undefined, completed_at: undefined })];
+    let renders = 0;
+    const { unmount } = render(<UTCClockProvider><UTCClock /><Profiler id="timeline" onRender={() => renders++}>
+      <RunTimeline tasks={tasks} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00Z" runStatus="failed" />
+    </Profiler></UTCClockProvider>);
+    expect(screen.getByText("image pull failed")).toBeInTheDocument();
+    expect(screen.getByText("did not start")).toBeInTheDocument();
+    expect(screen.queryByText("waits on upstream work")).not.toBeInTheDocument();
+    const bars = screen.getAllByTestId("run-timeline-bar");
+    bars.forEach(bar => expect(bar).toHaveAttribute("data-ghost", "false"));
+    const positions = bars.map(bar => bar.style.left);
+    const before = renders;
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(renders).toBe(before);
+    expect(bars.map(bar => bar.style.left)).toEqual(positions);
+    unmount();
+    vi.useRealTimers();
+  });
+
   it("renders a plain row for an unfanned task and keeps the run-timeline-task-row testid", () => {
     const tasks = [makeTask({ task_id: "task-1" })];
 

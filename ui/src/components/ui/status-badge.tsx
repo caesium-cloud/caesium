@@ -10,20 +10,22 @@ export function StatusGlyph({ meta, className, testId }: { meta: StatusMeta; cla
     style={{ color: meta.fg }} />;
 }
 
-export function StatusBadge({ status, domain, variant = "word", size = "md", label, className }: {
+export function StatusBadge({ status, domain, variant = "word", size = "md", label, className, muted = false }: {
   status: string;
   domain?: StatusDomain;
   variant?: StatusBadgeVariant;
   size?: StatusBadgeSize;
   label?: string;
   className?: string;
+  muted?: boolean;
 }) {
   const { key, meta } = resolveStatusForDomain(status, domain);
   const text = label ?? meta.label;
+  const color = muted ? "hsl(var(--text-3))" : meta.fg;
   return <span className={cn("inline-flex items-center gap-2 whitespace-nowrap font-bold lowercase", size === "sm" ? "text-xs" : "text-[13px]", className)}
-    style={{ color: meta.fg }} data-status={key ?? "unknown"} data-variant={variant}
+    style={{ color }} data-status={key ?? "unknown"} data-variant={variant}
     aria-label={variant === "glyph" ? text : undefined}>
-    <StatusGlyph meta={meta} />
+    <StatusGlyph meta={{ ...meta, fg: color }} />
     {variant === "word" ? text : <span className="sr-only">{text}</span>}
   </span>;
 }

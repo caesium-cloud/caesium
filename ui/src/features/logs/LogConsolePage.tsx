@@ -6,7 +6,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, formatUTCTime } from "@/lib/utils";
 import {
   LogBadge,
   LogSearchInput,
@@ -264,7 +264,7 @@ function LogRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const ts = new Date(entry.ts).toISOString().slice(11, 23); // HH:mm:ss.SSS
+  const ts = formatUTCTime(entry.ts, { milliseconds: true });
   const meta = { ...statusMeta(entry.level === "debug" ? "queued" : entry.level === "info" ? "succeeded" : entry.level === "warn" ? "paused" : "failed"), dotClass: "" };
   const hasFields = entry.fields && Object.keys(entry.fields).length > 0;
 

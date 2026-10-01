@@ -1,3 +1,4 @@
+import { MetadataValue } from "@/components/ui/metadata-value";
 import { ImageReference } from "@/components/ui/image-reference";
 import { IdChip } from "@/components/ui/id-chip";
 import { type ChangeEvent, useState } from "react";
@@ -167,13 +168,13 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
     <div data-testid="receipt-summary" className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetadataCell testId="receipt-version" label="receipt_version" value={`v${receipt.receipt_version}`} mono />
-        <MetadataCell testId="receipt-run-id" label="run_id" value={receipt.run_id} mono />
-        <MetadataCell testId="receipt-job-id" label="job_id" value={receipt.job_id} mono />
+        <MetadataCell testId="receipt-run-id" label="run_id" idChip value={receipt.run_id} mono />
+        <MetadataCell testId="receipt-job-id" label="job_id" idChip value={receipt.job_id} mono />
         <MetadataCell testId="receipt-job-alias" label="job_alias" value={receipt.job_alias || "None"} mono />
-        <MetadataCell testId="receipt-git-commit" label="git_commit" value={receipt.git_commit || "None"} mono />
+        <MetadataCell testId="receipt-git-commit" label="git_commit" idChip value={receipt.git_commit || "None"} mono />
         <MetadataCell
           testId="receipt-manifest-content-hash"
-          label="manifest_content_hash"
+          label="manifest_content_hash" idChip
           value={receipt.manifest_content_hash || "None"}
           mono
         />
@@ -239,13 +240,13 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <MetadataCell
                   testId="receipt-task-identity-hash"
-                  label="identity_hash"
+                  label="identity_hash" idChip
                   value={task.identity_hash || "None"}
                   mono
                 />
                 <MetadataCell
                   testId="receipt-task-resolved-image-digest"
-                  label="resolved_image_digest"
+                  label="resolved_image_digest" idChip
                   value={task.resolved_image_digest ?? "None"}
                   mono
                 />
@@ -422,13 +423,13 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
       <div className="grid gap-3 md:grid-cols-2">
         <MetadataCell
           testId="receipt-verify-expected-digest"
-          label="expected_digest"
+          label="expected_digest" idChip
           value={result.expected_digest}
           mono
         />
         <MetadataCell
           testId="receipt-verify-actual-digest"
-          label="actual_digest"
+          label="actual_digest" idChip
           value={result.actual_digest}
           mono
         />
@@ -496,11 +497,13 @@ function MetadataCell({
   label,
   value,
   mono,
+  idChip,
   testId,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  idChip?: boolean;
   testId?: string;
 }) {
   return (
@@ -513,7 +516,7 @@ function MetadataCell({
         className={cn("mt-1 break-all text-xs text-text-1", mono ? "" : undefined)}
         title={value}
       >
-        {/(_id|hash|digest|commit)$/.test(label) && value !== "None" ? <IdChip value={value} label={label} /> : value}
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </div>
     </div>
   );

@@ -31,7 +31,7 @@ export const DataFlowEdge = memo(({
 
   return (
     <>
-      <BaseEdge id={id} path={edgePath} style={data?.running ? { ...style, animation: "cs-dash 1s linear infinite", animationDelay: "var(--cs-phase, 0ms)" } : style} markerEnd={markerEnd} />
+      <BaseEdge id={id} path={edgePath} style={data?.running ? { ...style, animation: "cs-dash 1s linear infinite" } : style} markerEnd={markerEnd} />
       {showLabel && (
         <EdgeLabelRenderer>
           <div

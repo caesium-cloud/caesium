@@ -237,8 +237,10 @@ test("jobs contrast scans wait for finite fades and still reject settled defects
   await page.mouse.move(0, 0); // Non-hover card rows, as in the failed CI scan.
   await waitForFiniteAnimations(page);
 
-  const ids = '[data-testid="job-row"] .text-text-3';
-  await expect(page.locator(ids).first()).toBeVisible();
+  // Use guaranteed visible text. The optional origin subtitle was removed,
+  // and the first muted cell can now be an em dash or an empty instrument.
+  const contrastTarget = page.getByTestId("job-row").first().getByRole("link").first();
+  await expect(contrastTarget).toBeVisible();
   await page.locator("main").evaluate((main) => {
     const fade = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
     fade.pause();
@@ -265,11 +267,11 @@ test("jobs contrast scans wait for finite fades and still reject settled defects
 
     // Readiness does not excuse a genuinely bad settled foreground. Preserve
     // the full scan and its 4.5:1 rule, including this concrete failed CI color.
-    await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.color = "#727886"; });
+    await contrastTarget.evaluate((text) => { (text as HTMLElement).style.color = "#727886"; });
     try {
       await expect(assertNoNewViolations(page, testInfo, "jobs-list")).rejects.toThrow("NEW critical/serious axe violation");
     } finally {
-      await page.locator(ids).first().evaluate((id) => { (id as HTMLElement).style.removeProperty("color"); });
+      await contrastTarget.evaluate((text) => { (text as HTMLElement).style.removeProperty("color"); });
     }
   } finally {
     // Failure diagnostics must not wait on the deliberately paused long fade.

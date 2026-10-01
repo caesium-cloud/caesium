@@ -35,7 +35,7 @@ test("self-hosted fonts and UTC instruments honor reduced motion", async ({ page
   const clock = page.locator("header").getByText(/^\d{2}:\d{2}:\d{2}$/);
   const previous = await clock.textContent();
   await expect.poll(() => clock.textContent()).not.toBe(previous);
-  expect(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--cs-phase-38"))).toMatch(/^-?\d+ms$/);
+  expect(await page.locator("footer .cs-cursor").evaluate(node => node.getAnimations().length)).toBe(1);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(page.locator("header .cs-wave-flat")).toHaveCSS("display", "block");
   await expect(page.locator("header .cs-wave-flat")).toHaveAttribute("d", "M0 10 H120");

@@ -46,35 +46,41 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
+    let pending = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const destinations = { j: "/jobs", t: "/triggers", a: "/atoms", s: "/stats", y: "/system", d: "/jobdefs", l: "/system/logs" } as const;
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't trigger if user is typing in an input
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
-        (e.target as HTMLElement).isContentEditable
+        (e.target as HTMLElement).closest('select, [contenteditable="true"], [role="dialog"]:not([data-navigation-drawer]), [role="menu"]') ||
+        e.ctrlKey || e.metaKey || e.altKey || e.repeat
       ) {
+        pending = false;
+        clearTimeout(timer);
         return;
       }
 
+      if (pending) {
+        pending = false;
+        clearTimeout(timer);
+        // Consume the chord before page-local single-key handlers see it.
+        e.preventDefault();
+        e.stopPropagation();
+        const to = destinations[e.key as keyof typeof destinations];
+        if (to) void navigate({ to });
+        return;
+      }
       if (e.key === "g") {
-        const nextKeyHandler = (nextEvent: KeyboardEvent) => {
-          if (nextEvent.key === "j") navigate({ to: "/jobs" });
-          if (nextEvent.key === "t") navigate({ to: "/triggers" });
-          if (nextEvent.key === "a") navigate({ to: "/atoms" });
-          if (nextEvent.key === "s") navigate({ to: "/stats" });
-          if (nextEvent.key === "y") navigate({ to: "/system" });
-          if (nextEvent.key === "d") navigate({ to: "/jobdefs" });
-          if (nextEvent.key === "l") navigate({ to: "/system/logs" });
-          window.removeEventListener("keydown", nextKeyHandler);
-        };
-        window.addEventListener("keydown", nextKeyHandler, { once: true });
-        // Auto-remove listener after a short delay if no second key is pressed
-        setTimeout(() => window.removeEventListener("keydown", nextKeyHandler), 1000);
+        pending = true;
+        e.preventDefault();
+        timer = setTimeout(() => { pending = false; }, 1000);
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => { clearTimeout(timer); window.removeEventListener("keydown", handleKeyDown, true); };
   }, [navigate]);
 
   return (
@@ -83,6 +89,7 @@ export function AppShell() {
         <Sidebar className="hidden lg:flex" />
         <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}>
           <DialogContent
+            data-navigation-drawer
             aria-describedby={undefined}
             onCloseAutoFocus={(event) => {
               event.preventDefault();

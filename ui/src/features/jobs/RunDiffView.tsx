@@ -1,3 +1,4 @@
+import { MetadataValue } from "@/components/ui/metadata-value";
 import { IdChip } from "@/components/ui/id-chip";
 import { Link, useParams, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -8,7 +9,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type FieldChange, type RunDiffTask, type RunDiffVerdict, type TaskRun, type WhyTrigger } from "@/lib/api";
-import { cn, formatDurationNs, formatUTCTimestamp } from "@/lib/utils";
+import { cn, formatDurationNs, formatUTCTime, formatUTCTimestamp } from "@/lib/utils";
 
 export interface RunDiffViewProps {
   jobId: string;
@@ -114,7 +115,7 @@ export function RunDiffView({ jobId, leftRunId, rightRunId }: RunDiffViewProps) 
 
       <div className="grid grid-cols-2 gap-7 border-b border-border pb-3">
         {[{ id: leftRunId, run: leftRun }, { id: rightRunId, run: rightRun }].map(side => <div key={side.id} className="space-y-2">
-          <div className="text-sm text-text-2">run started {side.run?.started_at ? new Date(side.run.started_at).toISOString().slice(11, 19) : "unknown"}</div>
+          <div className="text-sm text-text-2">run started {formatUTCTime(side.run?.started_at, { fallback: "unknown" })}</div>
           <IdChip value={side.id} label="run id" />
         </div>)}
       </div>
@@ -124,8 +125,8 @@ export function RunDiffView({ jobId, leftRunId, rightRunId }: RunDiffViewProps) 
         </div>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <MetadataCell label="Left Run ID" value={diff.leftRunId} mono />
-            <MetadataCell label="Right Run ID" value={diff.rightRunId} mono />
+            <MetadataCell label="Left Run ID" idChip value={diff.leftRunId} mono />
+            <MetadataCell label="Right Run ID" idChip value={diff.rightRunId} mono />
             <MetadataCell label="Left Trigger" value={formatTrigger(diff.leftTrigger)} mono />
             <MetadataCell label="Right Trigger" value={formatTrigger(diff.rightTrigger)} mono />
           </div>
@@ -213,14 +214,14 @@ export function TaskDiffRow({ task, leftTask, rightTask }: { task: RunDiffTask; 
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <MetadataCell label="Left Task Run ID" value={task.leftTaskRunId} mono />
-            <MetadataCell label="Right Task Run ID" value={task.rightTaskRunId} mono />
-            <MetadataCell label="Left Task ID" value={task.leftTaskId} mono />
-            <MetadataCell label="Right Task ID" value={task.rightTaskId} mono />
+            <MetadataCell label="Left Task Run ID" idChip value={task.leftTaskRunId} mono />
+            <MetadataCell label="Right Task Run ID" idChip value={task.rightTaskRunId} mono />
+            <MetadataCell label="Left Task ID" idChip value={task.leftTaskId} mono />
+            <MetadataCell label="Right Task ID" idChip value={task.rightTaskId} mono />
             <MetadataCell label="Left Attempt" value={String(task.leftAttempt)} mono />
             <MetadataCell label="Right Attempt" value={String(task.rightAttempt)} mono />
             <MetadataCell label="Hash Equal" value={String(task.hashEqual)} mono />
-            {!task.hashEqual ? <><MetadataCell label="Left Hash" value={task.leftHash || "None"} mono /><MetadataCell label="Right Hash" value={task.rightHash || "None"} mono /></> : null}
+            {!task.hashEqual ? <><MetadataCell label="Left Hash" idChip value={task.leftHash || "None"} mono /><MetadataCell label="Right Hash" idChip value={task.rightHash || "None"} mono /></> : null}
             {task.degraded ? <MetadataCell label="Degraded" value={task.degraded} /> : null}
           </div>
 
@@ -300,17 +301,19 @@ function MetadataCell({
   label,
   value,
   mono = false,
+  idChip,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div className="min-w-0">
       <div className="mb-0.5 text-[11px] font-normal lowercase text-muted-foreground">
         {label}
       </div>
-      <div className={cn("break-all text-xs text-foreground", mono && "")}>{/ID$|fingerprint|hash|digest|commit/i.test(label) && value && value !== "None" ? <IdChip value={value} label={label} /> : value}</div>
+      <div className={cn("break-all text-xs text-foreground", mono && "")}><MetadataValue value={value} label={label} idChip={idChip} /></div>
     </div>
   );
 }

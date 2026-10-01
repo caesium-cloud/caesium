@@ -7,6 +7,7 @@ import { Oscillator } from "../ui/oscillator";
 import { Button } from "@/components/ui/button";
 import { UTCClock } from "@/components/ui/utc-clock";
 import { logout } from "@/lib/auth";
+import { formatUTCTime } from "@/lib/utils";
 import { NotificationsPopover } from "./NotificationsPopover";
 
 interface Crumb {
@@ -23,7 +24,7 @@ function Breadcrumb({ jobAlias, runStartedAt }: { jobAlias?: string; runStartedA
     acc += `/${segment}`;
     if (segments[2] === "runs" && segments[3] && i === 2) return;
     if (segments[0] === "jobs" && i === 1) segment = jobAlias ?? "pipeline";
-    if (segments[2] === "runs" && i === 3) segment = runStartedAt ? `run ${new Date(runStartedAt).toISOString().slice(11, 16)}` : "run";
+    if (segments[2] === "runs" && i === 3) segment = `run ${formatUTCTime(runStartedAt, { seconds: false, fallback: "unknown" })}`;
     crumbs.push({ label: segment, to: i === segments.length - 1 ? undefined : acc });
   });
   return <nav aria-label="Breadcrumb" className="hidden min-w-0 items-center text-xs text-text-3 lg:flex">

@@ -30,9 +30,10 @@ func (s *IntegrationTestSuite) TestJobdefJSONAcceptsDocumentedScalarEdges() {
 			alias := fmt.Sprintf("scalar-edges-%d", time.Now().UnixNano())
 			definition["metadata"].(map[string]any)["alias"] = alias
 			trigger := definition["trigger"].(map[string]any)
-			if trigger["type"] == "http" {
+			switch trigger["type"] {
+			case "http":
 				trigger["configuration"].(map[string]any)["path"] = "/hooks/scalar-edges/" + alias
-			} else if trigger["type"] == "cron" {
+			case "cron":
 				trigger["configuration"].(map[string]any)["cron"] = "0 0 1 1 *"
 			}
 			payload, err := json.Marshal(map[string]any{"definitions": []any{definition}})

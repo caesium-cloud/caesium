@@ -24,7 +24,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatUTCTimestamp } from "@/lib/utils";
+import { formatUTCTime, formatUTCTimestamp } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
@@ -284,8 +284,9 @@ export function RunDetailPage() {
     const shortcuts: Record<string, string> = { c: '[data-testid="run-compare-trigger"]', a: '[data-testid="all-runs-link"]', p: '[data-testid="run-replay-trigger"]', r: '[data-testid="run-rerun-trigger"]' };
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (event.ctrlKey || event.metaKey || event.altKey || target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
-      const selector = shortcuts[event.key];
+      const rerun = event.altKey && event.code === "KeyR";
+      if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || (event.altKey && !rerun) || target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
+      const selector = rerun ? shortcuts.r : event.key === "r" ? undefined : shortcuts[event.key];
       if (selector && !document.querySelector('[role="dialog"]')) {
         const control = document.querySelector<HTMLElement>(selector);
         if (control && !control.hasAttribute('disabled')) { event.preventDefault(); control.click(); }
@@ -335,7 +336,7 @@ export function RunDetailPage() {
         <div>
           <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
             <h1 data-testid="run-heading" className="text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
-            <span className="text-xs text-text-3">run started {new Date(run.started_at).toISOString().slice(11, 19)}</span>
+            <span className="text-xs text-text-3">run started {formatUTCTime(run.started_at)}</span>
             <StatusBadge status={run.status} />
             <IdChip value={runId} label="run id" />
           </div>
@@ -380,7 +381,7 @@ export function RunDetailPage() {
                   <div className="min-w-0">
                     <div className="truncate text-xs">run started {formatRunTimestamp(candidate)}</div>
                     <div className="truncate text-[11px] text-text-3">
-                      {formatRunTimestamp(candidate)}
+                      <IdChip value={candidate.id} label="run id" />
                     </div>
                   </div>
                   <StatusBadge status={candidate.status} size="sm" />
@@ -440,7 +441,7 @@ export function RunDetailPage() {
             data-testid="run-rerun-trigger"
             disabled={triggerMutation.isPending}
           >
-            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <kbd aria-hidden="true" className="text-[11px] text-text-3">r</kbd>
+            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <kbd aria-hidden="true" className="text-[11px] text-text-3">Alt R</kbd>
           </Button>
           {isLive && (
             <Button
@@ -506,7 +507,7 @@ export function RunDetailPage() {
         {timelineOpen && (
           <div id="run-execution-timeline-body" className="p-4">
             {run.tasks && run.tasks.length > 0 ? (
-              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} />
+              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} runStatus={run.status} />
             ) : (
               <div className="text-[12px] text-text-3 py-4 text-center">
                 No task execution data yet.

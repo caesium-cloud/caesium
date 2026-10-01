@@ -1,4 +1,5 @@
-import { yamlTheme, yamlHighlight } from "@/components/ui/yaml-theme";
+import { useTheme } from "@/components/theme-provider";
+import { yamlThemes, yamlHighlight } from "@/components/ui/yaml-theme";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -165,6 +166,7 @@ function contractBadgeClass(verdict: ContractDiffFinding["verdict"]) {
 }
 
 export function JobDefsPage() {
+  const { resolvedTheme } = useTheme();
   const queryClient = useQueryClient();
   const [yaml, setYaml] = useState(EXAMPLE_YAML);
   const [tab, setTab] = useState("editor");
@@ -523,7 +525,8 @@ export function JobDefsPage() {
                     value={yaml}
                     className="min-w-0 w-full"
                     height="420px"
-                    extensions={[yamlLang(), yamlTheme, yamlHighlight, customLinter]}
+                    theme={yamlThemes[resolvedTheme]}
+                    extensions={[yamlLang(), yamlHighlight, customLinter]}
                     onChange={handleYamlChange}
                     onCreateEditor={(view) => {
                       editorViewRef.current = view;

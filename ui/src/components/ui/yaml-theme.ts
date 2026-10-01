@@ -3,7 +3,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
 // Simple custom theme for the editor to match our brand
-export const yamlTheme = EditorView.theme({
+const yamlStyles = {
   "&": {
     backgroundColor: "hsl(var(--midnight)) !important",
     color: "hsl(var(--text-1))",
@@ -28,7 +28,19 @@ export const yamlTheme = EditorView.theme({
   ".cm-activeLine": {
     backgroundColor: "hsl(var(--obsidian))",
   },
-}, { dark: true });
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+    backgroundColor: "hsl(var(--cyan) / .2)",
+  },
+  ".cm-tooltip, .cm-panels": {
+    backgroundColor: "hsl(var(--obsidian))",
+    color: "hsl(var(--text-1))",
+    border: "1px solid hsl(var(--border))",
+  },
+};
+export const yamlThemes = {
+  dark: EditorView.theme({ ...yamlStyles, "&": { ...yamlStyles["&"], colorScheme: "dark" } }, { dark: true }),
+  light: EditorView.theme({ ...yamlStyles, "&": { ...yamlStyles["&"], colorScheme: "light" } }, { dark: false }),
+};
 export const yamlHighlight = syntaxHighlighting(HighlightStyle.define([
   { tag: tags.propertyName, color: "hsl(var(--text-1))" },
   { tag: tags.string, color: "hsl(var(--text-2))" },

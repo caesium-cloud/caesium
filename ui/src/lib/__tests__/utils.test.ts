@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCommandForDisplay, formatUTCTimestamp, normalizeCommand } from "../utils";
+import { formatCommandForDisplay, formatUTCTime, formatUTCTimestamp, normalizeCommand } from "../utils";
 
 describe("command formatting", () => {
   it("decodes JSON-array command strings before joining for display", () => {
@@ -38,5 +38,18 @@ describe("formatUTCTimestamp", () => {
     expect(formatUTCTimestamp(null, "unavailable")).toBe("unavailable");
     expect(formatUTCTimestamp(undefined, "unavailable")).toBe("unavailable");
     expect(formatUTCTimestamp("", "unavailable")).toBe("unavailable");
+  });
+});
+
+
+describe("formatUTCTime", () => {
+  it("formats UTC seconds, minutes, and optional milliseconds", () => {
+    const value = "2026-10-01T15:34:56.007-04:00";
+    expect(formatUTCTime(value)).toBe("19:34:56");
+    expect(formatUTCTime(value, { seconds: false })).toBe("19:34");
+    expect(formatUTCTime(value, { milliseconds: true })).toBe("19:34:56.007");
+  });
+  it.each(["not-a-date", "", null, undefined, NaN, new Date(NaN)])("returns a fallback without throwing for %s", value => {
+    expect(formatUTCTime(value, { fallback: "unavailable" })).toBe("unavailable");
   });
 });

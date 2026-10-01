@@ -89,7 +89,7 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   // viewport's transform, proving the far edge of a wide DAG is reachable,
   // not merely present off-screen.
   await dagSection.getByRole("button", { name: /fit view/i }).click();
-  const leafNode = dagSection.locator(".react-flow__node", { hasText: "leaf-15" });
+  const leafNode = dagSection.locator(".react-flow__node").filter({ has: page.getByTestId("task-node-label").filter({ hasText: /^leaf-15$/ }) });
   await expect(leafNode).toBeVisible();
 
   // The fitted flow must use the visible clipping container, not a taller

@@ -166,9 +166,8 @@
 @font-face { font-family: "Sometype Mono"; src: url("/fonts/SometypeMono[wght].woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: block; }
 @font-face { font-family: "Sometype Mono"; src: url("/fonts/SometypeMono-Italic[wght].woff2") format("woff2"); font-weight: 400 700; font-style: italic; font-display: block; }
 
-/* Motion. Every animation is phase-locked to the UTC second: the app shell sets
-   --cs-phase: -<Date.now() % 1000>ms once at mount (see DESIGN-SPEC.md §4) and every
-   animated element declares animation-delay: var(--cs-phase). Durations are whole seconds. */
+/* Motion. phase.ts aligns each CSS instrument through Animation.startTime at
+   insertion and when a hidden tab returns. Durations are whole seconds. */
 @keyframes cs-beat        { 0% { box-shadow: 0 0 0 0 hsl(var(--running) / .7) } 70%, 100% { box-shadow: 0 0 0 7px hsl(var(--running) / 0) } }
 @keyframes cs-beat-gold   { 0% { box-shadow: 0 0 0 0 hsl(var(--gold) / .6) } 70%, 100% { box-shadow: 0 0 0 7px hsl(var(--gold) / 0) } }
 @keyframes cs-nucleus     { 0% { transform: scale(1); opacity: 1 } 15% { transform: scale(1.25); opacity: .85 } 100% { transform: scale(1); opacity: 1 } }
@@ -178,8 +177,8 @@
 @keyframes cs-dash        { to { stroke-dashoffset: -14 } }
 @keyframes cs-cursor      { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
 
-.animate-cyan-pulse { animation: cs-beat 1s ease-out infinite; animation-delay: var(--cs-phase, 0ms); }
-.animate-gold-pulse { animation: cs-beat-gold 2s ease-out infinite; animation-delay: var(--cs-phase-2, 0ms); }
+.animate-cyan-pulse { animation: cs-beat 1s ease-out infinite; }
+.animate-gold-pulse { animation: cs-beat-gold 2s ease-out infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-cyan-pulse, .animate-gold-pulse, .cs-animated, .cs-animated * { animation: none !important; }
@@ -238,26 +237,26 @@
 }
 
 /* Standard instruments. Shapes accompany every status word. */
-.cs-status-glyph { display: inline-block; flex: none; position: relative; width: 10px; height: 10px; animation-delay: var(--cs-phase, 0ms); }
+.cs-status-glyph { display: inline-block; flex: none; position: relative; width: 10px; height: 10px; }
 .cs-status-ring { border: 2px solid currentColor; border-radius: 50%; }
 .cs-status-solid { background: currentColor; border-radius: 2px; }
 .cs-status-failed { border: 1px solid currentColor; border-radius: 2px; }
 .cs-status-failed::before, .cs-status-failed::after { content: ''; position: absolute; top: 3px; left: 0; width: 8px; height: 1px; background: currentColor; transform: rotate(45deg); }
 .cs-status-failed::after { transform: rotate(-45deg); }
 .cs-status-hollow { border: 1px solid currentColor; border-radius: 2px; }
-.cs-status-paused { border-left: 3px solid currentColor; border-right: 3px solid currentColor; animation-delay: var(--cs-phase-2, 0ms); }
+.cs-status-paused { border-left: 3px solid currentColor; border-right: 3px solid currentColor; }
 .cs-status-dashed { border: 1px dashed currentColor; border-radius: 2px; }
 .cs-status-skipped { border: 1px solid currentColor; border-radius: 2px; background: linear-gradient(135deg, transparent 42%, currentColor 43%, currentColor 54%, transparent 55%); }
-.cs-wave { animation: cs-wave 1s linear infinite; animation-delay: var(--cs-phase, 0ms); }
+.cs-wave { animation: cs-wave 1s linear infinite; }
 .cs-wave-flat { display: none; }
-.cs-cursor { display: inline-block; width: 7px; height: 14px; background: hsl(var(--running)); animation: cs-cursor 1s steps(1) infinite; animation-delay: var(--cs-phase, 0ms); }
+.cs-cursor { display: inline-block; width: 7px; height: 14px; background: hsl(var(--running)); animation: cs-cursor 1s steps(1) infinite; }
 .cs-electron { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: hsl(var(--gold)); pointer-events: none; }
-.cs-electron-running { top: 0; left: 0; offset-path: inset(0 round 6px); animation: cs-orbit 6s linear infinite; animation-delay: var(--cs-phase-6, 0ms); box-shadow: 0 0 8px 2px hsl(var(--gold) / .55); }
+.cs-electron-running { top: 0; left: 0; offset-path: inset(0 round 6px); animation: cs-orbit 6s linear infinite; box-shadow: 0 0 8px 2px hsl(var(--gold) / .55); }
 .cs-electron-succeeded, .cs-electron-cached { top: -4px; right: -4px; }
 .cs-electron-cached { background: hsl(var(--cached)); }
 .cs-electron-queued { top: calc(50% - 4px); left: -4px; border: 1px solid hsl(var(--gold)); background: hsl(var(--void)); }
-.cs-now-head { animation: cs-beat 1s ease-out infinite; animation-delay: var(--cs-phase, 0ms); }
-.cs-edge-running { animation: cs-dash 1s linear infinite; animation-delay: var(--cs-phase, 0ms); }
+.cs-now-head { animation: cs-beat 1s ease-out infinite; }
+.cs-edge-running { animation: cs-dash 1s linear infinite; }
 :where(button, a, input, textarea, select, [tabindex]):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .cs-status-glyph, .cs-electron, .cs-now-head, .cs-edge-running, .cs-edge-running .react-flow__edge-path, .cs-cursor { animation: none !important; }

@@ -3,6 +3,7 @@ import {
   authHeaders,
   loginAsRunner,
   loginAsViewer,
+  loginWithApiKey,
   obtainAuthKeys,
   type AuthLaneKeys,
 } from "../helpers/auth";
@@ -44,6 +45,24 @@ test("runner login resolves a runner principal through the UI", async ({ page })
   const principal = await loginAsRunner(page, keys);
 
   expect(principal.role).toBe("runner");
+});
+
+test("SYNTHETIC: empty-fleet authoring navigation preserves the in-memory API-key session", async ({ page }) => {
+  // Mock only the empty list; authenticate and lint through the real API.
+  // Other auth specs may already have seeded jobs.
+  await page.route("**/v1/jobs", route => route.request().method() === "GET"
+    ? route.fulfill({ json: [] }) : route.continue());
+  await loginWithApiKey(page, process.env.CAESIUM_E2E_AUTH_ADMIN_KEY!);
+  await expect(page.getByRole("status")).toContainText("No pipelines yet");
+  await page.evaluate(() => { Object.defineProperty(window, "qaDocumentMarker", { value: "original" }); });
+  const lint = page.waitForResponse(response => response.url().endsWith("/v1/jobdefs/lint"));
+  await page.getByRole("button", { name: "apply a jobdef", exact: true }).click();
+  await expect(page).toHaveURL(/\/jobdefs$/);
+  const response = await lint;
+  expect(response.status()).toBe(200);
+  expect(Boolean(response.request().headers().authorization)).toBe(true);
+  expect(await page.evaluate(() => (window as unknown as { qaDocumentMarker: string }).qaDocumentMarker)).toBe("original");
+  await expect(page.getByPlaceholder("csk_live_...")).toHaveCount(0);
 });
 
 test("a job-scoped key resolves its own principal and whoami names its scope", async ({

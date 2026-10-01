@@ -1,7 +1,8 @@
+import { useTheme } from "@/components/theme-provider";
 import { ImageReference } from "@/components/ui/image-reference";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
-import { yamlTheme, yamlHighlight } from "@/components/ui/yaml-theme";
+import { yamlThemes, yamlHighlight } from "@/components/ui/yaml-theme";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -44,7 +45,7 @@ import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
+import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTime, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
 
@@ -440,7 +441,7 @@ export function JobDetailPage() {
           <div className="min-w-0">
 
             <div className="flex items-center gap-2.5">
-              <h1 className="text-2xl font-bold lowercase text-text-1">{job.alias}</h1>
+              <h1 className="text-2xl font-bold text-text-1">{job.alias}</h1>
               <StatusBadge status={job.paused ? "paused" : (featuredRun?.status ?? "queued")} size="sm" />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
@@ -567,13 +568,13 @@ export function JobDetailPage() {
                   </span>
                 )}
                 <span className="truncate">
-                  {activeRun ? "Overlay from" : "Latest overlay: run"}{" "}
+                  {activeRun ? "Overlay from" : "Latest overlay:"}{" "}
                   <Link
                     to="/jobs/$jobId/runs/$runId"
                     params={{ jobId, runId: featuredRun.id }}
                     className="text-cyan-glow hover:text-cyan-glow"
                   >
-                    run started {new Date(featuredRun.started_at).toISOString().slice(11, 19)}
+                    run started {formatUTCTime(featuredRun.started_at)}
                   </Link>
                 </span>
               </>
@@ -925,6 +926,7 @@ function JobManifestView({
   isLoading: boolean;
   error: unknown;
 }) {
+  const { resolvedTheme } = useTheme();
   if (isLoading) {
     return <div className="p-8 text-center text-muted-foreground">Loading manifest...</div>;
   }
@@ -956,7 +958,7 @@ function JobManifestView({
         </div>
       </div>
       <div className="overflow-hidden rounded-lg border border-border bg-midnight" data-testid="job-manifest-yaml">
-        <CodeMirror value={manifest || ""} height="420px" editable={false} readOnly extensions={[yamlLang(), yamlTheme, yamlHighlight]} basicSetup={{ lineNumbers: true, foldGutter: true }} />
+        <CodeMirror value={manifest || ""} height="420px" editable={false} readOnly theme={yamlThemes[resolvedTheme]} extensions={[yamlLang(), yamlHighlight]} basicSetup={{ lineNumbers: true, foldGutter: true }} />
       </div>
     </div>
   );
@@ -989,7 +991,7 @@ function RunsView({
       <div className="divide-y border-y border-border" data-testid="job-runs-list">
         {runs.length === 0 ? <div className="p-8 text-center text-text-3">No runs found for this job.</div> : null}
         {runs.map(run => <div key={run.id} className="flex min-h-[42px] flex-wrap items-center gap-x-7 gap-y-2 px-3 py-2 hover:bg-obsidian">
-          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{new Date(run.started_at).toISOString().slice(11, 19)}</span>
+          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{formatUTCTime(run.started_at)}</span>
           <span className="text-xs text-text-3"><RelativeTime date={run.started_at} /></span>
           {renderRunStatus(run.status)}
           <span className="text-xs text-text-2"><Duration start={run.started_at} end={run.completed_at} /></span>

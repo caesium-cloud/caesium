@@ -12,19 +12,19 @@ export function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
   const waiting = tasks.filter((task) => task.status === "pending" || task.status === "queued").length;
 
   const parts = [
-    { status: "succeeded", label: `${done} done`, className: "text-success" },
-    { status: "failed", label: `${failed} failed`, className: failed > 0 ? "text-danger" : "text-text-3" },
-    { status: "skipped", label: `${blocked} blocked`, className: blocked > 0 ? "text-warning" : "text-text-3" },
+    { status: "succeeded", label: `${done} done`, count: done },
+    { status: "failed", label: `${failed} failed`, count: failed },
+    { status: "skipped", label: `${blocked} blocked`, count: blocked },
   ];
 
   if (running > 0) {
-    parts.push({ status: "running", label: `${running} running`, className: "text-cyan-glow" });
+    parts.push({ status: "running", label: `${running} running`, count: running });
   }
   if (cached > 0) {
-    parts.push({ status: "cached", label: `${cached} cached`, className: "text-cached" });
+    parts.push({ status: "cached", label: `${cached} cached`, count: cached });
   }
   if (waiting > 0) {
-    parts.push({ status: "queued", label: `${waiting} waiting`, className: "text-text-3" });
+    parts.push({ status: "queued", label: `${waiting} waiting`, count: waiting });
   }
 
   return (
@@ -32,7 +32,7 @@ export function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
       {parts.map((part, index) => (
         <span key={part.label} className="inline-flex items-center gap-1.5">
           {index > 0 ? <span className="inline-block w-3" aria-hidden="true" /> : null}
-          <StatusBadge status={part.status} label={part.label} size="sm" />
+          <StatusBadge status={part.status} label={part.label} size="sm" muted={part.count === 0} />
         </span>
       ))}
     </div>

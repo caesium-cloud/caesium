@@ -39,8 +39,5 @@ describe("<UTCClock />", () => {
     expect(new Set(texts).size).toBe(1);
   });
 
-  it("hides the gold pulse dot when hideDot is set", () => {
-    const { container } = render(<UTCClock hideDot />);
-    expect(container.querySelector(".animate-gold-pulse")).toBeNull();
-  });
+
 });

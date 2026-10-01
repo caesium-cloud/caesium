@@ -6,7 +6,7 @@ import { statusMeta } from "@/lib/status";
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex items-center gap-2 text-xs font-normal lowercase text-text-3",
+  "inline-flex items-center gap-2 text-xs font-normal text-text-3",
   { variants: { variant: {
     default: "text-text-3", secondary: "text-text-3", destructive: "text-danger", success: "text-success", running: "text-running", cached: "text-cached", outline: "text-text-3",
   } }, defaultVariants: { variant: "default" } }

@@ -232,7 +232,7 @@ export function ReplayDialog({
                   role="alert"
                   className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
                 >
-                  <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
+                  <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
                   <span>{inlineError}</span>
                 </div>
               )}

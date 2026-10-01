@@ -1,3 +1,4 @@
+import { MetadataValue } from "@/components/ui/metadata-value";
 import { IdChip } from "@/components/ui/id-chip";
 import {
   useState,
@@ -461,7 +462,7 @@ export function TaskDetailPanel({
 
               {/* Metadata grid */}
               <div className="grid grid-cols-2 gap-3">
-                <MetadataCell label="Task ID" value={task?.id ?? runTask?.task_id ?? taskId} mono />
+                <MetadataCell label="Task ID" idChip value={task?.id ?? runTask?.task_id ?? taskId} mono />
                 <MetadataCell label="Trigger Rule" value={task?.trigger_rule ?? "all_success"} mono />
                 <MetadataCell label="Attempts" value={formatAttempts(runTask)} mono />
                 <MetadataCell label="Retries" value={String(task?.retries ?? 0)} mono />
@@ -811,10 +812,12 @@ function MetadataCell({
   label,
   value,
   mono = false,
+  idChip,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div>
@@ -827,7 +830,7 @@ function MetadataCell({
           mono && "",
         )}
       >
-        {/id$|fingerprint|digest/i.test(label) ? <IdChip value={value} label={label} /> : value}
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </div>
     </div>
   );

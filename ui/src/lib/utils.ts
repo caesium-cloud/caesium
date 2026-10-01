@@ -100,6 +100,22 @@ function padUTC(value: number): string {
   return String(value).padStart(2, "0")
 }
 
+export function formatUTCTime(
+  value: string | number | Date | null | undefined,
+  { seconds = true, milliseconds = false, fallback = "Unknown time" }: {
+    seconds?: boolean;
+    milliseconds?: boolean;
+    fallback?: string;
+  } = {},
+): string {
+  if (value === null || value === undefined || value === "") return fallback
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) return fallback
+  const time = `${padUTC(date.getUTCHours())}:${padUTC(date.getUTCMinutes())}`
+  return time + (seconds || milliseconds ? `:${padUTC(date.getUTCSeconds())}` : "") +
+    (milliseconds ? `.${String(date.getUTCMilliseconds()).padStart(3, "0")}` : "")
+}
+
 export function formatUTCTimestamp(
   value: string | number | Date | null | undefined,
   fallback = "Unknown time",

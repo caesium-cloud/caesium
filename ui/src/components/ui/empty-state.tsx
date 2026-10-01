@@ -19,6 +19,7 @@ export function EmptyState({
   title,
   subtitle,
   action,
+  icon,
   className,
 }: EmptyStateProps) {
   return (
@@ -29,7 +30,7 @@ export function EmptyState({
         className,
       )}
     >
-      <AtomLogo size={80} animated={false} />
+      {icon ?? <AtomLogo size={80} animated={false} />}
       <div className="text-base font-normal text-text-1">{title}</div>
       {subtitle ? (
         <div className="max-w-sm text-[13px] text-text-3">{subtitle}</div>
