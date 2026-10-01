@@ -1,0 +1,51 @@
+{
+  "profile": "short",
+  "description": "Locally reproducible short form: exactly one seeded episode of every family (the mandatory pass) on one host. Target <= 15 min end to end on an arm64 Mac, <= 25 min on a 4-vCPU hosted runner.",
+  "schedule_budget": "12m",
+  "max_episodes": 5,
+  "heal_progress_bound": "120s",
+  "run_bound": "180s",
+  "background": {
+    "trickle_interval_ms": [6000, 10000],
+    "hold_seconds": 1
+  },
+  "slow_consumers": {
+    "consumers": [2, 3],
+    "read_delay_ms": [400, 900],
+    "chunk_bytes": 128,
+    "burst_runs": [3, 4],
+    "hold_seconds": [1, 2],
+    "goroutine_slack": 40,
+    "settle_bound": "60s"
+  },
+  "queue_overload": {
+    "low": [4, 5],
+    "high": [2, 3],
+    "hold_seconds": [1, 2]
+  },
+  "retention": {
+    "burst_runs": [6, 8],
+    "long_steps": [5, 6],
+    "long_step_seconds": [2, 2],
+    "keep_fulls": 3,
+    "trigger_parallelism": 4
+  },
+  "repeated_failover": {
+    "mandatory_kinds": ["owner_is_leader", "owner_is_not_leader"],
+    "extra_kinds": [],
+    "extra_kills": [0, 0],
+    "recovery_bound": "120s",
+    "rejoin_bound": "180s"
+  },
+  "node_replacement": {
+    "replacements": [1, 1],
+    "rejoin_bound": "300s"
+  },
+  "drain": {
+    "bound": "5m",
+    "settle": "20s",
+    "samples": 3,
+    "sample_interval": "15s",
+    "container_grace": "150s"
+  }
+}
