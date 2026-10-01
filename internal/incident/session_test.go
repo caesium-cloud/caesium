@@ -523,3 +523,15 @@ func TestEndSessionWithoutContainerIsQuiet(t *testing.T) {
 	require.NoError(t, db.First(&got, "id = ?", session.ID).Error)
 	require.Equal(t, models.AgentSessionStateSucceeded, got.State)
 }
+
+func (e *fakeEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}
+
+func (e *blockingEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}
+
+func (e *cancelEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

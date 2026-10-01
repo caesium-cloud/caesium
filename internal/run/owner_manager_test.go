@@ -159,6 +159,29 @@ func TestOwnerManager_RedeliveredCompletionKeepsTerminalSequence(t *testing.T) {
 	require.Equal(t, taskA, rows[0].TaskID)
 }
 
+// A final worker attempt reports its runtime result, then the retry loop may
+// report the returned error. That second envelope must preserve the first one.
+func TestOwnerManager_GenericFailurePreservesRuntimeOutcome(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "node-1")
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+	_, err := mgr.Complete(runID, taskA, TaskStatusFailed, "resource_failure", "runtime OOM", "node-1", nil, nil)
+	require.NoError(t, err)
+	var before models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&before).Error)
+	_, err = mgr.Complete(runID, taskA, TaskStatusFailed, "", "attempts exhausted", "node-1", nil, nil)
+	require.NoError(t, err)
+	var after models.TaskRun
+	require.NoError(t, db.First(&after, "id = ?", before.ID).Error)
+	require.Equal(t, "resource_failure", after.Result)
+	require.Equal(t, before.Error, after.Error)
+	require.Equal(t, before.CompletedAt, after.CompletedAt)
+	require.Equal(t, before.TerminalSequence, after.TerminalSequence)
+}
+
 // TestOwnerManager_RedeliveryAfterFailedPersistWritesTerminalRows models the
 // case that makes the re-delivery live: the first delivery advanced the DAG in
 // memory and then its durable write failed (transient contention → 503), so the

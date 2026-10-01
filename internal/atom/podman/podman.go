@@ -37,6 +37,7 @@ var (
 )
 
 type podmanBackend interface {
+	ContainerStats(context.Context, string) (atom.ResourceStats, error)
 	ContainerInspect(string) (*define.InspectContainerData, error)
 	ContainerList(map[string][]string, bool) ([]entities.ListContainer, error)
 	ContainerCreate(*specgen.SpecGenerator) (entities.ContainerCreateResponse, error)

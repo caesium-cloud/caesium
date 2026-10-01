@@ -403,6 +403,10 @@ thing that changes OOM classification (release-noted).
       identical retry from firing on OOM — Stream C's escalation replaces it.
       **AND persist the flag — nothing else does.** `TaskRun.OOMKilled` is the
       evidence the classifier branch stands on, and no other item writes it:
+      persist `OOMKnown` beside it so an observed `false` verdict is distinct
+      from unavailable inspect evidence. A known non-OOM `137` suppresses only
+      the default `137 → oom` fallback; unavailable evidence and explicit custom
+      exit-code mappings retain their existing behavior.
       A1 adds the column + setter, A3 owns the *sampler's*
       `PeakMemoryBytes`/`CPUSeconds`/`StatsSource` writes only. So at task
       completion, alongside the two shipped `store.SetTaskExitCode(...,

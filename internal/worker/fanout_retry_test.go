@@ -277,3 +277,7 @@ func TestWorkerSchemaViolationsRecordOnTheOffendingInstance(t *testing.T) {
 	require.Empty(t, clean.SchemaViolations,
 		"a sibling that emitted valid output must not inherit the violation")
 }
+
+func (e *attemptResultEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

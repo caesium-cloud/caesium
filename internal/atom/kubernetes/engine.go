@@ -52,8 +52,9 @@ type Engine interface {
 }
 
 type kubernetesEngine struct {
-	ctx     context.Context
-	backend kubernetesBackend
+	ctx         context.Context
+	backend     kubernetesBackend
+	statsClient rest.Interface
 }
 
 // getKubernetesCore resolves the CoreV1 client from the local kubeconfig,
@@ -113,9 +114,14 @@ func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) (Engine, err
 		}
 	}
 
+	statsClient := backend.RESTClient()
+	if concrete, ok := statsClient.(*rest.RESTClient); ok && concrete == nil {
+		statsClient = nil
+	}
 	return &kubernetesEngine{
-		ctx:     ctx,
-		backend: backend.Pods(env.Variables().KubernetesNamespace),
+		ctx:         ctx,
+		backend:     backend.Pods(env.Variables().KubernetesNamespace),
+		statsClient: statsClient,
 	}, nil
 }
 

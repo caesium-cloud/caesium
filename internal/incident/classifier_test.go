@@ -7,6 +7,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 )
 
+func intPtr(value int) *int { return &value }
+
 func TestClassifyStructuredSignals(t *testing.T) {
 	c := NewClassifier()
 	cases := []struct {
@@ -19,7 +21,10 @@ func TestClassifyStructuredSignals(t *testing.T) {
 		{"schema_event", Signal{EventType: string(event.TypeSchemaViolationRecorded)}, ClassSchemaViolation},
 		{"schema_flag", Signal{EventType: string(event.TypeTaskFailed), HasSchemaViolations: true}, ClassSchemaViolation},
 		{"startup_failure", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.StartupFailure)}, ClassTransientInfra},
+		{"resource_failure_oom", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.ResourceFailure), OOMKilled: true}, ClassOOM},
 		{"resource_failure", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.ResourceFailure)}, ClassTransientInfra},
+		{"legacy_exit_137_without_runtime_evidence", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: intPtr(137)}, ClassOOM},
+		{"observed_non_oom_exit_137", Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: intPtr(137), OOMKnown: true}, ClassUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,9 +70,19 @@ func TestClassifyLogFallsBackToErrorText(t *testing.T) {
 
 func TestClassifyExitCodeTable(t *testing.T) {
 	c := NewClassifier()
-	got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: new(137)})
-	if got != ClassOOM {
-		t.Fatalf("expected oom from exit 137, got %q", got)
+	if got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: new(137)}); got != ClassOOM {
+		t.Fatalf("expected oom from unavailable exit 137, got %q", got)
+	}
+	if got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: new(137), OOMKnown: true}); got != ClassUnknown {
+		t.Fatalf("expected unknown from observed non-OOM exit 137, got %q", got)
+	}
+}
+
+func TestClassifyObservedNonOOMPreservesCustom137Rule(t *testing.T) {
+	c := NewClassifier().WithExitCodeRule(137, ClassTransientInfra)
+	got := c.Classify(Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.Killed), ExitCode: new(137), OOMKnown: true, OOMKilled: false})
+	if got != ClassTransientInfra {
+		t.Fatalf("expected custom 137 class from observed non-OOM exit, got %q", got)
 	}
 }
 

@@ -250,3 +250,7 @@ func TestLocalRunEngineFactoryOverridesEveryEngineKind(t *testing.T) {
 		})
 	}
 }
+
+func (e *fakeLocalEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

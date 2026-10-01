@@ -765,3 +765,7 @@ func TestWorkerPersistsHashOnTheInstanceRow(t *testing.T) {
 		require.Empty(t, row.HashInputBlob)
 	}
 }
+
+func (e *partitionEmittingEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
+	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}

@@ -176,6 +176,14 @@ type TaskRun struct {
 	ClaimAttempt     int                       `json:"claim_attempt"`
 	Attempt          int                       `json:"attempt"`
 	MaxAttempts      int                       `json:"max_attempts"`
+	ExitCode         *int                      `json:"exit_code,omitempty"`
+	PeakMemoryBytes  *int64                    `json:"peak_memory_bytes,omitempty"`
+	CPUSeconds       *float64                  `json:"cpu_seconds,omitempty"`
+	StatsSource      string                    `json:"stats_source,omitempty"`
+	OOMKnown         bool                      `json:"oom_known,omitempty"`
+	OOMKilled        bool                      `json:"oom_killed,omitempty"`
+	AppliedResources datatypes.JSON            `json:"applied_resources,omitempty"`
+	EscalationLevel  int                       `json:"escalation_level,omitempty"`
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`
 	SchemaViolations []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
@@ -4418,6 +4426,13 @@ func (s *Store) CompleteTaskOwner(
 				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
 				Where("EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = ? AND job_runs.status = ?)", runID, string(StatusRunning))
 			if err := tq.First(&taskRun).Error; err == nil {
+				// A terminal row and its companion skips/expansion committed
+				// atomically. Redelivery must not replace that outcome (the
+				// worker can send a generic Failed after its precise completion)
+				// or count the same attempt in metrics/events twice.
+				if IsTerminal(TaskStatus(taskRun.Status)) {
+					return nil
+				}
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
 					if !taskRun.Quarantine && !jobRun.Quarantine {
@@ -5534,27 +5549,25 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 				return nil
 			}
 
+			updates := TaskResourceResetColumns()
+			maps.Copy(updates, map[string]any{
+				"status": string(TaskStatusPending),
+				// A new owner must be able to claim the replacement runtime.
+				"claimed_by":             "",
+				"claim_expires_at":       nil,
+				"runtime_id":             "",
+				"started_at":             nil,
+				"rate_limit_retry_after": nil,
+				"cache_hit":              false,
+				"cache_origin_run_id":    nil,
+				"cache_created_at":       nil,
+				"cache_expires_at":       nil,
+			})
 			for _, chunk := range chunkTaskRunIDs(ids) {
 				if err := tx.Model(&models.TaskRun{}).
-					// The status predicate is the guard, not the id list: a row
-					// that completed since the pluck is terminal and stays
-					// terminal.
+					// A row that completed since the pluck stays terminal.
 					Where("id IN ? AND status = ?", chunk, string(TaskStatusRunning)).
-					Updates(WithInvalidatedSecretLogSnapshot(map[string]any{
-						"status": string(TaskStatusPending),
-						// Clear the claim too, so a new owner taking over a run can re-claim
-						// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
-						// owner's worker that held the claim is gone (its lease expired).
-						"claimed_by":             "",
-						"claim_expires_at":       nil,
-						"runtime_id":             "",
-						"started_at":             nil,
-						"rate_limit_retry_after": nil,
-						"cache_hit":              false,
-						"cache_origin_run_id":    nil,
-						"cache_created_at":       nil,
-						"cache_expires_at":       nil,
-					})).Error; err != nil {
+					Updates(WithInvalidatedSecretLogSnapshot(updates)).Error; err != nil {
 					return err
 				}
 			}
@@ -6102,6 +6115,14 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		ClaimAttempt:            model.ClaimAttempt,
 		Attempt:                 model.Attempt,
 		MaxAttempts:             model.MaxAttempts,
+		ExitCode:                model.ExitCode,
+		PeakMemoryBytes:         model.PeakMemoryBytes,
+		CPUSeconds:              model.CPUSeconds,
+		StatsSource:             model.StatsSource,
+		OOMKnown:                model.OOMKnown,
+		OOMKilled:               model.OOMKilled,
+		AppliedResources:        append(datatypes.JSON(nil), model.AppliedResources...),
+		EscalationLevel:         model.EscalationLevel,
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,
@@ -6225,6 +6246,12 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 			head.HasUnresolvedImageIdentity = head.HasUnresolvedImageIdentity || inst.HasUnresolvedImageIdentity
 		}
 		if n > 1 {
+			// Resource measurements describe an instance, never the arbitrary
+			// first sibling selected for this collapsed group. Read partitions
+			// for the individual observations.
+			head.ExitCode, head.PeakMemoryBytes, head.CPUSeconds = nil, nil, nil
+			head.StatsSource, head.OOMKnown, head.OOMKilled = "", false, false
+			head.AppliedResources, head.EscalationLevel = nil, 0
 			modelsRows := make([]models.TaskRun, 0, n)
 			var firstStart *time.Time
 			var lastEnd *time.Time
@@ -6950,7 +6977,8 @@ func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
 //
 // A retried instance must be indistinguishable from one that has never run.
 func retryResetColumns() map[string]any {
-	return map[string]any{
+	updates := TaskResourceResetColumns()
+	maps.Copy(updates, map[string]any{
 		// Scheduling.
 		"status":           string(TaskStatusPending),
 		"completed_at":     nil,
@@ -6974,10 +7002,10 @@ func retryResetColumns() map[string]any {
 		"log_generation":          "",
 		"schema_violations":       nil,
 		"data_violations":         nil,
-		"exit_code":               nil,
 		"rate_limit_retry_after":  nil,
 		"partition_retry_pending": false,
-	}
+	})
+	return updates
 }
 
 // satisfiedPredecessorTaskIDsTx returns the catalog task IDs whose whole
