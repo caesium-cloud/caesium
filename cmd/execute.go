@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/reproduce"
 	"github.com/caesium-cloud/caesium/cmd/run"
 	"github.com/caesium-cloud/caesium/cmd/start"
+	"github.com/caesium-cloud/caesium/cmd/system"
 	"github.com/caesium-cloud/caesium/cmd/test"
 	"github.com/caesium-cloud/caesium/cmd/trigger"
 	"github.com/caesium-cloud/caesium/cmd/verify"
@@ -39,6 +40,7 @@ var cmds = []*cobra.Command{
 	receipt.Cmd,
 	run.Cmd,
 	start.Cmd,
+	system.Cmd,
 	test.Cmd,
 	trigger.Cmd,
 	verify.Cmd,

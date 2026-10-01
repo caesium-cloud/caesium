@@ -368,6 +368,9 @@ func logSuccessfulAction(
 		entry.ResourceType = "cache"
 	case auth.ActionCacheDelete:
 		entry.ResourceType = "cache"
+	case auth.ActionClusterMemberRemove:
+		entry.ResourceType = "cluster_member"
+		entry.ResourceID = c.Param("id")
 	}
 
 	logAuditFailure(auditor.Log(entry))
@@ -403,6 +406,8 @@ func auditActionForRoute(method, routePath string) string {
 		return auth.ActionCacheDelete
 	case "DELETE /v1/jobs/:id/cache/:id":
 		return auth.ActionCacheDelete
+	case "DELETE /v1/system/nodes/:id":
+		return auth.ActionClusterMemberRemove
 	default:
 		return ""
 	}

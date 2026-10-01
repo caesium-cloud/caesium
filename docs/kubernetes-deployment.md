@@ -332,22 +332,88 @@ container decides between the two (#582):
   or
   `no dqlite bootstrap peer answered within the probe window; bootstrapping a new cluster`.
 
-The lost member's old entry is not removed. It stays in the raft configuration
-under its old node ID (for the original ordinal 0 that is dqlite's bootstrap
-ID) at the old pod address. go-dqlite's role adjustment promotes the new member
-to voter and demotes the unreachable old entry to a spare, so the cluster is
-back to three live voters and the stale spare has no vote. It is harmless but
-is listed by `GET /v1/system/nodes` and direct dqlite `Cluster` calls.
+### Removing the lost member's entry
 
-Residual risks:
+The replacement does not take over the lost member's raft entry. That entry
+stays in the configuration under its old node ID (for the original ordinal 0,
+dqlite's bootstrap ID `3297041220608546238`) at the old pod address. go-dqlite's
+role adjustment, which runs on the leader every 30 s, promotes the new member
+to voter and then demotes the unreachable entry to a spare, so the cluster is
+back to three live voters within about a minute. Nothing removes the spare. It
+has no vote, but every member's `/health` keeps reporting the cluster's nodes
+as degraded because a member is unreachable. It also stays in
+`GET /v1/system/nodes` and keeps its old address. Once the replacement is Ready,
+remove it:
 
+```sh
+# The stale entry is a spare (or standby) whose reachability is "unreachable".
+kubectl exec caesium-1 -c caesium -- caesium system nodes list
+# ID                    ADDRESS           ROLE   REACHABILITY  LEADER
+# 3297041220608546238   10.244.2.5:9001   spare  unreachable   false
+# ...
+
+kubectl exec caesium-1 -c caesium -- caesium system nodes remove 3297041220608546238
+# Removed dqlite member 3297041220608546238 (10.244.2.5:9001, was spare); the configuration now has 3 members.
+```
+
+The command calls `DELETE /v1/system/nodes/<id>`, where `<id>` is the decimal
+`id` that `GET /v1/system/nodes` and `/health` (`checks.cluster.members`)
+report. When authentication is enabled the route needs an unscoped **admin**
+key, and a job-scoped key is refused. From outside the pod, pass `--server` and
+set `CAESIUM_API_KEY`. The removal is written to the audit log as
+`cluster.member_remove`. When authentication is disabled the route is as open as
+the rest of the API, but the checks below still apply.
+
+The server checks the leader's current configuration, probes the addresses,
+checks the configuration again, and removes the entry through the leader. It
+removes the entry only if every check passes. Otherwise it changes nothing and
+answers with a machine-readable reason. `caesium system nodes remove` then
+exits non-zero with the reason on stderr. With `--json`, stdout carries the
+server's answer either way: `{"status":"removed",...}` with the removed member
+and the remaining configuration, or `{"status":"refused","reason":...,"reasons":[...],"retryable":...}`.
+`reasons` lists every configuration reason that applies, not only the first.
+
+| Reason | HTTP | Meaning | What to do |
+| --- | --- | --- | --- |
+| `not_a_member` | 404 | No member has this ID. It was never a member or is already removed. | Nothing, if you just removed it. Otherwise check the ID. |
+| `local_node` | 409 | The ID is the node serving the request. | That member is alive. Check the ID. |
+| `leader` | 409 | The ID is the current leader. | That member is alive. Check the ID. |
+| `voter` | 409 | The member still has a vote. | If `retryable` is true, the member is unreachable and not yet demoted. Wait up to a minute for role adjustment and run the command again. Otherwise it is a live voter. |
+| `insufficient_voters` | 409 | The configuration would be left with fewer than three voters. | Restore the cluster to three voters first. |
+| `reachable` | 409 | A dqlite node answers at the entry's address. | The member is not gone. If a new pod was given the lost member's address, see below. |
+| `voters_unreachable` | 409 | At least one voter does not answer. | Bring every voter back before changing membership. |
+| `configuration_change_in_progress` | 409 | The leader is applying another membership or role change. | Run it again. A promotion stalled on an unreachable member holds changes off for up to about a minute. |
+| `no_leader` | 503 | No leader could be reached, or leadership moved during the request. | Run it again once the cluster has a leader. |
+| `invalid_id` | 400 | The ID is not a decimal dqlite node ID. | Use an ID from `caesium system nodes list`. |
+| `not_clustered` | 409 | This deployment does not run dqlite. | Nothing to remove. |
+
+`retryable` is true only for `configuration_change_in_progress`, `no_leader`,
+and an unreachable `voter` that role adjustment has yet to demote. Every other
+refusal needs an operator action or a different ID.
+
+The F2 lifecycle qualification exercises this command after an ordinal-1 and
+an ordinal-0 disk-loss replacement. It first checks that removing the leader or
+a live voter is refused. It then removes the stale entries and checks that
+they are gone from every member's own raft configuration and `/health` view.
+
+Residual risks and limits:
+
+- Removal is manual. Nothing removes a stale entry on its own. A stale spare is
+  harmless to quorum, so skipping the removal only leaves health degraded.
 - If ordinal 0 loses its disk while **every** other member is unreachable at
   once (for example, all pods are being rescheduled), both probes find nothing
   and ordinal 0 bootstraps an empty cluster of its own. Replace one member at a
   time and do not delete ordinal 0's PVC while the other members are down.
 - If the replacement pod is given exactly the old pod's IP, raft refuses the
-  join because the stale entry holds that address; the pod stays not Ready
-  instead of serving a divergent database. Deleting the pod again gets a new IP.
+  join because the stale entry holds that address, and the pod stays not Ready
+  instead of serving a divergent database. The removal refuses too
+  (`reachable`), because the protocol cannot tell which node answers at an
+  address. Delete the pod so it gets a new IP, then remove the entry. This
+  path is not covered by the qualification.
+- Removal does not fence the old identity. If the lost member's volume turns
+  out not to be lost and a pod starts on it again, Caesium's membership repair
+  treats the missing entry like an interrupted repair and adds that node back
+  under its old ID. Delete such a PVC rather than reattach it.
 
 ## Air-Gapped Deployment Notes
 

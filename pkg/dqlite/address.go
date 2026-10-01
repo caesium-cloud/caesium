@@ -525,8 +525,10 @@ func repairClusterAddress(ctx context.Context, dir string, id uint64, address st
 	if current == nil {
 		// This node holds a data directory for the cluster but is not in the
 		// configuration, which is what a repair interrupted between its remove
-		// and its re-add leaves behind. Nothing else in Caesium removes a
-		// member, so finish the job rather than run on as a non-member.
+		// and its re-add leaves behind. The only other removal Caesium makes is
+		// an operator's RemoveStaleMember, which refuses any member that
+		// answers, so a node reaching here was removed while it was gone. Finish
+		// the job rather than run on as a non-member.
 		log.Warn("this node is absent from the dqlite cluster configuration; rejoining",
 			"node_id", id, "node_address", address, "role", role.String())
 		if err := writeYAMLFile(dir, repairFileName, addressRepair{ID: id, Address: address, Role: role}); err != nil {
