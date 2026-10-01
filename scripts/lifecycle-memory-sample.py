@@ -846,6 +846,15 @@ def load_samples(path: Path, lifecycle_id: str) -> list[dict]:
     return samples
 
 
+def in_write_samples(samples: list[dict], member: str, batch: int) -> list[dict]:
+    """The in-write rule: a readable sample from round 1 on. Round 0 can land
+    before the batch's first catalog write, so it never counts. The watcher
+    asks the same question (`covered`) to decide when to slow its cadence."""
+    return [sample for sample in samples
+            if sample.get("member") == member and sample.get("batch") == batch
+            and sample.get("readings_ok") and int(sample.get("round") or 0) >= 1]
+
+
 def gap_reasons(samples: list[dict], batches: list[int], apply_batch: int | None) -> list[str]:
     reasons = []
     if not batches:
@@ -856,8 +865,7 @@ def gap_reasons(samples: list[dict], batches: list[int], apply_batch: int | None
                     if sample.get("member") == member and sample.get("batch") == batch]
             if not rows:
                 reasons.append(f"{member} batch {batch} has no memory sample")
-            elif not any(sample.get("readings_ok") and int(sample.get("round") or 0) >= 1
-                         for sample in rows):
+            elif not in_write_samples(rows, member, batch):
                 reasons.append(
                     f"{member} batch {batch} has no in-write memory sample; a pre-write round does not count")
     if apply_batch is not None:
@@ -1075,6 +1083,22 @@ def cmd_finish(argv: list[str]) -> int:
     return code
 
 
+def cmd_covered(argv: list[str]) -> int:
+    """Exit 0 once every survivor has --min in-write samples for --batch."""
+    parser = argparse.ArgumentParser(prog="lifecycle-memory-sample.py covered")
+    parser.add_argument("--lifecycle-id", required=True)
+    parser.add_argument("--jsonl", required=True, type=Path)
+    parser.add_argument("--batch", required=True, type=int)
+    parser.add_argument("--min", type=int, default=1)
+    args = parser.parse_args(argv)
+    if args.min < 1:
+        parser.error("min must be >= 1")
+    samples = load_samples(args.jsonl, args.lifecycle_id)
+    if all(len(in_write_samples(samples, member, args.batch)) >= args.min for member in MEMBERS):
+        return 0
+    return 1
+
+
 
 # --- #583 attribution ---------------------------------------------------------
 CLOSED_SEGMENT_RE = re.compile(r"(?:^|/)(\d{16})-(\d{16})$")
@@ -1264,7 +1288,7 @@ def cmd_attribute(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         sys.stderr.write(
-            "usage: lifecycle-memory-sample.py emit-probe|sample|finish|attribute\n")
+            "usage: lifecycle-memory-sample.py emit-probe|sample|finish|covered|attribute\n")
         return 2
     command = argv[1]
     if command == "emit-probe":
@@ -1276,6 +1300,8 @@ def main(argv: list[str]) -> int:
         return cmd_sample(argv[2:])
     if command == "finish":
         return cmd_finish(argv[2:])
+    if command == "covered":
+        return cmd_covered(argv[2:])
     if command == "attribute":
         return cmd_attribute(argv[2:])
     sys.stderr.write(f"unknown command {command}\n")

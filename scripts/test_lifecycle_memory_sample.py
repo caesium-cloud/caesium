@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -392,6 +393,154 @@ fi
         self.assertIn('lc_stop_phase_group "${LC_PHASE_PID:-}"', controller)
         self.assertIn("lc_stop_phase_group \"$LC_PHASE_PID\"", controller)
 
+    # --- #604: watcher cadence against short and long write batches ---------
+
+    def watched_batch(self, seconds, knobs=""):
+        """Run one snapshot write batch of `seconds` through the real watcher and
+        sampler (a fake kubectl runs the probe against the fixture tree), then
+        publish it through lc_snapshot_case. Returns (status, rows, end_epoch)."""
+        metrics = self.v2_tree()
+        art = self.root / "art"
+        (art / "cluster-logs").mkdir(parents=True, exist_ok=True)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        kubectl = bin_dir / "kubectl"
+        kubectl.write_text(
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "  *\" get pod \"*) printf 'containerd://abc 0' ;;\n"
+            "  *\" exec \"*) exec /bin/sh -s ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n")
+        kubectl.chmod(0o755)
+        evidence = art / "proof.json"
+        evidence.write_text('{"truncation_proved": true}\n')
+        script = f'''
+set -euo pipefail
+ROOT={ROOT}
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
+lc_case() {{ printf '%s\\n' "$2" > "$LC_ART/status"; }}
+lc_phase() {{ sleep {seconds}; date +%s > "$LC_ART/batch-end"; }}
+lc_base() {{ :; }}
+LC_ART={art}
+LC_ID={self.lifecycle_id}
+LC_KUBE=unused
+LC_CAND_ID=cand
+LC_MEM_ACTIVE=0
+LC_MEM_BATCHES=
+LC_MEM_APPLY_BATCH=
+LC_MEM_SEQ=0
+LC_MEM_SAMPLE_CAP=40
+LC_PHASE_PID=
+LC_SNAP_RC=0
+{knobs}
+lc_run_snapshot_phase 1
+[[ "$LC_SNAP_RC" == 0 ]]
+lc_snapshot_case pass "would pass" {evidence}
+'''
+        env = self.probe_env(metrics, path=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        for key in ("LC_MEM_INTERVAL", "LC_MEM_FAST_INTERVAL", "LC_MEM_IN_WRITE_TARGET"):
+            env.pop(key, None)
+        result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True,
+                                timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in
+                (art / "cluster-logs/snapshot-memory-samples.jsonl").read_text().splitlines()]
+        self.assertTrue(rows)
+        self.assertTrue(all(row["readings_ok"] for row in rows), rows)
+        end = int((art / "batch-end").read_text())
+        return (art / "status").read_text().strip(), rows, end
+
+    @staticmethod
+    def rounds(rows, member):
+        return sorted(row["round"] for row in rows if row["member"] == member)
+
+    def test_fast_batch_has_no_in_write_sample_under_the_old_fixed_cadence(self):
+        # The pre-#604 watcher: round 0, then a 15 s wait before any in-write
+        # round. A 4 s batch (master's 500-update batch is ~5.5 s) ends first.
+        status, rows, _ = self.watched_batch(
+            4, "LC_MEM_INTERVAL=15\nLC_MEM_FAST_INTERVAL=15\nLC_MEM_IN_WRITE_TARGET=2")
+        self.assertEqual(status, "blocked")
+        for member in self.module.MEMBERS:
+            self.assertEqual(self.rounds(rows, member), [0])
+        document = json.loads((self.root / "art/cluster-logs/snapshot-memory-case.json").read_text())
+        self.assertTrue(document["memory_samples"]["gap"])
+        self.assertIn("caesium-0 batch 1 has no in-write memory sample",
+                      document["memory_samples"]["gap_detail"])
+
+    def test_fast_batch_gets_in_write_samples_under_the_default_cadence(self):
+        status, rows, end = self.watched_batch(4)
+        self.assertEqual(status, "pass")
+        for member in self.module.MEMBERS:
+            rounds = self.rounds(rows, member)
+            self.assertEqual(rounds[0], 0)
+            self.assertGreaterEqual(len([r for r in rounds if r >= 1]), 1, rounds)
+        stamps = [int(datetime.strptime(row["timestamp"], "%Y-%m-%dT%H:%M:%SZ")
+                      .replace(tzinfo=timezone.utc).timestamp())
+                  for row in rows if row["round"] >= 1]
+        self.assertTrue(stamps and max(stamps) <= end, (stamps, end))
+        document = json.loads((self.root / "art/cluster-logs/snapshot-memory-case.json").read_text())
+        self.assertFalse(document["memory_samples"]["gap"])
+
+    def test_cadence_slows_once_each_survivor_has_its_in_write_target(self):
+        # Scaled long batch: 1 s short cadence, target 2, long cadence 30 s.
+        # Rounds 1 and 2 meet the target; a fourth round would land at ~4 s
+        # if the short cadence had not stopped.
+        status, rows, _ = self.watched_batch(
+            5, "LC_MEM_INTERVAL=30\nLC_MEM_FAST_INTERVAL=1\nLC_MEM_IN_WRITE_TARGET=2")
+        self.assertEqual(status, "pass")
+        for member in self.module.MEMBERS:
+            self.assertEqual(self.rounds(rows, member), [0, 1, 2])
+
+    def test_in_write_round_skips_members_once_the_batch_is_done(self):
+        done = self.root / "phase.rc"
+        calls = self.root / "calls"
+        script = f'''
+set -euo pipefail
+ROOT={ROOT}
+source "$ROOT/scripts/lifecycle-snapshot-phase.sh"
+lc_memory_sample_member() {{ printf '%s %s\\n' "$1" "$5" >> {calls}; printf '0\\n' > {done}; }}
+lc_memory_sample_members cadence 1 1 {done}
+lc_memory_sample_members post-batch 1 0
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The in-write round stops after the batch ends; a paired post-batch
+        # sample (round 0, never in-write) still covers both members.
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["caesium-0 1", "caesium-0 0", "caesium-1 0"])
+
+    def test_covered_cli_applies_the_publishers_in_write_rule(self):
+        jsonl = self.root / "covered.jsonl"
+
+        def row(member, round_index, ok=True, batch=1, lifecycle=None):
+            return {"lifecycle_id": lifecycle or self.lifecycle_id, "member": member,
+                    "batch": batch, "round": round_index, "readings_ok": ok,
+                    "reason": "cadence"}
+
+        def covered(rows, minimum):
+            jsonl.write_text("".join(json.dumps(item) + "\n" for item in rows))
+            return subprocess.run([
+                sys.executable, str(SCRIPT), "covered", "--lifecycle-id", self.lifecycle_id,
+                "--jsonl", str(jsonl), "--batch", "1", "--min", str(minimum),
+            ], capture_output=True, text=True).returncode
+
+        pre = [row("caesium-0", 0), row("caesium-1", 0)]
+        self.assertEqual(covered(pre, 1), 1)
+        one = pre + [row("caesium-0", 1), row("caesium-1", 1)]
+        self.assertEqual(covered(one, 1), 0)
+        self.assertEqual(covered(one, 2), 1)
+        unreadable = one + [row("caesium-0", 2), row("caesium-1", 2, ok=False)]
+        self.assertEqual(covered(unreadable, 2), 1)
+        foreign = one + [row("caesium-0", 2), row("caesium-1", 2, batch=2),
+                         row("caesium-1", 2, lifecycle="other")]
+        self.assertEqual(covered(foreign, 2), 1)
+        self.assertEqual(covered(one + [row("caesium-0", 2), row("caesium-1", 2)], 2), 0)
+        # The publisher agrees: the pre-write rows alone are a gap.
+        _, code = self.module.publish(samples=pre, lifecycle_id=self.lifecycle_id, batches=[1],
+                                      apply_batch=None, evidence={"ok": True})
+        self.assertEqual(code, 2)
+
     def test_lifecycle_chart_keeps_1gi_limit_and_topology(self):
         text = VALUES.read_text()
         self.assertEqual(re.findall(r"(?m)^[ \t]*memory:\s*(\S+)\s*$", text), ["128Mi", "1Gi"])
@@ -658,6 +807,12 @@ Swap:                  0 kB
         paired = controller.index('lc_memory_sample_members post-batch "$LC_BATCH" 0', listing)
         self.assertLess(paired - listing, 400)
         self.assertIn('lifecycle-memory-sample.py" attribute --artifact-root "$LC_ART"', controller)
+        # #604: the watcher cadence knobs default to 2 s until two in-write
+        # samples per survivor, then 15 s, bounded by 40 rounds.
+        self.assertIn('LC_MEM_INTERVAL="${LC_MEM_INTERVAL:-15}"', controller)
+        self.assertIn('LC_MEM_FAST_INTERVAL="${LC_MEM_FAST_INTERVAL:-2}"', controller)
+        self.assertIn('LC_MEM_IN_WRITE_TARGET="${LC_MEM_IN_WRITE_TARGET:-2}"', controller)
+        self.assertIn("LC_MEM_SAMPLE_CAP=40", controller)
         # A soak batch that loses the truncation proof blocks the case.
         self.assertIn("no longer held at soak batch", controller)
 
