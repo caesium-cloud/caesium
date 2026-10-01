@@ -143,9 +143,10 @@ class CommittedManifestTests(unittest.TestCase):
                 self.assertEqual(item["gates"], [], item["id"])
             covered.update(item["contract_ids"])
             owners.add(item["owner_item"])
-            # No runner exists for these owners yet, so they must not claim
-            # evidence of any kind.
-            if item["owner_item"] in {"B2", "B3", "D3"}:
+            # G6 wired B3's TestCore and D3's console journey into gated lanes;
+            # B2's TestTargetedFaults still has no gated runner, so its rows
+            # must not claim evidence of any kind.
+            if item["owner_item"] == "B2":
                 self.assertEqual(item["status"], "absent", item["id"])
         self.assertEqual(covered, set(CONTRACTS))
         self.assertTrue({"B1", "E5"} <= owners)

@@ -17,13 +17,44 @@ on:
     branches: [master]
   merge_group:
     types: [checks_requested]
+  # distributed-testing G6: the nightly system-suite set, runnable on demand
+  # until G4 schedules it (.github/workflows/testing-qualification.yml). A
+  # non-empty `nightly` runs ONLY the named lanes (every path output of
+  # `changes` is false, so the PR matrix and ci-ok's promoted lanes skip);
+  # an empty one is a push-equivalent full run. Nightly results are broader
+  # evidence, never per-PR proof.
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: >-
+          Comma-separated nightly lanes: cluster-lifecycle, console-recovery,
+          performance, core-robustness (instrumented TestCore), or all.
+          Empty = push-equivalent full run.
+        type: string
+        default: ''
+      performance-mode:
+        description: advisory records the performance verdict; enforcing requires the calibrated gate to pass.
+        type: choice
+        options: [advisory, enforcing]
+        default: advisory
+      performance-base:
+        description: Base SHA for the performance comparison (empty = same-code A/A control).
+        type: string
+        default: ''
+      performance-runs:
+        description: JSON list of parallel performance runs, e.g. [1,2,3] for an A/A calibration set.
+        type: string
+        default: '[1]'
 
 concurrency:
   # A merge_group run must never share a group with, or be cancelled by, a PR
   # run: name its group from the queue entry's own head SHA rather than
   # falling through to `github.ref` (which merge_group also sets, but keying
   # off it here would tie the two event types' fates together implicitly).
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'merge_group' && format('mergegroup-{0}', github.event.merge_group.head_sha)) || github.ref }}
+  # A workflow_dispatch run keys off its own run id, so concurrent nightly
+  # dispatches (e.g. an A/A calibration set) never queue behind or cancel
+  # each other or a master push.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'merge_group' && format('mergegroup-{0}', github.event.merge_group.head_sha)) || (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id)) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -115,10 +146,36 @@ jobs:
           HELM: ${{ steps.filter.outputs.helm }}
           REAGENTS: ${{ steps.filter.outputs.reagents }}
           CI: ${{ steps.filter.outputs.ci }}
+          NIGHTLY: ${{ inputs.nightly }}
         run: |
           set -euo pipefail
-          # push (master/tag) never path-filters: every output is true. This
-          # is the only event allowed to skip the checkout/filter steps above.
+          # distributed-testing G6: a workflow_dispatch that names nightly
+          # lanes runs ONLY those lanes. Every path output is false, so the PR
+          # matrix and ci-ok's promoted lanes are deselected (not failed). An
+          # unknown lane name fails here rather than silently running nothing.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "${NIGHTLY:-}" ]; then
+            for lane in ${NIGHTLY//,/ }; do
+              case "$lane" in
+                all|cluster-lifecycle|console-recovery|performance|core-robustness) ;;
+                *)
+                  echo "changes: unknown nightly lane '$lane' in '$NIGHTLY'" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            {
+              echo "go=false"
+              echo "ui=false"
+              echo "helm=false"
+              echo "reagents=false"
+              echo "ci=false"
+              echo "images=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # push (master/tag) and a push-equivalent dispatch never path-filter:
+          # every output is true. These are the only events allowed to skip the
+          # checkout/filter steps above.
           if [ "$EVENT" != "pull_request" ] && [ "$EVENT" != "merge_group" ]; then
             {
               echo "go=true"
@@ -308,6 +365,21 @@ jobs:
         with:
           name: robustness-amd64
           images: caesiumcloud/caesium-robustness:${{ env.IMAGE_TAG }}-amd64
+      # distributed-testing G6: the producer records the release image's id at
+      # build time, so a consumer that runs a supplied image (lifecycle-standalone)
+      # can bind what it qualified to what this job built from this commit.
+      - name: Record release image identity
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/image-ids-amd64
+          docker image inspect --format '{{.Id}}' "caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64" >/tmp/image-ids-amd64/release.txt
+          cat /tmp/image-ids-amd64/release.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-ids-amd64
+          path: /tmp/image-ids-amd64/
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@v7
         with:
           name: release-cli-amd64
@@ -1321,10 +1393,10 @@ jobs:
   # absent fault-activation evidence.
   #
   # PROMOTED (distributed-testing G5): this lane is part of the fail-closed
-  # `ci-ok` aggregate, which also gates `publish`. `ci-ok` itself is NOT one of
-  # master's eight required status checks, so until a CODEOWNER adds it the
-  # promotion blocks tag publication, not PR merge. Every existing
-  # engine/architecture suite keeps running unchanged and unpromoted.
+  # `ci-ok` aggregate, which also gates `publish`. Since 2026-09-28 (W8, Q6)
+  # `ci-ok` is a required status check and the merge queue's condition, so the
+  # promotion blocks PR merge. Every existing engine/architecture suite keeps
+  # running unchanged and unpromoted.
   early-evidence:
     needs: [changes, images, helm-lint]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
@@ -1372,6 +1444,495 @@ jobs:
           path: .tmp/evidence/
           if-no-files-found: error
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # distributed-testing G6: the remaining complete system suites, each as its
+  # own job off the existing image artifacts, in parallel with early-evidence.
+  # Every lane reduces its artifacts to a scenario report with
+  # scripts/collect-lane-evidence.py and validates it against the committed
+  # manifest under its own gate inside the job; `ci-ok` then downloads that
+  # report and re-validates it against this run's candidate SHA, exactly as it
+  # does for early-evidence. A green job without a report fails the gate.
+  # ---------------------------------------------------------------------------
+
+  # F4 single-node v0.1.0 -> candidate upgrade qualification. The candidate is
+  # the release image `images` built from this commit; its producer-recorded
+  # image id binds the (explicitly overridden, recorded) supplied image.
+  lifecycle-standalone:
+    needs: [changes, builder, images]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: builder-amd64
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: product-amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: image-ids-amd64
+          path: .tmp/image-ids
+      - name: Single-node upgrade qualification
+        run: |
+          set -euo pipefail
+          expected="$(cat .tmp/image-ids/release.txt)"
+          CAESIUM_LIFECYCLE_CANDIDATE_IMAGE="caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64" \
+          CAESIUM_LIFECYCLE_ALLOW_UNVERIFIED_IMAGE=1 \
+          CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID="$expected" \
+          CAESIUM_LIFECYCLE_BUILDER_IMAGE="caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64" \
+            just tag=${{ env.IMAGE_TAG }}-amd64 lifecycle-standalone
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-standalone-evidence
+          path: .tmp/lane-evidence/lifecycle-standalone/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-standalone-artifacts
+          path: |
+            .tmp/lane-evidence/lifecycle-standalone/
+            !.tmp/lane-evidence/lifecycle-standalone/artifacts/lifecycle.test
+            !.tmp/lane-evidence/lifecycle-standalone/artifacts/cli/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # C2 native fuzzing in short mode plus the -race renewal repeat matrix.
+  generated-fuzz:
+    needs: [changes, builder]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: builder-amd64
+      # Go build and fuzz cache between runs: a cold cache spends most of the
+      # lane compiling (race and fuzz-instrumented builds). Content-addressed,
+      # so it can only miss; keyed on the dependency set and the fuzz script.
+      - name: Restore the Go fuzz build cache
+        uses: actions/cache@v4
+        with:
+          path: .tmp/fuzz-gocache
+          key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
+          restore-keys: |
+            fuzz-gocache-v1-amd64-
+      - name: Native fuzz targets (short mode)
+        run: CAESIUM_FUZZ_GOCACHE="$PWD/.tmp/fuzz-gocache" just tag=${{ env.IMAGE_TAG }}-amd64 generated-fuzz
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-fuzz-evidence
+          path: .tmp/lane-evidence/generated-fuzz/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-fuzz-artifacts
+          path: .tmp/lane-evidence/generated-fuzz/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # C3 checker-strength validator: eight known-bad mutations in an isolated
+  # clone must each be rejected by their named test.
+  generated-oracles:
+    needs: [changes, builder]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: builder-amd64
+      - name: Mutation validator
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 generated-oracles
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-oracles-evidence
+          path: .tmp/lane-evidence/generated-oracles/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-oracles-artifacts
+          path: .tmp/lane-evidence/generated-oracles/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # G2 coverage-instrumented CLI/server/browser collection against the
+  # committed ratchets. The diff floor needs the tested change's real Go paths:
+  # the base is the event's own (pull_request base / merge_group base / push
+  # before), fetched explicitly because the checkout is shallow.
+  coverage-ratchets:
+    needs: [changes, builder]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for the browser journey
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      # scripts/integration-coverage.sh pins the builder as `name@<image id>`
+      # for Docker FROM. That reference resolves locally only where an image id
+      # is a content digest (the containerd image store) AND the engine's
+      # BuildKit resolves a local digest reference (Docker Desktop's engine
+      # does; the hosted image's 28.0.4 goes to the registry instead). Upgrade
+      # the engine from Docker's own apt repository and switch the store before
+      # anything is loaded, rather than weaken the script's immutable pin.
+      - name: Docker engine with the containerd image store
+        run: |
+          set -euo pipefail
+          need=29.0
+          have="$(docker version --format '{{.Server.Version}}')"
+          echo "docker server $have"
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            sudo install -m 0755 -d /etc/apt/keyrings
+            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+              | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+          fi
+          conf=/etc/docker/daemon.json
+          if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
+          printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+          sudo systemctl restart docker
+          docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
+          docker info --format '{{json .DriverStatus}}'
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: builder-amd64
+      - name: Changed Go paths of the tested change
+        env:
+          DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/coverage-diff
+          base="${DIFF_BASE_SHA:-}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=2 origin "${{ github.sha }}"
+            base="$(git rev-parse "${{ github.sha }}^")"
+          else
+            git fetch --no-tags --depth=1 origin "$base"
+          fi
+          git diff --name-only --diff-filter=ACMR "$base" "${{ github.sha }}" -- '*.go' >.tmp/coverage-diff/changed-paths.txt
+          echo "diff base $base; $(wc -l <.tmp/coverage-diff/changed-paths.txt) changed Go path(s)"
+          echo "CAESIUM_COVERAGE_DIFF_BASE=$base" >>"$GITHUB_ENV"
+          echo "CAESIUM_COVERAGE_CHANGED_PATHS=$PWD/.tmp/coverage-diff/changed-paths.txt" >>"$GITHUB_ENV"
+      - name: Coverage collection against the ratchets
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 coverage-ratchets
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-ratchets-evidence
+          path: .tmp/lane-evidence/coverage-ratchets/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-ratchets-artifacts
+          path: .tmp/lane-evidence/coverage-ratchets/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Nightly set (distributed-testing G6, W8 decision record): not merge
+  # evidence. Each runs only when a workflow_dispatch names it in `nightly`
+  # (G4 schedules them later); each builds its own images from the dispatched
+  # commit, keeps its evidence and validates its registered manifest rows.
+  # ---------------------------------------------------------------------------
+
+  # F2 persistent three-voter upgrade/replacement/recovery qualification.
+  lifecycle-cluster:
+    needs: [changes]
+    if: contains(format(',{0},', inputs.nightly), ',cluster-lifecycle,') || contains(format(',{0},', inputs.nightly), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      # Cluster mode verifies single-platform OCI image archives with
+      # `docker image inspect --platform` (Docker >= 28.1; the hosted image
+      # ships 28.0.4) and reads each archive's platform descriptor, which only
+      # the containerd image store writes. Upgrade from Docker's own apt
+      # repository when older, and switch the store, before any image exists.
+      - name: Docker engine with the containerd image store
+        run: |
+          set -euo pipefail
+          need=28.1
+          have="$(docker version --format '{{.Server.Version}}')"
+          echo "docker server $have"
+          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+            sudo install -m 0755 -d /etc/apt/keyrings
+            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+              | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+            sudo apt-get update -q
+            sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+          fi
+          conf=/etc/docker/daemon.json
+          if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
+          printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+          sudo systemctl restart docker
+          docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
+          docker info --format '{{json .DriverStatus}}'
+      - name: Cluster lifecycle qualification
+        run: just lifecycle-cluster
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-cluster-evidence
+          path: .tmp/lane-evidence/lifecycle-cluster/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lifecycle-cluster-artifacts
+          path: |
+            .tmp/lane-evidence/lifecycle-cluster/
+            !.tmp/lane-evidence/lifecycle-cluster/**/*.tar
+            !.tmp/lane-evidence/lifecycle-cluster/**/kubeconfig*
+            !.tmp/lane-evidence/lifecycle-cluster/**/lifecycle.test
+          if-no-files-found: warn
+          retention-days: 30
+
+  # B3 fenced core suite with the testfault-instrumented server (gate
+  # nightly-core requires every b3 row, the durable-event crash included).
+  # Demoted from the merge budget (W8 decision record order): the measured
+  # PR lane ended 16m30s after `changes` started, past the 15-minute path.
+  core-robustness-nightly:
+    needs: [changes]
+    if: contains(format(',{0},', inputs.nightly), ',core-robustness,') || contains(format(',{0},', inputs.nightly), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      - name: Build the release, runner and instrumented images
+        run: just tag=${{ github.sha }} robustness-instrumented
+      - name: Fenced core suite with the instrumented server
+        run: |
+          CAESIUM_ROBUSTNESS_INSTRUMENTED_IMAGE="caesiumcloud/caesium:${{ github.sha }}-testfault" \
+            just tag=${{ github.sha }} core-robustness nightly-core
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-robustness-nightly-evidence
+          path: .tmp/lane-evidence/core-robustness/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-robustness-nightly-artifacts
+          path: .tmp/lane-evidence/core-robustness/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # D3 console journey across a real owner crash (TestOwnerCrash on a kept
+  # cluster, then the Playwright cluster-recovery project).
+  console-recovery:
+    needs: [changes]
+    if: contains(format(',{0},', inputs.nightly), ',console-recovery,') || contains(format(',{0},', inputs.nightly), ',all,')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for the console journey
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      - name: Console cluster-recovery journey
+        run: just tag=${{ github.sha }} console-recovery
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-recovery-evidence
+          path: .tmp/lane-evidence/console-recovery/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: console-recovery-artifacts
+          path: |
+            .tmp/lane-evidence/console-recovery/
+            ui/test-results/
+            ui/playwright-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # E4 performance gate. `performance-runs` fans out parallel runs on
+  # separate hosted runners (an A/A calibration set is [1,2,3]).
+  performance-gate:
+    needs: [changes]
+    if: contains(format(',{0},', inputs.nightly), ',performance,') || contains(format(',{0},', inputs.nightly), ',all,')
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(inputs.performance-runs || '[1]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      # A stable fleet identity: the hosted runner's hostname changes per job.
+      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-24.04|x86_64
+      CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # performance.sh checks out the base SHA in a temporary worktree.
+          fetch-depth: 0
+      - uses: taiki-e/install-action@just
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Chromium for the browser series
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      # scripts/performance.sh runs its builds as root inside the builder image
+      # on bind mounts of this checkout and of a temporary base worktree. On a
+      # Linux runner those belong to the runner uid, so git in the container
+      # refuses them ("dubious ownership", which fails Go's VCS stamping) and
+      # the host cannot clean the root-owned files the containers leave behind.
+      # Run the gate as root on a root-owned checkout -- the same single owner
+      # Docker Desktop presents on the calibrated Mac -- rather than change the
+      # script (not this stream's file; reported to its owner).
+      - name: Let the builder container own the checkout
+        run: |
+          set -euo pipefail
+          sudo chown -R 0:0 "$GITHUB_WORKSPACE"
+          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test -z "$(sudo git -C "$GITHUB_WORKSPACE" status --porcelain)"
+      - name: Performance gate
+        run: |
+          sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" \
+            just performance-gate ${{ inputs.performance-mode || 'advisory' }}
+          sudo chown -R "$(id -u):$(id -g)" .tmp/lane-evidence
+      - name: Upload lane report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-gate-evidence-${{ matrix.run }}
+          path: .tmp/lane-evidence/performance-gate/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-gate-artifacts-${{ matrix.run }}
+          path: |
+            .tmp/lane-evidence/performance-gate/
+            !.tmp/lane-evidence/performance-gate/**/*.tar
+          if-no-files-found: warn
+          retention-days: 30
 
   podman-integration-test:
     needs: [changes, images]
@@ -1490,11 +2051,15 @@ jobs:
   # uploaded and re-validates it against the committed scenario manifest, bound
   # to this run's candidate SHA. Absent, foreign or hollow evidence fails.
   #
-  # NOTE: `ci-ok` is not itself one of master's required status checks (they are
-  # lint, unit-test, unit-test-arm64, ui-test, ui-e2e, ui-e2e-auth,
-  # build-and-integration-test and build-and-integration-test-agent-auth). This
-  # job gates `publish`; making it gate PR merge is a repository-settings change
-  # for the CODEOWNER, not a workflow change.
+  # distributed-testing G6 promotes the remaining system suites the same way:
+  # lifecycle-standalone, generated-fuzz, generated-oracles and
+  # coverage-ratchets each upload a lane report that this job downloads and
+  # `scripts/ci-ok.py` re-validates under the lane's own manifest gate
+  # (`--lane-evidence job=path`). The nightly-only lanes are not in `needs`;
+  # ci-ok.py lists them as unpromoted on every run.
+  #
+  # Since 2026-09-28 (W8, Q6) `ci-ok` is a required status check on master and
+  # the merge queue's required check, and it also gates `publish`.
   #
   # distributed-testing G7: the gate also carries this run's full candidate
   # identity (event, tested SHA, base/head SHA) and a base-freshness check.
@@ -1521,6 +2086,10 @@ jobs:
       - integration
       - helm-lint
       - early-evidence
+      - lifecycle-standalone
+      - generated-fuzz
+      - generated-oracles
+      - coverage-ratchets
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1533,6 +2102,30 @@ jobs:
         with:
           name: early-evidence
           path: .tmp/evidence
+      - name: Download lifecycle-standalone report
+        if: needs.lifecycle-standalone.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: lifecycle-standalone-evidence
+          path: .tmp/lane-evidence/lifecycle-standalone
+      - name: Download generated-fuzz report
+        if: needs.generated-fuzz.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: generated-fuzz-evidence
+          path: .tmp/lane-evidence/generated-fuzz
+      - name: Download generated-oracles report
+        if: needs.generated-oracles.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: generated-oracles-evidence
+          path: .tmp/lane-evidence/generated-oracles
+      - name: Download coverage-ratchets report
+        if: needs.coverage-ratchets.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-ratchets-evidence
+          path: .tmp/lane-evidence/coverage-ratchets
       # Q6/G7 staleness input: master's actual tip at evaluation time, read
       # fresh rather than trusted from any earlier step. A transient failure
       # here must not hard-fail the job -- ci-ok.py's own fail-closed logic
@@ -1568,6 +2161,10 @@ jobs:
           python3 scripts/ci-ok.py \
             --evidence-report .tmp/evidence/evidence.json \
             --evidence-manifest test/contracts/scenarios.json \
+            --lane-evidence lifecycle-standalone=.tmp/lane-evidence/lifecycle-standalone/evidence.json \
+            --lane-evidence generated-fuzz=.tmp/lane-evidence/generated-fuzz/evidence.json \
+            --lane-evidence generated-oracles=.tmp/lane-evidence/generated-oracles/evidence.json \
+            --lane-evidence coverage-ratchets=.tmp/lane-evidence/coverage-ratchets/evidence.json \
             --candidate-sha "${{ github.sha }}" \
             --event-name "${{ github.event_name }}" \
             --base-sha "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha) || '' }}" \
@@ -1589,7 +2186,11 @@ jobs:
             ui-e2e-auth \
             integration \
             helm-lint \
-            early-evidence
+            early-evidence \
+            lifecycle-standalone \
+            generated-fuzz \
+            generated-oracles \
+            coverage-ratchets
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

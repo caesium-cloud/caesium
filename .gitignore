@@ -62,3 +62,5 @@ reagents/testdata/**/tf.plan
 # `ui/test-results/.last-run.json` was tracked for a while, so every e2e run
 # dirtied the tree; it is generated output and belongs to nobody's diff.
 ui/test-results/
+__pycache__/
+*.pyc
