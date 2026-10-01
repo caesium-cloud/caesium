@@ -1156,6 +1156,14 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
             if inside in mounts:
                 (mounts[inside]/"covmeta.fake").write_text("meta")
                 (mounts[inside]/"covcounters.fake").write_text("counters")
+        if "nodes" in args and "list" in args:
+            print(json.dumps([{"id":"42","address":"caesium:9001","role":"voter","leader":True,"reachability":"reachable"}]))
+        elif "nodes" in args and "remove" in args:
+            if os.environ.get("FAKE_SCENARIO")=="nodes-removed":
+                print(json.dumps({"status":"removed"}))
+            else:
+                print(json.dumps({"status":"refused","id":args[args.index("remove")+1],"reason":"not_a_member"}))
+                raise SystemExit(1)
     names_path.write_text(json.dumps(names))
 ''')
         # The stand-in only emulates CLI responses; it cannot launch a real engine.
@@ -1180,6 +1188,19 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertEqual(browser["test_exit_code"], 0)
         self.assertEqual(browser["image_id"], IMAGE_ID)
         self.assertIn("cov-test-browser", result.stdout.split("KEEP=1;")[-1])
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        removals = [args for args in calls if "remove" in args and "nodes" in args]
+        self.assertEqual(len(removals), 1)
+        self.assertIn("43", removals[0], "the refused removal must target an ID absent from the member list")
+
+    def test_system_nodes_removal_that_is_not_a_refusal_fails_the_journey(self):
+        result = self.collect("nodes-removed")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("without a not_a_member refusal", output(result))
+        cli = json.loads((self.profiles / "cli.provenance.json").read_text())
+        self.assertFalse(cli["complete"])
+        report = json.loads((self.art / "report.json").read_text())
+        self.assertNotEqual(report["verdict"], "pass")
 
 
     def test_retag_between_collection_launches_cannot_change_measured_image(self):
@@ -1342,6 +1363,9 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("job apply", text)
         self.assertIn("job export", text)
         self.assertIn("coverage-write-read", text)
+        self.assertIn("system nodes list", text)
+        self.assertIn("system nodes remove", text)
+        self.assertIn("not_a_member", text)
         self.assertIn("check-coverage.py", text)
         self.assertIn("build/Dockerfile.coverage", text)
         self.assertIn("reagents", text)

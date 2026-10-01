@@ -1787,6 +1787,23 @@ it is neither execution of historical source nor historical CI outcomes.
 Genuinely uncovered changed code still needs journeys before promotion.
 Local, ephemeral details: `/tmp/caesium-w6-round2-new-policy-replay.json`.
 
+After G6 made `coverage-ratchets` merge-blocking, #595 (stale-member removal)
+added `pkg/dqlite/remove.go` and an `api/middleware` audit mapping. The two
+packages' statement counts grew, so their percentages fell below the floors:
+`api/middleware` 7.6 < 7.7 and `pkg/dqlite` 33.8 < 39.5. Covered statements
+did not fall (34 and 351 against floors of 34 and 341). This failed every PR.
+The refresh is the second `baseline_refresh` in
+`scripts/coverage-ratchet.json`. It was remeasured on master `095ce649`. The
+journey now also runs `caesium system nodes list`, then
+`caesium system nodes remove` on an ID the list does not contain. The removal
+must exit non-zero with a `not_a_member` refusal on stdout. Any other answer
+fails the journey. Both are read-only on the single-node server. With them,
+`pkg/dqlite` measures 390/1,039 (37.5%), and the H1 controller/service/CLI files
+no longer have zero coverage. Those files would otherwise fail the
+zero-uncovered diff floor for any PR that touches them. The covered-statement
+floors were kept (`api/middleware` 34) or raised (`pkg/dqlite` 341 → 390). Only
+the two percentage floors were lowered, to 7.6 and 37.5.
+
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
 `scripts/performance.sh` builds both SHAs with `just build-release`, records

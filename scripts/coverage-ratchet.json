@@ -2,22 +2,22 @@
   "schema_version": 1,
   "kind": "package-diff-ratchet",
   "source": "integration",
-  "measured_candidate_sha": "00ba7d99077210030a7cd1dce91ee4245fb337e8",
+  "measured_candidate_sha": "095ce649346800b28cb465e7544df45ca2bdc897",
   "baseline_refresh": {
-    "previous_measured_candidate_sha": "7dcef7f07d85cf460a26239e11bb30889ac9221a",
-    "reason": "Remeasured after already-merged run API and CLI additions increased statement denominators. Covered-statement floors are retained or raised; the two lower percentage floors reflect those additions, not lost observed paths. Browser profiles and first-attempt journeys are complete.",
+    "previous_measured_candidate_sha": "00ba7d99077210030a7cd1dce91ee4245fb337e8",
+    "reason": "Remeasured on master 095ce649 after already-merged #595 (stale-member removal) added pkg/dqlite/remove.go and the api/middleware audit mapping for DELETE /v1/system/nodes/:id, which increased both statement denominators; no covered statement was lost. On 095ce649 the unchanged journey covers api/middleware 34/445 (7.6%) and pkg/dqlite 351/1039 (33.8%). The same refresh adds `caesium system nodes list` and a refused not_a_member `caesium system nodes remove` to scripts/integration-coverage.sh; the floors below were measured with that journey on 095ce649's unchanged Go source, which brings pkg/dqlite to 390/1039 (37.5%). Covered-statement floors are retained or raised; the two lower percentage floors reflect the #595 additions, not lost observed paths. Browser profiles and first-attempt journeys are complete.",
     "package_statement_counts": {
-      "github.com/caesium-cloud/caesium/api/rest/service/run": {
-        "previous_covered": 9,
-        "previous_total": 23,
-        "covered": 9,
-        "total": 28
+      "github.com/caesium-cloud/caesium/api/middleware": {
+        "previous_covered": 34,
+        "previous_total": 442,
+        "covered": 34,
+        "total": 445
       },
-      "github.com/caesium-cloud/caesium/cmd/run": {
-        "previous_covered": 81,
-        "previous_total": 759,
-        "covered": 83,
-        "total": 784
+      "github.com/caesium-cloud/caesium/pkg/dqlite": {
+        "previous_covered": 341,
+        "previous_total": 863,
+        "covered": 390,
+        "total": 1039
       }
     }
   },
@@ -31,7 +31,7 @@
       "min_statements_covered": 302
     },
     "github.com/caesium-cloud/caesium/api/middleware": {
-      "min_percent": 7.7,
+      "min_percent": 7.6,
       "min_statements_covered": 34
     },
     "github.com/caesium-cloud/caesium/api/rest/bind": {
@@ -255,8 +255,8 @@
       "min_statements_covered": 33
     },
     "github.com/caesium-cloud/caesium/pkg/dqlite": {
-      "min_percent": 39.5,
-      "min_statements_covered": 341
+      "min_percent": 37.5,
+      "min_statements_covered": 390
     },
     "github.com/caesium-cloud/caesium/pkg/env": {
       "min_percent": 43.0,
