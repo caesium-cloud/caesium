@@ -380,12 +380,12 @@ export function JobDefsPage() {
   const runtimeHints = useMemo(() => getJobDefRuntimeHints(deferredYaml), [deferredYaml]);
 
   return (
-    <div className="space-y-6 pb-12">
+    <div className="min-w-0 space-y-6 pb-12">
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
 
           <h1 className="text-2xl font-bold lowercase text-text-1">Jobdefs</h1>
-          <p className="text-sm text-text-3 mt-1 flex items-center gap-1.5">
+          <p className="text-sm text-text-3 mt-1 flex flex-wrap items-center gap-1.5">
             Lint, diff, and apply YAML manifests <span className="inline-block w-3" aria-hidden="true" /> <code className="text-cyan-glow text-xs bg-cyan-glow/10 px-1 py-0.5 rounded">caesium job apply</code>
           </p>
         </div>
@@ -455,12 +455,12 @@ export function JobDefsPage() {
         </div>
       </div>
 
-      <div className="bg-obsidian border border-graphite/50 rounded-md p-[3px] w-fit">
+      <div className="w-fit max-w-full">
         <Tabs value={tab} onValueChange={handleTabChange}>
-          <TabsList className="bg-transparent h-auto p-0 space-x-1">
+          <TabsList className="bg-transparent h-auto p-0">
             <TabsTrigger
               value="editor"
-              className="data-[state=active]:bg-cyan/15 data-[state=active]:text-cyan-glow data-[state=active]:border-cyan/30 border border-transparent px-3.5 py-1.5 text-xs font-normal text-text-2 transition-all"
+              className="text-text-2"
             >
               Editor
               {hasErrors && (
@@ -471,7 +471,7 @@ export function JobDefsPage() {
             </TabsTrigger>
             <TabsTrigger
               value="diff"
-              className="data-[state=active]:bg-cyan/15 data-[state=active]:text-cyan-glow data-[state=active]:border-cyan/30 border border-transparent px-3.5 py-1.5 text-xs font-normal text-text-2 transition-all"
+              className="text-text-2"
             >
               Diff vs server
               {diffCount > 0 && !hasErrors && (
@@ -487,7 +487,7 @@ export function JobDefsPage() {
               value="history"
               disabled
               title="Coming in v1.1"
-              className="disabled:opacity-50 border border-transparent px-3.5 py-1.5 text-xs font-normal text-text-2 transition-all cursor-not-allowed"
+              className="cursor-not-allowed text-text-2"
             >
               History
             </TabsTrigger>
@@ -495,17 +495,17 @@ export function JobDefsPage() {
         </Tabs>
       </div>
 
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
-        <div className="flex flex-col gap-4">
+      <div className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+        <div className="flex min-w-0 flex-col gap-4">
           {tab === "editor" ? (
             <>
-              <Card className="bg-midnight/30 border-graphite/50 overflow-hidden shadow-lg">
-                <div className="flex justify-between items-center px-4 py-2.5 border-b border-graphite/50 bg-obsidian/50">
+              <Card className="min-w-0 bg-midnight/30 border-graphite/50 overflow-hidden">
+                <div className="flex flex-wrap justify-between items-center gap-2 px-4 py-2.5 border-b border-graphite/50 bg-obsidian/50">
                   <div className="flex items-center gap-2">
 
                     <span className="text-xs text-text-2">job.yaml</span>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     <span className="text-[11px] text-text-3">
                       {lineCount} lines <span className="inline-block w-3" aria-hidden="true" /> {(yaml.length / 1024).toFixed(1)} KB
                     </span>
@@ -518,9 +518,10 @@ export function JobDefsPage() {
                   </div>
                 </div>
 
-                <div className="min-h-[420px] bg-void">
+                <div className="min-h-[420px] min-w-0 overflow-hidden bg-void">
                   <CodeMirror
                     value={yaml}
+                    className="min-w-0 w-full"
                     height="420px"
                     extensions={[yamlLang(), yamlTheme, yamlHighlight, customLinter]}
                     onChange={handleYamlChange}

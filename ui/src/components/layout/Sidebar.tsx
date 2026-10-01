@@ -146,6 +146,7 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
           <Link
             key={item.to}
             to={item.to}
+            activeOptions={{ exact: item.to === "/datasets" }}
             activeProps={{
               className:
                 "bg-sidebar-accent text-sidebar-foreground font-bold [&_.nav-caret]:visible",

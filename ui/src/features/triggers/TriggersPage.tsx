@@ -554,8 +554,9 @@ export function TriggersPage() {
           <form onSubmit={handleEditorSubmit} className="space-y-5 mt-2">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelClass}>Alias</label>
+                <label htmlFor="http-trigger-alias" className={labelClass}>Alias</label>
                 <input
+                  id="http-trigger-alias"
                   value={formState.alias}
                   onChange={(event) => setFormState((current) => ({ ...current, alias: event.target.value }))}
                   className={inputClass}
@@ -564,8 +565,9 @@ export function TriggersPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Webhook Path</label>
+                <label htmlFor="http-trigger-path" className={labelClass}>Webhook Path</label>
                 <input
+                  id="http-trigger-path"
                   value={formState.path}
                   onChange={(event) => setFormState((current) => ({ ...current, path: event.target.value }))}
                   placeholder="/v1/hooks/team/deploy"
@@ -578,8 +580,9 @@ export function TriggersPage() {
 
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
-                <label className={labelClass}>Secret</label>
+                <label htmlFor="http-trigger-secret" className={labelClass}>Secret</label>
                 <input
+                  id="http-trigger-secret"
                   value={formState.secret}
                   onChange={(event) => setFormState((current) => ({ ...current, secret: event.target.value }))}
                   placeholder="shared-secret or secret://..."
@@ -588,8 +591,9 @@ export function TriggersPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Auth Scheme</label>
+                <label htmlFor="http-trigger-signatureScheme" className={labelClass}>Auth Scheme</label>
                 <select
+                  id="http-trigger-signatureScheme"
                   value={formState.signatureScheme}
                   onChange={(event) => setFormState((current) => ({ ...current, signatureScheme: event.target.value }))}
                   className={cn(inputClass, "appearance-none")}
@@ -603,8 +607,9 @@ export function TriggersPage() {
                 </select>
               </div>
               <div>
-                <label className={labelClass}>Signature Header</label>
+                <label htmlFor="http-trigger-signatureHeader" className={labelClass}>Signature Header</label>
                 <input
+                  id="http-trigger-signatureHeader"
                   value={formState.signatureHeader}
                   onChange={(event) => setFormState((current) => ({ ...current, signatureHeader: event.target.value }))}
                   placeholder="X-Hub-Signature-256"
@@ -616,8 +621,9 @@ export function TriggersPage() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelClass}>Param Mapping JSON</label>
+                <label htmlFor="http-trigger-paramMappingText" className={labelClass}>Param Mapping JSON</label>
                 <textarea
+                  id="http-trigger-paramMappingText"
                   value={formState.paramMappingText}
                   onChange={(event) => setFormState((current) => ({ ...current, paramMappingText: event.target.value }))}
                   className={textareaClass}
@@ -626,8 +632,9 @@ export function TriggersPage() {
                 />
               </div>
               <div>
-                <label className={labelClass}>Default Params JSON</label>
+                <label htmlFor="http-trigger-defaultParamsText" className={labelClass}>Default Params JSON</label>
                 <textarea
+                  id="http-trigger-defaultParamsText"
                   value={formState.defaultParamsText}
                   onChange={(event) => setFormState((current) => ({ ...current, defaultParamsText: event.target.value }))}
                   className={textareaClass}

@@ -37,7 +37,7 @@ export default defineConfig({
     },
     {
       name: "light",
-      testMatch: /(?:accessibility|visual|mobile-console|performance|facelift)\.spec\.ts/,
+      testMatch: /(?:accessibility|visual|mobile-console|performance|facelift(?:-qa)?)\.spec\.ts/,
       use: {
         colorScheme: "light",
         storageState: { cookies: [], origins: [{

@@ -2,7 +2,7 @@
 
 Implements the Standard concept from `Caesium Operator Console Facelift.zip`, starting with its handoff README, design specification, route guide, and functional invariants.
 
-The console uses self-hosted Sometype Mono, warm text on cool instrument surfaces, flat lists, word tabs, and status glyphs. The shell has a 44 px header, 208 px sidebar, and 40 px command footer. Cmd-K and `:` open the inline desktop palette; mobile keeps its dialog and navigation drawer.
+The console uses self-hosted Sometype Mono, warm text on cool instrument surfaces, flat lists, word tabs, and status glyphs. The shell has a 44 px header, 208 px sidebar, and 40 px command footer. Cmd-K and `:` open inline desktop navigation search; mobile keeps its dialog and navigation drawer.
 
 The shared UTC clock drives the fleet history strip, trigger countdowns, and phase alignment. Animation phases resynchronize after a hidden tab returns. Reduced motion freezes live indicators and replaces the oscillator with a flat line. Identifiers use one copy-chip component with eight visible characters, the full title and clipboard payload, and a one-second confirmation.
 
@@ -43,7 +43,7 @@ Run the browser suite against the containerized production release, with the env
 
 Go validation uses the repository builder image (`go test -race ./...` inside the container) and the real `TestJobsListIncludesLastRuns` integration scenario. Never build the Go application on the host.
 
-### Local qualification, 2026-10-01
+### Initial facelift qualification, 2026-10-01
 
 - ESLint and all 414 UI tests passed across 57 test files.
 - The containerized production image built successfully. Its embedded UI passed 83 browser scenarios: 62 default, 16 light and five network-recovery checks. All six regenerated Linux visual baselines were compared without snapshot updates. Accessibility, mobile-console and performance gates passed in both themes.
@@ -53,3 +53,21 @@ Go validation uses the repository builder image (`go test -race ./...` inside th
 - A live uncached task confirmed that the running electron travels around the node perimeter; dark/light jobs and system views and a live run were rendered for inspection.
 
 Browser JSON reports are retained in the ignored `.tmp/facelift-e2e-results.json`, `.tmp/facelift-auth-results.json` and `.tmp/facelift-auth-light-results.json`. Render previews and the electron probe are in `.tmp/facelift-previews/`.
+
+### Exploratory QA follow-up
+
+- F1: Graph height uses unscrolled layout coordinates and changes only with loading/layout measurement or window resize. Ordinary main-panel scrolling can reach and open the receipt without growing the graph.
+- F2/F8: Structured logs use the theme foreground; both task error banners use the failed glyph and danger color. The terminal keeps its readable dark instrument surface in either theme.
+- F3/F4: JobDefs constrains its grid/editor widths, wraps its header and contains long lines in CodeMirror's own scroller. Its tabs use the shared underline style. JSON step parsing accepts the same scalar/list `next` and `dependsOn` forms as YAML; invalid forms name the step and field. The three reported repository examples are covered through live lint, diff, apply and persisted graph checks.
+- F5: All seven webhook controls have stable IDs and associated labels. Browser coverage drives label-based entry and keyboard submission.
+- F6/F7: The footer and palette describe navigation search and its supported destinations. Datasets uses exact active matching so Holds is the sole active destination on `/datasets/holds`.
+- Dialogs have accessible descriptions, and a completed live-log source badge describes where the logs were collected. The documentation index includes this page.
+
+`ui/e2e/facelift-qa.spec.ts` runs six regression journeys in each theme. It uses real runs and REST endpoints, checks computed log contrast for both renderers, and drives scrolling, editing, focus and keyboard submission through the browser. `test/jobdef_scalar_edges_test.go` independently qualifies the JSON REST edge forms and named invalid-field diagnostics.
+
+
+Follow-up validation uses `caesiumcloud/caesium:facelift-qa-fixes-20261001`, built with `just tag=facelift-qa-fixes-20261001 build-release`. ESLint, 414 UI tests, the production asset budget, containerized Go race tests and vet passed. All six Linux screenshot baselines matched without updates. The two new REST integration scenarios passed, including all three documented examples and both invalid-field diagnostics.
+
+A subsequent clean-server run passed all 12 QA journeys with zero retries, skips, flaky or failed tests. The broader zero-retry browser attempt reported 80 passes, 10 failures and five unrun dependency-blocked recovery tests. All 12 QA regression journeys passed within that attempt. Failures included unexpected live-event stream closures, incomplete run/lineage rendering and a mobile empty-table overflow assertion; server logs also recorded database deadline errors. These results do not qualify the complete suite, and their relationship to the changes is unresolved. No error allowlist, timeout or assertion was weakened. The original 83-test qualification above predates these QA corrections.
+
+Follow-up reports and failure traces are retained under ignored `.tmp/facelift-qa-fixes-*` artifacts. The original exploratory QA server and its evidence remain untouched.

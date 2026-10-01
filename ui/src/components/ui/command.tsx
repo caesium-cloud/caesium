@@ -5,7 +5,7 @@ import { type DialogProps } from "@radix-ui/react-dialog"
 import { Command as CommandPrimitive } from "cmdk"
 
 import { cn } from "@/lib/utils"
-import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 
 const Command = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive>,
@@ -30,6 +30,8 @@ const CommandDialog = ({ children, commandProps, ...props }: CommandDialogProps)
   return (
     <Dialog {...props}>
       <DialogContent className="overflow-hidden p-0 sm:rounded-md">
+        <DialogTitle className="sr-only">Navigation search</DialogTitle>
+        <DialogDescription className="sr-only">Find pages, jobs, triggers, or atoms.</DialogDescription>
         <Command
           {...commandProps}
           className={cn(

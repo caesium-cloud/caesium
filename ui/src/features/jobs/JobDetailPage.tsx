@@ -26,6 +26,7 @@ import { INCIDENT_EVENT_TYPES, formatIncidentClass, incidentAge, incidentSummary
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -634,6 +635,7 @@ export function JobDetailPage() {
           <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-md`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
+              <DialogDescription className="sr-only">{secondaryViewTitle(secondaryView)} for {job.alias}.</DialogDescription>
             </DialogHeader>
             <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
               {secondaryView === "runs" && (

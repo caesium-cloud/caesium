@@ -52,7 +52,7 @@ export function CommandMenu() {
   const contents = (
 
     <>
-        <CommandInput ref={inputRef} aria-label="Type a command or search" placeholder="Type a command or search..." />
+        <CommandInput ref={inputRef} aria-label="Search pages, jobs, triggers, or atoms" placeholder="Search pages, jobs, triggers, or atoms..." />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
           <CommandGroup heading="Suggestions">
@@ -133,12 +133,12 @@ export function CommandMenu() {
   );
   return <footer className="relative z-30 flex h-10 shrink-0 items-center justify-between border-t border-border bg-obsidian px-4 lg:px-6">
     <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} className="flex h-full items-center gap-2 text-[13px] text-text-2">
-      <span className="hidden lg:inline">caesium</span><span className="text-cyan">❯</span><span aria-hidden="true" className="cs-cursor" />
+      <span className="hidden lg:inline">caesium search</span><span className="text-cyan">❯</span><span aria-hidden="true" className="cs-cursor" />
     </button>
     <div className="flex items-center gap-7 text-[11px] text-text-3">
-      <span className="hidden xl:inline">why task</span><span className="hidden xl:inline">blame run</span><span className="hidden xl:inline">diff run run</span><span className="hidden xl:inline">replay run</span><span className="hidden xl:inline">verify receipt</span><kbd>⌘K</kbd>
+      <span className="hidden xl:inline">pages</span><span className="hidden xl:inline">jobs</span><span className="hidden xl:inline">triggers</span><span className="hidden xl:inline">atoms</span><kbd>⌘K</kbd>
     </div>
-    {desktop ? open ? <div role="dialog" aria-label="Command palette" className="absolute bottom-10 left-0 right-0 border-t border-border bg-midnight p-2 shadow-sm">
+    {desktop ? open ? <div role="dialog" aria-label="Navigation search" className="absolute bottom-10 left-0 right-0 border-t border-border bg-midnight p-2 shadow-sm">
       <Command filter={commandPaletteFilter}>{contents}</Command>
     </div> : null : <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>{contents}</CommandDialog>}
   </footer>;

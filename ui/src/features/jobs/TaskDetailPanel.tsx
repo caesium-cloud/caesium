@@ -396,8 +396,8 @@ export function TaskDetailPanel({
                   </div>
                 </div>
               ) : runTask?.error ? (
-                <div className="rounded-md border border-danger/20 bg-danger/10 px-3 py-2.5 flex gap-3 items-start">
-                  <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
+                <div data-testid="task-detail-error" className="rounded-md border border-danger/20 bg-danger/10 px-3 py-2.5 flex gap-3 items-start">
+                  <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
                   <div className="flex flex-col gap-1 min-w-0">
                     <span className="text-[11px] font-bold text-danger lowercase">
                       Error

@@ -72,7 +72,7 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await expectNoPageHorizontalOverflow(page);
   await expectHeaderActionsDoNotOverlap(page);
   await page.getByRole("button", { name: "Open search" }).click();
-  const commandInput = page.getByPlaceholder("Type a command or search...");
+  const commandInput = page.getByPlaceholder("Search pages, jobs, triggers, or atoms...");
   await expect(commandInput).toBeVisible();
   const commandDialog = page.getByRole("dialog").filter({ has: commandInput });
   await expectDialogContentFitsViewport(page, commandDialog);

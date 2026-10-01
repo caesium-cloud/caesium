@@ -16,9 +16,9 @@ test("live run identities copy in full and the desktop prompt remains keyboard u
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(run.id);
   await expect(chip.getByRole("status")).toHaveCount(0);
   await page.keyboard.press(":");
-  const command = page.getByRole("combobox", { name: "Type a command or search" });
+  const command = page.getByRole("combobox", { name: "Search pages, jobs, triggers, or atoms" });
   await expect(command).toBeFocused();
-  await expect(page.locator("footer").getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  await expect(page.locator("footer").getByRole("dialog", { name: "Navigation search" })).toBeVisible();
   await command.fill(job.alias);
   await page.locator('[cmdk-item][data-value^="job "]').filter({ hasText: job.alias }).click();
   await expect(page).toHaveURL(new RegExp(`/jobs/${job.id}$`));

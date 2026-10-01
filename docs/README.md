@@ -18,6 +18,7 @@ authoring pipelines against a real server.
 
 - [upgrade-notes.md](upgrade-notes.md): Upgrade compatibility notes, including dataset identities written under escaped names.
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, schema tooling, Git sync, and operational controls for job manifests.
+- [operator-console-facelift.md](operator-console-facelift.md): Console design, data availability, accessibility and local validation evidence.
 - [caesium-job-llm-reference.md](caesium-job-llm-reference.md): LLM authoring guide plus executable harness scenario format, including metrics and OpenLineage assertions.
 - [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
 - [backfill.md](backfill.md): Backfill behavior across API, CLI, and UI.

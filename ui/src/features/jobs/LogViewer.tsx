@@ -338,9 +338,9 @@ export function LogViewer({
       </div>
     </div>
   ) : error ? (
-    <div className="border-b border-danger/20 bg-danger/10 px-4 py-2.5">
+    <div data-testid="task-log-error" className="border-b border-danger/20 bg-danger/10 px-4 py-2.5">
       <div className="flex items-start gap-3">
-        <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
+        <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
         <div className="min-w-0">
           <div className="text-[11px] font-bold lowercase text-danger">Task Error</div>
           <div className="text-[11px] leading-relaxed text-danger">{error}</div>
@@ -361,7 +361,7 @@ export function LogViewer({
             <LogStatusBadge
               testId="log-source-badge"
               label="Live stream"
-              tooltip="Logs are currently streaming from the running task."
+              tooltip={status === "running" ? "Logs are currently streaming from the running task." : "Logs were collected from this task's live stream."}
               className="border-success/30 bg-success/10 text-success"
             />
           )}
@@ -451,7 +451,7 @@ export function LogViewer({
           */}
           <pre
             data-testid="task-log-structured-text"
-            className="m-0 min-w-max whitespace-pre break-normal px-3 py-2 text-[11px] leading-5 text-slate-200"
+            className="m-0 min-w-max whitespace-pre break-normal px-3 py-2 text-[11px] leading-5 text-text-1"
           >
             {filterResult.renderedText}
           </pre>
