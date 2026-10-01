@@ -684,6 +684,47 @@ if [[ "$cli_rc" -eq 0 ]]; then
     >/dev/null || cli_rc=$?
 fi
 
+# H1 operator surface on the same single-node server, read-only by design:
+# list the dqlite members, then ask to remove an ID that is not one. The
+# documented answer is a non-zero exit with a not_a_member refusal on stdout;
+# anything else (success, another reason, a docker error) fails the journey.
+if [[ "$cli_rc" -eq 0 ]]; then
+  log "listing dqlite members, then requesting a refused non-member removal"
+  "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 0:0 \
+    --entrypoint /bin/caesium \
+    -e GOCOVERDIR=/coverage \
+    -v "$RAW/cli:/coverage" \
+    "$IMAGE_ID" system nodes list --json --server http://caesium:8080 \
+    >"$ARTIFACTS/system-nodes.json" || cli_rc=$?
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  non_member="$(python3 -c 'import json,sys
+ids = {str(n.get("id", "")) for n in json.load(open(sys.argv[1]))}
+n = 42
+while str(n) in ids: n += 1
+print(n)' "$ARTIFACTS/system-nodes.json")" || cli_rc=1
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  refusal_rc=0
+  "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 0:0 \
+    --entrypoint /bin/caesium \
+    -e GOCOVERDIR=/coverage \
+    -v "$RAW/cli:/coverage" \
+    "$IMAGE_ID" system nodes remove "$non_member" --json --server http://caesium:8080 \
+    >"$ARTIFACTS/system-nodes-remove.json" || refusal_rc=$?
+  if [[ "$refusal_rc" -eq 0 || "$refusal_rc" -ge 125 ]] || ! python3 -c 'import json,sys
+a = json.load(open(sys.argv[1]))
+sys.exit(0 if (a.get("status"), a.get("reason")) == ("refused", "not_a_member") else 1)' \
+      "$ARTIFACTS/system-nodes-remove.json"; then
+    log "system nodes remove $non_member exited $refusal_rc without a not_a_member refusal"
+    cli_rc=1
+  fi
+fi
+
 cli_complete=false
 cli_missing=true
 cli_killed=false
