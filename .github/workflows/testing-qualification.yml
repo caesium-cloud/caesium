@@ -1,0 +1,162 @@
+name: Testing qualification
+
+# distributed-testing G4: the nightly qualification set on hosted runners
+# (W8 decision record: hosted only; multi-host campaigns deferred).
+#
+# Every lane is defined once in .github/workflows/qualification-lanes.yml
+# (CI's release chain calls the same file); this workflow only schedules it,
+# fixes the nightly budgets, keeps the evidence and folds one triage summary:
+#
+#   release-required  F2 cluster lifecycle, D3 console recovery, B3 core
+#                     robustness (instrumented server)
+#   nightly-required  C2 fuzz targets at the long budget (5m per target)
+#   advisory          E4 performance gate (hosted fleet uncalibrated) and the
+#                     F3 seeded single-host soak (known-failing on #598-#603)
+#
+# Each lane's job is independent (one lane failing never cancels or hides
+# another); `summary` always runs, writes one job summary, and on a SCHEDULED
+# night with a failing lane adds ONE comment to the single open issue titled
+# "Nightly qualification failures" (opening it if none is open). Manual
+# dispatches never touch issues. Triage owner: the CODEOWNERS default owners.
+#
+# Nightly results are broader evidence about the scheduled commit (master's
+# tip), never proof for an individual PR, and never merge- or publish-gating:
+# `publish` re-runs the release-required lanes on the tagged commit itself.
+on:
+  schedule:
+    # 07:23 UTC daily, off the top of the hour.
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: >-
+          Comma-separated lanes: cluster-lifecycle, console-recovery,
+          core-robustness, fuzz-campaign, performance, soak, or all.
+        type: string
+        default: all
+      fuzz-seconds:
+        description: Per-target -fuzztime for the fuzz campaign.
+        type: string
+        default: 5m
+      soak-profile:
+        description: F3 soak profile.
+        type: choice
+        options: [short, nightly]
+        default: short
+      soak-seed:
+        description: F3 soak seed (empty = generated and recorded).
+        type: string
+        default: ''
+      soak-duration:
+        description: F3 soak schedule budget, a Go duration (empty = the profile's default).
+        type: string
+        default: ''
+      performance-runs:
+        description: JSON list of parallel performance runs.
+        type: string
+        default: '[1]'
+
+# Never shares a group with CI (pull_request / merge_group / push runs are in
+# `CI-...` groups) and never cancels: a second night queues behind the first.
+concurrency:
+  group: testing-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  qualification:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/qualification-lanes.yml
+    with:
+      # A scheduled run has no inputs; every fallback below is the nightly
+      # default.
+      lanes: ${{ inputs.lanes || 'all' }}
+      retention-days: 30
+      performance-mode: advisory
+      performance-runs: ${{ inputs.performance-runs || '[1]' }}
+      fuzz-seconds: ${{ inputs.fuzz-seconds || '5m' }}
+      soak-profile: ${{ inputs.soak-profile || 'short' }}
+      soak-seed: ${{ inputs.soak-seed || '' }}
+      soak-duration: ${{ inputs.soak-duration || '' }}
+
+  summary:
+    needs: [qualification]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      # Every report this run uploaded, one directory per artifact; a lane
+      # that never ran leaves none, which the fold judges (not this step).
+      - name: Download this run's lane reports
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: '*-evidence*'
+          path: .tmp/qualification/evidence
+      - name: Fold the night
+        id: fold
+        env:
+          LANE_RESULTS_JSON: ${{ needs.qualification.outputs.results }}
+          LANES: ${{ inputs.lanes || 'all' }}
+          QUALIFICATION_RESULT: ${{ needs.qualification.result }}
+          FUZZ_SECONDS: ${{ inputs.fuzz-seconds || '5m' }}
+          SOAK_PROFILE: ${{ inputs.soak-profile || 'short' }}
+        run: |
+          mkdir -p .tmp/qualification
+          python3 scripts/qualification-gate.py summary \
+            --lanes "$LANES" \
+            --candidate-sha "$GITHUB_SHA" \
+            --evidence-dir .tmp/qualification/evidence \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --qualification-result "$QUALIFICATION_RESULT" \
+            --fuzz-seconds "$FUZZ_SECONDS" \
+            --soak-profile "$SOAK_PROFILE" \
+            --codeowners .github/CODEOWNERS \
+            --markdown-out .tmp/qualification/summary.md
+      # Scheduled nights only: one comment per failing night on one issue.
+      - name: Record a failing night on the triage issue
+        if: github.event_name == 'schedule' && steps.fold.outputs.failing != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILING: ${{ steps.fold.outputs.failing }}
+          OWNERS: ${{ steps.fold.outputs.triage_owner }}
+        run: |
+          set -euo pipefail
+          title="Nightly qualification failures"
+          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          {
+            echo "Failing lanes: \`$FAILING\` on \`$GITHUB_SHA\`."
+            echo ""
+            cat .tmp/qualification/summary.md
+          } >.tmp/qualification/comment.md
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file .tmp/qualification/comment.md
+          else
+            {
+              echo "Tracking issue for failing scheduled nights of \`.github/workflows/testing-qualification.yml\`."
+              echo "Each failing night adds one comment. Triage owner: ${OWNERS:-the CODEOWNERS default owners}."
+              echo "Close this issue once a scheduled night is green; the next failing night opens a new one."
+              echo ""
+              cat .tmp/qualification/comment.md
+            } >.tmp/qualification/issue.md
+            gh issue create --title "$title" --body-file .tmp/qualification/issue.md
+          fi
+      - name: Fail a failing night
+        if: steps.fold.outputs.failing != ''
+        env:
+          FAILING: ${{ steps.fold.outputs.failing }}
+        run: |
+          echo "failing lanes: $FAILING" >&2
+          exit 1

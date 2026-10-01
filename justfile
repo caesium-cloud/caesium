@@ -1157,6 +1157,51 @@ robustness-test: robustness-runner
     fi
     exit "$status"
 
+# F3 seeded single-host soak (scripts/soak-tests.sh): an owned four-node kind
+# cluster, three persistent members, the seeded plan for <profile> (short |
+# nightly). The harness builds the candidate and runner from this clean
+# checkout itself. The record lands in $CAESIUM_LANE_EVIDENCE_DIR/soak
+# (soak.json, fault-schedule.jsonl, records/, samples/, containers/, logs/).
+# mode=advisory (the nightly) records the verdict -- pass, fail or blocked --
+# and exits 0, because the soak is known-failing on the F3 findings
+# #598-#603; mode=enforcing requires `pass`. A missing or incomplete record is
+# a harness error and fails in both modes. Reproduce a recorded plan with
+# CAESIUM_SOAK_SEED=<soak.json seed>; CAESIUM_SOAK_DURATION overrides the
+# profile's schedule budget. Hold the host Docker lane lock locally.
+soak-tests profile="short" mode="advisory": lane-candidate-check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ profile }}" in short|nightly) ;; *) echo "profile must be short or nightly" >&2; exit 2 ;; esac
+    case "{{ mode }}" in advisory|enforcing) ;; *) echo "mode must be advisory or enforcing" >&2; exit 2 ;; esac
+    lane="{{ lane_evidence_dir }}/soak"
+    case "$lane" in /*/*/*) ;; *) echo "refusing to clear $lane" >&2; exit 1 ;; esac
+    rm -rf "$lane"
+    mkdir -p "$lane"
+    status=0
+    CAESIUM_SOAK_ARTIFACTS="$lane" CAESIUM_SOAK_PROFILE="{{ profile }}" \
+        bash scripts/soak-tests.sh || status=$?
+    echo "soak-tests: scripts/soak-tests.sh exit $status"
+    # The kubeconfig names a deleted cluster; never let it reach an upload.
+    rm -f "$lane"/kubeconfig* "$lane/internal-token.txt"
+    result="$(python3 scripts/soak-report.py result --artifacts "$lane")"
+    python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); print("soak-tests: result=%s profile=%s seed=%s (%s) failed_gates=%s" % (r.get("result"), r.get("profile"), r.get("seed"), r.get("seed_source"), ",".join(r.get("failed_gates") or []) or "none")); print("soak-tests: detail: %s" % (r.get("detail") or "")[:2000])' "$lane/soak.json" || true
+    case "$result" in
+        pass)
+            exit 0
+            ;;
+        fail|blocked)
+            if [ "{{ mode }}" = "advisory" ]; then
+                echo "soak-tests: advisory mode; the $result verdict above is recorded, not enforced (known findings #598-#603)"
+                exit 0
+            fi
+            exit 1
+            ;;
+        *)
+            echo "soak-tests: no verdict was recorded (result=$result); the harness did not complete" >&2
+            exit 1
+            ;;
+    esac
+
 # E5's SQL-work budget against the existing `integration-up` server. The full
 # sharded suite still runs this scenario in the `integration` lane; this focused
 # recipe exists so the scenario emits scenario evidence with an observed
