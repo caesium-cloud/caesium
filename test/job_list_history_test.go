@@ -9,8 +9,9 @@ import (
 )
 
 type lastRunSummary struct {
-	Status   string   `json:"status"`
-	Duration *float64 `json:"duration"`
+	StartedAt time.Time `json:"started_at"`
+	Status    string    `json:"status"`
+	Duration  *float64  `json:"duration"`
 }
 
 type listJobResponse struct {
@@ -53,6 +54,10 @@ steps:
 
 	latestHistory := listed.LastRuns[len(listed.LastRuns)-1]
 	s.Equal(completed.Status, latestHistory.Status)
+	s.False(latestHistory.StartedAt.IsZero(), "history must provide start times for the fleet strip")
+	startedAt, err := time.Parse(time.RFC3339Nano, listed.LatestRun.StartedAt)
+	s.Require().NoError(err)
+	s.True(latestHistory.StartedAt.Equal(startedAt), "history and latest run must identify the same start time")
 	s.Require().NotNil(latestHistory.Duration)
 	s.GreaterOrEqual(*latestHistory.Duration, float64(0))
 }

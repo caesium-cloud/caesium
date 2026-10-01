@@ -76,7 +76,7 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   // viewport explicit so the canvas and page containment are both exercised.
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const dagSection = page.getByTestId("run-interactive-dag-section");
   await expect(dagSection).toContainText(`${width + 2} nodes`);
@@ -159,7 +159,7 @@ test("SYNTHETIC: a fanned task's partition table stays reachable through virtual
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   await page.locator(".react-flow__node", { hasText: "process-file" }).click();
   const panel = page.getByTestId("task-detail-panel");
@@ -234,7 +234,7 @@ test("long log output remains fully reachable through the log viewer's search fi
   const run = await awaitRun(request, job.id, { status: "succeeded", timeoutMs: 60_000 });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   await page.locator(".react-flow__node").first().click();
   const panel = page.getByTestId("task-detail-panel");

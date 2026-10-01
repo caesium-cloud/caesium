@@ -64,3 +64,5 @@ reagents/testdata/**/tf.plan
 ui/test-results/
 __pycache__/
 *.pyc
+ui/playwright-report/
+ui/playwright-results.json

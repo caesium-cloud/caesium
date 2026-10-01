@@ -1,17 +1,17 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { useEffect, useMemo } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Inbox, ListFilter, RefreshCw, ShieldAlert } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Incident, type IncidentListParams } from "@/lib/api";
 import { events } from "@/lib/events";
 import { ALL_INCIDENT_STATUSES } from "@/lib/status";
-import { cn, shortId } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import {
   buildJobAliasMap,
   formatIncidentClass,
@@ -130,10 +130,10 @@ export function IncidentsPage() {
     <div className="space-y-6" data-testid="incidents-page">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <p className="mb-1 text-xs font-medium uppercase tracking-widest text-text-3">
+          <p className="mb-1 text-xs font-normal lowercase text-text-3">
             Agent remediation
           </p>
-          <h1 className="text-2xl font-bold tracking-tight">Incidents</h1>
+          <h1 className="text-2xl font-bold lowercase text-text-1">Incidents</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-3">
             <Badge variant="outline">{incidentsQuery.data?.total ?? 0} visible</Badge>
             <Badge variant="outline">{activeCount} active on page</Badge>
@@ -148,23 +148,23 @@ export function IncidentsPage() {
           size="sm"
           onClick={() => queryClient.invalidateQueries({ queryKey: ["incidents"] })}
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+
           Refresh
         </Button>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-4">
-          <Card className="border-graphite/40 bg-midnight/30">
-            <CardHeader className="border-b border-border/50 pb-3">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <ListFilter className="h-4 w-4 text-cyan-glow" />
+          <section className="border-graphite/40 bg-midnight/30">
+            <div className="border-b border-border/50 pb-3">
+              <h3 className="flex items-center gap-2 text-sm">
+
                 Feed filters
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 p-4 md:grid-cols-4">
+              </h3>
+            </div>
+            <div className="grid gap-3 p-4 md:grid-cols-4">
               <label className="space-y-1.5">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-text-3">
+                <span className="text-[11px] font-bold lowercase text-text-3">
                   Status
                 </span>
                 <select
@@ -182,7 +182,7 @@ export function IncidentsPage() {
                 </select>
               </label>
               <label className="space-y-1.5">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-text-3">
+                <span className="text-[11px] font-bold lowercase text-text-3">
                   Class
                 </span>
                 <select
@@ -200,7 +200,7 @@ export function IncidentsPage() {
                 </select>
               </label>
               <label className="space-y-1.5">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-text-3">
+                <span className="text-[11px] font-bold lowercase text-text-3">
                   Job
                 </span>
                 <select
@@ -212,7 +212,7 @@ export function IncidentsPage() {
                   <option value="">Any job</option>
                   {(jobsQuery.data ?? []).map((job) => (
                     <option key={job.id} value={job.id}>
-                      {job.alias || shortId(job.id)}
+                      {job.alias || "job alias unavailable"}
                     </option>
                   ))}
                 </select>
@@ -229,17 +229,17 @@ export function IncidentsPage() {
                 />
                 Needs approval
               </label>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
 
-          <Card className="overflow-hidden border-graphite/40 bg-midnight/30">
-            <CardHeader className="border-b border-border/50 pb-3">
-              <CardTitle className="flex items-center gap-2 text-sm">
+          <section className="overflow-hidden border-graphite/40 bg-midnight/30">
+            <div className="border-b border-border/50 pb-3">
+              <h3 className="flex items-center gap-2 text-sm">
                 <ShieldAlert className="h-4 w-4 text-warning" />
                 Incident feed
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
+              </h3>
+            </div>
+            <div className="p-0">
               {incidentsQuery.isLoading ? (
                 <div className="space-y-2 p-4">
                   {Array.from({ length: 4 }).map((_, index) => (
@@ -250,13 +250,11 @@ export function IncidentsPage() {
                 <EmptyState
                   title="Incidents unavailable"
                   subtitle={incidentsQuery.error.message}
-                  icon={<AlertTriangle className="h-12 w-12 text-danger" />}
                 />
               ) : incidents.length === 0 ? (
                 <EmptyState
                   title="No incidents match"
                   subtitle="Adjust the filters or wait for a failing run to open an incident."
-                  icon={<Inbox className="h-12 w-12 text-text-3" />}
                 />
               ) : (
                 <div className="divide-y divide-border/50">
@@ -269,8 +267,8 @@ export function IncidentsPage() {
                   ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          </section>
         </div>
 
         <PendingApprovalsList
@@ -297,30 +295,30 @@ function IncidentFeedRow({ incident, jobAlias }: { incident: Incident; jobAlias:
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-text-1">{jobAlias}</span>
+            <span className="font-normal text-text-1">{jobAlias}</span>
             <StatusBadge status={incident.status} domain="incident" size="sm" />
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-[11px]">
               {formatIncidentClass(incident.class)}
             </Badge>
             {isAwaitingApproval(incident) ? (
-              <Badge variant="outline" className="border-gold/30 bg-gold/10 text-[10px] text-gold">
+              <Badge variant="outline" className="border-gold/30 bg-gold/10 text-[11px] text-gold">
                 approval
               </Badge>
             ) : null}
           </div>
           <div className="mt-1 line-clamp-2 text-sm text-text-2">{incidentSummary(incident)}</div>
-          <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-[10px] text-text-4">
-            <span>#{shortId(incident.id)}</span>
-            <span>run {shortId(incident.run_id)}</span>
-            <span>task {incident.task_name || shortId(incident.task_id)}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-3">
+            <IdChip value={incident.id} label="incident id" />
+            {incident.run_id ? <IdChip value={incident.run_id} label="run id" /> : null}
+            <span>task {incident.task_name || "unknown"}</span>
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-text-3">
-          <Badge variant="outline" className="font-mono text-[10px]">
+          <Badge variant="outline" className="text-[11px]">
             {incidentAge(incident)}
           </Badge>
           {incident.occurrence_count > 1 ? (
-            <Badge variant="outline" className="font-mono text-[10px]">
+            <Badge variant="outline" className="text-[11px]">
               {incident.occurrence_count}x
             </Badge>
           ) : null}
@@ -340,14 +338,14 @@ function PendingApprovalsList({
   isLoading: boolean;
 }) {
   return (
-    <Card className="border-gold/30 bg-gold/5" data-testid="pending-approvals-list">
-      <CardHeader className="border-b border-gold/20 pb-3">
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Inbox className="h-4 w-4 text-gold" />
+    <section className="border-gold/30 bg-gold/5" data-testid="pending-approvals-list">
+      <div className="border-b border-gold/20 pb-3">
+        <h3 className="flex items-center gap-2 text-sm">
+
           Pending approvals
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
+        </h3>
+      </div>
+      <div className="p-0">
         {isLoading ? (
           <div className="space-y-2 p-4">
             <Skeleton className="h-16 w-full" />
@@ -367,14 +365,14 @@ function PendingApprovalsList({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-text-1">
+                    <div className="truncate text-sm font-normal text-text-1">
                       {jobLabel(incident, jobAliases)}
                     </div>
                     <div className="mt-1 truncate text-xs text-text-3">
                       {incident.task_name || formatIncidentClass(incident.class)}
                     </div>
                   </div>
-                  <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
+                  <Badge variant="outline" className="shrink-0 text-[11px]">
                     {incidentAge(incident)}
                   </Badge>
                 </div>
@@ -382,8 +380,8 @@ function PendingApprovalsList({
             ))}
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -392,7 +390,6 @@ function IncidentsUnavailable() {
     <EmptyState
       title="Incidents disabled"
       subtitle="Agent remediation is not enabled on this Caesium server."
-      icon={<ShieldAlert className="h-12 w-12 text-text-3" />}
       className="py-16"
     />
   );

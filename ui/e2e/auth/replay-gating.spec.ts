@@ -63,7 +63,7 @@ test("runner sees replay and can launch a no-override quarantined replay", async
   const principal = await loginAtUrl(page, `/jobs/${job.id}/runs/${baseline.id}`, keys.runner);
   expect(principal.role).toBe("runner");
 
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("run-replay-trigger")).toBeEnabled();
   await expect(page.getByTestId("run-replay-gate-reason")).toHaveCount(0);
 
@@ -92,7 +92,7 @@ test("viewer gets a gated non-actionable replay affordance", async ({ page, requ
   const principal = await loginAtUrl(page, `/jobs/${job.id}/runs/${baseline.id}`, keys.viewer);
   expect(principal.role).toBe("viewer");
 
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("run-replay-trigger")).toBeVisible();
   await expect(page.getByTestId("run-replay-trigger")).toBeDisabled();
   await expect(page.getByTestId("run-replay-gate-reason")).toContainText("Requires runner role");

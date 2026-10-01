@@ -29,7 +29,7 @@ test("Re-run preserves the selected run parameters and task output", async ({ pa
   );
 
   await page.goto(`/jobs/${job.id}/runs/${originalRun.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const newRunURL = new RegExp(`/jobs/${job.id}/runs/(?!${originalRun.id}$)[^/]+$`);
   const rerunNavigation = page.waitForURL(newRunURL);
@@ -77,7 +77,7 @@ test("Re-run starts a fresh trigger chain without inheriting scheduler depth", a
   expect(priorRuns.every((run) => run.params?._trigger_depth === "2")).toBe(true);
 
   await page.goto(`/jobs/${job.id}/runs/${originalRun.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   const navigation = page.waitForURL(new RegExp(`/jobs/${job.id}/runs/(?!${originalRun.id}$)[^/]+$`));
   await page.getByRole("button", { name: "Re-run" }).click();
   await navigation;

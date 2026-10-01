@@ -68,7 +68,7 @@ describe('TaskNode', () => {
       error: 'exit code 1',
     });
     expect(screen.getByText('exit code 1')).toBeInTheDocument();
-    expect(screen.getByText('Error Details')).toBeInTheDocument();
+    expect(screen.getByText('exit code 1')).toHaveClass('text-danger');
   });
 
   it('renders task with cached status', () => {
@@ -81,7 +81,7 @@ describe('TaskNode', () => {
     });
 
     expect(screen.getByTestId('status-icon-cached')).toBeInTheDocument();
-    expect(screen.getByText('Reused Result')).toBeInTheDocument();
+    expect(screen.getByText('Successful output restored from cache. No container started.')).toBeInTheDocument();
   });
 
   it('renders docker engine icon', () => {
@@ -128,7 +128,7 @@ describe('TaskNode', () => {
       command: '["sh","-c","echo streamed logs"]',
     });
 
-    expect(screen.getByText('SHELL')).toBeInTheDocument();
+    expect(screen.getByText('shell')).toBeInTheDocument();
     expect(screen.getByText('echo streamed logs')).toBeInTheDocument();
   });
 

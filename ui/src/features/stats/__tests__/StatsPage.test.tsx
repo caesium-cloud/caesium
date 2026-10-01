@@ -4,12 +4,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StatsPage } from '../StatsPage';
 import type { StatsResponse } from '@/lib/api';
 
-vi.mock('@/lib/api', () => {
+vi.mock('@/lib/api', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   const mockApi = {
     getStatsSummary: vi.fn(),
     getSystemFeatures: vi.fn(),
   };
-  return { api: mockApi, ApiError: class extends Error { status: number; constructor(s: number, m: string) { super(m); this.status = s; } } };
+  return { ...actual, api: mockApi, ApiError: class extends Error { status: number; constructor(s: number, m: string) { super(m); this.status = s; } } };
 });
 
 // Mock recharts ResponsiveContainer since jsdom has no layout
@@ -70,7 +71,7 @@ describe('StatsPage', () => {
   it('shows loading state', () => {
     vi.mocked(api.getStatsSummary).mockReturnValue(new Promise(() => {}));
     render(<StatsPage />, { wrapper: createWrapper() });
-    expect(screen.getByText('Operator Statistics')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Stats' })).toBeInTheDocument();
   });
 
   it('shows error state', async () => {

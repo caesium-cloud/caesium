@@ -22,7 +22,8 @@ export function useDagHeight(
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    setDagHeight(Math.max(minHeight, window.innerHeight - rect.top - bottomPadding));
+    const mainBottom = el.closest("main")?.getBoundingClientRect().bottom ?? window.innerHeight;
+    setDagHeight(Math.max(minHeight, Math.min(window.innerHeight, mainBottom) - rect.top - bottomPadding));
   }, [bottomPadding, minHeight]);
 
   // Re-measure whenever the window resizes.

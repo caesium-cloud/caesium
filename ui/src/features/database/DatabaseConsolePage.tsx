@@ -1,19 +1,10 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import {
-  ArrowRight,
-  Copy,
-  Database,
-  History,
-  Play,
-  RefreshCw,
-  Search,
-  TerminalSquare,
-} from "lucide-react";
+import { Copy, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import {
   Table,
   TableBody,
@@ -240,11 +231,11 @@ export function DatabaseConsolePage() {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="space-y-2">
           <div className="flex items-center gap-3">
-            <div className="rounded-2xl border border-primary/30 bg-primary/10 p-3 shadow-[0_0_40px_hsl(var(--cyan)/0.18)]">
+            <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 ">
               <TerminalSquare className="h-5 w-5 text-primary" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight">Database Console</h1>
+              <h1 className="text-2xl font-bold lowercase text-text-1">db</h1>
               <p className="text-sm text-muted-foreground">
                 Inspect Caesium&apos;s embedded persistence layer with schema-aware, read-only SQL.
               </p>
@@ -256,10 +247,10 @@ export function DatabaseConsolePage() {
             <Badge variant="outline" className="border-success/30 text-success">
               read-only
             </Badge>
-            <span className="rounded-full border border-border/70 bg-background/80 px-3 py-1 font-mono text-muted-foreground">
+            <span className="rounded-full border border-border/70 bg-background/80 px-3 py-1 text-muted-foreground">
               Ctrl/Cmd+Enter run
             </span>
-            <span className="rounded-full border border-border/70 bg-background/80 px-3 py-1 font-mono text-muted-foreground">
+            <span className="rounded-full border border-border/70 bg-background/80 px-3 py-1 text-muted-foreground">
               Ctrl/Cmd+Space autocomplete
             </span>
           </div>
@@ -271,53 +262,53 @@ export function DatabaseConsolePage() {
             onClick={() => refetch()}
             disabled={schemaLoading || databaseConsoleUnavailable}
           >
-            <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", schemaLoading && "animate-spin")} />
+
             Refresh schema
           </Button>
           <Button size="sm" onClick={() => execute()} disabled={runQuery.isPending || databaseConsoleUnavailable}>
-            <Play className="mr-1.5 h-3.5 w-3.5" />
+
             Run query
           </Button>
         </div>
       </div>
 
       {databaseConsoleUnavailable ? (
-        <Card className="border-warning/30 bg-warning/5">
-          <CardHeader>
-            <CardTitle className="text-base">Database Console Disabled</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
+        <section className="border-warning/30 bg-warning/5">
+          <div className="mb-3">
+            <h3 className="text-base">Database Console Disabled</h3>
+          </div>
+          <div className="space-y-2 text-sm text-muted-foreground">
             <p>The database console endpoints are not enabled on this server.</p>
-            <p className="font-mono text-xs text-foreground">
+            <p className="text-xs text-foreground">
               Set <code>CAESIUM_DATABASE_CONSOLE_ENABLED=true</code> and restart Caesium to expose the operator database console.
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_360px]">
         <div className="space-y-6">
-          <Card className="overflow-hidden border-border/70 bg-card/90 shadow-2xl shadow-black/10">
-            <CardHeader className="border-b border-border/70 bg-gradient-to-br from-obsidian/95 to-midnight/95 p-0">
+          <section className="overflow-hidden rounded-lg border border-border bg-midnight">
+            <div className="border-b border-border/70 bg-midnight p-0">
               <div className="flex items-center justify-between border-b border-graphite/40 px-4 py-3">
                 <div className="flex items-center gap-2">
                   <span className="h-3 w-3 rounded-full bg-danger/90" />
                   <span className="h-3 w-3 rounded-full bg-warning/90" />
                   <span className="h-3 w-3 rounded-full bg-success/90" />
                 </div>
-                <div className="flex items-center gap-2 text-xs uppercase tracking-[0.3em] text-text-3">
-                  <Database className="h-3.5 w-3.5" />
+                <div className="flex items-center gap-2 text-xs lowercase text-text-3">
+
                   Operator SQL
                 </div>
               </div>
               <div className="flex items-center justify-between px-4 py-3 text-sm text-text-2">
-                <div className="flex items-center gap-2 font-mono">
+                <div className="flex items-center gap-2">
                   <span className="text-success">caesium@db</span>
-                  <ArrowRight className="h-3.5 w-3.5 text-text-4" />
+
                   <span>{schema?.dialect ?? "query"}</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs">
-                  <label className="font-medium text-text-3" htmlFor="query-limit">
+                  <label className="font-normal text-text-3" htmlFor="query-limit">
                     Row cap
                   </label>
                   <input
@@ -327,17 +318,17 @@ export function DatabaseConsolePage() {
                     max={1000}
                     value={limit}
                     onChange={(event) => handleLimitChange(event.target.value)}
-                    className="w-20 rounded-md border border-graphite/40 bg-midnight/70 px-2 py-1 font-mono text-text-1 outline-none ring-0 transition focus:border-primary"
+                    className="w-20 rounded-md border border-graphite/40 bg-midnight/70 px-2 py-1 text-text-1 outline-none ring-0 transition focus:border-primary"
                   />
                 </div>
               </div>
-            </CardHeader>
-            <CardContent className="space-y-4 bg-gradient-to-b from-void/95 to-obsidian/95 p-4">
+            </div>
+            <div className="space-y-4 bg-midnight p-4">
               <div
                 ref={editorSurfaceRef}
-                className="relative rounded-2xl border border-graphite/40 bg-midnight/70 shadow-[inset_0_1px_0_hsl(var(--text-1)/0.04)]"
+                className="relative rounded-lg border border-graphite/40 bg-midnight/70 shadow-[inset_0_1px_0_hsl(var(--text-1)/0.04)]"
               >
-                <div className="border-b border-graphite/40 px-4 py-2 text-xs uppercase tracking-[0.28em] text-text-4">
+                <div className="border-b border-graphite/40 px-4 py-2 text-xs lowercase text-text-3">
                   Query
                 </div>
                 <textarea
@@ -354,13 +345,13 @@ export function DatabaseConsolePage() {
                   onSelect={(event) => setCursorPosition(event.currentTarget.selectionStart)}
                   spellCheck={false}
                   disabled={databaseConsoleUnavailable}
-                  className="min-h-[220px] w-full resize-y bg-transparent px-4 py-4 font-mono text-sm leading-6 text-text-1 outline-none placeholder:text-text-4"
+                  className="min-h-[220px] w-full resize-y bg-transparent px-4 py-4 text-sm leading-6 text-text-1 outline-none placeholder:text-text-3"
                   placeholder="SELECT * FROM job_runs ORDER BY started_at DESC LIMIT 25;"
                 />
 
                 {autocompleteVisible && suggestions.length > 0 ? (
                   <div
-                    className="absolute z-20 w-80 overflow-hidden rounded-2xl border border-primary/20 bg-midnight/95 shadow-[0_24px_80px_hsl(var(--void)/0.45)] backdrop-blur"
+                    className="absolute z-20 w-80 overflow-hidden rounded-lg border border-primary/20 bg-midnight/95 shadow-[0_24px_80px_hsl(var(--void)/0.45)]"
                     style={{ top: autocompletePosition.top, left: autocompletePosition.left }}
                   >
                     <div className="max-h-60 overflow-auto p-2">
@@ -374,14 +365,14 @@ export function DatabaseConsolePage() {
                               acceptSuggestion(index);
                             }}
                             className={cn(
-                              "flex items-center justify-between rounded-xl px-3 py-2 text-left font-mono text-sm transition",
+                              "flex items-center justify-between rounded-md px-3 py-2 text-left text-sm transition",
                               index === activeSuggestionIndex
                                 ? "bg-primary/15 text-primary"
                                 : "text-text-2 hover:bg-graphite/30",
                             )}
                           >
                             <span className="truncate pr-3">{suggestion.label}</span>
-                            <span className="shrink-0 text-[10px] uppercase tracking-[0.2em] text-text-4">
+                            <span className="shrink-0 text-[11px] lowercase text-text-3">
                               {suggestion.detail}
                             </span>
                           </button>
@@ -401,18 +392,18 @@ export function DatabaseConsolePage() {
                     disabled={databaseConsoleUnavailable}
                     className="rounded-full border border-graphite/40 bg-graphite/20 px-3 py-1.5 text-left transition hover:border-primary/40 hover:bg-primary/10"
                   >
-                    <div className="text-sm font-medium text-text-1">{snippet.label}</div>
+                    <div className="text-sm font-normal text-text-1">{snippet.label}</div>
                     <div className="text-xs text-text-3">{snippet.description}</div>
                   </button>
                 ))}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
 
-          <Card className="border-border/70 bg-card/90">
-            <CardHeader className="flex flex-row items-center justify-between gap-4">
+          <section className="border-y border-border py-3">
+            <div className="flex flex-row items-center justify-between gap-4">
               <div>
-                <CardTitle className="text-base">Results</CardTitle>
+                <h3 className="text-base">Results</h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Query output is capped client-side for readability while remaining read-only on the server.
                 </p>
@@ -429,16 +420,16 @@ export function DatabaseConsolePage() {
                   </Button>
                 </div>
               ) : null}
-            </CardHeader>
-            <CardContent>
+            </div>
+            <div className="space-y-3">
               {runQuery.isPending ? (
-                <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-6 text-sm text-muted-foreground">
+                <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-6 text-sm text-muted-foreground">
                   Running query against {schema?.dialect ?? "database"}...
                 </div>
               ) : null}
 
               {!runQuery.isPending && runQuery.error ? (
-                <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-4 text-sm text-destructive">
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-4 text-sm text-destructive">
                   {runQuery.error.message}
                 </div>
               ) : null}
@@ -448,49 +439,49 @@ export function DatabaseConsolePage() {
               ) : null}
 
               {!runQuery.isPending && !runQuery.error && !result && !databaseConsoleUnavailable ? (
-                <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
+                <div className="rounded-md border border-dashed border-border/80 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
                   No query executed yet. Start with a snippet or browse a table from the schema explorer.
                 </div>
               ) : null}
-            </CardContent>
-          </Card>
+            </div>
+          </section>
         </div>
 
         <div className="space-y-6">
-          <Card className="border-border/70 bg-card/90">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Schema Explorer</CardTitle>
+          <section className="border-y border-border py-3">
+            <div className="pb-3">
+              <h3 className="text-base">Schema Explorer</h3>
               <p className="text-sm text-muted-foreground">
                 Live table metadata from the connected database.
               </p>
-            </CardHeader>
-            <CardContent className="space-y-4">
+            </div>
+            <div className="space-y-4">
               <label className="relative block">
-                <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+
                 <input
                   aria-label="Search tables"
                   value={schemaSearch}
                   onChange={(event) => setSchemaSearch(event.target.value)}
                   placeholder="Search tables or columns"
-                  className="w-full rounded-xl border border-input bg-background px-10 py-2.5 text-sm outline-none transition focus:border-primary"
+                  className="w-full rounded-md border border-input bg-background px-10 py-2.5 text-sm outline-none transition focus:border-primary"
                 />
               </label>
 
               <div className="max-h-[640px] space-y-3 overflow-auto pr-1">
                 {schemaLoading ? (
-                  <div className="rounded-xl border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
                     Loading schema...
                   </div>
                 ) : null}
 
                 {schemaError && !databaseConsoleUnavailable ? (
-                  <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-4 text-sm text-destructive">
+                  <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-4 text-sm text-destructive">
                     {schemaError.message}
                   </div>
                 ) : null}
 
                 {!schemaLoading && !schemaError && filteredTables.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
                     No tables match that filter.
                   </div>
                 ) : null}
@@ -504,19 +495,19 @@ export function DatabaseConsolePage() {
                   />
                 ))}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
 
-          <Card className="border-border/70 bg-card/90">
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <History className="h-4 w-4" />
+          <section className="border-y border-border py-3">
+            <div className="pb-3">
+              <h3 className="flex items-center gap-2 text-base">
+
                 Recent Queries
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
+              </h3>
+            </div>
+            <div className="space-y-2">
               {history.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border/80 px-4 py-6 text-sm text-muted-foreground">
+                <div className="rounded-md border border-dashed border-border/80 px-4 py-6 text-sm text-muted-foreground">
                   Executed queries will appear here for quick recall.
                 </div>
               ) : null}
@@ -525,13 +516,13 @@ export function DatabaseConsolePage() {
                   key={`${index}-${entry}`}
                   type="button"
                   onClick={() => applySnippet(entry)}
-                  className="w-full rounded-xl border border-border/70 bg-background/60 px-3 py-3 text-left transition hover:border-primary/40 hover:bg-primary/5"
+                  className="w-full rounded-md border border-border/70 bg-background/60 px-3 py-3 text-left transition hover:border-primary/40 hover:bg-primary/5"
                 >
-                  <div className="line-clamp-3 font-mono text-xs text-foreground">{entry}</div>
+                  <div className="line-clamp-3 text-xs text-foreground">{entry}</div>
                 </button>
               ))}
-            </CardContent>
-          </Card>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -541,22 +532,22 @@ export function DatabaseConsolePage() {
 function ResultTable({ result }: { result: DatabaseQueryResponse }) {
   if (result.columns.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
+      <div className="rounded-md border border-dashed border-border/80 px-4 py-8 text-center text-sm text-muted-foreground">
         Query completed without a tabular result set.
       </div>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/70">
+    <div className="overflow-hidden rounded-md border border-border/70">
       <div className="max-h-[520px] overflow-auto">
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-card">
             <TableRow>
               {result.columns.map((column) => (
-                <TableHead key={column.name} className="whitespace-nowrap font-mono text-xs uppercase tracking-[0.2em]">
+                <TableHead key={column.name} className="whitespace-nowrap text-xs lowercase">
                   <div>{column.name}</div>
-                  <div className="mt-1 text-[10px] font-normal text-muted-foreground">{column.data_type || "unknown"}</div>
+                  <div className="mt-1 text-[11px] font-normal text-muted-foreground">{column.data_type || "unknown"}</div>
                 </TableHead>
               ))}
             </TableRow>
@@ -572,7 +563,7 @@ function ResultTable({ result }: { result: DatabaseQueryResponse }) {
             {result.rows.map((row, rowIndex) => (
               <TableRow key={rowIndex}>
                 {row.map((cell, cellIndex) => (
-                  <TableCell key={`${rowIndex}-${cellIndex}`} className="max-w-[360px] align-top font-mono text-xs">
+                  <TableCell key={`${rowIndex}-${cellIndex}`} className="max-w-[360px] align-top text-xs">
                     <div className="break-words whitespace-pre-wrap">{formatCellValue(cell)}</div>
                   </TableCell>
                 ))}
@@ -595,10 +586,10 @@ function SchemaTableCard({
   onCount: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-border/70 bg-background/60 p-4">
+    <div className="rounded-lg border border-border/70 bg-background/60 p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-mono text-sm font-medium text-foreground">{table.name}</div>
+          <div className="text-sm font-normal text-foreground">{table.name}</div>
           {table.row_count == null ? (
             <div className="mt-1 text-xs text-muted-foreground">Row count on demand</div>
           ) : (
@@ -616,9 +607,9 @@ function SchemaTableCard({
       </div>
       <div className="mt-3 grid gap-2">
         {table.columns.map((column) => (
-          <div key={column.name} className="flex items-center justify-between gap-3 rounded-xl border border-border/60 px-3 py-2">
+          <div key={column.name} className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2">
             <div className="min-w-0">
-              <div className="truncate font-mono text-xs text-foreground">{column.name}</div>
+              <div className="truncate text-xs text-foreground">{column.name}</div>
               <div className="truncate text-[11px] text-muted-foreground">{column.data_type.toLowerCase()}</div>
             </div>
             <div className="flex shrink-0 gap-2">

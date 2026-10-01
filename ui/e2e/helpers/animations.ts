@@ -3,6 +3,10 @@ import type { Page } from "@playwright/test";
 /** Scan settled UI without disabling motion or excusing contrast violations. */
 export async function waitForFiniteAnimations(page: Page, timeout = 5_000): Promise<void> {
   await page.waitForFunction(() => document.getAnimations().every((animation) => {
+    // Fleet marks continuously slide on the shared clock; their named left
+    // transition is live motion, just like an infinite oscillator. Other
+    // finite transitions and injected fades must still settle.
+    if (animation instanceof CSSTransition && animation.transitionProperty === "left" && (animation.effect as KeyframeEffect).target instanceof Element && ((animation.effect as KeyframeEffect).target as Element).classList.contains("cs-time-mark")) return true;
     const endTime = animation.effect?.getComputedTiming().endTime;
     // Infinite spinners are intentionally ongoing; finite entry/exit effects
     // must finish. Re-query every frame so cancellation/replacement cannot

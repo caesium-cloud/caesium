@@ -1,15 +1,15 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { CallbackRun } from "@/lib/api";
-import { shortId } from "@/lib/utils";
 
 /**
  * CallbackRunsSection renders a run's webhook callback attempts. Beyond the
  * pre-formatted `error` string it surfaces the transport detail the backend now
- * records — the HTTP status the target answered with, how many attempts
- * preceded this one, and the (already truncated + scrubbed) response body — so
+ * records: the HTTP status the target answered with, how many attempts
+ * preceded this one, and the (already truncated + scrubbed) response body: so
  * a transient network failure is distinguishable from a permanent 4xx without
  * leaving the page.
  */
@@ -43,18 +43,18 @@ function CallbackRunRow({ callback }: { callback: CallbackRun }) {
     >
       <div className="flex flex-wrap items-center gap-2">
         <StatusBadge status={callback.status} size="sm" />
-        <span className="font-mono text-xs text-text-2">callback {shortId(callback.callback_id)}</span>
-        <span className="font-mono text-[10px] text-text-4">run {shortId(callback.id)}</span>
+        <span className="text-xs text-text-2">callback <IdChip value={callback.callback_id} label="callback id" /></span>
+        <span className="text-[11px] text-text-3">run <IdChip value={callback.id} label="callback run id" /></span>
         {callback.http_status ? (
           <span
             data-testid="run-callback-http-status"
-            className={`font-mono text-[10px] ${failed ? "text-danger" : "text-text-3"}`}
+            className={`text-[11px] ${failed ? "text-danger" : "text-text-3"}`}
           >
             HTTP {callback.http_status}
           </span>
         ) : null}
         {retryCount > 0 ? (
-          <span data-testid="run-callback-retry-count" className="font-mono text-[10px] text-text-4">
+          <span data-testid="run-callback-retry-count" className="text-[11px] text-text-3">
             {retryCount === 1 ? "1 retry" : `${retryCount} retries`}
           </span>
         ) : null}
@@ -62,7 +62,7 @@ function CallbackRunRow({ callback }: { callback: CallbackRun }) {
       {callback.error ? (
         <div
           data-testid="run-callback-error"
-          className={`mt-2 break-words font-mono text-xs ${failed ? "text-danger" : "text-text-3"}`}
+          className={`mt-2 break-words text-xs ${failed ? "text-danger" : "text-text-3"}`}
         >
           {callback.error}
         </div>
@@ -72,7 +72,7 @@ function CallbackRunRow({ callback }: { callback: CallbackRun }) {
           <button
             type="button"
             data-testid="run-callback-body-toggle"
-            className="mt-2 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3 transition-colors hover:text-text-2"
+            className="mt-2 flex items-center gap-1 text-[11px] font-bold lowercase text-text-3 transition-colors hover:text-text-2"
             onClick={() => setBodyOpen((open) => !open)}
             aria-expanded={bodyOpen}
             aria-controls={bodyId}
@@ -84,7 +84,7 @@ function CallbackRunRow({ callback }: { callback: CallbackRun }) {
             <pre
               id={bodyId}
               data-testid="run-callback-response-body"
-              className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-border/50 bg-obsidian/40 p-2 font-mono text-[11px] text-text-3"
+              className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-border/50 bg-obsidian/40 p-2 text-[11px] text-text-3"
             >
               {callback.response_body}
             </pre>

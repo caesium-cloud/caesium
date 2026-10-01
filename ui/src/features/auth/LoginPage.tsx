@@ -1,5 +1,7 @@
 import { useState, useCallback } from "react";
-import { LogIn } from "lucide-react";
+import { AtomLogo } from "@/components/brand/atom-logo";
+import { UTCClock } from "@/components/ui/utc-clock";
+import { Oscillator } from "@/components/ui/oscillator";
 import {
   apiKeyLogin,
   type AuthMethod,
@@ -135,11 +137,18 @@ export function LoginPage({
   );
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background text-foreground">
+    <div className="relative flex min-h-screen items-center justify-center bg-void px-4 py-8 text-foreground">
+      <Oscillator className="pointer-events-none absolute left-0 top-1/2 w-full opacity-35" />
       <div
-        className="flex w-full max-w-[400px] flex-col gap-4 rounded-lg border border-border bg-card p-8"
+        className="relative flex w-full max-w-[420px] flex-col gap-4"
       >
-        <h1 className="mb-2 text-center text-xl font-semibold">Caesium</h1>
+        <div className="flex flex-col items-center gap-3 pb-4">
+          <AtomLogo size={180} />
+          <h1 className="text-xl font-bold tracking-[.12em]">CAESIUM</h1>
+          <p className="text-xs text-text-3">9 192 631 770 Hz</p>
+        </div>
+        <div className="space-y-4 rounded-lg border border-border bg-midnight p-6">
+          <p className="text-sm text-text-2">caesium <span className="text-cyan">❯</span> login</p>
 
         {redirectMethods.length > 0 && (
           <div className="flex flex-col gap-2">
@@ -148,9 +157,9 @@ export function LoginPage({
                 key={authMethodKey(method)}
                 type="button"
                 onClick={() => handleSSOLogin(method.loginUrl)}
-                className="inline-flex items-center justify-center gap-2 rounded-md border border-input bg-background px-4 py-2 font-medium text-foreground transition hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
+                className="inline-flex items-center justify-center gap-2 rounded-md border border-input bg-void px-4 py-2 font-normal text-foreground transition hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
               >
-                <LogIn className="h-4 w-4" aria-hidden="true" />
+
                 <span>{authMethodLabel(method)}</span>
               </button>
             ))}
@@ -166,18 +175,20 @@ export function LoginPage({
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              aria-label="Username"
               placeholder="Username"
               autoFocus
               autoComplete="username"
-              className="rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
+              className="rounded-md border border-input bg-void px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
             />
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              aria-label="Password"
               placeholder="Password"
               autoComplete="current-password"
-              className="rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
+              className="rounded-md border border-input bg-void px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
             />
 
             {credentialError && (
@@ -187,7 +198,7 @@ export function LoginPage({
             <button
               type="submit"
               disabled={credentialLoading}
-              className="rounded-md border-none bg-primary px-4 py-2 font-medium text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-md border-none bg-primary px-4 py-2 font-normal text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-60"
             >
               {credentialLoading ? "Signing in..." : authMethodLabel(credentialMethod)}
             </button>
@@ -203,10 +214,11 @@ export function LoginPage({
             type="password"
             value={key}
             onChange={(e) => setKey(e.target.value)}
+            aria-label="API key"
             placeholder="csk_live_..."
             autoFocus={!credentialMethod}
             autoComplete="off"
-            className="rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition focus:border-primary"
+            className="rounded-md border border-input bg-void px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
           />
 
           {error && (
@@ -216,13 +228,16 @@ export function LoginPage({
           <button
             type="submit"
             disabled={loading}
-            className="rounded-md border-none bg-primary px-4 py-2 font-medium text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-md border-none bg-primary px-4 py-2 font-normal text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loading ? "Verifying..." : "Sign In"}
           </button>
         </form>
 
-        <p className="m-0 text-center text-xs text-muted-foreground">
+        </div>
+        <UTCClock className="justify-center" />
+        <div className="text-center text-xs text-text-3">build unavailable</div>
+        <p className="m-0 text-center text-xs text-text-3">
           Key is stored in memory only and cleared on tab close
         </p>
       </div>

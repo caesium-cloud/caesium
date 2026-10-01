@@ -21,7 +21,7 @@ export function GitSyncDialog({ trigger }: GitSyncDialogProps) {
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent
         data-testid="jobdefs-git-sync-dialog"
-        className="bg-midnight border-graphite/50 p-4 text-text-1 sm:max-w-lg sm:rounded-lg sm:p-6"
+        className="bg-midnight border-graphite/50 p-4 text-text-1 sm:max-w-lg sm:rounded-md sm:p-6"
       >
         <DialogHeader>
           <DialogTitle>Git sync</DialogTitle>
@@ -32,18 +32,18 @@ export function GitSyncDialog({ trigger }: GitSyncDialogProps) {
         <div className="space-y-3 text-sm leading-relaxed text-text-2">
           <p>
             The scheduler clones repositories listed in{" "}
-            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 font-mono text-xs text-cyan-glow">
+            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 text-xs text-cyan-glow">
               CAESIUM_JOBDEF_GIT_SOURCES
             </code>{" "}
             when{" "}
-            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 font-mono text-xs text-cyan-glow">
+            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 text-xs text-cyan-glow">
               CAESIUM_JOBDEF_GIT_ENABLED=true
             </code>
             . This console cannot start a clone or edit those sources.
           </p>
           <p>
             To apply local YAML from this machine, use{" "}
-            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 font-mono text-xs text-cyan-glow">
+            <code className="rounded border border-graphite/50 bg-obsidian px-1 py-0.5 text-xs text-cyan-glow">
               caesium job apply --path
             </code>
             .

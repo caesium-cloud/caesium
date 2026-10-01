@@ -2,142 +2,51 @@ import { useId } from "react";
 import { cn } from "@/lib/utils";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 
-interface AtomLogoProps {
-  /** Pixel size of the SVG square. Defaults to `40`. */
+export interface AtomVoter { id: string; leader: boolean; reachable: boolean | null }
+export interface AtomLogoProps {
+  voters?: AtomVoter[];
+  quorum?: "ok" | "lost" | "unknown";
   size?: number;
-  /**
-   * Whether to animate the orbits + nucleus. Defaults to `true`.
-   * Always renders static when the user prefers reduced motion.
-   */
   animated?: boolean;
   className?: string;
-  /** Test hook only. Forces the reduced-motion branch. */
   forceReducedMotion?: boolean;
 }
+const BRAND_VOTERS: AtomVoter[] = Array.from({ length: 3 }, (_, i) => ({ id: `brand-${i}`, leader: i === 0, reachable: true }));
 
-/**
- * The Caesium atom: a stable nucleus with three deterministic orbits and
- * three gold satellites at fixed positions. The animated variant spins each
- * orbit at a different period (one reversed) and pulses the nucleus.
- */
-export function AtomLogo({
-  size = 40,
-  animated = true,
-  className,
-  forceReducedMotion = false,
-}: AtomLogoProps) {
+/** Three orbits, with real voters dealt round-robin. Missing evidence never looks healthy. */
+export function AtomLogo({ size = 40, animated = true, className, forceReducedMotion = false, voters = BRAND_VOTERS, quorum = "ok" }: AtomLogoProps) {
   const reducedMotion = useReducedMotion();
   const motionOff = forceReducedMotion || reducedMotion || !animated;
-
-  // Stable per-instance gradient id — keeps multiple <AtomLogo>s from sharing.
-  const gradId = `atom-nuc-glow-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
-
-  const orbitClass = motionOff ? "" : "atom-orbit";
-  const nucleusClass = motionOff ? "" : "atom-nucleus";
-
-  return (
-    <svg
-      viewBox="0 0 512 512"
-      width={size}
-      height={size}
-      className={cn("block", className)}
-      role="img"
-      aria-label="Caesium"
-      data-reduced-motion={motionOff ? "true" : "false"}
-    >
-      <defs>
-        <radialGradient id={gradId} cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="hsl(var(--cyan-glow))" stopOpacity="0.55" />
-          <stop offset="100%" stopColor="hsl(var(--cyan-glow))" stopOpacity="0" />
-        </radialGradient>
-      </defs>
-      <circle cx="256" cy="256" r="76" fill={`url(#${gradId})`} />
-      <g
-        className={orbitClass}
-        style={
-          motionOff
-            ? undefined
-            : {
-                transformOrigin: "256px 256px",
-                animation: "orbit-spin 22s linear infinite",
-              }
-        }
-      >
-        <ellipse
-          cx="256"
-          cy="256"
-          rx="210"
-          ry="70"
-          stroke="hsl(var(--cyan))"
-          strokeWidth="3.5"
-          opacity="0.9"
-          fill="none"
-          transform="rotate(-60 256 256)"
-        />
-      </g>
-      <g
-        className={orbitClass}
-        style={
-          motionOff
-            ? undefined
-            : {
-                transformOrigin: "256px 256px",
-                animation: "orbit-spin 30s linear infinite reverse",
-              }
-        }
-      >
-        <ellipse
-          cx="256"
-          cy="256"
-          rx="210"
-          ry="70"
-          stroke="hsl(var(--cyan))"
-          strokeWidth="3.5"
-          opacity="0.85"
-          fill="none"
-        />
-      </g>
-      <g
-        className={orbitClass}
-        style={
-          motionOff
-            ? undefined
-            : {
-                transformOrigin: "256px 256px",
-                animation: "orbit-spin 38s linear infinite",
-              }
-        }
-      >
-        <ellipse
-          cx="256"
-          cy="256"
-          rx="210"
-          ry="70"
-          stroke="hsl(var(--cyan))"
-          strokeWidth="3.5"
-          opacity="0.9"
-          fill="none"
-          transform="rotate(60 256 256)"
-        />
-      </g>
-      <circle
-        cx="256"
-        cy="256"
-        r="20"
-        fill="hsl(var(--cyan))"
-        className={nucleusClass}
-        style={
-          motionOff
-            ? undefined
-            : {
-                transformOrigin: "256px 256px",
-                animation: "nucleus-pulse 2.4s ease-in-out infinite",
-              }
-        }
-      />
-      <circle cx="361" cy="74" r="10" fill="hsl(var(--gold))" />
-      <circle cx="46" cy="256" r="10" fill="hsl(var(--gold))" />
-      <circle cx="361" cy="438" r="10" fill="hsl(var(--gold))" />
-    </svg>
-  );
+  const descriptionId = useId();
+  const drawn = voters.slice(0, 9);
+  const orbitColor = quorum === "lost" ? "hsl(var(--danger))" : quorum === "unknown" ? "hsl(var(--text-4))" : "hsl(var(--cyan))";
+  return <svg viewBox="0 0 512 512" width={size} height={size} className={cn("block cs-animated", className)}
+    role="img" aria-label="Caesium" aria-describedby={descriptionId} data-quorum={quorum} data-reduced-motion={motionOff ? "true" : "false"}>
+    <desc id={descriptionId}>{voters.length} voters. {quorum === "unknown" ? "Cluster health unknown." : quorum === "lost" ? "Quorum lost." : "Quorum available."}</desc>
+    {[-60, 0, 60].map((angle, orbit) => {
+      const period = [22, 30, 38][orbit];
+      const members = drawn.filter((_, i) => i % 3 === orbit);
+      return <g key={angle} transform={`rotate(${angle} 256 256)`}>
+        <g className={motionOff ? undefined : "atom-orbit"} style={motionOff ? undefined : {
+          transformOrigin: "256px 256px", animation: `cs-spin ${period}s linear infinite${orbit === 1 ? " reverse" : ""}`, animationDelay: `var(--cs-phase-${period}, 0ms)`,
+        }}>
+          <ellipse cx="256" cy="256" rx="210" ry="70" fill="none" stroke={orbitColor} strokeWidth="3.5" strokeDasharray={quorum === "lost" ? "14 12" : undefined} />
+          {members.map((voter, i) => {
+            const theta = 2 * Math.PI * i / members.length;
+            const x = 256 + 210 * Math.cos(theta), y = 256 + 70 * Math.sin(theta);
+            const unknown = quorum === "unknown" || voter.reachable === null;
+            const radius = size <= 22 ? 36 : 13;
+            return <g key={voter.id} data-voter={voter.id} data-reachable={unknown ? "unknown" : String(voter.reachable)} data-leader={String(voter.leader)}>
+              <circle cx={x} cy={y} r={radius} fill={!unknown && voter.reachable ? "hsl(var(--gold))" : "hsl(var(--void))"}
+                stroke={unknown ? "hsl(var(--text-4))" : voter.reachable ? "hsl(var(--gold))" : "hsl(var(--danger))"} strokeWidth="4" />
+              {voter.leader && !unknown && voter.reachable ? <circle cx={x} cy={y} r={radius + 7} fill="none" stroke="hsl(var(--cyan))" strokeWidth="4" /> : null}
+            </g>;
+          })}
+        </g>
+      </g>;
+    })}
+    <circle cx="256" cy="256" r="20" fill={quorum === "lost" ? "hsl(var(--text-4))" : "hsl(var(--cyan))"}
+      className={!motionOff && quorum === "ok" ? "atom-nucleus" : undefined}
+      style={!motionOff && quorum === "ok" ? { transformOrigin: "256px 256px", animation: "cs-nucleus 1s ease-out infinite", animationDelay: "var(--cs-phase, 0ms)" } : undefined} />
+  </svg>;
 }

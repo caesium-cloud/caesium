@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { FileDiff } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { JobTask, TaskRun } from "@/lib/api";
@@ -10,7 +10,7 @@ interface RunProposalSummaryProps {
   tasks?: TaskRun[];
   /** Job-level task definitions, keyed by id, used only to resolve a human-readable row label. */
   taskDefinitions?: Record<string, JobTask>;
-  /** Opens (or toggles) the task's detail panel — the same handler wired to the DAG's node click. */
+  /** Opens (or toggles) the task's detail panel: the same handler wired to the DAG's node click. */
   onSelectTask?: (taskId: string) => void;
 }
 
@@ -18,7 +18,7 @@ interface TaskProposalRow {
   taskId: string;
   taskName: string;
   kind: string;
-  /** Empty for a `generic`-section proposal (unregistered kind, or `proposal_summary` that failed to parse) — the row still renders, just with no counts. */
+  /** Empty for a `generic`-section proposal (unregistered kind, or `proposal_summary` that failed to parse): the row still renders, just with no counts. */
   counts: ActionCount[];
 }
 
@@ -28,7 +28,7 @@ interface TaskProposalRow {
  * that already lives in `TaskDetailPanel`). Sums per-action counts across
  * every task in the run whose output carries `proposal_kind`, and lists one
  * row per such task linking to its own task panel. Renders nothing when no
- * task in the run has a proposal — this reuses `parseProposal` rather than
+ * task in the run has a proposal: this reuses `parseProposal` rather than
  * re-implementing any of the `proposal_summary` parsing.
  */
 export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: RunProposalSummaryProps) {
@@ -69,7 +69,7 @@ export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: Run
     <Card data-testid="run-proposal-summary">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <FileDiff className="h-4 w-4 text-primary" />
+
           Proposals
         </CardTitle>
       </CardHeader>
@@ -82,7 +82,7 @@ export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: Run
                 data-testid="run-proposal-summary-total"
                 data-action={total.action}
                 variant={countBadgeVariant(total.action)}
-                className="gap-1 font-mono text-[11px]"
+                className="gap-1 text-[11px]"
               >
                 <span className="capitalize">{total.action}</span>
                 <span>{total.count}</span>
@@ -102,10 +102,10 @@ export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: Run
               onClick={() => onSelectTask?.(row.taskId)}
               className="flex w-full items-center gap-2 rounded-md border border-border/50 bg-obsidian/20 px-3 py-2 text-left text-xs transition-colors hover:bg-obsidian/30"
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-text-2" title={row.taskName}>
+              <span className="min-w-0 flex-1 truncate text-text-2" title={row.taskName}>
                 {row.taskName}
               </span>
-              <Badge data-testid="run-proposal-summary-kind" variant="outline" className="shrink-0 font-mono text-[10px]">
+              <Badge data-testid="run-proposal-summary-kind" variant="outline" className="shrink-0 text-[11px]">
                 {row.kind}
               </Badge>
               {row.counts.length > 0 ? (
@@ -116,7 +116,7 @@ export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: Run
                       data-testid="run-proposal-summary-row-count"
                       data-action={count.action}
                       variant={countBadgeVariant(count.action)}
-                      className="gap-1 font-mono text-[10px]"
+                      className="gap-1 text-[11px]"
                     >
                       <span className="capitalize">{count.action}</span>
                       <span>{count.count}</span>
@@ -126,7 +126,7 @@ export function RunProposalSummary({ tasks, taskDefinitions, onSelectTask }: Run
               ) : (
                 <span
                   data-testid="run-proposal-summary-row-counts-blank"
-                  className="shrink-0 text-[10px] text-muted-foreground"
+                  className="shrink-0 text-[11px] text-muted-foreground"
                 >
                   —
                 </span>

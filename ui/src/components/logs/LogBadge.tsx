@@ -10,8 +10,9 @@ export function LogBadge({ children, className }: LogBadgeProps) {
   return (
     <span
       className={cn(
-        "rounded-md border border-graphite/60 bg-midnight px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-text-2",
+        "inline-flex items-center gap-1.5 text-[11px] font-bold lowercase text-text-2",
         className,
+        "rounded-none border-0 bg-transparent",
       )}
     >
       {children}

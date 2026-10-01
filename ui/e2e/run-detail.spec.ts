@@ -22,7 +22,7 @@ test("run detail surfaces failed callback errors", async ({ page, request }) => 
   const failedCallback = await awaitFailedCallback(request, job.id, run.id);
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const callbacks = page.getByTestId("run-callbacks-section");
   await expect(callbacks).toBeVisible();
@@ -66,7 +66,7 @@ test("watching a run complete refreshes its asynchronous callback result", async
   await page.goto(`/jobs/${job.id}`);
   const runLink = page.locator(`a[href="/jobs/${job.id}/runs/${run.id}"]`);
   await expect(runLink).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('[data-status="running"]')).toBeVisible();
+  await expect(page.locator('[data-status="running"]').first()).toBeVisible();
 
   const initialResponse = await request.get(`/v1/jobs/${job.id}/runs/${run.id}`);
   expect(initialResponse.ok()).toBe(true);
@@ -75,8 +75,8 @@ test("watching a run complete refreshes its asynchronous callback result", async
   expect(initialRun.callbacks ?? []).toEqual([]);
 
   await runLink.click();
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('[data-status="running"]')).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('[data-status="running"]').first()).toBeVisible();
   await expect(page.getByTestId("run-callbacks-section")).toHaveCount(0);
 
   const callbacks = page.getByTestId("run-callbacks-section");

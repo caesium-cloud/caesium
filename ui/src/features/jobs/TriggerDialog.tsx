@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type FormEvent, type ReactElement } from "react";
-import { Play } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { isSchedulerOwnedParam } from "./rerun-params";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 
 interface TriggerDialogProps {
+  jobAlias?: string;
   open: boolean;
   disabled?: boolean;
   isPending?: boolean;
@@ -23,6 +24,7 @@ interface TriggerDialogProps {
 
 export function TriggerDialog({
   open,
+  jobAlias,
   disabled,
   isPending,
   trigger,
@@ -47,7 +49,7 @@ export function TriggerDialog({
       "focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50",
     [],
   );
-  const labelClassName = "block text-xs uppercase tracking-wide text-muted-foreground mb-1";
+  const labelClassName = "block text-xs lowercase text-muted-foreground mb-1";
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -70,14 +72,14 @@ export function TriggerDialog({
         </DialogTrigger>
       ) : null}
       <DialogContent
-        className="max-w-lg p-4 sm:rounded-lg sm:p-6"
+        className="max-w-lg p-4 sm:rounded-md sm:p-6"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           triggerRef.current?.focus();
         }}
       >
         <DialogHeader>
-          <DialogTitle>Trigger Job</DialogTitle>
+          <DialogTitle aria-label="Trigger Job" className="font-normal lowercase">caesium ❯ trigger {jobAlias || "job"}</DialogTitle>
           <DialogDescription>
             Confirm a manual run and optionally pass run parameters.
           </DialogDescription>
@@ -92,7 +94,7 @@ export function TriggerDialog({
               value={paramLines}
               onChange={(event) => setParamLines(event.target.value)}
               disabled={isPending || disabled}
-              className={`${inputClassName} min-h-24 font-mono text-xs`}
+              className={`${inputClassName} min-h-24 text-xs`}
               placeholder="key=value"
             />
           </div>
@@ -106,7 +108,7 @@ export function TriggerDialog({
               Cancel
             </Button>
             <Button type="submit" size="sm" disabled={isPending || disabled}>
-              <Play className="mr-1.5 h-3.5 w-3.5" />
+
               {isPending ? "Triggering..." : "Confirm Trigger"}
             </Button>
           </DialogFooter>

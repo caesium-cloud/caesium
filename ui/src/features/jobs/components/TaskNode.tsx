@@ -1,326 +1,71 @@
-import { memo } from 'react';
-import { Handle, Position, type NodeProps } from 'reactflow';
-import { isRecord } from '@/lib/typeGuards';
-import { cn, formatUTCTimestamp } from '@/lib/utils';
-import { statusMeta } from '@/lib/status';
-import { fanoutStatusSegments } from '@/lib/fanout';
-import { getHandleVisibility } from './node-edges';
-import {
-  Activity,
-  CheckCircle2,
-  Circle,
-  XCircle,
-  Clock,
-  Container,
-  Cloud,
-  Zap,
-  Settings,
-  Terminal as TerminalIcon,
-  AlertTriangle,
-  Archive,
-  SkipForward,
-  HardDrive,
-  ShieldCheck,
-  TimerReset,
-} from 'lucide-react';
-import { Duration } from '@/components/duration';
+import { memo } from "react";
+import { Handle, Position, type NodeProps } from "reactflow";
+import { isRecord } from "@/lib/typeGuards";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
+import { statusMeta, statusKeyForDomain } from "@/lib/status";
+import { StatusGlyph } from "@/components/ui/status-badge";
+import { fanoutStatusSegments } from "@/lib/fanout";
+import { getHandleVisibility } from "./node-edges";
+import { ImageReference } from "@/components/ui/image-reference";
+import { Duration } from "@/components/duration";
 
 export const TaskNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter, partitionCount, partitionStatusCounts, partitionValue } = data;
-  const taskLabel = typeof label === 'string' ? label : '';
-  const runtimeHints = getRuntimeHints(atom?.spec);
-  const { showTargetHandle, showSourceHandle } = getHandleVisibility(data.edgeDegree);
-  // Partition IDENTITY, not count: an expansion that materializes exactly one
-  // instance still has a partition value, its own cache identity, and its own
-  // log — hiding fan-out chrome for it would make the same task's UI silently
-  // change shape from run to run as N crosses 1. Mirrors
-  // internal/run.IsFanOutInstance / TaskDetailPanel's isFannedTask.
-  const isFanned =
-    typeof partitionCount === 'number' &&
-    (partitionCount > 1 || (partitionCount > 0 && !!partitionValue));
-  const fanoutSegments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
-
-  const getStatusIcon = () => {
-    switch (status) {
-      case 'completed':
-      case 'succeeded':
-        return <CheckCircle2 data-testid="status-icon-succeeded" className="w-5 h-5 text-success fill-success/10" />;
-      case 'failed':
-        return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-danger fill-danger/10" />;
-      case 'cached':
-        return <Archive data-testid="status-icon-cached" className="w-5 h-5 text-cached fill-cached/10" />;
-      case 'running':
-        return <Activity data-testid="status-icon-running" className="w-5 h-5 text-running animate-spin" />;
-      case 'skipped':
-        return <SkipForward data-testid="status-icon-skipped" className="w-5 h-5 text-text-3" />;
-      case 'pending':
-        return <Clock data-testid="status-icon-pending" className="w-5 h-5 text-text-4" />;
-      default:
-        return <Circle data-testid="status-icon-unknown" className="w-5 h-5 text-text-4" />;
-    }
-  };
-
-  const getEngineIcon = () => {
-    const e = (engine || atom?.engine || '').toLowerCase();
-    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-running" />;
-    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-running" />;
-    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-accent" />;
-    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-warning" />;
-    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-text-3" />;
-  };
-
-  const getProcessedCommand = () => {
-    let cmd = command || atom?.command || [];
-    if (typeof cmd === 'string') {
-      try {
-        cmd = JSON.parse(cmd);
-      } catch {
-        cmd = [cmd];
-      }
-    }
-
-    const isShell = cmd.length >= 2 &&
-      (cmd[0] === 'sh' || cmd[0] === 'bash' || cmd[0] === '/bin/sh' || cmd[0] === '/bin/bash') &&
-      cmd[1] === '-c';
-
-    return {
-      args: isShell ? cmd.slice(2) : cmd,
-      isShell
-    };
-  };
-
-  const { args: commandArray, isShell } = getProcessedCommand();
-
-  const getStatusColor = () => {
-    switch (status) {
-      case 'completed':
-      case 'succeeded':
-        return 'border-success/45 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.16),hsl(var(--success)/0.2)_30%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_hsl(var(--success)/0.16)]';
-      case 'failed':
-        return 'border-danger/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(var(--danger)/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_hsl(var(--danger)/0.16)]';
-      case 'running':
-        return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_hsl(var(--caesium-cyan)/0.28)]';
-      case 'cached':
-        return 'border-dashed border-cached/55 bg-[linear-gradient(155deg,hsl(var(--cached)/0.16),hsl(var(--caesium-cyan)/0.08)_34%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_hsl(var(--cached)/0.14)]';
-      case 'skipped':
-        return 'border-text-3/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
-      default:
-        return 'border-caesium-cyan/35 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--caesium-cyan)/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_hsl(var(--caesium-cyan)/0.14)]';
-    }
-  };
-
-  const shortImage = (image: string) => {
-    if (!image) return 'unknown';
-    const parts = image.split('/');
-    return parts[parts.length - 1];
-  };
-
-  return (
-    <div className="relative h-[148px] w-[300px]">
-      {isFanned && (
-        <>
-          <div
-            aria-hidden="true"
-            data-testid="fanout-stack-card"
-            className="absolute inset-0 -z-20 translate-x-2 translate-y-2 rounded-xl border-2 border-caesium-cyan/10 bg-node-surface/30"
-          />
-          <div
-            aria-hidden="true"
-            data-testid="fanout-stack-card"
-            className="absolute inset-0 -z-10 translate-x-1 translate-y-1 rounded-xl border-2 border-caesium-cyan/20 bg-node-surface/55"
-          />
-        </>
-      )}
-      <div
-        className={cn(
-          'relative h-full w-full overflow-hidden rounded-xl border-2 px-4 py-2 transition-all duration-300',
-          getStatusColor(),
-          isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
-        )}
-      >
-      {showTargetHandle ? (
-        <Handle
-          data-testid="task-node-target-handle"
-          type="target"
-          position={Position.Left}
-          className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan"
-        />
-      ) : null}
-
-      <div className="flex h-full flex-col gap-2">
-        <div className="flex min-h-[44px] items-start justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 overflow-hidden">
-            <div className="rounded-lg border border-caesium-cyan/20 bg-muted p-1.5 shadow-inner shadow-caesium-cyan/10">
-              {getEngineIcon()}
-            </div>
-            <div className="flex min-w-0 flex-1 flex-col">
-              <span
-                data-testid="task-node-label"
-                className="block truncate text-[13px] font-bold leading-5 text-foreground"
-                title={taskLabel}
-              >
-                {taskLabel}
-              </span>
-              <div className="mt-0.5 flex min-w-0 items-center gap-1">
-                {isShell && (
-                  <span className="rounded border border-caesium-cyan/40 bg-caesium-cyan/15 px-1 text-[8px] font-black tracking-tighter text-caesium-cyan">
-                    SHELL
-                  </span>
-                )}
-                {runtimeHints.volumeCount > 0 && (
-                  <span
-                    data-testid="runtime-volume-badge"
-                    title={`${runtimeHints.volumeCount} resolved volume ${runtimeHints.volumeCount === 1 ? 'mount' : 'mounts'}`}
-                    className="inline-flex items-center gap-0.5 rounded border border-caesium-cyan/30 bg-caesium-cyan/10 px-1 text-[8px] font-black text-caesium-cyan"
-                  >
-                    <HardDrive className="h-2.5 w-2.5" />
-                    {runtimeHints.volumeCount}
-                  </span>
-                )}
-                {runtimeHints.hasKubernetesIdentity && (
-                  <span
-                    data-testid="runtime-identity-badge"
-                    title={runtimeHints.serviceAccountName ? `ServiceAccount ${runtimeHints.serviceAccountName}` : 'Kubernetes pod identity settings'}
-                    className="inline-flex items-center gap-0.5 rounded border border-gold/35 bg-gold/10 px-1 text-[8px] font-black text-gold"
-                  >
-                    <ShieldCheck className="h-2.5 w-2.5" />
-                    SA
-                  </span>
-                )}
-                <span
-                  data-testid="task-node-image"
-                  className="truncate text-[9px] font-mono text-muted-foreground"
-                  title={atom?.image}
-                >
-                  {shortImage(atom?.image)}
-                </span>
-              </div>
-            </div>
-          </div>
-          <div className="flex min-h-[30px] min-w-[44px] flex-col items-end justify-between gap-1">
-            {isFanned && (
-              <span data-testid="fanout-badge" className="text-[9px] font-mono font-bold text-caesium-cyan">
-                ×{partitionCount}
-              </span>
-            )}
-            {getStatusIcon()}
-            <div className={cn("text-[9px] font-mono text-muted-foreground", !startedAt && "invisible")}>
-              {startedAt ? (
-                <Duration start={startedAt} end={completedAt} />
-              ) : (
-                "00:00"
-              )}
-            </div>
-          </div>
-        </div>
-
-        {fanoutSegments.length > 0 && (
-          <div
-            data-testid="fanout-status-strip"
-            title="Partition status breakdown"
-            className="flex h-1.5 w-full shrink-0 overflow-hidden rounded-full bg-muted/40"
-          >
-            {fanoutSegments.map((segment) => (
-              <div
-                key={segment.status}
-                data-testid="fanout-status-segment"
-                data-status={segment.status}
-                title={`${segment.status}: ${segment.count}`}
-                style={{
-                  width: `${segment.fraction * 100}%`,
-                  backgroundColor: statusMeta(segment.status).fg,
-                }}
-              />
-            ))}
-          </div>
-        )}
-
-        <div
-          className={cn(
-            "custom-scrollbar overflow-y-auto rounded-lg border px-2.5 py-1.5 shadow-inner",
-            fanoutSegments.length > 0 ? "h-16" : "h-[72px]",
-            error && status !== 'skipped'
-              ? "border-danger/20 bg-danger/10"
-              : error && status === 'skipped'
-                ? "border-text-3/20 bg-text-3/5"
-                : "border-caesium-cyan/20 bg-muted/70",
-            isShell && !error && "border-caesium-cyan/30"
-          )}
-        >
-          {error && status === 'skipped' ? (
-            <div className="flex gap-2 items-start">
-              <SkipForward className="w-3.5 h-3.5 text-text-3 shrink-0 mt-0.5" />
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-text-3/80 uppercase tracking-wider">Skipped</span>
-                <span className="text-[9px] text-text-3/70 font-mono leading-relaxed break-all line-clamp-3">
-                  {error}
-                </span>
-              </div>
-            </div>
-          ) : error ? (
-            <div className="flex gap-2 items-start">
-              <AlertTriangle className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-danger/80 uppercase tracking-wider">Error Details</span>
-                <span className="text-[9px] text-danger/90 font-mono leading-relaxed break-all line-clamp-3">
-                  {error}
-                </span>
-              </div>
-            </div>
-          ) : rateLimitRetryAfter ? (
-            <div data-testid="task-rate-limit-indicator" className="flex gap-2 items-start">
-              <TimerReset className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-warning/90 uppercase tracking-wider">Rate limited</span>
-                <span className="text-[9px] text-warning/85 font-mono leading-relaxed line-clamp-3">
-                  Rate-limited until {formatRetryAfter(rateLimitRetryAfter)}
-                </span>
-              </div>
-            </div>
-          ) : status === 'cached' ? (
-            <div className="flex gap-2 items-start">
-              <Archive className="w-3.5 h-3.5 text-cached shrink-0 mt-0.5" />
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-cached/90 uppercase tracking-wider">Reused Result</span>
-                <span className="text-[9px] text-cached/85 font-mono leading-relaxed line-clamp-3">
-                  Successful output restored from cache. No container started.
-                </span>
-              </div>
-            </div>
-          ) : commandArray.length > 0 ? (
-            <div className="flex flex-col gap-1">
-              {commandArray.map((arg: string, i: number) => (
-                <div key={i} className="flex items-start gap-2 group">
-                  <span className="mt-0.5 text-[10px] font-bold leading-none text-caesium-cyan/70 select-none">{isShell ? ">" : "-"}</span>
-                  <span className="break-all font-mono text-[10px] leading-relaxed text-foreground/70 transition-colors group-hover:text-foreground">
-                    {arg}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="flex h-full items-center gap-2 opacity-50">
-              <TerminalIcon className="h-3 w-3 text-caesium-cyan/55" />
-              <span className="text-[10px] font-mono italic text-muted-foreground">no command</span>
-            </div>
-          )}
-        </div>
+  const taskLabel = typeof label === "string" ? label : "";
+  const branch = data.taskType === "branch";
+  const runtime = getRuntimeHints(atom?.spec);
+  const handles = getHandleVisibility(data.edgeDegree);
+  const state = statusKeyForDomain(status === "completed" ? "succeeded" : status) ?? "unknown";
+  const meta = statusMeta(state);
+  const isFanned = typeof partitionCount === "number" && (partitionCount > 1 || (partitionCount > 0 && !!partitionValue));
+  const segments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
+  let rawCommand = command || atom?.command || [];
+  if (typeof rawCommand === "string") { try { rawCommand = JSON.parse(rawCommand); } catch { rawCommand = [rawCommand]; } }
+  const args: string[] = Array.isArray(rawCommand) ? rawCommand.map(String) : [];
+  const shell = args.length >= 2 && ["sh", "bash", "/bin/sh", "/bin/bash"].includes(args[0]) && args[1] === "-c";
+  const visibleArgs = shell ? args.slice(2) : args;
+  const runtimeEngine = String(engine || atom?.engine || "unknown").toLowerCase();
+  const image = String(atom?.image || "unknown").split("/").pop() || "unknown";
+  const border = state === "running" ? "border-running shadow-[0_0_24px_hsl(var(--running)/.18)]" : state === "succeeded" ? "border-success/45" : state === "failed" ? "border-danger" : state === "cached" ? "border-cached border-dashed" : state === "skipped" ? "border-border" : "border-gold/50";
+  const note = error ? String(error).split("\n")[0] : rateLimitRetryAfter ? `Rate-limited until ${formatRetryAfter(rateLimitRetryAfter)}` : state === "cached" ? "Successful output restored from cache. No container started." : startedAt ? data.runStartedAt ? `started at +${Math.max(0, (Date.parse(startedAt) - Date.parse(data.runStartedAt)) / 1000).toFixed(2)}s` : `started at ${formatUTCTimestamp(startedAt)}` : state === "skipped" ? "branch chose another path" : "waits on upstream work";
+  const prefix = branch ? "branch" : "task";
+  return <div className="relative h-[112px] w-[260px]">
+    {isFanned ? <>
+      <div aria-hidden="true" data-testid="fanout-stack-card" className="absolute inset-0 -z-20 translate-x-2 translate-y-2 rounded-lg border border-border bg-node-surface" />
+      <div aria-hidden="true" data-testid="fanout-stack-card" className="absolute inset-0 -z-10 translate-x-1 translate-y-1 rounded-lg border border-border bg-node-surface" />
+    </> : null}
+    <div className={cn("relative h-full rounded-lg border bg-midnight px-3", border, isSelected && "ring-2 ring-ring ring-offset-2 ring-offset-background")}>
+      {["running", "succeeded", "cached", "queued"].includes(state) ? <span aria-hidden="true" data-testid="task-node-electron" className={`cs-electron cs-electron-${state}`} /> : null}
+      {handles.showTargetHandle ? <Handle data-testid={`${prefix}-node-target-handle`} type="target" position={Position.Left} className="h-2 w-2 border border-dag-bg bg-cyan" /> : null}
+      <div className="flex h-8 items-center gap-2">
+        <StatusGlyph meta={meta} testId={`status-icon-${status === "pending" ? "pending" : state}`} />
+        <span className="sr-only">{meta.label}</span>
+        <span data-testid="task-node-label" title={taskLabel} className="min-w-0 flex-1 truncate text-sm font-bold text-text-1">{taskLabel}</span>
+        {isFanned ? <span data-testid="fanout-badge" className="text-[11px] text-text-3">×{partitionCount}</span> : null}
+        <span className={cn("text-[11px] tabular-nums", state === "running" ? "text-running" : "text-text-3")}>
+          {startedAt ? <Duration start={startedAt} end={completedAt} /> : ""}
+        </span>
       </div>
-
-      {showSourceHandle ? (
-        <Handle
-          data-testid="task-node-source-handle"
-          type="source"
-          position={Position.Right}
-          className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan"
-        />
-      ) : null}
+      {segments.length > 0 ? <div data-testid="fanout-status-strip" title="Partition status breakdown" className="absolute left-0 right-0 top-8 flex h-1 overflow-hidden">
+        {segments.map(segment => <span key={segment.status} data-testid="fanout-status-segment" data-status={segment.status} title={`${segment.status}: ${segment.count}`} style={{ width: `${segment.fraction * 100}%`, backgroundColor: statusMeta(segment.status).fg }} />)}
+      </div> : null}
+      <div className="flex h-5 min-w-0 items-center gap-2 text-[11px] text-text-3">
+        <span data-testid="task-node-image" title={atom?.image} className="min-w-0 flex-1 truncate"><ImageReference image={image} /></span>
+        {shell ? <span>shell</span> : null}
+        {runtime.volumeCount > 0 ? <span data-testid="runtime-volume-badge" title={`${runtime.volumeCount} resolved volume ${runtime.volumeCount === 1 ? "mount" : "mounts"}`}>volume {runtime.volumeCount}</span> : null}
+        {runtime.hasKubernetesIdentity ? <span data-testid="runtime-identity-badge" title={runtime.serviceAccountName ? `ServiceAccount ${runtime.serviceAccountName}` : "Kubernetes pod identity settings"}>SA</span> : null}
+        <span data-testid={`engine-icon-${runtimeEngine.includes("k8s") ? "kubernetes" : runtimeEngine}`}>{branch ? <span className="text-gold">branch</span> : runtimeEngine}</span>
       </div>
+      <div className="mt-1 flex h-6 min-w-0 items-center gap-2 rounded-sm bg-void px-2 text-[11px]" title={visibleArgs.join(" ")}>
+        <span className="text-cyan">$</span>
+        <span className="min-w-0 truncate text-text-2">{visibleArgs.length ? visibleArgs.map((arg, i) => <span key={i}>{i ? " " : ""}{arg}</span>) : "no command"}</span>
+      </div>
+      <div data-testid={rateLimitRetryAfter ? "task-rate-limit-indicator" : "task-node-note"} className={cn("mt-1 truncate text-[11px] italic", error && state !== "skipped" ? "text-danger" : rateLimitRetryAfter ? "text-gold" : "text-text-3")} title={note}>{note}</div>
+      {handles.showSourceHandle ? <Handle data-testid={`${prefix}-node-source-handle`} type="source" position={Position.Right} className="h-2 w-2 border border-dag-bg bg-cyan" /> : null}
     </div>
-  );
+  </div>;
 });
-
-TaskNode.displayName = 'TaskNode';
+TaskNode.displayName = "TaskNode";
 
 function formatRetryAfter(value: unknown) {
   if (typeof value !== 'string' || value.trim() === '') {

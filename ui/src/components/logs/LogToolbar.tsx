@@ -17,7 +17,7 @@ export function LogToolbar({ children, status, className }: LogToolbarProps) {
     >
       {children}
       {status && (
-        <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
+        <div className="ml-auto flex flex-wrap items-center gap-2 text-[11px] font-bold lowercase">
           {status}
         </div>
       )}

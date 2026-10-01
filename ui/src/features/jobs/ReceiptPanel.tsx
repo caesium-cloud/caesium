@@ -1,6 +1,8 @@
+import { ImageReference } from "@/components/ui/image-reference";
+import { IdChip } from "@/components/ui/id-chip";
 import { type ChangeEvent, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, FileJson, Loader2, ShieldCheck, Upload } from "lucide-react";
+import { Loader2, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -81,7 +83,7 @@ export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <FileJson className="h-4 w-4 text-primary" />
+
               Reproducibility Receipt
             </CardTitle>
             <p className="mt-1 max-w-3xl text-xs text-text-3">
@@ -100,10 +102,10 @@ export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
             className="rounded-md border border-warning/25 bg-warning/10 p-3 text-xs text-warning"
           >
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
               <div>
-                <div className="font-semibold">Receipt unavailable</div>
-                <div className="mt-1 text-warning/80">{receiptQuery.error.message}</div>
+                <div className="font-bold">Receipt unavailable</div>
+                <div className="mt-1 text-warning">{receiptQuery.error.message}</div>
               </div>
             </div>
           </div>
@@ -147,7 +149,7 @@ function ReceiptStatus({ receipt }: { receipt: Receipt }) {
       variant="secondary"
       className={cn("h-fit gap-1.5", RECEIPT_INFO_BADGE_CLASS)}
     >
-      <FileJson className="h-3.5 w-3.5" />
+
       degraded-unverifiable
     </Badge>
   ) : (
@@ -180,15 +182,15 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
       </div>
 
       <div className="rounded-md border border-border/60 bg-background/40 p-3">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="text-[11px] font-bold lowercase text-muted-foreground">
           receipt_digest
         </div>
         <div
           data-testid="receipt-digest"
-          className="mt-1 break-all font-mono text-xs text-text-1"
+          className="mt-1 break-all text-xs text-text-1"
           title={receipt.receipt_digest}
         >
-          {receipt.receipt_digest}
+          <IdChip value={receipt.receipt_digest} label="receipt digest" />
         </div>
       </div>
 
@@ -206,19 +208,19 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                 <div className="min-w-0">
                   <div
                     data-testid="receipt-task-name"
-                    className="break-words font-mono text-sm font-semibold text-text-1"
+                    className="break-words text-sm font-bold text-text-1"
                   >
                     {task.task_name}
                   </div>
-                  <div className="mt-1 break-all font-mono text-xs text-text-3" data-testid="receipt-task-image">
-                    {task.image}
+                  <div className="mt-1 break-all text-xs text-text-3" data-testid="receipt-task-image">
+                    <ImageReference image={task.image} />
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Badge
                     data-testid="receipt-task-digest-pinned-marker"
                     variant={task.digest_pinned ? "success" : "secondary"}
-                    className={cn("text-[10px]", task.digest_pinned ? undefined : RECEIPT_INFO_BADGE_CLASS)}
+                    className={cn("text-[11px]", task.digest_pinned ? undefined : RECEIPT_INFO_BADGE_CLASS)}
                   >
                     digest_pinned={String(task.digest_pinned)}
                   </Badge>
@@ -226,7 +228,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                     <Badge
                       data-testid="receipt-task-unverifiable-marker"
                       variant="secondary"
-                      className={cn("text-[10px]", RECEIPT_INFO_BADGE_CLASS)}
+                      className={cn("text-[11px]", RECEIPT_INFO_BADGE_CLASS)}
                     >
                       unverifiable
                     </Badge>
@@ -288,15 +290,15 @@ function UnverifiableSummary({ tasks }: { tasks: string[] }) {
       className={RECEIPT_INFO_PANEL_CLASS}
     >
       <div className="flex items-start gap-2">
-        <FileJson className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-3" />
+
         <div>
-          <div className="font-semibold">This receipt is degraded-unverifiable.</div>
+          <div className="font-bold">This receipt is degraded-unverifiable.</div>
           <div className="mt-1 text-text-3">
             Unverifiable tasks:{" "}
             {tasks.map((task, index) => (
               <span key={`${task}:${index}`}>
                 {index > 0 ? ", " : null}
-                <span data-testid="receipt-degraded-task" className="font-mono">
+                <span data-testid="receipt-degraded-task" className="">
                   {task}
                 </span>
               </span>
@@ -347,7 +349,7 @@ function VerifyForm({
           />
           <Button asChild variant="outline" size="sm">
             <label htmlFor="receipt-file-upload" className="cursor-pointer">
-              <Upload className="h-3.5 w-3.5" />
+
               Upload .receipt
             </label>
           </Button>
@@ -369,7 +371,7 @@ function VerifyForm({
         value={committedReceiptText}
         onChange={(event) => onChange(event.target.value)}
         spellCheck={false}
-        className="min-h-[128px] w-full resize-y rounded-md border border-border/70 bg-background/60 p-3 font-mono text-xs text-text-1 outline-none focus:border-primary"
+        className="min-h-[128px] w-full resize-y rounded-md border border-border/70 bg-background/60 p-3 text-xs text-text-1 outline-none focus:border-primary"
         placeholder='{"receipt_version":1,"run_id":"...","job_id":"...","tasks":[],"degraded":false,"receipt_digest":"..."}'
       />
 
@@ -414,7 +416,7 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
         >
           {verdict}
         </Badge>
-        <span className="font-mono text-[10px] text-text-3">run_id={result.run_id}</span>
+        <span className="text-[11px] text-text-3">run_id={result.run_id}</span>
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
@@ -436,11 +438,11 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
 
       {degradedTasks.length > 0 ? (
         <div className="rounded-md border border-border/60 bg-muted/25 p-2 text-xs text-text-3">
-          <span className="font-semibold">degraded_tasks </span>
+          <span className="font-bold">degraded_tasks </span>
           {degradedTasks.map((task, index) => (
             <span key={`${task}:${index}`}>
               {index > 0 ? ", " : null}
-              <span data-testid="receipt-verify-degraded-task" className="font-mono">
+              <span data-testid="receipt-verify-degraded-task" className="">
                 {task}
               </span>
             </span>
@@ -468,11 +470,11 @@ function DriftRow({ drift }: { drift: ReceiptDrift }) {
   return (
     <div data-testid="receipt-verify-drift-row" className="rounded-md border border-border/50 bg-background/40 p-2">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge data-testid="receipt-verify-drift-kind" variant="outline" className="font-mono text-[10px]">
+        <Badge data-testid="receipt-verify-drift-kind" variant="outline" className="text-[11px]">
           {drift.kind}
         </Badge>
         {drift.task ? (
-          <span data-testid="receipt-verify-drift-task" className="font-mono text-[10px] text-text-3">
+          <span data-testid="receipt-verify-drift-task" className="text-[11px] text-text-3">
             {drift.task}
           </span>
         ) : null}
@@ -503,15 +505,15 @@ function MetadataCell({
 }) {
   return (
     <div className="min-w-0 rounded-md border border-border/50 bg-background/40 p-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="text-[11px] font-bold lowercase text-muted-foreground">
         {label}
       </div>
       <div
         data-testid={testId}
-        className={cn("mt-1 break-all text-xs text-text-1", mono ? "font-mono" : undefined)}
+        className={cn("mt-1 break-all text-xs text-text-1", mono ? "" : undefined)}
         title={value}
       >
-        {value}
+        {/(_id|hash|digest|commit)$/.test(label) && value !== "None" ? <IdChip value={value} label={label} /> : value}
       </div>
     </div>
   );
@@ -519,7 +521,7 @@ function MetadataCell({
 
 function SectionLabel({ children }: { children: string }) {
   return (
-    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="text-[11px] font-bold lowercase text-muted-foreground">
       {children}
     </div>
   );

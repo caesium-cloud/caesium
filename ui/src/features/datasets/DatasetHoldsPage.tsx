@@ -1,3 +1,4 @@
+import { StatusBadge } from "@/components/ui/status-badge";
 import { useState } from "react";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -69,14 +70,14 @@ export function DatasetHoldsPage() {
     );
   return (
     <div className="space-y-5" data-testid="dataset-holds-page">
-      <h1 className="text-xl font-semibold">Dataset holds</h1>
+      <h1 className="text-2xl font-bold lowercase text-text-1">Dataset holds</h1>
       <p className="text-sm text-text-3">
         A held dataset skips downstream runs at admission. Review the producer
         evidence before acknowledging it.
       </p>
       {search.name ? (
         <div className="flex items-center gap-3 text-xs">
-          <span className="font-mono">
+          <span className="">
             {search.namespace ? `${search.namespace}/` : ""}
             {search.name}
           </span>
@@ -110,7 +111,7 @@ export function DatasetHoldsPage() {
           ) : (
             <>
               <p className="text-xs text-text-3" data-testid="hold-page-total">
-                {list.data.total} holds · page {page + 1} of{" "}
+                {list.data.total} holds, page {page + 1} of{" "}
                 {Math.max(1, Math.ceil(list.data.total / pageSize))}
               </p>
               {list.data.holds.length === 0 ? (
@@ -124,14 +125,14 @@ export function DatasetHoldsPage() {
                   to="/datasets/holds"
                   search={holdSearch(hold)}
                   data-testid="hold-list-row"
-                  className="block space-y-1 rounded border border-fuchsia-400/30 bg-card p-3 hover:bg-fuchsia-400/5"
+                  className="block min-h-14 space-y-1 border-b border-border py-2 hover:bg-obsidian"
                 >
-                  <p className="break-all font-mono text-sm">
+                  <p className="break-all text-sm">
                     {hold.namespace ? `${hold.namespace}/` : ""}
                     {hold.name}
                   </p>
                   <p className="text-xs text-text-3">
-                    {hold.status} · {hold.reason} · {hold.occurrence_count}{" "}
+                    <StatusBadge status={hold.status === "active" ? "queued" : "succeeded"} label={hold.status} size="sm" /> <span className="ml-4">{hold.reason}</span> <span className="ml-4">{hold.occurrence_count}</span>{" "}
                     occurrences
                   </p>
                 </Link>

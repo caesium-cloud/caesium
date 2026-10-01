@@ -33,7 +33,7 @@ test("task detail panel renders a terraform.plan.v1 proposal from a propose step
   const run = await awaitRun(request, job.id, { status: "succeeded" });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const node = page.locator(".react-flow__node").first();
   await expect(node).toBeVisible({ timeout: 30_000 });

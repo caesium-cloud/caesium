@@ -26,7 +26,10 @@ export type RunStatus =
 /** Status sources use distinct lifecycles even where their strings overlap. */
 export type StatusDomain = "run" | "incident" | "agent-action" | "agent-session";
 
+export type StatusShape = "ring" | "solid" | "failed" | "hollow" | "paused" | "dashed" | "skipped";
+
 export interface StatusMeta {
+  shape: StatusShape;
   /** Lowercase display label, e.g. "running". */
   label: string;
   /** Foreground (text) color as a CSS `hsl(...)` expression. */
@@ -45,13 +48,15 @@ export interface StatusMeta {
 const META: Record<RunStatus, StatusMeta> = {
   running: {
     label: "running",
-    fg: "hsl(var(--cyan-glow))",
+    shape: "ring",
+    fg: "hsl(var(--running))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
     dotClass: "animate-cyan-pulse",
   },
   succeeded: {
     label: "succeeded",
+    shape: "solid",
     fg: "hsl(var(--success))",
     bg: "hsl(var(--success) / 0.12)",
     border: "hsl(var(--success) / 0.3)",
@@ -59,6 +64,7 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   failed: {
     label: "failed",
+    shape: "failed",
     fg: "hsl(var(--danger))",
     bg: "hsl(var(--danger) / 0.12)",
     border: "hsl(var(--danger) / 0.35)",
@@ -66,6 +72,7 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   queued: {
     label: "queued",
+    shape: "hollow",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.32)",
@@ -73,6 +80,7 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   paused: {
     label: "paused",
+    shape: "paused",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
@@ -80,6 +88,7 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   cached: {
     label: "cached",
+    shape: "dashed",
     fg: "hsl(var(--cached))",
     bg: "hsl(var(--cached) / 0.12)",
     border: "hsl(var(--cached) / 0.3)",
@@ -87,6 +96,7 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   skipped: {
     label: "skipped",
+    shape: "skipped",
     fg: "hsl(var(--text-3))",
     bg: "hsl(var(--text-4) / 0.18)",
     border: "hsl(var(--text-4) / 0.3)",
@@ -97,6 +107,7 @@ const META: Record<RunStatus, StatusMeta> = {
 const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   open: {
     label: "open",
+    shape: "hollow",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
@@ -104,13 +115,15 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   triaging: {
     label: "triaging",
-    fg: "hsl(var(--cyan-glow))",
+    shape: "ring",
+    fg: "hsl(var(--running))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
     dotClass: "",
   },
   awaiting_approval: {
     label: "awaiting approval",
+    shape: "paused",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
@@ -118,6 +131,7 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   remediated: {
     label: "remediated",
+    shape: "solid",
     fg: "hsl(var(--success))",
     bg: "hsl(var(--success) / 0.12)",
     border: "hsl(var(--success) / 0.3)",
@@ -125,6 +139,7 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   escalated: {
     label: "escalated",
+    shape: "failed",
     fg: "hsl(var(--danger))",
     bg: "hsl(var(--danger) / 0.12)",
     border: "hsl(var(--danger) / 0.35)",
@@ -132,6 +147,7 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   closed: {
     label: "closed",
+    shape: "solid",
     fg: "hsl(var(--text-3))",
     bg: "hsl(var(--text-4) / 0.18)",
     border: "hsl(var(--text-4) / 0.3)",
@@ -139,6 +155,7 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   suppressed: {
     label: "suppressed",
+    shape: "skipped",
     fg: "hsl(var(--text-3))",
     bg: "hsl(var(--text-4) / 0.18)",
     border: "hsl(var(--text-4) / 0.3)",
@@ -146,6 +163,7 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
   },
   abandoned: {
     label: "abandoned",
+    shape: "failed",
     fg: "hsl(var(--danger))",
     bg: "hsl(var(--danger) / 0.12)",
     border: "hsl(var(--danger) / 0.35)",
@@ -156,13 +174,15 @@ const INCIDENT_META: Record<KnownIncidentStatus, StatusMeta> = {
 const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
   proposed: {
     label: "proposed",
-    fg: "hsl(var(--cyan-glow))",
+    shape: "hollow",
+    fg: "hsl(var(--running))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
     dotClass: "",
   },
   approved: {
     label: "approved",
+    shape: "paused",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.35)",
@@ -170,6 +190,7 @@ const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
   },
   rejected: {
     label: "rejected",
+    shape: "skipped",
     fg: "hsl(var(--text-3))",
     bg: "hsl(var(--text-4) / 0.18)",
     border: "hsl(var(--text-4) / 0.3)",
@@ -177,13 +198,15 @@ const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
   },
   executing: {
     label: "executing",
-    fg: "hsl(var(--cyan-glow))",
+    shape: "ring",
+    fg: "hsl(var(--running))",
     bg: "hsl(var(--running) / 0.14)",
     border: "hsl(var(--running) / 0.4)",
     dotClass: "",
   },
   executed: {
     label: "executed",
+    shape: "solid",
     fg: "hsl(var(--success))",
     bg: "hsl(var(--success) / 0.12)",
     border: "hsl(var(--success) / 0.3)",
@@ -191,6 +214,7 @@ const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
   },
   failed: {
     label: "failed",
+    shape: "failed",
     fg: "hsl(var(--danger))",
     bg: "hsl(var(--danger) / 0.12)",
     border: "hsl(var(--danger) / 0.35)",
@@ -201,6 +225,7 @@ const AGENT_ACTION_META: Record<KnownAgentActionStatus, StatusMeta> = {
 const AGENT_SESSION_META: Record<KnownAgentSessionState, StatusMeta> = {
   pending: {
     label: "pending",
+    shape: "hollow",
     fg: "hsl(var(--gold))",
     bg: "hsl(var(--gold) / 0.12)",
     border: "hsl(var(--gold) / 0.32)",
@@ -211,6 +236,7 @@ const AGENT_SESSION_META: Record<KnownAgentSessionState, StatusMeta> = {
   failed: META.failed,
   timed_out: {
     label: "timed out",
+    shape: "failed",
     fg: "hsl(var(--danger))",
     bg: "hsl(var(--danger) / 0.12)",
     border: "hsl(var(--danger) / 0.35)",
@@ -218,6 +244,7 @@ const AGENT_SESSION_META: Record<KnownAgentSessionState, StatusMeta> = {
   },
   cancelled: {
     label: "cancelled",
+    shape: "skipped",
     fg: "hsl(var(--text-3))",
     bg: "hsl(var(--text-4) / 0.18)",
     border: "hsl(var(--text-4) / 0.3)",
@@ -233,6 +260,7 @@ const DOMAIN_META = {
 
 const UNKNOWN: StatusMeta = {
   label: "unknown",
+    shape: "hollow",
   fg: "hsl(var(--text-3))",
   bg: "hsl(var(--text-4) / 0.18)",
   border: "hsl(var(--text-4) / 0.3)",

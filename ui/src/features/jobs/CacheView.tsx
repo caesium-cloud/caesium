@@ -1,15 +1,15 @@
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DatabaseZap, Trash2 } from "lucide-react";
+
 import { toast } from "sonner";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, type CacheEntry, type Job, type JobRun, type JobTask } from "@/lib/api";
-import { shortId } from "@/lib/utils";
+import { IdChip } from "@/components/ui/id-chip";
 import { describeCachePolicy, describeEffectiveCachePolicy, normalizeCacheConfig } from "./cache-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 
@@ -69,48 +69,48 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Job Cache Policy</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
+        <section className="border-b border-border py-3">
+          <div className="pb-2">
+            <h3 className="text-sm">Job Cache Policy</h3>
+          </div>
+          <div className="space-y-2">
             <Badge variant={jobPolicyEnabled ? "cached" : "outline"}>
               {!hasJobPolicy ? "Server default" : jobPolicyEnabled ? "Enabled" : "Disabled"}
             </Badge>
             <p className="text-sm text-muted-foreground">{jobPolicy}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Active Entries</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="text-2xl font-semibold">{entries.length}</div>
+          </div>
+        </section>
+        <section className="border-b border-border py-3">
+          <div className="pb-2">
+            <h3 className="text-sm">Active Entries</h3>
+          </div>
+          <div className="space-y-2">
+            <div className="text-2xl font-bold">{entries.length}</div>
             <p className="text-sm text-muted-foreground">Unexpired cache records for this job.</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Featured Run</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
+          </div>
+        </section>
+        <section className="border-b border-border py-3">
+          <div className="pb-2">
+            <h3 className="text-sm">Featured Run</h3>
+          </div>
+          <div className="space-y-2">
             {featuredRun ? (
               <>
                 <RunCacheSummary run={featuredRun} />
                 <p className="text-xs text-muted-foreground">
-                  Run <span className="font-mono">{shortId(featuredRun.id)}</span>
+                  Run <IdChip value={featuredRun.id} label="run id" />
                 </p>
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Trigger a run to see cache hit ratios here.</p>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       </div>
 
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold">Cache Inventory</h3>
+          <h3 className="text-sm font-bold">Cache Inventory</h3>
           <p className="text-sm text-muted-foreground">Inspect active cache entries and invalidate them by task or job.</p>
         </div>
         <Button
@@ -119,21 +119,21 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
           onClick={() => invalidateAllMutation.mutate()}
           disabled={invalidateAllMutation.isPending || entries.length === 0}
         >
-          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+
           Invalidate All
         </Button>
       </div>
 
       {isLoading ? (
-        <div className="rounded-md border bg-card p-6 text-sm text-muted-foreground">Loading cache entries...</div>
+        <div className="border-y border-border p-6 text-sm text-muted-foreground">Loading cache entries...</div>
       ) : entries.length === 0 ? (
         <div className="rounded-md border border-dashed bg-card/60 p-8 text-center">
-          <DatabaseZap className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-          <div className="text-sm font-medium">No active cache entries</div>
+
+          <div className="text-sm font-normal">No active cache entries</div>
           <p className="mt-1 text-sm text-muted-foreground">Successful cached tasks will appear here after runs populate the cache store.</p>
         </div>
       ) : (
-        <div className="rounded-md border bg-card">
+        <div className="border-y border-border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -193,8 +193,8 @@ function CacheEntryRow({
   return (
     <TableRow>
       <TableCell>
-        <div className="font-medium">{entry.task_name}</div>
-        {task?.id ? <div className="text-[10px] font-mono text-muted-foreground">{shortId(task.id)}</div> : null}
+        <div className="font-bold">{entry.task_name}</div>
+        {task?.id ? <div className="text-[11px] text-muted-foreground"><IdChip value={task.id} label="task id" /></div> : null}
       </TableCell>
       <TableCell className="text-sm text-muted-foreground" data-testid="cache-entry-policy">
         {taskPolicyAvailable ? describeEffectiveCachePolicy(task?.cache_config, jobCacheConfig) : "Policy unavailable"}
@@ -206,11 +206,11 @@ function CacheEntryRow({
         {entry.expires_at ? <span data-testid="cache-expiry"><RelativeTime date={entry.expires_at} future /></span> : "Never"}
       </TableCell>
       <TableCell className="text-sm">
-        <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: entry.run_id }} className="font-mono text-primary hover:underline">
-          {shortId(entry.run_id)}
+        <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: entry.run_id }} className="text-primary hover:underline">
+          open run
         </Link>
       </TableCell>
-      <TableCell className="font-mono text-xs text-muted-foreground">{shortId(entry.hash, 12)}</TableCell>
+      <TableCell className="text-xs text-muted-foreground"><IdChip value={entry.hash} label="fingerprint" /></TableCell>
       <TableCell className="text-right">
         <Button variant="ghost" size="sm" onClick={() => onInvalidate(entry.task_name)} disabled={pending}>
           Invalidate Task

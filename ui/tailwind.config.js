@@ -108,9 +108,9 @@ export default {
         },
       },
       borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        lg: "6px",
+        md: "var(--radius)",
+        sm: "3px",
       },
       keyframes: {
         "accordion-down": {
@@ -154,9 +154,9 @@ export default {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         "orbit-spin": "orbit-spin 22s linear infinite",
-        "nucleus-pulse": "nucleus-pulse 2.4s ease-in-out infinite",
-        "cyan-pulse": "cyan-pulse 1.6s ease-out infinite",
-        "gold-pulse": "gold-pulse 2s ease-out infinite",
+        "nucleus-pulse": "cs-nucleus 1s ease-out infinite",
+        "cyan-pulse": "cs-beat 1s ease-out infinite",
+        "gold-pulse": "cs-beat-gold 2s ease-out infinite",
       },
     },
   },

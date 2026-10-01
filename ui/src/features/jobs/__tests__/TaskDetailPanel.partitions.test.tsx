@@ -220,7 +220,7 @@ describe("TaskDetailPanel partition table", () => {
     expect(within(table).getByText("Fingerprint")).toBeInTheDocument();
     expect(within(table).getByText("Depends on")).toBeInTheDocument();
     // Fingerprint cell is truncated to the first 12 characters of the value.
-    expect(within(table).getByText("sha256:abcde")).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: /^Copy fingerprint: sha256:abcde/ })).toBeInTheDocument();
     const bravoRow = within(table)
       .getAllByTestId("partition-row")
       .find((row) => row.textContent?.includes("bravo"));

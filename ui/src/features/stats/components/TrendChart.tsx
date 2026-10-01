@@ -7,7 +7,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from 'recharts';
 import type { DailyStats } from '@/lib/api';
 
@@ -51,19 +50,19 @@ export function TrendChart({ data }: TrendChartProps) {
   return (
     <ResponsiveContainer width="100%" height={350}>
       <ComposedChart data={chartData} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--graphite))" opacity={0.3} />
+        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
         <XAxis
           dataKey="name"
           tickFormatter={formatDateLabel}
           stroke="hsl(var(--text-3))"
-          fontSize={12}
+          fontSize={11}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
           yAxisId="left"
           stroke="hsl(var(--text-3))"
-          fontSize={12}
+          fontSize={11}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
@@ -72,7 +71,7 @@ export function TrendChart({ data }: TrendChartProps) {
           yAxisId="right"
           orientation="right"
           stroke="hsl(var(--text-3))"
-          fontSize={12}
+          fontSize={11}
           tickLine={false}
           axisLine={false}
           domain={[0, 100]}
@@ -83,14 +82,9 @@ export function TrendChart({ data }: TrendChartProps) {
             backgroundColor: 'hsl(var(--midnight))',
             borderColor: 'hsl(var(--graphite))',
             color: 'hsl(var(--text-1))',
-            borderRadius: '8px',
+            borderRadius: '6px',
           }}
           itemStyle={{ fontSize: '12px' }}
-        />
-        <Legend
-          verticalAlign="top"
-          align="right"
-          wrapperStyle={{ paddingBottom: '20px', fontSize: '12px' }}
         />
         <Bar
           yAxisId="left"
@@ -106,7 +100,7 @@ export function TrendChart({ data }: TrendChartProps) {
           dataKey="rate"
           name="Success Rate"
           stroke="hsl(var(--success))"
-          strokeWidth={2}
+          strokeWidth={1.5}
           dot={false}
           activeDot={{ r: 4, strokeWidth: 0 }}
         />

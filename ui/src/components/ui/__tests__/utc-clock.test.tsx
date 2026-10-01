@@ -33,7 +33,7 @@ describe("<UTCClock />", () => {
         <UTCClock />
       </UTCClockProvider>,
     );
-    const texts = Array.from(container.querySelectorAll("span.font-mono")).map(
+    const texts = Array.from(container.querySelectorAll("span.tabular-nums")).map(
       (n) => n.textContent,
     );
     expect(new Set(texts).size).toBe(1);

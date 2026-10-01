@@ -6,7 +6,7 @@ const distIdx = process.argv.indexOf("--dist");
 const DIST_ASSETS_DIR =
   distIdx >= 0 && process.argv[distIdx + 1]
     ? process.argv[distIdx + 1]
-    : join(process.cwd(), "dist", "assets");
+    : join(process.cwd(), "dist");
 const emitJSON = process.argv.includes("--json");
 
 // Largest-chunk budgets: a single JS file cannot exceed these.

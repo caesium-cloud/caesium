@@ -9,7 +9,7 @@ test("fanned step renders as one DAG node with a partition table", async ({ page
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   // The fixture has exactly 3 steps (list-files, process-file, publish). Dynamic
   // fan-out must materialize as ONE DAG node per step, never one node per partition.
@@ -49,7 +49,7 @@ test("a fanned task's partition table exposes a per-instance Logs action", async
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   await page.locator(".react-flow__node", { hasText: "process-file" }).click();
   const panel = page.getByTestId("task-detail-panel");
@@ -86,7 +86,7 @@ test("each partition's Logs tab streams that instance's own container output", a
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   await page.locator(".react-flow__node", { hasText: "process-file" }).click();
   const panel = page.getByTestId("task-detail-panel");

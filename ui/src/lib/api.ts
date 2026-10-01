@@ -20,6 +20,7 @@ export interface Job {
 }
 
 export interface JobLastRun {
+  started_at: string;
   status: string;
   duration?: number | null;
 }

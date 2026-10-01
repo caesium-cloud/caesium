@@ -1,3 +1,4 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -70,17 +71,17 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
   ];
   return (
     <section
-      className="space-y-4 rounded-lg border border-fuchsia-400/40 bg-card p-4"
+      className="space-y-4 border-l-2 border-gold bg-gold/[.06] p-4"
       data-testid="hold-panel"
       data-hold-id={hold.id}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-text-1">
-          Dataset hold · {current.status}
+        <h2 className="text-sm font-bold text-text-1">
+          Dataset hold, {current.status}
         </h2>
-        <span className="font-mono text-[11px] text-text-3">{hold.id}</span>
+        <IdChip value={hold.id} label="hold id" />
       </div>
-      <p className="break-all font-mono text-sm text-fuchsia-300">
+      <p className="break-all text-sm text-gold">
         {hold.namespace ? `${hold.namespace}/` : ""}
         {hold.name}
       </p>
@@ -102,30 +103,30 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
               }}
               className="text-cyan-glow hover:underline"
             >
-              {hold.held_by_job_alias || hold.held_by_job_id} ·{" "}
-              {hold.held_by_run_id}
+              {hold.held_by_job_alias || "opening run"}
             </Link>
           ) : (
             "Run reference unavailable"
           )}
+          {hold.held_by_run_id ? <IdChip value={hold.held_by_run_id} label="opening run id" className="ml-2" /> : null}
         </dd>
         {hold.last_breach_run_id &&
         hold.last_breach_run_id !== hold.held_by_run_id ? (
           <>
             <dt className="text-text-3">Latest breach run</dt>
             <dd
-              className="break-all font-mono"
+              className="break-all"
               data-testid="hold-latest-breach-run"
             >
               {/* The latest occurrence may come from a different producer.
                   The API only supplies its run ID, not its owning job ID. */}
-              {hold.last_breach_run_id}
+              <IdChip value={hold.last_breach_run_id} label="latest breach run id" />
             </dd>
           </>
         ) : null}
       </dl>
       <div className="space-y-4">
-        <h3 className="text-xs font-semibold text-text-2">
+        <h3 className="text-xs font-bold text-text-2">
           Latest breach evidence
         </h3>
         {hold.violations?.length ? (
@@ -152,7 +153,7 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
           role="status"
         >
           <p>
-            Released by {current.released_by || "unknown"} ·{" "}
+            Released by {current.released_by || "unknown"},
             {current.release_reason}
           </p>
           <p>{current.release_note}</p>
@@ -172,7 +173,7 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
           className="space-y-3 border-t border-border/50 pt-4"
           onSubmit={submit}
         >
-          <h3 className="text-sm font-semibold">Release hold</h3>
+          <h3 className="text-sm font-bold">Release hold</h3>
           {!canRelease ? (
             <p className="text-xs text-warning" data-testid="hold-release-gate">
               Manual release requires an authenticated, unscoped operator or
@@ -196,7 +197,7 @@ export function HoldPanel({ hold }: { hold: DatasetHold }) {
               key={key}
               className="flex items-center justify-between gap-3 text-xs"
             >
-              Advisory tolerance · {key}
+              Advisory tolerance, {key}
               <select
                 aria-label={`Tolerance for ${key}`}
                 value={tolerances[key] ?? ""}

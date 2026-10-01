@@ -36,11 +36,22 @@ export default defineConfig({
       testIgnore: ["**/auth/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts"],
     },
     {
+      name: "light",
+      testMatch: /(?:accessibility|visual|mobile-console|performance|facelift)\.spec\.ts/,
+      use: {
+        colorScheme: "light",
+        storageState: { cookies: [], origins: [{
+          origin: new URL(process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:8080").origin,
+          localStorage: [{ name: "caesium-ui-theme", value: "light" }],
+        }] },
+      },
+    },
+    {
       // Run offline/reconnect tests last, in a separate worker/browser. On
       // Linux Chromium, a network-change event can affect neighboring pages.
       name: "network-recovery",
       testMatch: "**/network-recovery.spec.ts",
-      dependencies: ["default"],
+      dependencies: ["default", "light"],
     },
     {
       name: "auth",

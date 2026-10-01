@@ -1,3 +1,4 @@
+import { AtomLogo } from "@/components/brand/atom-logo";
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -9,8 +10,8 @@ interface NotFoundStateProps {
 }
 
 export function NotFoundState({
-  title = "Page not found",
-  subtitle = "The route you opened does not exist in the Caesium console.",
+  title = "~/404",
+  subtitle = "Nothing is scheduled here.",
   className,
 }: NotFoundStateProps) {
   return (
@@ -22,11 +23,9 @@ export function NotFoundState({
         className,
       )}
     >
-      <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-1.5 font-mono text-xs font-semibold tracking-[0.2em] text-text-3">
-        404
-      </div>
+      <AtomLogo size={80} animated={false} />
       <div className="space-y-1.5">
-        <h1 className="text-lg font-semibold text-text-1">{title}</h1>
+        <h1 aria-label={title === "~/404" ? "Page not found" : undefined} className="text-2xl font-bold lowercase text-text-1">{title}</h1>
         <p className="max-w-sm text-[13px] text-text-3">{subtitle}</p>
       </div>
       <Button asChild variant="outline" size="sm">

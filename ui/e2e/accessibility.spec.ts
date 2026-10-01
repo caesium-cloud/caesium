@@ -237,7 +237,7 @@ test("jobs contrast scans wait for finite fades and still reject settled defects
   await page.mouse.move(0, 0); // Non-hover card rows, as in the failed CI scan.
   await waitForFiniteAnimations(page);
 
-  const ids = '[data-testid="job-row"] .font-mono.text-text-4';
+  const ids = '[data-testid="job-row"] .text-text-3';
   await expect(page.locator(ids).first()).toBeVisible();
   await page.locator("main").evaluate((main) => {
     const fade = main.animate([{ opacity: 0.76 }, { opacity: 1 }], { duration: 60_000, fill: "both" });
@@ -286,7 +286,7 @@ test("job detail run page (DAG + task panel) is free of critical/serious violati
   const { job, run } = await applyAndRun(request, "run-history.job.yaml", { status: "succeeded" });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   const firstNode = page.locator(".react-flow__node").first();
   await expect(firstNode).toBeVisible();
@@ -303,6 +303,7 @@ test("job detail run page (DAG + task panel) is free of critical/serious violati
   // immediately afterwards.
   await page.keyboard.press("Escape");
   await expect(panel).toBeHidden();
+  await expect(firstNode).toBeFocused();
   await page.keyboard.press("Tab");
   const activeIsAttached = await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body);
   expect(activeIsAttached).toBe(true);

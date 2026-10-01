@@ -61,12 +61,12 @@ export function NotificationsPopover() {
           tabIndex={-1}
           className="absolute right-0 top-full z-50 mt-2 w-[min(20rem,calc(100vw-2rem))] rounded-md border border-border/70 bg-popover p-4 text-popover-foreground shadow-md"
         >
-          <div className="text-sm font-medium text-text-1">Notifications</div>
+          <div className="text-sm font-normal text-text-1">Notifications</div>
           <p className="mt-2 text-xs leading-relaxed text-text-3">
             There is no in-console alert inbox yet. Notification channels and policies are configured via the API{" "}
-            <code className="font-mono text-[11px] text-cyan-glow">/v1/notifications/channels</code>
+            <code className="text-[11px] text-cyan-glow">/v1/notifications/channels</code>
             {" "}and{" "}
-            <code className="font-mono text-[11px] text-cyan-glow">/v1/notifications/policies</code>.
+            <code className="text-[11px] text-cyan-glow">/v1/notifications/policies</code>.
           </p>
         </div>
       ) : null}

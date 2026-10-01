@@ -177,5 +177,5 @@ function describeNormalizedCachePolicy(normalized: CachePolicySummary): string {
   if (typeof normalized.version === "number") {
     fragments.push(`v${normalized.version}`);
   }
-  return fragments.join(" · ");
+  return fragments.join(", ");
 }

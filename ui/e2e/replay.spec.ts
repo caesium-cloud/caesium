@@ -156,7 +156,7 @@ function buildReplayDefinition(alias: string, replaySafe: boolean, stepName: str
 
 async function openRunReplayDialog(page: Page, jobId: string, runId: string): Promise<void> {
   await page.goto(`/jobs/${jobId}/runs/${runId}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("run-replay-trigger")).toBeEnabled();
   await page.getByTestId("run-replay-trigger").click();
   await expect(page.getByTestId("replay-dialog")).toBeVisible();

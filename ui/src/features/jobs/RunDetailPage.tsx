@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, FileJson, RotateCcw, Square, History } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { NotFoundState } from "@/components/not-found-state";
-import { RelativeTime } from "@/components/relative-time";
+import { Duration } from "@/components/duration";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
@@ -23,7 +24,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatUTCTimestamp, shortId } from "@/lib/utils";
+import { formatUTCTimestamp } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
@@ -48,11 +49,21 @@ export function RunDetailPage() {
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
   const principal = usePrincipal();
 
+  const { data: job } = useQuery({ queryKey: ["job", jobId], queryFn: () => api.getJob(jobId) });
+
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
     refetchInterval: (query) =>
       !streamHealthy || isTerminalRunStatus(query.state.data?.status) ? 5000 : false,
+  });
+
+  const receiptQuery = useQuery({
+    queryKey: ["job", jobId, "runs", runId, "receipt"],
+    queryFn: () => api.getReceipt(jobId, runId),
+    enabled: isTerminalRunStatus(run?.status),
+    staleTime: 15_000,
+    retry: false,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -269,6 +280,21 @@ export function RunDetailPage() {
     onError: (err: Error) => toast.error(`Failed to trigger: ${err.message}`),
   });
 
+  useEffect(() => {
+    const shortcuts: Record<string, string> = { c: '[data-testid="run-compare-trigger"]', a: '[data-testid="all-runs-link"]', p: '[data-testid="run-replay-trigger"]', r: '[data-testid="run-rerun-trigger"]' };
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (event.ctrlKey || event.metaKey || event.altKey || target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
+      const selector = shortcuts[event.key];
+      if (selector && !document.querySelector('[role="dialog"]')) {
+        const control = document.querySelector<HTMLElement>(selector);
+        if (control && !control.hasAttribute('disabled')) { event.preventDefault(); control.click(); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   if (isLoading) {
     return (
       <div className="space-y-4 p-8">
@@ -307,31 +333,18 @@ export function RunDetailPage() {
       {/* Header */}
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Link
-              to="/jobs/$jobId"
-              params={{ jobId }}
-              className="flex items-center gap-1 text-[11px] text-text-3 hover:text-text-2 transition-colors"
-            >
-              <ArrowLeft className="h-3 w-3" />
-              Job
-            </Link>
-            <span className="text-text-4">/</span>
-            <span className="text-[11px] text-text-3">Run</span>
+          <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
+            <h1 data-testid="run-heading" className="text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
+            <span className="text-xs text-text-3">run started {new Date(run.started_at).toISOString().slice(11, 19)}</span>
+            <StatusBadge status={run.status} />
+            <IdChip value={runId} label="run id" />
           </div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">
-            Run detail
-          </div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-semibold text-text-1 font-mono tracking-tight">
-              Run {shortId(runId)}
-            </h1>
-            <StatusBadge status={run.status} size="sm" />
-          </div>
-          <div className="mt-1 flex items-center gap-2 text-xs text-text-3">
-            <RelativeTime date={run.started_at} />
-            <span className="text-text-4">·</span>
-            <span className="font-mono text-text-4 text-[10px]">{runId}</span>
+          <div className="mt-3 flex flex-wrap items-center gap-x-7 gap-y-2 text-xs text-text-3">
+            <Link to="/jobs/$jobId/runs" params={{ jobId }} className="hover:text-text-1">← all runs</Link>
+            <span>elapsed <Duration start={run.started_at} end={run.completed_at} /></span>
+            <span>trigger {run.trigger_type || "manual"}</span>
+            <span>tasks {(run.tasks ?? []).filter(task => ["succeeded", "cached", "skipped"].includes(task.status)).length}/{run.tasks?.length ?? 0} done</span>
+            <span>receipt {isLive || receiptQuery.isPending ? "pending" : receiptQuery.data ? "available" : "unavailable"}</span>
           </div>
         </div>
 
@@ -347,8 +360,7 @@ export function RunDetailPage() {
                 data-testid="run-compare-trigger"
                 title={compareDisabledReason}
               >
-                <ArrowLeftRight className="mr-1.5 h-3.5 w-3.5" />
-                Compare to run…
+                Compare to run… <kbd aria-hidden="true" className="text-[11px] text-text-3">c</kbd>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
@@ -366,8 +378,8 @@ export function RunDetailPage() {
                   }
                 >
                   <div className="min-w-0">
-                    <div className="truncate font-mono text-xs">Run {shortId(candidate.id)}</div>
-                    <div className="truncate text-[10px] text-text-3">
+                    <div className="truncate text-xs">run started {formatRunTimestamp(candidate)}</div>
+                    <div className="truncate text-[11px] text-text-3">
                       {formatRunTimestamp(candidate)}
                     </div>
                   </div>
@@ -376,14 +388,13 @@ export function RunDetailPage() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="ghost" size="sm" className="h-8 text-xs" asChild>
+          <Button variant="outline" size="sm" className="h-8 text-xs" asChild>
             <Link
               to="/jobs/$jobId/runs"
               params={{ jobId }}
               data-testid="all-runs-link"
             >
-              <History className="mr-1.5 h-3.5 w-3.5" />
-              All runs
+              All runs <kbd aria-hidden="true" className="text-[11px] text-text-3">a</kbd>
             </Link>
           </Button>
           {canLaunchReplay ? (
@@ -394,8 +405,7 @@ export function RunDetailPage() {
               onClick={() => setReplayDialogOpen(true)}
               data-testid="run-replay-trigger"
             >
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-              Replay…
+              Replay… <kbd aria-hidden="true" className="text-[11px] text-text-3">p</kbd>
             </Button>
           ) : (
             <span className="inline-flex" title={replayGateReason}>
@@ -408,8 +418,7 @@ export function RunDetailPage() {
                 aria-describedby="run-replay-gate-reason"
                 data-testid="run-replay-trigger"
               >
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                Replay…
+                  Replay… <kbd aria-hidden="true" className="text-[11px] text-text-3">p</kbd>
               </Button>
               <span
                 id="run-replay-gate-reason"
@@ -428,10 +437,10 @@ export function RunDetailPage() {
               const params = rerunParams(run.params);
               triggerMutation.mutate({ jobId, params });
             }}
+            data-testid="run-rerun-trigger"
             disabled={triggerMutation.isPending}
           >
-            <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-            {triggerMutation.isPending ? "Re-running…" : "Re-run"}
+            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <kbd aria-hidden="true" className="text-[11px] text-text-3">r</kbd>
           </Button>
           {isLive && (
             <Button
@@ -441,7 +450,7 @@ export function RunDetailPage() {
               disabled
               title="Cancel not yet implemented"
             >
-              <Square className="mr-1.5 h-3.5 w-3.5" />
+
               Cancel
             </Button>
           )}
@@ -471,7 +480,7 @@ export function RunDetailPage() {
       />
 
       {/* Gantt timeline */}
-      <div data-testid="run-execution-timeline-section" className="rounded-md border border-border/50 bg-card overflow-hidden">
+      <div data-testid="run-execution-timeline-section" className="rounded-lg border border-border bg-midnight overflow-hidden">
         <button
           type="button"
           className="flex w-full items-center gap-2 px-4 py-2.5 text-left border-b border-border/50 hover:bg-obsidian/30 transition-colors"
@@ -484,13 +493,13 @@ export function RunDetailPage() {
           ) : (
             <ChevronRight className="h-3.5 w-3.5 text-text-3" />
           )}
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+          <span className="text-[11px] font-bold lowercase text-text-3">
             Execution timeline
           </span>
           {isLive && (
-            <span className="ml-2 text-[10px] text-cyan-glow/70 font-medium animate-pulse">Live</span>
+            <StatusBadge status="running" label="live" size="sm" />
           )}
-          <span className="ml-auto text-[10px] text-text-4">
+          <span className="ml-auto text-[11px] text-text-3">
             {run.tasks?.length ?? 0} tasks
           </span>
         </button>
@@ -499,7 +508,7 @@ export function RunDetailPage() {
             {run.tasks && run.tasks.length > 0 ? (
               <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} />
             ) : (
-              <div className="text-[12px] text-text-4 py-4 text-center">
+              <div className="text-[12px] text-text-3 py-4 text-center">
                 No task execution data yet.
               </div>
             )}
@@ -510,10 +519,10 @@ export function RunDetailPage() {
       {/* Interactive DAG with task selection */}
       <div data-testid="run-interactive-dag-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
         <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
-            Interactive DAG + task logs
+          <span className="text-[11px] font-bold lowercase text-text-3">
+            graph
           </span>
-          <span className="ml-auto text-[10px] text-text-4">
+          <span className="ml-auto text-[11px] text-text-3">
             {dag?.nodes?.length ?? 0} nodes
           </span>
         </div>
@@ -528,6 +537,7 @@ export function RunDetailPage() {
               dag={dag}
               atoms={atoms}
               taskDefinitions={taskDefinitions}
+              runStartedAt={run.started_at}
               taskMetadata={taskMetadata}
               taskRunData={runTasks}
               onNodeClick={handleTaskSelect}
@@ -564,8 +574,8 @@ export function RunDetailPage() {
           <CardContent className="grid gap-2 md:grid-cols-2">
             {Object.entries(run.params).map(([key, value]) => (
               <div key={key}>
-                <div className="text-[10px] uppercase tracking-wide text-text-3">{key}</div>
-                <div className="font-mono text-sm text-text-1">{value}</div>
+                <div className="text-[11px] lowercase text-text-3">{key}</div>
+                <div className="text-sm text-text-1">{value}</div>
               </div>
             ))}
           </CardContent>
@@ -586,11 +596,11 @@ export function RunDetailPage() {
           ) : (
             <ChevronRight className="h-3.5 w-3.5 text-text-3" />
           )}
-          <FileJson className="h-3.5 w-3.5 text-text-3" />
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+
+          <span className="text-[11px] font-bold lowercase text-text-3">
             Reproducibility
           </span>
-          <span className="ml-auto text-[10px] text-text-4">Receipt</span>
+          <span className="ml-auto text-[11px] text-text-3">Receipt</span>
         </button>
         {reproducibilityOpen ? (
           <div id="run-reproducibility-body" className="border-t border-border/50 p-4">

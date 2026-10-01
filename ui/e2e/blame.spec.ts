@@ -75,11 +75,11 @@ test("operator can inspect blame attribution for provenance-backed applies", asy
   );
 
   const changedTask = page.getByTestId("blame-task-row").filter({ hasText: "transform" });
-  await expect(changedTask.getByTestId("blame-task-introducing-commit")).toContainText(secondCommit);
+  await expect(changedTask.getByTestId("blame-task-introducing-commit").getByRole("button")).toHaveAttribute("title", secondCommit);
   await expect(changedTask.getByTestId("blame-task-command")).toContainText("transform-v2");
 
   const stableTask = page.getByTestId("blame-task-row").filter({ hasText: "extract" });
-  await expect(stableTask.getByTestId("blame-task-introducing-commit")).toContainText(firstCommit);
+  await expect(stableTask.getByTestId("blame-task-introducing-commit").getByRole("button")).toHaveAttribute("title", firstCommit);
 });
 
 function buildBlameDefinition(alias: string, variant: string): BlameFixture {

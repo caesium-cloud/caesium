@@ -1,11 +1,12 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { XCircle } from "lucide-react";
+
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RelativeTime } from "@/components/relative-time";
 import { api, type Backfill } from "@/lib/api";
-import { formatUTCTimestamp, shortId } from "@/lib/utils";
+import { formatUTCTimestamp } from "@/lib/utils";
 
 interface BackfillsViewProps {
   jobId: string;
@@ -62,20 +63,20 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
   return (
     <div className="flex items-center justify-between gap-3 p-4">
       <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="font-medium text-sm truncate">
+        <div className="font-normal text-sm truncate">
           {formatDateRange(backfill.start, backfill.end)}
         </div>
         <div className="text-xs text-muted-foreground">
           <RelativeTime date={backfill.created_at} />
-          {" · "}
-          <span className="font-mono">{shortId(backfill.id)}</span>
-          {" · "}
-          reprocess: <span className="font-mono">{backfill.reprocess}</span>
-          {" · "}
-          max concurrent: <span className="font-mono">{backfill.max_concurrent}</span>
+          {", "}
+          <span className=""><IdChip value={backfill.id} label="backfill id" /></span>
+          {", "}
+          reprocess: <span className="">{backfill.reprocess}</span>
+          {", "}
+          max concurrent: <span className="">{backfill.max_concurrent}</span>
         </div>
 
-        {/* Progress — shown for running and terminal states */}
+        {/* Progress: shown for running and terminal states */}
         {backfill.total_runs > 0 && (
           <div className="space-y-1">
             {isRunning && (
@@ -86,19 +87,19 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
                 />
               </div>
             )}
-            <div className="text-xs font-mono text-muted-foreground">
+            <div className="text-xs text-muted-foreground">
               {backfill.completed_runs}/{backfill.total_runs} completed
               {backfill.failed_runs > 0 && (
-                <span className="text-destructive"> · {backfill.failed_runs} failed</span>
+                <span className="text-destructive">, {backfill.failed_runs} failed</span>
               )}
-              {isCancelling && <span> · cancellation requested</span>}
+              {isCancelling && <span>, cancellation requested</span>}
             </div>
           </div>
         )}
 
         {/* Empty backfill (total_runs = 0, terminal) */}
         {backfill.total_runs === 0 && !isRunning && (
-          <div className="text-xs font-mono text-muted-foreground">0 runs — all dates skipped</div>
+          <div className="text-xs text-muted-foreground">0 runs: all dates skipped</div>
         )}
       </div>
 
@@ -112,7 +113,7 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
             onClick={() => cancelMutation.mutate()}
             disabled={cancelMutation.isPending || isCancelling}
           >
-            <XCircle className="mr-1 h-3.5 w-3.5" />
+            <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
             {isCancelling ? "Cancelling" : "Cancel"}
           </Button>
         )}

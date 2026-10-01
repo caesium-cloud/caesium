@@ -155,7 +155,7 @@ describe("deriveSystemBanner", () => {
 
     expect(banner.tone).toBe("warn");
     expect(banner.badge).toBe("degraded");
-    expect(banner.headline).toBe("Degraded — 2 of 3 voters reachable");
+    expect(banner.headline).toBe("Degraded: 2 of 3 voters reachable");
   });
 
   it("flags a lost quorum as an outage even if the API still answers", () => {
@@ -178,7 +178,7 @@ describe("deriveSystemBanner", () => {
   });
 
   // Review P2: a crashed standby never enters the voter arithmetic, so quorum
-  // stays available — the banner must still not read "All systems operational".
+  // stays available: the banner must still not read "All systems operational".
   it("never says operational while a non-voter is unreachable", () => {
     const standbyDown = clusterCheck({
       status: "degraded",
@@ -190,7 +190,7 @@ describe("deriveSystemBanner", () => {
 
     expect(banner.tone).toBe("warn");
     expect(banner.badge).toBe("degraded");
-    expect(banner.headline).toBe("Degraded — 3 of 4 cluster nodes reachable");
+    expect(banner.headline).toBe("Degraded: 3 of 4 cluster nodes reachable");
     // Quorum itself is still correctly reported as a full voter majority.
     expect(deriveQuorumView(standbyDown).label).toBe("3/3");
     expect(deriveQuorumView(standbyDown).status).toBe("available");
@@ -235,7 +235,7 @@ describe("deriveSystemBanner", () => {
 });
 
 // Review round 6: `fetch` has no deadline, and React Query keeps serving the
-// last successful response through a pending refetch — so a cluster that was
+// last successful response through a pending refetch: so a cluster that was
 // healthy when the connection stalled stayed green on screen forever.
 describe("stale health observations", () => {
   const NOW = Date.UTC(2026, 8, 16, 12, 0, 0);
@@ -314,7 +314,7 @@ describe("stale health observations", () => {
     expect(rows.every((r) => r.livenessCurrent === false)).toBe(true);
     expect(rows.every((r) => r.leader === false)).toBe(true);
     expect(reachableNodeCount(rows)).toBeNull();
-    // Supplementary worker detail survives — it was never a liveness claim.
+    // Supplementary worker detail survives: it was never a liveness claim.
     expect(rows.find((r) => r.address === "a:9001")?.workersBusy).toBe(2);
   });
 });
@@ -440,7 +440,7 @@ describe("mergeNodeRows", () => {
 
     const rows = mergeNodeRows(null, cached);
 
-    // Identities are kept — the operator still sees which nodes exist.
+    // Identities are kept: the operator still sees which nodes exist.
     expect(rows.map((r) => r.address)).toEqual(["a:9001", "b:9001"]);
     // ...but nothing current says they are alive.
     expect(rows.every((r) => r.reachability === "unknown")).toBe(true);

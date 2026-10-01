@@ -29,3 +29,9 @@ coverage.txt
 .tmp
 **/__pycache__
 *.tar.gz
+
+# Browser diagnostics are validation output, not runtime inputs.
+ui/test-results
+ui/playwright-report
+ui/playwright-results.json
+Caesium Operator Console Facelift.zip

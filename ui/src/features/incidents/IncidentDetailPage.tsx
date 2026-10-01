@@ -1,22 +1,8 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Bot,
-  CheckCircle2,
-  ClipboardList,
-  ExternalLink,
-  FileSearch,
-  GitCompare,
-  ListChecks,
-  PlayCircle,
-  RotateCcw,
-  ScrollText,
-  ShieldAlert,
-  TerminalSquare,
-} from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, FileSearch, ListChecks } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,7 +17,7 @@ import { RunDiffView } from "@/features/jobs/RunDiffView";
 import { TaskWhyView } from "@/features/jobs/TaskWhyView";
 import { api, type AgentAction, type AgentSession, type ApprovalRequest, type Incident } from "@/lib/api";
 import { events } from "@/lib/events";
-import { cn, shortId } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
 import { ApprovalCard } from "./ApprovalCard";
 import {
@@ -133,7 +119,6 @@ export function IncidentDetailPage() {
       <EmptyState
         title="Incidents disabled"
         subtitle="Agent remediation is not enabled on this Caesium server."
-        icon={<ShieldAlert className="h-12 w-12 text-text-3" />}
         className="py-16"
       />
     );
@@ -144,7 +129,6 @@ export function IncidentDetailPage() {
       <EmptyState
         title="Incident unavailable"
         subtitle={detailQuery.error.message}
-        icon={<AlertTriangle className="h-12 w-12 text-danger" />}
         className="py-16"
       />
     );
@@ -155,7 +139,6 @@ export function IncidentDetailPage() {
       <EmptyState
         title="Incident not found"
         subtitle="The incident API returned no detail for this id."
-        icon={<ShieldAlert className="h-12 w-12 text-text-3" />}
         className="py-16"
       />
     );
@@ -172,14 +155,14 @@ export function IncidentDetailPage() {
             search={{}}
             className="mb-2 inline-flex items-center gap-1 text-xs text-text-3 transition hover:text-text-1"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
+
             Incidents
           </Link>
-          <p className="mb-1 text-xs font-medium uppercase tracking-widest text-text-3">
+          <p className="mb-1 text-xs font-normal lowercase text-text-3">
             {currentJobLabel}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight">Incident {shortId(incident.id)}</h1>
+            <h1 className="text-2xl font-bold lowercase text-text-1">{currentJobLabel || "incident"}</h1>
             <StatusBadge status={incident.status} domain="incident" size="sm" />
             <Badge variant="outline">{formatIncidentClass(incident.class)}</Badge>
             {isAwaitingApproval(incident) ? (
@@ -190,12 +173,12 @@ export function IncidentDetailPage() {
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-3">
             <span>opened {formatDateTime(incident.opened_at)}</span>
-            <span className="text-text-4">·</span>
+            <span className="inline-block w-3" aria-hidden="true" />
             <span>{incidentAge(incident)}</span>
             {incident.task_name ? (
               <>
-                <span className="text-text-4">·</span>
-                <span className="font-mono">{incident.task_name}</span>
+                <span className="inline-block w-3" aria-hidden="true" />
+                <span className="">{incident.task_name}</span>
               </>
             ) : null}
           </div>
@@ -204,14 +187,14 @@ export function IncidentDetailPage() {
           <Button asChild variant="outline" size="sm">
             <Link to="/jobs/$jobId" params={{ jobId: incident.job_id }}>
               Job
-              <ExternalLink className="h-3.5 w-3.5" />
+
             </Link>
           </Button>
           {incident.run_id ? (
             <Button asChild variant="outline" size="sm">
               <Link to="/jobs/$jobId/runs/$runId" params={{ jobId: incident.job_id, runId: incident.run_id }}>
                 Run
-                <ExternalLink className="h-3.5 w-3.5" />
+
               </Link>
             </Button>
           ) : null}
@@ -223,7 +206,7 @@ export function IncidentDetailPage() {
           <Card className="border-warning/30 bg-warning/5">
             <CardHeader className="border-b border-warning/20 pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <AlertTriangle className="h-4 w-4 text-warning" />
+                <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
                 Current summary
               </CardTitle>
             </CardHeader>
@@ -259,7 +242,7 @@ export function IncidentDetailPage() {
           <Card data-testid="incident-timeline" className="overflow-hidden border-graphite/40 bg-midnight/30">
             <CardHeader className="border-b border-border/50 pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <ClipboardList className="h-4 w-4 text-cyan-glow" />
+
                 Incident timeline
               </CardTitle>
             </CardHeader>
@@ -278,7 +261,7 @@ export function IncidentDetailPage() {
           <Card className="border-graphite/40 bg-midnight/30">
             <CardHeader className="border-b border-border/50 pb-3">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <ListChecks className="h-4 w-4 text-cyan-glow" />
+
                 Actions
               </CardTitle>
             </CardHeader>
@@ -289,7 +272,7 @@ export function IncidentDetailPage() {
                 actions.map((action) => (
                   <div key={action.id} className="rounded-md border border-border/50 bg-background/50 p-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px]">
+                      <Badge variant="outline" className="text-[11px]">
                         tier {action.tier}
                       </Badge>
                       <StatusBadge status={action.status} domain="agent-action" size="sm" />
@@ -350,7 +333,7 @@ function buildTimeline(
       content: (
         <div className="space-y-3">
           <div className="grid gap-2 text-xs sm:grid-cols-3">
-            <Metadata label="Session" value={shortId(session.id)} mono />
+            <Metadata label="Session" value={session.id} mono />
             <Metadata label="Engine" value={session.engine || "unknown"} />
             <Metadata label="Tools" value={String(session.actions_used)} />
           </div>
@@ -449,7 +432,7 @@ function EvidencePanel({
     <Card className="overflow-hidden border-graphite/40 bg-midnight/30">
       <CardHeader className="border-b border-border/50 pb-3">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <FileSearch className="h-4 w-4 text-cyan-glow" />
+
           Primary evidence
         </CardTitle>
       </CardHeader>
@@ -457,23 +440,23 @@ function EvidencePanel({
         <Tabs defaultValue="why">
           <TabsList className="grid h-auto w-full grid-cols-2 gap-1 bg-midnight p-1 md:grid-cols-5">
             <TabsTrigger value="why" className="gap-1 text-xs">
-              <FileSearch className="h-3.5 w-3.5" />
+
               Why
             </TabsTrigger>
             <TabsTrigger value="logs" className="gap-1 text-xs">
-              <TerminalSquare className="h-3.5 w-3.5" />
+
               Logs
             </TabsTrigger>
             <TabsTrigger value="lineage" className="gap-1 text-xs">
-              <ScrollText className="h-3.5 w-3.5" />
+
               Lineage
             </TabsTrigger>
             <TabsTrigger value="diff" className="gap-1 text-xs">
-              <GitCompare className="h-3.5 w-3.5" />
+
               Diff
             </TabsTrigger>
             <TabsTrigger value="replay" className="gap-1 text-xs">
-              <RotateCcw className="h-3.5 w-3.5" />
+
               Replay
             </TabsTrigger>
           </TabsList>
@@ -521,7 +504,7 @@ function EvidencePanel({
                 disabled={!incident.run_id}
                 data-testid="incident-replay-trigger"
               >
-                <PlayCircle className="h-4 w-4" />
+
                 Replay baseline
               </Button>
               {incident.run_id ? (
@@ -545,7 +528,7 @@ function TimelineRow({ item }: { item: TimelineItem }) {
     <div data-testid="incident-timeline-event" className="grid gap-3 px-4 py-4 md:grid-cols-[160px_28px_minmax(0,1fr)]">
       <div className="text-xs text-text-3">
         <div>{formatDateTime(item.timestamp)}</div>
-        <div className="mt-1 font-mono text-[10px] text-text-4">{item.timestamp}</div>
+        <div className="mt-1 text-[11px] text-text-3">{item.timestamp}</div>
       </div>
       <div className="flex justify-center">
         <span
@@ -562,9 +545,9 @@ function TimelineRow({ item }: { item: TimelineItem }) {
       </div>
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-sm font-semibold text-text-1">{item.title}</h2>
+          <h2 className="text-sm font-bold text-text-1">{item.title}</h2>
           {item.subtitle ? (
-            <Badge variant="outline" className="max-w-full truncate text-[10px]">
+            <Badge variant="outline" className="max-w-full truncate text-[11px]">
               {item.subtitle}
             </Badge>
           ) : null}
@@ -588,7 +571,7 @@ function ApprovalHistory({
     <Card className="border-gold/30 bg-gold/5">
       <CardHeader className="border-b border-gold/20 pb-3">
         <CardTitle className="flex items-center gap-2 text-sm">
-          <CheckCircle2 className="h-4 w-4 text-gold" />
+          <span aria-hidden="true" className="cs-status-glyph cs-status-solid text-success" />
           Approval cards
         </CardTitle>
       </CardHeader>
@@ -618,10 +601,10 @@ function JsonDetails({ value, title = "Evidence" }: { value: unknown; title?: st
   if (Object.keys(record).length === 0) return null;
   return (
     <details className="rounded-md border border-border/50 bg-background/50 p-3">
-      <summary className="cursor-pointer text-[10px] font-semibold uppercase tracking-wide text-text-3">
+      <summary className="cursor-pointer text-[11px] font-bold lowercase text-text-3">
         {title}
       </summary>
-      <pre className="mt-2 overflow-auto font-mono text-xs text-text-3">{formatJson(value)}</pre>
+      <pre className="mt-2 overflow-auto text-xs text-text-3">{formatJson(value)}</pre>
     </details>
   );
 }
@@ -629,8 +612,8 @@ function JsonDetails({ value, title = "Evidence" }: { value: unknown; title?: st
 function Metadata({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="rounded-md border border-border/50 bg-background/50 p-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-text-3">{label}</div>
-      <div className={cn("mt-1 truncate text-sm text-text-1", mono && "font-mono text-xs")}>{value}</div>
+      <div className="text-[11px] font-bold lowercase text-text-3">{label}</div>
+      <div className={cn("mt-1 truncate text-sm text-text-1", mono && "text-xs")}>{["Session", "Dedupe"].includes(label) ? <IdChip value={value} label={label} /> : value}</div>
     </div>
   );
 }

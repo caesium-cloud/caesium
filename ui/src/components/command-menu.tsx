@@ -1,18 +1,8 @@
 import * as React from "react"
 import { useNavigate } from "@tanstack/react-router"
 import {
-  Database,
-  LayoutDashboard,
-  BarChart,
-  Circle,
-  FileCode2,
-  Radio,
-  Server,
-  Search,
-} from "lucide-react"
-
-import {
   CommandDialog,
+  Command,
   CommandEmpty,
   CommandGroup,
   CommandInput,
@@ -29,86 +19,59 @@ import { commandPaletteFilter } from "./command-filter"
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
   const navigate = useNavigate()
-
-  const { data: jobs } = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.getJobs,
-    enabled: open,
-  })
-
-  const { data: triggers } = useQuery({
-    queryKey: ["triggers"],
-    queryFn: api.getTriggers,
-    enabled: open,
-  })
-
-  const { data: atoms } = useQuery({
-    queryKey: ["atoms"],
-    queryFn: api.getAtoms,
-    enabled: open,
-  })
+  const [desktop, setDesktop] = React.useState(() => window.matchMedia("(min-width: 1024px)").matches)
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  const inputRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px)");
+    const resize = () => setDesktop(media.matches);
+    media.addEventListener("change", resize);
+    return () => media.removeEventListener("change", resize);
+  }, []);
+  React.useEffect(() => {
+    if (open && desktop) inputRef.current?.focus();
+  }, [open, desktop]);
+  const { data: jobs } = useQuery({ queryKey: ["jobs"], queryFn: api.getJobs, enabled: open });
+  const { data: triggers } = useQuery({ queryKey: ["triggers"], queryFn: api.getTriggers, enabled: open });
+  const { data: atoms } = useQuery({ queryKey: ["atoms"], queryFn: api.getAtoms, enabled: open });
+  React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault()
-        setOpen((open) => !open)
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable;
+      if ((e.key === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing)) {
+        e.preventDefault(); setOpen(value => !value);
       }
-    }
-
-    document.addEventListener("keydown", down)
-    return () => document.removeEventListener("keydown", down)
-  }, [])
-
+      if (e.key === "Escape" && open) { setOpen(false); triggerRef.current?.focus(); }
+    };
+    document.addEventListener("keydown", down);
+    return () => document.removeEventListener("keydown", down);
+  }, [open]);
   const runCommand = React.useCallback((command: () => void) => {
-    setOpen(false)
-    command()
-  }, [])
+    setOpen(false); triggerRef.current?.focus(); command();
+  }, []);
+  const contents = (
 
-  return (
     <>
-      <button
-        type="button"
-        aria-label="Open search"
-        onClick={() => setOpen(true)}
-        className="flex h-9 w-9 items-center justify-center rounded-md border text-sm text-muted-foreground transition-colors hover:bg-muted sm:w-64 sm:justify-between sm:px-3"
-      >
-        <div className="hidden items-center gap-2 sm:flex">
-          <Search className="h-4 w-4" />
-          <span>Search...</span>
-        </div>
-        <Search className="h-4 w-4 sm:hidden" />
-        <kbd className="pointer-events-none hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100 sm:inline-flex">
-          <span className="text-xs">⌘</span>K
-        </kbd>
-      </button>
-      <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>
-        <CommandInput placeholder="Type a command or search..." />
+        <CommandInput ref={inputRef} aria-label="Type a command or search" placeholder="Type a command or search..." />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
           <CommandGroup heading="Suggestions">
             <CommandItem value="jobs pipelines" onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
-              <LayoutDashboard className="mr-2 h-4 w-4" />
               <span>Jobs</span>
             </CommandItem>
             <CommandItem value="stats analytics" onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
-              <BarChart className="mr-2 h-4 w-4" />
               <span>Stats</span>
             </CommandItem>
             <CommandItem value="triggers schedules events" onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
-              <Radio className="mr-2 h-4 w-4" />
               <span>Triggers</span>
             </CommandItem>
             <CommandItem value="atoms containers" onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
-              <Database className="mr-2 h-4 w-4" />
               <span>Atoms</span>
             </CommandItem>
             <CommandItem value="system health nodes" onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
-              <Server className="mr-2 h-4 w-4" />
               <span>System</span>
             </CommandItem>
             <CommandItem value="job definitions manifests yaml" onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
-              <FileCode2 className="mr-2 h-4 w-4" />
               <span>Job Definitions</span>
             </CommandItem>
           </CommandGroup>
@@ -123,11 +86,9 @@ export function CommandMenu() {
                 className="flex items-center justify-between"
               >
                 <div className="flex items-center">
-                  <Circle className="mr-2 h-4 w-4 text-running" />
                   <span>{job.alias}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(job.id)}</span>
                 </div>
-                <div className="text-[10px] text-muted-foreground">
+                <div className="text-[11px] text-muted-foreground">
                   <RelativeTime date={job.created_at} />
                 </div>
               </CommandItem>
@@ -144,11 +105,9 @@ export function CommandMenu() {
                 className="flex items-center justify-between"
               >
                 <div className="flex items-center">
-                  <Radio className="mr-2 h-4 w-4 text-cyan-glow" />
                   <span>{trigger.alias}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(trigger.id)}</span>
                 </div>
-                <div className="text-[10px] uppercase text-muted-foreground">{trigger.type}</div>
+                <div className="text-[11px] lowercase text-muted-foreground">{trigger.type}</div>
               </CommandItem>
             ))}
           </CommandGroup>
@@ -163,16 +122,24 @@ export function CommandMenu() {
                 className="flex items-center justify-between"
               >
                 <div className="flex min-w-0 items-center">
-                  <Database className="mr-2 h-4 w-4 shrink-0 text-success" />
-                  <span className="truncate">{atom.image}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(atom.id)}</span>
+                  <span className="truncate" title={atom.image}>{atom.image.split("@")[0]}</span>
                 </div>
-                <div className="text-[10px] uppercase text-muted-foreground">{atom.engine}</div>
+                <div className="text-[11px] lowercase text-muted-foreground">{atom.engine}</div>
               </CommandItem>
             ))}
           </CommandGroup>
         </CommandList>
-      </CommandDialog>
     </>
-  )
+  );
+  return <footer className="relative z-30 flex h-10 shrink-0 items-center justify-between border-t border-border bg-obsidian px-4 lg:px-6">
+    <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} className="flex h-full items-center gap-2 text-[13px] text-text-2">
+      <span className="hidden lg:inline">caesium</span><span className="text-cyan">❯</span><span aria-hidden="true" className="cs-cursor" />
+    </button>
+    <div className="flex items-center gap-7 text-[11px] text-text-3">
+      <span className="hidden xl:inline">why task</span><span className="hidden xl:inline">blame run</span><span className="hidden xl:inline">diff run run</span><span className="hidden xl:inline">replay run</span><span className="hidden xl:inline">verify receipt</span><kbd>⌘K</kbd>
+    </div>
+    {desktop ? open ? <div role="dialog" aria-label="Command palette" className="absolute bottom-10 left-0 right-0 border-t border-border bg-midnight p-2 shadow-sm">
+      <Command filter={commandPaletteFilter}>{contents}</Command>
+    </div> : null : <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>{contents}</CommandDialog>}
+  </footer>;
 }

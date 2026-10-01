@@ -76,7 +76,7 @@ test("operator can inspect receipts and verify a committed receipt against drift
   await page.goto(`/jobs/${pinnedJob.id}/runs/${pinnedRun.id}`);
   await expectRunRealityBeforeReceipt(page);
   await openReproducibility(page);
-  await expect(page.getByTestId("receipt-digest")).toContainText(committedReceipt.receipt_digest);
+  await expect(page.getByTestId("receipt-digest").getByRole("button")).toHaveAttribute("title", committedReceipt.receipt_digest);
   await expect(page.getByTestId("receipt-task-row").filter({ hasText: "prepare" })).toContainText("digest_pinned=true");
   await expect(page.getByTestId("receipt-task-row").filter({ hasText: "render" })).toContainText("identity_hash");
 

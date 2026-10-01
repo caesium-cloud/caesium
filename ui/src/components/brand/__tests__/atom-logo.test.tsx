@@ -42,3 +42,20 @@ describe("<AtomLogo />", () => {
     );
   });
 });
+
+it("deals seven voters 3/2/2, retains an unreachable voter, and marks quorum loss", () => {
+  const voters = Array.from({ length: 7 }, (_, i) => ({ id: String(i), leader: i === 0, reachable: i !== 4 }));
+  const { container } = render(<AtomLogo voters={voters} quorum="lost" />);
+  expect([...container.querySelectorAll('.atom-orbit')].map(orbit => orbit.querySelectorAll('[data-voter]').length)).toEqual([3, 2, 2]);
+  expect(container.querySelector('[data-voter="4"]')).toHaveAttribute('data-reachable', 'false');
+  expect(container.querySelectorAll('ellipse[stroke-dasharray="14 12"]')).toHaveLength(3);
+  expect(container.querySelector('.atom-nucleus')).toBeNull();
+});
+
+it("caps the drawing at nine without losing the actual voter count", () => {
+  const voters = Array.from({ length: 12 }, (_, i) => ({ id: String(i), leader: false, reachable: null }));
+  const { container } = render(<AtomLogo voters={voters} quorum="unknown" />);
+  expect(container.querySelectorAll('[data-voter]')).toHaveLength(9);
+  expect(container.querySelector('desc')).toHaveTextContent('12 voters. Cluster health unknown.');
+  expect(container.querySelector('.atom-nucleus')).toBeNull();
+});

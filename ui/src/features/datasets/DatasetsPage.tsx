@@ -1,14 +1,8 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { useMemo, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  ChevronLeft,
-  ChevronRight,
-  Database,
-  GitBranch,
-  History,
-} from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +14,7 @@ import {
   type DatasetState,
   type DatasetStatus,
 } from "@/lib/api";
-import { cn, shortId } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { holdSearch } from "./hold-utils";
 import { useDataAssertionsEnabled } from "./useDataAssertions";
 import { DerivationsPanel } from "./DerivationsPanel";
@@ -197,16 +191,16 @@ function PageHeader({ total }: { total: number | undefined }) {
   return (
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3">
+        <div className="mb-1 text-[11px] font-bold lowercase text-text-3">
           Freshness
         </div>
-        <h1 className="text-xl font-semibold tracking-tight text-text-1">Datasets</h1>
+        <h1 className="text-2xl font-bold lowercase text-text-1">Datasets</h1>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="outline" className="font-mono text-[10px]">
+        <Badge variant="outline" className="text-[11px]">
           {total ?? 0} datasets
         </Badge>
-        <Badge variant="outline" className="text-[10px]">
+        <Badge variant="outline" className="text-[11px]">
           Live SLO state
         </Badge>
       </div>
@@ -231,7 +225,7 @@ function StatusFilterBar({
             type="button"
             onClick={() => onChange(filter.key)}
             className={cn(
-              "rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
+              "rounded px-2.5 py-1 text-[11px] font-normal transition-colors",
               active
                 ? "bg-obsidian text-text-1 shadow-sm"
                 : "text-text-3 hover:bg-obsidian/50 hover:text-text-2",
@@ -278,7 +272,6 @@ function DatasetBoard({
         <EmptyState
           title="Datasets unavailable"
           subtitle={error instanceof Error ? error.message : "The dataset endpoint returned an error."}
-          icon={<AlertTriangle className="h-12 w-12 text-danger" />}
         />
       </div>
     );
@@ -293,7 +286,6 @@ function DatasetBoard({
             ? "Declared or observed datasets will appear here once jobs are applied."
             : "Try another freshness status filter."
         }
-        icon={<Database className="h-12 w-12 text-text-3" />}
         className="py-20"
       />
     );
@@ -305,12 +297,12 @@ function DatasetBoard({
         className="grid min-w-[980px] items-center border-b border-border/50 bg-obsidian/30 px-4 py-2"
         style={{ gridTemplateColumns: "1.45fr 128px 190px 190px 1.1fr 110px" }}
       >
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Dataset</span>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Status</span>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Staleness / SLO</span>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Producer</span>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Reason</span>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">Observed</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Dataset</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Status</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Staleness / SLO</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Producer</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Reason</span>
+        <span className="text-[11px] font-bold lowercase text-text-3">Observed</span>
       </div>
       <div className="min-w-[980px] divide-y divide-border/40">
         {rows.map((state) => {
@@ -420,13 +412,13 @@ function DatasetIdentity({ state }: { state: DatasetState }) {
   const namespace = datasetNamespace(state);
   return (
     <div className="min-w-0 py-3 pr-4">
-      <div className="truncate font-mono text-sm font-medium text-text-1" title={state.name}>
+      <div className="truncate text-sm font-normal text-text-1" title={state.name}>
         {state.name}
       </div>
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-text-4">
-        <span className="font-mono">{displayNamespace(namespace)}</span>
+      <div className="mt-1 flex items-center gap-2 text-[11px] text-text-3">
+        <span className="">{displayNamespace(namespace)}</span>
         {state.watermark ? (
-          <span className="truncate font-mono" title={state.watermark}>
+          <span className="truncate" title={state.watermark}>
             wm {state.watermark}
           </span>
         ) : (
@@ -440,21 +432,21 @@ function DatasetIdentity({ state }: { state: DatasetState }) {
 function ProducingJobCell({ detail }: { detail: DatasetDetail | undefined }) {
   const producer = detail?.producing_job;
   if (!producer) {
-    return <span className="text-xs text-text-4">No Caesium producer</span>;
+    return <span className="text-xs text-text-3">No Caesium producer</span>;
   }
   return (
     <div className="min-w-0 space-y-1">
       <Link
         to="/jobs/$jobId"
         params={{ jobId: producer.id }}
-        className="block truncate text-sm font-medium text-text-1 hover:text-cyan-glow"
+        className="block truncate text-sm font-normal text-text-1 hover:text-cyan-glow"
         title={producer.alias}
         onClick={(event) => event.stopPropagation()}
       >
         {producer.alias}
       </Link>
       {producer.step_name ? (
-        <div className="truncate font-mono text-[10px] text-text-4" title={producer.step_name}>
+        <div className="truncate text-[11px] text-text-3" title={producer.step_name}>
           {producer.step_name}
         </div>
       ) : null}
@@ -464,7 +456,7 @@ function ProducingJobCell({ detail }: { detail: DatasetDetail | undefined }) {
 
 function ReasonCell({ status, reason }: { status: DatasetStatus; reason: string | undefined }) {
   if (!reason) {
-    return <span className="text-xs text-text-4">-</span>;
+    return <span className="text-xs text-text-3">-</span>;
   }
   const tone = freshnessTone(status);
   return (
@@ -477,7 +469,7 @@ function ReasonCell({ status, reason }: { status: DatasetStatus; reason: string 
 function ObservedAt({ state }: { state: DatasetState }) {
   const observedAt = effectiveObservedAt(state);
   if (!observedAt) {
-    return <span className="text-text-4">never</span>;
+    return <span className="text-text-3">never</span>;
   }
   return <RelativeTime date={observedAt} />;
 }
@@ -499,8 +491,8 @@ function StalenessBar({
     return (
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2 text-[11px]">
-          <span className="text-text-4">No SLO</span>
-          <span className="font-mono text-text-4">-</span>
+          <span className="text-text-3">No SLO</span>
+          <span className="text-text-3">-</span>
         </div>
         <div className="h-2 rounded-full bg-graphite/60" />
       </div>
@@ -511,8 +503,8 @@ function StalenessBar({
     return (
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2 text-[11px]">
-          <span className="text-text-4">Awaiting first observation</span>
-          <span className="font-mono text-text-3">{slo}</span>
+          <span className="text-text-3">Awaiting first observation</span>
+          <span className="text-text-3">{slo}</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-graphite/60">
           <div className="h-full w-[8%] rounded-full bg-text-4" />
@@ -527,8 +519,8 @@ function StalenessBar({
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className={cn("font-mono tabular-nums", tone.textClass)}>{label}</span>
-        <span className="font-mono text-text-4">{Math.round(percent)}%</span>
+        <span className={cn("tabular-nums", tone.textClass)}>{label}</span>
+        <span className="text-text-3">{Math.round(percent)}%</span>
       </div>
       <div
         role="progressbar"
@@ -563,7 +555,6 @@ function DatasetDetailPanel({
         <EmptyState
           title="Select a dataset"
           subtitle="Choose a row to inspect the producer, SLO, and derivation audit."
-          icon={<Database className="h-12 w-12 text-text-3" />}
           className="py-12"
         />
       </div>
@@ -586,7 +577,6 @@ function DatasetDetailPanel({
         <EmptyState
           title="Dataset detail unavailable"
           subtitle={error instanceof Error ? error.message : "The dataset detail endpoint returned an error."}
-          icon={<AlertTriangle className="h-12 w-12 text-danger" />}
         />
       </div>
     );
@@ -600,18 +590,18 @@ function DatasetDetailPanel({
     <div className="rounded-md border border-border/50 bg-card p-4" data-testid="dataset-detail-panel">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3">
+          <div className="text-[11px] font-bold lowercase text-text-3">
             Dataset detail
           </div>
-          <h2 className="mt-1 truncate font-mono text-base font-semibold text-text-1" title={name}>
+          <h2 className="mt-1 truncate text-base font-bold text-text-1" title={name}>
             {name}
           </h2>
-          <div className="mt-1 font-mono text-[11px] text-text-4">{displayNamespace(namespace)}</div>
+          <div className="mt-1 text-[11px] text-text-3">{displayNamespace(namespace)}</div>
         </div>
         <FreshnessStatusChip status={state?.status} />
       </div>
 
-      {detail?.hold ? <Link to="/datasets/holds" search={holdSearch(detail.hold)} className="mt-3 block rounded border border-fuchsia-400/40 bg-fuchsia-400/10 p-2 text-xs text-fuchsia-300">Held · {detail.hold.reason} · inspect {detail.hold.occurrence_count} occurrences</Link> : null}
+      {detail?.hold ? <Link to="/datasets/holds" search={holdSearch(detail.hold)} className="mt-3 block rounded border border-fuchsia-400/40 bg-fuchsia-400/10 p-2 text-xs text-fuchsia-300">Held, {detail.hold.reason}, inspect {detail.hold.occurrence_count} occurrences</Link> : null}
       <dl className="mt-4 grid gap-3 text-xs">
         <MetadataRow label="Watermark" value={state?.watermark || "-"} mono />
         <MetadataRow label="Reason" value={state?.reason || detail?.last_decision?.reason || "-"} />
@@ -626,27 +616,27 @@ function DatasetDetailPanel({
 
       {producer ? (
         <div className="mt-4 rounded-md border border-border/50 bg-obsidian/30 p-3">
-          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-3">
-            <GitBranch className="h-3 w-3" />
+          <div className="flex items-center gap-2 text-[11px] font-bold lowercase text-text-3">
+
             Producer
           </div>
           <Link
             to="/jobs/$jobId"
             params={{ jobId: producer.id }}
-            className="mt-2 block truncate text-sm font-medium text-cyan-glow hover:underline"
+            className="mt-2 block truncate text-sm font-normal text-cyan-glow hover:underline"
           >
             {producer.alias}
           </Link>
           {producer.step_name ? (
-            <div className="mt-1 font-mono text-[11px] text-text-4">{producer.step_name}</div>
+            <div className="mt-1 text-[11px] text-text-3">{producer.step_name}</div>
           ) : null}
         </div>
       ) : null}
 
       {detail?.last_decision ? (
         <div className="mt-4 rounded-md border border-border/50 bg-obsidian/30 p-3">
-          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-3">
-            <History className="h-3 w-3" />
+          <div className="flex items-center gap-2 text-[11px] font-bold lowercase text-text-3">
+
             Last decision
           </div>
           <div className="mt-2 text-sm text-text-1">{detail.last_decision.decision.replaceAll("_", " ")}</div>
@@ -658,11 +648,11 @@ function DatasetDetailPanel({
 
       <div className="mt-5 border-t border-border/50 pt-4">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3">
+          <div className="text-[11px] font-bold lowercase text-text-3">
             Derivations
           </div>
           {state?.last_run_id ? (
-            <span className="font-mono text-[10px] text-text-4">run {shortId(state.last_run_id)}</span>
+            <IdChip value={state.last_run_id} label="run id" />
           ) : null}
         </div>
         <DerivationsPanel namespace={namespace} name={name} producingJob={producer} />
@@ -682,8 +672,8 @@ function MetadataRow({
 }) {
   return (
     <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-3">
-      <dt className="text-text-4">{label}</dt>
-      <dd className={cn("truncate text-text-2", mono && "font-mono")} title={value}>
+      <dt className="text-text-3">{label}</dt>
+      <dd className={cn("truncate text-text-2", mono && "")} title={value}>
         {value}
       </dd>
     </div>

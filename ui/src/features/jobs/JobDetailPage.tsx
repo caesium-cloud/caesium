@@ -1,20 +1,25 @@
+import { ImageReference } from "@/components/ui/image-reference";
+import CodeMirror from "@uiw/react-codemirror";
+import { yaml as yamlLang } from "@codemirror/lang-yaml";
+import { yamlTheme, yamlHighlight } from "@/components/ui/yaml-theme";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, MoreHorizontal, Pause, Play, Settings2, ShieldCheck, XCircle, Zap } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
 import { NotFoundState } from "@/components/not-found-state";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { INCIDENT_EVENT_TYPES, formatIncidentClass, incidentAge, incidentSummary, isResolvedIncident } from "@/features/incidents/incident-utils";
@@ -38,7 +43,7 @@ import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
+import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
 
@@ -97,7 +102,7 @@ export function JobDetailPage() {
 
   // getAllJobRuns (not getJobRuns) walks every page: the endpoint now
   // defaults to a 100-run page, and this tab previously relied on it being
-  // unbounded — reading only the first page here would silently drop a
+  // unbounded: reading only the first page here would silently drop a
   // job's older history once it passed 100 runs. The walk itself has a
   // safety cap (AllJobRunsResult.truncated), surfaced below the run list.
   const { data: runsResult, isLoading: isLoadingRuns } = useQuery({
@@ -248,7 +253,7 @@ export function JobDetailPage() {
     },
     onError: (err: Error) => {
       if (err instanceof ApiError && err.status === 409) {
-        toast.error("Queued run already started — can't cancel");
+        toast.error("Queued run already started: can't cancel");
         queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
         queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
         return;
@@ -432,22 +437,22 @@ export function JobDetailPage() {
       <div className="space-y-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">Pipeline</div>
+
             <div className="flex items-center gap-2.5">
-              <h1 className="text-xl font-semibold text-text-1 tracking-tight">{job.alias}</h1>
+              <h1 className="text-2xl font-bold lowercase text-text-1">{job.alias}</h1>
               <StatusBadge status={job.paused ? "paused" : (featuredRun?.status ?? "queued")} size="sm" />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
-              <span className="font-mono text-text-4">{shortId(job.id)}</span>
+              <IdChip value={job.id} label="job id" />
               {featuredRun ? (
                 <>
-                  <span className="text-text-4">·</span>
+                  <span className="inline-block w-3" aria-hidden="true" />
                   <span>
                     {activeRun ? "Started" : "Last run"}{" "}
                     <RelativeTime date={featuredRun.started_at} />
                   </span>
-                  <span className="text-text-4">·</span>
-                  <span className="font-mono tabular-nums">
+                  <span className="inline-block w-3" aria-hidden="true" />
+                  <span className="tabular-nums">
                     <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
                   </span>
                 </>
@@ -457,6 +462,7 @@ export function JobDetailPage() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <TriggerDialog
+        jobAlias={job.alias}
               open={triggerDialogOpen}
               onOpenChange={setTriggerDialogOpen}
               disabled={job.paused}
@@ -468,7 +474,7 @@ export function JobDetailPage() {
                   aria-label="Trigger job"
                   disabled={triggerMutation.isPending || job.paused}
                 >
-                  <Play className="mr-1.5 h-3.5 w-3.5" />
+
                   Trigger
                 </Button>
               )}
@@ -481,7 +487,7 @@ export function JobDetailPage() {
                   aria-label="More job actions"
                   data-testid="job-actions-overflow"
                 >
-                  <MoreHorizontal className="h-4 w-4" />
+                  <span aria-hidden="true">…</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
@@ -490,7 +496,7 @@ export function JobDetailPage() {
                   disabled={job.paused || trigger?.type !== "cron"}
                   onSelect={() => setBackfillDialogOpen(true)}
                 >
-                  <CalendarRange className="h-4 w-4" />
+
                   Backfill
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -498,7 +504,7 @@ export function JobDetailPage() {
                   disabled={pauseMutation.isPending}
                   onSelect={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
                 >
-                  <Pause className="h-4 w-4" />
+
                   {job.paused ? "Unpause" : "Pause"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -506,22 +512,22 @@ export function JobDetailPage() {
           </div>
         </div>
         <div
-          className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border bg-card/80 p-1"
+          className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border bg-void/80 p-1"
           data-testid="job-detail-view-tabs"
         >
-          <ViewTab jobId={job.id} view="runs" activeView={secondaryView} icon={<History className="h-3.5 w-3.5" />}>
+          <ViewTab jobId={job.id} view="runs" activeView={secondaryView}>
             Runs
           </ViewTab>
-          <ViewTab jobId={job.id} view="tasks" activeView={secondaryView} icon={<List className="h-3.5 w-3.5" />}>
+          <ViewTab jobId={job.id} view="tasks" activeView={secondaryView}>
             Tasks
           </ViewTab>
-          <ViewTab jobId={job.id} view="configuration" activeView={secondaryView} icon={<Settings2 className="h-3.5 w-3.5" />}>
+          <ViewTab jobId={job.id} view="configuration" activeView={secondaryView}>
             Config
           </ViewTab>
-          <ViewTab jobId={job.id} view="definition" activeView={secondaryView} icon={<FileText className="h-3.5 w-3.5" />}>
+          <ViewTab jobId={job.id} view="definition" activeView={secondaryView}>
             YAML
           </ViewTab>
-          <ViewTab jobId={job.id} view="backfills" activeView={secondaryView} icon={<CalendarRange className="h-3.5 w-3.5" />}>
+          <ViewTab jobId={job.id} view="backfills" activeView={secondaryView}>
             Backfills
           </ViewTab>
           <ViewTab jobId={job.id} view="cache" activeView={secondaryView}>
@@ -542,10 +548,10 @@ export function JobDetailPage() {
         <RemediationOverview job={job} incidents={jobIncidents} activeIncidents={activeIncidents} />
       ) : null}
 
-      {/* DAG — fills to bottom of viewport */}
+      {/* DAG: fills to bottom of viewport */}
       <div
         ref={dagContainerRef}
-        className="relative flex flex-col overflow-hidden rounded-md border bg-card"
+        className="relative flex flex-col overflow-hidden rounded-md border bg-void"
         style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
       >
         {/* Compact overlay status bar */}
@@ -555,23 +561,23 @@ export function JobDetailPage() {
               <>
                 {activeRun && (
                   <span className="flex items-center gap-1.5">
-                    <Zap className="h-3 w-3 text-cyan-glow animate-pulse" />
-                    <span className="text-cyan-glow/80 font-medium">Live</span>
+
+                    <span className="text-cyan-glow font-normal">Live</span>
                   </span>
                 )}
                 <span className="truncate">
-                  {activeRun ? "Overlay from" : "Latest overlay — run"}{" "}
+                  {activeRun ? "Overlay from" : "Latest overlay: run"}{" "}
                   <Link
                     to="/jobs/$jobId/runs/$runId"
                     params={{ jobId, runId: featuredRun.id }}
-                    className="font-mono text-cyan-glow/70 hover:text-cyan-glow"
+                    className="text-cyan-glow hover:text-cyan-glow"
                   >
-                    {shortId(featuredRun.id)}
+                    run started {new Date(featuredRun.started_at).toISOString().slice(11, 19)}
                   </Link>
                 </span>
               </>
             ) : (
-              <span className="text-text-4">DAG topology — trigger a run to see live state</span>
+              <span className="text-text-3">DAG topology: trigger a run to see live state</span>
             )}
           </div>
 
@@ -579,7 +585,7 @@ export function JobDetailPage() {
             {/* Live task counters */}
             {featuredRun && <DagCounters tasks={featuredRun.tasks} />}
             {job.paused && (
-              <StatusBadge status="paused" variant="soft" size="sm" />
+              <StatusBadge status="paused" variant="word" size="sm" />
             )}
           </div>
         </div>
@@ -625,7 +631,7 @@ export function JobDetailPage() {
         }}
       >
         {secondaryView ? (
-          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-lg`}>
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-md`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
             </DialogHeader>
@@ -693,23 +699,23 @@ function RunQueuePanel({
   }
 
   return (
-    <div data-testid="run-queue-panel" className="rounded-md border bg-card px-4 py-3">
+    <div data-testid="run-queue-panel" className="rounded-md border bg-void px-4 py-3">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <ListOrdered className="h-4 w-4 text-cyan-glow" />
-          <h2 className="text-sm font-semibold text-text-1">Run queue</h2>
+
+          <h2 className="text-sm font-bold text-text-1">Run queue</h2>
         </div>
         <div className="flex items-center gap-2">
           {staleCount > 0 ? (
             <Badge
               variant="outline"
               data-testid="run-queue-stale-count"
-              className="border-danger/35 bg-danger/10 font-mono text-[10px] text-danger"
+              className="border-danger/35 bg-danger/10 text-[11px] text-danger"
             >
               {staleCount} stale
             </Badge>
           ) : null}
-          <Badge variant="outline" className="font-mono text-[10px]">
+          <Badge variant="outline" className="text-[11px]">
             {rows?.length ?? 0} queued
           </Badge>
         </div>
@@ -725,15 +731,15 @@ function RunQueuePanel({
             >
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-text-3">#{row.position}</span>
-                  <Badge variant="outline" className="w-fit font-mono text-[10px]">
+                  <span className="text-text-3">#{row.position}</span>
+                  <Badge variant="outline" className="w-fit text-[11px]">
                     {formatPriority(row.priority)}
                   </Badge>
                   {isStaleQueueRow(row) ? (
                     <Badge
                       variant="outline"
                       data-testid="run-queue-stale-badge"
-                      className="w-fit border-danger/35 bg-danger/10 font-mono text-[10px] text-danger"
+                      className="w-fit border-danger/35 bg-danger/10 text-[11px] text-danger"
                     >
                       stale claim
                     </Badge>
@@ -741,13 +747,13 @@ function RunQueuePanel({
                     <Badge
                       variant="outline"
                       data-testid="run-queue-claimed-badge"
-                      className="w-fit font-mono text-[10px] text-text-3"
+                      className="w-fit text-[11px] text-text-3"
                     >
                       claimed
                     </Badge>
                   ) : null}
                 </div>
-                <div className="mt-1 font-mono text-[10px] text-text-4">{shortId(row.id)}</div>
+                <div className="mt-1 text-[11px] text-text-3"><IdChip value={row.id} label="queued run id" /></div>
               </div>
               <div className="min-w-0">
                 <div className="truncate text-text-2" title={queuePendingReason(row)}>
@@ -757,7 +763,7 @@ function RunQueuePanel({
                   enqueued <RelativeTime date={row.enqueued_at} />
                 </div>
               </div>
-              <span className="min-w-0 truncate font-mono text-text-2" title={formatQueueParams(row.params)}>
+              <span className="min-w-0 truncate text-text-2" title={formatQueueParams(row.params)}>
                 {formatQueueParams(row.params)}
               </span>
               <div className="flex items-center justify-end gap-1">
@@ -780,7 +786,7 @@ function RunQueuePanel({
                   disabled={cancelingQueueId === row.id}
                   onClick={() => onCancel(row.id)}
                 >
-                  <XCircle className="mr-1 h-3.5 w-3.5" />
+                  <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
                   {cancelingQueueId === row.id ? "Canceling" : "Cancel"}
                 </Button>
               </div>
@@ -800,7 +806,6 @@ function ViewTab({
   jobId,
   view,
   activeView,
-  icon,
   children,
 }: {
   jobId: string;
@@ -813,15 +818,14 @@ function ViewTab({
   return (
     <Button
       asChild
-      variant={isActive ? "secondary" : "ghost"}
+      variant="ghost"
       size="sm"
-      className="h-8 shrink-0 px-2.5 text-xs"
+      className={cn("h-8 shrink-0 rounded-none border-b-2 px-2.5 text-xs", isActive ? "border-cyan" : "border-transparent")}
     >
       <Link
         to={jobViewPath(jobId, view)}
         aria-current={isActive ? "page" : undefined}
       >
-        {icon}
         {children}
       </Link>
     </Button>
@@ -850,14 +854,14 @@ function RemediationOverview({
           label="Active job incident"
           testId="job-incident-ribbon"
         />
-        <Card className="border-graphite/40 bg-midnight/30">
-          <CardHeader className="border-b border-graphite/40 pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <FileWarning className="h-4 w-4 text-warning" />
+        <section className="border-graphite/40 bg-midnight/30">
+          <div className="border-b border-graphite/40 pb-3">
+            <h3 className="flex items-center gap-2 text-sm">
+              <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
               Incident history
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
+            </h3>
+          </div>
+          <div className="p-0">
             {recentIncidents.length > 0 ? (
               <div className="divide-y divide-border/40">
                 {recentIncidents.map((incident) => (
@@ -869,14 +873,14 @@ function RemediationOverview({
                   >
                     <div className="flex flex-wrap items-center gap-2">
                       <StatusBadge status={incident.status} domain="incident" size="sm" />
-                      <span className="font-mono text-[10px] text-text-4">{incidentAge(incident)}</span>
+                      <span className="text-[11px] text-text-3">{incidentAge(incident)}</span>
                     </div>
-                    <Badge variant="outline" className="w-fit border-warning/30 bg-warning/10 text-[10px] text-warning">
+                    <Badge variant="outline" className="w-fit border-warning/30 bg-warning/10 text-[11px] text-warning">
                       {formatIncidentClass(incident.class)}
                     </Badge>
                     <div className="min-w-0">
                       <div className="truncate text-xs text-text-2">{incidentSummary(incident)}</div>
-                      <div className="mt-0.5 font-mono text-[10px] text-text-4">#{shortId(incident.id)}</div>
+                      <div className="mt-0.5 text-[11px] text-text-3"><IdChip value={incident.id} label="incident id" /></div>
                     </div>
                   </Link>
                 ))}
@@ -884,26 +888,26 @@ function RemediationOverview({
             ) : (
               <div className="p-4 text-sm text-text-3">No remediation incidents recorded for this job.</div>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       </div>
 
-      <Card className="h-fit border-cyan-glow/25 bg-cyan-glow/5" data-testid="job-remediation-policy">
-        <CardHeader className="border-b border-cyan-glow/15 pb-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
+      <section className="h-fit border-cyan-glow/25 bg-cyan-glow/5" data-testid="job-remediation-policy">
+        <div className="border-b border-cyan-glow/15 pb-3">
+          <h3 className="flex items-center gap-2 text-sm">
             <ShieldCheck className="h-4 w-4 text-cyan-glow" />
             Remediation policy
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 p-4">
+          </h3>
+        </div>
+        <div className="space-y-3 p-4">
           {policyFields.map(([key, value]) => (
             <div key={key}>
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-text-3">{key}</div>
-              <div className="mt-1 break-words font-mono text-xs text-text-1">{value}</div>
+              <div className="text-[11px] font-bold lowercase text-text-3">{key}</div>
+              <div className="mt-1 break-words text-xs text-text-1">{value}</div>
             </div>
           ))}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   );
 }
@@ -926,9 +930,9 @@ function JobManifestView({
   if (error) {
     return (
       <div className="flex gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-text-2">
-        <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
         <div>
-          <div className="font-medium text-destructive">Could not export this job&apos;s manifest</div>
+          <div className="font-normal text-destructive">Could not export this job&apos;s manifest</div>
           <div className="mt-1 text-text-3">{error instanceof Error ? error.message : String(error)}</div>
         </div>
       </div>
@@ -938,20 +942,20 @@ function JobManifestView({
   return (
     <div className="space-y-3">
       <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
-        <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+        <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
         <div>
-          <div className="font-medium text-warning">Reconstructed from the stored job</div>
+          <div className="font-normal text-warning">Reconstructed from the stored job</div>
           <div className="mt-1 text-text-3">
-            Identical to <span className="font-mono">caesium job export</span>. Two authoring details are not
+            Identical to <span className="">caesium job export</span>. Two authoring details are not
             persisted and cannot be recovered: a volume&apos;s alternative per-engine sources (only the ones this
-            job&apos;s steps resolved survive) and its <span className="font-mono">accessMode</span>. Job-level
+            job&apos;s steps resolved survive) and its <span className="">accessMode</span>. Job-level
             workload identity comes back on each Kubernetes step, which is equivalent.
           </div>
         </div>
       </div>
-      <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs" data-testid="job-manifest-yaml">
-        {manifest}
-      </pre>
+      <div className="overflow-hidden rounded-lg border border-border bg-midnight" data-testid="job-manifest-yaml">
+        <CodeMirror value={manifest || ""} height="420px" editable={false} readOnly extensions={[yamlLang(), yamlTheme, yamlHighlight]} basicSetup={{ lineNumbers: true, foldGutter: true }} />
+      </div>
     </div>
   );
 }
@@ -980,34 +984,17 @@ function RunsView({
           {typeof total === "number" ? ` of ${total.toLocaleString()} total` : ""}. Older history is not shown.
         </div>
       ) : null}
-      <div className="rounded-md border bg-card divide-y" data-testid="job-runs-list">
-        {runs.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
-        ) : null}
-        {runs.map((run) => (
-          <Link
-            key={run.id}
-            to="/jobs/$jobId/runs/$runId"
-            params={{ jobId: job.id, runId: run.id }}
-            className="flex items-center justify-between gap-3 p-4 transition-colors hover:bg-muted/50"
-          >
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{formatUTCTimestamp(run.started_at, run.started_at)}</span>
-                {run.params && Object.keys(run.params).length > 0 ? (
-                  <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
-                ) : null}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                <RelativeTime date={run.started_at} /> · <span className="font-mono">{shortId(run.id)}</span> ·{" "}
-                <span className="font-mono">
-                  <Duration start={run.started_at} end={run.completed_at} />
-                </span>
-              </div>
-            </div>
-            {renderRunStatus(run.status)}
-          </Link>
-        ))}
+      <div className="divide-y border-y border-border" data-testid="job-runs-list">
+        {runs.length === 0 ? <div className="p-8 text-center text-text-3">No runs found for this job.</div> : null}
+        {runs.map(run => <div key={run.id} className="flex min-h-[42px] flex-wrap items-center gap-x-7 gap-y-2 px-3 py-2 hover:bg-obsidian">
+          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{new Date(run.started_at).toISOString().slice(11, 19)}</span>
+          <span className="text-xs text-text-3"><RelativeTime date={run.started_at} /></span>
+          {renderRunStatus(run.status)}
+          <span className="text-xs text-text-2"><Duration start={run.started_at} end={run.completed_at} /></span>
+          {run.params && Object.keys(run.params).length ? <span className="text-xs text-text-3">{Object.keys(run.params).length} params</span> : null}
+          <IdChip value={run.id} label="run id" className="ml-auto" />
+          <Link to="/jobs/$jobId/runs/$runId" params={{ jobId: job.id, runId: run.id }} className="text-xs text-cyan">open</Link>
+        </div>)}
       </div>
     </div>
   );
@@ -1027,24 +1014,25 @@ function TasksView({
   return (
     <div className="space-y-4">
       {tasks?.map((task) => (
-        <Card key={task.id}>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3 text-sm md:grid-cols-2">
+        <section className="border-b border-border py-3" key={task.id}>
+          <div className="pb-3">
+            <h3 className="text-sm font-bold">{task.name || atoms?.[task.atom_id]?.image.split("@")[0] || "task"}</h3>
+            <div className="mt-1 text-xs text-text-3"><ImageReference image={atoms?.[task.atom_id]?.image || "image unavailable"} /></div>
+          </div>
+          <div className="grid gap-3 text-sm md:grid-cols-2">
             <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} taskType={dag?.nodes?.find(n => n.id === task.id)?.type} framed={false} />
             <div className="space-y-3">
               <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Atom ID</div>
-                <div className="font-mono text-xs">{task.atom_id}</div>
+                <div className="mb-1 text-xs lowercase text-muted-foreground">Atom ID</div>
+                <div className="text-xs"><IdChip value={task.atom_id} label="atom id" /></div>
               </div>
               <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Command</div>
-                <div className="font-mono text-xs break-all">{formatCommandForDisplay(atoms?.[task.atom_id]?.command)}</div>
+                <div className="mb-1 text-xs lowercase text-muted-foreground">Command</div>
+                <div className="text-xs break-all">{formatCommandForDisplay(atoms?.[task.atom_id]?.command)}</div>
               </div>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ))}
     </div>
   );
@@ -1061,65 +1049,65 @@ function ConfigurationView({
 }) {
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Trigger Configuration</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
+      <section className="border-b border-border py-3">
+        <div className="pb-3">
+          <h3 className="text-sm">Trigger Configuration</h3>
+        </div>
+        <div className="space-y-3 text-sm">
           {renderTriggerSummary(trigger)}
           {triggerConfig?.defaultParams && typeof triggerConfig.defaultParams === "object" ? (
             <div>
-              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Default Params</div>
-              <div className="font-mono text-xs">{formatKeyValueMap(triggerConfig.defaultParams as Record<string, unknown>)}</div>
+              <div className="mb-1 text-xs lowercase text-muted-foreground">Default Params</div>
+              <div className="text-xs">{formatKeyValueMap(triggerConfig.defaultParams as Record<string, unknown>)}</div>
             </div>
           ) : null}
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Raw Config</div>
+            <div className="mb-1 text-xs lowercase text-muted-foreground">Raw Config</div>
             <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{trigger?.configuration || "{}"}</pre>
           </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Job Metadata</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
+        </div>
+      </section>
+      <section className="border-b border-border py-3">
+        <div className="pb-3">
+          <h3 className="text-sm">Job Metadata</h3>
+        </div>
+        <div className="space-y-3 text-sm">
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Pause State</div>
+            <div className="mb-1 text-xs lowercase text-muted-foreground">Pause State</div>
             <div>{job.paused ? "Paused (blocks new runs)" : "Active"}</div>
           </div>
           {job.run_timeout ? (
             <div>
-              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Run Timeout</div>
-              <div className="font-mono text-xs">{formatDurationNs(job.run_timeout)}</div>
+              <div className="mb-1 text-xs lowercase text-muted-foreground">Run Timeout</div>
+              <div className="text-xs">{formatDurationNs(job.run_timeout)}</div>
             </div>
           ) : null}
           {job.task_timeout ? (
             <div>
-              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Task Timeout</div>
-              <div className="font-mono text-xs">{formatDurationNs(job.task_timeout)}</div>
+              <div className="mb-1 text-xs lowercase text-muted-foreground">Task Timeout</div>
+              <div className="text-xs">{formatDurationNs(job.task_timeout)}</div>
             </div>
           ) : null}
           {job.max_parallel_tasks ? (
             <div>
-              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Max Parallel Tasks</div>
-              <div className="font-mono text-xs">{job.max_parallel_tasks}</div>
+              <div className="mb-1 text-xs lowercase text-muted-foreground">Max Parallel Tasks</div>
+              <div className="text-xs">{job.max_parallel_tasks}</div>
             </div>
           ) : null}
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Cache Policy</div>
-            <div className="font-mono text-xs">{describeCachePolicy(job.cache_config)}</div>
+            <div className="mb-1 text-xs lowercase text-muted-foreground">Cache Policy</div>
+            <div className="text-xs">{describeCachePolicy(job.cache_config)}</div>
           </div>
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
-            <div className="font-mono text-xs">{formatKeyValueMap(job.labels)}</div>
+            <div className="mb-1 text-xs lowercase text-muted-foreground">Labels</div>
+            <div className="text-xs">{formatKeyValueMap(job.labels)}</div>
           </div>
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Annotations</div>
-            <div className="font-mono text-xs">{formatKeyValueMap(job.annotations)}</div>
+            <div className="mb-1 text-xs lowercase text-muted-foreground">Annotations</div>
+            <div className="text-xs">{formatKeyValueMap(job.annotations)}</div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1246,16 +1234,16 @@ function renderTriggerSummary(trigger: Trigger | null | undefined) {
   return (
     <>
       <div>
-        <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Type</div>
+        <div className="mb-1 text-xs lowercase text-muted-foreground">Type</div>
         <div>{trigger.type}</div>
       </div>
       <div>
-        <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Alias</div>
+        <div className="mb-1 text-xs lowercase text-muted-foreground">Alias</div>
         <div>{trigger.alias}</div>
       </div>
       <div>
-        <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Trigger ID</div>
-        <div className="font-mono text-xs">{trigger.id}</div>
+        <div className="mb-1 text-xs lowercase text-muted-foreground">Trigger ID</div>
+        <div className="text-xs">{trigger.id}</div>
       </div>
     </>
   );

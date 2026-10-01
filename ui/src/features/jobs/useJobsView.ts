@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import type { RunSummary } from "@/components/ui/sparkline";
+import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
 export type SortKey = "alias" | "status" | "last_run";
@@ -301,8 +301,8 @@ export function useJobsView() {
     return sorted.map((job) => ({
       ...job,
       lastRuns: (job.last_runs ?? [])
-        .slice(-14)
-        .map((r) => ({ status: r.status, duration: r.duration ?? null })),
+        .slice(-10)
+        .map((r) => ({ status: r.status, duration: r.duration ?? null, startedAt: r.started_at })),
     }));
   }, [jobs, statusFilter, search, sort]);
 

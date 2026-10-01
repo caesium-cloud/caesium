@@ -58,7 +58,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await row.locator('button[title="Trigger run"]').click();
 
   await page.waitForURL(/\/jobs\/[^/]+\/runs\/[^/]+$/);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
 
   let node = page.locator(".react-flow__node").first();
@@ -69,7 +69,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await expect(page.getByTestId("task-detail-panel").getByText("Live stream", { exact: true })).toBeVisible();
   await expect(page.getByTestId("task-log-plaintext")).toContainText("Starting log streaming showcase");
 
-  await expect(page.locator('[data-status="succeeded"]').first()).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByTestId("run-heading").locator("..").locator('[data-status="succeeded"]')).toBeVisible({ timeout: 90_000 });
 
   await page.reload();
   node = page.locator(".react-flow__node").first();

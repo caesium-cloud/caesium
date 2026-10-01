@@ -10,8 +10,8 @@ import type {
   ContractVerdict,
 } from "@/lib/api";
 
-export const contractNodeWidth = 300;
-export const contractNodeHeight = 138;
+export const contractNodeWidth = 260;
+export const contractNodeHeight = 80;
 
 export interface ContractFlowNodeData {
   id: string;
@@ -130,7 +130,7 @@ function edgeVisualStyle(edge: ContractGraphEdge): CSSProperties {
   const stroke = edgeStrokeColor(edge);
   return {
     stroke,
-    strokeWidth: edge.class === "evidence" ? 2 : 2.5,
+    strokeWidth: 1.5,
     strokeDasharray: edgeDashArray(edge.class),
     strokeLinecap: edge.class === "evidence" ? "round" : undefined,
     opacity: edge.class === "evidence" ? 0.58 : 1,
@@ -173,8 +173,8 @@ function getLayoutedElements(
   dagreGraph.setDefaultEdgeLabel(() => ({}));
   dagreGraph.setGraph({
     rankdir: direction,
-    nodesep: 150,
-    ranksep: 200,
+    nodesep: 120,
+    ranksep: 170,
     marginx: 50,
     marginy: 50,
     ranker: "network-simplex",

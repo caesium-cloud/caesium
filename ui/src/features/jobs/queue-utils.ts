@@ -33,7 +33,7 @@ export function isStaleQueueRow(row: RunQueueItem) {
 export function queuePendingReason(row: RunQueueItem) {
   if (isStaleQueueRow(row)) {
     const holder = row.claimed_by ? ` by ${row.claimed_by}` : "";
-    return `Claim${holder} expired — the dequeuer that took this run died mid-drain; the leader will release it`;
+    return `Claim${holder} expired: the dequeuer that took this run died mid-drain; the leader will release it`;
   }
   if (row.claim_state === "claimed") {
     return row.claimed_by ? `Starting on ${row.claimed_by}` : "Claimed by a dequeuer; starting";

@@ -1,10 +1,11 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, GitBranch, GitCommit, Info, Search } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type BlameEdgeAttribution, type BlameTaskAttribution } from "@/lib/api";
@@ -87,7 +88,7 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
 
   if (isLoading) {
     return (
-      <div className="space-y-5" data-testid="blame-container">
+      <div className="space-y-5 relative" data-testid="blame-container"><span aria-hidden="true" className="cs-now-head absolute left-0 top-0 h-[7px] w-[7px] rounded-full bg-running" />
         <BlameBreadcrumb jobId={jobId} />
         <Skeleton className="h-8 w-[220px]" />
         <Skeleton className="h-24 w-full" />
@@ -98,12 +99,11 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
 
   if (error) {
     return (
-      <div className="space-y-5" data-testid="blame-container">
+      <div className="space-y-5 relative" data-testid="blame-container"><span aria-hidden="true" className="cs-now-head absolute left-0 top-0 h-[7px] w-[7px] rounded-full bg-running" />
         <BlameBreadcrumb jobId={jobId} />
         <EmptyState
           title="Blame unavailable"
           subtitle={error instanceof Error ? error.message : "The blame endpoint returned an error."}
-          icon={<AlertTriangle className="h-12 w-12 text-danger" />}
         />
       </div>
     );
@@ -111,12 +111,11 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
 
   if (!blame) {
     return (
-      <div className="space-y-5" data-testid="blame-container">
+      <div className="space-y-5 relative" data-testid="blame-container"><span aria-hidden="true" className="cs-now-head absolute left-0 top-0 h-[7px] w-[7px] rounded-full bg-running" />
         <BlameBreadcrumb jobId={jobId} />
         <EmptyState
           title="No blame data"
           subtitle="The blame endpoint returned no attribution data for this job."
-          icon={<GitBranch className="h-12 w-12 text-text-3" />}
         />
       </div>
     );
@@ -125,50 +124,50 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
   const hasElements = blame.tasks.length > 0 || blame.edges.length > 0;
 
   return (
-    <div className="space-y-5" data-testid="blame-container">
+    <div className="space-y-5 relative" data-testid="blame-container"><span aria-hidden="true" className="cs-now-head absolute left-0 top-0 h-[7px] w-[7px] rounded-full bg-running" />
       <BlameBreadcrumb jobId={jobId} />
 
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">
+          <div className="text-[11px] font-bold lowercase text-text-3 mb-1">
             DAG blame
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="text-xl font-semibold text-text-1 font-mono tracking-tight">
+            <h1 className="text-2xl font-bold lowercase text-text-1">
               Job attribution
             </h1>
-            <Badge data-testid="blame-coverage" variant="outline" className="text-[10px]">
+            <Badge data-testid="blame-coverage" variant="outline" className="text-[11px]">
               {formatCoverage(blame.coverage)}
             </Badge>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
-            <span className="font-mono text-text-4 text-[10px]" data-testid="blame-job-id">
-              {blame.job_id}
+            <span className="text-text-3 text-[11px]" data-testid="blame-job-id">
+              <IdChip value={blame.job_id} label="job id" />
             </span>
-            <span className="text-text-4">/</span>
+            <span className="text-text-3">/</span>
             <span data-testid="blame-range-summary">
-              {blame.from_commit ? `from ${blame.from_commit}` : "from first snapshot"}
+              {blame.from_commit ? <>from <IdChip value={blame.from_commit} label="from commit" /></> : "from first snapshot"}
               {" "}
-              {blame.to_commit ? `to ${blame.to_commit}` : "to latest snapshot"}
+              {blame.to_commit ? <>to <IdChip value={blame.to_commit} label="to commit" /></> : "to latest snapshot"}
             </span>
           </div>
         </div>
         <div
-          className="flex w-fit max-w-full items-start gap-1.5 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs font-medium text-primary"
+          className="flex w-fit max-w-full items-start gap-1.5 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs font-normal text-primary"
           data-testid="blame-coverage-caveat"
         >
-          <Info className="h-3.5 w-3.5 shrink-0" />
+
           <span>
             Coverage caveat: topology, image, and command are tracked. env/spec/retries/cache/schema/sla/triggerRules are intentionally untracked.
           </span>
         </div>
       </div>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Commit Range</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <section className="border-b border-border py-3">
+        <div className="pb-3">
+          <h3 className="text-sm">Commit Range</h3>
+        </div>
+        <div className="space-y-4">
           <form className="grid gap-3 md:grid-cols-[1fr_1fr_0.8fr_auto]" onSubmit={applyFilters}>
             <FilterInput
               id="blame-from"
@@ -196,7 +195,7 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
             />
             <div className="flex items-end gap-2">
               <Button type="submit" size="sm" className="h-9" data-testid="blame-filter-apply">
-                <Search className="h-3.5 w-3.5" />
+
                 Apply
               </Button>
               <Button type="button" variant="outline" size="sm" className="h-9" onClick={clearFilters}>
@@ -211,21 +210,20 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
             <MetadataCell label="To Commit" value={blame.to_commit || "Latest snapshot"} testId="blame-to-commit" mono />
             <MetadataCell label="Elements" value={`${blame.tasks.length} tasks / ${blame.edges.length} edges`} />
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
       {!hasElements ? (
         <EmptyState
           title="No attributed elements"
           subtitle="No task or edge descriptors were introduced inside the selected commit range."
-          icon={<GitBranch className="h-12 w-12 text-text-3" />}
         />
       ) : null}
 
       {blame.tasks.length > 0 ? (
         <section className="space-y-3" aria-labelledby="blame-tasks-title">
           <div className="flex items-center justify-between gap-3">
-            <h2 id="blame-tasks-title" className="text-sm font-semibold text-text-1">
+            <h2 id="blame-tasks-title" className="text-sm font-bold text-text-1">
               Tasks
             </h2>
             <span className="text-xs text-text-3">{blame.tasks.length} attributed</span>
@@ -241,7 +239,7 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
       {blame.edges.length > 0 ? (
         <section className="space-y-3" aria-labelledby="blame-edges-title">
           <div className="flex items-center justify-between gap-3">
-            <h2 id="blame-edges-title" className="text-sm font-semibold text-text-1">
+            <h2 id="blame-edges-title" className="text-sm font-bold text-text-1">
               Edges
             </h2>
             <span className="text-xs text-text-3">{blame.edges.length} attributed</span>
@@ -265,10 +263,10 @@ function BlameBreadcrumb({ jobId }: { jobId: string }) {
         params={{ jobId }}
         className="flex items-center gap-1 hover:text-text-2 transition-colors"
       >
-        <ArrowLeft className="h-3 w-3" />
+
         Job
       </Link>
-      <span className="text-text-4">/</span>
+      <span className="text-text-3">/</span>
       <span>Blame</span>
     </div>
   );
@@ -276,29 +274,29 @@ function BlameBreadcrumb({ jobId }: { jobId: string }) {
 
 function BlameTaskRow({ task }: { task: BlameTaskAttribution }) {
   return (
-    <Card
+    <section
       data-testid="blame-task-row"
       data-task-name={task.element.name}
       className="overflow-hidden"
     >
-      <CardContent className="p-0">
+      <div className="p-0">
         <div
-          className="border-l-2 border-primary px-4 py-3"
+          className="min-h-[42px] border-l border-border px-4 py-2"
           data-testid={`blame-task-${testIdSlug(task.element.name)}`}
         >
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h3 className="font-mono text-sm font-semibold text-text-1" data-testid="blame-task-name">
+                <h3 className="text-sm font-bold text-text-1" data-testid="blame-task-name">
                   {task.element.name}
                 </h3>
-                <Badge variant="secondary" className="text-[10px]">Task</Badge>
+                <Badge variant="secondary" className="text-[11px]">Task</Badge>
               </div>
               <div className="mt-2 flex items-start gap-1.5 text-xs text-text-3">
-                <GitCommit className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                <span className="font-semibold text-text-2">Introduced by</span>
-                <span className="break-all font-mono" data-testid="blame-task-introducing-commit">
-                  {formatCommit(task.introducing_commit)}
+
+                <span className="font-bold text-text-2">Introduced by</span>
+                <span className="break-all" data-testid="blame-task-introducing-commit">
+                  {task.introducing_commit ? <IdChip value={task.introducing_commit} label="introducing commit" /> : "No commit recorded"}
                 </span>
               </div>
             </div>
@@ -310,36 +308,36 @@ function BlameTaskRow({ task }: { task: BlameTaskAttribution }) {
             <MetadataCell label="Snapshot ID" value={task.snapshot_id} testId="blame-task-snapshot-id" mono />
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
 function BlameEdgeRow({ edge }: { edge: BlameEdgeAttribution }) {
   return (
-    <Card
+    <section
       data-testid="blame-edge-row"
       data-edge={`${edge.element.from}->${edge.element.to}`}
       className="overflow-hidden"
     >
-      <CardContent className="p-0">
+      <div className="p-0">
         <div
-          className="border-l-2 border-running px-4 py-3"
+          className="min-h-[42px] border-l border-border px-4 py-2"
           data-testid={`blame-edge-${testIdSlug(`${edge.element.from}-${edge.element.to}`)}`}
         >
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h3 className="font-mono text-sm font-semibold text-text-1" data-testid="blame-edge-name">
+                <h3 className="text-sm font-bold text-text-1" data-testid="blame-edge-name">
                   {edge.element.from} -&gt; {edge.element.to}
                 </h3>
-                <Badge variant="outline" className="text-[10px]">Edge</Badge>
+                <Badge variant="outline" className="text-[11px]">Edge</Badge>
               </div>
               <div className="mt-2 flex items-start gap-1.5 text-xs text-text-3">
-                <GitCommit className="mt-0.5 h-3.5 w-3.5 shrink-0 text-running" />
-                <span className="font-semibold text-text-2">Introduced by</span>
-                <span className="break-all font-mono" data-testid="blame-edge-introducing-commit">
-                  {formatCommit(edge.introducing_commit)}
+
+                <span className="font-bold text-text-2">Introduced by</span>
+                <span className="break-all" data-testid="blame-edge-introducing-commit">
+                  {edge.introducing_commit ? <IdChip value={edge.introducing_commit} label="introducing commit" /> : "No commit recorded"}
                 </span>
               </div>
             </div>
@@ -357,8 +355,8 @@ function BlameEdgeRow({ edge }: { edge: BlameEdgeAttribution }) {
             />
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -379,14 +377,14 @@ function FilterInput({
 }) {
   return (
     <label htmlFor={id} className="min-w-0 space-y-1.5">
-      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="text-[11px] font-normal lowercase text-muted-foreground">{label}</span>
       <input
         id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         data-testid={testId}
-        className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-text-1 outline-none transition-colors placeholder:text-text-4 focus:border-primary focus:ring-1 focus:ring-primary"
+        className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-xs text-text-1 outline-none transition-colors placeholder:text-text-3 focus:border-primary focus:ring-1 focus:ring-primary"
       />
     </label>
   );
@@ -405,14 +403,14 @@ function MetadataCell({
 }) {
   return (
     <div className="min-w-0">
-      <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="mb-0.5 text-[11px] font-normal lowercase text-muted-foreground">
         {label}
       </div>
       <div
-        className={cn("break-all text-xs text-foreground", mono && "font-mono")}
+        className={cn("break-all text-xs text-foreground", mono && "")}
         data-testid={testId}
       >
-        {value}
+        {/ID$|Commit$/i.test(label) && value && !["None", "First snapshot", "Latest snapshot"].includes(value) ? <IdChip value={value} label={label} /> : value}
       </div>
     </div>
   );
@@ -438,9 +436,7 @@ function formatCoverage(coverage: string): string {
   return coverage;
 }
 
-function formatCommit(commit: string): string {
-  return commit || "No commit recorded";
-}
+
 
 function formatCommand(command?: string[]): string {
   return command && command.length > 0 ? command.join(" ") : "No command recorded";

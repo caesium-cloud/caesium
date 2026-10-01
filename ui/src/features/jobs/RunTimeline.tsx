@@ -1,274 +1,69 @@
-import { useState, type ReactNode } from "react";
 import type { JobTask, TaskRun } from "@/lib/api";
-import { shortId } from "@/lib/utils";
 import { statusMeta } from "@/lib/status";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { useUTCTick } from "@/components/ui/utc-clock";
 import { fanoutStatusSegments } from "@/lib/fanout";
 
-interface Props {
-  tasks: TaskRun[];
-  taskDefinitions: Record<string, JobTask>;
-  runStartedAt: string;
-}
-
-// Statuses surfaced in the timeline legend, in display order.
+interface Props { tasks: TaskRun[]; taskDefinitions: Record<string, JobTask>; runStartedAt: string }
 const LEGEND_STATUSES = ["succeeded", "cached", "failed", "running", "skipped", "queued"] as const;
 
-function colorFor(status: string): string {
-  return statusMeta(status).fg;
-}
-
 function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
 }
 
 export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
-  const runStart = new Date(runStartedAt).getTime();
-  // Pass Date.now as an initializer reference (not called during render) so
-  // React captures wall-clock time once at mount without violating purity rules.
-  const [now] = useState<number>(Date.now);
-
-  // Only show tasks that have started
-  const startedTasks = orderTasksByExecution(
-    tasks.filter(t => t.started_at || t.status === "cached"),
-    taskDefinitions,
-  );
-  if (startedTasks.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
-        No task execution data available yet.
-      </div>
-    );
-  }
-
-  // Compute relative start/end offsets in ms
-  const taskTimes = startedTasks.map(t => {
-    const startAt = t.started_at ?? t.created_at;
-    const start = new Date(startAt).getTime() - runStart;
-    const end = t.completed_at
-      ? new Date(t.completed_at).getTime() - runStart
-      : now - runStart;
-    return { task: t, start: Math.max(0, start), end: Math.max(0, end) };
+  const now = useUTCTick().getTime();
+  const runStart = Date.parse(runStartedAt);
+  const ordered = orderTasksByExecution(tasks, taskDefinitions);
+  if (!ordered.length || !Number.isFinite(runStart)) return <div className="flex h-32 items-center justify-center text-sm text-text-3">No task execution data available yet.</div>;
+  const live = tasks.some(task => statusMeta(task.status).label === "running" || statusMeta(task.status).label === "queued");
+  const elapsed = Math.max(0, now - runStart);
+  const taskTimes = ordered.map(task => {
+    const status = statusMeta(task.status).label;
+    const ghost = !task.started_at && status !== "cached";
+    const start = ghost ? elapsed : Math.max(0, Date.parse(task.started_at ?? task.created_at) - runStart);
+    const end = task.completed_at ? Math.max(start, Date.parse(task.completed_at) - runStart) : status === "running" ? elapsed : start;
+    return { task, status, start: Number.isFinite(start) ? start : 0, end: Number.isFinite(end) ? end : 0, ghost };
   });
-
-  const maxEnd = Math.max(...taskTimes.map(t => t.end), 1);
-
-  const ROW_H = 36;
-  const LABEL_W = 180;
-  const BAR_AREA = 600;
-  const BAR_H = 18;
-  const BAR_Y_OFFSET = (ROW_H - BAR_H) / 2;
-  const svgHeight = taskTimes.length * ROW_H + 30; // +30 for time axis
-
-  // Time axis ticks (5 ticks)
-  const ticks = Array.from({ length: 6 }, (_, i) => Math.round((maxEnd / 5) * i));
-
-  return (
-    <div className="overflow-x-auto">
-      <svg
-        width={LABEL_W + BAR_AREA + 20}
-        height={svgHeight}
-        className="font-mono"
-        style={{ fontFamily: "ui-monospace, monospace" }}
-      >
-        {/* Background rows */}
-        {taskTimes.map((_, i) => (
-          <rect
-            key={i}
-            x={0}
-            y={i * ROW_H}
-            width={LABEL_W + BAR_AREA + 20}
-            height={ROW_H}
-            fill={i % 2 === 0 ? "transparent" : "hsl(var(--text-3) / 0.04)"}
-          />
-        ))}
-
-        {/* Grid lines */}
-        {ticks.map((tick, i) => {
-          const x = LABEL_W + (tick / maxEnd) * BAR_AREA;
-          return (
-            <line
-              key={i}
-              x1={x}
-              y1={0}
-              x2={x}
-              y2={svgHeight - 28}
-              stroke="hsl(var(--text-3) / 0.18)"
-              strokeDasharray="3,3"
-            />
-          );
-        })}
-
-        {/* Task rows */}
-        {taskTimes.map(({ task, start, end }, i) => {
-          const barX = LABEL_W + (start / maxEnd) * BAR_AREA;
-          const barW = Math.max(2, ((end - start) / maxEnd) * BAR_AREA);
-          const color = colorFor(task.status);
+  const span = Math.max(1000, ...taskTimes.filter(row => !row.ghost).map(row => row.end), live ? elapsed : 0);
+  const step = [1000, 2000, 5000, 10000, 30000, 60000].find(value => span / value <= 8) ?? Math.ceil(span / 480000) * 60000;
+  const maxEnd = Math.ceil(span / step) * step + step;
+  const nowPosition = Math.min(100, elapsed / maxEnd * 100);
+  const ticks = Array.from({ length: Math.floor(maxEnd / step) + 1 }, (_, i) => i * step);
+  return <div>
+    <div className="mb-2 flex flex-wrap justify-end gap-4">{LEGEND_STATUSES.map(status => <StatusBadge key={status} status={status} size="sm" />)}</div>
+    <div className="overflow-x-auto bg-midnight" tabIndex={0} aria-label="Execution timeline">
+      <div className="min-w-[800px]">
+        {taskTimes.map(({ task, status, start, end, ghost }, index) => {
           const label = taskLabel(task, taskDefinitions);
-          const duration = end - start;
-          // Partition IDENTITY, not count: an expansion that materializes exactly
-          // one instance still has a partition value and its own cache identity,
-          // so gating on `> 1` alone made the same step's lane silently change
-          // shape from run to run as N crosses 1. Mirrors
-          // internal/run.IsFanOutInstance / TaskDetailPanel's isFannedTask.
-          const isFanned =
-            typeof task.partition_count === "number" &&
-            (task.partition_count > 1 || (task.partition_count > 0 && !!task.partition_value));
-          const displayLabel = isFanned ? `${label} ×${task.partition_count}` : label;
-          const densitySegments = isFanned ? fanoutStatusSegments(task.partition_status_counts) : [];
-
-          // The group envelope bar and per-instance density strip below it —
-          // rendered only for a fanned step, so an unfanned row is byte-identical
-          // to before.
-          const rowBody = (
-            <>
-              {/* Task label (shows ×N for a fanned group) */}
-              <text
-                x={LABEL_W - 8}
-                y={i * ROW_H + ROW_H / 2 + 4}
-                textAnchor="end"
-                fontSize={11}
-                fill="currentColor"
-                className="fill-muted-foreground"
-              >
-                {displayLabel.length > 18 ? displayLabel.substring(0, 16) + "…" : displayLabel}
-              </text>
-
-              {/* Bar background */}
-              <rect
-                x={LABEL_W}
-                y={i * ROW_H + BAR_Y_OFFSET}
-                width={BAR_AREA}
-                height={BAR_H}
-                fill="hsl(var(--text-3) / 0.1)"
-                rx={3}
-              />
-
-              {/* Bar (group envelope: first-start → last-end for a fanned step) */}
-              <rect
-                x={barX}
-                y={i * ROW_H + BAR_Y_OFFSET}
-                width={barW}
-                height={BAR_H}
-                fill={color}
-                fillOpacity={task.status === "running" ? 0.9 : 0.75}
-                rx={3}
-              >
-                {task.status === "running" && (
-                  <animate
-                    attributeName="fillOpacity"
-                    values="0.6;0.95;0.6"
-                    dur="1.5s"
-                    repeatCount="indefinite"
-                  />
-                )}
-              </rect>
-
-              {/* Duration label inside bar if wide enough */}
-              {barW > 40 && (
-                <text
-                  x={barX + barW / 2}
-                  y={i * ROW_H + BAR_Y_OFFSET + BAR_H / 2 + 4}
-                  textAnchor="middle"
-                  fontSize={9}
-                  fill="hsl(var(--background))"
-                  fontWeight="600"
-                >
-                  {formatMs(duration)}
-                </text>
-              )}
-
-              {/* Density strip: proportion of instances per status, when known */}
-              {densitySegments.length > 0 && (
-                <g data-testid="run-timeline-density-strip">
-                  {densitySegments.reduce<{ elements: ReactNode[]; offset: number }>(
-                    (acc, segment) => {
-                      const segWidth = Math.max(1, segment.fraction * barW);
-                      acc.elements.push(
-                        <rect
-                          key={segment.status}
-                          data-testid="run-timeline-density-segment"
-                          data-status={segment.status}
-                          x={barX + acc.offset}
-                          y={i * ROW_H + BAR_Y_OFFSET + BAR_H + 2}
-                          width={segWidth}
-                          height={4}
-                          fill={colorFor(segment.status)}
-                          rx={1}
-                        />,
-                      );
-                      acc.offset += segWidth;
-                      return acc;
-                    },
-                    { elements: [], offset: 0 },
-                  ).elements}
-                </g>
-              )}
-
-              {/* Status dot */}
-              <circle
-                cx={barX + barW + 6}
-                cy={i * ROW_H + ROW_H / 2}
-                r={3}
-                fill={color}
-              />
-            </>
-          );
-
-          return (
-            <g
-              key={task.id}
-              data-testid="run-timeline-task-row"
-              data-task-id={task.task_id}
-              data-task-name={label}
-              data-started-at={task.started_at ?? ""}
-              data-partition-count={task.partition_count ?? 0}
-            >
-              {isFanned ? <g data-testid="run-timeline-group-row">{rowBody}</g> : rowBody}
-            </g>
-          );
+          const fanned = typeof task.partition_count === "number" && (task.partition_count > 1 || (task.partition_count > 0 && !!task.partition_value));
+          const segments = fanned ? fanoutStatusSegments(task.partition_status_counts) : [];
+          const meta = statusMeta(status);
+          const left = ghost ? Math.min(nowPosition, 96) : start / maxEnd * 100;
+          const width = ghost ? 4 : Math.max(.5, (end - start) / maxEnd * 100);
+          const body = <div className="grid h-9 grid-cols-[180px_1fr] items-center border-b border-obsidian">
+            <div className="flex items-center gap-2 pr-3 text-xs text-text-2"><span className="w-5 text-[11px] text-text-3">{String(index + 1).padStart(2, "0")}</span><StatusBadge status={status} variant="glyph" size="sm" /><span className="truncate" title={label}>{label}{fanned ? ` ×${task.partition_count}` : ""}</span></div>
+            <div className="relative h-full">
+              {ticks.map(tick => <span key={tick} aria-hidden="true" className="absolute inset-y-0 border-l border-border" style={{ left: `${tick / maxEnd * 100}%` }} />)}
+              {live ? <span aria-hidden="true" className="absolute inset-y-0 border-l border-running" style={{ left: `${nowPosition}%` }} /> : null}
+              <span title={`${label}: ${meta.label}, ${formatMs(end - start)}`} className={`absolute top-[10px] h-[10px] rounded-sm ${status === "running" ? "shadow-[0_0_10px_hsl(var(--running)/.5)]" : ""}`}
+                style={{ left: `${left}%`, width: `${width}%`, background: status === "skipped" || ghost ? "transparent" : status === "running" ? "linear-gradient(90deg,hsl(var(--running)/.2),hsl(var(--running)))" : meta.fg, border: status === "skipped" ? "1px dashed hsl(var(--text-4))" : ghost ? "1px solid hsl(var(--gold))" : undefined }} />
+              <span className="absolute top-[21px] max-w-full truncate text-[11px] italic text-text-3" style={{ left: `${Math.min(left, 70)}%` }}>{status === "skipped" ? task.error || "branch chose another path" : ghost ? "waits on upstream work" : formatMs(end - start)}</span>
+              {segments.length ? <div data-testid="run-timeline-density-strip" className="absolute top-[29px] flex h-1" style={{ left: `${left}%`, width: `${width}%` }}>{segments.map(segment => <span key={segment.status} data-testid="run-timeline-density-segment" data-status={segment.status} style={{ width: `${segment.fraction * 100}%`, backgroundColor: statusMeta(segment.status).fg }} />)}</div> : null}
+            </div>
+          </div>;
+          return <div key={task.id} data-testid="run-timeline-task-row" data-task-id={task.task_id} data-task-name={label} data-started-at={task.started_at ?? ""} data-partition-count={task.partition_count ?? 0}>
+            {fanned ? <div data-testid="run-timeline-group-row">{body}</div> : body}
+          </div>;
         })}
-
-        {/* Time axis */}
-        <line
-          x1={LABEL_W}
-          y1={svgHeight - 28}
-          x2={LABEL_W + BAR_AREA}
-          y2={svgHeight - 28}
-          stroke="hsl(var(--text-3) / 0.35)"
-        />
-        {ticks.map((tick, i) => {
-          const x = LABEL_W + (tick / maxEnd) * BAR_AREA;
-          return (
-            <g key={i}>
-              <line x1={x} y1={svgHeight - 28} x2={x} y2={svgHeight - 22} stroke="hsl(var(--text-3) / 0.45)" />
-              <text
-                x={x}
-                y={svgHeight - 10}
-                textAnchor="middle"
-                fontSize={9}
-                fill="currentColor"
-                className="fill-muted-foreground"
-              >
-                {formatMs(tick)}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-4 mt-3 px-1">
-        {LEGEND_STATUSES.map((status) => (
-          <div key={status} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: colorFor(status), opacity: 0.75 }} />
-            {status === "queued" ? "pending" : status}
-          </div>
-        ))}
+        <div className="ml-[180px] h-7 relative text-[11px] text-text-3">{ticks.map(tick => <span key={tick} className="absolute top-2 -translate-x-1/2" style={{ left: `${tick / maxEnd * 100}%` }}>{formatMs(tick)}</span>)}
+          {live ? <span aria-hidden="true" className="cs-now-head absolute -top-1 h-[7px] w-[7px] rounded-full bg-running" style={{ left: `${nowPosition}%` }} /> : null}
+        </div>
       </div>
     </div>
-  );
+  </div>;
 }
 
 function orderTasksByExecution(tasks: TaskRun[], taskDefinitions: Record<string, JobTask>): TaskRun[] {
@@ -356,8 +151,8 @@ function taskLabel(task: TaskRun, taskDefinitions: Record<string, JobTask>): str
   if (name) return name;
 
   if (task.image) {
-    return task.image.split("/").pop()?.split(":")[0] ?? shortId(task.atom_id);
+    return task.image.split("/").pop()?.split(":")[0] ?? "task";
   }
 
-  return shortId(task.atom_id);
+  return "task";
 }

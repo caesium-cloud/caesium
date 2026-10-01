@@ -322,7 +322,7 @@ test("authenticated console observes the owner crash and converges on the durabl
   };
   page.on("response", onEventResponse);
   try {
-    await expect(page.getByRole("heading", { name: /^Run / })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
     // The hold stays closed until the lease has moved to a survivor, so the
     // run cannot complete before the takeover is observed.
@@ -560,7 +560,7 @@ async function readRunSurface(
   const logText = (await plaintext.textContent()) ?? "";
   const logSourceLabel = (await source.count()) > 0 ? ((await source.textContent()) ?? "").trim() : "";
   const heading = await headingStatus(page);
-  const headings = await page.getByRole("heading", { name: /^Run / }).count();
+  const headings = await page.getByTestId("run-heading").count();
   // Run detail has no history table. The job page's Runs tab is the console list.
   await page.locator(`a[href="/jobs/${jobId}"]`).first().click();
   await page.getByTestId("job-detail-view-tabs").getByRole("link", { name: "Runs" }).click();
@@ -577,7 +577,7 @@ async function readRunSurface(
   }
   const runListSettledMs = Date.now() - listOpenedAt;
   await page.getByTestId("job-runs-list").locator(runHistoryLinkSelector(jobId, runId)).first().click();
-  await expect(page.getByRole("heading", { name: /^Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   return { headingStatus: heading, headingCount: headings, logText, logSourceLabel, runRows, runListFirstRows, runListSettledMs };
 }
 

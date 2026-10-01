@@ -25,12 +25,12 @@ export function FailureAtomsChart({ data }: FailureAtomsChartProps) {
 
   return (
     <ResponsiveContainer width="100%" height={350}>
-      <BarChart 
-        data={data} 
-        layout="vertical" 
+      <BarChart
+        data={data}
+        layout="vertical"
         margin={{ top: 5, right: 30, left: 10, bottom: 5 }}
       >
-        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--graphite))" opacity={0.3} />
+        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
         <XAxis type="number" hide />
         <YAxis
           dataKey="atom_name"
@@ -47,7 +47,7 @@ export function FailureAtomsChart({ data }: FailureAtomsChartProps) {
             backgroundColor: 'hsl(var(--midnight))',
             borderColor: 'hsl(var(--graphite))',
             color: 'hsl(var(--text-1))',
-            borderRadius: '8px',
+            borderRadius: '6px',
           }}
           itemStyle={{ fontSize: '12px' }}
           formatter={(value, _name, props) => [value, `Failures (${props.payload.alias})`]}
@@ -59,7 +59,7 @@ export function FailureAtomsChart({ data }: FailureAtomsChartProps) {
           barSize={20}
         >
           {data.map((_, index) => (
-            <Cell key={`cell-${index}`} opacity={1 - index * 0.15} />
+            <Cell key={`cell-${index}`} opacity={Math.max(0.4, 1 - index * 0.15)} />
           ))}
         </Bar>
       </BarChart>

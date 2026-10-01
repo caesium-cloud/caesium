@@ -39,7 +39,7 @@ export function Sparkline({
     return (
       <span
         aria-label="no runs"
-        className={cn("inline-flex items-center text-[11px] text-text-4", className)}
+        className={cn("inline-flex items-center text-[11px] text-text-3", className)}
       >
         —
       </span>

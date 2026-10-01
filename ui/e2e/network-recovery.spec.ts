@@ -40,14 +40,14 @@ test("reload preserves a terminal run's detail view", async ({ page, request }) 
   const { job, run } = await applyAndRun(request, "run-history.job.yaml", { status: "succeeded" });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   await expect(page.getByText("succeeded", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".react-flow__node")).toHaveCount(3);
 
   await page.reload();
 
   await expect(page).toHaveURL(new RegExp(`/jobs/${job.id}/runs/${run.id}$`));
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   await expect(page.getByText("succeeded", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".react-flow__node")).toHaveCount(3);
 });

@@ -128,13 +128,13 @@ describe("effective cache policy labels", () => {
       version: 2,
     });
     expect(describeEffectiveCachePolicy({ ttl: "1h" }, { enabled: true, ttl: "24h", version: 2 })).toBe(
-      "Override: Enabled · TTL 1h · v2",
+      "Override: Enabled, TTL 1h, v2",
     );
   });
 
   it("matches the server's map behavior when enabled is present", () => {
     expect(resolveCachePolicy({ enabled: false, ttl: "1h" }, true)).toEqual({ enabled: true, ttl: "1h" });
-    expect(describeEffectiveCachePolicy({ enabled: false, ttl: "1h" }, true)).toBe("Override: Enabled · TTL 1h");
-    expect(describeCachePolicy({ enabled: false, ttl: "1h" })).toBe("Enabled · TTL 1h");
+    expect(describeEffectiveCachePolicy({ enabled: false, ttl: "1h" }, true)).toBe("Override: Enabled, TTL 1h");
+    expect(describeCachePolicy({ enabled: false, ttl: "1h" })).toBe("Enabled, TTL 1h");
   });
 });
