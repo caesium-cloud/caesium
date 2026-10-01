@@ -156,6 +156,11 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 	}
 
 	if isInternalDqlite(dbType) {
+		// gorm.Open started the local node, so its listener exists now and has
+		// accepted only the connection that just read sqlite_version(). Turn
+		// Nagle off on the node's sockets before the pools below open theirs
+		// (see disableNagleOnDqliteNode, #588).
+		disableNagleOnDqliteNode(vars.NodeAddress)
 		// Internal dqlite: split reads and writes across two pools so writes
 		// serialize on a single connection — concurrent writers queue at the
 		// database/sql layer instead of colliding with SQLITE_BUSY, which dqlite

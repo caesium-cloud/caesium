@@ -1363,6 +1363,16 @@ class PerformanceShAttributionTests(unittest.TestCase):
                         "throughput": {"completed_per_second": 0.48, "verdict": "sustained"},
                         "backlog": {"slope_per_second": -0.01},
                         "counts": {"unreconciled": 0},
+                        "api_reads": {"status": "ok", "p50_seconds": 0.002, "p99_seconds": 0.011, "dropped": 0},
+                    }))
+                    stem.with_suffix(".exit").write_text("0\n")
+                    # A closed-loop sample has no read mix: the driver reports
+                    # api_reads unavailable, and no read field may be invented.
+                    stem = runs / f"closed-baseline-warm-{repeat}"
+                    stem.with_suffix(".json").write_text(json.dumps({
+                        "outcome": "passed", "duration_seconds": 5.0 + repeat,
+                        "api_reads": {"status": "unavailable", "reason": "not_configured: api-read-rate is zero",
+                                      "offered": 0},
                     }))
                     stem.with_suffix(".exit").write_text("0\n")
             result = self.assemble(art, "0")
@@ -1375,13 +1385,95 @@ class PerformanceShAttributionTests(unittest.TestCase):
             self.assertEqual(sample["sustained_verdict"], "sustained")
             self.assertEqual(sample["backlog_slope_per_second"], -0.01)
             self.assertEqual(sample["unreconciled"], 0)
+            self.assertEqual(sample["api_read_p50_seconds"], 0.002)
+            self.assertEqual(sample["api_read_p99_seconds"], 0.011)
+            self.assertEqual(sample["api_reads_dropped"], 0)
+            closed = assembled["candidate"]["workloads"]["closed-baseline.warm"]["samples"][0]
+            for field in ("api_read_p50_seconds", "api_read_p99_seconds", "api_reads_dropped"):
+                self.assertNotIn(field, closed)
             self.assertEqual(assembled["settings"]["repeats"], 10)
             self.assertEqual(assembled["settings"]["server_phase_first_side"], "base")
             self.assertTrue(assembled["measured_at"])
             # Carried fields are SLO inputs, never extra compared series.
             report = compare_doc(assembled)
-            self.assertEqual([m["id"] for m in report["metrics"]
-                              if m["family"] == "workload"], ["workload.open-tiny-sustained.warm.duration_seconds"])
+            self.assertEqual(sorted(m["id"] for m in report["metrics"] if m["family"] == "workload"),
+                             ["workload.closed-baseline.warm.duration_seconds",
+                              "workload.open-tiny-sustained.warm.duration_seconds"])
+
+    def read_mix_gate(self, reads_ok, reads_failed, reads_dropped=0):
+        """Assemble ten cold and ten warm open-api-read-mix samples per side
+        through performance.sh and judge them with the committed budgets."""
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp)
+            (art / "observations").mkdir()
+            for label in ("base", "candidate"):
+                runs = art / label / "runs"
+                runs.mkdir(parents=True)
+                for phase in ("cold", "warm"):
+                    durations = shifted(23.05, 1.0, cv_pct=0.01, phase=3 if label == "candidate" else 0)
+                    for repeat in range(1, 11):
+                        stem = runs / f"open-api-read-mix-{phase}-{repeat}"
+                        stem.with_suffix(".json").write_text(json.dumps({
+                            "outcome": "passed", "duration_seconds": durations[repeat - 1],
+                            "latency": {"p50_seconds": 0.512, "p99_seconds": 0.516},
+                            "throughput": {"completed_per_second": 0.999, "verdict": "sustained"},
+                            "backlog": {"slope_per_second": 0.0},
+                            "counts": {"unreconciled": 0},
+                            # Fast reads: a 10 ms p99 whatever the status code.
+                            "api_reads": {"status": "ok", "offered": reads_ok + reads_failed + reads_dropped,
+                                          "ok": reads_ok, "failed": reads_failed, "dropped": reads_dropped,
+                                          "status_codes": {"200": reads_ok, "500": reads_failed},
+                                          "p50_seconds": 0.002, "p99_seconds": 0.010},
+                        }))
+                        stem.with_suffix(".exit").write_text("0\n")
+            result = self.assemble(art, "1")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assembled = json.loads((art / "comparison.json").read_text())
+            report = COMPARE["compare"](assembled, budgets=COMPARE["load_budgets"](BUDGETS_PATH))
+            return assembled, report
+
+    def test_read_mix_of_fast_http_500s_is_refused(self):
+        # 166 successful reads and 34 HTTP 500s of 200 offered, with a 10 ms
+        # read p99 and normal throughput (the #594 review's shape): the driver
+        # still says api_reads status "ok", every latency and throughput SLO
+        # holds, and the catalog's 100-successful-reads floor is met. The read
+        # error SLOs must refuse it, on both phases, and block the strict gate.
+        assembled, report = self.read_mix_gate(reads_ok=166, reads_failed=34)
+        sample = assembled["candidate"]["workloads"]["open-api-read-mix.warm"]["samples"][0]
+        self.assertEqual((sample["api_reads_offered"], sample["api_reads_ok"], sample["api_reads_failed"]),
+                         (200, 166, 34))
+        self.assertAlmostEqual(sample["api_read_error_ratio"], 0.17)
+        slos = {s["id"]: s for s in report["decision"]["slos"]["results"]}
+        for phase in ("cold", "warm"):
+            self.assertEqual(slos[f"open-api-read-mix-{phase}-read-errors"]["verdict"], "breach")
+        for passing in ("open-api-read-mix-warm-api-read-p99", "open-api-read-mix-warm-throughput",
+                        "open-api-read-mix-warm-sustained", "open-api-read-mix-warm-reads-ok"):
+            self.assertEqual(slos[passing]["verdict"], "pass", passing)
+        self.assertEqual(report["overall"], "slo_breach")
+        self.assertTrue(report["strict_gate"]["blocking"])
+        self.assertNotEqual(COMPARE["EXIT_BY_OVERALL"][report["overall"]], 0)
+
+    def test_read_mix_drops_and_missing_accounting_are_refused(self):
+        # Client drops count as unsuccessful reads and have their own ceiling.
+        _, report = self.read_mix_gate(reads_ok=195, reads_failed=0, reads_dropped=6)
+        slos = {s["id"]: s for s in report["decision"]["slos"]["results"]}
+        self.assertEqual(slos["open-api-read-mix-warm-reads-dropped"]["verdict"], "breach")
+        self.assertEqual(slos["open-api-read-mix-warm-read-errors"]["verdict"], "breach")
+        self.assertEqual(report["overall"], "slo_breach")
+        # A configured mix with no successful read has no latency and no
+        # account to trust: the ratio is 1, the floor is missed, never a pass.
+        _, report = self.read_mix_gate(reads_ok=0, reads_failed=200)
+        self.assertNotIn(report["overall"], COMPARE["PASS_VERDICTS"])
+
+    def test_clean_read_mix_passes_the_same_gate(self):
+        # The mirror case: the same samples with every read successful pass.
+        _, report = self.read_mix_gate(reads_ok=201, reads_failed=0)
+        slos = {s["id"]: s for s in report["decision"]["slos"]["results"]}
+        read_mix = {k: v["verdict"] for k, v in slos.items() if k.startswith("open-api-read-mix-")}
+        self.assertEqual(len(read_mix), 11)
+        self.assertEqual(set(read_mix.values()), {"pass"}, read_mix)
+        self.assertEqual(report["decision"]["target_base"]["verdict"], "no_significant_difference")
+        self.assertEqual(report["overall"], "no_significant_difference")
 
     def test_a_a_control_reuses_the_candidate_build_only_for_one_sha_and_image(self):
         source = SH.read_text()

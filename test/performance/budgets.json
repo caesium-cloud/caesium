@@ -51,6 +51,22 @@
           "rationale": "As the cold series: A/A CV 0.0002. Floor 5%."
         },
         {
+          "match": "workload.open-api-read-mix.cold.duration_seconds",
+          "max_relative_degradation": 0.05,
+          "fixed_baseline_max_relative_degradation": 0.1,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "Open-loop run whose duration is the fixed 20 s arrival window plus drain. A/A perf-w9g-aa1 (fixed build, 20 samples): CV 0.0001, sigma_log worst 0.0001, derived margin 0.0003. The 5% floor is a drain-time guard (about 1 s of extra drain); the sustained, throughput, latency and read-latency SLOs carry the capacity signal (#588)."
+        },
+        {
+          "match": "workload.open-api-read-mix.warm.duration_seconds",
+          "max_relative_degradation": 0.05,
+          "fixed_baseline_max_relative_degradation": 0.1,
+          "min_samples": 10,
+          "max_cv": 0.1,
+          "rationale": "As the cold series, measured on the 4th driver run against one server (the #588 state): A/A perf-w9g-aa1 CV 0.0002, sigma_log worst 0.0002, derived margin 0.0004. Floor 5%."
+        },
+        {
           "match": "workload.*",
           "max_relative_degradation": 0.25,
           "fixed_baseline_max_relative_degradation": 0.35,
@@ -439,6 +455,114 @@
       "min_samples": 10,
       "unit": "s",
       "rationale": "A/A pooled warm per-sample p99: p90 1.233 s, max 1.246 s; ceiling = 1.5 x max, rounded."
+    },
+    {
+      "id": "open-api-read-mix-cold-sustained",
+      "workload": "open-api-read-mix.cold",
+      "field": "sustained_verdict",
+      "statistic": "all",
+      "equals": "sustained",
+      "min_samples": 10,
+      "rationale": "The catalog marks this workload require-sustained. A/A perf-w9g-aa1 (fixed build): 20 of 20 cold samples sustained, backlog peak 0. Evaluated only when the run includes this workload (CAESIUM_PERF_WORKLOADS)."
+    },
+    {
+      "id": "open-api-read-mix-warm-sustained",
+      "workload": "open-api-read-mix.warm",
+      "field": "sustained_verdict",
+      "statistic": "all",
+      "equals": "sustained",
+      "min_samples": 10,
+      "rationale": "The #588 state: the 4th driver run against one server. Before the dqlite TCP_NODELAY fix 12 of 20 warm samples read backlog_growing (perf-w8g-aa4); after it 20 of 20 sustained (perf-w9g-aa1)."
+    },
+    {
+      "id": "open-api-read-mix-warm-throughput",
+      "workload": "open-api-read-mix.warm",
+      "field": "completed_per_second",
+      "statistic": "p90",
+      "min": 0.9,
+      "min_samples": 10,
+      "unit": "runs/s",
+      "rationale": "Offered rate 1/s. A/A perf-w9g-aa1 pooled minimum 0.9989/s; the floor is 90% of the offered rate for the 90th-percentile-worst sample. The pre-fix warm samples (perf-w8g-aa4) had a 90th-percentile-worst of 0.824/s, which breaches it."
+    },
+    {
+      "id": "open-api-read-mix-warm-latency-p99",
+      "workload": "open-api-read-mix.warm",
+      "field": "latency_p99_seconds",
+      "statistic": "p90",
+      "max": 0.9,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "A/A perf-w9g-aa1 pooled warm per-sample p99: p90 0.530 s, max 0.550 s; ceiling = 1.5 x max, rounded up to 0.1 s. Pre-fix warm p90 was 6.10 s."
+    },
+    {
+      "id": "open-api-read-mix-warm-api-read-p99",
+      "workload": "open-api-read-mix.warm",
+      "field": "api_read_p99_seconds",
+      "statistic": "p90",
+      "max": 0.03,
+      "min_samples": 10,
+      "unit": "s",
+      "rationale": "The read-path signal #588 was about: the per-sample p99 of the concurrent 10 reads/s public read mix. A/A perf-w9g-aa1 pooled warm: p90 0.0170 s, max 0.0177 s; ceiling = 1.5 x max, rounded up to 10 ms. Pre-fix warm p90 was 2.44 s (and cold 0.99 s): every read whose result spanned more than one 4 KiB dqlite response part waited on a delayed ACK."
+    },
+    {
+      "id": "open-api-read-mix-cold-read-errors",
+      "workload": "open-api-read-mix.cold",
+      "field": "api_read_error_ratio",
+      "statistic": "max",
+      "max": 0.01,
+      "min_samples": 10,
+      "unit": "ratio",
+      "rationale": "Read-mix accounting, fail closed (#594 review): the share of offered public reads that did not complete with a 2xx (HTTP errors, transport failures and client drops), judged on EVERY sample. The driver reports api_reads status ok whenever a mix was configured, even when reads fail, so a fast mix of 500s must be rejected here and not by latency. A/A perf-w9g-aa1/aa2: 0 of 201 in all 40 samples per phase; 1% allows at most 2 per sample. Pre-fix cold samples (perf-w8g-aa4) reached 3.3% and warm 25%. A missing or incomplete account is missing evidence and fails."
+    },
+    {
+      "id": "open-api-read-mix-cold-reads-dropped",
+      "workload": "open-api-read-mix.cold",
+      "field": "api_reads_dropped",
+      "statistic": "max",
+      "max": 2,
+      "min_samples": 10,
+      "unit": "reads",
+      "rationale": "Reads the driver dropped at its in-flight cap (8), the saturation signal of #588, judged on every sample. A/A perf-w9g-aa1/aa2: 0 in every sample; pre-fix warm 40-57."
+    },
+    {
+      "id": "open-api-read-mix-cold-reads-ok",
+      "workload": "open-api-read-mix.cold",
+      "field": "api_reads_ok",
+      "statistic": "min",
+      "min": 100,
+      "min_samples": 10,
+      "unit": "reads",
+      "rationale": "The mix actually ran: at least the catalog's min_api_reads_ok (100) successful reads in every sample, so a sample whose mix barely started cannot pass on a zero error ratio. A/A: 201 in every sample."
+    },
+    {
+      "id": "open-api-read-mix-warm-read-errors",
+      "workload": "open-api-read-mix.warm",
+      "field": "api_read_error_ratio",
+      "statistic": "max",
+      "max": 0.01,
+      "min_samples": 10,
+      "unit": "ratio",
+      "rationale": "Read-mix accounting, fail closed (#594 review): the share of offered public reads that did not complete with a 2xx (HTTP errors, transport failures and client drops), judged on EVERY sample. The driver reports api_reads status ok whenever a mix was configured, even when reads fail, so a fast mix of 500s must be rejected here and not by latency. A/A perf-w9g-aa1/aa2: 0 of 201 in all 40 samples per phase; 1% allows at most 2 per sample. Pre-fix cold samples (perf-w8g-aa4) reached 3.3% and warm 25%. A missing or incomplete account is missing evidence and fails."
+    },
+    {
+      "id": "open-api-read-mix-warm-reads-dropped",
+      "workload": "open-api-read-mix.warm",
+      "field": "api_reads_dropped",
+      "statistic": "max",
+      "max": 2,
+      "min_samples": 10,
+      "unit": "reads",
+      "rationale": "Reads the driver dropped at its in-flight cap (8), the saturation signal of #588, judged on every sample. A/A perf-w9g-aa1/aa2: 0 in every sample; pre-fix warm 40-57."
+    },
+    {
+      "id": "open-api-read-mix-warm-reads-ok",
+      "workload": "open-api-read-mix.warm",
+      "field": "api_reads_ok",
+      "statistic": "min",
+      "min": 100,
+      "min_samples": 10,
+      "unit": "reads",
+      "rationale": "The mix actually ran: at least the catalog's min_api_reads_ok (100) successful reads in every sample, so a sample whose mix barely started cannot pass on a zero error ratio. A/A: 201 in every sample."
     }
   ],
   "bundle": {
@@ -520,8 +644,8 @@
     },
     "workload_coverage": {
       "gate_default": "closed-baseline with Go benchmarks, browser and bundle (CAESIUM_PERF_REPEATS=10, CAESIUM_PERF_BROWSER=1): about 26 minutes per attempt on this runner",
-      "calibrated_opt_in": "open-tiny-sustained (add it to CAESIUM_PERF_WORKLOADS; about 45 more minutes per attempt): duration rules plus sustained, throughput and latency SLOs",
-      "not_budgeted": "open-api-read-mix: a same-code A/A failed its require-sustained check in 12 of 20 warm samples (#588), so no budget can pass it; every other catalog workload is uncalibrated and falls to the workload.* catch-all"
+      "calibrated_opt_in": "open-tiny-sustained (about 45 more minutes per attempt) and open-api-read-mix (about 25 more): add them to CAESIUM_PERF_WORKLOADS. Each has duration rules plus sustained, throughput and latency SLOs; open-api-read-mix also has read-latency and read error/drop/success SLOs.",
+      "not_budgeted": "every other catalog workload is uncalibrated and falls to the workload.* catch-all. open-api-read-mix was excluded at version 1 (#588); version 2 budgets it after the dqlite TCP_NODELAY product fix."
     },
     "limitations": [
       "Q2 is unresolved: there is no isolated performance runner. These values are calibrated on the runner above only. The fixed baseline and every budget refuse (inconclusive) or mean nothing on another host_id/platform; recalibrating on the promoted runner (new A/A runs, a new baseline, a reviewed budgets change) is a G6 promotion precondition.",
@@ -603,6 +727,51 @@
         "minutes": 70,
         "image_built_by_run": true,
         "result": "exit 2 (fail closed): open-api-read-mix failed its require-sustained check (backlog_growth) in 12 of 20 warm samples, 6 per side, same image; all 60 open-tiny-sustained runs and every cold/warm-up open-api-read-mix run passed. Filed as #588. open-tiny-sustained is calibrated from this run; open-api-read-mix is not budgeted."
+      },
+      {
+        "id": "perf-w9g-aa1",
+        "kind": "A/A (load only)",
+        "sha": "7a8f04f460b925069adef501c6a6fe3fd1f5a6ae",
+        "harness": "E4 harness plus the api_read_* sample fields (distributed-testing H2); product code = master 755cd054 plus the dqlite TCP_NODELAY fix",
+        "workloads": "open-tiny-sustained,open-api-read-mix",
+        "repeats": 10,
+        "families": [
+          "workload"
+        ],
+        "lane": "2026-09-28T17:27:30Z to 18:35:18Z",
+        "minutes": 68,
+        "image_built_by_run": true,
+        "result": "exit 0, no_significant_difference (attempt 1 of 3). All 60 open-api-read-mix samples (cold, warm-up, warm) and all 60 open-tiny-sustained samples sustained; warm read-mix 0.9989-0.9992 completions/s, backlog peak 0, read p99 13-18 ms, no dropped reads. open-api-read-mix is calibrated from this run."
+      },
+      {
+        "id": "perf-w9g-aa2",
+        "kind": "A/A (load only), out-of-sample control",
+        "sha": "a401959980f043957a241fde99d31e2dfffcb490",
+        "harness": "as perf-w9g-aa1; the committed version 2 budgets judged the run in-run",
+        "workloads": "open-tiny-sustained,open-api-read-mix",
+        "repeats": 10,
+        "families": [
+          "workload"
+        ],
+        "lane": "2026-09-28T20:12:03Z to 21:19:51Z",
+        "minutes": 68,
+        "image_built_by_run": true,
+        "result": "exit 0, no_significant_difference on attempt 1 of 3 under version 2 as first proposed (before the read-accounting SLOs): 4 of 4 series non-inferior (worst upper bound 1.0002), 9 of 9 evaluated SLOs pass. Re-judged with its read accounting re-projected, it passes the final version 2 too. All 120 samples sustained; warm read-mix 0.9988-0.9992 completions/s, backlog peak 0, read p99 13.7-19.0 ms, 201 of 201 reads ok in every sample."
+      },
+      {
+        "id": "perf-w9g-aa3",
+        "kind": "A/A (load only), out-of-sample control after the #594 review",
+        "sha": "71392d8db78e0886b487371acb2d2d6d0873857a",
+        "harness": "corrected harness: performance.sh carries the read accounting (api_reads_offered/ok/failed/dropped, api_read_error_ratio); the final version 2 budgets judged the run in-run",
+        "workloads": "open-tiny-sustained,open-api-read-mix",
+        "repeats": 10,
+        "families": [
+          "workload"
+        ],
+        "lane": "2026-09-30T03:06:48Z to 04:14:34Z",
+        "minutes": 68,
+        "image_built_by_run": true,
+        "result": "exit 0, no_significant_difference on attempt 1 of 3 under the final version 2: 4 of 4 series non-inferior (worst upper bound 1.0005), 15 of 15 evaluated SLOs pass, including the 6 read error/drop/success SLOs. All 60 open-api-read-mix and all 60 open-tiny-sustained samples sustained; warm read-mix 0.9989-0.9995 completions/s, backlog peak 0, read p99 12.9-16.1 ms, 201 of 201 reads ok (error ratio 0, 0 dropped) in every read-mix sample."
       }
     ],
     "closed_baseline_family_results": {
@@ -691,6 +860,64 @@
         "inconclusive": null,
         "pass": null,
         "worst_upper": null
+      },
+      "post_fix": {
+        "note": "Version 2 (distributed-testing H2, #588) on the recorded runner, judged by the final version 2 budgets. perf-w9g-aa1 calibrated open-api-read-mix; perf-w9g-aa2 was the first out-of-sample control; both predate the read-accounting SLOs, so their assembled documents are re-projected from the retained driver reports (the fields scripts/performance.sh now carries). perf-w9g-aa3 is the out-of-sample control run by the corrected harness and judged in-run by these budgets.",
+        "runs": [
+          {
+            "comparison": "aa1",
+            "budgeted_overall": "no_significant_difference",
+            "uncorrected_e3_overall": "no_significant_difference",
+            "series": 4,
+            "uncorrected_significant": 0,
+            "min_uncorrected_p": 0.1405,
+            "non_pass_series": [],
+            "slo_breaches": [],
+            "slos_passed": 15
+          },
+          {
+            "comparison": "aa2",
+            "budgeted_overall": "no_significant_difference",
+            "uncorrected_e3_overall": "no_significant_difference",
+            "series": 4,
+            "uncorrected_significant": 0,
+            "min_uncorrected_p": 0.1859,
+            "non_pass_series": [],
+            "slo_breaches": [],
+            "slos_passed": 15
+          },
+          {
+            "comparison": "aa3",
+            "budgeted_overall": "no_significant_difference",
+            "uncorrected_e3_overall": "no_significant_difference",
+            "series": 4,
+            "uncorrected_significant": 0,
+            "min_uncorrected_p": 0.2123,
+            "non_pass_series": [],
+            "slo_breaches": [],
+            "slos_passed": 15
+          }
+        ],
+        "control_rates": {
+          "runs": 3,
+          "false_fail": 0.0,
+          "inconclusive": 0.0,
+          "pass": 1.0,
+          "uncorrected_any_significant": 0.0,
+          "uncorrected_overall_not_nsd": 0.0
+        },
+        "pooled_uncorrected_p": {
+          "count": 12,
+          "below_alpha": 0,
+          "ks_uniform_p": 0.6196030641892775
+        },
+        "cross_run_fixed_baseline": {
+          "pairs": 6,
+          "false_fail": 0.0,
+          "inconclusive": 0.0,
+          "pass": 1.0,
+          "worst_upper": 1.000614134641914
+        }
       }
     },
     "a_b_demonstration": {
@@ -782,6 +1009,14 @@
       "evidence": "budgets.calibration: A/A control runs on the recorded runner, pooled per-series variance, cross-run drift, and one A/B run of master through the rule.",
       "reviewed_in": "https://github.com/caesium-cloud/caesium/pull/589",
       "values_sha256": "2a2c6cb38de51ab0da393087e384080592ace39d5ed66beae3aaed763ade7f97"
+    },
+    {
+      "version": 2,
+      "date": "2026-09-28",
+      "rationale": "Budget open-api-read-mix (#588, distributed-testing H2). Its warm-server sustained failure was a product defect, not a workload expectation error: the embedded dqlite node left Nagle's algorithm on for the connections it accepts, so every query whose result spanned more than one 4 KiB response part waited for the client's delayed ACK (~40 ms per stall). Run reads cost ~86 ms instead of ~1.4 ms, run lists crossed the threshold once a job held about five runs, and under the 10 reads/s mix the read pool and the single write connection queued behind those stalls until completions fell behind arrivals. pkg/db now sets TCP_NODELAY on the node's listener and accepted sockets. With the fix the catalog rate and read mix are unchanged and sustained on a warm server, so this entry adds duration rules and cold/warm sustained, warm throughput, warm latency and warm read-latency SLOs for it, derived with the version 1 method. It also gives the read mix an explicit error and drop policy that fails closed: per-sample read error ratio (non-2xx, transport failures and drops over offered) at most 1%, dropped reads at most 2 and successful reads at least 100, cold and warm (added in review of #594). No existing value changes.",
+      "evidence": "budgets.calibration: A/A perf-w9g-aa1 (fixed build, load only, open-tiny-sustained + open-api-read-mix, 10 repeats) calibrated the values; out-of-sample A/A perf-w9g-aa2 and perf-w9g-aa3 (aa3 run by the corrected harness and judged in-run by these budgets) confirm them (calibration.open_workload_results.post_fix). The reproduction, bisection and regression-test evidence is in the H2 note of docs/exec-plans/active/distributed-testing.md.",
+      "reviewed_in": "https://github.com/caesium-cloud/caesium/pull/594",
+      "values_sha256": "ad4ef87468e008e7982a77a9a939ab1fedbb91a312ca3cdfa8d04e6e13889cc7"
     }
   ]
 }
