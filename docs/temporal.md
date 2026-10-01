@@ -6,6 +6,11 @@
 > Caesium does not depend on Temporal. Nothing here is a plugin; it is how the
 > two fit together over Caesium's REST API.
 
+Native workflow monitoring and declared operator actions are proposed in the
+[execution-connectors plan](exec-plans/active/execution-connectors.md), with
+Temporal as the first implementation of a generic execution connector. That
+plan is not shipped; the patterns below describe the current REST integration.
+
 [Temporal](https://temporal.io) and Caesium sit at different layers, and they
 work best together, not as substitutes:
 
