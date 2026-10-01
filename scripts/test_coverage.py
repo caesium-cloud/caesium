@@ -1151,7 +1151,27 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         if name:
             if name in names: raise SystemExit("container name already exists: "+name)
             names.append(name)
-        if "wget" in args: print("healthy")
+        if "stat" in args: print("998")
+        if "wget" in args:
+            url=args[-1]
+            unsampled=os.environ.get("FAKE_SCENARIO")=="run-unsampled"
+            task={"id":"t1","status":"succeeded","exit_code":0,"stats_source":"none" if unsampled else "sampled",
+                  "peak_memory_bytes":None if unsampled else 1048576}
+            if url.endswith("/v1/jobs"):
+                print(json.dumps([{"id":"other","alias":"other"},{"id":"11111111-1111-4111-8111-111111111111","alias":"coverage-write-read"}]))
+            elif "/runs/" in url:
+                polls=root/"run-polls"
+                count=int(polls.read_text()) if polls.exists() else 0
+                polls.write_text(str(count+1))
+                print(json.dumps({"id":url.rsplit("/",1)[-1],"status":"running" if count==0 else "succeeded","tasks":[task]}))
+            else:
+                print("healthy")
+        if "start" in args and "--job-id" in args:
+            print("22222222-2222-4222-8222-222222222222")
+        if "partitions" in args:
+            unsampled=os.environ.get("FAKE_SCENARIO")=="run-unsampled"
+            print(json.dumps({"partitions":[{"task_run_id":"t1","status":"succeeded","exit_code":0,
+                "stats_source":"none" if unsampled else "sampled","peak_memory_bytes":None if unsampled else 1048576}],"total":1}))
         for inside in ("/coverage","/var/lib/caesium/coverage"):
             if inside in mounts:
                 (mounts[inside]/"covmeta.fake").write_text("meta")
@@ -1192,6 +1212,33 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         removals = [args for args in calls if "remove" in args and "nodes" in args]
         self.assertEqual(len(removals), 1)
         self.assertIn("43", removals[0], "the refused removal must target an ID absent from the member list")
+        # #449: the journey server runs the default-off resource sampler against
+        # the engine socket as UID 10001 in the socket's group, never as root.
+        server = next(args for args in calls if "--name" in args and args[args.index("--name") + 1] == "cov-test-server")
+        self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", server)
+        self.assertIn("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms", server)
+        self.assertIn("/var/run/docker.sock:/var/run/docker.sock", server)
+        self.assertEqual(server[server.index("--group-add") + 1], "998")
+        self.assertEqual(server[server.index("--user") + 1], "10001:10001")
+        starts = [args for args in calls if "start" in args and "--job-id" in args]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0][starts[0].index("--job-id") + 1], "11111111-1111-4111-8111-111111111111")
+        polls = [args for args in calls if any("/runs/22222222-2222-4222-8222-222222222222" in a for a in args)]
+        self.assertEqual(len(polls), 2, "the journey must keep reading the run until it is terminal")
+        partitions = [args for args in calls if "partitions" in args]
+        self.assertEqual(len(partitions), 1)
+        self.assertIn("22222222-2222-4222-8222-222222222222", partitions[0])
+        self.assertIn("--json", partitions[0])
+
+    def test_task_run_without_a_sampled_observation_fails_the_journey(self):
+        result = self.collect("run-unsampled")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("stats_source 'none', not sampled", output(result))
+        self.assertIn("did not succeed with a sampled resource observation", output(result))
+        cli = json.loads((self.profiles / "cli.provenance.json").read_text())
+        self.assertFalse(cli["complete"])
+        report = json.loads((self.art / "report.json").read_text())
+        self.assertNotEqual(report["verdict"], "pass")
 
     def test_system_nodes_removal_that_is_not_a_refusal_fails_the_journey(self):
         result = self.collect("nodes-removed")
@@ -1365,6 +1412,9 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("coverage-write-read", text)
         self.assertIn("system nodes list", text)
         self.assertIn("system nodes remove", text)
+        self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", text)
+        self.assertIn("run start --job-id", text)
+        self.assertIn("run partitions", text)
         self.assertIn("not_a_member", text)
         self.assertIn("check-coverage.py", text)
         self.assertIn("build/Dockerfile.coverage", text)

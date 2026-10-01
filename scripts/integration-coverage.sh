@@ -401,9 +401,9 @@ trigger:
   configuration:
     cron: "0 2 * * *"
 steps:
-  - name: noop
+  - name: sample
     image: alpine:3.23
-    command: ["true"]
+    command: ["sh", "-c", "sleep 2"]
 YAML
 }
 
@@ -623,27 +623,47 @@ chmod 0777 "$RAW/cli" "$RAW/server"
 
 BUILD_CONTEXT="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["build_context"]))' "$AUDIT/source-inventory.json")"
 
-log "starting coverage server $SERVER_NAME on network $NETWORK (no host port)"
+# The journey runs one real task through the Docker engine, so the server
+# (still UID 10001) joins the engine socket's group instead of running as root.
+SOCK="${CAESIUM_SOCK:-/var/run/docker.sock}"
+SOCK_GID="$("$CONTAINER_CLI" run --rm --platform "$PLATFORM" --user 0:0 --entrypoint stat \
+  -v "$SOCK:/var/run/docker.sock" "$IMAGE_ID" -c '%g' /var/run/docker.sock 2>/dev/null || true)"
+[[ "$SOCK_GID" =~ ^[0-9]+$ ]] || die "could not determine the group of $SOCK inside a container; refusing to guess"
+
+# CAESIUM_RESOURCE_STATS_ENABLED defaults to false; the journey's task run is
+# the only thing that reaches the resource sampler and its projections, so the
+# feature is enabled here exactly as `just integration-up` enables it.
+log "starting coverage server $SERVER_NAME on network $NETWORK (no host port; engine socket group $SOCK_GID)"
 "$CONTAINER_CLI" run -d \
   --name "$SERVER_NAME" \
   --platform "$PLATFORM" \
   --network "$NETWORK" \
   --network-alias caesium \
   --user 10001:10001 \
+  --group-add "$SOCK_GID" \
   -e GOCOVERDIR=/var/lib/caesium/coverage \
   -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
   -e CAESIUM_LOG_LEVEL=info \
   -e CAESIUM_AUTH_MODE=none \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+  -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+  -v "$SOCK:/var/run/docker.sock" \
   -v "$RAW/server:/var/lib/caesium/coverage" \
   "$IMAGE_ID" start >/dev/null
 
+# GET a server path from inside the journey network (the server has no host port).
+server_get() {
+  "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 0:0 \
+    --entrypoint wget \
+    "$IMAGE_ID" -q -O - "http://caesium:8080$1"
+}
+
 healthy=0
 for _ in $(seq 1 60); do
-  if "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-      --network "$NETWORK" \
-      --user 0:0 \
-      --entrypoint wget \
-      "$IMAGE_ID" -q -O - http://caesium:8080/health 2>/dev/null | grep -q healthy; then
+  if server_get /health 2>/dev/null | grep -q healthy; then
     healthy=1
     break
   fi
@@ -682,6 +702,85 @@ if [[ "$cli_rc" -eq 0 ]]; then
     -v "$RAW/cli:/coverage" \
     "$IMAGE_ID" job export coverage-write-read --server http://caesium:8080 \
     >/dev/null || cli_rc=$?
+fi
+
+# Resource-right-sizing W1-α (#449): start one run of the applied fixture with
+# `caesium run start`, read the run back over HTTP until it is terminal, then
+# read its instance through `caesium run partitions --json`. The step must have
+# succeeded with exit code 0 and a sampled, nonzero peak-memory observation on
+# BOTH reads; anything else (including a run that never finishes) fails the
+# journey rather than letting an unreached sampler pass as coverage.
+if [[ "$cli_rc" -eq 0 ]]; then
+  log "starting a task run with resource stats enabled, then reading its observation back"
+  server_get /v1/jobs >"$ARTIFACTS/jobs.json" || cli_rc=1
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  job_id="$(python3 -c 'import json,sys
+print(next(j["id"] for j in json.load(open(sys.argv[1])) if j.get("alias") == "coverage-write-read"))' \
+    "$ARTIFACTS/jobs.json")" || cli_rc=1
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  run_id="$("$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 0:0 \
+    --entrypoint /bin/caesium \
+    -e GOCOVERDIR=/coverage \
+    -v "$RAW/cli:/coverage" \
+    "$IMAGE_ID" run start --job-id "$job_id" --server http://caesium:8080)" || cli_rc=$?
+  if [[ "$cli_rc" -eq 0 && ! "$run_id" =~ ^[0-9a-f-]{36}$ ]]; then
+    log "caesium run start printed '$run_id', not a run id"
+    cli_rc=1
+  fi
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  run_terminal=0
+  for _ in $(seq 1 120); do
+    if server_get "/v1/jobs/$job_id/runs/$run_id" >"$ARTIFACTS/task-run.json" 2>/dev/null \
+        && python3 -c 'import json,sys
+sys.exit(0 if json.load(open(sys.argv[1])).get("status") not in ("pending", "running", "queued") else 1)' \
+          "$ARTIFACTS/task-run.json"; then
+      run_terminal=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$run_terminal" -ne 1 ]]; then
+    log "run $run_id never became terminal"
+    cli_rc=1
+  fi
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 0:0 \
+    --entrypoint /bin/caesium \
+    -e GOCOVERDIR=/coverage \
+    -v "$RAW/cli:/coverage" \
+    "$IMAGE_ID" run partitions "$run_id" --job-id "$job_id" --task sample --json --server http://caesium:8080 \
+    >"$ARTIFACTS/task-run-partitions.json" || cli_rc=$?
+fi
+if [[ "$cli_rc" -eq 0 ]] && ! python3 -c 'import json,sys
+run = json.load(open(sys.argv[1]))
+rows = json.load(open(sys.argv[2])).get("partitions") or []
+problems = []
+if run.get("status") != "succeeded":
+    problems.append("run status %r, not succeeded" % run.get("status"))
+for label, items in (("run", run.get("tasks") or []), ("partitions", rows)):
+    if len(items) != 1:
+        problems.append("%s read has %d task instances, not 1" % (label, len(items)))
+        continue
+    item = items[0]
+    if item.get("exit_code") != 0:
+        problems.append("%s read exit_code %r, not 0" % (label, item.get("exit_code")))
+    if item.get("stats_source") != "sampled":
+        problems.append("%s read stats_source %r, not sampled" % (label, item.get("stats_source")))
+    if not isinstance(item.get("peak_memory_bytes"), int) or item["peak_memory_bytes"] <= 0:
+        problems.append("%s read peak_memory_bytes %r is not a measurement" % (label, item.get("peak_memory_bytes")))
+for problem in problems:
+    print("task run observation: " + problem, file=sys.stderr)
+sys.exit(1 if problems else 0)' "$ARTIFACTS/task-run.json" "$ARTIFACTS/task-run-partitions.json"; then
+  log "run $run_id did not succeed with a sampled resource observation on both reads"
+  cli_rc=1
 fi
 
 # H1 operator surface on the same single-node server, read-only by design:
