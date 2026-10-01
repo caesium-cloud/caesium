@@ -1541,6 +1541,17 @@ restore-from-snapshot, or rollback as a product guarantee. The published
 amd64/arm64 CLI checksums are carried in `versions.json` but
 `scripts/ci-cli-smoke.sh` is not re-run by this lane.
 
+**Post-W9 repair (#614).** #449 made the run API return `task_runs.exit_code`,
+which v0.1.0 stored but never returned, so `assert3-recorded-identities-readable`
+and `supported-candidate-readdress` failed on `nil → 0`. `assertRunUnchanged`
+now treats `exit_code` as a newly returned field: a code the previous release
+already returned must not change or disappear, a newly returned code must match
+the recorded outcome (0 for succeeded, the run's `EXIT` parameter for failed,
+none for skipped), and every other field must still match exactly; twelve
+fixtures in the runner's `selfcheck` phase pin the rule, and the helper is
+shared with the F2 cluster lane. The seven new `task_runs` columns stay
+recorded as unpinned additions, like `run_start_idempotency`.
+
 ### Persistent-cluster lifecycle qualification (distributed-testing W6/F2)
 
 F2 extends the F4 controller with `CAESIUM_LIFECYCLE_MODE=cluster`. Run it only
@@ -1902,6 +1913,27 @@ no longer have zero coverage. Those files would otherwise fail the
 zero-uncovered diff floor for any PR that touches them. The covered-statement
 floors were kept (`api/middleware` 34) or raised (`pkg/dqlite` 341 → 390). Only
 the two percentage floors were lowered, to 7.6 and 37.5.
+
+**Post-W9 repair (#614).** After #449 (resource-right-sizing W1-α) merged on
+top of the promoted lanes, the max-zero diff ratchet refused 18 changed paths
+that the journey could not reach because the feature is off by default. The
+coverage server now starts with `CAESIUM_RESOURCE_STATS_ENABLED=true` (100 ms
+sampling; it reaches the Docker socket through `--group-add` while still
+running as UID 10001), the fixture step sleeps 2 s so the sampler gets
+readings, and the journey starts one run with `caesium run start`, polls it
+over HTTP to completion and reads it back through `caesium run partitions
+--json`; both reads must show a succeeded run, exit code 0, `stats_source:
+sampled` and a nonzero `peak_memory_bytes`. That covers 7 of the 18 paths (the
+rest are Podman/Kubernetes engines, the remediation-gated incident classifier
+and distributed-mode code, which a single-node Docker journey cannot run) and
+raised integration coverage from 8.0 % to 12.7 %. The third `baseline_refresh`
+(previous `095ce649`, measured `f1092a59`) raised ten floors and added sixteen
+newly covered packages (67 → 77); no covered-statement floor or percentage was
+lowered, and `uncovered_changed_paths_max` stays 0. The same PR fixed a real
+workflow bug #449 introduced: its `Push stress fixture multi-arch manifest`
+step lacked the `publish-dry-run` guard every other writer has, so a dry run
+would have pushed `caesiumcloud/resource-stress`; the wiring test now pins the
+five writer steps by name.
 
 ### Base/candidate performance comparison (distributed-testing W5/E3)
 
