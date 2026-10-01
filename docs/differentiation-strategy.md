@@ -92,6 +92,18 @@ activities because it is the platform they have. Two things follow:
   [`temporal.md`](temporal.md). It is documentation and REST contract only;
   Caesium takes no dependency on Temporal.
 
+**Proposed scope amendment (2026-10-01; implementation has not shipped).**
+The execution-connectors plan adds one optional Temporal monitoring/action
+adapter that joins external workflow state to Caesium run and data evidence.
+Build only the small shared execution identity, observation, capability,
+relationship and operation contracts needed by that adapter now. A test-only
+adapter checks that these contracts do not embed Temporal fields; a second real
+provider must justify further generalization. This authorizes neither a provider
+catalog nor a dynamic plugin system. B1 must update this section and the Temporal
+guide in the same PR that adds the compiled SDK dependency. Even then, the
+default-disabled runtime requires no Temporal service, worker or credentials.
+The active plan is `exec-plans/active/execution-connectors.md`.
+
 ## Positioning statement
 
 > *Kubernetes + Kueue + Argo schedule your containers but understand nothing about your data, and every serious data-aware orchestrator makes you stand up Postgres, Redis, or Kafka — or pay for the parts that matter. Caesium is the data-pipeline orchestrator that ships as a **single zero-dependency self-hosted binary**: it runs where Dagster, Airflow, and Flyte architecturally cannot — air-gapped, edge, regulated on-prem, sovereign — with HA, RBAC, SSO, and lineage free. And once you're inside, it remembers what data flowed and why each task ran, so it can explain, reproduce, and provably skip work — the data-plane memory that separates it from the other zero-dependency schedulers.*
@@ -109,7 +121,7 @@ Use the words a frustrated engineer actually types into a search bar: *"lightwei
 
 - **Generic priority / quotas / fair-share / preemption / GPU / gang / topology scheduling** — Kueue owns this on every axis a single binary structurally loses. Delegate, don't compete.
 - **Out-UI-ing Kestra** — its in-browser editor is its product and years ahead. Win on a different axis.
-- **Connector / plugin breadth** — Airflow has 1,500+ providers, Kestra 1,200+ plugins. "The image *is* the integration." Any connector-catalog framing loses instantly.
+- **Connector / plugin breadth** — Airflow has 1,500+ providers, Kestra 1,200+ plugins. "The image *is* the integration." Any connector-catalog framing loses instantly. The narrow proposed execution-observation amendment above permits one Temporal adapter and its necessary shared contracts; it does not reopen this catalog.
 - **Generic caching / cost dashboards / dataset-event triggers as headlines** — me-too unless tied to *data* (cost-per-dataset, cost wasted on cold re-runs the cache would have skipped).
 - **Container-native + YAML as *the* pitch** — table stakes (Argo, Kestra). Always lead with what runs on top.
 
