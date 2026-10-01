@@ -30,7 +30,16 @@ closes #582), recorded the isolated rollback outcome on an isolated volume
 copy (#590) and calibrated performance budgets with a fixed baseline (#589);
 the merged-tree cluster qualification then passed (`lifecycle-w8acc-00d65c9a`),
 so F2 is accepted. Budgets are calibrated for the recorded local runner only
-(Q2 open); no performance lane exists in CI yet.
+(Q2 open); W8 had no performance lane in CI. W9 promoted the standalone lifecycle
+qualification, native fuzz, the mutation validator and the coverage ratchets into
+`ci-ok` and defined the nightly set behind `workflow_dispatch` (#593), added the
+stale-member removal command (#595), fixed the dqlite TCP_NODELAY read stall
+(#594, closes #588), pinned the mixed-version window and attributed the leader
+memory residual (#596), shipped the single-host soak harness whose first runs
+surfaced six product findings (#597; #598–#603), and refreshed the coverage
+floors after the merges (#607), and scheduled the nightly
+qualification set and gated publication on same-SHA release evidence (#610). An advisory `performance-gate`
+lane now exists on dispatch; it is not calibrated for the hosted fleet.
 
 W3 added one job to the workflow (`early-evidence`) and two dependencies to
 `ci-ok` (`early-evidence` and `helm-lint`). W4 added **no jobs and no `ci-ok`
@@ -42,9 +51,18 @@ or aggregate dependencies**: the C3 validator, F2 cluster runner, D3
 `cluster-recovery` project, E3 comparator and E4 budgets remain standalone. W1–W7
 changed no repository settings. W8 did, on 2026-09-28 with the CODEOWNER's
 explicit go-ahead (Q6): `ci-ok` is now a required status check on master and
-ruleset 24123341 ("master merge queue") is active, so every merge goes through
-the queue and `merge_group` fires live. See §1 and "Early evidence lane and the
-promoted gate" / "Candidate identity and merge-group wiring" in §4.
+ruleset 24123341 ("master merge queue") is active, so merges are meant to go
+through the queue. See §1 and "Early evidence lane and the promoted gate" /
+"Candidate identity and merge-group wiring" in §4. W9 (#593) added nine jobs:
+four promoted into `ci-ok` (`lifecycle-standalone`, `generated-fuzz`,
+`generated-oracles`, `coverage-ratchets`) and the dispatch-only nightly set
+(`lifecycle-cluster`, `console-recovery`, `core-robustness-nightly`,
+`performance-gate`); W9 (#610) then moved the nightly lanes into the reusable
+`qualification-lanes.yml`, added `fuzz-campaign` and `soak`, a scheduled
+`testing-qualification.yml`, and a `release-qualification` job that `publish`
+needs. **No merge has yet gone through the queue:**
+the W8 N-1 sync and every W9 PR were squash-merged with the admin bypass, so
+`merge_group` has still never fired (§1).
 
 ## 1. Required-to-merge checks
 
@@ -64,6 +82,10 @@ Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 - `ui-test`, `ui-e2e`, `ui-e2e-auth`
 - `integration` (all three Docker shards and the agent-auth lane)
 - `helm-lint` and `early-evidence` (distributed-testing G5; see §4)
+- `lifecycle-standalone`, `generated-fuzz`, `generated-oracles` and
+  `coverage-ratchets` (distributed-testing G6, W9; each uploads lane evidence
+  that `ci-ok` re-validates the same way — see "Promoted system suites and the
+  nightly set" in §4)
 
 `early-evidence` is not satisfied by a green job result. `ci-ok` downloads the
 evidence report that lane uploaded and `scripts/ci-ok.py` re-validates it
@@ -79,9 +101,14 @@ branch ruleset 24123341 "master merge queue" is active: target
 `~DEFAULT_BRANCH`, a `merge_queue` rule (ALLGREEN grouping, squash, up to five
 entries built and merged, 60-minute check timeout, 5-minute minimum wait) plus
 `required_status_checks: ci-ok`; repository admins may bypass via pull request
-only. Merges into master now go through the queue, `merge_group` runs live, and
-the first queued run is the W8 N-1 sync PR. The paragraph below is the
-pre-W8 state, kept for history.
+only. Merges into master are meant to go through the queue. **As of 2026-10-01 none
+has:** the W8 N-1 sync and all six W9 merges used the admin bypass
+(`gh pr merge --admin`), so `merge_group` has never fired and the queue's
+combined build is still unexercised. The cost of that bypass showed in W9:
+#595 merged green on top of #593 without a combined run and turned
+`coverage-ratchets` red on master until #607 refreshed the floors. The next
+merge should go through the queue. The paragraph below is the pre-W8 state,
+kept for history.
 
 **`ci-ok` was not enforced at merge before W8.** Read at execution time on
 2026-09-14, master's protection lists eight required contexts — `lint`,
@@ -243,6 +270,16 @@ named in a recent master-red incident, but they haven't accumulated 10
 consecutive green runs' worth of evidence as a *required* gate and stay out
 under the same criterion until they do.
 
+**W9 audit (G6, #593).** Over the last 10 non-cancelled master pushes,
+`build-and-integration-test-distributed`, `-owner-memory`,
+`podman-integration-test`, `helm-pod-replacement-test` and the arm64 lanes were
+green 10/10 and ended 9.2–14.4 min after `changes`, inside the ≤ 15-minute
+budget; `infra` was 9/10; `helm-integration-test` was green 10/10 but ended
+16.9–19.3 min after `changes`, over the budget. None was promoted in W9. The
+first five meet the criterion above and are promotion candidates for the
+CODEOWNER. B3 `TestCore` was measured at 16:30 on the PR path and runs nightly
+instead (`core-robustness-nightly`).
+
 ## 3. Required-to-merge vs. required-to-publish
 
 These are two different, deliberately different-sized sets. A green required
@@ -259,6 +296,7 @@ set is **not** proof that a commit is safe to tag and publish.
 
 ```
 ci-ok
+release-qualification
 lint
 unit-test
 unit-test-arm64
@@ -277,6 +315,11 @@ helm-integration-test
 helm-pod-replacement-test
 podman-integration-test
 ```
+
+`release-qualification` (distributed-testing W9/G4, #610) is the fail-closed
+same-SHA release gate `publish` now needs; see "Nightly qualification schedule
+and the release gate" in §4.
+
 
 Concretely: a PR can merge into `master` on the strength of `ci-ok`
 alone, while `integration-extra` (distributed / owner-memory / infra),
@@ -1663,6 +1706,26 @@ Merged master `d690d65e` differs from the qualified tree `1c4915ab` only by #589
 supported rollback guarantee; the same `CAESIUM_LIFECYCLE_MODE=cluster`
 invocation above reproduces it.
 
+**W9 regression and repair.** After #594 landed, the merged master failed this
+qualification locally (`lifecycle-w9m-72e3f576` on `f85dbfcd`): a 500-update
+snapshot batch now takes about 5.6 s instead of 25.6 s, so the memory sampler's
+15 s cadence took no in-write sample, the publisher reported an evidence gap,
+`snapshot-catch-up` was blocked and the destructive cases behind it were
+blocked too. #609 (`a888d16a`) makes the watcher sample on a short cadence until
+each batch has in-write coverage (closes #604) and re-qualified the merged
+tree (`lifecycle-fixsamp-c24e`, 18m44s, nine cases pass and rollback recorded, 106 memory samples with two in-write samples per member per batch). A second hosted failure mode, twice in seven attempts,
+is a readiness gap: `caesium-2` went NotReady while `caesium-1` and its PVC were
+being replaced, and the ordinal-1 block waited only for `caesium-1` before the
+runner's three-Ready precondition blocked `joining-ordinal-1-replacement`. A
+bounded, recorded all-members-Ready wait before each ordinal phase (and after
+the snapshot soak) is prepared as a follow-up and awaiting the CODEOWNER's approval before it is applied.
+On hosted runners F2 was 2 passes in 7 attempts at the W9 close: the #604
+cascade twice, that readiness gap twice,
+and #608 once (a released in-flight run never reaching a terminal status within
+five minutes after the rolling upgrade; hosted-only so far). After #609 the first two hosted F2 runs (G4's
+final nightly and publish dry run) passed. G4 keeps F2 in the publish-required
+set, so a `v*` publish is blocked whenever hosted F2 is red.
+
 ### Fenced core failures (distributed-testing W5/B3)
 
 B3 adds `TestCore` on the same kind/Helm harness as B1 and B2. It is **not**
@@ -2027,6 +2090,247 @@ delivery and ambiguous response timeout histories must still pass on the
 candidate. The merged C3 head passed the candidate probes and all eight
 mutation rejections. Its ordinary Go/Python probes run in existing unit/config
 lanes; the full mutation script is not yet a CI job (G6 owns promotion).
+
+### Promoted system suites and the nightly set (distributed-testing W9/G6)
+
+W9-α (#593) extended the G3/G5 lane pattern to the remaining complete
+suites. Every new lane depends on `lane-candidate-check` (the G7 candidate
+identity), runs one `just` recipe against the images this run built, reduces
+its own artifacts to scenario evidence with `scripts/collect-lane-evidence.py`,
+validates that evidence under its own manifest gate and uploads it as
+`<lane>-evidence`; `ci-ok` downloads each report and `scripts/ci-ok.py`
+re-validates it against this run's `github.sha` (`EVIDENCE_LANES`,
+`--lane-evidence job=path`), failing closed on an absent, foreign, hollow or
+failing report and on a failed, cancelled, unexpectedly skipped or missing job.
+Unpromoted lanes are listed on every `ci-ok` run.
+
+| Lane | Recipe | Status | Hosted duration |
+| --- | --- | --- | --- |
+| `lifecycle-standalone` | `just lifecycle-standalone` (F4) | merge-blocking | 3:31–4:46 |
+| `generated-fuzz` | `just generated-fuzz` (C2, 10 s per target, warm Go cache) | merge-blocking | 3:16–4:03 warm, 12:09 cold |
+| `generated-oracles` | `just generated-oracles` (C3 mutation validator) | merge-blocking | 1:15–1:40 |
+| `coverage-ratchets` | `just coverage-ratchets` (G2) | merge-blocking | 4:58–5:42 |
+| `core-robustness-nightly` | `just core-robustness nightly-core` (B3, instrumented) | nightly | 14:12 |
+| `lifecycle-cluster` | `just lifecycle-cluster` (F2) | nightly | 27:26 |
+| `console-recovery` | `just console-recovery` (D3) | nightly | 16:47 |
+| `performance-gate` | `just performance-gate mode=advisory` (E4) | nightly, advisory | 52–72 min |
+
+The promoted set was chosen by measurement, per the W8 decision record: with
+all five candidates as parallel jobs the required-to-merge critical path
+(`changes` start to `ci-ok` end, queue time excluded) was 16:40 on run
+36450262760 because `TestCore` alone ran 10:24 and ended at 16:30; with
+`TestCore` demoted the final set measured 13:54 / 12:15 / 13:42 over the three
+attempts of run 36468078619. The nightly lanes run only when a
+`workflow_dispatch` names them (`nightly=cluster-lifecycle,console-recovery,
+performance,core-robustness` or `all`; such a dispatch deselects the PR matrix)
+and were proven once together in run 36468082335. Manifest rows registered:
+`f4-standalone-lifecycle`, `c2-native-fuzz`, `c3-oracle-mutations`,
+`g2-coverage-ratchets`, `f2-cluster-lifecycle`, `e4-performance-gate`
+(unproven, ungated while advisory) and the remaining `b3-*` rows; after the
+review round, `b3-quorum-loss-uncertain-write` and `b3-split-heal-2-1` are
+`unproven` and outside `nightly-core` because unresolved
+`unknown_possibly_committed` identities no longer count as reconciled and the
+runner cannot yet record an identity for a timed-out minority mutation (#605).
+
+**Limits.** E4 hosted recalibration did not happen: three same-code A/A runs
+landed on three CPU models (AMD EPYC 7763, Intel Xeon Platinum 8573C, AMD EPYC
+9V45), the fixed baseline is refused on host id, and cross-run margins came out
+at 105–145 % (benchmarks) and 80–225 % (browser) — CPU-model drift, not noise.
+The performance lane therefore stays advisory until a SKU-pinned runner
+identity exists or the Q5 rule changes. `merge_group` is still proven only
+statically (above). The hosted F2 run blocked `snapshot-catch-up` once because
+the sampler's fixed 15 s cadence took no in-write sample on a slower runner
+(#604). `early-evidence` itself flaked on two of the day's `pull_request` runs
+on 2026-10-01 (`TestOwnerCrash/owner_is_not_leader`, once before the kill and
+once as a takeover timeout with an empty lease; both passed on rerun; master
+pushes stayed green) — tracked as #611, with the takeover shape possibly the
+#600 class.
+
+### Stale dqlite member removal (distributed-testing W9/H1)
+
+W9-β (#595) adds the operator removal path that a disk-loss replacement needs
+once the fresh node has joined (#582 follow-up): `DELETE /v1/system/nodes/:id`
+and `caesium system nodes remove <id> [--json]`, with `caesium system nodes
+list [--json]` and `GET /v1/system/nodes` now carrying each member's raft id.
+The endpoint is admin-only through `endpointPolicy`, refuses job-scoped keys,
+and audits a successful removal as `cluster.member_remove`. It removes only a
+spare or standby that is not the serving node or the leader, does not answer
+at its address, and sits beside at least three voters that all answer;
+everything else is refused with no change — 400 `invalid_id`, 404
+`not_a_member`, 409 `local_node` / `leader` / `voter` / `insufficient_voters` /
+`reachable` / `voters_unreachable` / `configuration_change_in_progress` /
+`not_clustered`, 503 `no_leader`; the body carries `reason`, `reasons`,
+`retryable`, `member` and `leader`, with ids as decimal strings. Loopback
+tests cover concurrent removals of the same id (exactly one succeeds), a
+removal during a stalled promotion (refused, then succeeds on retry) and a live
+spare refused as `reachable`; `test/system_nodes_test.go` drives the REST and
+CLI refusals on the integration server and the admin requirement on the auth
+lane. F2's `joining-ordinal-1-replacement` and `ordinal-0-disk-loss` cases now
+run the command after the fresh member is a voter and assert that every
+member's `/health` view has exactly three reachable voters; qualification
+`lifecycle-w9b-q2-affa59` passed (1,179 s). Removal is refused when a live pod
+has taken over the lost member's address, because the protocol cannot tell
+which node is answering; see `docs/kubernetes-deployment.md`.
+
+### TCP_NODELAY on the dqlite node (distributed-testing W9/H2)
+
+W9-γ (#594) attributed #588: the embedded dqlite node (dqlite 1.18.7 under
+go-dqlite 3.0.4) never set TCP_NODELAY on the connections it accepts, and it
+streams a query result as 4 KiB parts, writing the next part only after the
+previous write completes, so the second part of any result larger than one part
+waited for the client's delayed ACK (at least 40 ms on Linux). "Warm server"
+meant bigger responses: the read-mix jobs reach 5–10 runs during the fourth
+driver run, list reads crossed a second part, and under 10 reads/s every
+request queued behind the stalls (server CPU 5–12 %). `pkg/db/nodelay*.go`
+sets the option on the node's listener and on sockets already accepted
+(later sockets inherit it; a failure is logged, not fatal; non-Linux builds do
+nothing). Unloaded, a run read falls from 86 ms to 1.4 ms and `GET /v1/jobs`
+from 43 ms to 1.0 ms. Regressions: a real-node unit test (fails under a
+`go -overlay` mutation that skips the option) and `TestMultiPartReadsAreNotStalled`
+in `test/` (100 back-to-back run and log reads; 35/100 stalled on the pre-fix
+image, 0/100 with the fix; it logs and skips on the port-forwarded Kubernetes
+lane, where the forwarder adds unattributed 40–88 ms stalls). Budgets v2
+(`test/performance/budgets.json`, `changes[1]`) adds `open-api-read-mix` with
+cold and warm duration rules and 11 SLOs, including the review-requested read
+error ratio ≤ 1 %, dropped reads ≤ 2 and successful reads ≥ 100 on every
+sample, failing closed on missing read counts; `scripts/performance.sh` now
+carries read p50/p99 and offered/ok/failed/dropped per sample, builds the
+driver with `-buildvcs=false` and hands root-written files back before
+cleanup. A/A controls aa1/aa2/aa3 on the recorded runner were 0/3 false-fail
+and 0/3 inconclusive. Hosted recalibration of this workload belongs to the
+nightly performance lane.
+
+### Held mixed-version window and leader memory attribution (distributed-testing W9/H3, W9/H4)
+
+W9-δ (#596) replaced the raced mixed-version observation with a held one:
+before the image-only `helm upgrade --wait`, `scripts/lifecycle-tests.sh`
+patches the live StatefulSet to `rollingUpdate.partition: 2`, verifies from
+the API that only `caesium-2` runs the candidate while `caesium-0/1` are still
+v0.1.0, requires dispatch and completion in both directions with all three
+members on protocol 2, then restores the recorded update strategy
+byte-for-byte; the chart is untouched. After the review round a run proved
+cross-version by its lease and durable attempt fails the case if it ends in
+any status other than succeeded, if its durable attempt changes, or if it
+succeeds without its raw completion, and a recorded failure outranks any later
+success. The W8 block (`lifecycle-w8b-r1-fbbe76d2`) was not a race: the
+retained logs show a 65 s write stall on the v0.1.0 leader (137 `database is
+locked`, 17 `cannot start a transaction within a transaction`) that cleared
+only when that leader was replaced (#600). For #583, the sampler now records
+`smaps_rollup`/`maps` region sizes, post-batch and post-rejoin samples and a
+leader-pin knob: the residual follows Raft leadership, not the HTTP target; it
+is native memory in anonymous mappings of 64 MiB or more held while one voter
+is stopped, starting at the first log truncation past that voter's index,
+levelling off about 450 MiB above the retained log and released (−348 to −354
+MiB) when the voter rejoins. It is recorded as a limit in
+`docs/parallel-execution-operations.md`; #583 stays open for the residual in
+its original run, which began before any truncation and did not recur in five
+soaks. Three consecutive qualifications on `dd407e2f` passed
+(`lifecycle-w9d-f1-c0a1` 1,405 s, `f2r-c1d4` 1,404 s, `f3r-e3f5` 1,400 s),
+plus `lifecycle-rv596-044d` (1,411 s) on the review-fixed tree.
+
+### Single-host soak harness (distributed-testing W9/F3)
+
+W9-ε (#597) ships the single-host part of F3. `scripts/soak-tests.sh` builds
+the candidate and runner images from a clean checkout (`built-by-this-run`; a
+dirty tree or reused image is refused unless
+`CAESIUM_SOAK_ALLOW_UNVERIFIED_IMAGE=1` is set and recorded), creates an owned
+four-node kind cluster with three persistent members from B3's robustness
+values plus the run-queue dequeuer and `RUN_QUEUE_MAX_DEPTH=5`, runs
+`^TestExploratory$` in-cluster and executes every fault itself (cordon, kill,
+restart, replace). Each fault is appended to the retained **actual** schedule
+`fault-schedule.jsonl`; `soak.json` starts `result: incomplete`, carries the
+manifest (five families, four post-drain checks; a family with no record is
+`blocked`), every phase's exit code, the seed and its source, provenance and
+the schedule, and is folded by `scripts/soak-report.py`. The plan is a pure
+function of `CAESIUM_SOAK_SEED` and the workload file
+(`test/robustness/workloads/{short,nightly}.json`; `CAESIUM_SOAK_PROFILE`,
+`CAESIUM_SOAK_DURATION`): slow consumers, queue overload, retention, repeated
+failover and node replacement, each with a short and a nightly form. Post-drain
+checks bound native RSS (≤ 1.5× baseline + 64 MiB and stable), FDs
+(≤ baseline + max(16, 25 %)) and owned task containers/pods, require an
+unchanged pod identity and restart count across the post-drain series, and a
+test enforces that no process kill is labelled power loss. One-command local
+reproduction, through the host lane lock:
+
+```sh
+CAESIUM_SOAK_SEED=314159 CAESIUM_SOAK_PROFILE=short bash scripts/soak-tests.sh
+```
+
+**Every run so far fails on product findings, so F3 is not checked.** The
+short profile (seeds 314159 and 271828, 762–1,098 s) and two 30-minute nightly
+runs (1,378 and 1,423 s) exited 1 on: orphaned task pods after a worker kill
+(#598), `checkpoint in progress` persisted as a terminal task error (#599), a
+poisoned write connection wedging survivors after an owner kill with one leader
+exit 139 (#600), startup-migration crash loops (#601), SSE streams cut every
+30 s by the API server's write timeout (#602) and a possible read regression
+after crash loops (#603). Thirty-minute resource stabilization is therefore not
+yet shown; the short runs show it. The soak runs nightly as known-failing
+evidence until those are fixed (G4, #610, runs it nightly in advisory mode through
+`just soak-tests nightly advisory`; it sits in `UNPROMOTED_LANES` and has no
+manifest row).
+
+### Nightly qualification schedule and the release gate (distributed-testing W9/G4)
+
+W9-ζ (#610) scheduled the nightly set and made publication depend on
+same-SHA release qualification. `ci.yml` is not itself callable (a called
+workflow's permission ceiling would have to cover `publish`'s `contents:
+write`, and a `schedule` event would reach `changes`/`ci-ok`, which refuse an
+unrecognized event), so the G6 lanes moved unchanged into the reusable
+`.github/workflows/qualification-lanes.yml` (`workflow_call` only: a `select`
+job that refuses unknown lane names, the four G6 lanes, the new
+`fuzz-campaign` — the C2 recipe at 5 min per target with its corpus retained
+and the PR Go cache restored but never saved — and the new `soak`, F3's
+harness through `just soak-tests <short|nightly> <advisory|enforcing>`, plus a
+`results` output). `scripts/qualification-gate.py` is the single lane
+registry and holds both the release gate and the nightly summary.
+
+- **Nightly:** `.github/workflows/testing-qualification.yml` runs on
+  `schedule` (`23 7 * * *`) and `workflow_dispatch`
+  (`gh workflow run testing-qualification.yml -f lanes=…`), in its own
+  concurrency group that is never cancelled and never shared with PR or
+  merge-queue runs, with 30-day artifact retention and one `summary` job that
+  re-validates every gated report against the run SHA, writes per-lane
+  verdicts with one-command reproductions, and on a failing **scheduled**
+  night adds one comment to a single "Nightly qualification failures" issue
+  (triage owner: the CODEOWNERS `*` rule). Manual dispatches never create or
+  comment on issues. Lane classes: release-required F2 `lifecycle-cluster`,
+  D3 `console-recovery`, B3 `core-robustness-nightly`; nightly-required
+  `fuzz-campaign`; advisory `performance-gate` and `soak` (the soak is
+  known-failing on #598–#603, records `soak.json`'s verdict, fails only when
+  no verdict was recorded, sits in `UNPROMOTED_LANES` and has no manifest
+  row).
+- **Release gate:** a `v*` tag (or a `publish-dry-run` dispatch) runs the
+  release-required lanes on the tagged commit, and `publish` now needs the
+  fail-closed `release-qualification` job: `ci-ok`, `images`, `images-arm64`
+  and `qualification` succeeded; every release lane succeeded; the F4 report
+  and the F2/D3/B3-core reports bind to `github.sha` and pass their gates;
+  both native CLI markers match the binary sha256 and architecture; and,
+  outside a dry run, the ref is a `v*` tag. The existing CLI smoke and
+  checksum gates are unchanged. Performance, soak and the fuzz campaign are
+  never required to publish. Dry runs:
+  `gh workflow run ci.yml -f publish-dry-run=true [-f simulate-failed-qualification=true]`
+  runs the real chain with every login/push/release step skipped; the
+  simulation rewrites the F2 report to `fail` before the unchanged gate reads
+  it. On a release, a failed F2 means "Re-run failed jobs" on the tag run.
+
+**Hosted proofs.** Final nightly 36812085723 (`lanes=all`, 67.5 min): B3-core
+14:53 pass, D3 16:24 pass, F2 30:02 pass, fuzz 42:36 pass, performance 67:12
+advisory `inconclusive_unresolved`, soak (short) 18:58 advisory recording
+`fail` on #598 and a `database is locked` run error. An earlier nightly,
+36800713747 (72 min), was red only on F2 (#608). Blocked-mode publish dry run
+36804757602 attempt 2: everything passed, F2 included, the only refusal was
+the simulated F2 `fail`, `publish` was skipped. Allowed-mode dry run
+36812088507 attempt 2: "publication allowed", `publish` verified the CLI
+markers and skipped every upload (attempt 1 failed only on a `ui-e2e`
+apt-mirror stall). Nothing was published; the last release is still v0.1.0.
+
+**Limits.** Hosted F2 is release-required and was 2 passes in 7 attempts
+before #609 (see the F2 section above); both attempts after #609 passed. A
+tag run's tail grows from about 16 to about 28 minutes. The schedule and the
+issue path have not fired live yet. A workflow not yet on the default branch
+cannot be dispatched, so the proof used a temporary push trigger that was
+removed before review. Multi-host campaigns stay deferred and E4 stays
+advisory.
 
 ## 5. Server env per lane, and the silent-drift rule
 
