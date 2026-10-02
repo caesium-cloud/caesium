@@ -10,6 +10,7 @@ import (
 	"time"
 
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/api/streaming"
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
@@ -326,7 +327,7 @@ func serveScrubbedTaskLog(c *echo.Context, runID uuid.UUID, task *runstorage.Tas
 						res.WriteHeader(http.StatusOK)
 						committed = true
 					}
-					if _, err := res.Write([]byte(text[len(sent):])); err != nil {
+					if _, err := streaming.Writer(res).Write([]byte(text[len(sent):])); err != nil {
 						return err
 					}
 					if flusher, ok := res.(http.Flusher); ok {
@@ -455,7 +456,7 @@ func serveTaskLog(
 
 	flusher, _ := res.(http.Flusher)
 	write := func(b []byte) error {
-		if _, writeErr := res.Write(b); writeErr != nil {
+		if _, writeErr := streaming.Writer(res).Write(b); writeErr != nil {
 			return writeErr
 		}
 		if flusher != nil {

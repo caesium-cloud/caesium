@@ -245,3 +245,18 @@ The full browser suite exposed two runtime issues beyond the focused review pass
 A latest-run projection that disagreed with paged history could make each completed history walk schedule another. Bound retries for the same latest-run revision to once per minute; changed revisions and lifecycle events still refresh promptly. Browser coverage verifies both the absence of a feedback loop and a later retry for eventual consistency.
 
 Presentation fixtures now use one fixed browser clock and consistent latest/history snapshots. Sustained-event coverage retains one request handler throughout its gated read; slow-response request bounds use elapsed time rather than assuming workstation timing. The mid-burst update, final update, single in-flight request, concurrent-run identity, and console-error assertions remain enforced. CI follow-up artifacts are retained in `.tmp/pr617-ci-recovery/` and `.tmp/pr617-ci-green/`.
+
+### Streaming follow-up review
+
+| Finding | Correction |
+| --- | --- |
+| Task logs still inherit the initial write deadline | Both live paths—the runtime log pipe and scrubbed snapshot tail—use the shared bounded streaming writer. One-shot retained snapshots keep the ordinary response deadline. |
+| Server and stream timeout constants can diverge | The API server takes its write timeout from the same constant used by streaming writes. |
+| Manual reconnect replays all retained events | Retain the last delivered SSE ID and send it as the reconnect cursor. Reset it for a changed filter or disconnected session; ignore callbacks from replaced sources and cancel superseded reconnect timers. |
+| Long integration tests are undercosted | Record 46-second idle-stream and 65-second task-stream costs in the shard timing inventory. Document the parallel idle subtests' reliance on immutable suite configuration without per-test hooks. |
+
+Real integration coverage runs plain and secret-bearing log producers concurrently for 50 seconds, follows both actual live REST responses, checks every output marker and redaction, and requires successful completion. The two idle SSE paths independently deliver heartbeats past 30 seconds. Browser coverage observes native event IDs across an offline interruption and requires cursor resumption without replaying earlier IDs. A loopback relay forwards real backend bytes and severs the established socket, because Chromium's offline flag alone can leave an existing SSE connection open. It also opens the live server-log console through navigation. The coverage collector reads the executed task's retained logs and fails if its actual output is absent; these journeys exercise the changed REST surfaces without lowering coverage thresholds.
+
+Local validation passes: 474 UI unit tests, production build and bundle budgets, Go lint/vet and focused package tests, documentation guardrails, 226 coverage/CI configuration tests, both long-lived integration scenarios, and the two focused browser journeys with zero retries. The three-node local deployment serves the new application build with healthy 3/3 quorum and matching entry assets.
+
+Artifacts and local deployment receipts are retained in `.tmp/pr617-stream-followup/`. This follow-up preserves scheduler behavior, permissions, retained-log responses, and cross-node event distribution.

@@ -20,8 +20,8 @@ class MockEventSource {
     this.eventListeners[type].push(listener);
   }
 
-  emit(type: string, payload: unknown) {
-    const event = { data: JSON.stringify(payload) } as MessageEvent;
+  emit(type: string, payload: unknown, lastEventId = "") {
+    const event = { data: JSON.stringify(payload), lastEventId } as MessageEvent;
     this.eventListeners[type]?.forEach((listener) => listener(event));
   }
 
@@ -110,6 +110,49 @@ describe('EventManager', () => {
     vi.advanceTimersByTime(3000);
     MockEventSource.instances.at(-1)?.onerror?.();
     expect(events.isHealthy()).toBe(false);
+  });
+
+  it('resumes a manual reconnect from the last delivered event ID', () => {
+    events.connect({ job_id: 'abc' });
+    const source = MockEventSource.instances[0];
+    source.emit('run_started', { type: 'run_started' }, '41');
+    source.emit('task_started', { type: 'task_started' }); // ID-less events cannot erase the cursor.
+    source.onerror?.();
+    vi.advanceTimersByTime(3000);
+    expect(MockEventSource.instances.at(-1)?.url).toBe('/v1/events?job_id=abc&cursor=41');
+  });
+
+  it('retains the cursor for equivalent filters and resets it for a new scope', () => {
+    events.connect({ job_id: 'abc', types: 'run_started' });
+    MockEventSource.instances[0].emit('run_started', {}, '41');
+    events.connect({ types: 'run_started', job_id: 'abc' });
+    expect(MockEventSource.instances.at(-1)?.url).toContain('cursor=41');
+    events.connect({ job_id: 'different' });
+    expect(MockEventSource.instances.at(-1)?.url).toBe('/v1/events?job_id=different');
+  });
+
+  it('cancels a pending reconnect and ignores late callbacks from the replaced source', () => {
+    events.connect({ job_id: 'abc' });
+    const old = MockEventSource.instances[0];
+    old.onerror?.();
+    events.connect({ job_id: 'different' });
+    const current = MockEventSource.instances.at(-1)!;
+    old.emit('run_started', {}, '41');
+    old.onerror?.();
+    vi.advanceTimersByTime(3000);
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(current.close).not.toHaveBeenCalled();
+    current.onerror?.();
+    vi.advanceTimersByTime(3000);
+    expect(MockEventSource.instances.at(-1)?.url).toBe('/v1/events?job_id=different');
+  });
+
+  it('starts a new session without a cursor after disconnect', () => {
+    events.connect();
+    MockEventSource.instances[0].emit('run_started', {}, '41');
+    events.disconnect();
+    events.connect();
+    expect(MockEventSource.instances.at(-1)?.url).toBe('/v1/events?');
   });
 
   it('disconnect closes EventSource', () => {

@@ -17,6 +17,7 @@ class EventManager {
   private connectionListeners: ConnectionHandler[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private filters: Record<string, string> = {};
+  private lastEventId: string | null = null;
   private connected = false;
   private opened = false;
   private errorsSinceOpen = 0;
@@ -24,23 +25,32 @@ class EventManager {
   private lastErrorAt = 0;
 
   connect(filters: Record<string, string> = {}) {
-    this.filters = filters;
+    const nextFilters = Object.fromEntries(Object.entries(filters).sort(([a], [b]) => a.localeCompare(b)));
+    if (JSON.stringify(nextFilters) !== JSON.stringify(this.filters)) this.lastEventId = null;
+    this.filters = nextFilters;
     this.reconnect();
   }
 
   private reconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.eventSource) {
       this.eventSource.close();
     }
 
     const params = new URLSearchParams(this.filters);
+    if (this.lastEventId) params.set("cursor", this.lastEventId);
     const url = `/v1/events?${params.toString()}`;
 
-    this.eventSource = new EventSource(url);
+    const source = new EventSource(url);
+    this.eventSource = source;
     this.connected = false;
     this.emitConnection();
 
-    this.eventSource.onopen = () => {
+    source.onopen = () => {
+      if (this.eventSource !== source) return;
       this.connected = true;
       this.opened = true;
       this.errorsSinceOpen = 0;
@@ -57,10 +67,12 @@ class EventManager {
     ];
 
     eventTypes.forEach(type => {
-      this.eventSource?.addEventListener(type, (message: MessageEvent) => {
+      source.addEventListener(type, (message: MessageEvent) => {
+        if (this.eventSource !== source) return;
         try {
           const event = JSON.parse(message.data) as CaesiumEvent;
           if (!event.type) event.type = type;
+          if (message.lastEventId) this.lastEventId = message.lastEventId;
           this.emit(event);
         } catch (err) {
           console.error(`Failed to parse SSE message for ${type}`, err);
@@ -68,7 +80,8 @@ class EventManager {
       });
     });
 
-    this.eventSource.onerror = () => {
+    source.onerror = () => {
+      if (this.eventSource !== source) return;
       this.connected = false;
       this.errorsSinceOpen += 1;
       this.lastErrorAt = Date.now();
@@ -135,6 +148,9 @@ class EventManager {
     this.connected = false;
     this.opened = false;
     this.errorsSinceOpen = 0;
+    this.lastEventId = null;
+    this.lastEventAt = 0;
+    this.lastErrorAt = 0;
     this.emitConnection();
   }
 

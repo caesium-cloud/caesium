@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// WriteTimeout bounds each stream write, including its subsequent flush.
+// WriteTimeout is the API server deadline and bounds each stream write,
+// including its subsequent flush.
 const WriteTimeout = 30 * time.Second
 
 type writer struct{ response http.ResponseWriter }

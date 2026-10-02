@@ -30,7 +30,11 @@ func TestStreamOutlivesInitialServerWriteDeadline(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(srv.URL + "/stream")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

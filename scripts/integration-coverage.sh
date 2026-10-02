@@ -403,7 +403,7 @@ trigger:
 steps:
   - name: sample
     image: alpine:3.23
-    command: ["sh", "-c", "sleep 2"]
+    command: ["sh", "-c", "sleep 2; echo coverage-task-log"]
 YAML
 }
 
@@ -781,6 +781,20 @@ for problem in problems:
 sys.exit(1 if problems else 0)' "$ARTIFACTS/task-run.json" "$ARTIFACTS/task-run-partitions.json"; then
   log "run $run_id did not succeed with a sampled resource observation on both reads"
   cli_rc=1
+fi
+
+# Exercise the actual retained-log endpoint for the task that just ran. Live
+# deadline/redaction behavior is qualified by the integration stream scenarios.
+if [[ "$cli_rc" -eq 0 ]]; then
+  task_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["id"])' \
+    "$ARTIFACTS/task-run.json")" || cli_rc=1
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  server_get "/v1/jobs/$job_id/runs/$run_id/logs?task_id=$task_id" >"$ARTIFACTS/task-run.log" || cli_rc=1
+  if ! grep -q 'coverage-task-log' "$ARTIFACTS/task-run.log"; then
+    log "task's retained log did not contain its actual output"
+    cli_rc=1
+  fi
 fi
 
 # H1 operator surface on the same single-node server, read-only by design:

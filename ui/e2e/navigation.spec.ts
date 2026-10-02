@@ -24,6 +24,14 @@ test("sidebar navigates between every primary control-plane page", async ({ page
     await sidebar.getByRole("link", { name: new RegExp(`^${item.label}\\b`) }).click();
     await page.waitForURL(item.urlMatch);
     await expect(page.getByRole("heading", { name: item.heading })).toBeVisible();
+    if (item.label === "System") {
+      // The coverage journey uses this real operator control to reach the
+      // server-log stream, rather than counting the logs page as navigation only.
+      await page.getByRole("link", { name: "Log console", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Log Console", exact: true })).toBeVisible();
+      await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+      await expect(page.locator("tbody tr").first()).toBeVisible();
+    }
   }
 });
 

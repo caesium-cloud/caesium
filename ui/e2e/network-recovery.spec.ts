@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createServer, get, type ServerResponse } from "node:http";
 import {
   applyAndRun,
   applyDefinitions,
@@ -52,7 +53,7 @@ test("reload preserves a terminal run's detail view", async ({ page, request }) 
   await expect(page.locator(".react-flow__node")).toHaveCount(3);
 });
 
-test("the console recovers live updates after a real network interruption", async ({ page, request, context }) => {
+test("the console recovers live updates after a real network interruption", async ({ page, request, context, baseURL }) => {
   test.slow();
 
   // A deliberately slow single-step run, so it is still genuinely "running"
@@ -63,7 +64,7 @@ test("the console recovers live updates after a real network interruption", asyn
     kind: "Job",
     metadata: { alias },
     trigger: { type: "cron", configuration: { cron: "0 0 1 1 *" } },
-    steps: [{ name: "hold", image: "alpine:3.23", command: ["sh", "-c", "sleep 6"] }],
+    steps: [{ name: "hold", engine: process.env.CAESIUM_E2E_ENGINE || "docker", image: "alpine:3.23", cache: false, command: ["sh", "-c", "sleep 12"] }],
   } as unknown as FixtureDefinition;
   await applyDefinitions(request, definition);
   const job = await findJobByAlias(request, alias);
@@ -75,25 +76,93 @@ test("the console recovers live updates after a real network interruption", asyn
   // very first page load's own job fetch already reflect a running run.
   await awaitRun(request, job.id, { status: "running", timeoutMs: 15_000 });
 
-  await page.goto(`/jobs/${job.id}`);
-  await expect(page.getByRole("heading", { name: job.alias })).toBeVisible();
-  await expect(page.getByTestId("dag-counters")).toContainText("running", { timeout: 15_000 });
+  // Relay real backend bytes through loopback so the test can sever the
+  // established connection. No frames, IDs, or response bodies are fabricated.
+  const streams = new Set<ServerResponse>();
+  const relay = createServer((incoming, response) => {
+    const target = new URL(incoming.url || "/v1/events", baseURL);
+    target.searchParams.set("job_id", job.id);
+    streams.add(response);
+    const upstream = get(target, { headers: { Accept: "text/event-stream" } }, result => {
+      response.writeHead(result.statusCode || 502, {
+        ...result.headers,
+        "access-control-allow-origin": new URL(baseURL!).origin,
+      });
+      result.pipe(response);
+    });
+    upstream.on("error", () => response.destroy());
+    response.on("close", () => { streams.delete(response); upstream.destroy(); });
+  });
+  await new Promise<void>((resolve, reject) => {
+    relay.once("error", reject);
+    relay.listen(0, "127.0.0.1", resolve);
+  });
+  const address = relay.address();
+  if (!address || typeof address === "string") throw new Error("SSE relay did not listen");
+  const relayOrigin = `http://127.0.0.1:${address.port}`;
+  try {
+    // Observe IDs delivered by the real EventSource, plus the cursor at the
+    // actual network error. No events or backend responses are synthesized.
+    await page.addInitScript((relayOrigin: string) => {
+      const Original = window.EventSource;
+      const records: { url: string; lastId: string; failureCursor: string; open: boolean; ids: string[] }[] = [];
+      (window as unknown as { qaStreamRecords: typeof records }).qaStreamRecords = records;
+      window.EventSource = class extends Original {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          const originalUrl = new URL(url, location.origin);
+          const streamUrl = new URL(originalUrl.pathname + originalUrl.search, relayOrigin);
+          super(streamUrl, options);
+          const record = { url: String(streamUrl), lastId: "", failureCursor: "", open: false, ids: [] as string[] };
+          records.push(record);
+          this.addEventListener("open", () => { record.open = true; });
+          this.addEventListener("error", () => { record.open = false; record.failureCursor = record.lastId; });
+          for (const type of ["job_created", "run_started", "run_completed", "run_terminal", "task_ready", "task_claimed", "task_started", "task_succeeded"]) {
+            this.addEventListener(type, (event: MessageEvent) => {
+              if (event.lastEventId) { record.lastId = event.lastEventId; record.ids.push(event.lastEventId); }
+            });
+          }
+        }
+      };
+    }, relayOrigin);
+    await page.goto(`/jobs/${job.id}`);
+    await expect(page.getByRole("heading", { name: job.alias })).toBeVisible();
+    await expect(page.getByTestId("dag-counters")).toContainText("running", { timeout: 15_000 });
 
-  // A REAL browser-level network cut (not a mocked response) — this is the
-  // actual condition the SSE client's onerror/reconnect path and the
-  // polling fallback (JobDetailPage's streamHealthy-gated refetchInterval)
-  // exist for. Chrome auto-logs a net::ERR_* console error for this (and CI
-  // has been observed logging it against later tests in this file too) —
-  // tolerated file-wide via allowNetworkLevelErrors above, not just here.
-  await context.setOffline(true);
-  await page.waitForTimeout(2_000);
-  await context.setOffline(false);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { qaStreamRecords: { lastId: string; open: boolean }[] }).qaStreamRecords.some(record => record.open && record.lastId !== ""))).toBe(true);
+    // A REAL browser-level network cut (not a mocked response) — this is the
+    // actual condition the SSE client's onerror/reconnect path and the
+    // polling fallback (JobDetailPage's streamHealthy-gated refetchInterval)
+    // exist for. Chrome auto-logs a net::ERR_* console error for this (and CI
+    // has been observed logging it against later tests in this file too) —
+    // tolerated file-wide via allowNetworkLevelErrors above, not just here.
+    await context.setOffline(true);
+    // Chromium may leave established sockets open when its offline flag changes.
+    // Cut the actual relayed TCP connection; the native EventSource must error.
+    for (const response of streams) response.destroy();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { qaStreamRecords: { failureCursor: string }[] }).qaStreamRecords.some(record => record.failureCursor !== ""))).toBe(true);
+    await context.setOffline(false);
 
-  // By the time the connection is restored and either the reconnected
-  // stream or the polling fallback catches up, the held step should have
-  // finished and the DAG counters should reflect it — without requiring a
-  // manual reload.
-  await expect(page.getByTestId("dag-counters")).toContainText("1 succeeded", { timeout: 60_000 });
+    await expect.poll(() => page.evaluate(() => {
+      const records = (window as unknown as { qaStreamRecords: { url: string; failureCursor: string; open: boolean; ids: string[] }[] }).qaStreamRecords;
+      const failed = records.find(record => record.failureCursor !== "");
+      if (!failed) return false;
+      const resumed = records.find(record => record.open && new URL(record.url, location.origin).searchParams.get("cursor") === failed.failureCursor);
+      return !!resumed?.ids.length && resumed.ids.every(id => BigInt(id) > BigInt(failed.failureCursor));
+    })).toBe(true);
+    await test.info().attach("sse-resumption", {
+      body: JSON.stringify(await page.evaluate(() => (window as unknown as { qaStreamRecords: unknown }).qaStreamRecords)),
+      contentType: "application/json",
+    });
+    // By the time the connection is restored and either the reconnected
+    // stream or the polling fallback catches up, the held step should have
+    // finished and the DAG counters should reflect it — without requiring a
+    // manual reload.
+    await expect(page.getByTestId("dag-counters")).toContainText("1 succeeded", { timeout: 60_000 });
+  } finally {
+    for (const response of streams) response.destroy();
+    relay.closeAllConnections();
+    await new Promise<void>(resolve => relay.close(() => resolve()));
+  }
 });
 
 test("SYNTHETIC: an expired credential is surfaced to the operator instead of silently retried", async ({
