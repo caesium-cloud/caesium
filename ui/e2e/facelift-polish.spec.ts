@@ -71,9 +71,14 @@ test("sidebar columns, wrapped filters, and filtered-empty state remain usable",
   await applyAndRun(request, "branching.job.yaml");
   await page.goto("/jobs");
   await expect(page.getByTestId("job-row").first()).toBeVisible();
-  const columns = await page.locator("aside nav a").evaluateAll(rows => rows.map(row => ({ count: row.querySelector("[data-nav-count]")!.getBoundingClientRect().right, hint: row.querySelector("[data-nav-shortcut]")!.getBoundingClientRect().right })));
-  expect(new Set(columns.map(row => row.count)).size).toBe(1);
-  expect(new Set(columns.map(row => row.hint)).size).toBe(1);
+  const columns = await page.locator("aside nav [data-nav-count]").evaluateAll(counts => counts.map(count => count.getBoundingClientRect().right));
+  expect(new Set(columns).size).toBe(1);
+  await expect(page.locator("aside nav kbd")).toHaveCount(0);
+  const jobsLink = page.locator('aside nav a[href="/jobs"]');
+  await jobsLink.hover();
+  await expect(page.getByRole("tooltip", { name: "Keyboard shortcut: G, then J" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   for (const name of [/^All/, /^running/, /^succeeded/, /^failed/, /^paused/]) await expect(page.getByRole("button", { name }).first()).toBeInViewport();
   await page.getByPlaceholder("Filter pipelines…").fill(`no-match-${uniqueSuffix()}`);

@@ -5,6 +5,7 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
 import { Check, ChevronRight, Circle } from "lucide-react";
 
 import { cn } from "@/lib/utils"
+import { Kbd } from "@/components/ui/kbd"
 
 const DropdownMenu = DropdownMenuPrimitive.Root
 
@@ -172,10 +173,10 @@ DropdownMenuSeparator.displayName = DropdownMenuPrimitive.Separator.displayName
 const DropdownMenuShortcut = ({
   className,
   ...props
-}: React.HTMLAttributes<HTMLSpanElement>) => {
+}: React.ComponentProps<typeof Kbd>) => {
   return (
-    <span
-      className={cn("ml-auto text-xs opacity-60", className)}
+    <Kbd
+      className={cn("ml-auto", className)}
       {...props}
     />
   )

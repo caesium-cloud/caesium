@@ -15,6 +15,7 @@ import { api } from "@/lib/api"
 import { shortId } from "@/lib/utils"
 import { RelativeTime } from "./relative-time"
 import { commandPaletteFilter } from "./command-filter"
+import { Kbd } from "./ui/kbd"
 
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
@@ -123,9 +124,9 @@ export function CommandMenu() {
           </CommandGroup>
         </CommandList>
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-2 text-xs text-text-3">
-          <span><kbd>↑ ↓</kbd> move</span>
-          <span><kbd>↵</kbd> open</span>
-          <span><kbd>esc</kbd> close</span>
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>↑</Kbd><Kbd aria-hidden={false}>↓</Kbd> move</span>
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>↵</Kbd> open</span>
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>esc</Kbd> close</span>
         </div>
     </>
   );
@@ -133,7 +134,7 @@ export function CommandMenu() {
     <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(true)} className="flex h-full w-full items-center gap-3 px-4 text-left text-[13px] text-text-2 transition-colors hover:bg-graphite hover:text-foreground focus-visible:-outline-offset-4 lg:px-6">
       <Search aria-hidden="true" className="size-4 shrink-0 text-cyan" />
       <span className="min-w-0 flex-1 truncate"><span className="sm:hidden">Search pages and resources…</span><span className="hidden sm:inline">Search pages, jobs, triggers, or atoms…</span></span>
-      <kbd className="shrink-0 rounded border border-border bg-midnight px-1.5 py-0.5 text-xs text-text-3">{shortcut}</kbd>
+      <Kbd>{shortcut}</Kbd>
     </button>
     <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }} contentProps={{
       onOpenAutoFocus: (event) => { event.preventDefault(); inputRef.current?.focus(); },

@@ -40,6 +40,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800
     const dialog = page.getByRole("dialog", { name: "Navigation search" });
     const input = dialog.getByRole("combobox", { name: "Search pages, jobs, triggers, or atoms" });
     await expect(input).toBeFocused();
+    // Focus arrives before the opening animation finishes. Measure one settled
+    // layout rather than comparing boxes captured on different animation frames.
+    await expect(dialog).toHaveCSS("opacity", "1");
     await expect.poll(() => dialog.evaluate(el => {
       const box = el.getBoundingClientRect();
       return box.x >= 0 && box.y >= 0 && box.right <= innerWidth && box.bottom <= innerHeight && box.width <= 672 && el.scrollWidth === el.clientWidth;
@@ -63,6 +66,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800
     await expect(trigger).toBeFocused();
     await page.keyboard.press("Control+k");
     await expect(input).toBeFocused();
+    await expect(dialog).toHaveCSS("opacity", "1");
     await page.mouse.click(4, viewport.height / 2);
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();

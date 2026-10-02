@@ -12,6 +12,8 @@ import { useClusterHealth, type ClusterHealthState } from "@/features/system/use
 import { api } from "@/lib/api";
 import { events } from "@/lib/events";
 import { cn } from "@/lib/utils";
+import { Kbd } from "@/components/ui/kbd";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface NavItem {
   to: string;
@@ -141,10 +143,12 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
 
   return (
     <aside className={cn("relative flex w-[208px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground", className)}>
+      <TooltipProvider delayDuration={350}>
       <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-4">
         {navItems.map((item) => (
+          <Tooltip key={item.to}>
+          <TooltipTrigger asChild>
           <Link
-            key={item.to}
             to={item.to}
             activeOptions={{ exact: item.to === "/datasets" }}
             activeProps={{
@@ -155,15 +159,23 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
               className: "text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
             }}
             onClick={onNavigate}
-            className="grid min-h-8 grid-cols-[12px_minmax(0,1fr)_32px_24px] items-center gap-2 rounded-md px-2 text-[13px] lowercase transition-colors"
+            className="grid min-h-8 grid-cols-[12px_minmax(0,1fr)_32px] items-center gap-2 rounded-md px-2 text-[13px] lowercase transition-colors"
           >
             <span aria-hidden="true" className="nav-caret invisible text-cyan">❯</span>
             <span>{item.label}</span>
             <CountBadge value={item.count} />
-            <span data-nav-shortcut aria-hidden="true" className="text-right text-xs font-normal text-text-3">{item.hint ? `g${item.hint}` : ""}</span>
           </Link>
+          </TooltipTrigger>
+          {item.hint && (
+            <TooltipContent side="right" sideOffset={12} aria-label={`Keyboard shortcut: G, then ${item.hint.toUpperCase()}`} className="flex items-center gap-2 border border-border bg-obsidian text-text-2 shadow-md">
+              <span>Go to {item.label}</span>
+              <Kbd>g<span className="text-text-3">›</span>{item.hint}</Kbd>
+            </TooltipContent>
+          )}
+          </Tooltip>
         ))}
       </nav>
+      </TooltipProvider>
 
       <ClusterFooter
         state={health.state}

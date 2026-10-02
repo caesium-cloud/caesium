@@ -6,6 +6,7 @@ import { Command as CommandPrimitive } from "cmdk"
 import { Search } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { Kbd } from "@/components/ui/kbd"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 
 const Command = React.forwardRef<
@@ -140,13 +141,10 @@ CommandItem.displayName = CommandPrimitive.Item.displayName
 const CommandShortcut = ({
   className,
   ...props
-}: React.HTMLAttributes<HTMLSpanElement>) => {
+}: React.ComponentProps<typeof Kbd>) => {
   return (
-    <span
-      className={cn(
-        "ml-auto text-xs text-muted-foreground",
-        className
-      )}
+    <Kbd
+      className={cn("ml-auto", className)}
       {...props}
     />
   )

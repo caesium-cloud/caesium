@@ -16,6 +16,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Kbd } from "@/components/ui/kbd";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
@@ -364,7 +365,7 @@ export function RunDetailPage() {
                 data-testid="run-compare-trigger"
                 title={compareDisabledReason}
               >
-                Compare to run… <kbd aria-hidden="true" className="text-[11px] text-text-3">c</kbd>
+                Compare to run… <Kbd>c</Kbd>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
@@ -398,7 +399,7 @@ export function RunDetailPage() {
               params={{ jobId }}
               data-testid="all-runs-link"
             >
-              All runs <kbd aria-hidden="true" className="text-[11px] text-text-3">a</kbd>
+              All runs <Kbd>a</Kbd>
             </Link>
           </Button>
           </div>
@@ -412,7 +413,7 @@ export function RunDetailPage() {
               data-testid="run-replay-trigger"
               title="Configure a replay using this run as the baseline"
             >
-              Replay… <kbd aria-hidden="true" className="text-[11px] text-text-3">p</kbd>
+              Replay… <Kbd>p</Kbd>
             </Button>
           ) : (
             <span className="inline-flex" title={replayGateReason}>
@@ -425,7 +426,7 @@ export function RunDetailPage() {
                 aria-describedby="run-replay-gate-reason"
                 data-testid="run-replay-trigger"
               >
-                  Replay… <kbd aria-hidden="true" className="text-[11px] text-text-3">p</kbd>
+                  Replay… <Kbd>p</Kbd>
               </Button>
               <span
                 id="run-replay-gate-reason"
@@ -448,7 +449,7 @@ export function RunDetailPage() {
             data-testid="run-rerun-trigger"
             disabled={triggerMutation.isPending}
           >
-            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <kbd aria-hidden="true" className="text-[11px] text-text-3">Alt R</kbd>
+            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <Kbd>Alt R</Kbd>
           </Button>
           {isLive && (
             <Button
