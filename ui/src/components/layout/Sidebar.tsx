@@ -125,7 +125,7 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
     { to: "/triggers", label: "Triggers", hint: "t", count: counts.triggers },
     { to: "/atoms", label: "Atoms", hint: "a", count: counts.atoms },
     ...(freshnessEnabled
-      ? [{ to: "/datasets", label: "Datasets", count: null }]
+      ? [{ to: "/datasets", label: "Datasets", count: counts.datasets }]
       : []),
     ...(features?.data_assertions_enabled === true
       ? [{ to: "/datasets/holds", label: "Holds", count: counts.holds }]

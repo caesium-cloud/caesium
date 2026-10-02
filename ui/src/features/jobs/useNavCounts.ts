@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 const REFETCH_MS = 30_000;
 
 export interface NavCounts {
+  datasets: number | null;
   holds: number | null;
   jobs: number | null;
   triggers: number | null;
@@ -26,8 +27,20 @@ export interface NavCounts {
  */
 export function useNavCounts(): NavCounts {
   const assertionsEnabled = useDataAssertionsEnabled();
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
+  });
   const principal = usePrincipal();
   useHoldInvalidation(assertionsEnabled);
+  const datasetsEnabled = features?.freshness_enabled === true && !principal.isScoped;
+  const datasets = useQuery({
+    queryKey: ["datasets", "nav"],
+    queryFn: () => api.getDatasets({ limit: 1 }),
+    enabled: datasetsEnabled,
+    refetchInterval: REFETCH_MS,
+  });
   const holds = useQuery({
     queryKey: ["dataset-holds", "nav"],
     queryFn: () => api.getDatasetHolds({ status: "active", limit: 1 }),
@@ -59,6 +72,7 @@ export function useNavCounts(): NavCounts {
 
   const [jobs, triggers, atoms] = results;
   return {
+    datasets: datasetsEnabled && !datasets.error ? datasets.data?.total ?? null : null,
     holds: assertionsEnabled && !principal.isScoped && !holds.error ? holds.data?.total ?? null : null,
     jobs: jobs.data ? jobs.data.length : null,
     triggers: triggers.data ? triggers.data.length : null,

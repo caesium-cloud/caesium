@@ -623,7 +623,7 @@ export function JobDetailPage() {
         }}
       >
         {secondaryView ? (
-          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-md`}>
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : secondaryView === "runs" ? "max-w-4xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0 sm:rounded-md`}>
             <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
               <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
               <DialogDescription className="sr-only">{secondaryViewTitle(secondaryView)} for {job.alias}.</DialogDescription>
@@ -981,14 +981,14 @@ function RunsView({
       ) : null}
       <div className="divide-y border-y border-border" data-testid="job-runs-list">
         {runs.length === 0 ? <div className="p-8 text-center text-text-3">No runs found for this job.</div> : null}
-        {runs.map(run => <div key={run.id} className="flex min-h-[42px] flex-wrap items-center gap-x-7 gap-y-2 px-3 py-2 hover:bg-obsidian">
-          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{formatUTCTimestamp(run.started_at, "Unknown time")}</span>
-          <span className="text-xs text-text-3"><RelativeTime date={run.started_at} /></span>
-          {renderRunStatus(run.status)}
-          <span className="text-xs text-text-2"><Duration start={run.started_at} end={run.completed_at} /></span>
-          {run.params && Object.keys(run.params).length ? <span className="text-xs text-text-3">{Object.keys(run.params).length} params</span> : null}
-          <IdChip value={run.id} label="run id" className="ml-auto" />
-          <Link to="/jobs/$jobId/runs/$runId" params={{ jobId: job.id, runId: run.id }} className="text-xs text-cyan">open</Link>
+        {runs.map(run => <div key={run.id} data-testid="run-history-row" className="grid min-h-[42px] grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3 py-3 lg:grid-cols-[minmax(0,1fr)_7ch_96px_7ch_7ch_90px_32px] lg:py-2 hover:bg-obsidian">
+          <span data-history-cell="started" className="order-1 col-span-2 text-[13px] text-text-1 tabular-nums lg:col-span-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{formatUTCTimestamp(run.started_at, "Unknown time")}</span>
+          <span data-history-cell="age" className="order-3 text-right text-xs text-text-3 tabular-nums lg:order-2 lg:text-left"><RelativeTime date={run.started_at} /></span>
+          <span data-history-cell="status" className="order-2 lg:order-3">{renderRunStatus(run.status)}</span>
+          <span data-history-cell="duration" className="order-4 text-xs text-text-2 tabular-nums"><Duration start={run.started_at} end={run.completed_at} /></span>
+          <span data-history-cell="params" className="order-5 text-right text-xs text-text-3 lg:text-left">{run.params && Object.keys(run.params).length ? `${Object.keys(run.params).length} params` : null}</span>
+          <IdChip value={run.id} label="run id" className="order-6 justify-self-start" />
+          <Link to="/jobs/$jobId/runs/$runId" params={{ jobId: job.id, runId: run.id }} aria-label={`Open run ${run.id}`} className="order-7 justify-self-end text-xs text-cyan hover:underline">open</Link>
         </div>)}
       </div>
     </div>

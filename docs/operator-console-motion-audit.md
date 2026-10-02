@@ -154,3 +154,21 @@ Validation covers the real Jobs → overview → exact execution → historical 
 No scheduler, API, permission, run-state, or animation logic changes in this pass. Populated incident screens, external authentication providers, and large-history performance remain outside this focused navigation qualification.
 
 Local delivery: image `caesiumcloud/caesium:pr617-run-navigation-20261002` is served on port 8084 by three healthy replicas with 3/3 reachable voters. All 14 entry assets match the production build. A final real execution of `k8s-live-demo` (`d90f8e48-b992-46b9-8d96-b7bcae2ce6f2`) verifies View live run, exact execution identity, the run picker, natural completion, and return to the job overview with its succeeded outcome. Containerized documentation guardrails pass. The existing Kubernetes release remains running for inspection.
+
+## Follow-up: history alignment and consistent counts
+
+Reproduced on `a5de859f` at port 8084: relative ages shifted the run-history status and duration columns, Datasets had no count beside Holds' zero, and the tallest archived run marks began only 3px below their row boundary.
+
+| Finding | Correction |
+| --- | --- |
+| History rows shift with text length | Shared grid tracks align timestamps, ages, statuses, durations, parameters, IDs, and links. The dialog has room for those columns on desktop and reflows into consistently ordered rows on phones. Copy and exact-run links remain available. |
+| Missing Datasets count | The sidebar reads the existing paginated dataset endpoint's total, fetching one record. A confirmed empty result displays **0**, matching Holds. Loading, forbidden, unavailable, feature-disabled, and scoped states do not invent a zero or request an unauthorized global count. |
+| Crowded bars and ambiguous “Older” | Recent and archived marks share a baseline with at least 14px above the tallest terminal mark in a 64px row. Duration scaling is unchanged. Archived history keeps its separate ordinal treatment and now says **Outside 15m** (or the selected window), with an explicit **View history →** link to that job's history. Exact timestamps and the oldest age remain in accessible descriptions/native hover detail. |
+
+[Strip before](ui-motion-617/history-strip-before.png) · [Strip after](ui-motion-617/history-strip-after.png) · [Modal before](ui-motion-617/history-modal-before.png) · [Modal after](ui-motion-617/history-modal-after.png) · [Phone, light](ui-motion-617/history-modal-phone.png).
+
+Screenshots directly reviewed at 1440×900, 1280×800, and 390×844 in both themes. Focused browser coverage opens real executions through the archive link with keyboard navigation and verifies exact identity, aligned columns, mobile bounds, and bar padding in recent/archived modes. Age differences and long durations are explicitly synthetic browser responses over real run IDs; no server timestamps are changed. Separate rendering probes distinguish zero, a multi-digit paginated total, unavailable counts, and the feature gate. Populated dataset lifecycle and external authentication remain outside this focused pass. Raw evidence: `.tmp/pr617-history-polish/`.
+
+Validation: containerized ESLint, all 444 unit tests, production build/bundle budgets, and `go test ./internal/guardrails/...` pass. Both focused browser journeys pass against the container-built UI with zero retries. The initial browser attempt exposed an in-flight route callback at test teardown; waiting for interception callbacks fixes the test cleanup, with no application change required.
+
+Local delivery: image `caesiumcloud/caesium:pr617-history-polish-20261002` is running on port 8084 across three healthy replicas. Fresh membership observations confirm 3/3 reachable voters, and all 14 served entry assets match the build. A final browser check follows the deployed archive link into the history modal and opens its exact real execution and timeline. Only this release's superseded images were retired; foreign resources were preserved.

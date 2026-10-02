@@ -197,7 +197,7 @@ function JobsPageInner() {
 
                   {/* Shared time grid; archived history has its own ordinal lane. */}
                   <div className="min-w-0 self-stretch">
-                    <RunStrip runs={job.lastRuns} windowSeconds={historyWindow} />
+                    <RunStrip runs={job.lastRuns} windowSeconds={historyWindow} historyLink={<Link to="/jobs/$jobId/runs" params={{ jobId: job.id }} aria-label={`View run history for ${job.alias}`} className="shrink-0 text-cyan underline-offset-2 hover:underline">View history →</Link>} />
                   </div>
 
                   {/* Actions column */}
