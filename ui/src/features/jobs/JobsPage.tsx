@@ -13,7 +13,7 @@ import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { useJobsView, type ActivityEntry, type JobCounts, type StatusFilter, type SortKey } from "./useJobsView";
+import { useJobsView, type ActivityEntry, type HistoryWindow, type JobCounts, type StatusFilter, type SortKey } from "./useJobsView";
 
 export function JobsPage() {
   return <JobsPageInner />;
@@ -22,7 +22,7 @@ export function JobsPage() {
 function JobsPageInner() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { rows, counts, search, setSearch, statusFilter, setStatusFilter, sort, setSort, isLoading, error, activity } =
+  const { rows, counts, search, setSearch, statusFilter, setStatusFilter, sort, setSort, historyWindow, setHistoryWindow, isLoading, error, activity } =
     useJobsView();
 
   const triggerMutation = useMutation({
@@ -87,7 +87,14 @@ function JobsPageInner() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Jobs" description="Pipeline status and execution history." count={`${counts.all} pipelines`} />
+      <PageHeader title="Jobs" description="Pipeline status and execution history." count={`${counts.all} pipelines`} actions={
+        <div className="flex items-center gap-2 text-xs text-text-3">
+          <label htmlFor="jobs-history-window">History window</label>
+          <select id="jobs-history-window" value={historyWindow} onChange={event => setHistoryWindow(Number(event.target.value) as HistoryWindow)} className="h-8 rounded border border-input bg-obsidian px-2 text-text-1">
+            <option value={900}>15 minutes</option><option value={3600}>1 hour</option><option value={86400}>24 hours</option>
+          </select>
+        </div>
+      } />
 
       <FilterBar
         counts={counts}
@@ -122,7 +129,7 @@ function JobsPageInner() {
               <span className="text-xs font-bold lowercase text-text-3">Status</span>
               <span className="text-xs font-bold lowercase text-text-3">Last run</span>
               <span className="pr-4 text-right text-xs font-bold lowercase text-text-3">Duration</span>
-              <RunStripAxis />
+              <RunStripAxis windowSeconds={historyWindow} className="self-stretch" />
               <span className="sr-only">Actions</span>
             </div>
 
@@ -185,9 +192,9 @@ function JobsPageInner() {
                     )}
                   </div>
 
-                  {/* Sparkline column */}
-                  <div className="min-w-0">
-                    <RunStrip runs={job.lastRuns} />
+                  {/* Shared time grid; archived history has its own ordinal lane. */}
+                  <div className="min-w-0 self-stretch">
+                    <RunStrip runs={job.lastRuns} windowSeconds={historyWindow} />
                   </div>
 
                   {/* Actions column */}
@@ -223,6 +230,8 @@ function JobsPageInner() {
           </div>
         )}
       </div>
+
+      {rows.length > 0 ? <p className="text-xs text-text-3">Latest 10 runs per pipeline. Position shows start time; mark height shows duration, capped at 10s. Older runs use a separate ordered strip.</p> : null}
 
       {/* Activity feed */}
       {activity.length > 0 && <ActivityFeed entries={activity} />}

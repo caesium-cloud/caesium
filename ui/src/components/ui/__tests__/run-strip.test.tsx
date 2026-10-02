@@ -44,3 +44,21 @@ it("separates archived history from time coordinates and gives missing dates an 
   expect(screen.getByText("No runs yet")).toBeInTheDocument();
   expect(container.querySelector(".cs-now-head")).toBeNull();
 });
+
+it("preserves duration height in the archive without assigning it a recent time position", () => {
+  const { container } = render(<RunStrip runs={[
+    { status: "succeeded", duration: .5, startedAt: "2026-09-30T12:00:00Z" },
+    { status: "failed", duration: 10, startedAt: "2026-09-30T12:01:00Z" },
+    { status: "skipped", startedAt: "2026-09-30T12:02:00Z" },
+  ]} />);
+  const marks = [...container.querySelectorAll<HTMLElement>("[data-status]")];
+  expect(marks.map(mark => mark.style.height)).toEqual(["7px", "26px", "6px"]);
+  expect(container.querySelector("[data-history-grid]")).toBeNull();
+  expect(container.querySelector(".cs-live-bar")).toBeNull();
+});
+
+it("never presents an unknown terminal duration as elapsed live work", () => {
+  const { container } = render(<RunStrip runs={[{ status: "succeeded", startedAt: "2026-10-01T11:59:00Z" }]} />);
+  expect(container.querySelector<HTMLElement>('[data-status="succeeded"]')!.style.height).toBe("6px");
+  expect(screen.getByRole("img")).toHaveAccessibleName(/duration unknown/);
+});

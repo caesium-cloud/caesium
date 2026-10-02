@@ -58,7 +58,7 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
       data-testid="baseline-sparkline"
     >
       <div aria-label="Metric observations in the last 24 hours">
-        <RunStripAxis windowSeconds={86400} />
+        <RunStripAxis windowSeconds={86400} label="Observations" />
         <RunStrip windowSeconds={86400} runs={[...query.data.series].reverse().map(sample => ({ status: sample.violated ? "failed" : sample.in_baseline ? "succeeded" : "queued", startedAt: sample.created_at, duration: 0 }))} />
       </div>
       <svg

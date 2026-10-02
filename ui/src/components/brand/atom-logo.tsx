@@ -18,6 +18,8 @@ export function AtomLogo({ size = 40, animated = true, className, forceReducedMo
   const reducedMotion = useReducedMotion();
   const motionOff = forceReducedMotion || reducedMotion || !animated;
   const descriptionId = useId();
+  // The header mark needs optical sizing: a 5-unit stroke disappears at 22px.
+  const compact = size <= 32;
   const drawn = voters.slice(0, 9);
   const orbitColor = quorum === "lost" ? "hsl(var(--danger))" : quorum === "unknown" ? "hsl(var(--text-4))" : "hsl(var(--cyan))";
   return <svg viewBox="0 0 512 512" width={size} height={size} className={cn("block cs-animated", className)}
@@ -30,22 +32,22 @@ export function AtomLogo({ size = 40, animated = true, className, forceReducedMo
         <g className={motionOff ? undefined : "atom-orbit"} style={motionOff ? undefined : {
           transformOrigin: "256px 256px", animation: `cs-spin ${period}s linear infinite${orbit === 1 ? " reverse" : ""}`,
         }}>
-          <ellipse cx="256" cy="256" rx="210" ry="70" fill="none" stroke={orbitColor} strokeWidth="3.5" strokeDasharray={quorum === "lost" ? "14 12" : undefined} />
+          <ellipse cx="256" cy="256" rx="210" ry="70" fill="none" stroke={orbitColor} strokeWidth={compact ? 26 : 5} strokeDasharray={quorum === "lost" ? compact ? "36 24" : "14 12" : undefined} />
           {members.map((voter, i) => {
             const theta = 2 * Math.PI * i / members.length;
             const x = 256 + 210 * Math.cos(theta), y = 256 + 70 * Math.sin(theta);
             const unknown = quorum === "unknown" || voter.reachable === null;
-            const radius = size <= 22 ? 36 : 13;
+            const radius = compact ? 36 : 13;
             return <g key={voter.id} data-voter={voter.id} data-reachable={unknown ? "unknown" : String(voter.reachable)} data-leader={String(voter.leader)}>
               <circle cx={x} cy={y} r={radius} fill={!unknown && voter.reachable ? "hsl(var(--gold))" : "hsl(var(--void))"}
-                stroke={unknown ? "hsl(var(--text-4))" : voter.reachable ? "hsl(var(--gold))" : "hsl(var(--danger))"} strokeWidth="4" />
-              {voter.leader && !unknown && voter.reachable ? <circle cx={x} cy={y} r={radius + 7} fill="none" stroke="hsl(var(--cyan))" strokeWidth="4" /> : null}
+                stroke={unknown ? "hsl(var(--text-4))" : voter.reachable ? "hsl(var(--gold))" : "hsl(var(--danger))"} strokeWidth={compact ? 18 : 4} />
+              {voter.leader && !unknown && voter.reachable ? <circle cx={x} cy={y} r={radius + (compact ? 14 : 7)} fill="none" stroke="hsl(var(--cyan))" strokeWidth={compact ? 18 : 4} /> : null}
             </g>;
           })}
         </g>
       </g>;
     })}
-    <circle cx="256" cy="256" r="20" fill={quorum === "lost" ? "hsl(var(--text-4))" : "hsl(var(--cyan))"}
+    <circle cx="256" cy="256" r={compact ? 52 : 26} fill={quorum === "lost" ? "hsl(var(--text-4))" : "hsl(var(--cyan))"}
       className={!motionOff && quorum === "ok" ? "atom-nucleus" : undefined}
       style={!motionOff && quorum === "ok" ? { transformOrigin: "256px 256px", animation: "cs-nucleus 1s ease-out infinite" } : undefined} />
   </svg>;

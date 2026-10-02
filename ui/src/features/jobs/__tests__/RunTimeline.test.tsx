@@ -158,3 +158,13 @@ it("scales a 492ms terminal run to 500ms without distorting duration or clipping
   expect(ticks.at(-1)!.style.transform).toBe("translateX(-100%)");
   expect(parseFloat(screen.getByTestId("run-timeline-bar").style.width)).toBeCloseTo(98.4);
 });
+
+it("shows one shared now cursor only while the run is live", () => {
+  const props = { tasks: [makeTask({ task_id: "task-1", status: "running", completed_at: undefined })], taskDefinitions, runStartedAt: "2026-08-01T00:00:00Z" };
+  const { rerender } = render(<RunTimeline {...props} runStatus="running" />);
+  expect(screen.getAllByTestId("run-timeline-now")).toHaveLength(1);
+  expect(screen.getByTestId("run-timeline-bar")).toHaveClass("cs-live-bar");
+  rerender(<RunTimeline {...props} tasks={[makeTask({ task_id: "task-1" })]} runStatus="succeeded" />);
+  expect(screen.queryByTestId("run-timeline-now")).not.toBeInTheDocument();
+  expect(screen.getByTestId("run-timeline-bar")).not.toHaveClass("cs-live-bar");
+});

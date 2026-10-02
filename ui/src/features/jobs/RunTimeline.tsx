@@ -40,7 +40,14 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus }:
     <div className="mb-3 flex flex-wrap justify-end gap-x-4 gap-y-2">{LEGEND_STATUSES.map(status => <StatusBadge key={status} status={status} size="sm" />)}</div>
     <p className="mb-2 text-xs text-text-3 md:hidden">Scroll timeline horizontally → · task names stay visible</p>
     <div className="overflow-x-auto bg-midnight" tabIndex={0} role="region" aria-label="Execution timeline">
-      <div className="min-w-[620px]">
+      <div className="relative min-w-[620px] [--timeline-gutter:160px] md:[--timeline-gutter:220px]">
+        <div className="relative ml-[var(--timeline-gutter)] h-8 text-[11px] text-text-3">{ticks.map((tick, index) => <span data-testid="timeline-tick" key={tick} className="absolute top-1 whitespace-nowrap" style={{ left: `${tick / maxEnd * 100}%`, transform: `translateX(${index === 0 ? 0 : index === ticks.length - 1 ? -100 : -50}%)` }}>{formatMs(tick)}</span>)}</div>
+        <div aria-hidden="true" className="pointer-events-none absolute bottom-0 left-[var(--timeline-gutter)] right-0 top-8" style={{ containerType: "inline-size" }}>
+          {ticks.map(tick => <span key={tick} className="absolute inset-y-0 border-l border-border" style={{ left: `${tick / maxEnd * 100}%` }} />)}
+          {live ? <span data-testid="run-timeline-now" className="absolute inset-y-0 left-0 z-[1] border-l border-running/60" style={{ transform: `translateX(${nowPosition}cqw)` }}>
+            <span className="cs-now-head absolute -top-1 h-2 w-2 rounded-full bg-running" style={{ left: nowPosition > 99 ? -8 : -4 }} />
+          </span> : null}
+        </div>
         {taskTimes.map(({ task, status, start, end, ghost, unstarted }, index) => {
           const label = taskLabel(task, taskDefinitions);
           const fanned = typeof task.partition_count === "number" && (task.partition_count > 1 || (task.partition_count > 0 && !!task.partition_value));
@@ -50,15 +57,13 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus }:
           const width = ghost ? 4 : (end - start) / maxEnd * 100;
           const annotation = status === "skipped" ? "Skipped" : ghost ? "Waiting on upstream" : unstarted ? "Did not start" : formatMs(end - start);
           const reason = task.error || (status === "skipped" ? "Branch chose another path" : undefined);
-          const body = <div className="grid min-h-14 grid-cols-[160px_1fr] border-b border-border md:grid-cols-[220px_1fr]">
-            <div className="sticky left-0 z-10 border-r border-border bg-midnight py-2 pr-3 text-xs text-text-2">
+          const body = <div className="grid min-h-12 grid-cols-[var(--timeline-gutter)_1fr] border-b border-border">
+            <div className="sticky left-0 z-10 border-r border-border bg-midnight py-1.5 pr-3 text-xs text-text-2">
               <div className="flex items-center gap-2"><span className="text-text-3">{String(index + 1).padStart(2, "0")}</span><StatusBadge status={status} variant="glyph" size="sm" /><span className="truncate" title={label}>{label}{fanned ? ` ×${task.partition_count}` : ""}</span></div>
               {reason ? <details className="ml-6 mt-1 text-text-3"><summary className="cursor-pointer">{annotation} · reason</summary><p className="mt-2 break-words [overflow-wrap:anywhere]">{reason}</p></details> : <div className="ml-6 mt-1 text-text-3">{annotation}</div>}
             </div>
             <div className="relative min-w-0">
-              {ticks.map(tick => <span key={tick} aria-hidden="true" className="absolute inset-y-0 border-l border-border" style={{ left: `${tick / maxEnd * 100}%` }} />)}
-              {live ? <span aria-hidden="true" className="absolute inset-y-0 border-l border-running" style={{ left: `${nowPosition}%` }} /> : null}
-              <span data-testid="run-timeline-bar" data-ghost={ghost} title={`${label}: ${meta.label}, ${formatMs(end - start)}`} className={`absolute top-5 h-3 rounded-sm ${status === "running" ? "shadow-[0_0_10px_hsl(var(--running)/.5)]" : ""}`}
+              <span data-testid="run-timeline-bar" data-ghost={ghost} title={`${label}: ${meta.label}, ${formatMs(end - start)}`} className={`absolute top-5 h-2.5 rounded-sm ${status === "running" && live ? "cs-live-bar cs-duration-bar" : ""}`}
                 style={{ left: `${left}%`, width: width > 0 ? `${width}%` : 2, transform: left === 100 ? "translateX(-100%)" : undefined, background: status === "skipped" || ghost ? "transparent" : status === "running" ? "linear-gradient(90deg,hsl(var(--running)/.2),hsl(var(--running)))" : meta.fg, border: status === "skipped" ? "1px dashed hsl(var(--text-3))" : ghost ? "1px solid hsl(var(--gold))" : undefined }} />
               {segments.length ? <div data-testid="run-timeline-density-strip" className="absolute top-9 flex h-1" style={{ left: `${left}%`, width: `${width}%` }}>{segments.map(segment => <span key={segment.status} data-testid="run-timeline-density-segment" data-status={segment.status} style={{ width: `${segment.fraction * 100}%`, backgroundColor: statusMeta(segment.status).fg }} />)}</div> : null}
             </div>
@@ -67,7 +72,6 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus }:
             {fanned ? <div data-testid="run-timeline-group-row">{body}</div> : body}
           </div>;
         })}
-        <div className="relative ml-[160px] h-8 text-xs text-text-3 md:ml-[220px]">{ticks.map((tick, index) => <span data-testid="timeline-tick" key={tick} className="absolute top-2 whitespace-nowrap" style={{ left: `${tick / maxEnd * 100}%`, transform: `translateX(${index === 0 ? 0 : index === ticks.length - 1 ? -100 : -50}%)` }}>{formatMs(tick)}</span>)}</div>
       </div>
     </div>
     <p className="mt-2 text-xs text-text-3">Elapsed from run start · zero-duration events shown as a marker</p>

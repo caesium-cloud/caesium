@@ -6,6 +6,7 @@ import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
 export type SortKey = "alias" | "status" | "last_run";
+export type HistoryWindow = 900 | 3600 | 86400;
 
 export interface JobRow extends Job {
   lastRuns: RunSummary[];
@@ -41,22 +42,25 @@ const ACTIVITY_LIMIT = 20;
 const ACTIVITY_KEY_LIMIT = 100;
 const RUN_ACTIVITY_EVENTS = ["run_started", "run_completed", "run_failed", "run_cancelled"] as const;
 
-function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey } {
+function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey; historyWindow: HistoryWindow } {
   const params = new URLSearchParams(window.location.search);
   const status = params.get("status") as StatusFilter | null;
   const sort = params.get("sort") as SortKey | null;
+  const history = Number(params.get("history"));
   return {
     status: status && STATUS_FILTERS.includes(status) ? status : "all",
     q: params.get("q") ?? "",
     sort: sort && SORT_KEYS.includes(sort) ? sort : "alias",
+    historyWindow: history === 3600 || history === 86400 ? history : 900,
   };
 }
 
-function writeUrlParams(status: StatusFilter, q: string, sort: SortKey) {
+function writeUrlParams(status: StatusFilter, q: string, sort: SortKey, historyWindow: HistoryWindow) {
   const params = new URLSearchParams();
   if (status !== "all") params.set("status", status);
   if (q) params.set("q", q);
   if (sort !== "alias") params.set("sort", sort);
+  if (historyWindow !== 900) params.set("history", String(historyWindow));
   const search = params.toString();
   const url = search ? `${window.location.pathname}?${search}` : window.location.pathname;
   window.history.replaceState(window.history.state, "", url);
@@ -87,6 +91,7 @@ export function useJobsView() {
   const [statusFilter, setStatusFilterState] = useState<StatusFilter>(initial.status);
   const [search, setSearchState] = useState(initial.q);
   const [sort, setSortState] = useState<SortKey>(initial.sort);
+  const [historyWindow, setHistoryWindow] = useState(initial.historyWindow);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const activityIdRef = useRef(0);
   const activityKeysRef = useRef(new Set<string>());
@@ -98,8 +103,8 @@ export function useJobsView() {
   const setSort = useCallback((s: SortKey) => setSortState(s), []);
 
   useEffect(() => {
-    writeUrlParams(statusFilter, search, sort);
-  }, [statusFilter, search, sort]);
+    writeUrlParams(statusFilter, search, sort, historyWindow);
+  }, [statusFilter, search, sort, historyWindow]);
 
   const { data: jobs, isLoading, error } = useQuery({
     queryKey: ["jobs"],
@@ -160,6 +165,14 @@ export function useJobsView() {
 
   useEffect(() => {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const refreshHistory = () => {
+      // Reconnects replay a burst of retained events. Coalesce their list reads.
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      }, 250);
+    };
 
     const onRunEvent = (e: CaesiumEvent) => {
       const payload = e.payload as JobRun | undefined;
@@ -167,20 +180,20 @@ export function useJobsView() {
       const jobID = run?.job_id ?? e.job_id;
 
       if (!jobID) {
-        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        refreshHistory();
         return;
       }
 
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
         old?.map((job) =>
           job.id === jobID
-            ? { ...job, latest_run: run ? { ...job.latest_run, ...run } : job.latest_run }
+            ? { ...job, latest_run: run ? job.latest_run?.id === run.id ? { ...job.latest_run, ...run } : run : job.latest_run }
             : job,
         ),
       );
       if (run) {
         queryClient.setQueryData(["job", jobID], (old: Job | undefined) =>
-          old ? { ...old, latest_run: { ...old.latest_run, ...run } } : old,
+          old ? { ...old, latest_run: old.latest_run?.id === run.id ? { ...old.latest_run, ...run } : run } : old,
         );
       }
 
@@ -193,6 +206,10 @@ export function useJobsView() {
       const key = activityKey(e, jobID, runId);
 
       if (!rememberActivityKey(activityKeysRef.current, key)) return;
+
+      // The list projection owns the bounded history as well as its durations.
+      // Updating only latest_run leaves the strip frozen after an SSE event.
+      refreshHistory();
 
       const draft: PendingActivityEntry = {
         type: e.type,
@@ -207,7 +224,6 @@ export function useJobsView() {
       }
 
       pendingActivityRef.current.push(draft);
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     };
 
     const onPauseEvent = (e: CaesiumEvent) => {
@@ -244,6 +260,7 @@ export function useJobsView() {
     events.subscribe("task_cached", onTaskCached);
 
     return () => {
+      clearTimeout(refreshTimer);
       events.unsubscribeConnection(onConnection);
       RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));
       ["job_paused", "job_unpaused"].forEach((t) => events.unsubscribe(t, onPauseEvent));
@@ -298,12 +315,26 @@ export function useJobsView() {
       return a.alias.localeCompare(b.alias);
     });
 
-    return sorted.map((job) => ({
-      ...job,
-      lastRuns: (job.last_runs ?? [])
+    return sorted.map((job) => {
+      const history = [...(job.last_runs ?? [])];
+      const latest = job.latest_run;
+      // SSE updates latest_run immediately; the list's bounded history can lag.
+      // Preserve the server timestamp (including sub-ms precision) to reconcile it.
+      if (latest && Number.isFinite(Date.parse(latest.started_at))) {
+        const duration = latest.completed_at
+          ? (Date.parse(latest.completed_at) - Date.parse(latest.started_at)) / 1000
+          : null;
+        const entry = { started_at: latest.started_at, status: latest.status,
+          duration: duration !== null && Number.isFinite(duration) && duration >= 0 ? duration : null };
+        const index = history.findIndex(run => run.started_at === latest.started_at);
+        if (index >= 0) history[index] = entry;
+        else history.push(entry);
+      }
+      return { ...job, lastRuns: history
+        .sort((a, b) => a.started_at.localeCompare(b.started_at))
         .slice(-10)
-        .map((r) => ({ status: r.status, duration: r.duration ?? null, startedAt: r.started_at })),
-    }));
+        .map(r => ({ status: r.status, duration: r.duration ?? null, startedAt: r.started_at })) };
+    });
   }, [jobs, statusFilter, search, sort]);
 
   return {
@@ -315,6 +346,8 @@ export function useJobsView() {
     setStatusFilter,
     sort,
     setSort,
+    historyWindow,
+    setHistoryWindow,
     isLoading,
     error: error as Error | null,
     activity,

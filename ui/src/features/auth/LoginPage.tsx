@@ -138,7 +138,7 @@ export function LoginPage({
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-void px-4 py-8 text-foreground">
-      <Oscillator className="pointer-events-none absolute left-0 top-1/2 w-full opacity-35" />
+      <Oscillator ambient className="pointer-events-none absolute left-0 top-1/2 w-full opacity-[.35]" />
       <div
         className="relative flex w-full max-w-[420px] flex-col gap-4"
       >

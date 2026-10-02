@@ -6,11 +6,11 @@ The console uses self-hosted Sometype Mono, warm text on cool instrument surface
 
 The shared UTC clock drives recent fleet history and trigger countdowns. Historical strips and terminal timelines stop subscribing to ticks. Each CSS instrument aligns its own animation to UTC when inserted and resynchronizes after a hidden tab returns. Reduced motion freezes live indicators and replaces the oscillator with a flat line. Identifiers retain their original case and use one copy-chip component with eight visible characters, the full title and clipboard payload, and a one-second confirmation. Plain HTTP deployments use native copy when the Clipboard API is unavailable; if both paths are denied, the chip exposes the full selectable value.
 
-Run pages show alias and start time before the diagnostic ID. Task nodes are 260 × 112 px with status-specific electrons. Timeline rows are 36 px, graph spacing is updated, and contract and lineage nodes are 260 × 80 px. Lineage metadata remains in the node tooltip; its links, freshness and hold overlays remain functional. Job YAML uses the same CodeMirror theme as the authoring editor.
+Run pages show alias and start time before the diagnostic ID. Task nodes are 260 × 112 px with status-specific electrons. Timeline rows have a 48 px minimum to accommodate task annotations, graph spacing is updated, and contract and lineage nodes are 260 × 80 px. Lineage metadata remains in the node tooltip; its links, freshness and hold overlays remain functional. Job YAML uses the same CodeMirror theme as the authoring editor.
 
 Re-run uses Alt-R; unmodified `r` does not launch work. Global `g` navigation chords consume their second key before route shortcuts run. UTC time formatting accepts malformed or absent timestamps and displays a fallback. Both YAML surfaces follow the resolved light/dark theme, including selections and tooltips.
 
-The fleet strip uses the last 15 minutes, with a labeled last-ten fallback for older or undated history. `GET /v1/jobs` now includes `last_runs[].started_at`, which the existing SQL projection already collected. The integration history test checks this field against a real run.
+The fleet strip defaults to the last 15 minutes, with URL-persisted 1-hour and 24-hour choices and a separate, labeled ordinal fallback for older or undated history. One shared clock marker and aligned grid frame recent history; mark height shows duration up to 10 seconds. Live events update both status and the strip immediately, with coalesced reads to reconcile bounded history. `GET /v1/jobs` includes `last_runs[].started_at`, which the existing SQL projection already collected. The integration history test checks this field against a real run.
 
 ## Data availability
 
@@ -100,3 +100,5 @@ The shared Docker filesystem exhausted its free space during a separate Go check
 ### Visual polish follow-up
 
 See [Operator console polish](operator-console-polish.md) for the thirteen visual findings, behavior changes, before/after screenshots, and the current qualification boundary. Earlier test results above remain evidence for their recorded revisions.
+
+See [Handoff and motion audit](operator-console-motion-audit.md) for the comparison with the original bundle, restored timeline instruments, live-state correction, representative screenshots, and a real-run motion recording.
