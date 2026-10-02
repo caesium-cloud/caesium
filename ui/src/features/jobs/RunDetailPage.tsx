@@ -1,5 +1,8 @@
+import { JobRunNavigation } from "./JobRunNavigation";
+import { RunIdentity } from "./RunIdentity";
+import { RunPicker } from "./RunPicker";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
@@ -25,7 +28,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatUTCTime, formatUTCTimestamp } from "@/lib/utils";
+import { formatUTCTimestamp } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
@@ -340,9 +343,7 @@ export function RunDetailPage() {
         <div>
           <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
             <h1 data-testid="run-heading" className="min-w-0 basis-full [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
-            <span className="text-xs text-text-3">run started {formatUTCTime(run.started_at)}</span>
-            <StatusBadge status={run.status} />
-            <IdChip value={runId} label="run id" />
+            <RunIdentity run={run} />
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-7 gap-y-2 text-xs text-text-3">
             <span>elapsed <Duration start={run.started_at} end={run.completed_at} /></span>
@@ -351,6 +352,8 @@ export function RunDetailPage() {
             <span>receipt {isLive || receiptQuery.isPending ? "pending" : receiptQuery.data ? "available" : "unavailable"}</span>
           </div>
         </div>
+
+        <JobRunNavigation jobId={jobId} active="run" trailing={<RunPicker jobId={jobId} currentRun={run} runs={jobRuns?.runs} isLoading={isLoadingJobRuns} />} />
 
         <DagCounters tasks={run.tasks} runStatus={run.status} />
 
@@ -395,15 +398,7 @@ export function RunDetailPage() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="outline" size="sm" className="h-8 text-xs" asChild>
-            <Link
-              to="/jobs/$jobId/runs"
-              params={{ jobId }}
-              data-testid="all-runs-link"
-            >
-              All runs <Kbd>a</Kbd>
-            </Link>
-          </Button>
+
           </div>
           <div className="flex flex-wrap items-center gap-2" aria-label="Run execution actions">
           {canLaunchReplay ? (

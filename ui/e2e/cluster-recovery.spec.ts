@@ -563,7 +563,7 @@ async function readRunSurface(
   const headings = await page.getByTestId("run-heading").count();
   // Run detail has no history table. The job page's Runs tab is the console list.
   await page.locator(`a[href="/jobs/${jobId}"]`).first().click();
-  await page.getByTestId("job-detail-view-tabs").getByRole("link", { name: "Runs" }).click();
+  await page.getByTestId("job-detail-view-tabs").getByRole("link", { name: "Run history" }).click();
   await expect(page.getByTestId("job-runs-list")).toBeVisible();
   // The list renders its cached query first and refetches every 15 s while the
   // event stream is unauthorized. Give it the heading's 30 s to converge; a row

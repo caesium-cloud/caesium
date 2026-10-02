@@ -135,3 +135,22 @@ Validation: ESLint, 444 unit tests, production build/budgets, and the focused `d
 This is a UI correction, not a fix for the recorded backend database-lock failure. Populated incident/fan-out failure recovery and large-DAG performance remain unqualified by this focused pass. Existing permission, keyboard/copy, theme, and reduced-motion behavior is retained; no new accessibility-compliance claim is made.
 
 Local delivery: image `caesiumcloud/caesium:pr617-dag-motion-20261002` is embedded and served on port 8084 by all three replicas. Each replica passes database health and reports 3/3 reachable voters; all 14 entry assets match the production build. A final run of the same `k8s-live-demo` job (`a9a48115-face-4a5b-8ef3-a8f62d95025e`) succeeds on the deployed image and visibly stops without reload. Containerized documentation guardrails also pass. The rollout used the existing builder/OCI packaging procedure with host-mounted build caches and removed only superseded images belonging to this local release.
+
+## Follow-up: connect jobs to their executions
+
+The path from Jobs to a timeline previously relied on a small `Latest overlay` timestamp link, and an execution's main navigation offered no explicit route to the job overview. This pass keeps the graph-first job overview and existing execution routes while making their relationship visible.
+
+| Surface | Navigation change |
+| --- | --- |
+| Jobs list | The Last run value is a direct link to that exact execution, with an arrow and an accessible name. The job name continues to open its overview. Column widths and the history strip are retained. |
+| Job overview | A dedicated active/latest-run summary shows its copyable ID, status, full UTC timestamp, elapsed time, and cache summary. **View run / View live run** is the primary inspection action; the caption names timeline, logs, and receipt. **Choose run** opens other executions. The first-run empty state points to the existing Trigger action. |
+| Shared context | **Job overview** and **Run history** occupy the same navigation position on job and execution pages. The active **Execution** item distinguishes a specific run from its parent job. The run identity presentation is shared; paused remains a job property, while execution outcome belongs to the selected run. |
+| Exact historical run | **Switch run** lists timestamps, IDs, statuses, and durations, with the inspected run pinned independently of recent history. Up to eight alternatives appear, plus a route to complete history. Viewing history, using Back, copying an ID, or switching runs never launches a new execution. History rows now show the full UTC date as well as time. |
+
+[Job overview before](ui-motion-617/job-run-before.png) · [Job overview after](ui-motion-617/job-run-after.png) · [Execution navigation](ui-motion-617/run-navigation-after.png) · [Run picker on phone](ui-motion-617/run-picker-phone.png).
+
+Validation covers the real Jobs → overview → exact execution → historical execution → overview flow at 1440×900, 1280×800, and 390×844 in both themes. The browser checks zero/one/multiple-run states, exact URLs and IDs, direct entry/reload, keyboard selection and dismissal, copy behavior, the existing A history shortcut, browser Back, mobile reachability, and absence of accidental run creation. Four existing regression journeys also pass: mobile graph/timeline context, case-sensitive identifiers and Alt-R/navigation chords, malformed timestamps, and job-scoped history after re-run. ESLint, all 444 unit tests, and production build/budgets pass. Direct screenshot review includes a populated picker with the original failed run and subsequent successful runs. Evidence is under `.tmp/pr617-run-navigation/`.
+
+No scheduler, API, permission, run-state, or animation logic changes in this pass. Populated incident screens, external authentication providers, and large-history performance remain outside this focused navigation qualification.
+
+Local delivery: image `caesiumcloud/caesium:pr617-run-navigation-20261002` is served on port 8084 by three healthy replicas with 3/3 reachable voters. All 14 entry assets match the production build. A final real execution of `k8s-live-demo` (`d90f8e48-b992-46b9-8d96-b7bcae2ce6f2`) verifies View live run, exact execution identity, the run picker, natural completion, and return to the job overview with its succeeded outcome. Containerized documentation guardrails pass. The existing Kubernetes release remains running for inspection.

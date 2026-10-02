@@ -24,7 +24,7 @@ test("identifiers retain case and re-run shortcuts respect navigation chords and
   await expect(row).not.toContainText("manual");
   await row.getByRole("link", { name: job.alias, exact: true }).click();
   await expect(page.getByRole("heading", { name: job.alias, exact: true })).toHaveCSS("text-transform", "none");
-  await expect(page.getByText("Latest overlay:", { exact: false })).not.toContainText("run run");
+  await expect(page.getByTestId("job-run-context")).not.toContainText("run run");
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
   await expect(page.getByTestId("run-heading")).toBeVisible();
   let triggers = 0;
@@ -117,7 +117,7 @@ test("SYNTHETIC: malformed run timestamps do not crash job, history, run, breadc
   });
   await page.goto(`/jobs/${job.id}`);
   await expect(page.getByRole("heading", { name: job.alias, exact: true })).toBeVisible();
-  await expect(page.getByText("Latest overlay:", { exact: false })).toContainText("Unknown time");
+  await expect(page.getByTestId("job-run-context")).toContainText("Unknown time");
   await page.goto(`/jobs/${job.id}/runs`);
   await expect(page.getByRole("dialog")).toContainText("Unknown time");
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);

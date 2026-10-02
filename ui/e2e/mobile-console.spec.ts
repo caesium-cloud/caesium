@@ -203,7 +203,7 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   }).toBe(true);
   await page.keyboard.press("Escape");
   await page.goto(`/jobs/${job.id}`);
-  await page.getByRole("link", { name: "Runs" }).click();
+  await page.getByRole("link", { name: "Run history" }).click();
   const secondaryDialog = page.getByRole("dialog", { name: "Run History" });
   await expectDialogContentFitsViewport(page, secondaryDialog);
   await expect.poll(async () => {

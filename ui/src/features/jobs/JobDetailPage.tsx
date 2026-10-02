@@ -1,3 +1,6 @@
+import { JobRunNavigation } from "./JobRunNavigation";
+import { RunIdentity } from "./RunIdentity";
+import { RunPicker } from "./RunPicker";
 import { useTheme } from "@/components/theme-provider";
 import { ImageReference } from "@/components/ui/image-reference";
 import CodeMirror from "@uiw/react-codemirror";
@@ -6,7 +9,7 @@ import { yamlThemes, yamlHighlight } from "@/components/ui/yaml-theme";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck } from "lucide-react";
+import { ArrowRight, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
 import { NotFoundState } from "@/components/not-found-state";
@@ -45,7 +48,7 @@ import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTime, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
+import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
 
@@ -444,25 +447,12 @@ export function JobDetailPage() {
 
             <div className="flex flex-wrap items-center gap-2.5">
               <h1 className="min-w-0 [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job.alias}</h1>
-              <StatusBadge status={job.paused ? "paused" : (featuredRun?.status ?? "queued")} size="sm" />
+              {job.paused ? <StatusBadge status="paused" size="sm" /> : null}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
               <IdChip value={job.id} label="job id" />
-              {featuredRun ? (
-                <>
-                  <span className="inline-block w-3" aria-hidden="true" />
-                  <span>
-                    {activeRun ? "Started" : "Last run"}{" "}
-                    <RelativeTime date={featuredRun.started_at} />
-                  </span>
-                  <span className="inline-block w-3" aria-hidden="true" />
-                  <span className="tabular-nums">
-                    <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
-                  </span>
-                </>
-              ) : null}
+
             </div>
-            {featuredRun ? <div className="mt-2"><RunCacheSummary run={featuredRun} /></div> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <TriggerDialog
@@ -475,6 +465,7 @@ export function JobDetailPage() {
               trigger={(
                 <Button
                   size="sm"
+                  variant={featuredRun ? "outline" : "default"}
                   aria-label="Trigger job"
                   disabled={triggerMutation.isPending || job.paused}
                 >
@@ -515,13 +506,7 @@ export function JobDetailPage() {
             </DropdownMenu>
           </div>
         </div>
-        <div
-          className="flex max-w-full flex-wrap items-center gap-1 border-b border-border py-1"
-          data-testid="job-detail-view-tabs"
-        >
-          <ViewTab jobId={job.id} view="runs" activeView={secondaryView}>
-            Runs
-          </ViewTab>
+        <JobRunNavigation jobId={job.id} active={secondaryView ?? "overview"}>
           <ViewTab jobId={job.id} view="tasks" activeView={secondaryView}>
             Tasks
           </ViewTab>
@@ -537,7 +522,7 @@ export function JobDetailPage() {
           <ViewTab jobId={job.id} view="cache" activeView={secondaryView}>
             Cache
           </ViewTab>
-        </div>
+        </JobRunNavigation>
       </div>
 
       <RunQueuePanel
@@ -558,39 +543,31 @@ export function JobDetailPage() {
         className="relative flex flex-col overflow-hidden rounded-md border bg-void"
         style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
       >
-        {/* Compact overlay status bar */}
-        <div className="flex flex-wrap items-center justify-between border-b border-border px-4 py-3 gap-x-4 gap-y-3">
-          <div className="flex items-center gap-2 text-xs text-text-3 min-w-0">
-            {featuredRun ? (
-              <>
-                {activeRun && (
-                  <span className="flex items-center gap-1.5">
-
-                    <span className="text-cyan-glow font-normal">Live</span>
-                  </span>
-                )}
-                <span className="flex flex-wrap gap-x-2 gap-y-1">
-                  {activeRun ? "Overlay from" : "Latest overlay:"}{" "}
-                  <Link
-                    to="/jobs/$jobId/runs/$runId"
-                    params={{ jobId, runId: featuredRun.id }}
-                    className="text-cyan-glow hover:text-cyan-glow"
-                  >
-                    run started {formatUTCTime(featuredRun.started_at)}
+        {/* Make the execution behind the graph an explicit destination. */}
+        <div data-testid="job-run-context" className="space-y-3 border-b border-border bg-midnight px-4 py-3">
+          {featuredRun ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 space-y-2">
+                <RunIdentity run={featuredRun} label={activeRun ? "Active run" : "Latest run"} />
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-3">
+                  <span><RelativeTime date={featuredRun.started_at} /></span>
+                  <span>elapsed <Duration start={featuredRun.started_at} end={featuredRun.completed_at} /></span>
+                  <RunCacheSummary run={featuredRun} />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <RunPicker jobId={jobId} currentRun={featuredRun} runs={sortedRuns} label="Choose run" />
+                <Button asChild size="sm">
+                  <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: featuredRun.id }} data-testid="view-featured-run" aria-describedby="view-run-description">
+                    {activeRun ? "View live run" : "View run"}<ArrowRight aria-hidden="true" />
                   </Link>
-                </span>
-              </>
-            ) : (
-              <span className="text-text-3">DAG topology: trigger a run to see live state</span>
-            )}
-          </div>
-
-          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
-            {/* Live task counters */}
-            {featuredRun && <DagCounters tasks={featuredRun.tasks} runStatus={featuredRun.status} />}
-            {job.paused && (
-              <StatusBadge status="paused" variant="word" size="sm" />
-            )}
+                </Button>
+              </div>
+            </div>
+          ) : <div className="space-y-1"><p className="text-sm font-bold text-text-1">No runs yet</p><p className="text-xs text-text-3">Trigger this job to see its execution timeline, task logs, and receipt.</p></div>}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-border pt-2.5">
+            <span id="view-run-description" className="text-xs text-text-3">Job graph{featuredRun ? " · open a run for its timeline, logs & receipt" : " · waiting for its first execution"}</span>
+            {featuredRun ? <DagCounters tasks={featuredRun.tasks} runStatus={featuredRun.status} /> : null}
           </div>
         </div>
 
@@ -1005,7 +982,7 @@ function RunsView({
       <div className="divide-y border-y border-border" data-testid="job-runs-list">
         {runs.length === 0 ? <div className="p-8 text-center text-text-3">No runs found for this job.</div> : null}
         {runs.map(run => <div key={run.id} className="flex min-h-[42px] flex-wrap items-center gap-x-7 gap-y-2 px-3 py-2 hover:bg-obsidian">
-          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{formatUTCTime(run.started_at)}</span>
+          <span className="text-[13px] text-text-1" title={formatUTCTimestamp(run.started_at, run.started_at)}>{formatUTCTimestamp(run.started_at, "Unknown time")}</span>
           <span className="text-xs text-text-3"><RelativeTime date={run.started_at} /></span>
           {renderRunStatus(run.status)}
           <span className="text-xs text-text-2"><Duration start={run.started_at} end={run.completed_at} /></span>

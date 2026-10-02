@@ -35,7 +35,7 @@ test("mobile detail keeps navigation, the latest run, and timeline context reach
   await expect(counters).toContainText("3 succeeded");
   await expect(counters).toContainText("1 skipped");
   await expect(counters).not.toContainText("blocked");
-  const latest = page.getByRole("link", { name: /^run started/ });
+  const latest = page.getByTestId("view-featured-run");
   await expect(latest).toBeInViewport();
   const cache = page.getByTestId("job-detail-view-tabs").getByRole("link", { name: "Cache", exact: true });
   await expect(cache).toBeInViewport();
@@ -131,7 +131,7 @@ test("mobile live overlay wraps all counters beside a long pipeline name", async
       return box.left >= panel.left && box.right <= panel.right;
     });
   })).toBe(true);
-  await expect(page.getByRole("link", { name: /^run started/ })).toBeInViewport();
+  await expect(page.getByTestId("view-featured-run")).toBeInViewport();
   expect(await page.locator("main").evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await awaitRun(request, job.id, { status: "succeeded" });
 });

@@ -1,3 +1,4 @@
+import { ArrowUpRight } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { FilterChip } from "@/components/ui/filter-chip";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -12,7 +13,7 @@ import { RunStrip, RunStripAxis } from "@/components/ui/run-strip";
 import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Job, type JobRun } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
 import { useJobsView, type ActivityEntry, type HistoryWindow, type JobCounts, type StatusFilter, type SortKey } from "./useJobsView";
 
 export function JobsPage() {
@@ -180,7 +181,9 @@ function JobsPageInner() {
 
                   {/* Last run column */}
                   <div className="py-3 text-sm text-text-2 tabular-nums">
-                    {lr ? <RelativeTime date={lr.started_at} /> : <span className="text-text-3">—</span>}
+                    {lr ? <Link to="/jobs/$jobId/runs/$runId" params={{ jobId: job.id, runId: lr.id }} data-testid="job-latest-run-link" aria-label={`Open latest run of ${job.alias}`} title={`View run ${lr.id} · ${formatUTCTimestamp(lr.started_at, "Unknown time")}`} className="inline-flex items-center gap-1 text-cyan underline-offset-4 hover:underline">
+                      <RelativeTime date={lr.started_at} /><ArrowUpRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    </Link> : <span className="text-text-3">—</span>}
                   </div>
 
                   {/* Duration column */}
