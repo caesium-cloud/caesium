@@ -19,14 +19,27 @@ test("archive history links reach real executions; SYNTHETIC ages exercise align
   const latest = await awaitRun(request, job.id, { status: "succeeded" });
   expect(latest.id).not.toBe(first.id);
   // Age only the browser responses; server executions and exact IDs stay real.
+  const browserNow = await page.evaluate(() => Date.now());
+  await page.clock.setFixedTime(browserNow);
   const age = (run: JobRun) => {
-    const started = Date.now() - (run.id === latest.id ? 40 : 60) * 60_000;
+    const started = browserNow - (run.id === latest.id ? 40 : 60) * 60_000 - 30_000;
     return { ...run, started_at: new Date(started).toISOString(), completed_at: new Date(started + 15_000).toISOString() };
   };
   await page.route("**/v1/jobs", async route => {
     const response = await route.fetch();
     const jobs: Job[] = await response.json();
     await route.fulfill({ response, json: jobs.map(item => item.id === job.id ? { ...item, latest_run: age(latest), last_runs: [age(first), age(latest)].map(run => ({ status: run.status, started_at: run.started_at, duration: 15 })) } : item) });
+  });
+  // Keep the cheap latest-run projection consistent with the aged history,
+  // and exclude unrelated retained events from this presentation fixture.
+  await page.route(`**/v1/jobs/${job.id}`, async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), latest_run: age(latest) } });
+  });
+  await page.route("**/v1/events?**", route => {
+    const url = new URL(route.request().url());
+    url.searchParams.set("types", "history_layout_fixture");
+    return route.continue({ url: url.toString() });
   });
   await page.route(`**/v1/jobs/${job.id}/runs?*`, async route => {
     const response = await route.fetch();

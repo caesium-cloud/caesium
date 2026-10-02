@@ -236,4 +236,12 @@ Before/after captures were reviewed at 1440, 1280, and 390 px in both themes. Br
 
 Validation includes 470 unit tests, containerized lint/production build and bundle checks, 151 CI-configuration tests, and the docs guardrails. Focused browser scenarios exercise Compare, dialog copying without Clipboard API, DAG focus/Enter, 900 ms fleet responses during sustained events, successive retries, 500 retained events over paged history, aborting a walk on navigation, and discovery of a real new run with its event deliberately excluded from the stream. Delayed history, event bursts, and browser capability changes are explicitly synthetic; job creation and run execution use the real REST/runtime surface. Screenshots were reviewed directly; captures and receipts stay in `.tmp/pr617-final-review/`.
 
-Cross-node SSE fan-out itself remains a backend concern: the slow REST reconciliation bounds discovery delay to one minute while preserving the existing event bus and permissions. Populated incident lifecycles remain outside this focused visual qualification.
+Cross-node SSE fan-out itself remains a backend concern: a one-minute REST reconciliation interval discovers missed events while preserving the existing event bus and permissions. Populated incident lifecycles remain outside this focused visual qualification.
+
+### CI follow-up
+
+The full browser suite exposed two runtime issues beyond the focused review pass. SSE event and server-log responses inherited the HTTP server's 30-second write deadline; renew that deadline for each stream chunk, including heartbeats, while retaining the ordinary HTTP limit and a bounded timeout for stalled stream writes. Both real REST streams now have an integration scenario requiring four heartbeats over 45 seconds, plus a real HTTP unit regression through Echo's response wrapper.
+
+A latest-run projection that disagreed with paged history could make each completed history walk schedule another. Bound retries for the same latest-run revision to once per minute; changed revisions and lifecycle events still refresh promptly. Browser coverage verifies both the absence of a feedback loop and a later retry for eventual consistency.
+
+Presentation fixtures now use one fixed browser clock and consistent latest/history snapshots. Sustained-event coverage retains one request handler throughout its gated read; slow-response request bounds use elapsed time rather than assuming workstation timing. The mid-burst update, final update, single in-flight request, concurrent-run identity, and console-error assertions remain enforced. CI follow-up artifacts are retained in `.tmp/pr617-ci-recovery/` and `.tmp/pr617-ci-green/`.

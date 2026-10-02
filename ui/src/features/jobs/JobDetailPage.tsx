@@ -72,6 +72,7 @@ export function JobDetailPage() {
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [backfillDialogOpen, setBackfillDialogOpen] = useState(false);
   const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
+  const reconciledLatest = useRef({ signature: "", at: 0 });
   const historyRefresh = useRef<ReturnType<typeof coalescedRefresh> | undefined>(undefined);
 
   // URL-hash driven node selection
@@ -92,7 +93,7 @@ export function JobDetailPage() {
     }
   };
 
-  const { data: job, isLoading: isLoadingJob } = useQuery({
+  const { data: job, isLoading: isLoadingJob, dataUpdatedAt: jobUpdatedAt } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
     // Reconcile latest_run cheaply when another replica produced the event.
@@ -311,10 +312,17 @@ export function JobDetailPage() {
     const latest = job?.latest_run;
     if (!latest || !runsResult) return;
     const known = runsResult.runs.find(run => run.id === latest.id);
-    if (!known || known.status !== latest.status || known.completed_at !== latest.completed_at) {
+    const signature = JSON.stringify([jobId, latest.id, latest.status, latest.completed_at]);
+    // A stale replica may disagree with history for several reads. Reconcile
+    // each latest-run revision once per minute, rather than letting a walk's
+    // result schedule another walk indefinitely. Later cheap polls can retry
+    // eventual consistency; lifecycle events still refresh immediately.
+    if ((!known || known.status !== latest.status || known.completed_at !== latest.completed_at)
+      && (reconciledLatest.current.signature !== signature || Date.now() - reconciledLatest.current.at >= 60_000)) {
+      reconciledLatest.current = { signature, at: Date.now() };
       historyRefresh.current?.request();
     }
-  }, [job?.latest_run, runsResult]);
+  }, [jobId, job?.latest_run, jobUpdatedAt, runsResult]);
 
   useEffect(() => {
     if (!featuredRunId) {

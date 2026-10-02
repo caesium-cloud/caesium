@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/streaming"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
 	"go.uber.org/zap/zapcore"
@@ -45,7 +46,7 @@ func Stream(c *echo.Context) error {
 	}
 
 	// Initial ping.
-	if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
+	if _, err := fmt.Fprintf(streaming.Writer(c.Response()), ": ping\n\n"); err != nil {
 		return nil
 	}
 	flusher.Flush()
@@ -78,7 +79,7 @@ func Stream(c *echo.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
+			if _, err := fmt.Fprintf(streaming.Writer(c.Response()), ": ping\n\n"); err != nil {
 				return nil
 			}
 			flusher.Flush()
@@ -102,7 +103,7 @@ func writeLogEvent(c *echo.Context, entry log.LogEntry) error {
 	if err != nil {
 		return nil // skip malformed entries
 	}
-	if _, err := fmt.Fprintf(c.Response(), "id: %d\nevent: log\ndata: %s\n\n", entry.Sequence, data); err != nil {
+	if _, err := fmt.Fprintf(streaming.Writer(c.Response()), "id: %d\nevent: log\ndata: %s\n\n", entry.Sequence, data); err != nil {
 		return err
 	}
 	return nil

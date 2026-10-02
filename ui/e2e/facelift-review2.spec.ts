@@ -103,6 +103,8 @@ test("final pass SYNTHETIC: slow jobs reads land during sustained events and rep
   await readyStream(page);
   const row = page.getByTestId("job-row").filter({ hasText: job.alias });
   await expect(row).toContainText("refresh-0");
+  const burstStarted = Date.now();
+  const readsBeforeBurst = reads;
   for (let index = 1; index <= 24; index++) {
     revision = index;
     const event = { sequence: 900000 + index, type: "run_retried", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString() };
@@ -113,7 +115,9 @@ test("final pass SYNTHETIC: slow jobs reads land during sustained events and rep
   }
   await expect(row).toContainText("refresh-24", { timeout: 7000 });
   expect(maxInFlight).toBe(1);
-  expect(reads).toBeLessThanOrEqual(5);
+  // At most one read per 900ms latency interval, plus the trailing refresh.
+  // Browser evaluations take longer on loaded CI runners than on a workstation.
+  expect(reads - readsBeforeBurst).toBeLessThanOrEqual(Math.ceil((Date.now() - burstStarted) / 900) + 1);
   const feed = page.getByTestId("activity-feed");
   await expect(feed.locator('[aria-label="Run retried"]')).toHaveCount(20);
   await expect(feed.locator('[data-status="running"]')).toHaveCount(20);
@@ -236,21 +240,44 @@ test("second pass: real partition retry reopens the run through SSE before REST 
 test("second pass SYNTHETIC: healthy SSE does not repeatedly walk 8000 historical runs", async ({ page, request }) => {
   const { job, first } = await fixture(request);
   let historyReads = 0;
-  await exposeStream(page);
-  const history = Array.from({ length: 8000 }, (_, i) => ({ ...first, id: i === 0 ? first.id : `synthetic-history-${i}`, status: "failed" }));
+  await isolateStream(page);
+  const history = Array.from({ length: 8000 }, (_, i) => ({ ...first, id: i === 0 ? first.id : `synthetic-history-${i}`, status: i === 0 ? first.status : "failed" }));
   await page.route(new RegExp(`/v1/jobs/${job.id}/runs(?:\\?|$)`), route => {
     historyReads++;
     const url = new URL(route.request().url());
     const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit") || 100);
     return route.fulfill({ json: history.slice(offset, offset + limit), headers: { "X-Caesium-Total-Count": "8000", ...(offset + limit < 8000 ? { "X-Caesium-Next-Offset": String(offset + limit) } : {}) } });
   });
+  await page.clock.install();
   await page.goto(`/jobs/${job.id}`); await readyStream(page);
   await expect(page.getByRole("heading", { name: job.alias, exact: true })).toBeVisible();
   await expect.poll(() => historyReads).toBe(16);
-  await page.clock.install(); await page.clock.fastForward(31_000);
+  await page.clock.fastForward(31_000);
   // Keep an observation window after the fast-forward for asynchronous query work.
   await page.waitForTimeout(300);
   expect(historyReads).toBe(16);
+  await page.unrouteAll({ behavior: "wait" });
+});
+
+test("final pass SYNTHETIC: replica disagreement retries on later polls without a feedback loop", async ({ page, request }) => {
+  const { job, first } = await fixture(request);
+  const response = await request.get(`/v1/jobs/${job.id}`);
+  const snapshot = await response.json();
+  await page.route(`**/v1/jobs/${job.id}`, route => route.fulfill({ json: { ...snapshot, latest_run: { ...first, status: "failed" } } }));
+  let reads = 0;
+  await page.route(`**/v1/jobs/${job.id}/runs?**`, route => {
+    reads++;
+    return route.fulfill({ json: [first], headers: { "X-Caesium-Total-Count": "1" } });
+  });
+  await page.clock.install();
+  await isolateStream(page); await page.goto(`/jobs/${job.id}`); await readyStream(page);
+  await expect.poll(() => reads).toBe(2); // Initial history, then one reconciliation.
+  await page.waitForTimeout(1000);
+  expect(reads).toBe(2);
+  await page.clock.fastForward(65_000);
+  await expect.poll(() => reads).toBe(3); // One later retry for eventual consistency.
+  await page.waitForTimeout(1000);
+  expect(reads).toBe(3);
   await page.unrouteAll({ behavior: "wait" });
 });
 
@@ -260,26 +287,33 @@ test("second pass SYNTHETIC: sustained native stream events refresh history and 
   const jobs = await listResponse.json();
   const projected = jobs.map((entry: { id: string }) => entry.id === job.id ? { ...entry, latest_run: { ...latest, status: "running", completed_at: undefined } } : entry);
   let listReads = 0;
-  await page.route("**/v1/jobs", route => { listReads++; return route.fulfill({ json: projected }); });
-  await exposeStream(page); await page.goto(`/jobs?q=${job.alias}`); await readyStream(page);
+  let blocked: Promise<void> | undefined;
+  let inFlight = 0;
+  // Keep one route handler throughout, including the gated concurrent read.
+  await page.route("**/v1/jobs", async route => {
+    listReads++; inFlight++;
+    try {
+      if (blocked) await blocked;
+      await route.fulfill({ json: projected });
+    } finally { inFlight--; }
+  });
+  await isolateStream(page); await page.goto(`/jobs?q=${job.alias}`); await readyStream(page);
   const row = page.getByTestId("job-row").filter({ hasText: job.alias });
   await expect(row.getByRole("link", { name: /Open latest run/ })).toHaveAttribute("href", `/jobs/${job.id}/runs/${latest.id}`);
-  // Finish native backlog delivery, then establish the controlled concurrent state.
-  await page.waitForTimeout(600);
-  await emit(page, "run_started", { type: "run_started", job_id: job.id, run_id: latest.id, timestamp: new Date().toISOString(), payload: { ...latest, status: "running", completed_at: undefined } });
   await expect(row.locator(":scope > :nth-child(2)")).toHaveText("running");
-  const before = listReads;
   // Synthetic concurrent completion uses real run IDs; block refresh while checking the cache.
-  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.unroute("**/v1/jobs");
-  await page.route("**/v1/jobs", async route => { listReads++; await gate; await route.fulfill({ json: projected }); });
+  let release!: () => void;
+  blocked = new Promise<void>(resolve => { release = resolve; });
+  const beforeGate = listReads;
   try {
     await emit(page, "run_completed", { type: "run_completed", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString(), payload: first });
-    await page.waitForTimeout(400);
+    await expect.poll(() => listReads).toBeGreaterThan(beforeGate);
     await expect(row.getByRole("link", { name: /Open latest run/ })).toHaveAttribute("href", `/jobs/${job.id}/runs/${latest.id}`);
     await expect(row.locator(":scope > :nth-child(2)")).toHaveText("running");
-  } finally { release(); await page.unrouteAll({ behavior: "wait" }); }
-  await page.route("**/v1/jobs", route => { listReads++; return route.fulfill({ json: projected }); });
+  } finally { blocked = undefined; release(); }
+  await expect.poll(() => inFlight).toBe(0);
+  await page.waitForTimeout(350); // Let the coalescer finish the gated query.
+  const beforeBurst = listReads;
   await page.evaluate(({ jobId, run }) => {
     const source = (window as unknown as { qaSources: EventSource[] }).qaSources.find(source => source.readyState === 1)!;
     const start = performance.now(); let sequence = 0;
@@ -288,7 +322,7 @@ test("second pass SYNTHETIC: sustained native stream events refresh history and 
       if (performance.now() - start >= 2400) clearInterval(timer);
     }, 80);
   }, { jobId: job.id, run: latest });
-  await expect.poll(() => listReads - before, { timeout: 2000, intervals: [100] }).toBeGreaterThanOrEqual(4);
+  await expect.poll(() => listReads - beforeBurst, { timeout: 2200, intervals: [100] }).toBeGreaterThanOrEqual(4);
   await page.waitForTimeout(2600); await page.unrouteAll({ behavior: "wait" });
 });
 
