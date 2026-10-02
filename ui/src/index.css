@@ -271,7 +271,7 @@
 }
 
 @layer components {
-  .jobs-grid { display: grid; grid-template-columns: minmax(280px, 1.65fr) 108px 88px 80px minmax(180px, 1fr) 116px; column-gap: 12px; }
+  .jobs-grid { display: grid; grid-template-columns: minmax(220px, .85fr) 108px 88px 80px minmax(240px, 1.65fr) 116px; column-gap: 12px; }
   .jobs-grid > * { min-width: 0; }
 }
 @media (max-width: 767px) {
