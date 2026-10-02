@@ -33,7 +33,7 @@ test("real run events update the fleet strip and shared instruments stop at comp
   const liveStrip = row.locator('[data-history="recent"] .cs-live-bar');
   await expect(liveStrip).toBeVisible();
   await expect(row.locator(":scope > div").nth(3)).not.toHaveText("-");
-  await expect(page.getByTestId("history-now-head")).toHaveCount(1);
+  await expect(page.getByTestId("history-now-line")).toHaveCount(1);
   const elapsed = await liveStrip.innerText();
   await expect.poll(() => liveStrip.innerText()).not.toBe(elapsed);
   await page.screenshot({ path: testInfo.outputPath("fleet-live.png") });
@@ -85,6 +85,16 @@ test("history controls and aligned time lanes remain usable on desktop and phone
       }));
       expect(ticks).toHaveLength(4);
       grid.forEach((x, index) => expect(Math.abs(x - ticks[index])).toBeLessThan(1));
+      const nowLine = page.getByTestId("history-now-line");
+      expect(Math.abs((await nowLine.boundingBox())!.x - grid[3])).toBeLessThan(1);
+      const lines = page.locator(".cs-history-now-line");
+      await expect(nowLine).toHaveCSS("animation-duration", "2s");
+      const opacity = await nowLine.evaluate(el => getComputedStyle(el).opacity);
+      await expect.poll(() => nowLine.evaluate(el => getComputedStyle(el).opacity)).not.toBe(opacity);
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await expect.poll(() => lines.evaluateAll(nodes => nodes.every(node => node.getAnimations().length === 0))).toBe(true);
+      await expect(nowLine).toHaveCSS("opacity", "0.65");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
     }
   }
 });

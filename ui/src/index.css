@@ -176,6 +176,7 @@
 @keyframes cs-wave        { to { transform: translateX(-40px) } }
 @keyframes cs-dash        { to { stroke-dashoffset: -14 } }
 @keyframes cs-live-glow   { 0%, 100% { box-shadow: 0 0 10px hsl(var(--running) / .5) } 50% { box-shadow: 0 0 16px hsl(var(--running) / .3) } }
+@keyframes cs-now-line    { 0%, 100% { opacity: .5 } 50% { opacity: .85 } }
 
 .animate-cyan-pulse { animation: cs-beat 1s ease-out infinite; }
 .animate-gold-pulse { animation: cs-beat-gold 2s ease-out infinite; }
@@ -255,11 +256,12 @@
 .cs-electron-cached { background: hsl(var(--cached)); }
 .cs-electron-queued { top: calc(50% - 4px); left: -4px; border: 1px solid hsl(var(--gold)); background: hsl(var(--void)); }
 .cs-now-head { animation: cs-beat 1s ease-out infinite; }
+.cs-history-now-line { opacity: .65; animation: cs-now-line 2s ease-in-out infinite; }
 .cs-live-bar { animation: cs-live-glow 2s ease-in-out infinite; }
 .cs-edge-running .react-flow__edge-path { animation: cs-dash 1.4s linear infinite; }
 .cs-timeline-legend .cs-status-glyph { animation: none; }
 @media (prefers-reduced-motion: reduce) {
-  .cs-status-glyph, .cs-electron, .cs-now-head, .cs-live-bar, .cs-edge-running, .cs-edge-running .react-flow__edge-path { animation: none !important; }
+  .cs-status-glyph, .cs-electron, .cs-now-head, .cs-history-now-line, .cs-live-bar, .cs-edge-running, .cs-edge-running .react-flow__edge-path { animation: none !important; }
   .cs-electron { offset-distance: 0%; }
   .cs-wave { display: none; }
   .cs-wave-flat { display: block; }

@@ -19,7 +19,7 @@ export function RunStripAxis({ windowSeconds = 900, className, label = "Run hist
     <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs text-text-2">{label}</span><span>UTC</span></div>
     <div className="relative h-4">{GRID.map((position, index) => <span key={position} data-history-tick={position} className={cn("absolute whitespace-nowrap", position === 1 && "text-running")} style={{ left: `${position * 100}%`, transform: `translateX(${index === 0 ? 0 : index === GRID.length - 1 ? -100 : -50}%)` }}>{position === 1 ? "now" : `−${windowLabel(windowSeconds * (1 - position))}`}</span>)}</div>
     {/* One clock reference for the whole table, distinct from run-event marks. */}
-    <div className="relative"><span aria-hidden="true" data-testid="history-now-head" className="cs-now-head absolute -bottom-2 right-0 h-1.5 w-1.5 rounded-full bg-running" /></div>
+    <div className="relative"><span aria-hidden="true" data-testid="history-now-line" className="cs-history-now-line pointer-events-none absolute left-full top-0 h-2 border-l border-running/55" /></div>
   </div>;
 }
 
@@ -44,7 +44,7 @@ export function RunStrip({ runs, windowSeconds = 900, className, historyLink }: 
   </div>;
   return <div role="img" aria-label={description} data-history={runs.length ? "recent" : "empty"} className={cn("h-full min-h-16 bg-midnight px-3", className)}>
     <div className="relative h-full min-h-16 min-w-0" style={{ containerType: "inline-size" }}>
-      {GRID.map(position => <span key={position} aria-hidden="true" data-history-grid={position} className={cn("pointer-events-none absolute inset-y-0 border-l", position === 1 ? "border-running/35" : "border-border")} style={{ left: `${position * 100}%` }} />)}
+      {GRID.map(position => <span key={position} aria-hidden="true" data-history-grid={position} className={cn("pointer-events-none absolute inset-y-0 border-l", position === 1 ? "cs-history-now-line border-running/55" : "border-border")} style={{ left: `${position * 100}%` }} />)}
       {!runs.length ? <span className="absolute inset-y-0 left-2 flex items-center text-xs text-text-3"><span className="bg-midnight px-1">No runs yet</span></span> : <span className="absolute right-0 top-0 text-[11px] text-text-3 md:hidden">−{windowLabel(windowSeconds)} → now</span>}
       {displayed.map((run, index) => {
         const meta = statusMeta(run.status);

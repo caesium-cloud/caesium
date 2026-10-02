@@ -206,3 +206,9 @@ Validation for this review pass:
 - The earlier complete 17-test pass was green. The expanded pass exposed a test setup race: filling SQL while its initial schema/snippet was still loading could append to the default statement. The copy journey now waits for schema readiness and verifies the editor's full value before executing; both themes and the error-card captures passed the focused rerun. Earlier failure traces remain in `.tmp/pr617-review2/`.
 - Browser qualification used a sticky connection to the local cluster leader; the read-only SQL scenario used the existing enabled QA server. Cluster-wide SSE distribution, the full concurrent browser suite, and populated feature-gated incident flows are outside this focused pass. REST reconciliation and existing permission gates remain intact.
 - Local captures, test/build receipts, and an archive of the removed review media are under `.tmp/pr617-review2/`. CI collects new browser screenshots in its diagnostics artifact; no new binary evidence is added to the source tree.
+
+## Now-reference alignment
+
+The Jobs clock dot was centered 3 px left of the time-grid boundary. Replace it with a 1 px line below “now” at the same coordinate as the row guides, and give the time reference a synchronized, low-opacity two-second pulse. Reduced motion keeps the line static; archived history stays in its separate ordered lane.
+
+Before/after captures were reviewed at 1440, 1280, and 390 px in both themes. Browser checks measured zero horizontal offset, confirmed the pulse changes opacity without shifting the line, checked reduced motion, and found no main-panel overflow. Lint and the containerized production build/bundle budgets passed. Captures and geometry receipts are retained in `.tmp/pr617-now-line/`; no binary evidence is added to the source tree.
