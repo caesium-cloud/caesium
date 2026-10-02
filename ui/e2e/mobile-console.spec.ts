@@ -82,15 +82,14 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   }).toBe(true);
   await page.keyboard.press("Escape");
 
-  // The job table retains its operational columns, but its own scroll viewport
-  // contains the intentional horizontal overflow instead of widening the page.
+  // Phone rows reflow their operational fields and actions within the viewport.
   const jobsTable = page.getByTestId("jobs-table-scroll");
   await expect.poll(() => jobsTable.evaluate((table) => ({
     clientWidth: table.clientWidth,
     overflowX: getComputedStyle(table).overflowX,
     scrollWidth: table.scrollWidth,
   }))).toEqual(expect.objectContaining({ overflowX: "auto" }));
-  await expect.poll(() => jobsTable.evaluate((table) => table.scrollWidth > table.clientWidth)).toBe(true);
+  await expect.poll(() => jobsTable.evaluate((table) => table.scrollWidth === table.clientWidth)).toBe(true);
   const searchInput = page.getByPlaceholder("Filter pipelines…");
   await searchInput.fill("no-mobile-match");
   const emptyState = page.getByRole("status");
@@ -99,7 +98,6 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await expect.poll(() => jobsTable.evaluate((table) => table.scrollWidth === table.clientWidth)).toBe(true);
   await searchInput.fill("");
   await expect(emptyState).toBeHidden();
-  await jobsTable.evaluate((table) => { table.scrollLeft = table.scrollWidth; });
   const rowTrigger = page.getByTestId("job-row").filter({ hasText: job.alias }).getByRole("button", { name: "Trigger run" });
   await expect(rowTrigger).toBeVisible();
   await expect.poll(() => rowTrigger.evaluate((button) => {

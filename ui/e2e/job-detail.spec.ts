@@ -17,9 +17,10 @@ test("job detail DAG overlay reconciles failed task counts", async ({ page, requ
 
   const counters = page.getByTestId("dag-counters");
   await expect(counters).toBeVisible();
-  await expect(counters).toContainText("1 done");
+  await expect(counters).toContainText("1 succeeded");
   await expect(counters).toContainText("1 failed");
-  await expect(counters).toContainText("0 blocked");
+  await expect(counters).toContainText("0 skipped");
+  await expect(counters).not.toContainText("blocked");
   await expect(counters).not.toContainText("queued");
 });
 

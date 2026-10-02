@@ -63,8 +63,8 @@ describe("RunTimeline", () => {
       <RunTimeline tasks={tasks} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00Z" runStatus="failed" />
     </Profiler></UTCClockProvider>);
     expect(screen.getByText("image pull failed")).toBeInTheDocument();
-    expect(screen.getByText("did not start")).toBeInTheDocument();
-    expect(screen.queryByText("waits on upstream work")).not.toBeInTheDocument();
+    expect(screen.getByText("Did not start")).toBeInTheDocument();
+    expect(screen.queryByText("Waiting on upstream")).not.toBeInTheDocument();
     const bars = screen.getAllByTestId("run-timeline-bar");
     bars.forEach(bar => expect(bar).toHaveAttribute("data-ghost", "false"));
     const positions = bars.map(bar => bar.style.left);
@@ -148,4 +148,13 @@ describe("RunTimeline", () => {
     const groupRow = within(row).getByTestId("run-timeline-group-row");
     expect(groupRow).toHaveTextContent("×1");
   });
+});
+
+it("scales a 492ms terminal run to 500ms without distorting duration or clipping endpoints", () => {
+  render(<RunTimeline tasks={[makeTask({ task_id: "task-1", started_at: "2026-08-01T00:00:00.000Z", completed_at: "2026-08-01T00:00:00.492Z", status: "succeeded" })]} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00.000Z" runStatus="succeeded" />);
+  const ticks = screen.getAllByTestId("timeline-tick");
+  expect(ticks.map(tick => tick.textContent)).toEqual(["0ms", "100ms", "200ms", "300ms", "400ms", "500ms"]);
+  expect(ticks[0].style.transform).toBe("translateX(0%)");
+  expect(ticks.at(-1)!.style.transform).toBe("translateX(-100%)");
+  expect(parseFloat(screen.getByTestId("run-timeline-bar").style.width)).toBeCloseTo(98.4);
 });

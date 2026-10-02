@@ -96,3 +96,7 @@ The production budget reports largest JS 1,231.33 KiB raw / 359.36 KiB gzip and 
 The final image also passed all 18 API-key journeys: nine dark and nine light, including the empty-fleet authoring action and its authenticated lint request. Both lanes used zero retries and reported no skips or flaky tests. Final focused, expanded and authentication reports are retained under `.tmp/pr617-review-*`.
 
 The shared Docker filesystem exhausted its free space during a separate Go check; the successful rerun stored compiler temporary files and caches in the workspace. A subsequent visual/scale attempt reported four passes and three failures caused by missing run-page content and browser socket errors. Those failures are retained under `.tmp/pr617-review-*`; they are not counted as passes. Owned browser dependencies were moved into the workspace to reduce Docker disk use. No foreign images, volumes or containers were pruned.
+
+### Visual polish follow-up
+
+See [Operator console polish](operator-console-polish.md) for the thirteen visual findings, behavior changes, before/after screenshots, and the current qualification boundary. Earlier test results above remain evidence for their recorded revisions.

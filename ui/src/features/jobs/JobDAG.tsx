@@ -116,26 +116,26 @@ interface NodeEdgeDegree {
 }
 
 /**
- * React Flow fits on initial mount, but its transform is not recalculated
- * when an enclosing detail page changes the canvas height. The run and job
- * pages do that while their scroll position is measured, so defer a refit
- * until React Flow has the final dimensions and measured nodes.
+ * Own both initial framing and resize fitting after the viewport and nodes
+ * are measured. A separate React Flow initial fit can race this mobile view
+ * and shrink the whole graph back into an unreadable miniature.
  */
 function FitViewOnResize({ fitViewOptions }: { fitViewOptions: FitViewOptions }) {
-  const { fitView } = useReactFlow();
+  const { fitView, getNodes, viewportInitialized } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
   const width = useStore((state) => state.width);
   const height = useStore((state) => state.height);
 
   useEffect(() => {
-    if (!nodesInitialized || width === 0 || height === 0) return;
+    if (!viewportInitialized || !nodesInitialized || width === 0 || height === 0) return;
 
     const frame = window.requestAnimationFrame(() => {
-      void fitView(fitViewOptions);
+      const first = getNodes().slice().sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)[0];
+      void fitView(width < 640 && first ? { ...fitViewOptions, nodes: [{ id: first.id }], minZoom: 0.75, maxZoom: 0.9 } : fitViewOptions);
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [fitView, fitViewOptions, height, nodesInitialized, width]);
+  }, [fitView, getNodes, fitViewOptions, height, nodesInitialized, viewportInitialized, width]);
 
   return null;
 }
@@ -306,7 +306,6 @@ export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, 
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onNodeClick={handleNodeClick}
-          fitView
           fitViewOptions={fitViewOptions}
           minZoom={dagMinZoom}
           maxZoom={dagMaxZoom}
@@ -314,6 +313,7 @@ export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, 
           <FitViewOnResize fitViewOptions={fitViewOptions} />
           <Background gap={24} />
           <Controls fitViewOptions={fitViewOptions} />
+          <div className="pointer-events-none absolute right-2 top-2 z-10 rounded bg-card/95 px-2 py-1 text-xs text-text-3 sm:hidden">Drag to explore · Fit view shows all</div>
         </ReactFlow>
       </div>
 

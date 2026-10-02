@@ -1,10 +1,11 @@
+import { FilterChip } from "@/components/ui/filter-chip";
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { IdChip } from "@/components/ui/id-chip";
 import { useMemo, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -144,12 +145,11 @@ export function DatasetsPage() {
 
   return (
     <div className="space-y-5" data-testid="datasets-page">
-      <PageHeader total={listQuery.data?.total} />
+      <PageHeader total={listQuery.data?.total} holdsEnabled={assertionsEnabled} />
 
-      {assertionsEnabled ? <Link to="/datasets/holds" search={{}} className="text-sm text-fuchsia-300 hover:underline">View dataset holds</Link> : null}
       <StatusFilterBar value={statusFilter} onChange={setStatusFilter} />
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
+      <div className={cn("grid gap-5", (rows.length > 0 || selectedName) && "xl:grid-cols-[minmax(0,1fr)_390px]")}>
         <section className="min-w-0 rounded-md border border-border/50 bg-card">
           <DatasetBoard
             rows={rows}
@@ -159,6 +159,7 @@ export function DatasetsPage() {
             error={listQuery.error}
             statusFilter={statusFilter}
             onSelect={selectDataset}
+            onClear={() => setStatusFilter("all")}
           />
           {!listQuery.isLoading && !listQuery.error && total > PAGE_SIZE ? (
             <BoardPagination
@@ -173,7 +174,7 @@ export function DatasetsPage() {
           ) : null}
         </section>
 
-        <aside className="space-y-4">
+        {(rows.length > 0 || selectedName) ? <aside className="space-y-4">
           <DatasetDetailPanel
             namespace={selectedNamespace}
             name={selectedName}
@@ -181,31 +182,14 @@ export function DatasetsPage() {
             isLoading={selectedDetailQuery.isLoading}
             error={selectedDetailQuery.error}
           />
-        </aside>
+        </aside> : null}
       </div>
     </div>
   );
 }
 
-function PageHeader({ total }: { total: number | undefined }) {
-  return (
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div>
-        <div className="mb-1 text-[11px] font-bold lowercase text-text-3">
-          Freshness
-        </div>
-        <h1 className="text-2xl font-bold lowercase text-text-1">Datasets</h1>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="outline" className="text-[11px]">
-          {total ?? 0} datasets
-        </Badge>
-        <Badge variant="outline" className="text-[11px]">
-          Live SLO state
-        </Badge>
-      </div>
-    </div>
-  );
+function PageHeader({ total, holdsEnabled }: { total: number | undefined; holdsEnabled: boolean }) {
+  return <ConsolePageHeader title="Datasets" description="Dataset freshness and live SLO state." count={total == null ? undefined : `${total} datasets`} actions={holdsEnabled ? <Button variant="outline" size="sm" asChild><Link to="/datasets/holds" search={{}}>View dataset holds</Link></Button> : null} />;
 }
 
 function StatusFilterBar({
@@ -216,23 +200,13 @@ function StatusFilterBar({
   onChange: (value: DatasetStatusFilter) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/50 bg-card p-1">
+    <div className="flex flex-wrap items-center gap-2">
       {DATASET_STATUS_FILTERS.map((filter) => {
         const active = value === filter.key;
         return (
-          <button
-            key={filter.key}
-            type="button"
-            onClick={() => onChange(filter.key)}
-            className={cn(
-              "rounded px-2.5 py-1 text-[11px] font-normal transition-colors",
-              active
-                ? "bg-obsidian text-text-1 shadow-sm"
-                : "text-text-3 hover:bg-obsidian/50 hover:text-text-2",
-            )}
-          >
+          <FilterChip key={filter.key} active={active} onClick={() => onChange(filter.key)}>
             {filter.label}
-          </button>
+          </FilterChip>
         );
       })}
     </div>
@@ -247,6 +221,7 @@ function DatasetBoard({
   error,
   statusFilter,
   onSelect,
+  onClear,
 }: {
   rows: DatasetState[];
   detailByKey: Map<string, DatasetDetail>;
@@ -254,6 +229,7 @@ function DatasetBoard({
   isLoading: boolean;
   error: unknown;
   statusFilter: DatasetStatusFilter;
+  onClear: () => void;
   onSelect: (state: DatasetState) => void;
 }) {
   if (isLoading) {
@@ -286,7 +262,8 @@ function DatasetBoard({
             ? "Declared or observed datasets will appear here once jobs are applied."
             : "Try another freshness status filter."
         }
-        className="py-20"
+        action={statusFilter === "all" ? <Button variant="outline" asChild><Link to="/jobdefs">Apply a job definition</Link></Button> : <Button variant="outline" onClick={onClear}>Clear filters</Button>}
+        className="py-16"
       />
     );
   }
@@ -601,7 +578,7 @@ function DatasetDetailPanel({
         <FreshnessStatusChip status={state?.status} />
       </div>
 
-      {detail?.hold ? <Link to="/datasets/holds" search={holdSearch(detail.hold)} className="mt-3 block rounded border border-fuchsia-400/40 bg-fuchsia-400/10 p-2 text-xs text-fuchsia-300">Held, {detail.hold.reason}, inspect {detail.hold.occurrence_count} occurrences</Link> : null}
+      {detail?.hold ? <Link to="/datasets/holds" search={holdSearch(detail.hold)} className="mt-3 block rounded border border-fuchsia-400/40 bg-fuchsia-400/10 p-2 text-xs text-cyan">Held, {detail.hold.reason}, inspect {detail.hold.occurrence_count} occurrences</Link> : null}
       <dl className="mt-4 grid gap-3 text-xs">
         <MetadataRow label="Watermark" value={state?.watermark || "-"} mono />
         <MetadataRow label="Reason" value={state?.reason || detail?.last_decision?.reason || "-"} />

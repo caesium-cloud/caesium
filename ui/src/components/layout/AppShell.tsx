@@ -113,7 +113,7 @@ export function AppShell() {
             navigationButtonRef={navigationButtonRef}
             onOpenNavigation={() => setNavigationOpen(true)}
           />
-          <main className="min-w-0 flex-1 overflow-auto p-4 lg:p-6">
+          <main id="main-content" data-scroll-restoration-id="main-content" className="min-w-0 flex-1 overflow-auto p-4 lg:p-6">
             <Outlet />
           </main>
           <CommandMenu />

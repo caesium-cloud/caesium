@@ -1,3 +1,5 @@
+import { PageHeader } from "@/components/ui/page-header";
+import { FilterChip } from "@/components/ui/filter-chip";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -61,7 +63,7 @@ function JobsPageInner() {
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <PageHeader />
+        <PageHeader title="Jobs" description="Pipeline status and execution history." count={`${counts.all} pipelines`} />
         <div className="h-10 rounded-md bg-muted/30" />
         <div className="rounded-md border border-border/50 bg-card divide-y divide-border/50">
           {Array.from({ length: 5 }).map((_, i) => (
@@ -75,7 +77,7 @@ function JobsPageInner() {
   if (error) {
     return (
       <div className="space-y-4">
-        <PageHeader />
+        <PageHeader title="Jobs" description="Pipeline status and execution history." count={`${counts.all} pipelines`} />
         <div className="rounded-md border border-danger/30 bg-danger/5 p-6 text-sm text-danger">
           Failed to load jobs: {error.message}
         </div>
@@ -85,7 +87,7 @@ function JobsPageInner() {
 
   return (
     <div className="space-y-5">
-      <PageHeader />
+      <PageHeader title="Jobs" description="Pipeline status and execution history." count={`${counts.all} pipelines`} />
 
       <FilterBar
         counts={counts}
@@ -111,16 +113,15 @@ function JobsPageInner() {
             className="py-20"
           />
         ) : (
-          <div className="min-w-[720px] overflow-hidden">
+          <div className="md:min-w-[960px]">
             {/* Column headers */}
             <div
-              className="grid items-center px-4 border-b border-border"
-              style={{ gridTemplateColumns: "230px 130px 96px 86px minmax(0,1fr) 120px" }}
+              className="jobs-grid jobs-grid-header items-center px-4 border-b border-border"
             >
-              <span className="text-[11px] font-bold lowercase text-text-3">Pipeline</span>
-              <span className="text-[11px] font-bold lowercase text-text-3">Status</span>
-              <span className="text-[11px] font-bold lowercase text-text-3">Last run</span>
-              <span className="text-[11px] font-bold lowercase text-text-3">Duration</span>
+              <span className="text-xs font-bold lowercase text-text-3">Pipeline</span>
+              <span className="text-xs font-bold lowercase text-text-3">Status</span>
+              <span className="text-xs font-bold lowercase text-text-3">Last run</span>
+              <span className="pr-4 text-right text-xs font-bold lowercase text-text-3">Duration</span>
               <RunStripAxis />
               <span className="sr-only">Actions</span>
             </div>
@@ -135,7 +136,7 @@ function JobsPageInner() {
                   key={job.id}
                   data-testid="job-row"
                   className={cn(
-                    "group grid items-center px-4 py-0 border-b border-border/40 last:border-0 transition-colors",
+                    "jobs-grid group items-center md:px-4 border-b border-border last:border-0 transition-colors",
                     "hover:bg-obsidian/60",
                     isRunning && [
                       "shadow-[inset_2px_0_0_hsl(var(--running))]",
@@ -143,7 +144,6 @@ function JobsPageInner() {
                     ],
                     isPaused && !isRunning && "bg-gold/[.06] shadow-[inset_2px_0_0_hsl(var(--gold))]",
                   )}
-                  style={{ gridTemplateColumns: "230px 130px 96px 86px minmax(0,1fr) 120px", height: "56px" }}
                 >
                   {/* Alias column */}
                   <div className="min-w-0 py-2 pr-3">
@@ -151,7 +151,8 @@ function JobsPageInner() {
                       <Link
                         to="/jobs/$jobId"
                         params={{ jobId: job.id }}
-                        className="text-sm font-bold text-text-1 hover:text-cyan-glow truncate transition-colors"
+                        title={job.alias}
+                        className="min-w-0 text-sm font-bold text-text-1 hover:text-cyan-glow [overflow-wrap:anywhere] md:truncate transition-colors"
                       >
                         {job.alias}
                       </Link>
@@ -166,7 +167,7 @@ function JobsPageInner() {
                     {lr ? (
                       <StatusBadge status={lr.status} size="sm" />
                     ) : (
-                      <span className="text-[11px] text-text-3">—</span>
+                      <span className="text-xs text-text-3">—</span>
                     )}
                   </div>
 
@@ -190,11 +191,11 @@ function JobsPageInner() {
                   </div>
 
                   {/* Actions column */}
-                  <div className="flex items-center justify-end gap-0.5 py-2 opacity-100 transition-opacity [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 group-focus-within:opacity-100">
+                  <div className="flex items-center justify-end gap-1 py-2">
                     <Button
                       variant="default"
                       size="sm"
-                      className="h-7 px-1.5 text-[11px]"
+                      className="h-7 px-1.5 text-xs"
                       onClick={() => triggerMutation.mutate({ jobId: job.id })}
                       disabled={triggerMutation.isPending || isPaused}
                       title={isPaused ? "Unpause before triggering" : "Trigger run"}
@@ -205,7 +206,7 @@ function JobsPageInner() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 px-1.5 text-[11px]"
+                      className="h-7 px-1.5 text-xs"
                       onClick={() =>
                         pauseMutation.mutate({ jobId: job.id, paused: !isPaused, hasActiveRun: isRunning })
                       }
@@ -231,14 +232,6 @@ function JobsPageInner() {
 
 /* ── Sub-components ── */
 
-function PageHeader() {
-  return (
-    <div>
-      <h1 className="text-2xl font-bold lowercase text-text-1">Jobs</h1>
-    </div>
-  );
-}
-
 interface FilterBarProps {
   counts: JobCounts;
   statusFilter: StatusFilter;
@@ -261,27 +254,17 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
   return (
     <div className="flex flex-wrap items-center gap-3">
       {/* Status chips */}
-      <div className="flex max-w-full items-center gap-1 overflow-x-auto border-y border-border bg-transparent p-1">
+      <div className="flex max-w-full flex-wrap items-center gap-2" aria-label="Filter jobs by status">
         {FILTER_CHIPS.map(({ key, label }) => {
           const count = counts[key];
           const isActive = statusFilter === key;
           return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onStatusFilter(key)}
-              className={cn(
-                "shrink-0 flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-normal transition-colors",
-                isActive
-                  ? "text-text-1 border-b-2 border-cyan"
-                  : "text-text-3 hover:text-text-2 hover:bg-obsidian/50",
-              )}
-            >
+            <FilterChip key={key} active={isActive} onClick={() => onStatusFilter(key)}>
               {key === "all" ? label : <StatusBadge status={key} size="sm" />}
               {count > 0 && (
                 <span className="text-xs text-text-3">{count}</span>
               )}
-            </button>
+            </FilterChip>
           );
         })}
       </div>
@@ -295,7 +278,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
           onChange={(e) => onSearch(e.target.value)}
           placeholder="Filter pipelines…"
           className={cn(
-            "w-full pl-8 pr-3 py-1.5 text-[12px] rounded-md border border-border/50",
+            "w-full pl-3 pr-3 py-1.5 text-[12px] rounded-md border border-border/50",
             "bg-card text-text-1 placeholder:text-text-3",
             "focus:outline-none focus:ring-1 focus:ring-cyan/40 focus:border-cyan/40",
           )}
@@ -303,7 +286,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
       </div>
 
       {/* Sort */}
-      <div className="flex items-center gap-1.5 text-[11px] text-text-3 sm:ml-auto">
+      <div className="flex items-center gap-1.5 text-xs text-text-3 sm:ml-auto">
         <label htmlFor="jobs-sort">Sort</label>
         <select
           id="jobs-sort"
@@ -311,7 +294,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
           value={sort}
           onChange={(e) => onSort(e.target.value as SortKey)}
           className={cn(
-            "rounded border border-border/50 bg-card text-text-2 text-[11px] py-1 px-2",
+            "rounded border border-border/50 bg-card text-text-2 text-xs py-1 px-2",
             "focus:outline-none focus:ring-1 focus:ring-cyan/40",
           )}
         >
@@ -335,22 +318,22 @@ function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
   return (
     <div className="border-y border-border" data-testid="activity-feed">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/50">
-        <span className="text-[11px] font-bold lowercase text-text-3">
+        <span className="text-xs font-bold lowercase text-text-3">
           Live activity
         </span>
-        <span className="text-[11px] text-text-3">(last 20 events)</span>
+        <span className="text-xs text-text-3">(last 20 events)</span>
       </div>
       <div className="divide-y divide-border/30 max-h-64 overflow-y-auto">
         {entries.map((entry) => (
           <div key={entry.id} data-testid="activity-entry" className="flex items-center gap-3 px-4 py-2.5">
             <StatusBadge status={entry.type === "run_started" ? "running" : entry.type === "run_completed" ? "succeeded" : entry.type === "run_failed" ? "failed" : "paused"} variant="glyph" size="sm" label={ACTIVITY_LABELS[entry.type] ?? entry.type} />
-            <span className="text-[11px] text-text-3 shrink-0">
+            <span className="text-xs text-text-3 shrink-0">
               {ACTIVITY_LABELS[entry.type] ?? entry.type}
             </span>
             <Link
               to="/jobs/$jobId"
               params={{ jobId: entry.jobId }}
-              className="text-[11px] font-normal text-text-2 hover:text-text-1 truncate"
+              className="text-xs font-normal text-text-2 hover:text-text-1 truncate"
             >
               {entry.jobAlias}
             </Link>
@@ -358,13 +341,13 @@ function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
               <Link
                 to="/jobs/$jobId/runs/$runId"
                 params={{ jobId: entry.jobId, runId: entry.runId }}
-                className="text-[11px] text-text-3 hover:text-text-3 shrink-0"
+                className="text-xs text-text-3 hover:text-text-3 shrink-0"
               >
                 open run
               </Link>
             )}
             {entry.runId ? <IdChip value={entry.runId} label="run id" /> : null}
-            <span className="ml-auto text-[11px] text-text-3 tabular-nums shrink-0 whitespace-nowrap">
+            <span className="ml-auto text-xs text-text-3 tabular-nums shrink-0 whitespace-nowrap">
               <RelativeTime date={entry.timestamp} />
             </span>
           </div>

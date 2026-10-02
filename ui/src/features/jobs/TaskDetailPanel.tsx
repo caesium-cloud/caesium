@@ -450,7 +450,7 @@ export function TaskDetailPanel({
                     </div>
                   </div>
                   <Button
-                    variant="outline"
+                    variant="destructive"
                     size="sm"
                     onClick={() => invalidateCacheMutation.mutate()}
                     disabled={invalidateCacheMutation.isPending || !task?.name}

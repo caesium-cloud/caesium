@@ -99,7 +99,7 @@ describe('StatsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('deploy-prod')).toBeInTheDocument();
     });
-    expect(screen.getByText('Performance Trend')).toBeInTheDocument();
+    expect(screen.getByText('Performance Trend · UTC')).toBeInTheDocument();
     expect(screen.getByText('run-tests')).toBeInTheDocument();
     expect(screen.getByText('build-all')).toBeInTheDocument();
   });

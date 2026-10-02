@@ -34,3 +34,13 @@ it("does not rerender archived rows on shared ticks and stops subscribing when r
   unmount();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it("separates archived history from time coordinates and gives missing dates an honest caption", () => {
+  const { container, rerender } = render(<RunStrip runs={[{ status: "succeeded" }]} />);
+  expect(screen.getByText("Older")).toBeInTheDocument();
+  expect(screen.getByText(/time unknown/)).toBeInTheDocument();
+  expect(container.querySelector(".cs-time-mark")).toBeNull();
+  rerender(<RunStrip runs={[]} />);
+  expect(screen.getByText("No runs yet")).toBeInTheDocument();
+  expect(container.querySelector(".cs-now-head")).toBeNull();
+});

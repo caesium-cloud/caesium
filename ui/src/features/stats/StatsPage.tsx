@@ -1,3 +1,4 @@
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -41,24 +42,20 @@ export function StatsPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-
-          <h1 className="text-2xl font-bold lowercase text-text-1">Stats</h1>
-        </div>
-        <Tabs value={window} onValueChange={setWindow} className="w-full sm:w-[300px]">
-          <TabsList className="grid w-full grid-cols-3 bg-transparent border-b border-border">
-            <TabsTrigger value="24h" className="">24h</TabsTrigger>
-            <TabsTrigger value="7d" className="">7d</TabsTrigger>
-            <TabsTrigger value="30d" className="">30d</TabsTrigger>
-          </TabsList>
+    <div className="space-y-5">
+      <ConsolePageHeader title="Stats" description="Execution volume, reliability, and duration." />
+      <div className="grid gap-4 md:grid-cols-2">
+        <KPIItem title="Total jobs · current" value={stats?.jobs.total} isLoading={isLoading} />
+        <KPIItem title="Recent runs · fixed 24h" value={stats?.jobs.recent_runs} isLoading={isLoading} />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+        <div><h2 className="text-sm font-bold">Execution analysis · {window}</h2><p className="mt-1 text-xs text-text-3">This range controls success rate, duration, charts, and job rankings below. Dates are UTC.</p></div>
+        <Tabs value={window} onValueChange={setWindow}>
+          <TabsList aria-label="Execution analysis range"><TabsTrigger value="24h">24h</TabsTrigger><TabsTrigger value="7d">7d</TabsTrigger><TabsTrigger value="30d">30d</TabsTrigger></TabsList>
         </Tabs>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KPIItem title="Total Jobs" value={stats?.jobs.total} isLoading={isLoading} />
-        <KPIItem title="Recent Runs (24h)" value={stats?.jobs.recent_runs} isLoading={isLoading} />
+      <div className="grid gap-4 md:grid-cols-2">
         <KPIItem
           title="Success Rate"
           value={stats ? `${(stats.jobs.success_rate * 100).toFixed(1)}%` : undefined}
@@ -74,7 +71,7 @@ export function StatsPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="bg-midnight border-border">
           <CardHeader className="pb-2">
-            <div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-xs font-normal text-text-3 lowercase">Performance Trend</CardTitle><div className="flex gap-4"><span className="inline-flex items-center gap-2 text-xs text-cyan"><span aria-hidden="true" className="cs-status-glyph cs-status-solid" />run volume</span><StatusBadge status="succeeded" label="success rate" size="sm" /></div></div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-xs font-normal text-text-3 lowercase">Performance Trend · UTC</CardTitle><div className="flex gap-4"><span className="inline-flex items-center gap-2 text-xs text-cyan"><span aria-hidden="true" className="cs-status-glyph cs-status-solid" />run count</span><StatusBadge status="succeeded" label="success rate" size="sm" /></div></div>
           </CardHeader>
           <CardContent>
             {isLoading ? <Skeleton className="h-[350px] w-full bg-graphite/10" /> : <TrendChart data={stats?.success_rate_trend ?? []} />}
@@ -117,7 +114,7 @@ export function StatsPage() {
                 ) : (
                   stats?.top_failing.map((job) => (
                     <TableRow key={job.job_id} className="border-graphite/10 hover:bg-graphite/5 transition-colors group">
-                      <TableCell className="text-sm text-cyan-dim group-hover:text-cyan-glow transition-colors">
+                      <TableCell className="text-sm text-cyan group-hover:text-cyan-glow transition-colors">
                         {job.alias || job.job_id}
                       </TableCell>
                       <TableCell className="text-right text-sm text-text-2">{job.failure_count}</TableCell>

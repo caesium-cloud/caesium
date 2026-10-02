@@ -1,3 +1,4 @@
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { type FormEvent, memo, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -143,7 +144,6 @@ export function ContractGraph({
 
     return (
       <div className="space-y-5" data-testid="contracts-page">
-        <ContractBreadcrumb />
         <ContractHeader onRefresh={() => queryClient.invalidateQueries({ queryKey: ["contracts"] })} />
         <DatasetFilterForm
           datasetInput={datasetInput}
@@ -162,7 +162,6 @@ export function ContractGraph({
 
   return (
     <div className="space-y-5" data-testid="contracts-page">
-      <ContractBreadcrumb />
       <ContractHeader onRefresh={() => queryClient.invalidateQueries({ queryKey: ["contracts"] })} />
       <DatasetFilterForm
         datasetInput={datasetInput}
@@ -180,8 +179,9 @@ export function ContractGraph({
       {graphQuery.data && !hasEdges ? (
         <div data-testid="contracts-empty-state">
           <EmptyState
-            title="No contract edges yet"
-            subtitle="Contracts appear when job definitions declare dataset schemas or when lifecycle paramMapping chains infer producer and consumer relationships."
+            title={datasetFilter ? "No contracts match" : "No contract edges yet"}
+            subtitle={datasetFilter ? "Try another dataset or clear the filter." : "Contracts appear when job definitions declare dataset schemas or lifecycle parameter mappings connect producers and consumers."}
+            action={<Button variant="outline" asChild>{datasetFilter ? <Link to="/contracts" search={{ dataset: undefined }}>Clear filter</Link> : <Link to="/jobdefs">Apply a job definition</Link>}</Button>}
           />
         </div>
       ) : null}
@@ -231,36 +231,7 @@ function ContractGraphSkeleton() {
 }
 
 function ContractHeader({ onRefresh }: { onRefresh: () => void }) {
-  return (
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="min-w-0">
-        <div className="mb-1 text-[11px] font-bold lowercase text-text-3">
-          Contracts
-        </div>
-        <h1 className="text-2xl font-bold lowercase text-text-1">Contract graph</h1>
-      </div>
-      <Button type="button" variant="outline" size="sm" onClick={onRefresh}>
-
-        Refresh
-      </Button>
-    </div>
-  );
-}
-
-function ContractBreadcrumb() {
-  return (
-    <div className="flex items-center gap-2 text-[11px] text-text-3">
-      <Link
-        to="/jobs"
-        className="flex items-center gap-1 transition-colors hover:text-text-2"
-      >
-
-        Jobs
-      </Link>
-      <span className="text-text-3">/</span>
-      <span>Contracts</span>
-    </div>
-  );
+  return <ConsolePageHeader title="Contracts" description="Producer and consumer schema relationships." actions={<Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>} />;
 }
 
 function DatasetFilterForm({
@@ -273,18 +244,12 @@ function DatasetFilterForm({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <section className="border-graphite/40 bg-midnight/30">
-      <div className="border-b border-border/50 pb-3">
-        <h3 className="flex items-center gap-2 text-sm">
-
-          Dataset filter
-        </h3>
-      </div>
-      <div className="p-4">
+    <section aria-label="Filter contracts">
+      <div>
         <form className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={onSubmit}>
           <label htmlFor="contract-dataset-filter" className="space-y-1.5">
             <span className="text-[11px] font-bold lowercase text-text-3">
-              Dataset
+              Dataset filter
             </span>
             <input
               id="contract-dataset-filter"

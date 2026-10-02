@@ -77,7 +77,7 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
             <Badge variant={jobPolicyEnabled ? "cached" : "outline"}>
               {!hasJobPolicy ? "Server default" : jobPolicyEnabled ? "Enabled" : "Disabled"}
             </Badge>
-            <p className="text-sm text-muted-foreground">{jobPolicy}</p>
+            {hasJobPolicy ? <p className="text-sm text-muted-foreground">{jobPolicy}</p> : null}
           </div>
         </section>
         <section className="border-b border-border py-3">
@@ -108,13 +108,13 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
         </section>
       </div>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-bold">Cache Inventory</h3>
           <p className="text-sm text-muted-foreground">Inspect active cache entries and invalidate them by task or job.</p>
         </div>
         <Button
-          variant="outline"
+          variant="destructive"
           size="sm"
           onClick={() => invalidateAllMutation.mutate()}
           disabled={invalidateAllMutation.isPending || entries.length === 0}
@@ -212,7 +212,7 @@ function CacheEntryRow({
       </TableCell>
       <TableCell className="text-xs text-muted-foreground"><IdChip value={entry.hash} label="fingerprint" /></TableCell>
       <TableCell className="text-right">
-        <Button variant="ghost" size="sm" onClick={() => onInvalidate(entry.task_name)} disabled={pending}>
+        <Button variant="destructive" size="sm" onClick={() => onInvalidate(entry.task_name)} disabled={pending}>
           Invalidate Task
         </Button>
       </TableCell>

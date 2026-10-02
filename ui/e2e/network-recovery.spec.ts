@@ -93,7 +93,7 @@ test("the console recovers live updates after a real network interruption", asyn
   // stream or the polling fallback catches up, the held step should have
   // finished and the DAG counters should reflect it — without requiring a
   // manual reload.
-  await expect(page.getByTestId("dag-counters")).toContainText("1 done", { timeout: 60_000 });
+  await expect(page.getByTestId("dag-counters")).toContainText("1 succeeded", { timeout: 60_000 });
 });
 
 test("SYNTHETIC: an expired credential is surfaced to the operator instead of silently retried", async ({

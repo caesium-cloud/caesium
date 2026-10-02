@@ -1,3 +1,5 @@
+import { FilterChip } from "@/components/ui/filter-chip";
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/relative-time";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Trigger, type TriggerCreateRequest, type TriggerUpdateRequest } from "@/lib/api";
@@ -379,41 +381,18 @@ export function TriggersPage() {
 
   return (
     <>
-      <div className="space-y-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold lowercase text-text-1">Triggers</h1>
-            <p className="text-sm text-text-3 mt-1">Cron schedules and HTTP webhooks</p>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className="text-[11px] font-bold lowercase text-text-3 hidden sm:inline-block">
-              {filtered.length} trigger{filtered.length !== 1 ? "s" : ""}
-            </span>
-            <Button size="sm" onClick={openCreateDialog} className="bg-primary text-primary-foreground hover:bg-primary/90">
-
-              New HTTP Trigger
-            </Button>
-          </div>
-        </div>
+      <div className="space-y-5">
+        <ConsolePageHeader title="Triggers" description="Cron schedules, webhooks, and event subscriptions." count={`${filtered.length} triggers`} actions={<Button size="sm" onClick={openCreateDialog}>New HTTP Trigger</Button>} />
 
         {triggerTypes.length > 0 && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {triggerTypes.map((type) => {
               const isActive = typeFilter === type;
               return (
-                <button
-                  key={type}
-                  onClick={() => setTypeFilter(isActive ? null : type)}
-                  className={cn(
-                    "rounded-full px-3 py-1.5 text-xs border transition-colors flex items-center gap-1.5 font-normal",
-                    isActive
-                      ? "bg-cyan-glow/10 text-cyan-glow border-cyan-glow/30"
-                      : "bg-midnight/50 text-text-3 border-graphite/50 hover:border-text-3 hover:text-text-2",
-                  )}
-                >
+                <FilterChip key={type} active={isActive} onClick={() => setTypeFilter(isActive ? null : type)}>
                   {type === "cron" ? <Clock className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
                   <span className="capitalize">{type}</span>
-                </button>
+                </FilterChip>
               );
             })}
           </div>

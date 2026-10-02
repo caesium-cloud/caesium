@@ -1,3 +1,4 @@
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { useTheme } from "@/components/theme-provider";
 import { yamlThemes, yamlHighlight } from "@/components/ui/yaml-theme";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
@@ -382,16 +383,8 @@ export function JobDefsPage() {
   const runtimeHints = useMemo(() => getJobDefRuntimeHints(deferredYaml), [deferredYaml]);
 
   return (
-    <div className="min-w-0 space-y-6 pb-12">
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-        <div>
-
-          <h1 className="text-2xl font-bold lowercase text-text-1">Jobdefs</h1>
-          <p className="text-sm text-text-3 mt-1 flex flex-wrap items-center gap-1.5">
-            Lint, diff, and apply YAML manifests <span className="inline-block w-3" aria-hidden="true" /> <code className="text-cyan-glow text-xs bg-cyan-glow/10 px-1 py-0.5 rounded">caesium job apply</code>
-          </p>
-        </div>
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+    <div className="min-w-0 space-y-5">
+      <ConsolePageHeader title="JobDefs" description="Lint, compare, and apply YAML job definitions." actions={<>
           <input
             ref={uploadInputRef}
             type="file"
@@ -454,8 +447,7 @@ export function JobDefsPage() {
 
             {applyMutation.isPending ? "Applying..." : "Apply definition"}
           </Button>
-        </div>
-      </div>
+      </>} />
 
       <div className="w-fit max-w-full">
         <Tabs value={tab} onValueChange={handleTabChange}>

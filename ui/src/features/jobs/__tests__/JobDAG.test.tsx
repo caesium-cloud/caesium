@@ -85,7 +85,7 @@ vi.mock("reactflow", () => {
     Background: () => null,
     Controls: () => null,
     useNodesInitialized: () => true,
-    useReactFlow: () => ({ fitView }),
+    useReactFlow: () => ({ fitView, getNodes: () => [], viewportInitialized: true }),
     useStore: (selector: (state: typeof flowDimensions) => unknown) => selector(flowDimensions),
     MarkerType: { ArrowClosed: "arrow-closed" },
     Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },

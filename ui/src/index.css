@@ -58,7 +58,7 @@
 
     --text-1: 40 14% 13%;
     --text-2: 34 8% 32%;              /* #58524B */
-    --text-3: 32 8% 36%;              /* #625B53, 5.4:1 on paper, 4.8:1 on obsidian */
+    --text-3: 32 8% 32%;              /* Secondary ink: 6.69:1 on paper, 5.87:1 on obsidian. */
     --text-4: 32 8% 58%;              /* #9D958B, non-text use only */
 
     --success: 152 65% 24%;           /* #156540 */
@@ -76,7 +76,7 @@
     --sidebar: 60 8% 93%;
     --sidebar-foreground: 40 14% 13%;
     --sidebar-border: 60 9% 81%;
-    --sidebar-muted: 32 8% 36%;
+    --sidebar-muted: 32 8% 32%;
     --sidebar-accent: 60 10% 87%;
 
     --dag-bg: 213 25% 94%;            /* #EAEEF3 */
@@ -124,7 +124,7 @@
 
     --text-1: 40 28% 93%;             /* #F2EFE8 */
     --text-2: 36 10% 68%;             /* #B9B3A6, 8.7:1 on void */
-    --text-3: 32 7% 50%;              /* #857F74, 4.9:1 on void: floor for readable text */
+    --text-3: 32 7% 62%;              /* Secondary text, qualified against page and panel surfaces. */
     --text-4: 225 20% 28%;            /* #3A4256, non-text use only (dashed guides, disabled strokes) */
 
     --success: 152 65% 45%;           /* #28BD78 */
@@ -267,4 +267,24 @@
 
 @media (prefers-reduced-motion: reduce) {
   .cs-time-mark { transition: none !important; }
+}
+
+@layer components {
+  .jobs-grid { display: grid; grid-template-columns: minmax(280px, 1.65fr) 108px 88px 80px minmax(180px, 1fr) 116px; column-gap: 12px; }
+  .jobs-grid > * { min-width: 0; }
+}
+@media (max-width: 767px) {
+  .jobs-grid { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; padding: 12px 0; }
+  .jobs-grid-header { display: none; }
+  .jobs-grid > :first-child { grid-column: 1 / -1; }
+  .jobs-grid > * { padding-top: 3px; padding-bottom: 3px; }
+  .jobs-grid > :nth-child(4) { grid-column: 2; grid-row: 3; padding-right: 0; text-align: right; align-self: center; }
+  .jobs-grid > :nth-child(5) { grid-column: 1; grid-row: 3; }
+  .jobs-grid > :last-child { grid-column: 1 / -1; justify-content: flex-start; }
+}
+@layer base {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+  }
 }

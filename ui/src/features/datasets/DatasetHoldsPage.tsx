@@ -1,3 +1,5 @@
+import { EmptyState } from "@/components/ui/empty-state";
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useState } from "react";
 import { getRouteApi, Link } from "@tanstack/react-router";
@@ -48,6 +50,12 @@ export function DatasetHoldsPage() {
     enabled: enabled && !principal.isScoped,
     refetchInterval: 15_000,
   });
+  const inventory = useQuery({
+    queryKey: ["dataset-holds", "inventory-count"],
+    queryFn: () => api.getDatasetHolds({ status: "all", limit: 1 }),
+    enabled: enabled && !principal.isScoped,
+    refetchInterval: 15_000,
+  });
   const selected = useQuery({
     queryKey: [
       "dataset-holds",
@@ -70,11 +78,7 @@ export function DatasetHoldsPage() {
     );
   return (
     <div className="space-y-5" data-testid="dataset-holds-page">
-      <h1 className="text-2xl font-bold lowercase text-text-1">Dataset holds</h1>
-      <p className="text-sm text-text-3">
-        A held dataset skips downstream runs at admission. Review the producer
-        evidence before acknowledging it.
-      </p>
+      <ConsolePageHeader title="Holds" description="Held datasets skip downstream runs at admission. Inspect producer evidence before acknowledging a hold." count={list.data ? `${list.data.total} holds` : undefined} />
       {search.name ? (
         <div className="flex items-center gap-3 text-xs">
           <span className="">
@@ -86,7 +90,7 @@ export function DatasetHoldsPage() {
           </Link>
         </div>
       ) : null}
-      <div className="grid items-start gap-5 xl:grid-cols-2">
+      <div className={`grid items-start gap-5 ${list.data?.holds.length || search.name ? "xl:grid-cols-2" : ""}`}>
         <section className="space-y-3">
           <label className="flex items-center gap-3 text-xs">
             Hold status
@@ -110,15 +114,11 @@ export function DatasetHoldsPage() {
             <p role="alert">{list.error.message}</p>
           ) : (
             <>
-              <p className="text-xs text-text-3" data-testid="hold-page-total">
-                {list.data.total} holds, page {page + 1} of{" "}
-                {Math.max(1, Math.ceil(list.data.total / pageSize))}
-              </p>
-              {list.data.holds.length === 0 ? (
-                <p className="text-sm text-text-3">
-                  No {status === "all" ? "recorded" : status} holds match.
-                </p>
-              ) : null}
+              {list.data.holds.length === 0 ? <EmptyState
+                title={inventory.data?.total === 0 ? "No holds recorded" : "No holds match"}
+                subtitle={inventory.data?.total === 0 ? "Holds appear when a data assertion quarantines a dataset. Inspect pipeline execution and declared assertions in Jobs." : "Try all history or clear the dataset filter."}
+                action={inventory.data?.total === 0 ? <Button variant="outline" asChild><Link to="/jobs">View jobs</Link></Button> : <Button variant="outline" asChild><Link to="/datasets/holds" search={{}} onClick={() => { setStatus("all"); setPage(0); }}>Clear filters</Link></Button>}
+              /> : <p className="text-xs text-text-3" data-testid="hold-page-total">{list.data.total} holds</p>}
               {list.data.holds.map((hold) => (
                 <Link
                   key={hold.id}
@@ -137,7 +137,8 @@ export function DatasetHoldsPage() {
                   </p>
                 </Link>
               ))}
-              <div className="flex gap-2">
+              {list.data.total > pageSize ? <div className="flex items-center gap-2">
+                <span className="text-xs text-text-3">Page {page + 1} of {Math.ceil(list.data.total / pageSize)}</span>
                 <Button
                   size="sm"
                   variant="outline"
@@ -154,7 +155,7 @@ export function DatasetHoldsPage() {
                 >
                   Next holds
                 </Button>
-              </div>
+              </div> : null}
             </>
           )}
         </section>
@@ -173,11 +174,11 @@ export function DatasetHoldsPage() {
                   : "No active hold for this dataset. Select All history to inspect released holds."}
               </p>
             )
-          ) : (
+          ) : list.data?.holds.length ? (
             <p className="text-sm text-text-3">
               Select a hold to inspect its evidence.
             </p>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

@@ -1,3 +1,6 @@
+import { formatCommand } from "@/lib/command-display";
+import { FilterChip } from "@/components/ui/filter-chip";
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Atom } from "@/lib/api";
 import {
@@ -16,7 +19,6 @@ import { toast } from "sonner";
 import { X, ChevronDown, ChevronRight, ChevronLeft } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
 import { Fragment, useState, useMemo } from "react";
-import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
 
@@ -76,14 +78,8 @@ export function AtomsPage() {
   if (error) return <div className="p-8 text-center text-destructive">Error loading atoms: {error.message}</div>;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold lowercase text-text-1">Atoms</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Reusable execution units (containers)</p>
-        </div>
-        <span className="text-sm text-muted-foreground">{filtered.length} atom{filtered.length !== 1 ? "s" : ""}</span>
-      </div>
+    <div className="space-y-5">
+      <ConsolePageHeader title="Atoms" description="Reusable container execution units." count={`${filtered.length} atoms`} />
 
       {/* Filters */}
       <div className="flex flex-wrap gap-2 items-center">
@@ -93,28 +89,18 @@ export function AtomsPage() {
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(0); }}
             placeholder="Search by image, command, ID..."
-            className="w-full rounded-md border bg-background px-3 py-2 pl-8 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
-            <button onClick={() => setSearch("")} className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground">
+            <button aria-label="Clear atom search" onClick={() => { setSearch(""); setPage(0); }} className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground">
               <X className="h-4 w-4" />
             </button>
           )}
         </div>
         {engines.map(engine => (
-          <button
-            key={engine}
-            onClick={() => { setEngineFilter(engineFilter === engine ? null : engine); setPage(0); }}
-            className={cn(
-              "rounded-full px-3 py-1 text-xs border transition-colors flex items-center gap-1.5",
-              engineFilter === engine
-                ? "bg-primary text-primary-foreground border-primary"
-                : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
-            )}
-          >
-
+          <FilterChip key={engine} active={engineFilter === engine} onClick={() => { setEngineFilter(engineFilter === engine ? null : engine); setPage(0); }}>
             {engine}
-          </button>
+          </FilterChip>
         ))}
       </div>
 
@@ -123,10 +109,9 @@ export function AtomsPage() {
           <TableHeader>
             <TableRow>
               <TableHead className="w-8"></TableHead>
-              <TableHead>Name</TableHead>
+              <TableHead>Atom / image</TableHead>
               <TableHead>Engine</TableHead>
-              <TableHead>Image</TableHead>
-              <TableHead>Command</TableHead>
+              <TableHead>Command arguments</TableHead>
               <TableHead>Created</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -134,7 +119,7 @@ export function AtomsPage() {
           <TableBody>
             {pageAtoms.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
                   No atoms found.
                 </TableCell>
               </TableRow>
@@ -147,19 +132,19 @@ export function AtomsPage() {
                   onClick={() => setExpanded(expanded === atom.id ? null : atom.id)}
                 >
                   <TableCell>
-                    {expanded === atom.id
-                      ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                      : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                    <button aria-label={`Details for atom ${atom.id}`} aria-expanded={expanded === atom.id} onClick={event => { event.stopPropagation(); setExpanded(expanded === atom.id ? null : atom.id); }}>
+                      {expanded === atom.id ? <ChevronDown className="h-4 w-4 text-text-3" /> : <ChevronRight className="h-4 w-4 text-text-3" />}
+                    </button>
                   </TableCell>
-                  <TableCell><div className="text-sm font-bold">{typeof atom.spec?.name === "string" ? atom.spec.name : atom.image.split("@")[0]}</div><IdChip value={atom.id} label="atom id" /></TableCell>
+                  <TableCell className="min-w-[180px] max-w-[280px]">
+                    {typeof atom.spec?.name === "string" && atom.spec.name !== atom.image ? <div className="break-words text-sm font-bold">{atom.spec.name}</div> : null}
+                    <div className="text-sm"><ImageReference image={atom.image} /></div><IdChip value={atom.id} label="atom id" />
+                  </TableCell>
                   <TableCell>
                     <span className="text-xs text-text-3">{atom.engine}</span>
                   </TableCell>
-                  <TableCell className="text-xs max-w-[200px] truncate" title={atom.image}>
-                    <ImageReference image={atom.image} />
-                  </TableCell>
-                  <TableCell className="text-xs max-w-[200px] truncate text-muted-foreground" title={atom.command}>
-                    <span className="rounded-sm bg-code-bg px-2 py-1 text-code-fg"><span className="text-cyan">$ </span>{atom.command}</span>
+                  <TableCell className="text-xs max-w-[200px] truncate text-muted-foreground" title={formatCommand(atom.command)}>
+                    <span className="rounded-sm bg-code-bg px-2 py-1 text-code-fg">{formatCommand(atom.command)}</span>
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
                     <RelativeTime date={atom.created_at} />
@@ -183,8 +168,8 @@ export function AtomsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        className="text-danger hover:bg-danger/10 hover:text-danger"
                         onClick={() => setDeleteConfirm(atom.id)}
-                        className="text-muted-foreground hover:text-destructive"
                         title="Delete Atom"
                       >
                         <span>Delete Atom</span>
@@ -194,11 +179,11 @@ export function AtomsPage() {
                 </TableRow>
                 {expanded === atom.id && (
                   <TableRow key={`${atom.id}-detail`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={7}>
+                    <TableCell colSpan={6}>
                       <div className="py-2 px-2 space-y-3">
                         <div className="grid grid-cols-2 gap-4 text-sm">
                           <div>
-                            <p className="text-xs text-muted-foreground mb-1">Full ID</p>
+                            <p className="text-xs text-muted-foreground mb-1">Atom ID</p>
                             <IdChip value={atom.id} label="atom id" />
                           </div>
                           <div>
@@ -211,7 +196,8 @@ export function AtomsPage() {
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground mb-1">Command</p>
-                            <p className="text-xs break-all">{atom.command}</p>
+                            <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Command arguments (quoted)">{formatCommand(atom.command)}</pre>
+                            <details className="mt-2 text-xs"><summary className="cursor-pointer text-text-3">Raw command</summary><pre className="mt-2 whitespace-pre-wrap break-all">{atom.command}</pre></details>
                           </div>
                         </div>
                         {atom.spec && Object.keys(atom.spec).length > 0 && (

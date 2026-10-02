@@ -59,7 +59,7 @@ function writeUrlParams(status: StatusFilter, q: string, sort: SortKey) {
   if (sort !== "alias") params.set("sort", sort);
   const search = params.toString();
   const url = search ? `${window.location.pathname}?${search}` : window.location.pathname;
-  window.history.replaceState(null, "", url);
+  window.history.replaceState(window.history.state, "", url);
 }
 
 function activityKey(e: CaesiumEvent, jobId: string, runId?: string) {

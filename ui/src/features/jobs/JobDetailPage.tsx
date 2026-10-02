@@ -80,9 +80,9 @@ export function JobDetailPage() {
   const handleNodeSelect = (taskId: string | null) => {
     setSelectedTaskId(taskId);
     if (taskId) {
-      window.history.replaceState(null, "", `#${taskId}`);
+      window.history.replaceState(window.history.state, "", `#${taskId}`);
     } else {
-      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
     }
   };
 
@@ -98,7 +98,7 @@ export function JobDetailPage() {
   // sub-fetch, SSE filter, and mutation below operates on the full id.
   useEffect(() => {
     if (job && job.id !== jobId) {
-      navigate({ to: jobViewPath(job.id, secondaryView), replace: true });
+      navigate({ to: jobViewPath(job.id, secondaryView), replace: true, resetScroll: false });
     }
   }, [job, jobId, navigate, secondaryView]);
 
@@ -440,8 +440,8 @@ export function JobDetailPage() {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
 
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-2xl font-bold text-text-1">{job.alias}</h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="min-w-0 [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job.alias}</h1>
               <StatusBadge status={job.paused ? "paused" : (featuredRun?.status ?? "queued")} size="sm" />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
@@ -514,7 +514,7 @@ export function JobDetailPage() {
           </div>
         </div>
         <div
-          className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border bg-void/80 p-1"
+          className="flex max-w-full flex-wrap items-center gap-1 border-b border-border py-1"
           data-testid="job-detail-view-tabs"
         >
           <ViewTab jobId={job.id} view="runs" activeView={secondaryView}>
@@ -557,7 +557,7 @@ export function JobDetailPage() {
         style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
       >
         {/* Compact overlay status bar */}
-        <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5 gap-4">
+        <div className="flex flex-wrap items-center justify-between border-b border-border px-4 py-3 gap-x-4 gap-y-3">
           <div className="flex items-center gap-2 text-xs text-text-3 min-w-0">
             {featuredRun ? (
               <>
@@ -567,7 +567,7 @@ export function JobDetailPage() {
                     <span className="text-cyan-glow font-normal">Live</span>
                   </span>
                 )}
-                <span className="truncate">
+                <span className="flex flex-wrap gap-x-2 gap-y-1">
                   {activeRun ? "Overlay from" : "Latest overlay:"}{" "}
                   <Link
                     to="/jobs/$jobId/runs/$runId"
@@ -583,7 +583,7 @@ export function JobDetailPage() {
             )}
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
             {/* Live task counters */}
             {featuredRun && <DagCounters tasks={featuredRun.tasks} />}
             {job.paused && (
@@ -628,7 +628,7 @@ export function JobDetailPage() {
         open={secondaryView !== null}
         onOpenChange={(open) => {
           if (!open) {
-            navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true });
+            navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true, resetScroll: false });
           }
         }}
       >
@@ -827,6 +827,7 @@ function ViewTab({
     >
       <Link
         to={jobViewPath(jobId, view)}
+        resetScroll={false}
         aria-current={isActive ? "page" : undefined}
       >
         {children}
@@ -1247,7 +1248,7 @@ function renderTriggerSummary(trigger: Trigger | null | undefined) {
       </div>
       <div>
         <div className="mb-1 text-xs lowercase text-muted-foreground">Trigger ID</div>
-        <div className="text-xs">{trigger.id}</div>
+        <IdChip value={trigger.id} label="trigger id" />
       </div>
     </>
   );

@@ -60,7 +60,7 @@ function formatUptime(seconds: number | null): string {
 }
 
 function CountBadge({ value }: { value: number | null }) {
-  return value == null ? null : <span className="ml-auto text-xs text-text-3">{value}</span>;
+  return <span data-nav-count className="text-right text-xs tabular-nums text-text-3">{value ?? ""}</span>;
 }
 
 interface SidebarProps {
@@ -155,12 +155,12 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
               className: "text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
             }}
             onClick={onNavigate}
-            className="flex h-[30px] items-center gap-2 rounded-md px-2 text-[13px] lowercase transition-colors"
+            className="grid min-h-8 grid-cols-[12px_minmax(0,1fr)_32px_24px] items-center gap-2 rounded-md px-2 text-[13px] lowercase transition-colors"
           >
             <span aria-hidden="true" className="nav-caret invisible text-cyan">❯</span>
             <span>{item.label}</span>
             <CountBadge value={item.count} />
-            {item.hint ? <span aria-hidden="true" className="ml-auto w-6 text-right text-[11px] font-normal text-text-3">g{item.hint}</span> : null}
+            <span data-nav-shortcut aria-hidden="true" className="text-right text-xs font-normal text-text-3">{item.hint ? `g${item.hint}` : ""}</span>
           </Link>
         ))}
       </nav>

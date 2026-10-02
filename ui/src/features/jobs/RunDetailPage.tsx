@@ -28,6 +28,7 @@ import { formatUTCTime, formatUTCTimestamp } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
+import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
 import { ReplayDialog } from "./ReplayDialog";
@@ -332,25 +333,27 @@ export function RunDetailPage() {
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="space-y-4">
         <div>
           <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
-            <h1 data-testid="run-heading" className="text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
+            <h1 data-testid="run-heading" className="min-w-0 basis-full [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
             <span className="text-xs text-text-3">run started {formatUTCTime(run.started_at)}</span>
             <StatusBadge status={run.status} />
             <IdChip value={runId} label="run id" />
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-7 gap-y-2 text-xs text-text-3">
-            <Link to="/jobs/$jobId/runs" params={{ jobId }} className="hover:text-text-1">← all runs</Link>
             <span>elapsed <Duration start={run.started_at} end={run.completed_at} /></span>
             <span>trigger {run.trigger_type || "manual"}</span>
-            <span>tasks {(run.tasks ?? []).filter(task => ["succeeded", "cached", "skipped"].includes(task.status)).length}/{run.tasks?.length ?? 0} done</span>
+            <span title="Completed includes succeeded, cached, failed, skipped, and cancelled tasks; blocked tasks remain separate.">tasks {(run.tasks ?? []).filter(task => ["succeeded", "completed", "cached", "failed", "skipped", "cancelled"].includes(task.status)).length}/{run.tasks?.length ?? 0} completed</span>
             <span>receipt {isLive || receiptQuery.isPending ? "pending" : receiptQuery.data ? "available" : "unavailable"}</span>
           </div>
         </div>
 
+        <DagCounters tasks={run.tasks} />
+
         {/* Action cluster */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-border pt-3">
+          <div className="flex flex-wrap items-center gap-2" aria-label="Run navigation">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -398,6 +401,8 @@ export function RunDetailPage() {
               All runs <kbd aria-hidden="true" className="text-[11px] text-text-3">a</kbd>
             </Link>
           </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2" aria-label="Run execution actions">
           {canLaunchReplay ? (
             <Button
               variant="outline"
@@ -405,6 +410,7 @@ export function RunDetailPage() {
               className="h-8 text-xs"
               onClick={() => setReplayDialogOpen(true)}
               data-testid="run-replay-trigger"
+              title="Configure a replay using this run as the baseline"
             >
               Replay… <kbd aria-hidden="true" className="text-[11px] text-text-3">p</kbd>
             </Button>
@@ -438,6 +444,7 @@ export function RunDetailPage() {
               const params = rerunParams(run.params);
               triggerMutation.mutate({ jobId, params });
             }}
+            title="Start a new run with the same parameters"
             data-testid="run-rerun-trigger"
             disabled={triggerMutation.isPending}
           >
@@ -455,6 +462,7 @@ export function RunDetailPage() {
               Cancel
             </Button>
           )}
+          </div>
         </div>
       </div>
 
