@@ -75,7 +75,7 @@ export function IncidentAnalytics() {
     return (
       <Card className="border-danger/30 bg-danger/5">
         <CardContent className="flex items-center gap-3 p-4 text-sm text-danger">
-          <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
+          <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
           {incidentsQuery.error.message}
         </CardContent>
       </Card>

@@ -1,3 +1,4 @@
+import { MetadataValue } from "@/components/ui/metadata-value";
 import { IdChip } from "@/components/ui/id-chip";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -336,6 +337,7 @@ function BaselineDetails({
         <DetailRow
           label="Task run"
           value={baseline?.taskRunId || "none"}
+          idChip
           mono
         />
         <DetailRow
@@ -383,9 +385,9 @@ function HashDetails({ explanation }: { explanation: WhyExplanation }) {
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Hashes</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Task hash" value={explanation.hash || "none"} mono wrap />
-        <DetailRow label="Subject" value={explanation.diff?.subjectHash || "none"} mono wrap />
-        <DetailRow label="Baseline" value={explanation.diff?.baselineHash || "none"} mono wrap />
+        <DetailRow idChip label="Task hash" value={explanation.hash || "none"} mono wrap />
+        <DetailRow idChip label="Subject" value={explanation.diff?.subjectHash || "none"} mono wrap />
+        <DetailRow idChip label="Baseline" value={explanation.diff?.baselineHash || "none"} mono wrap />
       </div>
     </div>
   );
@@ -433,17 +435,19 @@ function DetailRow({
   value,
   mono = false,
   wrap = false,
+  idChip = false,
 }: {
   label: string;
   value: string;
   mono?: boolean;
   wrap?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div className="grid grid-cols-[96px_1fr] gap-2">
       <span className="text-muted-foreground">{label}</span>
       <span className={cn("text-text-2", mono && "", wrap && "break-all")}>
-        {/run$|fingerprint|digest|hash|^(Subject|Baseline)$/i.test(label) && value !== "none" ? <IdChip value={value} label={label} /> : value}
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </span>
     </div>
   );

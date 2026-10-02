@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
+import { mergeLatestRun } from "./run-updates";
 import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
@@ -40,7 +41,7 @@ const STATUS_FILTERS: StatusFilter[] = ["all", "running", "succeeded", "failed",
 const SORT_KEYS: SortKey[] = ["alias", "status", "last_run"];
 const ACTIVITY_LIMIT = 20;
 const ACTIVITY_KEY_LIMIT = 100;
-const RUN_ACTIVITY_EVENTS = ["run_started", "run_completed", "run_failed", "run_cancelled"] as const;
+const RUN_ACTIVITY_EVENTS = ["run_started", "run_retried", "run_completed", "run_failed", "run_cancelled"] as const;
 
 function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey; historyWindow: HistoryWindow } {
   const params = new URLSearchParams(window.location.search);
@@ -167,9 +168,10 @@ export function useJobsView() {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const refreshHistory = () => {
-      // Reconnects replay a burst of retained events. Coalesce their list reads.
-      clearTimeout(refreshTimer);
+      // Fixed coalescing window: sustained events cannot postpone a refresh.
+      if (refreshTimer !== undefined) return;
       refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
         queryClient.invalidateQueries({ queryKey: ["jobs"] });
       }, 250);
     };
@@ -187,13 +189,13 @@ export function useJobsView() {
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
         old?.map((job) =>
           job.id === jobID
-            ? { ...job, latest_run: run ? job.latest_run?.id === run.id ? { ...job.latest_run, ...run } : run : job.latest_run }
+            ? { ...job, latest_run: run ? mergeLatestRun(job.latest_run, run) : job.latest_run }
             : job,
         ),
       );
       if (run) {
         queryClient.setQueryData(["job", jobID], (old: Job | undefined) =>
-          old ? { ...old, latest_run: old.latest_run?.id === run.id ? { ...old.latest_run, ...run } : run } : old,
+          old ? { ...old, latest_run: mergeLatestRun(old.latest_run, run) } : old,
         );
       }
 

@@ -39,23 +39,25 @@ The bundle's sample fleet has frequent recent runs and a multi-voter cluster. Th
 
 ## Rendered evidence
 
+Screenshots and recordings remain available in the immutable PR review snapshot linked below. Binary review evidence is removed from the final source tree so a squash merge does not add it to `master`.
+
 Reference renders contain the bundle's sample data. Application screenshots are unedited browser captures of real API data, except the explicitly synthetic login gate used only to inspect its layout. API authentication behavior is not established by those login images.
 
 | Surface | Reference / before | After |
 | --- | --- | --- |
-| Fleet instrument reference | [Standard reference](ui-motion-617/reference-dark-jobs.png) | [24-hour real history, light](ui-motion-617/history-light-1440-after.png) |
-| Historical fleet, dark, 1440×900 | [Before](ui-motion-617/jobs-dark-1440-before.png) | [After](ui-motion-617/jobs-dark-1440-after.png) |
-| Terminal execution, light, 1280×800 | [Before](ui-motion-617/run-light-1280-before.png) | [After](ui-motion-617/run-light-1280-after.png) |
-| Live execution | [Standard reference](ui-motion-617/reference-dark-run.png) | [Real running job](ui-motion-617/live-execution-after.png) |
-| Phone history, dark, 390×844 | [Before](ui-motion-617/jobs-dark-390-before.png) | [After](ui-motion-617/jobs-dark-390-after.png) |
-| Login, dark, 1440×900 | [Before](ui-motion-617/login-dark-1440-before.png) · [Standard reference](ui-motion-617/reference-dark-login.png) | [After](ui-motion-617/login-dark-1440-after.png) |
-| Login, light, 390×844 | [Before](ui-motion-617/login-light-390-before.png) | [After](ui-motion-617/login-light-390-after.png) |
+| Fleet instrument reference | [Standard reference](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/reference-dark-jobs.png) | [24-hour real history, light](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-light-1440-after.png) |
+| Historical fleet, dark, 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/jobs-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/jobs-dark-1440-after.png) |
+| Terminal execution, light, 1280×800 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/run-light-1280-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/run-light-1280-after.png) |
+| Live execution | [Standard reference](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/reference-dark-run.png) | [Real running job](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/live-execution-after.png) |
+| Phone history, dark, 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/jobs-dark-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/jobs-dark-390-after.png) |
+| Login, dark, 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/login-dark-1440-before.png) · [Standard reference](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/reference-dark-login.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/login-dark-1440-after.png) |
+| Login, light, 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/login-light-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/login-light-390-after.png) |
 
-[Watch the real-run motion recording](ui-motion-617/live-instruments.webm): a REST-triggered uncached three-step job updates the fleet strip, then shows the execution cursor, running bar, and task electron. The API subsequently reported this recorded run as succeeded. [Live fleet still](ui-motion-617/live-fleet-after.png).
+[Watch the real-run motion recording](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/live-instruments.webm): a REST-triggered uncached three-step job updates the fleet strip, then shows the execution cursor, running bar, and task electron. The API subsequently reported this recorded run as succeeded. [Live fleet still](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/live-fleet-after.png).
 
 ## Qualification and limits
 
-The final production frontend was built inside the existing Playwright Linux image and served against the unchanged release backend. No Go application source, permission model, or API response schema changed. The raw capture matrix and receipts are under `.tmp/pr617-motion/`; representative artifacts are committed above.
+The final production frontend was built inside the existing Playwright Linux image and served against the unchanged release backend. No Go application source, permission model, or API response schema changed. The raw capture matrix and receipts are under `.tmp/pr617-motion/`; representative artifacts are linked above from the immutable PR review snapshot.
 
 - ESLint, 436 unit tests across 60 files, TypeScript production compilation, and unchanged asset budgets passed. Largest JS: 1,237.28 KiB raw / 362.75 KiB gzip; all route assets: 2,599.89 KiB raw / 787.88 KiB gzip.
 - Direct screenshots cover 1440×900, 1280×800, and 390×844 in both themes. Checks include real running/terminal jobs, historical-only/empty history, missing values, and the synthetic login layout. The earlier polish's populated/filtered-empty route captures remain supplemental evidence for unchanged surfaces.
@@ -69,7 +71,7 @@ Populated Datasets/Holds/Contracts, feature-gated incident screens, multi-node/d
 
 ## Fleet column spacing follow-up
 
-Give the timeline more of the flexible desktop width. At 1440 px, the name column changes from 436 to 238 px and history from 264 to 462 px; at 1280 px, names change from 336 to 220 px and history from 204 to 320 px. Header/row alignment, full-name tooltips, fixed status/time/action columns, and the phone layout are preserved. [Before](ui-motion-617/spacing-dark-1440-before.png) · [After](ui-motion-617/spacing-dark-1440-after.png).
+Give the timeline more of the flexible desktop width. At 1440 px, the name column changes from 436 to 238 px and history from 264 to 462 px; at 1280 px, names change from 336 to 220 px and history from 204 to 320 px. Header/row alignment, full-name tooltips, fixed status/time/action columns, and the phone layout are preserved. [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/spacing-dark-1440-before.png) · [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/spacing-dark-1440-after.png).
 
 Direct captures cover both themes at 1440×900, 1280×800, and 390×844, including long names. Containerized lint, production build/budget checks, and four existing browser alignment/responsive checks passed with zero retries. No new unit tests were added for this CSS-only adjustment. Local measurements and captures are retained in `.tmp/pr617-spacing/`.
 
@@ -79,10 +81,10 @@ The quorum count now sits below the large System atom, with tabular numerals, a 
 
 | View | Before | After |
 | --- | --- | --- |
-| System, dark, 1440×900 | [Prior standalone capture: count inside the orbit](ui-motion-617/system-quorum-before.png) | [Three-voter Kubernetes cluster: count below](ui-motion-617/system-quorum-dark-1440.png) |
-| System, light, 390×844 | — | [Phone layout](ui-motion-617/system-quorum-light-390.png) |
+| System, dark, 1440×900 | [Prior standalone capture: count inside the orbit](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/system-quorum-before.png) | [Three-voter Kubernetes cluster: count below](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/system-quorum-dark-1440.png) |
+| System, light, 390×844 | — | [Phone layout](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/system-quorum-light-390.png) |
 
-These captures use different real deployments: the earlier standalone server has one voter; the new cluster has three. The count is not mocked. [Watch the cluster atom and a real Kubernetes run](ui-motion-617/kubernetes-quorum-live.webm).
+These captures use different real deployments: the earlier standalone server has one voter; the new cluster has three. The count is not mocked. [Watch the cluster atom and a real Kubernetes run](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/kubernetes-quorum-live.webm).
 
 The current embedded release is running at **http://localhost:8084/system** (Jobs: **http://localhost:8084/jobs**). Port 8080 remains the original QA build. The new runtime uses the isolated Docker-backed kind cluster `caesium-ui-617`, Helm release/namespace `caesium-ui`, and three persistent Caesium replicas placed on three separate Kubernetes nodes. A loopback NodePort mapping serves port 8084 without a port-forward process. The default kubectl context remains `docker-desktop`; all deployment commands used the explicit kubeconfig below.
 
@@ -107,7 +109,7 @@ Run actions, the search footer, and search-dialog guidance now use the shared `K
 
 Hints remain separate from interactive controls and do not add tab stops. Decorative hints are excluded from control names; the search dialog's standalone keyboard instructions remain available to assistive technology. Existing key handlers, permissions, focus behavior, and disabled-button opacity are unchanged.
 
-[Before, desktop dark](ui-motion-617/shortcuts-dark-1440-before.png) · [After, desktop dark](ui-motion-617/shortcuts-dark-1440-after.png) · [Shortcut tooltip](ui-motion-617/shortcuts-tooltip-after.png) · [Phone drawer, light](ui-motion-617/shortcuts-light-390-after.png) · [Search guidance](ui-motion-617/shortcuts-search-after.png).
+[Before, desktop dark](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/shortcuts-dark-1440-before.png) · [After, desktop dark](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/shortcuts-dark-1440-after.png) · [Shortcut tooltip](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/shortcuts-tooltip-after.png) · [Phone drawer, light](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/shortcuts-light-390-after.png) · [Search guidance](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/shortcuts-search-after.png).
 
 Direct before/after review covers run actions and search at 1440×900, 1280×800, and 390×844 in both themes, plus both phone drawers. Read-only synthetic counts cover four digits, zero, and absent values without writing records. Browser checks verify shared keycap geometry, aligned count columns, absence of inline sidebar keycaps, hover/focus tooltip discovery, Escape dismissal, a clear drawer close button, run navigation/replay-dialog keys, and desktop/mobile `g` navigation sequences. Keycap text/background contrast measures 8.86:1 dark and 6.99:1 light; these measurements do not qualify the entire interface.
 
@@ -128,7 +130,7 @@ Reproduced against `0b775140` on the three-replica Kubernetes release at port 80
 | Graph motion feels unstable | Layout is computed from topology, independent of task status and selection updates. Removed the duplicate group/path dash animation and slowed the single flowing path. Unstarted timeline rows no longer sort before already-started work by creation time. |
 | Missed events leave stale state | Detail queries reconcile authoritative REST state every five seconds even with a connected event stream. Late task events cannot revive a terminal snapshot. Terminal payloads retain their actual outcome and completion metadata. |
 
-[Reported run before](ui-motion-617/execution-failed-before.png) · [Same run after](ui-motion-617/execution-failed-after.png) · [Phone, light](ui-motion-617/execution-failed-phone.png) · [Real live execution](ui-motion-617/execution-live-after.png).
+[Reported run before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/execution-failed-before.png) · [Same run after](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/execution-failed-after.png) · [Phone, light](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/execution-failed-phone.png) · [Real live execution](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/execution-live-after.png).
 
 Validation: ESLint, 444 unit tests, production build/budgets, and the focused `dag-execution-motion.spec.ts` browser journey. The browser drives real Kubernetes jobs, samples frame-by-frame bar movement (24 distinct widths in 24 samples), suppresses SSE updates to verify REST reconciliation, observes terminal stopping without reload, preserves graph framing, and checks reduced motion. A separately labeled synthetic incomplete snapshot exercises the rare parent/task mismatch without modifying server rows. The original failed run is also inspected directly through its real API and rendered route. Desktop 1440×900, 1280×800, and phone 390×844 captures cover both themes, mobile overflow and axis endpoints; screenshots were reviewed directly. A fresh execution of the user's same job succeeds. Raw API receipts, browser results, before/after screenshots, and an uninterrupted live-to-terminal video are in `.tmp/pr617-dag-motion/`.
 
@@ -147,7 +149,7 @@ The path from Jobs to a timeline previously relied on a small `Latest overlay` t
 | Shared context | **Job overview** and **Run history** occupy the same navigation position on job and execution pages. The active **Execution** item distinguishes a specific run from its parent job. The run identity presentation is shared; paused remains a job property, while execution outcome belongs to the selected run. |
 | Exact historical run | **Switch run** lists timestamps, IDs, statuses, and durations, with the inspected run pinned independently of recent history. Up to eight alternatives appear, plus a route to complete history. Viewing history, using Back, copying an ID, or switching runs never launches a new execution. History rows now show the full UTC date as well as time. |
 
-[Job overview before](ui-motion-617/job-run-before.png) · [Job overview after](ui-motion-617/job-run-after.png) · [Execution navigation](ui-motion-617/run-navigation-after.png) · [Run picker on phone](ui-motion-617/run-picker-phone.png).
+[Job overview before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/job-run-before.png) · [Job overview after](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/job-run-after.png) · [Execution navigation](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/run-navigation-after.png) · [Run picker on phone](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/run-picker-phone.png).
 
 Validation covers the real Jobs → overview → exact execution → historical execution → overview flow at 1440×900, 1280×800, and 390×844 in both themes. The browser checks zero/one/multiple-run states, exact URLs and IDs, direct entry/reload, keyboard selection and dismissal, copy behavior, the existing A history shortcut, browser Back, mobile reachability, and absence of accidental run creation. Four existing regression journeys also pass: mobile graph/timeline context, case-sensitive identifiers and Alt-R/navigation chords, malformed timestamps, and job-scoped history after re-run. ESLint, all 444 unit tests, and production build/budgets pass. Direct screenshot review includes a populated picker with the original failed run and subsequent successful runs. Evidence is under `.tmp/pr617-run-navigation/`.
 
@@ -165,10 +167,42 @@ Reproduced on `a5de859f` at port 8084: relative ages shifted the run-history sta
 | Missing Datasets count | The sidebar reads the existing paginated dataset endpoint's total, fetching one record. A confirmed empty result displays **0**, matching Holds. Loading, forbidden, unavailable, feature-disabled, and scoped states do not invent a zero or request an unauthorized global count. |
 | Crowded bars and ambiguous “Older” | Recent and archived marks share a baseline with at least 14px above the tallest terminal mark in a 64px row. Duration scaling is unchanged. Archived history keeps its separate ordinal treatment and now says **Outside 15m** (or the selected window), with an explicit **View history →** link to that job's history. Exact timestamps and the oldest age remain in accessible descriptions/native hover detail. |
 
-[Strip before](ui-motion-617/history-strip-before.png) · [Strip after](ui-motion-617/history-strip-after.png) · [Modal before](ui-motion-617/history-modal-before.png) · [Modal after](ui-motion-617/history-modal-after.png) · [Phone, light](ui-motion-617/history-modal-phone.png).
+[Strip before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-strip-before.png) · [Strip after](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-strip-after.png) · [Modal before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-modal-before.png) · [Modal after](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-modal-after.png) · [Phone, light](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/history-modal-phone.png).
 
 Screenshots directly reviewed at 1440×900, 1280×800, and 390×844 in both themes. Focused browser coverage opens real executions through the archive link with keyboard navigation and verifies exact identity, aligned columns, mobile bounds, and bar padding in recent/archived modes. Age differences and long durations are explicitly synthetic browser responses over real run IDs; no server timestamps are changed. Separate rendering probes distinguish zero, a multi-digit paginated total, unavailable counts, and the feature gate. Populated dataset lifecycle and external authentication remain outside this focused pass. Raw evidence: `.tmp/pr617-history-polish/`.
 
 Validation: containerized ESLint, all 444 unit tests, production build/bundle budgets, and `go test ./internal/guardrails/...` pass. Both focused browser journeys pass against the container-built UI with zero retries. The initial browser attempt exposed an in-flight route callback at test teardown; waiting for interception callbacks fixes the test cleanup, with no application change required.
 
 Local delivery: image `caesiumcloud/caesium:pr617-history-polish-20261002` is running on port 8084 across three healthy replicas. Fresh membership observations confirm 3/3 reachable voters, and all 14 served entry assets match the build. A final browser check follows the deployed archive link into the history modal and opens its exact real execution and timeline. Only this release's superseded images were retired; foreign resources were preserved.
+
+## Second review pass
+
+This pass addresses the 16 follow-up threads without changing the backend, permissions, animation phases, or duration geometry.
+
+| Finding | Correction |
+| --- | --- |
+| JobDefs heading checks | Navigation and performance journeys match the actual `JobDefs` heading. |
+| Repeated full-history reads | Healthy SSE disables periodic job/full-history reads; run lifecycle events reconcile the summaries. The selected run retains its bounded REST reconciliation. |
+| Timeline units | Use seconds, minutes, and hours for long-run ticks while retaining subsecond scaling for short runs. |
+| Partition retry remains terminal | Subscribe to the real `run_retried` event, reopen only the matching execution, reject older retry snapshots, and invalidate run/receipt/Why/job history after retry. Late task events still cannot revive a terminal run. |
+| Sustained activity starves refresh | Use a fixed 250 ms coalescing window, with teardown cleanup, instead of a trailing debounce. |
+| Concurrent completion overwrites latest | Compare start time, falling back to creation time, in both the fleet and individual-job caches. Completion order does not choose the latest run. |
+| Identifier capitalization | Preserve mixed-case trigger aliases and database column names. |
+| Autofill key event | Guard an absent key before lowercasing it. |
+| Incident error symbol | Use the failed glyph and danger foreground consistently. |
+| Compare menu nested button | Show a noninteractive abbreviated run ID inside the menu item; keyboard selection and full-ID tooltip remain available. |
+| Remaining metadata regexes | Why and Blame declare ID fields explicitly and share empty/None handling. |
+| HTTP copy behavior | Webhook URL, logs, and SQL results use the shared copy fallback and report failure without claiming success. |
+| Duplicate command formatting | Atoms, job tasks, and Blame share one argument-aware formatter; plain commands and malformed representations remain faithful. |
+| Focus and unused CSS | Keep one focus rule and remove the unused duration-bar transition and reduced-motion selector. |
+| Binary review evidence | Remove all 61 screenshot/video files from the final tree. Existing galleries link to their immutable PR snapshot; markdown reports remain. |
+
+Focused unit coverage exercises concurrent ordering, explicit retry reopening, bounded refresh under sustained events, native retry-event dispatch, metadata sentinels, argv quoting, and short/minute/hour/day timeline ticks. Browser regression coverage distinguishes real partition execution and copy interactions from explicitly synthetic history/event/capability/error scenarios.
+
+Validation for this review pass:
+
+- Containerized ESLint, 458 unit tests in 63 files, production TypeScript/Vite build, unchanged bundle budgets, and `go test ./internal/guardrails/... -count=1` passed. No Go application source changed.
+- Nineteen focused browser scenarios cover both themes, the navigation heading and memory/readiness regressions, real failed-partition retry, native event wiring, clipboard fallback/error feedback, explicit synthetic 8,000-run history and sustained/concurrent events, and synthetic 10-minute/two-hour layouts. Captures were reviewed directly at desktop and phone sizes.
+- The earlier complete 17-test pass was green. The expanded pass exposed a test setup race: filling SQL while its initial schema/snippet was still loading could append to the default statement. The copy journey now waits for schema readiness and verifies the editor's full value before executing; both themes and the error-card captures passed the focused rerun. Earlier failure traces remain in `.tmp/pr617-review2/`.
+- Browser qualification used a sticky connection to the local cluster leader; the read-only SQL scenario used the existing enabled QA server. Cluster-wide SSE distribution, the full concurrent browser suite, and populated feature-gated incident flows are outside this focused pass. REST reconciliation and existing permission gates remain intact.
+- Local captures, test/build receipts, and an archive of the removed review media are under `.tmp/pr617-review2/`. CI collects new browser screenshots in its diagnostics artifact; no new binary evidence is added to the source tree.

@@ -1,3 +1,4 @@
+import { mergeRetriedRun } from "./run-updates";
 import { JobRunNavigation } from "./JobRunNavigation";
 import { RunIdentity } from "./RunIdentity";
 import { RunPicker } from "./RunPicker";
@@ -92,7 +93,7 @@ export function JobDetailPage() {
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: streamHealthy ? 10000 : 15000,
+    refetchInterval: streamHealthy ? false : 15000,
   });
 
   // Short-id deep links: GET /v1/jobs/:id resolves an unambiguous UUID prefix,
@@ -113,7 +114,7 @@ export function JobDetailPage() {
   const { data: runsResult, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
     queryFn: () => api.getAllJobRuns(jobId),
-    refetchInterval: streamHealthy ? 10000 : 15000,
+    refetchInterval: streamHealthy ? false : 15000,
   });
   const runs = runsResult?.runs;
 
@@ -283,6 +284,19 @@ export function JobDetailPage() {
   });
 
   useEffect(() => {
+    const onRunEvent = (e: CaesiumEvent) => {
+      const payload = e.payload as JobRun | undefined;
+      if ((e.job_id ?? payload?.job_id) !== jobId) return;
+      queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"], exact: true });
+    };
+    const types = ["run_started", "run_retried", "run_completed", "run_failed", "run_cancelled", "run_terminal"];
+    types.forEach(type => events.subscribe(type, onRunEvent));
+    return () => types.forEach(type => events.unsubscribe(type, onRunEvent));
+  }, [jobId, queryClient]);
+
+  useEffect(() => {
     if (!featuredRunId) {
       return;
     }
@@ -320,6 +334,10 @@ export function JobDetailPage() {
             return { ...old, ...failedRun, status: "failed" };
           }
           return old;
+        }
+
+        if (e.type === "run_retried") {
+          return mergeRetriedRun(old, e.payload as JobRun | undefined);
         }
 
         if (e.type.startsWith("task_")) {
@@ -380,17 +398,19 @@ export function JobDetailPage() {
         return old;
       });
 
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
-      queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+      if (e.type === "run_retried") {
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", featuredRunId], exact: true });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", featuredRunId, "receipt"] });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", featuredRunId, "why"] });
+      }
     };
 
-    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
+    ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
       events.subscribe(type, onEvent),
     );
 
     return () => {
-      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
+      ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
         events.unsubscribe(type, onEvent),
       );
     };

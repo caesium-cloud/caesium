@@ -28,13 +28,13 @@ These are unedited browser screenshots with real API data, not mockups. The gall
 
 | Surface | Before | After |
 | --- | --- | --- |
-| Jobs and sidebar · dark · 1440×900 | [Before](ui-polish-617/jobs-dark-1440-before.png) | [After](ui-polish-617/jobs-dark-1440-after.png) |
-| Run header and timeline · light · 1280×800 | [Before](ui-polish-617/run-light-1280-before.png) | [After](ui-polish-617/run-light-1280-after.png) |
-| Job graph/navigation · dark · 390×844 | [Before](ui-polish-617/job-dark-390-before.png) | [After](ui-polish-617/job-dark-390-after.png) |
-| Empty datasets · light · 1280×800 | [Before](ui-polish-617/datasets-light-1280-before.png) | [After](ui-polish-617/datasets-light-1280-after.png) |
-| Atoms · dark · 1440×900 | [Before](ui-polish-617/atoms-dark-1440-before.png) | [After](ui-polish-617/atoms-dark-1440-after.png) |
-| Stats · light · 1440×900 | [Before](ui-polish-617/stats-light-1440-before.png) | [After](ui-polish-617/stats-light-1440-after.png) |
-| JobDefs · light · 390×844 | [Before](ui-polish-617/jobdefs-light-390-before.png) | [After](ui-polish-617/jobdefs-light-390-after.png) |
+| Jobs and sidebar · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobs-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobs-dark-1440-after.png) |
+| Run header and timeline · light · 1280×800 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/run-light-1280-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/run-light-1280-after.png) |
+| Job graph/navigation · dark · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/job-dark-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/job-dark-390-after.png) |
+| Empty datasets · light · 1280×800 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/datasets-light-1280-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/datasets-light-1280-after.png) |
+| Atoms · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/atoms-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/atoms-dark-1440-after.png) |
+| Stats · light · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/stats-light-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/stats-light-1440-after.png) |
+| JobDefs · light · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobdefs-light-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobdefs-light-390-after.png) |
 
 ## Qualification
 
@@ -67,9 +67,9 @@ These captures compare the production frontend at `eca55d81` with the search fol
 
 | Surface | Before | After |
 | --- | --- | --- |
-| Search button · dark · 1440×900 | [Before](ui-polish-617/search-closed-dark-1440-before.png) | [After](ui-polish-617/search-closed-dark-1440-after.png) |
-| Search dialog · dark · 1440×900 | [Before](ui-polish-617/search-open-dark-1440-before.png) | [After](ui-polish-617/search-open-dark-1440-after.png) |
-| Search dialog · light · 390×844 | [Before](ui-polish-617/search-open-light-390-before.png) | [After](ui-polish-617/search-open-light-390-after.png) |
+| Search button · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-closed-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-closed-dark-1440-after.png) |
+| Search dialog · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-dark-1440-after.png) |
+| Search dialog · light · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-light-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-light-390-after.png) |
 
 The search follow-up passed containerized ESLint, all 433 unit tests, the production build and unchanged bundle budgets, and the documentation guardrail. Twelve focused browser checks passed with one worker and zero retries across both themes, covering full-bar clicks, both keyboard shortcuts, focus containment/restoration, dismissal, viewport changes, full-ID navigation, the existing mobile journey, copying, and reduced motion. Direct screenshots were inspected at all three target sizes in both themes, including long results and no matches; six scoped axe scans of the open search dialog reported zero WCAG 2.0/2.1 A/AA violations. These scoped scans do not establish whole-application compliance. Local receipts are under `.tmp/pr617-search/`.
 

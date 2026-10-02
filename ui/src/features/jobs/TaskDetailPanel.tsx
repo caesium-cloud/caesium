@@ -631,6 +631,12 @@ function PartitionTable({
     mutationFn: (index: number) => api.retryPartition(jobId, runId, taskId, index),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["partitions", jobId, runId, taskId] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "why"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
       toast.success("Partition retry requested");
     },
     onError: (err: Error) => {

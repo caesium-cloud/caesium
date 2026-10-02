@@ -256,10 +256,8 @@
 .cs-electron-queued { top: calc(50% - 4px); left: -4px; border: 1px solid hsl(var(--gold)); background: hsl(var(--void)); }
 .cs-now-head { animation: cs-beat 1s ease-out infinite; }
 .cs-live-bar { animation: cs-live-glow 2s ease-in-out infinite; }
-.cs-duration-bar { transition: width 1s linear, left 1s linear; }
 .cs-edge-running .react-flow__edge-path { animation: cs-dash 1.4s linear infinite; }
 .cs-timeline-legend .cs-status-glyph { animation: none; }
-:where(button, a, input, textarea, select, [tabindex]):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .cs-status-glyph, .cs-electron, .cs-now-head, .cs-live-bar, .cs-edge-running, .cs-edge-running .react-flow__edge-path { animation: none !important; }
   .cs-electron { offset-distance: 0%; }
@@ -268,7 +266,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .cs-time-mark, .cs-duration-bar { transition: none !important; }
+  .cs-time-mark { transition: none !important; }
 }
 
 @layer components {

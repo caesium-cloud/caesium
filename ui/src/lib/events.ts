@@ -49,7 +49,7 @@ class EventManager {
 
     const eventTypes = [
       "job_created", "job_deleted", "job_paused", "job_unpaused",
-      "run_started", "run_completed", "run_failed", "run_cancelled", "run_terminal",
+      "run_started", "run_retried", "run_completed", "run_failed", "run_cancelled", "run_terminal",
       "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached",
       "task_ready", "task_claimed", "task_lease_expired",
       "incident_opened", "incident_status_changed", "agent_action_recorded", "approval_requested",

@@ -1,3 +1,4 @@
+import { copyText } from "@/lib/clipboard";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Copy, TerminalSquare } from "lucide-react";
@@ -166,7 +167,7 @@ export function DatabaseConsolePage() {
     });
   }
 
-  function copyResults() {
+  async function copyResults() {
     if (!result) return;
     const rows = result.rows.map((row) =>
       result.columns.reduce<Record<string, unknown>>((acc, column, index) => {
@@ -174,8 +175,12 @@ export function DatabaseConsolePage() {
         return acc;
       }, {}),
     );
-    void navigator.clipboard.writeText(JSON.stringify(rows, null, 2));
-    toast.success("Results copied as JSON");
+    try {
+      await copyText(JSON.stringify(rows, null, 2));
+      toast.success("Results copied as JSON");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to copy query results");
+    }
   }
 
   function handleEditorKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -545,7 +550,7 @@ function ResultTable({ result }: { result: DatabaseQueryResponse }) {
           <TableHeader className="sticky top-0 z-10 bg-card">
             <TableRow>
               {result.columns.map((column) => (
-                <TableHead key={column.name} className="whitespace-nowrap text-xs lowercase">
+                <TableHead key={column.name} className="whitespace-nowrap text-xs normal-case">
                   <div>{column.name}</div>
                   <div className="mt-1 text-[11px] font-normal text-muted-foreground">{column.data_type || "unknown"}</div>
                 </TableHead>

@@ -38,7 +38,7 @@ export function normalizeCommand(command?: string | string[]): string[] {
 
   try {
     const parsed = JSON.parse(trimmed)
-    if (Array.isArray(parsed)) {
+    if (Array.isArray(parsed) && parsed.every(arg => typeof arg === "string")) {
       return parsed.map(String)
     }
   } catch {
@@ -48,9 +48,12 @@ export function normalizeCommand(command?: string | string[]): string[] {
   return [command]
 }
 
-export function formatCommandForDisplay(command?: string | string[]): string {
+/** Display argv with explicit argument boundaries; preserve plain commands verbatim. */
+export function formatCommandForDisplay(command?: string | string[], fallback = "N/A"): string {
   const normalized = normalizeCommand(command)
-  return normalized.length > 0 ? normalized.join(" ") : "N/A"
+  if (!normalized.length) return fallback
+  if (typeof command === "string" && normalized.length === 1 && normalized[0] === command) return command
+  return normalized.map(arg => /^[A-Za-z0-9_./:@%+=,-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")
 }
 
 export function formatDurationNs(value?: number | null): string {

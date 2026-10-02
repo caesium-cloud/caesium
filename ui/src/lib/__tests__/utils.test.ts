@@ -4,7 +4,7 @@ import { formatCommandForDisplay, formatUTCTime, formatUTCTimestamp, normalizeCo
 describe("command formatting", () => {
   it("decodes JSON-array command strings before joining for display", () => {
     expect(formatCommandForDisplay('["sh","-c","echo \\u003e /out/files.json \\u0026\\u0026 echo ok"]')).toBe(
-      "sh -c echo > /out/files.json && echo ok",
+      'sh -c "echo > /out/files.json && echo ok"',
     );
   });
 

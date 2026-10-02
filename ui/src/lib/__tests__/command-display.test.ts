@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCommand } from "../command-display";
+import { formatCommandForDisplay as formatCommand } from "../utils";
 
 describe("command display", () => {
   it("decodes escaped operators while retaining argument boundaries", () => {

@@ -79,7 +79,7 @@ export function TriggerDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle aria-label="Trigger Job" className="font-normal lowercase">caesium ❯ trigger {jobAlias || "job"}</DialogTitle>
+          <DialogTitle aria-label="Trigger Job" className="font-normal">caesium ❯ trigger {jobAlias || "job"}</DialogTitle>
           <DialogDescription>
             Confirm a manual run and optionally pass run parameters.
           </DialogDescription>

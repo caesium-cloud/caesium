@@ -1,3 +1,4 @@
+import { copyText } from "@/lib/clipboard";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -309,7 +310,7 @@ export function LogViewer({
     }
 
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.success("Copied task logs");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to copy task logs");

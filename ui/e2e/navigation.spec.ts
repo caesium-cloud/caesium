@@ -6,7 +6,7 @@ const PRIMARY_NAV: { label: string; heading: RegExp; urlMatch: RegExp }[] = [
   { label: "Atoms", heading: /^Atoms$/, urlMatch: /\/atoms$/ },
   { label: "Stats", heading: /^Stats$/, urlMatch: /\/stats$/ },
   { label: "System", heading: /^System$/, urlMatch: /\/system$/ },
-  { label: "JobDefs", heading: /^Jobdefs$/, urlMatch: /\/jobdefs$/ },
+  { label: "JobDefs", heading: /^JobDefs$/, urlMatch: /\/jobdefs$/ },
 ];
 
 test("sidebar navigates between every primary control-plane page", async ({ page }) => {

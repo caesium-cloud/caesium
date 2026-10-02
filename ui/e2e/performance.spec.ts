@@ -67,7 +67,7 @@ const PRIMARY_ROUTES: { path: string; heading: RegExp }[] = [
   { path: "/jobs", heading: /^Jobs$/ },
   { path: "/triggers", heading: /^Triggers$/ },
   { path: "/system", heading: /^System$/ },
-  { path: "/jobdefs", heading: /^Jobdefs$/ },
+  { path: "/jobdefs", heading: /^JobDefs$/ },
 ];
 
 

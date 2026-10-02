@@ -1,3 +1,4 @@
+import { copyText } from "@/lib/clipboard";
 import { FilterChip } from "@/components/ui/filter-chip";
 import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/relative-time";
@@ -177,10 +178,14 @@ function CopyWebhookUrl({ path, externalUrl }: { path: string; externalUrl?: str
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    await navigator.clipboard.writeText(fullUrl);
-    setCopied(true);
-    toast.success("Webhook URL copied");
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await copyText(fullUrl);
+      setCopied(true);
+      toast.success("Webhook URL copied");
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to copy webhook URL");
+    }
   };
 
   return (

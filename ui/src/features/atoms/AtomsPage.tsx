@@ -1,4 +1,4 @@
-import { formatCommand } from "@/lib/command-display";
+import { formatCommandForDisplay } from "@/lib/utils";
 import { FilterChip } from "@/components/ui/filter-chip";
 import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -143,8 +143,8 @@ export function AtomsPage() {
                   <TableCell>
                     <span className="text-xs text-text-3">{atom.engine}</span>
                   </TableCell>
-                  <TableCell className="text-xs max-w-[200px] truncate text-muted-foreground" title={formatCommand(atom.command)}>
-                    <span className="rounded-sm bg-code-bg px-2 py-1 text-code-fg">{formatCommand(atom.command)}</span>
+                  <TableCell className="text-xs max-w-[200px] truncate text-muted-foreground" title={formatCommandForDisplay(atom.command)}>
+                    <span className="rounded-sm bg-code-bg px-2 py-1 text-code-fg">{formatCommandForDisplay(atom.command)}</span>
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
                     <RelativeTime date={atom.created_at} />
@@ -196,7 +196,7 @@ export function AtomsPage() {
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground mb-1">Command</p>
-                            <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Command arguments (quoted)">{formatCommand(atom.command)}</pre>
+                            <pre className="whitespace-pre-wrap break-words text-xs" aria-label="Command arguments (quoted)">{formatCommandForDisplay(atom.command)}</pre>
                             <details className="mt-2 text-xs"><summary className="cursor-pointer text-text-3">Raw command</summary><pre className="mt-2 whitespace-pre-wrap break-all">{atom.command}</pre></details>
                           </div>
                         </div>

@@ -12,7 +12,7 @@ it("keeps chip rendering independent of display labels", () => {
   expect(screen.getByText("plain-value")).toBeInTheDocument();
 });
 
-it.each(["None", "", "   "])("keeps missing value %s as plain text", value => {
+it.each(["None", "none", " NONE ", "", "   "])("keeps missing value %s as plain text", value => {
   render(<MetadataValue label="identity" value={value} idChip />);
   expect(screen.getByText("None")).toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();

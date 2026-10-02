@@ -71,6 +71,14 @@ describe('EventManager', () => {
     );
   });
 
+  it('dispatches the backend run_retried event', () => {
+    events.connect();
+    const handler = vi.fn();
+    events.subscribe('run_retried', handler);
+    MockEventSource.instances[0].emit('run_retried', { run_id: 'run-1', payload: { id: 'run-1', status: 'running' } });
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ type: 'run_retried', run_id: 'run-1' }));
+  });
+
   it('unsubscribe removes handler', () => {
     events.connect();
     const handler = vi.fn();

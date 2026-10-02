@@ -13,7 +13,20 @@ function formatMs(ms: number): string {
   if (ms < 10) return `${Number(ms.toFixed(2))}ms`;
   if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+  if (ms < 3600000) return ms % 60000 === 0 ? `${ms / 60000}m` : `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+  return ms % 3600000 === 0 ? `${ms / 3600000}h` : `${Math.floor(ms / 3600000)}h ${Math.floor((ms % 3600000) / 60000)}m`;
+}
+
+function tickStep(span: number): number {
+  const target = span / 5;
+  if (target < 1000) {
+    const magnitude = 10 ** Math.floor(Math.log10(target));
+    return [1, 2, 5, 10].map(value => value * magnitude).find(value => value >= target)!;
+  }
+  const steps = [1, 2, 5, 10, 15, 30].map(seconds => seconds * 1000)
+    .concat([1, 2, 5, 10, 15, 30].map(minutes => minutes * 60000))
+    .concat([1, 2, 6, 12, 24].map(hours => hours * 3600000));
+  return steps.find(value => value >= target) ?? Math.ceil(target / 86400000) * 86400000;
 }
 
 export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus, runCompletedAt }: Props) {
@@ -28,13 +41,12 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus, r
     const unstarted = !task.started_at && status !== "cached";
     const ghost = live && unstarted;
     const start = ghost ? elapsed : Math.max(0, Date.parse(task.started_at ?? task.completed_at ?? task.created_at) - runStart);
-    const end = presentation.end ? Math.max(start, Date.parse(presentation.end) - runStart) : status === "running" ? elapsed : start;
+    const end = presentation.end ? Math.max(start, Date.parse(presentation.end) - runStart) : status === "running" ? Math.max(start, elapsed) : start;
     return { task, status, start: Number.isFinite(start) ? start : 0, end: Number.isFinite(end) ? end : 0, ghost, unstarted, presentation };
   });
   const span = Math.max(live ? 5000 : 1, ...taskTimes.filter(row => !row.ghost).map(row => row.end), live ? elapsed : 0);
   // Short terminal runs fit tightly; live runs reserve one clock tick of headroom.
-  const magnitude = 10 ** Math.floor(Math.log10(span / 5));
-  const step = [1, 2, 5, 10].map(value => value * magnitude).find(value => span / value <= 5)!;
+  const step = tickStep(span);
   const maxEnd = Math.ceil((span + (live ? 1000 : 0)) / step) * step;
   const plotRef = useTimelineMotion(live, runStart, elapsed, maxEnd);
   const position = (ms: number) => live ? `calc(${ms} / var(--timeline-span) * 100%)` : `${ms / maxEnd * 100}%`;

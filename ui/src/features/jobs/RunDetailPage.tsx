@@ -1,3 +1,4 @@
+import { mergeRetriedRun } from "./run-updates";
 import { JobRunNavigation } from "./JobRunNavigation";
 import { RunIdentity } from "./RunIdentity";
 import { RunPicker } from "./RunPicker";
@@ -17,7 +18,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Kbd } from "@/components/ui/kbd";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
@@ -28,7 +28,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatUTCTimestamp } from "@/lib/utils";
+import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
@@ -139,6 +139,10 @@ export function RunDetailPage() {
           return failedRun?.id === old.id ? mergeTerminalRunUpdate(old, { ...old, ...failedRun, status: "failed" }) : { ...old, status: "failed" };
         }
 
+        if (e.type === "run_retried") {
+          return mergeRetriedRun(old, e.payload as JobRun | undefined);
+        }
+
         if (e.type.startsWith("task_")) {
           if (isTerminalRunStatus(old.status)) return old;
           const taskUpdate = e.payload as TaskRun | undefined;
@@ -197,16 +201,21 @@ export function RunDetailPage() {
 
         return old;
       });
+      if (e.type === "run_retried") {
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "why"] });
+      }
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+    ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
       (type) => events.subscribe(type, onEvent),
     );
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+      ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
         (type) => events.unsubscribe(type, onEvent),
       );
     };
@@ -390,7 +399,7 @@ export function RunDetailPage() {
                   <div className="min-w-0">
                     <div className="truncate text-xs">run started {formatRunTimestamp(candidate)}</div>
                     <div className="truncate text-[11px] text-text-3">
-                      <IdChip value={candidate.id} label="run id" />
+                      <span title={candidate.id}>{shortId(candidate.id)}</span>
                     </div>
                   </div>
                   <StatusBadge status={candidate.status} size="sm" />

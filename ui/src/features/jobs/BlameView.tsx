@@ -1,4 +1,5 @@
 import { IdChip } from "@/components/ui/id-chip";
+import { MetadataValue } from "@/components/ui/metadata-value";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -9,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type BlameEdgeAttribution, type BlameTaskAttribution } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, formatCommandForDisplay } from "@/lib/utils";
 
 type BlameSearch = {
   from: string | undefined;
@@ -206,8 +207,8 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <MetadataCell label="Coverage" value={blame.coverage} testId="blame-coverage-value" mono />
-            <MetadataCell label="From Commit" value={blame.from_commit || "First snapshot"} testId="blame-from-commit" mono />
-            <MetadataCell label="To Commit" value={blame.to_commit || "Latest snapshot"} testId="blame-to-commit" mono />
+            <MetadataCell idChip={!!blame.from_commit} label="From Commit" value={blame.from_commit || "First snapshot"} testId="blame-from-commit" mono />
+            <MetadataCell idChip={!!blame.to_commit} label="To Commit" value={blame.to_commit || "Latest snapshot"} testId="blame-to-commit" mono />
             <MetadataCell label="Elements" value={`${blame.tasks.length} tasks / ${blame.edges.length} edges`} />
           </div>
         </div>
@@ -304,8 +305,8 @@ function BlameTaskRow({ task }: { task: BlameTaskAttribution }) {
 
           <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
             <MetadataCell label="Image" value={task.element.image} testId="blame-task-image" mono />
-            <MetadataCell label="Command" value={formatCommand(task.element.command)} testId="blame-task-command" mono />
-            <MetadataCell label="Snapshot ID" value={task.snapshot_id} testId="blame-task-snapshot-id" mono />
+            <MetadataCell label="Command" value={formatCommandForDisplay(task.element.command, "No command recorded")} testId="blame-task-command" mono />
+            <MetadataCell idChip label="Snapshot ID" value={task.snapshot_id} testId="blame-task-snapshot-id" mono />
           </div>
         </div>
       </div>
@@ -346,9 +347,10 @@ function BlameEdgeRow({ edge }: { edge: BlameEdgeAttribution }) {
           <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-4">
             <MetadataCell label="From" value={edge.element.from} testId="blame-edge-from" mono />
             <MetadataCell label="To" value={edge.element.to} testId="blame-edge-to" mono />
-            <MetadataCell label="Snapshot ID" value={edge.snapshot_id} testId="blame-edge-snapshot-id" mono />
+            <MetadataCell idChip label="Snapshot ID" value={edge.snapshot_id} testId="blame-edge-snapshot-id" mono />
             <MetadataCell
               label="Provenance Commit"
+              idChip
               value={edge.provenance_commit || "None"}
               testId="blame-edge-provenance-commit"
               mono
@@ -395,11 +397,13 @@ function MetadataCell({
   value,
   testId,
   mono = false,
+  idChip = false,
 }: {
   label: string;
   value: string;
   testId?: string;
   mono?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div className="min-w-0">
@@ -410,7 +414,7 @@ function MetadataCell({
         className={cn("break-all text-xs text-foreground", mono && "")}
         data-testid={testId}
       >
-        {/ID$|Commit$/i.test(label) && value && !["None", "First snapshot", "Latest snapshot"].includes(value) ? <IdChip value={value} label={label} /> : value}
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </div>
     </div>
   );
@@ -436,11 +440,6 @@ function formatCoverage(coverage: string): string {
   return coverage;
 }
 
-
-
-function formatCommand(command?: string[]): string {
-  return command && command.length > 0 ? command.join(" ") : "No command recorded";
-}
 
 function testIdSlug(value: string): string {
   const slug = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");

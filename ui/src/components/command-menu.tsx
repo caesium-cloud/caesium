@@ -30,7 +30,7 @@ export function CommandMenu() {
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable;
-      if (!e.repeat && ((e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing))) {
+      if (!e.repeat && ((e.key?.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing))) {
         e.preventDefault(); setOpen(value => !value);
       }
     };

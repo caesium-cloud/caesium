@@ -53,6 +53,18 @@ const taskDefinitions: Record<string, JobTask> = {
 };
 
 describe("RunTimeline", () => {
+  it("does not show a negative duration before the clock reaches a task start", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    const { unmount } = render(<UTCClockProvider><RunTimeline
+      tasks={[makeTask({ task_id: "task-1", status: "running", started_at: "2026-08-01T00:00:00.250Z", completed_at: undefined })]}
+      taskDefinitions={taskDefinitions} runStartedAt="2026-07-31T23:59:59Z" runStatus="running"
+    /></UTCClockProvider>);
+    expect(screen.getByTestId("run-timeline-task-row")).toHaveTextContent("0ms");
+    expect(screen.getByTestId("run-timeline-task-row")).not.toHaveTextContent("-250ms");
+    unmount(); vi.useRealTimers();
+  });
+
   it("keeps terminal unstarted tasks anchored to recorded times and does not tick", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
@@ -183,6 +195,29 @@ it("freezes stale running tasks at their last observation when the parent failed
   expect(bar.style.width).toBe(width);
   expect(bar).not.toHaveClass("cs-live-bar");
   expect(task.status).toBe("running");
+  unmount();
+  vi.useRealTimers();
+});
+
+
+it.each([
+  [30_000, ["0ms", "10.0s", "20.0s", "30.0s"]],
+  [600_000, ["0ms", "2m", "4m", "6m", "8m", "10m"]],
+  [7_200_000, ["0ms", "30m", "1h", "1h 30m", "2h"]],
+  [86_400_000, ["0ms", "6h", "12h", "18h", "24h"]],
+])("uses time-aware ticks for a %sms terminal run", (duration, labels) => {
+  const start = "2026-08-01T00:00:00.000Z";
+  render(<RunTimeline tasks={[makeTask({ task_id: "task-1", completed_at: new Date(Date.parse(start) + duration).toISOString() })]} taskDefinitions={taskDefinitions} runStartedAt={start} runStatus="succeeded" />);
+  expect(screen.getAllByTestId("timeline-tick").map(tick => tick.textContent)).toEqual(labels);
+  expect(screen.getAllByTestId("timeline-tick").at(-1)!.style.transform).toBe("translateX(-100%)");
+  expect(parseFloat(screen.getByTestId("run-timeline-bar").style.width)).toBe(100);
+});
+
+it("uses half-hour ticks for a two-hour live run", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-01T02:00:00Z"));
+  const { unmount } = render(<RunTimeline tasks={[makeTask({ task_id: "task-1", status: "running", completed_at: undefined })]} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00Z" runStatus="running" />);
+  expect(screen.getAllByTestId("timeline-tick").map(tick => tick.textContent)).toEqual(["0ms", "30m", "1h", "1h 30m", "2h", "2h 30m"]);
   unmount();
   vi.useRealTimers();
 });
