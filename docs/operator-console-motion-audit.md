@@ -72,3 +72,31 @@ Populated Datasets/Holds/Contracts, feature-gated incident screens, multi-node/d
 Give the timeline more of the flexible desktop width. At 1440 px, the name column changes from 436 to 238 px and history from 264 to 462 px; at 1280 px, names change from 336 to 220 px and history from 204 to 320 px. Header/row alignment, full-name tooltips, fixed status/time/action columns, and the phone layout are preserved. [Before](ui-motion-617/spacing-dark-1440-before.png) · [After](ui-motion-617/spacing-dark-1440-after.png).
 
 Direct captures cover both themes at 1440×900, 1280×800, and 390×844, including long names. Containerized lint, production build/budget checks, and four existing browser alignment/responsive checks passed with zero retries. No new unit tests were added for this CSS-only adjustment. Local measurements and captures are retained in `.tmp/pr617-spacing/`.
+
+## Quorum placement and local Kubernetes follow-up
+
+The quorum count now sits below the large System atom, with tabular numerals, a stronger foreground, and the label “reachable / total voters.” Orbit paths no longer cross the count. Membership, liveness, leader marking, and reduced-motion behavior are unchanged.
+
+| View | Before | After |
+| --- | --- | --- |
+| System, dark, 1440×900 | [Prior standalone capture: count inside the orbit](ui-motion-617/system-quorum-before.png) | [Three-voter Kubernetes cluster: count below](ui-motion-617/system-quorum-dark-1440.png) |
+| System, light, 390×844 | — | [Phone layout](ui-motion-617/system-quorum-light-390.png) |
+
+These captures use different real deployments: the earlier standalone server has one voter; the new cluster has three. The count is not mocked. [Watch the cluster atom and a real Kubernetes run](ui-motion-617/kubernetes-quorum-live.webm).
+
+The current embedded release is running at **http://localhost:8084/system** (Jobs: **http://localhost:8084/jobs**). Port 8080 remains the original QA build. The new runtime uses the isolated Docker-backed kind cluster `caesium-ui-617`, Helm release/namespace `caesium-ui`, and three persistent Caesium replicas placed on three separate Kubernetes nodes. A loopback NodePort mapping serves port 8084 without a port-forward process. The default kubectl context remains `docker-desktop`; all deployment commands used the explicit kubeconfig below.
+
+```sh
+kubectl --kubeconfig .tmp/pr617-k8s/kubeconfig -n caesium-ui get pods -o wide
+curl -fsS http://localhost:8084/health
+```
+
+Image `caesiumcloud/caesium:pr617-k8s-20261002` was compiled with `just tag=pr617-k8s-20261002 build-release`, from `e146788b` plus the System count placement change. Its local image index is `sha256:d68919c1a95279d8b3bca5bf035a3b65b828b6de7e47235ea80e7f5e7b456330`. Build inputs, Helm values, kind config, health/pod inventories, browser checks, screenshots, and execution receipts are retained in `.tmp/pr617-k8s/`.
+
+Two manually triggered jobs are available: `k8s-branching-demo` (three successful tasks and one skipped branch) and `k8s-live-demo` (a three-step job with 30 seconds of heartbeat output). Both use the real Kubernetes engine and `alpine:3.23`; they were linted using the release CLI and applied through the REST API. No recurring schedules were added.
+
+Validation passed: containerized ESLint, 10 existing System unit tests, production compilation/asset budgets, documentation guardrails, Helm lint/render, the existing live System Playwright test, and a real Kubernetes live-to-terminal execution including the visible terminal status. The 11 served entry assets byte-match the current production build. Directly reviewed captures cover 1440×900, 1280×800, and 390×844 in both themes. Browser checks confirm three reachable voter electrons, one leader marker, motion that stops under reduced motion, count placement below the SVG, and no main-panel horizontal overflow.
+
+The node inventory has a remaining presentation issue: configured DNS seeds are listed separately from their IP-addressed raft members. Depending on the responding replica, the Nodes KPI can show 3/3, 3/4, or 3/5; supplementary rows are explicitly unknown, while the actual quorum remains 3/3. The initial visual script incorrectly assumed that inventory row count equals voter count; the corrected check verifies three current voters and requires extra DNS seed rows to remain unknown. No backend identity logic was changed. Healthy multi-node operation and Kubernetes task execution are qualified here; failover, partition recovery, populated data/incident surfaces, and storage stress remain outside this follow-up.
+
+Docker's shared disk was full. With explicit user approval, unused build cache was cleared; containers, images, volumes, and existing clusters were preserved. Free space remains low (about 630 MiB at the final runtime check), so this is a small demonstration cluster, not a stress-test environment. The new cluster is intentionally left running.

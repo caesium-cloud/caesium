@@ -142,7 +142,11 @@ export function SystemPage() {
 
       <div className="grid min-w-0 items-start gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
         <section className="flex flex-col items-center" aria-label="Cluster atom">
-          <div className="relative"><AtomLogo size={300} {...clusterAtomProps(health)} /><span data-testid="quorum-count" className="absolute left-0 right-0 top-[58%] text-center text-[22px] text-text-2">{quorum.label}</span></div>
+          <AtomLogo size={300} {...clusterAtomProps(health)} />
+          <div className="mb-5 text-center">
+            <div data-testid="quorum-count" className="text-[22px] tabular-nums text-text-1">{quorum.label}</div>
+            <p className="mt-1 text-xs text-text-3">reachable / total voters</p>
+          </div>
           <div className="space-y-2 text-xs text-text-3"><p>nucleus = leader</p><p>electron = reachable voter</p><p>hollow = voter not answering</p></div>
           <p className="mt-4 text-xs text-text-3" data-testid="quorum-detail">{quorum.detail}</p>
         </section>
