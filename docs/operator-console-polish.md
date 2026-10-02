@@ -58,3 +58,19 @@ Rendered pages are captured at 1440×900, 1280×800, and 390×844 in both themes
 Measured `text-3` contrast on page/panel backgrounds is 7.02–7.57:1 in dark mode and 5.87–6.99:1 in light mode. The checks also measured `text-2`, cyan, and danger against those three backgrounds; the minimum was 4.93:1. Disabled controls retain reduced opacity and dashed borders. These measurements do not establish whole-application accessibility compliance.
 
 Populated Datasets/Holds/Contracts layouts and feature-gated incident screens still require a dedicated visual qualification pass. The local visual matrix covers their empty states. Multi-node/degraded operation, external SSO providers, and the full concurrent browser suite are outside this polish pass.
+
+## Search follow-up
+
+The terminal-like footer obscured its navigation-search action: only the narrow left prompt opened it, while desktop results stretched across the content area. The entire 44 px footer is now a labeled search button with a search icon and platform shortcut. Cmd/Ctrl-K and `:` remain supported. Both desktop and phone use the same bounded dialog, with a reserved close-button area, quieter selected rows, consistent metadata, short IDs to distinguish duplicate names, and visible keyboard hints. Search accepts full IDs as well as names. Escape, Close, and outside click restore focus to the footer; resizing retains the query and input focus.
+
+These captures compare the production frontend at `eca55d81` with the search follow-up against the same real backend. The broader qualification limits above still apply.
+
+| Surface | Before | After |
+| --- | --- | --- |
+| Search button · dark · 1440×900 | [Before](ui-polish-617/search-closed-dark-1440-before.png) | [After](ui-polish-617/search-closed-dark-1440-after.png) |
+| Search dialog · dark · 1440×900 | [Before](ui-polish-617/search-open-dark-1440-before.png) | [After](ui-polish-617/search-open-dark-1440-after.png) |
+| Search dialog · light · 390×844 | [Before](ui-polish-617/search-open-light-390-before.png) | [After](ui-polish-617/search-open-light-390-after.png) |
+
+The search follow-up passed containerized ESLint, all 433 unit tests, the production build and unchanged bundle budgets, and the documentation guardrail. Twelve focused browser checks passed with one worker and zero retries across both themes, covering full-bar clicks, both keyboard shortcuts, focus containment/restoration, dismissal, viewport changes, full-ID navigation, the existing mobile journey, copying, and reduced motion. Direct screenshots were inspected at all three target sizes in both themes, including long results and no matches; six scoped axe scans of the open search dialog reported zero WCAG 2.0/2.1 A/AA violations. These scoped scans do not establish whole-application compliance. Local receipts are under `.tmp/pr617-search/`.
+
+A second regression selection passed 8/8 with zero retries: navigation-search destination/active-route checks in both themes and all six unchanged Linux visual baselines. Total focused browser coverage for this follow-up is 20/20 passing; it does not supersede the broader failures recorded above.

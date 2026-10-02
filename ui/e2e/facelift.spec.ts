@@ -18,11 +18,65 @@ test("live run identities copy in full and the desktop prompt remains keyboard u
   await page.keyboard.press(":");
   const command = page.getByRole("combobox", { name: "Search pages, jobs, triggers, or atoms" });
   await expect(command).toBeFocused();
-  await expect(page.locator("footer").getByRole("dialog", { name: "Navigation search" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Navigation search" })).toBeVisible();
   await command.fill(job.alias);
-  await page.locator('[cmdk-item][data-value^="job "]').filter({ hasText: job.alias }).click();
+  await expect(page.locator('[cmdk-item][data-value^="job "]').filter({ hasText: job.alias })).toBeVisible();
+  await command.fill(job.id);
+  await page.keyboard.press("Enter");
   await expect(page).toHaveURL(new RegExp(`/jobs/${job.id}$`));
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  test(`navigation search is discoverable and contained at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/jobs");
+    const trigger = page.getByRole("button", { name: "Open search", exact: true });
+    await expect(trigger).toContainText("Search pages");
+    const footer = (await page.locator("footer").boundingBox())!;
+    const button = (await trigger.boundingBox())!;
+    expect(button.width).toBe(footer.width);
+    // The middle of the bar and the shortcut area used to be inert.
+    await page.mouse.click(footer.x + footer.width / 2, footer.y + footer.height / 2);
+    const dialog = page.getByRole("dialog", { name: "Navigation search" });
+    const input = dialog.getByRole("combobox", { name: "Search pages, jobs, triggers, or atoms" });
+    await expect(input).toBeFocused();
+    await expect.poll(() => dialog.evaluate(el => {
+      const box = el.getBoundingClientRect();
+      return box.x >= 0 && box.y >= 0 && box.right <= innerWidth && box.bottom <= innerHeight && box.width <= 672 && el.scrollWidth === el.clientWidth;
+    })).toBe(true);
+    const close = dialog.getByRole("button", { name: "Close", exact: true });
+    const inputBox = (await input.boundingBox())!;
+    expect(inputBox.x + inputBox.width).toBeLessThanOrEqual((await close.boundingBox())!.x);
+    await page.screenshot({ path: testInfo.outputPath("search-open.png") });
+    await page.keyboard.press("Tab");
+    await expect(close).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(input).toBeFocused();
+    await input.fill("no-search-match-4bc995eb");
+    await expect(dialog.getByText("No results found.", { exact: true })).toBeVisible();
+    await close.click();
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.mouse.click(footer.x + footer.width - 24, footer.y + footer.height / 2);
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Control+k");
+    await expect(input).toBeFocused();
+    await page.mouse.click(4, viewport.height / 2);
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.keyboard.press("Meta+k");
+    await expect(input).toBeFocused();
+    await input.fill("stats");
+    await page.setViewportSize({ width: viewport.width === 390 ? 1280 : 390, height: 844 });
+    await expect(input).toHaveValue("stats");
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/stats$/);
+    await expect(dialog).toBeHidden();
+  });
+}
 
 test("self-hosted fonts and UTC instruments honor reduced motion", async ({ page, request }) => {
   const externalFonts: string[] = [];
@@ -35,7 +89,6 @@ test("self-hosted fonts and UTC instruments honor reduced motion", async ({ page
   const clock = page.locator("header").getByText(/^\d{2}:\d{2}:\d{2}$/);
   const previous = await clock.textContent();
   await expect.poll(() => clock.textContent()).not.toBe(previous);
-  expect(await page.locator("footer .cs-cursor").evaluate(node => node.getAnimations().length)).toBe(1);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(page.locator("header .cs-wave-flat")).toHaveCSS("display", "block");
   await expect(page.locator("header .cs-wave-flat")).toHaveAttribute("d", "M0 10 H120");

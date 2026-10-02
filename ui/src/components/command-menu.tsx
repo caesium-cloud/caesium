@@ -1,8 +1,8 @@
 import * as React from "react"
+import { Search } from "lucide-react"
 import { useNavigate } from "@tanstack/react-router"
 import {
   CommandDialog,
-  Command,
   CommandEmpty,
   CommandGroup,
   CommandInput,
@@ -19,43 +19,33 @@ import { commandPaletteFilter } from "./command-filter"
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
   const navigate = useNavigate()
-  const [desktop, setDesktop] = React.useState(() => window.matchMedia("(min-width: 1024px)").matches)
   const triggerRef = React.useRef<HTMLButtonElement>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
+  const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"
 
-  React.useEffect(() => {
-    const media = window.matchMedia("(min-width: 1024px)");
-    const resize = () => setDesktop(media.matches);
-    media.addEventListener("change", resize);
-    return () => media.removeEventListener("change", resize);
-  }, []);
-  React.useEffect(() => {
-    if (open && desktop) inputRef.current?.focus();
-  }, [open, desktop]);
   const { data: jobs } = useQuery({ queryKey: ["jobs"], queryFn: api.getJobs, enabled: open });
   const { data: triggers } = useQuery({ queryKey: ["triggers"], queryFn: api.getTriggers, enabled: open });
   const { data: atoms } = useQuery({ queryKey: ["atoms"], queryFn: api.getAtoms, enabled: open });
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable;
-      if ((e.key === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing)) {
+      if (!e.repeat && ((e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing))) {
         e.preventDefault(); setOpen(value => !value);
       }
-      if (e.key === "Escape" && open) { setOpen(false); triggerRef.current?.focus(); }
     };
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
-  }, [open]);
+  }, []);
   const runCommand = React.useCallback((command: () => void) => {
     setOpen(false); triggerRef.current?.focus(); command();
   }, []);
   const contents = (
 
     <>
-        <CommandInput ref={inputRef} aria-label="Search pages, jobs, triggers, or atoms" placeholder="Search pages, jobs, triggers, or atoms..." />
+        <CommandInput ref={inputRef} aria-label="Search pages, jobs, triggers, or atoms" placeholder="Search by name or ID…" />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
-          <CommandGroup heading="Suggestions">
+          <CommandGroup heading="Pages">
             <CommandItem value="jobs pipelines" onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
               <span>Jobs</span>
             </CommandItem>
@@ -80,15 +70,16 @@ export function CommandMenu() {
             {jobs?.map((job) => (
               <CommandItem
                 key={job.id}
-                value={`job ${job.alias} ${shortId(job.id)}`}
-                keywords={[job.alias, shortId(job.id)]}
+                value={`job ${job.alias} ${job.id}`}
+                keywords={[job.alias, job.id]}
                 onSelect={() => runCommand(() => navigate({ to: "/jobs/$jobId", params: { jobId: job.id } }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex items-center">
-                  <span>{job.alias}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={job.alias}>{job.alias}</div>
+                  <div className="text-xs text-text-3">{shortId(job.id)}</div>
                 </div>
-                <div className="text-[11px] text-muted-foreground">
+                <div className="shrink-0 text-xs text-text-3">
                   <RelativeTime date={job.created_at} />
                 </div>
               </CommandItem>
@@ -99,15 +90,16 @@ export function CommandMenu() {
             {triggers?.map((trigger) => (
               <CommandItem
                 key={trigger.id}
-                value={`trigger ${trigger.alias} ${shortId(trigger.id)}`}
-                keywords={[trigger.alias, shortId(trigger.id), trigger.type]}
+                value={`trigger ${trigger.alias} ${trigger.id}`}
+                keywords={[trigger.alias, trigger.id, trigger.type]}
                 onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex items-center">
-                  <span>{trigger.alias}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={trigger.alias}>{trigger.alias}</div>
+                  <div className="text-xs text-text-3">{shortId(trigger.id)}</div>
                 </div>
-                <div className="text-[11px] lowercase text-muted-foreground">{trigger.type}</div>
+                <div className="shrink-0 text-xs lowercase text-text-3">{trigger.type}</div>
               </CommandItem>
             ))}
           </CommandGroup>
@@ -116,30 +108,36 @@ export function CommandMenu() {
             {atoms?.map((atom) => (
               <CommandItem
                 key={atom.id}
-                value={`atom ${atom.image} ${atom.engine} ${shortId(atom.id)}`}
-                keywords={[atom.image, atom.engine, shortId(atom.id)]}
+                value={`atom ${atom.image} ${atom.engine} ${atom.id}`}
+                keywords={[atom.image, atom.engine, atom.id]}
                 onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex min-w-0 items-center">
-                  <span className="truncate" title={atom.image}>{atom.image.split("@")[0]}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={atom.image}>{atom.image.split("@")[0]}</div>
+                  <div className="text-xs text-text-3">{shortId(atom.id)}</div>
                 </div>
-                <div className="text-[11px] lowercase text-muted-foreground">{atom.engine}</div>
+                <div className="shrink-0 text-xs lowercase text-text-3">{atom.engine}</div>
               </CommandItem>
             ))}
           </CommandGroup>
         </CommandList>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-2 text-xs text-text-3">
+          <span><kbd>↑ ↓</kbd> move</span>
+          <span><kbd>↵</kbd> open</span>
+          <span><kbd>esc</kbd> close</span>
+        </div>
     </>
   );
-  return <footer className="relative z-30 flex h-10 shrink-0 items-center justify-between border-t border-border bg-obsidian px-4 lg:px-6">
-    <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} className="flex h-full items-center gap-2 text-[13px] text-text-2">
-      <span className="hidden lg:inline">caesium search</span><span className="text-cyan">❯</span><span aria-hidden="true" className="cs-cursor" />
+  return <footer className="relative z-30 h-11 shrink-0 border-t border-border bg-obsidian">
+    <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(true)} className="flex h-full w-full items-center gap-3 px-4 text-left text-[13px] text-text-2 transition-colors hover:bg-graphite hover:text-foreground focus-visible:-outline-offset-4 lg:px-6">
+      <Search aria-hidden="true" className="size-4 shrink-0 text-cyan" />
+      <span className="min-w-0 flex-1 truncate"><span className="sm:hidden">Search pages and resources…</span><span className="hidden sm:inline">Search pages, jobs, triggers, or atoms…</span></span>
+      <kbd className="shrink-0 rounded border border-border bg-midnight px-1.5 py-0.5 text-xs text-text-3">{shortcut}</kbd>
     </button>
-    <div className="flex items-center gap-7 text-[11px] text-text-3">
-      <span className="hidden xl:inline">pages</span><span className="hidden xl:inline">jobs</span><span className="hidden xl:inline">triggers</span><span className="hidden xl:inline">atoms</span><kbd>⌘K</kbd>
-    </div>
-    {desktop ? open ? <div role="dialog" aria-label="Navigation search" className="absolute bottom-10 left-0 right-0 border-t border-border bg-midnight p-2 shadow-sm">
-      <Command filter={commandPaletteFilter}>{contents}</Command>
-    </div> : null : <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>{contents}</CommandDialog>}
+    <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }} contentProps={{
+      onOpenAutoFocus: (event) => { event.preventDefault(); inputRef.current?.focus(); },
+      onCloseAutoFocus: (event) => { event.preventDefault(); triggerRef.current?.focus(); },
+    }}>{contents}</CommandDialog>
   </footer>;
 }

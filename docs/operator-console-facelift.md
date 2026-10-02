@@ -2,7 +2,7 @@
 
 Implements the Standard concept from `Caesium Operator Console Facelift.zip`, starting with its handoff README, design specification, route guide, and functional invariants.
 
-The console uses self-hosted Sometype Mono, warm text on cool instrument surfaces, flat lists, word tabs, and status glyphs. The shell has a 44 px header, 208 px sidebar, and 40 px command footer. Cmd-K and `:` open inline desktop navigation search; mobile keeps its dialog and navigation drawer.
+The console uses self-hosted Sometype Mono, warm text on cool instrument surfaces, flat lists, word tabs, and status glyphs. The shell has a 44 px header, 208 px sidebar, and 44 px search footer. Clicking anywhere in the footer, Cmd/Ctrl-K, or `:` opens navigation search in a bounded dialog on desktop and mobile. Search finds pages and resources by name or ID; it does not execute shell commands. Escape, Close, or clicking outside dismisses search and restores focus to its button. Mobile also keeps its navigation drawer.
 
 The shared UTC clock drives recent fleet history and trigger countdowns. Historical strips and terminal timelines stop subscribing to ticks. Each CSS instrument aligns its own animation to UTC when inserted and resynchronizes after a hidden tab returns. Reduced motion freezes live indicators and replaces the oscillator with a flat line. Identifiers retain their original case and use one copy-chip component with eight visible characters, the full title and clipboard payload, and a one-second confirmation. Plain HTTP deployments use native copy when the Clipboard API is unavailable; if both paths are denied, the chip exposes the full selectable value.
 
