@@ -56,8 +56,8 @@ export function RunDetailPage() {
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
-    refetchInterval: (query) =>
-      !streamHealthy || isTerminalRunStatus(query.state.data?.status) ? 5000 : false,
+    // SSE is immediate; polling reconciles missed events across cluster replicas.
+    refetchInterval: streamHealthy ? 5000 : 3000,
   });
 
   const receiptQuery = useQuery({
@@ -118,6 +118,7 @@ export function RunDetailPage() {
 
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     const onEvent = (e: CaesiumEvent) => {
+      if (e.job_id && e.job_id !== jobId) return;
       if (e.run_id && e.run_id !== runId) return;
 
       queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
@@ -126,16 +127,17 @@ export function RunDetailPage() {
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const finalRun = e.payload as JobRun;
           if (finalRun?.tasks) return mergeTerminalRunUpdate(old, finalRun);
-          toast.success("Run completed");
-          return { ...old, status: "succeeded" };
+          if (finalRun?.id && finalRun.id !== old.id) return old;
+          return { ...old, ...finalRun, status: finalRun?.status ?? (e.type === "run_terminal" ? old.status : "succeeded") };
         }
 
         if (e.type === "run_failed") {
-          toast.error("Run failed");
-          return { ...old, status: "failed" };
+          const failedRun = e.payload as JobRun | undefined;
+          return failedRun?.id === old.id ? mergeTerminalRunUpdate(old, { ...old, ...failedRun, status: "failed" }) : { ...old, status: "failed" };
         }
 
         if (e.type.startsWith("task_")) {
+          if (isTerminalRunStatus(old.status)) return old;
           const taskUpdate = e.payload as TaskRun | undefined;
           const taskID = taskUpdate?.task_id || e.task_id;
           if (!taskID) return old;
@@ -350,7 +352,7 @@ export function RunDetailPage() {
           </div>
         </div>
 
-        <DagCounters tasks={run.tasks} />
+        <DagCounters tasks={run.tasks} runStatus={run.status} />
 
         {/* Action cluster */}
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-border pt-3">
@@ -516,7 +518,7 @@ export function RunDetailPage() {
         {timelineOpen && (
           <div id="run-execution-timeline-body" className="p-4">
             {run.tasks && run.tasks.length > 0 ? (
-              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} runStatus={run.status} />
+              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} runStatus={run.status} runCompletedAt={run.completed_at} />
             ) : (
               <div className="text-[12px] text-text-3 py-4 text-center">
                 No task execution data yet.
@@ -545,6 +547,8 @@ export function RunDetailPage() {
           {dag && atoms ? (
             <JobDAG
               dag={dag}
+              runStatus={run?.status}
+              runCompletedAt={run?.completed_at}
               atoms={atoms}
               taskDefinitions={taskDefinitions}
               runStartedAt={run.started_at}
@@ -560,6 +564,8 @@ export function RunDetailPage() {
               key={selectedTaskId}
               taskId={selectedTaskId}
               task={selectedTask}
+              runStatus={run?.status}
+              runCompletedAt={run?.completed_at}
               runTask={selectedRunTask}
               taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
               jobId={jobId}

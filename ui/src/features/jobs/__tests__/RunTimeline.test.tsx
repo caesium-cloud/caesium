@@ -168,3 +168,21 @@ it("shows one shared now cursor only while the run is live", () => {
   expect(screen.queryByTestId("run-timeline-now")).not.toBeInTheDocument();
   expect(screen.getByTestId("run-timeline-bar")).not.toHaveClass("cs-live-bar");
 });
+
+it("freezes stale running tasks at their last observation when the parent failed", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+  const task = makeTask({ task_id: "task-1", status: "running", completed_at: undefined });
+  const { unmount } = render(<RunTimeline tasks={[task]} taskDefinitions={taskDefinitions} runStartedAt={task.started_at!} runStatus="failed" runCompletedAt="2026-08-01T00:00:02Z" />);
+  expect(screen.queryByTestId("run-timeline-now")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Outcome unknown")).toBeInTheDocument();
+  expect(screen.getByText(/≥1.0s observed/)).toBeInTheDocument();
+  const bar = screen.getByTestId("run-timeline-bar");
+  const width = bar.style.width;
+  act(() => { vi.advanceTimersByTime(10_000); });
+  expect(bar.style.width).toBe(width);
+  expect(bar).not.toHaveClass("cs-live-bar");
+  expect(task.status).toBe("running");
+  unmount();
+  vi.useRealTimers();
+});

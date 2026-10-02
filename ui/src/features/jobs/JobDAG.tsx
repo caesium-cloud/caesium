@@ -17,6 +17,7 @@ import { ShieldCheck } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { isRecord } from '@/lib/typeGuards';
 import type { JobDAGResponse, Atom, JobTask, TaskRun } from '@/lib/api';
+import { taskPresentation } from './task-presentation';
 import { TaskNode } from './components/TaskNode';
 import { BranchNode } from './components/BranchNode';
 import { DataFlowEdge } from './components/DataFlowEdge';
@@ -76,6 +77,7 @@ interface TaskRunMetadata {
   status: string;
   started_at?: string;
   completed_at?: string;
+  updated_at?: string;
   error?: string;
   rate_limit_retry_after?: string;
   output?: Record<string, string>;
@@ -88,6 +90,8 @@ interface JobDAGProps {
    */
   dag: JobDAGResponse;
   runStartedAt?: string;
+  runStatus?: string;
+  runCompletedAt?: string;
   atoms: Record<string, Atom>;
   taskDefinitions?: Record<string, JobTask>;
   taskStatus?: Record<string, string>;
@@ -140,23 +144,23 @@ function FitViewOnResize({ fitViewOptions }: { fitViewOptions: FitViewOptions })
   return null;
 }
 
-export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
+export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
     const [selectedEdge, setSelectedEdge] = useState<EdgeDetailsState | null>(null);
     const resolvedTaskStatus = useMemo(() => {
         const statusByTask: Record<string, string> = {};
 
         Object.entries(taskStatus ?? {}).forEach(([taskId, status]) => {
-            statusByTask[taskId] = normalizeTaskStatus(status);
+            statusByTask[taskId] = taskPresentation({ status, updated_at: "" }, runStatus).status;
         });
 
         Object.entries(taskMetadata ?? {}).forEach(([taskId, metadata]) => {
             if (metadata?.status) {
-                statusByTask[taskId] = normalizeTaskStatus(metadata.status);
+                statusByTask[taskId] = taskPresentation({ ...metadata, updated_at: metadata.updated_at ?? "" }, runStatus).status;
             }
         });
 
         return statusByTask;
-    }, [taskMetadata, taskStatus]);
+    }, [taskMetadata, taskStatus, runStatus]);
 
     const edgeDegreeByNode = useMemo(() => {
         const degreeByNode = new Map<string, NodeEdgeDegree>();
@@ -189,6 +193,10 @@ export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, 
                 data: {
                   label: taskDefinition?.name || "task",
                   runStartedAt,
+                  runStatus,
+                  runCompletedAt,
+                  recordedStatus: meta?.status ?? taskStatus?.[n.id],
+                  updatedAt: taskRunData?.[n.id]?.updated_at,
                   atom: atom,
                   status: status,
                   isSelected: selectedTaskId === n.id,
@@ -205,7 +213,7 @@ export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, 
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, runStartedAt, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, taskRunData, selectedTaskId, edgeDegreeByNode]);
+    }, [dag, runStartedAt, runStatus, runCompletedAt, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, taskRunData, taskStatus, selectedTaskId, edgeDegreeByNode]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
@@ -267,10 +275,15 @@ export function JobDAG({ dag, runStartedAt, atoms, taskDefinitions, taskStatus, 
         });
     }, [dag, resolvedTaskStatus, taskDefinitions, taskRunData]);
 
-    const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
-        () => getLayoutedElements(initialNodes, initialEdges),
-        [initialNodes, initialEdges]
-    );
+    const positions = useMemo(() => {
+      const topology = getLayoutedElements(
+        (dag.nodes ?? []).map(node => ({ id: node.id, data: {}, position: { x: 0, y: 0 } })),
+        (dag.edges ?? []).map(edge => ({ id: `${edge.from}-${edge.to}`, source: edge.from, target: edge.to })),
+      );
+      return new Map(topology.nodes.map(node => [node.id, node.position]));
+    }, [dag]);
+    const layoutedNodes = useMemo(() => initialNodes.map(node => ({ ...node, position: positions.get(node.id) ?? node.position })), [initialNodes, positions]);
+    const layoutedEdges = initialEdges;
 
     const isSingleNodeDAG = layoutedNodes.length === 1 && layoutedEdges.length === 0;
     const dagMaxZoom = isSingleNodeDAG ? 2.2 : 1.5;
@@ -339,15 +352,6 @@ function incrementEdgeDegree(degreeByNode: Map<string, NodeEdgeDegree>, nodeId: 
     degree[direction] += 1;
     degree.total += 1;
     degreeByNode.set(nodeId, degree);
-}
-
-function normalizeTaskStatus(status?: string) {
-    switch (status) {
-        case 'completed':
-            return 'succeeded';
-        default:
-            return status || 'pending';
-    }
 }
 
 function edgeColor(status: string) {

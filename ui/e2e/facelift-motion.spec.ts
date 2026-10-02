@@ -54,7 +54,7 @@ test("real run events update the fleet strip and shared instruments stop at comp
   await detail.screenshot({ path: testInfo.outputPath("execution-live.png") });
   await detail.emulateMedia({ reducedMotion: "reduce" });
   await expect.poll(() => detail.locator(".cs-live-bar, .cs-now-head, .cs-electron-running, .cs-wave").evaluateAll(nodes => nodes.every(node => node.getAnimations().length === 0))).toBe(true);
-  await expect(detail.locator(".cs-duration-bar")).toHaveCSS("transition-duration", "0s");
+  await expect(detail.locator('[data-testid="run-timeline-bar"].cs-live-bar')).toHaveCSS("transition-duration", "0s");
   await detail.emulateMedia({ reducedMotion: "no-preference" });
 
   await awaitRun(request, job.id, { status: "succeeded" });

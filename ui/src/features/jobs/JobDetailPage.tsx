@@ -89,7 +89,7 @@ export function JobDetailPage() {
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: streamHealthy ? false : 15000,
+    refetchInterval: streamHealthy ? 10000 : 15000,
   });
 
   // Short-id deep links: GET /v1/jobs/:id resolves an unambiguous UUID prefix,
@@ -110,7 +110,7 @@ export function JobDetailPage() {
   const { data: runsResult, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
     queryFn: () => api.getAllJobRuns(jobId),
-    refetchInterval: streamHealthy ? false : 15000,
+    refetchInterval: streamHealthy ? 10000 : 15000,
   });
   const runs = runsResult?.runs;
 
@@ -275,8 +275,8 @@ export function JobDetailPage() {
     queryKey: ["job", jobId, "runs", featuredRunId],
     queryFn: () => api.getJobRun(jobId, featuredRunId!),
     enabled: !!featuredRunId,
-    refetchInterval: (query) =>
-      !streamHealthy || isTerminalRunStatus(query.state.data?.status ?? featuredRunSummary?.status) ? 5000 : false,
+    // SSE is immediate; polling reconciles missed events across cluster replicas.
+    refetchInterval: streamHealthy ? 5000 : 3000,
   });
 
   useEffect(() => {
@@ -292,6 +292,7 @@ export function JobDetailPage() {
         if (!old) return old;
 
         if (e.type === "run_started") {
+          if (isTerminalRunStatus(old.status)) return old;
           const startedRun = e.payload as JobRun | undefined;
           return startedRun?.id === featuredRunId ? { ...old, ...startedRun } : old;
         }
@@ -302,7 +303,7 @@ export function JobDetailPage() {
             return mergeTerminalRunUpdate(old, completedRun);
           }
           if (completedRun?.id === featuredRunId) {
-            return { ...old, ...completedRun, status: "succeeded" };
+            return { ...old, ...completedRun, status: completedRun.status ?? (e.type === "run_terminal" ? old.status : "succeeded") };
           }
           return old;
         }
@@ -319,6 +320,7 @@ export function JobDetailPage() {
         }
 
         if (e.type.startsWith("task_")) {
+          if (isTerminalRunStatus(old.status)) return old;
           const taskUpdate = e.payload as TaskRun | undefined;
           const taskID = taskUpdate?.task_id || e.task_id;
           if (!taskID) return old;
@@ -403,7 +405,7 @@ export function JobDetailPage() {
     };
   }, [features?.agent_remediation_enabled, jobId, queryClient]);
 
-  const activeRun = featuredRun?.status === "running" ? featuredRun : activeRunSummary;
+  const activeRun = featuredRun ? (featuredRun.status === "running" ? featuredRun : undefined) : activeRunSummary;
   const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskStatus = useMemo(() => buildTaskStatusLookup(featuredRun?.tasks), [featuredRun?.tasks]);
@@ -585,18 +587,27 @@ export function JobDetailPage() {
 
           <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
             {/* Live task counters */}
-            {featuredRun && <DagCounters tasks={featuredRun.tasks} />}
+            {featuredRun && <DagCounters tasks={featuredRun.tasks} runStatus={featuredRun.status} />}
             {job.paused && (
               <StatusBadge status="paused" variant="word" size="sm" />
             )}
           </div>
         </div>
 
+        {featuredRun && isTerminalRunStatus(featuredRun.status) && featuredRun.tasks?.some(task => ["running", "pending", "queued"].includes(task.status)) ? (
+          <p data-testid="run-task-state-notice" className="border-b border-border px-4 py-2.5 text-xs leading-relaxed text-text-2">
+            Run {featuredRun.status}{featuredRun.error ? `: ${featuredRun.error}` : "."} · Some task outcomes were not recorded. The graph shows the last observed state; live animation has stopped.
+          </p>
+        ) : null}
+
         {/* DAG canvas */}
         <div className="flex-1 min-h-0">
           {dag && atoms ? (
             <JobDAG
               dag={dag}
+              runStartedAt={featuredRun?.started_at}
+              runStatus={featuredRun?.status}
+              runCompletedAt={featuredRun?.completed_at}
               atoms={atoms}
               taskDefinitions={taskDefinitions}
               taskMetadata={taskMetadata}
@@ -614,6 +625,8 @@ export function JobDetailPage() {
             key={selectedTaskId}
             taskId={selectedTaskId}
             task={selectedTask}
+            runStatus={featuredRun?.status}
+            runCompletedAt={featuredRun?.completed_at}
             runTask={selectedRunTask}
             taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
             jobId={jobId}

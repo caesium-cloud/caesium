@@ -1,3 +1,4 @@
+import { taskPresentation } from "../task-presentation";
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { isRecord } from "@/lib/typeGuards";
@@ -16,7 +17,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
   const runtime = getRuntimeHints(atom?.spec);
   const handles = getHandleVisibility(data.edgeDegree);
   const state = statusKeyForDomain(status === "completed" ? "succeeded" : status) ?? "unknown";
-  const meta = statusMeta(state);
+  const presentation = taskPresentation({ status: data.recordedStatus ?? status, started_at: startedAt, completed_at: completedAt, updated_at: data.updatedAt ?? "" }, data.runStatus, data.runCompletedAt);
+  const meta = { ...statusMeta(state), label: presentation.label };
   const isFanned = typeof partitionCount === "number" && (partitionCount > 1 || (partitionCount > 0 && !!partitionValue));
   const segments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
   let rawCommand = command || atom?.command || [];
@@ -26,8 +28,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
   const visibleArgs = shell ? args.slice(2) : args;
   const runtimeEngine = String(engine || atom?.engine || "unknown").toLowerCase();
   const image = String(atom?.image || "unknown").split("/").pop() || "unknown";
-  const border = state === "running" ? "border-running shadow-[0_0_24px_hsl(var(--running)/.18)]" : state === "succeeded" ? "border-success/45" : state === "failed" ? "border-danger" : state === "cached" ? "border-cached border-dashed" : state === "skipped" ? "border-border" : "border-gold/50";
-  const note = error ? String(error).split("\n")[0] : rateLimitRetryAfter ? `Rate-limited until ${formatRetryAfter(rateLimitRetryAfter)}` : state === "cached" ? "Successful output restored from cache. No container started." : startedAt ? data.runStartedAt ? `started at +${Math.max(0, (Date.parse(startedAt) - Date.parse(data.runStartedAt)) / 1000).toFixed(2)}s` : `started at ${formatUTCTimestamp(startedAt)}` : state === "skipped" ? "branch chose another path" : "waits on upstream work";
+  const border = state === "running" ? "border-running shadow-[0_0_24px_hsl(var(--running)/.18)]" : state === "succeeded" ? "border-success/45" : state === "failed" ? "border-danger" : state === "cached" ? "border-cached border-dashed" : state === "skipped" ? "border-border" : state === "unknown" ? "border-border border-dashed" : "border-gold/50";
+  const note = presentation.note ?? (error ? String(error).split("\n")[0] : rateLimitRetryAfter ? `Rate-limited until ${formatRetryAfter(rateLimitRetryAfter)}` : state === "cached" ? "Successful output restored from cache. No container started." : startedAt ? data.runStartedAt ? `started at +${Math.max(0, (Date.parse(startedAt) - Date.parse(data.runStartedAt)) / 1000).toFixed(2)}s` : `started at ${formatUTCTimestamp(startedAt)}` : state === "skipped" ? "branch chose another path" : "waits on upstream work");
   const prefix = branch ? "branch" : "task";
   return <div className="relative h-[112px] w-[260px]">
     {isFanned ? <>
@@ -43,7 +45,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         <span data-testid="task-node-label" title={taskLabel} className="min-w-0 flex-1 truncate text-sm font-bold text-text-1">{taskLabel}</span>
         {isFanned ? <span data-testid="fanout-badge" className="text-[11px] text-text-3">×{partitionCount}</span> : null}
         <span className={cn("text-[11px] tabular-nums", state === "running" ? "text-running" : "text-text-3")}>
-          {startedAt ? <Duration start={startedAt} end={completedAt} /> : ""}
+          {startedAt ? <>{presentation.uncertain ? "≥" : ""}<Duration start={startedAt} end={presentation.end} /></> : ""}
         </span>
       </div>
       {segments.length > 0 ? <div data-testid="fanout-status-strip" title="Partition status breakdown" className="absolute left-0 right-0 top-8 flex h-1 overflow-hidden">
@@ -60,7 +62,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         <span className="text-cyan">$</span>
         <span className="min-w-0 truncate text-text-2">{visibleArgs.length ? visibleArgs.map((arg, i) => <span key={i}>{i ? " " : ""}{arg}</span>) : "no command"}</span>
       </div>
-      <div data-testid={rateLimitRetryAfter ? "task-rate-limit-indicator" : "task-node-note"} className={cn("mt-1 truncate text-[11px] italic", error && state !== "skipped" ? "text-danger" : rateLimitRetryAfter ? "text-gold" : "text-text-3")} title={note}>{note}</div>
+      <div data-testid={rateLimitRetryAfter ? "task-rate-limit-indicator" : "task-node-note"} className={cn("mt-1 truncate text-[11px] italic", error && state !== "skipped" ? "text-danger" : rateLimitRetryAfter ? "text-gold" : "text-text-3")} title={note}>{presentation.incomplete ? `${presentation.label} · last reported ${data.recordedStatus ?? status}` : note}</div>
       {handles.showSourceHandle ? <Handle data-testid={`${prefix}-node-source-handle`} type="source" position={Position.Right} className="h-2 w-2 border border-dag-bg bg-cyan" /> : null}
     </div>
   </div>;

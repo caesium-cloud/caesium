@@ -1,7 +1,8 @@
+import { isTerminalRunStatus } from "./cache-utils";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { TaskRun } from "@/lib/api";
 
-export function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
+export function DagCounters({ tasks, runStatus }: { tasks?: TaskRun[]; runStatus?: string }) {
   if (!tasks || tasks.length === 0) return null;
 
   const succeeded = tasks.filter((task) => task.status === "succeeded" || task.status === "completed").length;
@@ -23,13 +24,13 @@ export function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
   if (cancelled > 0) parts.push({ status: "cancelled", label: `${cancelled} cancelled`, count: cancelled });
 
   if (running > 0) {
-    parts.push({ status: "running", label: `${running} running`, count: running });
+    parts.push({ status: isTerminalRunStatus(runStatus) ? "unknown" : "running", label: `${running} ${isTerminalRunStatus(runStatus) ? "unconfirmed" : "running"}`, count: running });
   }
   if (cached > 0) {
     parts.push({ status: "cached", label: `${cached} cached`, count: cached });
   }
   if (waiting > 0) {
-    parts.push({ status: "queued", label: `${waiting} waiting`, count: waiting });
+    parts.push({ status: isTerminalRunStatus(runStatus) ? "unknown" : "queued", label: `${waiting} ${isTerminalRunStatus(runStatus) ? "not started" : "waiting"}`, count: waiting });
   }
 
   return (

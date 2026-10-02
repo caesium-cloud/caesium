@@ -1,10 +1,12 @@
+import { taskPresentation } from "./task-presentation";
+import { useTimelineMotion } from "./useTimelineMotion";
 import type { JobTask, TaskRun } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useUTCTick } from "@/components/ui/utc-clock";
 import { fanoutStatusSegments } from "@/lib/fanout";
 
-interface Props { tasks: TaskRun[]; taskDefinitions: Record<string, JobTask>; runStartedAt: string; runStatus?: string }
+interface Props { tasks: TaskRun[]; taskDefinitions: Record<string, JobTask>; runStartedAt: string; runStatus?: string; runCompletedAt?: string }
 const LEGEND_STATUSES = ["succeeded", "cached", "failed", "running", "skipped", "queued"] as const;
 
 function formatMs(ms: number): string {
@@ -14,58 +16,66 @@ function formatMs(ms: number): string {
   return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
 }
 
-export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus }: Props) {
+export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus, runCompletedAt }: Props) {
   const live = runStatus ? ["running", "queued", "pending"].includes(runStatus) : tasks.some(task => ["running", "queued"].includes(statusMeta(task.status).label));
   const now = useUTCTick(live).getTime();
   const runStart = Date.parse(runStartedAt);
   const ordered = orderTasksByExecution(tasks, taskDefinitions);
-  if (!ordered.length || !Number.isFinite(runStart)) return <div className="flex h-32 items-center justify-center text-sm text-text-3">No task execution data available yet.</div>;
   const elapsed = Math.max(0, now - runStart);
   const taskTimes = ordered.map(task => {
-    const status = statusMeta(task.status).label;
+    const presentation = taskPresentation(task, runStatus, runCompletedAt);
+    const status = presentation.status;
     const unstarted = !task.started_at && status !== "cached";
     const ghost = live && unstarted;
     const start = ghost ? elapsed : Math.max(0, Date.parse(task.started_at ?? task.completed_at ?? task.created_at) - runStart);
-    const end = task.completed_at ? Math.max(start, Date.parse(task.completed_at) - runStart) : status === "running" ? elapsed : start;
-    return { task, status, start: Number.isFinite(start) ? start : 0, end: Number.isFinite(end) ? end : 0, ghost, unstarted };
+    const end = presentation.end ? Math.max(start, Date.parse(presentation.end) - runStart) : status === "running" ? elapsed : start;
+    return { task, status, start: Number.isFinite(start) ? start : 0, end: Number.isFinite(end) ? end : 0, ghost, unstarted, presentation };
   });
-  const span = Math.max(1, ...taskTimes.filter(row => !row.ghost).map(row => row.end), live ? elapsed : 0);
-  // Roughly five intervals, including sub-second runs. No extra empty interval.
+  const span = Math.max(live ? 5000 : 1, ...taskTimes.filter(row => !row.ghost).map(row => row.end), live ? elapsed : 0);
+  // Short terminal runs fit tightly; live runs reserve one clock tick of headroom.
   const magnitude = 10 ** Math.floor(Math.log10(span / 5));
   const step = [1, 2, 5, 10].map(value => value * magnitude).find(value => span / value <= 5)!;
-  const maxEnd = Math.ceil(span / step) * step;
-  const nowPosition = Math.min(100, elapsed / maxEnd * 100);
+  const maxEnd = Math.ceil((span + (live ? 1000 : 0)) / step) * step;
+  const plotRef = useTimelineMotion(live, runStart, elapsed, maxEnd);
+  const position = (ms: number) => live ? `calc(${ms} / var(--timeline-span) * 100%)` : `${ms / maxEnd * 100}%`;
+  if (!ordered.length || !Number.isFinite(runStart)) return <div className="flex h-32 items-center justify-center text-sm text-text-3">No task execution data available yet.</div>;
+  // New ticks enter only once the interpolated domain reaches them. They
+  // cannot expand the scroll surface or briefly imply the wrong time scale.
+  const tickPosition = (tick: number) => ({
+    left: live ? `min(100%, ${position(tick)})` : position(tick),
+    opacity: live ? `clamp(0, calc((var(--timeline-span) - ${tick} + 0.001) * 1000), 1)` : 1,
+  });
   const ticks = Array.from({ length: Math.round(maxEnd / step) + 1 }, (_, i) => i * step);
   return <div>
-    <div className="mb-3 flex flex-wrap justify-end gap-x-4 gap-y-2">{LEGEND_STATUSES.map(status => <StatusBadge key={status} status={status} size="sm" />)}</div>
+    <div className="cs-timeline-legend mb-3 flex flex-wrap justify-end gap-x-4 gap-y-2">{[...LEGEND_STATUSES.filter(status => taskTimes.some(row => row.status === status)), ...(taskTimes.some(row => row.presentation.incomplete) ? ["unknown"] : [])].map(status => <StatusBadge key={status} status={status} label={status === "unknown" ? "unconfirmed" : undefined} size="sm" />)}</div>
     <p className="mb-2 text-xs text-text-3 md:hidden">Scroll timeline horizontally → · task names stay visible</p>
     <div className="overflow-x-auto bg-midnight" tabIndex={0} role="region" aria-label="Execution timeline">
-      <div className="relative min-w-[620px] [--timeline-gutter:160px] md:[--timeline-gutter:220px]">
-        <div className="relative ml-[var(--timeline-gutter)] h-8 text-[11px] text-text-3">{ticks.map((tick, index) => <span data-testid="timeline-tick" key={tick} className="absolute top-1 whitespace-nowrap" style={{ left: `${tick / maxEnd * 100}%`, transform: `translateX(${index === 0 ? 0 : index === ticks.length - 1 ? -100 : -50}%)` }}>{formatMs(tick)}</span>)}</div>
+      <div ref={plotRef} className="relative min-w-[620px] [--timeline-gutter:160px] md:[--timeline-gutter:220px]">
+        <div className="relative ml-[var(--timeline-gutter)] h-8 text-[11px] text-text-3">{ticks.map((tick, index) => <span data-testid="timeline-tick" key={tick} className="absolute top-1 whitespace-nowrap" style={{ ...tickPosition(tick), transform: `translateX(${index === 0 ? 0 : index === ticks.length - 1 ? -100 : -50}%)` }}>{formatMs(tick)}</span>)}</div>
         <div aria-hidden="true" className="pointer-events-none absolute bottom-0 left-[var(--timeline-gutter)] right-0 top-8" style={{ containerType: "inline-size" }}>
-          {ticks.map(tick => <span key={tick} className="absolute inset-y-0 border-l border-border" style={{ left: `${tick / maxEnd * 100}%` }} />)}
-          {live ? <span data-testid="run-timeline-now" className="absolute inset-y-0 left-0 z-[1] border-l border-running/60" style={{ transform: `translateX(${nowPosition}cqw)` }}>
-            <span className="cs-now-head absolute -top-1 h-2 w-2 rounded-full bg-running" style={{ left: nowPosition > 99 ? -8 : -4 }} />
+          {ticks.map(tick => <span key={tick} className="absolute inset-y-0 border-l border-border" style={tickPosition(tick)} />)}
+          {live ? <span data-testid="run-timeline-now" className="absolute inset-y-0 left-0 z-[1] border-l border-running/60" style={{ left: "min(100%, calc(var(--timeline-elapsed) / var(--timeline-span) * 100%))" }}>
+            <span className="cs-now-head absolute -top-1 h-2 w-2 rounded-full bg-running" style={{ left: -4 }} />
           </span> : null}
         </div>
-        {taskTimes.map(({ task, status, start, end, ghost, unstarted }, index) => {
+        {taskTimes.map(({ task, status, start, end, ghost, unstarted, presentation }, index) => {
           const label = taskLabel(task, taskDefinitions);
           const fanned = typeof task.partition_count === "number" && (task.partition_count > 1 || (task.partition_count > 0 && !!task.partition_value));
           const segments = fanned ? fanoutStatusSegments(task.partition_status_counts) : [];
           const meta = statusMeta(status);
-          const left = ghost ? Math.min(nowPosition, 96) : start / maxEnd * 100;
-          const width = ghost ? 4 : (end - start) / maxEnd * 100;
-          const annotation = status === "skipped" ? "Skipped" : ghost ? "Waiting on upstream" : unstarted ? "Did not start" : formatMs(end - start);
-          const reason = task.error || (status === "skipped" ? "Branch chose another path" : undefined);
+          const left = ghost ? "min(96%, calc(var(--timeline-elapsed) / var(--timeline-span) * 100%))" : position(start);
+          const width = ghost ? "4%" : status === "running" && live ? `max(0px, calc((var(--timeline-elapsed) - ${start}) / var(--timeline-span) * 100%))` : end > start ? position(end - start) : "2px";
+          const annotation = status === "skipped" ? "Skipped" : ghost ? "Waiting on upstream" : unstarted ? "Did not start" : `${presentation.uncertain ? "≥" : ""}${formatMs(end - start)}${presentation.uncertain ? " observed" : ""}`;
+          const reason = presentation.note || task.error || (status === "skipped" ? "Branch chose another path" : undefined);
           const body = <div className="grid min-h-12 grid-cols-[var(--timeline-gutter)_1fr] border-b border-border">
             <div className="sticky left-0 z-10 border-r border-border bg-midnight py-1.5 pr-3 text-xs text-text-2">
-              <div className="flex items-center gap-2"><span className="text-text-3">{String(index + 1).padStart(2, "0")}</span><StatusBadge status={status} variant="glyph" size="sm" /><span className="truncate" title={label}>{label}{fanned ? ` ×${task.partition_count}` : ""}</span></div>
+              <div className="flex items-center gap-2"><span className="text-text-3">{String(index + 1).padStart(2, "0")}</span><StatusBadge status={status} label={presentation.label} variant="glyph" size="sm" /><span className="truncate" title={label}>{label}{fanned ? ` ×${task.partition_count}` : ""}</span></div>
               {reason ? <details className="ml-6 mt-1 text-text-3"><summary className="cursor-pointer">{annotation} · reason</summary><p className="mt-2 break-words [overflow-wrap:anywhere]">{reason}</p></details> : <div className="ml-6 mt-1 text-text-3">{annotation}</div>}
             </div>
             <div className="relative min-w-0">
-              <span data-testid="run-timeline-bar" data-ghost={ghost} title={`${label}: ${meta.label}, ${formatMs(end - start)}`} className={`absolute top-5 h-2.5 rounded-sm ${status === "running" && live ? "cs-live-bar cs-duration-bar" : ""}`}
-                style={{ left: `${left}%`, width: width > 0 ? `${width}%` : 2, transform: left === 100 ? "translateX(-100%)" : undefined, background: status === "skipped" || ghost ? "transparent" : status === "running" ? "linear-gradient(90deg,hsl(var(--running)/.2),hsl(var(--running)))" : meta.fg, border: status === "skipped" ? "1px dashed hsl(var(--text-3))" : ghost ? "1px solid hsl(var(--gold))" : undefined }} />
-              {segments.length ? <div data-testid="run-timeline-density-strip" className="absolute top-9 flex h-1" style={{ left: `${left}%`, width: `${width}%` }}>{segments.map(segment => <span key={segment.status} data-testid="run-timeline-density-segment" data-status={segment.status} style={{ width: `${segment.fraction * 100}%`, backgroundColor: statusMeta(segment.status).fg }} />)}</div> : null}
+              <span data-testid="run-timeline-bar" data-ghost={ghost} title={`${label}: ${presentation.label}, ${annotation}`} className={`absolute top-5 h-2.5 rounded-sm ${status === "running" && live ? "cs-live-bar" : ""}`}
+                style={{ left, width, transform: start === maxEnd ? "translateX(-100%)" : undefined, background: status === "skipped" || ghost ? "transparent" : status === "running" ? "linear-gradient(90deg,hsl(var(--running)/.2),hsl(var(--running)))" : meta.fg, border: status === "skipped" ? "1px dashed hsl(var(--text-3))" : ghost ? "1px solid hsl(var(--gold))" : undefined }} />
+              {segments.length ? <div data-testid="run-timeline-density-strip" className="absolute top-9 flex h-1" style={{ left, width }}>{segments.map(segment => <span key={segment.status} data-testid="run-timeline-density-segment" data-status={segment.status} style={{ width: `${segment.fraction * 100}%`, backgroundColor: statusMeta(segment.status).fg }} />)}</div> : null}
             </div>
           </div>;
           return <div key={task.id} data-testid="run-timeline-task-row" data-task-id={task.task_id} data-task-name={label} data-started-at={task.started_at ?? ""} data-partition-count={task.partition_count ?? 0}>
@@ -154,7 +164,7 @@ function taskTopologicalRanks(tasks: TaskRun[], taskDefinitions: Record<string, 
 }
 
 function executionTimestamp(task: TaskRun): number {
-  const parsed = new Date(task.started_at ?? task.created_at).getTime();
+  const parsed = new Date(task.started_at ?? task.completed_at ?? "").getTime();
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 

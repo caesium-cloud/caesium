@@ -1,3 +1,4 @@
+import { taskPresentation } from "./task-presentation";
 import { MetadataValue } from "@/components/ui/metadata-value";
 import { IdChip } from "@/components/ui/id-chip";
 import {
@@ -75,6 +76,8 @@ interface TaskDetailPanelProps {
   taskType?: string;
   jobId: string;
   runId: string;
+  runStatus?: string;
+  runCompletedAt?: string;
   incidents?: Incident[];
   onClose: () => void;
 }
@@ -93,6 +96,8 @@ export function TaskDetailPanel({
   taskType,
   jobId,
   runId,
+  runStatus,
+  runCompletedAt,
   incidents = [],
   onClose,
 }: TaskDetailPanelProps) {
@@ -240,7 +245,8 @@ export function TaskDetailPanel({
   }, [panelWidth]);
 
   const resolvedType = taskType || "task";
-  const status = runTask?.status ?? "pending";
+  const presentation = taskPresentation(runTask ?? { status: "pending", updated_at: "" }, runStatus, runCompletedAt);
+  const status = presentation.status;
   const catalogTaskId = task?.id ?? runTask?.task_id ?? taskId;
   const cached = isTaskCached(runTask);
   const fanned = isFannedTask(runTask);
@@ -330,7 +336,7 @@ export function TaskDetailPanel({
               {task?.name || "task"}
             </h3>
             <div className="flex items-center gap-2 mt-0.5">
-              <StatusBadge status={status} size="sm" />
+              <StatusBadge status={status} label={presentation.label} size="sm" />
               <IdChip value={runTask?.id || taskId} label="task run id" />
               {resolvedType !== "task" && (
                 <Badge variant="outline" className="text-[11px] px-1.5 py-0">
@@ -352,6 +358,7 @@ export function TaskDetailPanel({
         </Button>
       </div>
 
+      {presentation.note ? <p className="border-b border-border px-4 py-3 text-xs text-text-2">{presentation.note}</p> : null}
       {incidents.length > 0 ? (
         <div className="border-b border-border/60 p-3">
           <IncidentRibbon
