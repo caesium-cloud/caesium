@@ -1,4 +1,3 @@
-import { IdChip } from "@/components/ui/id-chip";
 import { useEffect, useMemo } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,7 +10,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Incident, type IncidentListParams } from "@/lib/api";
 import { events } from "@/lib/events";
 import { ALL_INCIDENT_STATUSES } from "@/lib/status";
-import { cn } from "@/lib/utils";
+import { cn, shortId } from "@/lib/utils";
 import {
   buildJobAliasMap,
   formatIncidentClass,
@@ -308,8 +307,8 @@ function IncidentFeedRow({ incident, jobAlias }: { incident: Incident; jobAlias:
           </div>
           <div className="mt-1 line-clamp-2 text-sm text-text-2">{incidentSummary(incident)}</div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-3">
-            <IdChip value={incident.id} label="incident id" />
-            {incident.run_id ? <IdChip value={incident.run_id} label="run id" /> : null}
+            <span title={incident.id}>incident {shortId(incident.id)}</span>
+            {incident.run_id ? <span title={incident.run_id}>run {shortId(incident.run_id)}</span> : null}
             <span>task {incident.task_name || "unknown"}</span>
           </div>
         </div>

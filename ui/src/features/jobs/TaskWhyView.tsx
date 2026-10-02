@@ -319,7 +319,7 @@ function BaselineDetails({
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Baseline</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Kind" value={baseline?.kind || "none"} mono />
+        <DetailRow label="Kind" value={baseline?.kind ?? ""} mono />
         <div className="grid grid-cols-[96px_1fr] gap-2">
           <span className="text-muted-foreground">Run</span>
           {baseline?.runId ? (
@@ -336,7 +336,7 @@ function BaselineDetails({
         </div>
         <DetailRow
           label="Task run"
-          value={baseline?.taskRunId || "none"}
+          value={baseline?.taskRunId ?? ""}
           idChip
           mono
         />
@@ -356,7 +356,7 @@ function TriggerDetails({ trigger }: { trigger?: WhyTrigger | null }) {
       <SectionLabel>Trigger causation</SectionLabel>
       <div className="grid gap-2 text-xs">
         <DetailRow label="Type" value={trigger?.type || "unknown"} mono />
-        <DetailRow label="Alias" value={trigger?.alias || "none"} mono />
+        <DetailRow label="Alias" value={trigger?.alias ?? ""} mono />
         <DetailRow
           label="Fired"
           value={trigger?.firedAt ? formatDateTime(trigger.firedAt) : "unknown"}
@@ -385,9 +385,9 @@ function HashDetails({ explanation }: { explanation: WhyExplanation }) {
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Hashes</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow idChip label="Task hash" value={explanation.hash || "none"} mono wrap />
-        <DetailRow idChip label="Subject" value={explanation.diff?.subjectHash || "none"} mono wrap />
-        <DetailRow idChip label="Baseline" value={explanation.diff?.baselineHash || "none"} mono wrap />
+        <DetailRow idChip label="Task hash" value={explanation.hash ?? ""} mono wrap />
+        <DetailRow idChip label="Subject" value={explanation.diff?.subjectHash ?? ""} mono wrap />
+        <DetailRow idChip label="Baseline" value={explanation.diff?.baselineHash ?? ""} mono wrap />
       </div>
     </div>
   );

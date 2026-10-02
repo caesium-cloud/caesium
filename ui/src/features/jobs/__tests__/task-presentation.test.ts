@@ -17,4 +17,7 @@ describe("terminal task presentation", () => {
   it("retains live state until the run has ended", () => {
     expect(taskPresentation(task, "running")).toMatchObject({ status: "running", end: undefined, incomplete: false });
   });
+  it.each(["cancelled", "blocked"])("preserves the recorded %s status", status => {
+    expect(taskPresentation({ ...task, status }, "failed")).toMatchObject({ status, label: status, incomplete: false });
+  });
 });

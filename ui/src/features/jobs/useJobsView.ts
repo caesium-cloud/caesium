@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { mergeLatestRun } from "./run-updates";
+import { coalescedRefresh } from "@/lib/coalesced-refresh";
 import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
@@ -68,8 +69,8 @@ function writeUrlParams(status: StatusFilter, q: string, sort: SortKey, historyW
 }
 
 function activityKey(e: CaesiumEvent, jobId: string, runId?: string) {
-  if (runId) return `${e.type}:${runId}`;
   if (e.sequence !== undefined) return `${e.type}:sequence:${e.sequence}`;
+  if (runId) return `${e.type}:${runId}`;
   return `${e.type}:${jobId}:${e.timestamp}`;
 }
 
@@ -110,7 +111,8 @@ export function useJobsView() {
   const { data: jobs, isLoading, error } = useQuery({
     queryKey: ["jobs"],
     queryFn: api.getJobs,
-    refetchInterval: streamHealthy ? false : 15000,
+    // The bounded list also reconciles events produced on another replica.
+    refetchInterval: streamHealthy ? 60000 : 15000,
   });
 
   const appendActivity = useCallback((draft: PendingActivityEntry, alias: string) => {
@@ -166,15 +168,10 @@ export function useJobsView() {
 
   useEffect(() => {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
-    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    const refreshHistory = () => {
-      // Fixed coalescing window: sustained events cannot postpone a refresh.
-      if (refreshTimer !== undefined) return;
-      refreshTimer = setTimeout(() => {
-        refreshTimer = undefined;
-        queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      }, 250);
-    };
+    const refresh = coalescedRefresh(() =>
+      queryClient.invalidateQueries({ queryKey: ["jobs"] }, { cancelRefetch: false }),
+    );
+    const refreshHistory = refresh.request;
 
     const onRunEvent = (e: CaesiumEvent) => {
       const payload = e.payload as JobRun | undefined;
@@ -231,7 +228,7 @@ export function useJobsView() {
     const onPauseEvent = (e: CaesiumEvent) => {
       const payload = e.payload as Job | undefined;
       if (!payload?.id) {
-        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        refreshHistory();
         return;
       }
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
@@ -244,7 +241,7 @@ export function useJobsView() {
 
     const onTaskCached = (e: CaesiumEvent) => {
       if (!e.job_id || !e.run_id) {
-        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        refreshHistory();
         return;
       }
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
@@ -262,7 +259,7 @@ export function useJobsView() {
     events.subscribe("task_cached", onTaskCached);
 
     return () => {
-      clearTimeout(refreshTimer);
+      refresh.dispose();
       events.unsubscribeConnection(onConnection);
       RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));
       ["job_paused", "job_unpaused"].forEach((t) => events.unsubscribe(t, onPauseEvent));
@@ -312,7 +309,7 @@ export function useJobsView() {
         return (a.latest_run?.status ?? "z").localeCompare(b.latest_run?.status ?? "z");
       }
       if (sort === "last_run") {
-        return (b.latest_run?.started_at ?? "").localeCompare(a.latest_run?.started_at ?? "");
+        return timestamp(b.latest_run?.started_at) - timestamp(a.latest_run?.started_at);
       }
       return a.alias.localeCompare(b.alias);
     });
@@ -333,7 +330,7 @@ export function useJobsView() {
         else history.push(entry);
       }
       return { ...job, lastRuns: history
-        .sort((a, b) => a.started_at.localeCompare(b.started_at))
+        .sort((a, b) => timestamp(a.started_at) - timestamp(b.started_at))
         .slice(-10)
         .map(r => ({ status: r.status, duration: r.duration ?? null, startedAt: r.started_at })) };
     });
@@ -354,4 +351,9 @@ export function useJobsView() {
     error: error as Error | null,
     activity,
   };
+}
+
+function timestamp(value?: string) {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
 }

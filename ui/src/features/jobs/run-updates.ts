@@ -8,7 +8,12 @@ function runTime(run: JobRun): number {
 /** Completion order does not determine which concurrent run is latest. */
 export function mergeLatestRun(current: JobRun | undefined, incoming: JobRun): JobRun {
   if (!current) return incoming;
-  if (current.id === incoming.id) return { ...current, ...incoming };
+  if (current.id === incoming.id) {
+    const nextUpdate = Date.parse(incoming.updated_at);
+    const currentUpdate = Date.parse(current.updated_at);
+    if (Number.isFinite(nextUpdate) && Number.isFinite(currentUpdate) && nextUpdate < currentUpdate) return current;
+    return { ...current, ...incoming, completed_at: incoming.completed_at, error: incoming.error };
+  }
   const nextTime = runTime(incoming);
   const currentTime = runTime(current);
   return Number.isFinite(nextTime) && (!Number.isFinite(currentTime) || nextTime > currentTime) ? incoming : current;

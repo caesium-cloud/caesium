@@ -15,6 +15,31 @@ vi.mock("@/lib/events", () => ({ events: {
 vi.mock("@/lib/api", () => ({ api: { getJobs } }));
 afterEach(() => { handlers.clear(); vi.useRealTimers(); });
 
+it("deduplicates replayed sequences while accepting successive retries of the same run", () => {
+  const job = { id: "job", alias: "job", paused: false } as Job;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  client.setQueryData(["jobs"], [job]);
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(useJobsView, { wrapper });
+  act(() => {
+    for (const sequence of [1, 2, 2, 3]) handlers.get("run_retried")!({ sequence, type: "run_retried", job_id: "job", run_id: "same", timestamp: new Date().toISOString() });
+  });
+  expect(result.current.activity.filter(entry => entry.type === "run_retried")).toHaveLength(3);
+  unmount(); client.clear();
+});
+
+it("orders variable RFC3339 fractional precision by parsed time before trimming history", () => {
+  const prefix = "2026-10-02T10:00:00";
+  const history = ["Z", ...Array.from({ length: 10 }, (_, i) => `.${i + 1 < 10 ? i + 1 : '95'}Z`)].map((suffix, index) => ({ started_at: prefix + suffix, status: String(index), duration: 1 }));
+  const job = { id: "job", alias: "job", paused: false, last_runs: history } as Job;
+  const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity } } });
+  client.setQueryData(["jobs"], [job]);
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(useJobsView, { wrapper });
+  expect(result.current.rows[0].lastRuns.map(run => run.status)).toEqual(Array.from({ length: 10 }, (_, i) => String(i + 1)));
+  unmount(); client.clear();
+});
+
 it("refreshes history during sustained events and releases pending activity for new jobs", async () => {
   vi.useFakeTimers();
   const job = { id: "known", alias: "known-job", paused: false } as Job;

@@ -74,6 +74,17 @@ describe("api.getAllJobRuns", () => {
     mockFetch.mockReset();
   });
 
+  it("stops a cancelled page walk before issuing the next request", async () => {
+    const controller = new AbortController();
+    mockFetch.mockResolvedValue({ ok: true, status: 200,
+      headers: new Headers({ "X-Caesium-Total-Count": "1000", "X-Caesium-Next-Offset": "500" }),
+      text: () => { controller.abort(); return Promise.resolve(JSON.stringify([run("first")])); },
+    });
+    await expect(api.getAllJobRuns("job-1", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
   // This is the regression a codex review caught: the console's job detail
   // page called the (now-paginated) list endpoint with no params and
   // rendered the bare array directly, so a job with more than the server's

@@ -25,6 +25,14 @@ function renderTaskNode(data: Record<string, unknown>) {
 }
 
 describe('TaskNode', () => {
+  it.each([
+    ['[1,2]', '[1,2]'],
+    ['123', '123'],
+    ['["printf","hello world","again"]', 'printf "hello world" again'],
+  ])('preserves command %s faithfully', (command, expected) => {
+    renderTaskNode({ label: 'command', status: 'succeeded', command });
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
   it('renders task with succeeded status', () => {
     renderTaskNode({
       label: 'task-abc123',
@@ -103,9 +111,7 @@ describe('TaskNode', () => {
       engine: 'docker',
       command: ['python', '-m', 'pytest'],
     });
-    expect(screen.getByText('python')).toBeInTheDocument();
-    expect(screen.getByText('-m')).toBeInTheDocument();
-    expect(screen.getByText('pytest')).toBeInTheDocument();
+    expect(screen.getByText('python -m pytest')).toBeInTheDocument();
   });
 
   it('renders image name', () => {
@@ -129,7 +135,7 @@ describe('TaskNode', () => {
     });
 
     expect(screen.getByText('shell')).toBeInTheDocument();
-    expect(screen.getByText('echo streamed logs')).toBeInTheDocument();
+    expect(screen.getByText('"echo streamed logs"')).toBeInTheDocument();
   });
 
   it('does not render redundant schema or in/out badges on the node chrome', () => {

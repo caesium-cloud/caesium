@@ -1254,11 +1254,11 @@ async function requestURL<T>(
  * backward compatible for every caller that already decodes it as a bare
  * array/object.
  */
-async function requestWithHeaders<T>(endpoint: string): Promise<{ data: T; headers: Headers }> {
+async function requestWithHeaders<T>(endpoint: string, signal?: AbortSignal): Promise<{ data: T; headers: Headers }> {
   const url = `${API_BASE_URL}${endpoint}`;
   const headers = withAuthHeaders({ "Content-Type": "application/json" });
 
-  const response = await fetch(url, { credentials: "include", headers });
+  const response = await fetch(url, { credentials: "include", headers, signal });
 
   if (response.status === 401) {
     clearApiKey();
@@ -1457,7 +1457,7 @@ export const api = {
    * pathological history. `truncated` on the result says so explicitly
    * instead of quietly rendering a partial list as complete.
    */
-  getAllJobRuns: async (jobId: string): Promise<AllJobRunsResult> => {
+  getAllJobRuns: async (jobId: string, signal?: AbortSignal): Promise<AllJobRunsResult> => {
     const runs: JobRun[] = [];
     const seenIDs = new Set<string>();
     let offset = 0;
@@ -1465,7 +1465,8 @@ export const api = {
     let truncated = false;
 
     for (;;) {
-      const page = await fetchJobRunsPage(jobId, { limit: jobRunsPageSize, offset: offset || undefined });
+      signal?.throwIfAborted();
+      const page = await fetchJobRunsPage(jobId, { limit: jobRunsPageSize, offset: offset || undefined }, signal);
       total = page.total;
       for (const run of page.runs) {
         if (seenIDs.has(run.id)) continue;
@@ -1795,10 +1796,10 @@ export const api = {
 };
 
 /** One page of a job's runs. See `api.getJobRuns` / `api.getAllJobRuns`. */
-async function fetchJobRunsPage(jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> {
+async function fetchJobRunsPage(jobId: string, query?: JobRunsQuery, signal?: AbortSignal): Promise<JobRunsPage> {
   const params = queryString({ limit: query?.limit, offset: query?.offset });
   const suffix = params ? `?${params}` : "";
-  const { data, headers } = await requestWithHeaders<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  const { data, headers } = await requestWithHeaders<JobRun[]>(`/jobs/${jobId}/runs${suffix}`, signal);
   const totalHeader = headers.get("X-Caesium-Total-Count");
   const nextHeader = headers.get("X-Caesium-Next-Offset");
   const runs = data ?? [];

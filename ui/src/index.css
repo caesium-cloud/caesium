@@ -2,6 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* React Flow's unlayered focus reset otherwise overrides the shared base rule. */
+.react-flow__node.selectable:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
 :root {
   --font-sans: "Sometype Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-mono: var(--font-sans);

@@ -12,8 +12,15 @@ it("keeps chip rendering independent of display labels", () => {
   expect(screen.getByText("plain-value")).toBeInTheDocument();
 });
 
-it.each(["None", "none", " NONE ", "", "   "])("keeps missing value %s as plain text", value => {
+it.each(["", "   "])("keeps missing value %s as plain text", value => {
   render(<MetadataValue label="identity" value={value} idChip />);
   expect(screen.getByText("None")).toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+it.each(["none", "None", " NONE "])("preserves literal value %s", value => {
+  const { rerender } = render(<MetadataValue label="expected" value={value} />);
+  expect(screen.getByText(value.trim())).toBeInTheDocument();
+  rerender(<MetadataValue label="identity" value={value} idChip />);
+  expect(screen.getByRole("button", { name: `Copy identity: ${value.trim()}` })).toHaveAttribute("title", value);
 });

@@ -221,7 +221,7 @@ export function TaskDiffRow({ task, leftTask, rightTask }: { task: RunDiffTask; 
             <MetadataCell label="Left Attempt" value={String(task.leftAttempt)} mono />
             <MetadataCell label="Right Attempt" value={String(task.rightAttempt)} mono />
             <MetadataCell label="Hash Equal" value={String(task.hashEqual)} mono />
-            {!task.hashEqual ? <><MetadataCell label="Left Hash" idChip value={task.leftHash || "None"} mono /><MetadataCell label="Right Hash" idChip value={task.rightHash || "None"} mono /></> : null}
+            {!task.hashEqual ? <><MetadataCell label="Left Hash" idChip value={task.leftHash ?? ""} mono /><MetadataCell label="Right Hash" idChip value={task.rightHash ?? ""} mono /></> : null}
             {task.degraded ? <MetadataCell label="Degraded" value={task.degraded} /> : null}
           </div>
 

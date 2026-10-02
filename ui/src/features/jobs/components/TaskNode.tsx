@@ -2,7 +2,7 @@ import { taskPresentation } from "../task-presentation";
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import { isRecord } from "@/lib/typeGuards";
-import { cn, formatUTCTimestamp } from "@/lib/utils";
+import { cn, formatCommandForDisplay, formatUTCTimestamp, normalizeCommand } from "@/lib/utils";
 import { statusMeta, statusKeyForDomain } from "@/lib/status";
 import { StatusGlyph } from "@/components/ui/status-badge";
 import { fanoutStatusSegments } from "@/lib/fanout";
@@ -21,11 +21,10 @@ export const TaskNode = memo(({ data }: NodeProps) => {
   const meta = { ...statusMeta(state), label: presentation.label };
   const isFanned = typeof partitionCount === "number" && (partitionCount > 1 || (partitionCount > 0 && !!partitionValue));
   const segments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
-  let rawCommand = command || atom?.command || [];
-  if (typeof rawCommand === "string") { try { rawCommand = JSON.parse(rawCommand); } catch { rawCommand = [rawCommand]; } }
-  const args: string[] = Array.isArray(rawCommand) ? rawCommand.map(String) : [];
+  const rawCommand = command || atom?.command;
+  const args = normalizeCommand(rawCommand);
   const shell = args.length >= 2 && ["sh", "bash", "/bin/sh", "/bin/bash"].includes(args[0]) && args[1] === "-c";
-  const visibleArgs = shell ? args.slice(2) : args;
+  const visibleCommand = formatCommandForDisplay(shell ? args.slice(2) : rawCommand, "no command");
   const runtimeEngine = String(engine || atom?.engine || "unknown").toLowerCase();
   const image = String(atom?.image || "unknown").split("/").pop() || "unknown";
   const border = state === "running" ? "border-running shadow-[0_0_24px_hsl(var(--running)/.18)]" : state === "succeeded" ? "border-success/45" : state === "failed" ? "border-danger" : state === "cached" ? "border-cached border-dashed" : state === "skipped" ? "border-border" : state === "unknown" ? "border-border border-dashed" : "border-gold/50";
@@ -58,9 +57,9 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         {runtime.hasKubernetesIdentity ? <span data-testid="runtime-identity-badge" title={runtime.serviceAccountName ? `ServiceAccount ${runtime.serviceAccountName}` : "Kubernetes pod identity settings"}>SA</span> : null}
         <span data-testid={`engine-icon-${runtimeEngine.includes("k8s") ? "kubernetes" : runtimeEngine}`}>{branch ? <span className="text-gold">branch</span> : runtimeEngine}</span>
       </div>
-      <div className="mt-1 flex h-6 min-w-0 items-center gap-2 rounded-sm bg-void px-2 text-[11px]" title={visibleArgs.join(" ")}>
+      <div className="mt-1 flex h-6 min-w-0 items-center gap-2 rounded-sm bg-void px-2 text-[11px]" title={visibleCommand}>
         <span className="text-cyan">$</span>
-        <span className="min-w-0 truncate text-text-2">{visibleArgs.length ? visibleArgs.map((arg, i) => <span key={i}>{i ? " " : ""}{arg}</span>) : "no command"}</span>
+        <span className="min-w-0 truncate text-text-2">{visibleCommand}</span>
       </div>
       <div data-testid={rateLimitRetryAfter ? "task-rate-limit-indicator" : "task-node-note"} className={cn("mt-1 truncate text-[11px] italic", error && state !== "skipped" ? "text-danger" : rateLimitRetryAfter ? "text-gold" : "text-text-3")} title={note}>{presentation.incomplete ? `${presentation.label} · last reported ${data.recordedStatus ?? status}` : note}</div>
       {handles.showSourceHandle ? <Handle data-testid={`${prefix}-node-source-handle`} type="source" position={Position.Right} className="h-2 w-2 border border-dag-bg bg-cyan" /> : null}

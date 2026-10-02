@@ -15,7 +15,9 @@ export async function copyText(value: string): Promise<void> {
   text.value = value;
   text.readOnly = true;
   text.style.cssText = "position:fixed;left:-9999px;top:0";
-  document.body.append(text);
+  // Radix traps focus inside an open modal; the selection must live there too.
+  const container = focused instanceof Element ? focused.closest('[role="dialog"]') : null;
+  (container ?? document.body).append(text);
   try {
     text.focus({ preventScroll: true });
     text.select();

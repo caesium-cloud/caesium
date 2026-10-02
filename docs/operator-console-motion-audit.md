@@ -213,3 +213,27 @@ Validation for this review pass:
 The Jobs clock dot was centered 3 px left of the time-grid boundary. Replace it with a 1 px line below “now” at the same coordinate as the row guides, and give the time reference a synchronized, low-opacity two-second pulse. Reduced motion keeps the line static; archived history stays in its separate ordered lane.
 
 Before/after captures were reviewed at 1440, 1280, and 390 px in both themes. Browser checks measured zero horizontal offset, confirmed the pulse changes opacity without shifting the line, checked reduced motion, and found no main-panel overflow. Lint and the containerized production build/bundle budgets passed. Captures and geometry receipts are retained in `.tmp/pr617-now-line/`; no binary evidence is added to the source tree.
+
+## Final review pass
+
+| Finding | Correction |
+| --- | --- |
+| Database-console test setup | Keep `just ui-e2e` in parity with the enabled CI browser server. Production defaults are unchanged. |
+| Replayed job events and slow fleet reads | Share a 250 ms coalescer, allow an in-flight read to finish, and schedule one trailing refresh for intervening events. Job history walks also consume an AbortSignal when leaving the route. |
+| Repeat retry lifecycle events | Prefer the unique event sequence for replay deduplication; successive retries and failures remain separate activity entries. |
+| Terminal metadata after retry | Clear omitted completion/error fields for an authoritative same-run snapshot and reject older updates. |
+| Compare shortcut | Control the Radix menu's open state so `c` opens the menu and Escape restores focus. |
+| Task outcome labels | Preserve cancelled, blocked, and pending labels in the panel, DAG, timeline rows, and legend. Visual status aliases do not rename recorded outcomes. |
+| Cross-node discovery | Reconcile the cheap job/latest-run projection every 60 seconds while SSE is healthy. Refresh full history only for a newly discovered run or a changed outcome/completion, rather than every poll. The fleet projection uses the same slow reconciliation interval. |
+| Copy inside dialogs | Place the fallback selection inside the active dialog's focus scope and restore focus after copying. |
+| Retry activity presentation | Show “Run retried” with the running glyph. |
+| Literal metadata values | Only blank values mean absence; preserve literal `none` and use blanks at missing-field call sites. |
+| Timestamp ordering | Parse variable-precision timestamps before sorting fleet history and last-run order. |
+| Incident links | Use noninteractive abbreviated IDs with full-value titles inside row links; keep copy controls on detail surfaces. |
+| DAG keyboard focus | Add an unlayered outline that takes precedence over React Flow's focus reset. |
+| Standalone atom state | Distinguish an observed deployment without Raft from unknown health, with no invented voters and a matching accessible description. |
+| DAG command display | Reuse the shared argument decoder and formatter, preserving raw malformed/scalar commands and quoted argument boundaries. |
+
+Validation includes 470 unit tests, containerized lint/production build and bundle checks, 151 CI-configuration tests, and the docs guardrails. Focused browser scenarios exercise Compare, dialog copying without Clipboard API, DAG focus/Enter, 900 ms fleet responses during sustained events, successive retries, 500 retained events over paged history, aborting a walk on navigation, and discovery of a real new run with its event deliberately excluded from the stream. Delayed history, event bursts, and browser capability changes are explicitly synthetic; job creation and run execution use the real REST/runtime surface. Screenshots were reviewed directly; captures and receipts stay in `.tmp/pr617-final-review/`.
+
+Cross-node SSE fan-out itself remains a backend concern: the slow REST reconciliation bounds discovery delay to one minute while preserving the existing event bus and permissions. Populated incident lifecycles remain outside this focused visual qualification.

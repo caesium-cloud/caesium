@@ -52,6 +52,7 @@ export function RunDetailPage() {
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [reproducibilityOpen, setReproducibilityOpen] = useState(false);
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const principal = usePrincipal();
 
   const { data: job } = useQuery({ queryKey: ["job", jobId], queryFn: () => api.getJob(jobId) });
@@ -305,7 +306,11 @@ export function RunDetailPage() {
       const selector = rerun ? shortcuts.r : event.key === "r" ? undefined : shortcuts[event.key];
       if (selector && !document.querySelector('[role="dialog"]')) {
         const control = document.querySelector<HTMLElement>(selector);
-        if (control && !control.hasAttribute('disabled')) { event.preventDefault(); control.click(); }
+        if (control && !control.hasAttribute('disabled')) {
+          event.preventDefault();
+          if (selector === shortcuts.c) setCompareOpen(true);
+          else control.click();
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -369,7 +374,7 @@ export function RunDetailPage() {
         {/* Action cluster */}
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-border pt-3">
           <div className="flex flex-wrap items-center gap-2" aria-label="Run navigation">
-          <DropdownMenu>
+          <DropdownMenu open={compareOpen} onOpenChange={setCompareOpen}>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="outline"

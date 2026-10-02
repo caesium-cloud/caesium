@@ -3,7 +3,8 @@ import type { ClusterHealth } from "./useClusterHealth";
 
 export function clusterAtomProps(health: ClusterHealth): Pick<AtomLogoProps, "voters" | "quorum"> {
   const cluster = health.raw?.checks?.cluster;
-  const unknown = health.stale || !cluster?.clustered || !cluster.observed || cluster.quorum.status === "unknown";
+  if (health.raw && !cluster?.clustered) return { voters: [], quorum: "unreported" };
+  const unknown = health.stale || !cluster || !cluster.observed || cluster.quorum.status === "unknown";
   return {
     voters: (cluster?.members ?? []).filter((member) => member.role.toLowerCase() === "voter").map((member) => ({
       id: String(member.id ?? member.address), leader: member.leader,

@@ -7,7 +7,7 @@ import { useUTCTick } from "@/components/ui/utc-clock";
 import { fanoutStatusSegments } from "@/lib/fanout";
 
 interface Props { tasks: TaskRun[]; taskDefinitions: Record<string, JobTask>; runStartedAt: string; runStatus?: string; runCompletedAt?: string }
-const LEGEND_STATUSES = ["succeeded", "cached", "failed", "running", "skipped", "queued"] as const;
+const LEGEND_STATUSES = ["succeeded", "cached", "failed", "cancelled", "blocked", "running", "pending", "skipped", "queued"] as const;
 
 function formatMs(ms: number): string {
   if (ms < 10) return `${Number(ms.toFixed(2))}ms`;
@@ -59,7 +59,7 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt, runStatus, r
   });
   const ticks = Array.from({ length: Math.round(maxEnd / step) + 1 }, (_, i) => i * step);
   return <div>
-    <div className="cs-timeline-legend mb-3 flex flex-wrap justify-end gap-x-4 gap-y-2">{[...LEGEND_STATUSES.filter(status => taskTimes.some(row => row.status === status)), ...(taskTimes.some(row => row.presentation.incomplete) ? ["unknown"] : [])].map(status => <StatusBadge key={status} status={status} label={status === "unknown" ? "unconfirmed" : undefined} size="sm" />)}</div>
+    <div className="cs-timeline-legend mb-3 flex flex-wrap justify-end gap-x-4 gap-y-2">{[...LEGEND_STATUSES.filter(status => taskTimes.some(row => row.status === status)), ...(taskTimes.some(row => row.presentation.incomplete) ? ["unknown"] : [])].map(status => <StatusBadge key={status} status={status} label={status === "unknown" ? "unconfirmed" : status} size="sm" />)}</div>
     <p className="mb-2 text-xs text-text-3 md:hidden">Scroll timeline horizontally → · task names stay visible</p>
     <div className="overflow-x-auto bg-midnight" tabIndex={0} role="region" aria-label="Execution timeline">
       <div ref={plotRef} className="relative min-w-[620px] [--timeline-gutter:160px] md:[--timeline-gutter:220px]">

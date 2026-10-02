@@ -7,7 +7,7 @@ import { ImageReference } from "@/components/ui/image-reference";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
 import { yamlThemes, yamlHighlight } from "@/components/ui/yaml-theme";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, ShieldCheck } from "lucide-react";
@@ -49,6 +49,7 @@ import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
+import { coalescedRefresh } from "@/lib/coalesced-refresh";
 import { cn, formatCommandForDisplay, formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
@@ -71,6 +72,7 @@ export function JobDetailPage() {
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [backfillDialogOpen, setBackfillDialogOpen] = useState(false);
   const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
+  const historyRefresh = useRef<ReturnType<typeof coalescedRefresh> | undefined>(undefined);
 
   // URL-hash driven node selection
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => {
@@ -93,7 +95,8 @@ export function JobDetailPage() {
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: streamHealthy ? false : 15000,
+    // Reconcile latest_run cheaply when another replica produced the event.
+    refetchInterval: streamHealthy ? 60000 : 15000,
   });
 
   // Short-id deep links: GET /v1/jobs/:id resolves an unambiguous UUID prefix,
@@ -113,7 +116,7 @@ export function JobDetailPage() {
   // safety cap (AllJobRunsResult.truncated), surfaced below the run list.
   const { data: runsResult, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
-    queryFn: () => api.getAllJobRuns(jobId),
+    queryFn: ({ signal }) => api.getAllJobRuns(jobId, signal),
     refetchInterval: streamHealthy ? false : 15000,
   });
   const runs = runsResult?.runs;
@@ -284,17 +287,34 @@ export function JobDetailPage() {
   });
 
   useEffect(() => {
+    const refresh = coalescedRefresh(() => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true }, { cancelRefetch: false }),
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true }, { cancelRefetch: false }),
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"], exact: true }, { cancelRefetch: false }),
+    ]));
+    historyRefresh.current = refresh;
     const onRunEvent = (e: CaesiumEvent) => {
       const payload = e.payload as JobRun | undefined;
       if ((e.job_id ?? payload?.job_id) !== jobId) return;
-      queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true });
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true });
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"], exact: true });
+      refresh.request();
     };
     const types = ["run_started", "run_retried", "run_completed", "run_failed", "run_cancelled", "run_terminal"];
     types.forEach(type => events.subscribe(type, onRunEvent));
-    return () => types.forEach(type => events.unsubscribe(type, onRunEvent));
+    return () => {
+      refresh.dispose();
+      historyRefresh.current = undefined;
+      types.forEach(type => events.unsubscribe(type, onRunEvent));
+    };
   }, [jobId, queryClient]);
+
+  useEffect(() => {
+    const latest = job?.latest_run;
+    if (!latest || !runsResult) return;
+    const known = runsResult.runs.find(run => run.id === latest.id);
+    if (!known || known.status !== latest.status || known.completed_at !== latest.completed_at) {
+      historyRefresh.current?.request();
+    }
+  }, [job?.latest_run, runsResult]);
 
   useEffect(() => {
     if (!featuredRunId) {
@@ -894,7 +914,7 @@ function RemediationOverview({
                     </Badge>
                     <div className="min-w-0">
                       <div className="truncate text-xs text-text-2">{incidentSummary(incident)}</div>
-                      <div className="mt-0.5 text-[11px] text-text-3"><IdChip value={incident.id} label="incident id" /></div>
+                      <div className="mt-0.5 text-[11px] text-text-3" title={incident.id}>{shortId(incident.id)}</div>
                     </div>
                   </Link>
                 ))}

@@ -1,11 +1,11 @@
 import type { TaskRun } from "@/lib/api";
-import { statusMeta } from "@/lib/status";
+import { statusKeyForDomain } from "@/lib/status";
 import { isTerminalRunStatus } from "./cache-utils";
 
 /** Preserve the recorded outcome; a terminal parent cannot make a stale task live. */
 export function taskPresentation(task: Pick<TaskRun, "status" | "started_at" | "completed_at" | "updated_at">, runStatus?: string, runCompletedAt?: string) {
-  const status = statusMeta(task.status === "completed" ? "succeeded" : task.status).label;
-  const incomplete = isTerminalRunStatus(runStatus) && ["running", "queued"].includes(status);
+  const status = task.status === "completed" ? "succeeded" : task.status;
+  const incomplete = isTerminalRunStatus(runStatus) && ["running", "queued"].includes(statusKeyForDomain(status) ?? "");
   const uncertain = incomplete && !!task.started_at;
   const label = incomplete ? uncertain ? "Outcome unknown" : "Did not start" : status;
   const observed = Date.parse(task.updated_at ?? "");

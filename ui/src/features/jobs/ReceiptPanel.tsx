@@ -170,12 +170,12 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
         <MetadataCell testId="receipt-version" label="receipt_version" value={`v${receipt.receipt_version}`} mono />
         <MetadataCell testId="receipt-run-id" label="run_id" idChip value={receipt.run_id} mono />
         <MetadataCell testId="receipt-job-id" label="job_id" idChip value={receipt.job_id} mono />
-        <MetadataCell testId="receipt-job-alias" label="job_alias" value={receipt.job_alias || "None"} mono />
-        <MetadataCell testId="receipt-git-commit" label="git_commit" idChip value={receipt.git_commit || "None"} mono />
+        <MetadataCell testId="receipt-job-alias" label="job_alias" value={receipt.job_alias ?? ""} mono />
+        <MetadataCell testId="receipt-git-commit" label="git_commit" idChip value={receipt.git_commit ?? ""} mono />
         <MetadataCell
           testId="receipt-manifest-content-hash"
           label="manifest_content_hash" idChip
-          value={receipt.manifest_content_hash || "None"}
+          value={receipt.manifest_content_hash ?? ""}
           mono
         />
         <MetadataCell testId="receipt-task-count" label="tasks" value={String(tasks.length)} mono />
@@ -241,13 +241,13 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                 <MetadataCell
                   testId="receipt-task-identity-hash"
                   label="identity_hash" idChip
-                  value={task.identity_hash || "None"}
+                  value={task.identity_hash ?? ""}
                   mono
                 />
                 <MetadataCell
                   testId="receipt-task-resolved-image-digest"
                   label="resolved_image_digest" idChip
-                  value={task.resolved_image_digest ?? "None"}
+                  value={task.resolved_image_digest ?? ""}
                   mono
                 />
                 <MetadataCell
@@ -485,8 +485,8 @@ function DriftRow({ drift }: { drift: ReceiptDrift }) {
       </div>
       {drift.expected || drift.actual ? (
         <div className="mt-2 grid gap-2 md:grid-cols-2">
-          <MetadataCell label="expected" value={drift.expected || "None"} mono />
-          <MetadataCell label="actual" value={drift.actual || "None"} mono />
+          <MetadataCell label="expected" value={drift.expected ?? ""} mono />
+          <MetadataCell label="actual" value={drift.actual ?? ""} mono />
         </div>
       ) : null}
     </div>

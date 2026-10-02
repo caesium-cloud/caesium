@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import { AtomLogo } from "../atom-logo";
+import { clusterAtomProps } from "@/features/system/cluster-atom";
+import type { ClusterHealth } from "@/features/system/useClusterHealth";
+
+it("distinguishes an observed standalone server from missing cluster evidence", () => {
+  const health = { raw: { status: "healthy", checks: {} }, stale: false } as ClusterHealth;
+  const props = clusterAtomProps(health);
+  expect(props).toEqual({ voters: [], quorum: "unreported" });
+  const { container } = render(<AtomLogo {...props} />);
+  expect(container.querySelector('desc')).toHaveTextContent('0 voters. No raft cluster backs this deployment.');
+  expect(container.querySelector('[data-voter]')).toBeNull();
+  expect(clusterAtomProps({ ...health, raw: null }).quorum).toBe('unknown');
+});
 
 describe("<AtomLogo />", () => {
   it("renders a labelled SVG with three orbits, a nucleus, and three satellites", () => {

@@ -5,7 +5,7 @@ import { useReducedMotion } from "@/hooks/useReducedMotion";
 export interface AtomVoter { id: string; leader: boolean; reachable: boolean | null }
 export interface AtomLogoProps {
   voters?: AtomVoter[];
-  quorum?: "ok" | "lost" | "unknown";
+  quorum?: "ok" | "lost" | "unknown" | "unreported";
   size?: number;
   animated?: boolean;
   className?: string;
@@ -21,10 +21,10 @@ export function AtomLogo({ size = 40, animated = true, className, forceReducedMo
   // The header mark needs optical sizing: a 5-unit stroke disappears at 22px.
   const compact = size <= 32;
   const drawn = voters.slice(0, 9);
-  const orbitColor = quorum === "lost" ? "hsl(var(--danger))" : quorum === "unknown" ? "hsl(var(--text-4))" : "hsl(var(--cyan))";
+  const orbitColor = quorum === "lost" ? "hsl(var(--danger))" : ["unknown", "unreported"].includes(quorum) ? "hsl(var(--text-4))" : "hsl(var(--cyan))";
   return <svg viewBox="0 0 512 512" width={size} height={size} className={cn("block cs-animated", className)}
     role="img" aria-label="Caesium" aria-describedby={descriptionId} data-quorum={quorum} data-reduced-motion={motionOff ? "true" : "false"}>
-    <desc id={descriptionId}>{voters.length} voters. {quorum === "unknown" ? "Cluster health unknown." : quorum === "lost" ? "Quorum lost." : "Quorum available."}</desc>
+    <desc id={descriptionId}>{voters.length} voters. {quorum === "unreported" ? "No raft cluster backs this deployment." : quorum === "unknown" ? "Cluster health unknown." : quorum === "lost" ? "Quorum lost." : "Quorum available."}</desc>
     {[-60, 0, 60].map((angle, orbit) => {
       const period = [22, 30, 38][orbit];
       const members = drawn.filter((_, i) => i % 3 === orbit);

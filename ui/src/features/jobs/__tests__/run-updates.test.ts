@@ -2,6 +2,11 @@ import { expect, it } from "vitest";
 import type { JobRun } from "@/lib/api";
 import { mergeLatestRun, mergeRetriedRun } from "../run-updates";
 
+it("clears terminal metadata when the latest execution is retried", () => {
+  const failed = run({ status: "failed", completed_at: "2026-10-02T10:01:00Z", error: "failed" });
+  expect(mergeLatestRun(failed, run({ status: "running" }))).toMatchObject({ status: "running", completed_at: undefined, error: undefined });
+});
+
 const run = (overrides: Partial<JobRun> = {}): JobRun => ({
   id: "new", job_id: "job", status: "running", started_at: "2026-10-02T10:00:00Z",
   created_at: "2026-10-02T10:00:00Z", updated_at: "2026-10-02T10:00:10Z", ...overrides,

@@ -321,6 +321,7 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
 
 const ACTIVITY_LABELS: Record<string, string> = {
   run_started: "Run started",
+  run_retried: "Run retried",
   run_completed: "Run completed",
   run_failed: "Run failed",
   run_cancelled: "Run cancelled",
@@ -338,7 +339,7 @@ function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
       <div className="divide-y divide-border/30 max-h-64 overflow-y-auto">
         {entries.map((entry) => (
           <div key={entry.id} data-testid="activity-entry" className="flex items-center gap-3 px-4 py-2.5">
-            <StatusBadge status={entry.type === "run_started" ? "running" : entry.type === "run_completed" ? "succeeded" : entry.type === "run_failed" ? "failed" : "paused"} variant="glyph" size="sm" label={ACTIVITY_LABELS[entry.type] ?? entry.type} />
+            <StatusBadge status={["run_started", "run_retried"].includes(entry.type) ? "running" : entry.type === "run_completed" ? "succeeded" : entry.type === "run_failed" ? "failed" : "cancelled"} variant="glyph" size="sm" label={ACTIVITY_LABELS[entry.type] ?? entry.type} />
             <span className="text-xs text-text-3 shrink-0">
               {ACTIVITY_LABELS[entry.type] ?? entry.type}
             </span>

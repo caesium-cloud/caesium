@@ -351,7 +351,7 @@ function BlameEdgeRow({ edge }: { edge: BlameEdgeAttribution }) {
             <MetadataCell
               label="Provenance Commit"
               idChip
-              value={edge.provenance_commit || "None"}
+              value={edge.provenance_commit ?? ""}
               testId="blame-edge-provenance-commit"
               mono
             />

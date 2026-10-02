@@ -44,6 +44,129 @@ async function fixture(request: Parameters<typeof applyDefinitions>[0], twoRuns 
   return { job, first, latest };
 }
 
+async function isolateStream(page: Page) {
+  await page.route("**/v1/events?**", route => {
+    const url = new URL(route.request().url());
+    url.searchParams.set("types", "review_controlled_stream");
+    return route.continue({ url: url.toString() });
+  });
+  await exposeStream(page);
+}
+
+test("final pass: compare shortcut, dialog clipboard fallback, and DAG keyboard focus work through the rendered controls", async ({ page, request }, info) => {
+  const { job, latest } = await fixture(request, true);
+  await page.addInitScript(() => {
+    const read = navigator.clipboard.readText.bind(navigator.clipboard);
+    (window as unknown as { qaReadClipboard: () => Promise<string> }).qaReadClipboard = read;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  });
+  await page.goto(`/jobs/${job.id}/runs/${latest.id}`);
+  await expect(page.getByTestId("run-compare-trigger")).toBeEnabled();
+  await page.keyboard.press("c");
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(page.getByTestId("run-compare-option").first()).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("run-compare-trigger")).toBeFocused();
+  await page.keyboard.press("p");
+  const dialog = page.getByTestId("replay-dialog");
+  await expect(dialog).toBeVisible();
+  const copy = dialog.getByRole("button", { name: `Copy baseline run id: ${latest.id}`, exact: true });
+  await copy.click();
+  expect(await page.evaluate(() => (window as unknown as { qaReadClipboard: () => Promise<string> }).qaReadClipboard())).toBe(latest.id);
+  await expect(copy).toBeFocused();
+  await page.screenshot({ path: info.outputPath("dialog-copy.png") });
+  await page.keyboard.press("Escape");
+  const node = page.locator(".react-flow__node").first();
+  await page.keyboard.press("Tab");
+  await node.focus();
+  await expect(node).toHaveCSS("outline-style", "solid");
+  await expect(node).toHaveCSS("outline-width", "2px");
+  await page.screenshot({ path: info.outputPath("dag-keyboard-focus.png") });
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("task-detail-panel")).toBeVisible();
+});
+
+test("final pass SYNTHETIC: slow jobs reads land during sustained events and repeated retries remain distinct", async ({ page, request }) => {
+  const { job, first } = await fixture(request);
+  const jobs = await (await request.get("/v1/jobs")).json();
+  let revision = 0, reads = 0, inFlight = 0, maxInFlight = 0;
+  await page.route("**/v1/jobs", async route => {
+    reads++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    const snapshot = revision;
+    try {
+      await new Promise(resolve => setTimeout(resolve, 900));
+      await route.fulfill({ json: jobs.map((entry: { id: string }) => entry.id === job.id ? { ...entry, alias: `${job.alias}-refresh-${snapshot}` } : entry) });
+    } finally { inFlight--; }
+  });
+  await isolateStream(page);
+  await page.goto(`/jobs?q=${job.alias}`);
+  await readyStream(page);
+  const row = page.getByTestId("job-row").filter({ hasText: job.alias });
+  await expect(row).toContainText("refresh-0");
+  for (let index = 1; index <= 24; index++) {
+    revision = index;
+    const event = { sequence: 900000 + index, type: "run_retried", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString() };
+    await emit(page, "run_retried", event);
+    if (index === 1) await emit(page, "run_retried", event); // A retained replay must not add another activity entry.
+    await page.waitForTimeout(100);
+    if (index === 18) await expect(row).not.toContainText("refresh-0");
+  }
+  await expect(row).toContainText("refresh-24", { timeout: 7000 });
+  expect(maxInFlight).toBe(1);
+  expect(reads).toBeLessThanOrEqual(5);
+  const feed = page.getByTestId("activity-feed");
+  await expect(feed.locator('[aria-label="Run retried"]')).toHaveCount(20);
+  await expect(feed.locator('[data-status="running"]')).toHaveCount(20);
+  await page.unrouteAll({ behavior: "wait" });
+});
+
+test("final pass SYNTHETIC: retained lifecycle bursts coalesce paged job history and cancellation stops the walk", async ({ page, request }) => {
+  const { job, first } = await fixture(request);
+  const history = Array.from({ length: 1500 }, (_, index) => ({ ...first, id: index === 0 ? first.id : `review-history-${index}`,
+    started_at: new Date(Date.parse(first.started_at) - index * 1000).toISOString(), tasks: [] }));
+  let reads = 0, inFlight = 0, maxInFlight = 0;
+  await page.route(`**/v1/jobs/${job.id}/runs?**`, async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("limit") !== "500") return route.continue();
+    reads++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      await route.fulfill({ json: history.slice(offset, offset + 500), headers: { "X-Caesium-Total-Count": "1500", ...(offset + 500 < 1500 ? { "X-Caesium-Next-Offset": String(offset + 500) } : {}) } });
+    } finally { inFlight--; }
+  });
+  await isolateStream(page); await page.goto(`/jobs/${job.id}`); await readyStream(page);
+  await page.evaluate(({ jobId, run }) => {
+    const source = (window as unknown as { qaSources: EventSource[] }).qaSources.find(source => source.readyState === 1)!;
+    for (let index = 0; index < 500; index++) source.dispatchEvent(new MessageEvent("run_completed", { data: JSON.stringify({ sequence: 1000000 + index, type: "run_completed", job_id: jobId, run_id: run.id, timestamp: new Date().toISOString(), payload: run }) }));
+  }, { jobId: job.id, run: first });
+  await expect(page.getByTestId("view-featured-run")).toBeVisible();
+  await page.waitForTimeout(1500);
+  expect(reads).toBeLessThanOrEqual(6);
+  expect(maxInFlight).toBe(1);
+  // Start a new slow walk, leave the route while its first page is in flight,
+  // and ensure its AbortSignal prevents background paging.
+  const before = reads;
+  await emit(page, "run_started", { sequence: 2000000, type: "run_started", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString() });
+  await expect.poll(() => reads).toBe(before + 1);
+  await page.goto("/triggers");
+  await page.waitForTimeout(800);
+  expect(reads).toBe(before + 1);
+  await page.unrouteAll({ behavior: "wait" });
+});
+
+test("final pass: a missed run event is reconciled with a cheap job read", async ({ page, request }) => {
+  const { job, first } = await fixture(request);
+  await isolateStream(page); await page.goto(`/jobs/${job.id}`); await readyStream(page);
+  const link = page.getByTestId("view-featured-run");
+  await expect(link).toHaveAttribute("href", `/jobs/${job.id}/runs/${first.id}`);
+  await triggerJob(request, job.id);
+  const next = await awaitRun(request, job.id, { status: "succeeded" });
+  expect(next.id).not.toBe(first.id);
+  await expect(link).toHaveAttribute("href", `/jobs/${job.id}/runs/${next.id}`, { timeout: 75000 });
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 test("second pass: trigger identifiers keep case, missing-key events are safe, and compare items are keyboard accessible", async ({ page, request }, info) => {
   const { job, first, latest } = await fixture(request, true);
   await page.goto(`/jobs/${job.id}`);
