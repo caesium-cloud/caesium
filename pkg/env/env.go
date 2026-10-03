@@ -15,6 +15,8 @@ import (
 var variables = new(Environment)
 
 // Process the environment variables set for caesium.
+// The connector file is not read here. Every command calls Process, including
+// caesium version. caesium start loads the file after this gate has passed.
 func Process() error {
 	next := &Environment{MaxParallelTasks: runtime.NumCPU()}
 
@@ -101,6 +103,26 @@ func validate() error {
 		}
 	}
 
+	if err := validateConnectorGate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateConnectorGate checks the connector switch without reading the file.
+// caesium start loads the file after Process returns.
+func validateConnectorGate() error {
+	if !variables.ConnectorsEnabled {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
+	if mode != "api-key" && !variables.SSOEnabled() {
+		return errors.New("CAESIUM_CONNECTORS_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider")
+	}
+	if strings.TrimSpace(variables.ConnectorsConfigFile) == "" {
+		return errors.New("CAESIUM_CONNECTORS_CONFIG_FILE is required when CAESIUM_CONNECTORS_ENABLED=true")
+	}
 	return nil
 }
 
@@ -471,6 +493,15 @@ type Environment struct {
 	// the synchronous dispatch that normally follows a decision; it must
 	// comfortably exceed one dispatch. Default 2m.
 	AgentApprovalRedriveGrace time.Duration `envconfig:"AGENT_APPROVAL_REDRIVE_GRACE" default:"2m"`
+
+	// Execution connectors are off unless CAESIUM_CONNECTORS_ENABLED=true.
+	// An unset or false gate ignores CAESIUM_CONNECTORS_CONFIG_FILE.
+	// CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT names the stored fingerprint
+	// a later epoch transition must replace. It is not part of the contract
+	// fingerprint and is not enforced until that transition exists.
+	ConnectorsEnabled                   bool   `envconfig:"CONNECTORS_ENABLED" default:"false"`
+	ConnectorsConfigFile                string `envconfig:"CONNECTORS_CONFIG_FILE" default:""`
+	ConnectorsConfigPreviousFingerprint string `envconfig:"CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT" default:""`
 }
 
 // SSOEnabled reports whether any SSO provider is configured.

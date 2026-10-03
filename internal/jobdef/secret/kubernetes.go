@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,18 @@ func (r *KubernetesResolver) parseReference(ref *Reference) (namespace, name, ke
 	}
 
 	return namespace, name, key, nil
+}
+
+// ValidateKubernetesReference reports whether ref has the path shape
+// KubernetesResolver.parseReference accepts. It does not dial the API.
+// A query key alone cannot replace a missing path segment.
+func ValidateKubernetesReference(ref *Reference) error {
+	if ref == nil {
+		return errors.New("kubernetes secret reference is required")
+	}
+	resolver := &KubernetesResolver{config: KubernetesConfig{Namespace: defaultNamespace}}
+	_, _, _, err := resolver.parseReference(ref)
+	return err
 }
 
 func (r *KubernetesResolver) clientset() (kubernetes.Interface, error) {

@@ -1,6 +1,8 @@
 package env
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -225,4 +227,67 @@ func (s *EnvTestSuite) TestResourceStatsGateAndSampleInterval() {
 	s.Equal(100*time.Millisecond, Variables().ResourceStatsSampleInterval)
 	s.T().Setenv("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL", "0")
 	s.ErrorContains(Process(), "CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL must be greater than 0")
+}
+
+func (s *EnvTestSuite) TestConnectorsDisabledIgnoresConfigFile() {
+	s.Require().NoError(Process())
+	baseline := Variables()
+
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", s.T().TempDir())
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT", "previous-fingerprint")
+	s.Require().NoError(Process())
+	got := Variables()
+	s.Equal(baseline.LogLevel, got.LogLevel)
+	s.Equal(baseline.Port, got.Port)
+	s.Equal(baseline.AuthMode, got.AuthMode)
+	s.Equal(baseline.DatabaseMaxOpenConns, got.DatabaseMaxOpenConns)
+	s.Equal(baseline.DatabaseVoters, got.DatabaseVoters)
+	s.Equal(baseline.WorkerPollInterval, got.WorkerPollInterval)
+	s.Equal(baseline.AuthSessionIdleTTL, got.AuthSessionIdleTTL)
+	s.False(got.ConnectorsEnabled)
+	s.False(got.SSOEnabled())
+	s.Equal("previous-fingerprint", got.ConnectorsConfigPreviousFingerprint)
+
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "false")
+	s.Require().NoError(Process())
+	s.Equal(8080, Variables().Port)
+	s.Equal("none", Variables().AuthMode)
+}
+
+func (s *EnvTestSuite) TestConnectorsEnabledRequiresAuth() {
+	const planted = "planted-secret-VALUE/env-auth"
+	path := filepath.Join(s.T().TempDir(), "connectors.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("token: "+planted+"\n"), 0o600))
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", path)
+
+	err := Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_CONNECTORS_ENABLED")
+	s.NotContains(err.Error(), planted)
+
+	s.T().Setenv("CAESIUM_AUTH_MODE", "none")
+	err = Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_CONNECTORS_ENABLED")
+	s.NotContains(err.Error(), planted)
+}
+
+func (s *EnvTestSuite) TestConnectorsEnabledDoesNotReadTheFile() {
+	// Process runs for every command. A directory is not a readable config
+	// file; startup is what reports that. The gate only checks auth and that
+	// a path is set.
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_MODE", "api-key")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", s.T().TempDir())
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT", "stored-a")
+	s.Require().NoError(Process())
+	s.True(Variables().ConnectorsEnabled)
+	s.Equal("stored-a", Variables().ConnectorsConfigPreviousFingerprint)
+	s.Equal(8080, Variables().Port)
+
+	s.T().Setenv("CAESIUM_AUTH_MODE", "none")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
+	s.Require().NoError(Process())
+	s.True(Variables().SSOEnabled())
 }

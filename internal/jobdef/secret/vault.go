@@ -249,6 +249,16 @@ func parseVaultPathField(reference *Reference) (path, field string, err error) {
 	return path, field, nil
 }
 
+// ValidateVaultReference reports whether ref has the path and field shape
+// parseVaultPathField accepts. It does not read fragments and does not dial Vault.
+func ValidateVaultReference(ref *Reference) error {
+	if ref == nil {
+		return errors.New("vault secret reference is required")
+	}
+	_, _, err := parseVaultPathField(ref)
+	return err
+}
+
 func extractVaultField(secret *vault.Secret, field string) (string, bool) {
 	if secret == nil {
 		return "", false

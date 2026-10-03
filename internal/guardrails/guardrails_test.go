@@ -513,6 +513,56 @@ func parseJustfileRecipeEnvVars(justfile string) map[string]map[string]struct{} 
 	return recipes
 }
 
+// TestAgentLaneBootsDocumentedConnectorFile keeps the connector gate on the
+// auth lane that already uses API-key auth, and off the main integration-up
+// lane. The mounted file is the example in docs/connectors.md.
+func TestAgentLaneBootsDocumentedConnectorFile(t *testing.T) {
+	root := repoRoot(t)
+	justfileBytes, err := os.ReadFile(filepath.Join(root, "justfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	justfile := string(justfileBytes)
+	agent := justRecipeBody(justfile, "integration-up-agent")
+	for _, needle := range []string{
+		"CAESIUM_CONNECTORS_ENABLED=true",
+		"CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml",
+		"test/fixtures/connectors/connections.yaml",
+		"TEMPORAL_TOKEN=",
+	} {
+		if !strings.Contains(agent, needle) {
+			t.Errorf("integration-up-agent is missing %s", needle)
+		}
+	}
+	if strings.Contains(justRecipeBody(justfile, "integration-up"), "CAESIUM_CONNECTORS_ENABLED") {
+		t.Error("integration-up must not set the connector gate")
+	}
+	runner := justRecipeBody(justfile, "integration-test-agent")
+	if !strings.Contains(runner, "CAESIUM_CONNECTORS_ENABLED=true") {
+		t.Error("integration-test-agent runner must set CAESIUM_CONNECTORS_ENABLED so the boot scenario cannot skip")
+	}
+}
+
+func justRecipeBody(justfile, name string) string {
+	var body strings.Builder
+	in := false
+	header := name + ":"
+	for _, line := range strings.Split(justfile, "\n") {
+		if !in {
+			if strings.HasPrefix(line, header) {
+				in = true
+			}
+			continue
+		}
+		if line != "" && (line[0] != ' ' && line[0] != '\t') {
+			break
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	return body.String()
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 

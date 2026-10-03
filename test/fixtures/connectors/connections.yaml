@@ -1,0 +1,45 @@
+version: 1
+connections:
+  - id: primary
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: true
+    credentials:
+      secretRefs:
+        - secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN
+      certificatePaths:
+        - /var/run/secrets/caesium/temporal/tls.crt
+        - /var/run/secrets/caesium/temporal/tls.key
+    limits:
+      consoleRefresh: 10s
+      readsPerMinute: 60
+      queriesPerMinute: 6
+      maxInFlightRPCs: 4
+      rpcDeadline: 10s
+      maxPageEntries: 100
+      maxPageMetadataBytes: 65536
+      unreferencedSnapshotMaxAge: 24h
+      maxUnreferencedSnapshots: 1000
+    bindings:
+      - name: publication
+        version: "1"
+        displayName: Publication
+        statusQuery: publication_status
+        activityAllowlist:
+          - activityType: caesium.start
+            jobs: [publish, notify]
+        actions:
+          - name: approve_publication
+            inputSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                note:
+                  type: string
+            resultSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                approved:
+                  type: boolean

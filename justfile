@@ -596,6 +596,9 @@ integration-test-agent: integration-runner
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
+        -e CAESIUM_CONNECTORS_ENABLED=true \
+        -e CAESIUM_CONNECTORS_CONFIG_FILE={{ bld_dir }}/test/fixtures/connectors/connections.yaml \
+        -e TEMPORAL_TOKEN=agent-integration-connector-token \
         -e CAESIUM_TRIAGE_AGENT_IMAGE={{ triage_agent_image }}:latest \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ agent_it_container }} \
@@ -948,6 +951,10 @@ integration-up-agent: build-stress build-test build-triage-agent
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
         -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -v {{ repo_dir }}/test/fixtures/connectors/connections.yaml:/etc/caesium/connectors/connections.yaml:ro \
+        -e CAESIUM_CONNECTORS_ENABLED=true \
+        -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \
+        -e TEMPORAL_TOKEN=agent-integration-connector-token \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         -e CAESIUM_AGENT_DEFAULT_PROFILE=triage-only \
         -e CAESIUM_AGENT_MAX_CONCURRENT_SESSIONS=1 \
