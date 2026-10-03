@@ -1266,7 +1266,7 @@ function renderRunStatus(status: string) {
           ? "running"
           : "secondary";
 
-  return <Badge variant={variant}>{status}</Badge>;
+  return <Badge variant={variant} data-status={status}>{status}</Badge>;
 }
 
 function renderTriggerSummary(trigger: Trigger | null | undefined) {

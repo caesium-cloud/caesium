@@ -52,12 +52,10 @@ import {
   planAuthExtraEnv,
   releaseSample,
   runHistoryLinkSelector,
-  runIdFromHref,
   runTaskPods,
   serviceConsoleForward,
   startReadyChild,
   stopChildProcess,
-  statusFromRowText,
   stripRuntimeContainerID,
   taskImageListed,
   taskListCommand,
@@ -71,6 +69,7 @@ import {
   type ShellCommand,
 } from "./helpers/cluster";
 import { failOnUnexpectedPageErrors } from "./helpers/fixtures";
+import { readRunRows } from "./helpers/run-history";
 
 // The owner crash drops the connected browser. Chrome logs net::ERR_* for that
 // cut; tolerate only that class, in this file, the same way network-recovery does.
@@ -583,24 +582,6 @@ async function readRunSurface(
 
 function rowsShow(rows: ConsoleRunRow[], runId: string, status: string): boolean {
   return rows.length > 0 && rows.every((row) => row.id === runId && row.status === status);
-}
-
-async function readRunRows(page: Page, jobId: string): Promise<ConsoleRunRow[]> {
-  const links = page.getByTestId("job-runs-list").locator("a");
-  const count = await links.count();
-  const rows: ConsoleRunRow[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const link = links.nth(index);
-    const href = (await link.getAttribute("href")) ?? "";
-    const id = runIdFromHref(href, jobId);
-    if (!id) continue;
-    // Read the status badge alone: the row's whole textContent glues the
-    // duration to the badge ("2.4ssucceeded"), which defeats a word match.
-    const badge = link.locator(":scope > div").last();
-    const badgeText = (await badge.count()) > 0 ? ((await badge.textContent()) ?? "") : "";
-    rows.push({ id, status: statusFromRowText(badgeText) });
-  }
-  return rows;
 }
 
 async function headingStatus(page: Page): Promise<string> {

@@ -1187,6 +1187,14 @@ echo "D3 proof exit status: $rc"; (exit "$rc")
 `afterAll` restores the node, captures member logs and writes
 `d3-evidence.json` (no keys).
 
+The run-history badge exposes its raw status through `data-status`. The reader
+follows each `run-history-row`'s execution link and reads that attribute from
+the row's status cell. The badge and link are siblings
+in the operator console layout; a selector below the link cannot read the
+badge (#613, scheduled run 37107093673). Missing, unknown, or ambiguous badges
+remain unreadable evidence. `ui/e2e/run-history-status.spec.ts` exercises the
+same reader against real succeeded and failed runs before and after reload.
+
 [#581](https://github.com/caesium-cloud/caesium/pull/581) merged at
 `149857d74313ca2ce30bb0e85353c11a1c4ea3de`. Live proof a4 on tested head
 `58826a1a`, cluster `rb-w7a-32fc67ca9424`, passed:
@@ -1553,6 +1561,20 @@ shared with the F2 cluster lane. The seven new `task_runs` columns stay
 recorded as unpinned additions, like `run_start_idempotency`.
 
 ### Persistent-cluster lifecycle qualification (distributed-testing W6/F2)
+
+Owner recovery must reset the previous worker claims successfully before it
+publishes in-memory state or writes its generation checkpoint. If the reset
+fails, recovery returns the error and the next dispatch tick rebuilds again.
+Scheduled run 36831946746 (#613) exposed the old best-effort reset: a
+`database is locked` error left the durable task running while the owner
+published it as ready, causing repeated `task_not_running` refusals and the
+retained-history timeout. `TestOwnerManager_RecoverRetriesFailedClaimReset`
+injects a reset transaction failure, checks that ownership and checkpoints
+stay unpublished, then verifies the retry executes the root and its successor.
+The coverage collector also runs the real run-history browser regression with
+distributed execution and the in-memory owner enabled. This adds runtime
+coverage of owner recovery while preserving the local CLI/server collection;
+all three browser journeys must pass on their first attempt.
 
 F2 extends the F4 controller with `CAESIUM_LIFECYCLE_MODE=cluster`. Run it only
 in the exclusive Docker/kind/Helm lane from a clean, committed candidate;

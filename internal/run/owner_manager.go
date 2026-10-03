@@ -367,9 +367,11 @@ func (m *OwnerManager) rebuild(runID uuid.UUID, generation int64) (RecoveryResul
 	// this, not just when RunState re-queued tasks: the checkpoint can lag the
 	// DB (the dead owner dispatched a task after its last checkpoint), so a row
 	// may be "running" in the DB while the recovered in-memory state shows it
-	// "ready".  Best-effort: a failure just delays the re-claim.
+	// "ready". A failed reset must abort recovery before publishing that ready
+	// state: otherwise the loop skips recovery on every later tick and retries
+	// dispatch forever against rows that still hold the dead worker's claim.
 	if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
-		log.Warn("owner manager: reset in-flight tasks failed", "run_id", runID, "error", rErr)
+		return RecoveryResult{}, nil, fmt.Errorf("run owner: reset in-flight tasks for %s: %w", runID, rErr)
 	}
 	or := &ownedRun{
 		state:  rs,

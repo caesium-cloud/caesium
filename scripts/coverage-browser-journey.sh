@@ -17,9 +17,9 @@ cd "$ROOT/ui"
 npm ci --prefer-offline
 PLAYWRIGHT_BASE_URL="$BASE_URL" \
   ./node_modules/.bin/playwright test \
-    e2e/navigation.spec.ts e2e/jobs-management.spec.ts \
+    e2e/navigation.spec.ts e2e/jobs-management.spec.ts e2e/run-history-status.spec.ts \
     --project=default \
-    --grep 'sidebar navigates between every primary control-plane page|operator can pause and unpause a job from the detail page' \
+    --grep 'sidebar navigates between every primary control-plane page|operator can pause and unpause a job from the detail page|recovery reads the status of each real run history row before and after reload' \
     --workers=1 --retries=0 --reporter=json >"$REPORT"
 
 # Playwright can exit zero for an all-skipped suite. Validate its structured

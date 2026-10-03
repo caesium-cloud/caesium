@@ -911,7 +911,7 @@ fi
 # A separate process and GOCOVERDIR keep the browser contribution distinct
 # from the CLI/server write-to-read path. The live Console bundle is served by
 # the same instrumented image; Playwright drives Chromium over a loopback-only
-# ephemeral host port and must record both expected first-attempt passes.
+# ephemeral host port and must record all expected first-attempt passes.
 "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
 chmod 0777 "$RAW/browser"
 log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
@@ -921,9 +921,20 @@ log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
   --network "$NETWORK" \
   -p 127.0.0.1::8080 \
   --user 10001:10001 \
+  --group-add "$SOCK_GID" \
   -e GOCOVERDIR=/var/lib/caesium/coverage \
   -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
   -e CAESIUM_AUTH_MODE=none \
+  -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -e CAESIUM_EXECUTION_MODE=distributed \
+  -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
+  -e CAESIUM_INTERNAL_WAKEUP_TOKEN=coverage-owner-internal-token \
+  -e CAESIUM_RUN_OWNER_ENABLED=true \
+  -e CAESIUM_RUN_OWNER_IN_MEMORY=true \
+  -e CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms \
+  -e CAESIUM_WORKER_ENABLED=true \
+  -e CAESIUM_WORKER_POLL_INTERVAL=500ms \
+  -v "$SOCK:/var/run/docker.sock" \
   -v "$RAW/browser:/var/lib/caesium/coverage" \
   "$IMAGE_ID" start >/dev/null
 
