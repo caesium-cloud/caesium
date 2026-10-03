@@ -1,5 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act } from "@testing-library/react";
+import { Profiler } from "react";
+import { describe, expect, it, vi } from "vitest";
+import { UTCClock, UTCClockProvider } from "@/components/ui/utc-clock";
 import type { JobTask, TaskRun } from "@/lib/api";
 import { RunTimeline } from "../RunTimeline";
 
@@ -50,6 +53,41 @@ const taskDefinitions: Record<string, JobTask> = {
 };
 
 describe("RunTimeline", () => {
+  it("does not show a negative duration before the clock reaches a task start", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+    const { unmount } = render(<UTCClockProvider><RunTimeline
+      tasks={[makeTask({ task_id: "task-1", status: "running", started_at: "2026-08-01T00:00:00.250Z", completed_at: undefined })]}
+      taskDefinitions={taskDefinitions} runStartedAt="2026-07-31T23:59:59Z" runStatus="running"
+    /></UTCClockProvider>);
+    expect(screen.getByTestId("run-timeline-task-row")).toHaveTextContent("0ms");
+    expect(screen.getByTestId("run-timeline-task-row")).not.toHaveTextContent("-250ms");
+    unmount(); vi.useRealTimers();
+  });
+
+  it("keeps terminal unstarted tasks anchored to recorded times and does not tick", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+    const tasks = [makeTask({ task_id: "task-1", status: "failed", started_at: undefined, error: "image pull failed" }),
+      makeTask({ task_id: "task-2", status: "queued", started_at: undefined, completed_at: undefined })];
+    let renders = 0;
+    const { unmount } = render(<UTCClockProvider><UTCClock /><Profiler id="timeline" onRender={() => renders++}>
+      <RunTimeline tasks={tasks} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00Z" runStatus="failed" />
+    </Profiler></UTCClockProvider>);
+    expect(screen.getByText("image pull failed")).toBeInTheDocument();
+    expect(screen.getByText("Did not start")).toBeInTheDocument();
+    expect(screen.queryByText("Waiting on upstream")).not.toBeInTheDocument();
+    const bars = screen.getAllByTestId("run-timeline-bar");
+    bars.forEach(bar => expect(bar).toHaveAttribute("data-ghost", "false"));
+    const positions = bars.map(bar => bar.style.left);
+    const before = renders;
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(renders).toBe(before);
+    expect(bars.map(bar => bar.style.left)).toEqual(positions);
+    unmount();
+    vi.useRealTimers();
+  });
+
   it("renders a plain row for an unfanned task and keeps the run-timeline-task-row testid", () => {
     const tasks = [makeTask({ task_id: "task-1" })];
 
@@ -122,4 +160,64 @@ describe("RunTimeline", () => {
     const groupRow = within(row).getByTestId("run-timeline-group-row");
     expect(groupRow).toHaveTextContent("×1");
   });
+});
+
+it("scales a 492ms terminal run to 500ms without distorting duration or clipping endpoints", () => {
+  render(<RunTimeline tasks={[makeTask({ task_id: "task-1", started_at: "2026-08-01T00:00:00.000Z", completed_at: "2026-08-01T00:00:00.492Z", status: "succeeded" })]} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00.000Z" runStatus="succeeded" />);
+  const ticks = screen.getAllByTestId("timeline-tick");
+  expect(ticks.map(tick => tick.textContent)).toEqual(["0ms", "100ms", "200ms", "300ms", "400ms", "500ms"]);
+  expect(ticks[0].style.transform).toBe("translateX(0%)");
+  expect(ticks.at(-1)!.style.transform).toBe("translateX(-100%)");
+  expect(parseFloat(screen.getByTestId("run-timeline-bar").style.width)).toBeCloseTo(98.4);
+});
+
+it("shows one shared now cursor only while the run is live", () => {
+  const props = { tasks: [makeTask({ task_id: "task-1", status: "running", completed_at: undefined })], taskDefinitions, runStartedAt: "2026-08-01T00:00:00Z" };
+  const { rerender } = render(<RunTimeline {...props} runStatus="running" />);
+  expect(screen.getAllByTestId("run-timeline-now")).toHaveLength(1);
+  expect(screen.getByTestId("run-timeline-bar")).toHaveClass("cs-live-bar");
+  rerender(<RunTimeline {...props} tasks={[makeTask({ task_id: "task-1" })]} runStatus="succeeded" />);
+  expect(screen.queryByTestId("run-timeline-now")).not.toBeInTheDocument();
+  expect(screen.getByTestId("run-timeline-bar")).not.toHaveClass("cs-live-bar");
+});
+
+it("freezes stale running tasks at their last observation when the parent failed", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-02T00:00:00Z"));
+  const task = makeTask({ task_id: "task-1", status: "running", completed_at: undefined });
+  const { unmount } = render(<RunTimeline tasks={[task]} taskDefinitions={taskDefinitions} runStartedAt={task.started_at!} runStatus="failed" runCompletedAt="2026-08-01T00:00:02Z" />);
+  expect(screen.queryByTestId("run-timeline-now")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Outcome unknown")).toBeInTheDocument();
+  expect(screen.getByText(/≥1.0s observed/)).toBeInTheDocument();
+  const bar = screen.getByTestId("run-timeline-bar");
+  const width = bar.style.width;
+  act(() => { vi.advanceTimersByTime(10_000); });
+  expect(bar.style.width).toBe(width);
+  expect(bar).not.toHaveClass("cs-live-bar");
+  expect(task.status).toBe("running");
+  unmount();
+  vi.useRealTimers();
+});
+
+
+it.each([
+  [30_000, ["0ms", "10.0s", "20.0s", "30.0s"]],
+  [600_000, ["0ms", "2m", "4m", "6m", "8m", "10m"]],
+  [7_200_000, ["0ms", "30m", "1h", "1h 30m", "2h"]],
+  [86_400_000, ["0ms", "6h", "12h", "18h", "24h"]],
+])("uses time-aware ticks for a %sms terminal run", (duration, labels) => {
+  const start = "2026-08-01T00:00:00.000Z";
+  render(<RunTimeline tasks={[makeTask({ task_id: "task-1", completed_at: new Date(Date.parse(start) + duration).toISOString() })]} taskDefinitions={taskDefinitions} runStartedAt={start} runStatus="succeeded" />);
+  expect(screen.getAllByTestId("timeline-tick").map(tick => tick.textContent)).toEqual(labels);
+  expect(screen.getAllByTestId("timeline-tick").at(-1)!.style.transform).toBe("translateX(-100%)");
+  expect(parseFloat(screen.getByTestId("run-timeline-bar").style.width)).toBe(100);
+});
+
+it("uses half-hour ticks for a two-hour live run", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-01T02:00:00Z"));
+  const { unmount } = render(<RunTimeline tasks={[makeTask({ task_id: "task-1", status: "running", completed_at: undefined })]} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00Z" runStatus="running" />);
+  expect(screen.getAllByTestId("timeline-tick").map(tick => tick.textContent)).toEqual(["0ms", "30m", "1h", "1h 30m", "2h", "2h 30m"]);
+  unmount();
+  vi.useRealTimers();
 });

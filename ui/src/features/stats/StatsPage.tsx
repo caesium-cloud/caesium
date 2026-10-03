@@ -1,7 +1,9 @@
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { TrendChart } from "./components/TrendChart";
 import { FailureAtomsChart } from "./components/FailureAtomsChart";
 import { IncidentAnalytics } from "./components/IncidentAnalytics";
@@ -40,49 +42,45 @@ export function StatsPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <p className="text-xs font-medium text-text-3 uppercase tracking-widest mb-1">System Intelligence</p>
-          <h1 className="text-2xl font-bold tracking-tight">Operator Statistics</h1>
-        </div>
-        <Tabs value={window} onValueChange={setWindow} className="w-full sm:w-[300px]">
-          <TabsList className="grid w-full grid-cols-3 bg-midnight border border-graphite/50">
-            <TabsTrigger value="24h" className="data-[state=active]:bg-graphite/50">24h</TabsTrigger>
-            <TabsTrigger value="7d" className="data-[state=active]:bg-graphite/50">7d</TabsTrigger>
-            <TabsTrigger value="30d" className="data-[state=active]:bg-graphite/50">30d</TabsTrigger>
-          </TabsList>
+    <div className="space-y-5">
+      <ConsolePageHeader title="Stats" description="Execution volume, reliability, and duration." />
+      <div className="grid gap-4 md:grid-cols-2">
+        <KPIItem title="Total jobs · current" value={stats?.jobs.total} isLoading={isLoading} />
+        <KPIItem title="Recent runs · fixed 24h" value={stats?.jobs.recent_runs} isLoading={isLoading} />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+        <div><h2 className="text-sm font-bold">Execution analysis · {window}</h2><p className="mt-1 text-xs text-text-3">This range controls success rate, duration, charts, and job rankings below. Dates are UTC.</p></div>
+        <Tabs value={window} onValueChange={setWindow}>
+          <TabsList aria-label="Execution analysis range"><TabsTrigger value="24h">24h</TabsTrigger><TabsTrigger value="7d">7d</TabsTrigger><TabsTrigger value="30d">30d</TabsTrigger></TabsList>
         </Tabs>
       </div>
-      
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KPIItem title="Total Jobs" value={stats?.jobs.total} isLoading={isLoading} />
-        <KPIItem title="Recent Runs (24h)" value={stats?.jobs.recent_runs} isLoading={isLoading} />
-        <KPIItem 
-          title="Success Rate" 
-          value={stats ? `${(stats.jobs.success_rate * 100).toFixed(1)}%` : undefined} 
-          isLoading={isLoading} 
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <KPIItem
+          title="Success Rate"
+          value={stats ? `${(stats.jobs.success_rate * 100).toFixed(1)}%` : undefined}
+          isLoading={isLoading}
         />
-        <KPIItem 
-          title="Avg Duration" 
-          value={stats ? `${stats.jobs.avg_duration_seconds.toFixed(2)}s` : undefined} 
-          isLoading={isLoading} 
+        <KPIItem
+          title="Avg Duration"
+          value={stats ? `${stats.jobs.avg_duration_seconds.toFixed(2)}s` : undefined}
+          isLoading={isLoading}
         />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card className="bg-midnight/30 border-graphite/30 backdrop-blur-sm">
+        <Card className="bg-midnight border-border">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-text-3 uppercase tracking-wider">Performance Trend</CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-xs font-normal text-text-3 lowercase">Performance Trend · UTC</CardTitle><div className="flex gap-4"><span className="inline-flex items-center gap-2 text-xs text-cyan"><span aria-hidden="true" className="cs-status-glyph cs-status-solid" />run count</span><StatusBadge status="succeeded" label="success rate" size="sm" /></div></div>
           </CardHeader>
           <CardContent>
             {isLoading ? <Skeleton className="h-[350px] w-full bg-graphite/10" /> : <TrendChart data={stats?.success_rate_trend ?? []} />}
           </CardContent>
         </Card>
 
-        <Card className="bg-midnight/30 border-graphite/30 backdrop-blur-sm">
+        <Card className="bg-midnight border-border">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-text-3 uppercase tracking-wider">Top Failing Atoms</CardTitle>
+            <CardTitle className="text-xs font-bold text-text-3 lowercase">Top Failing Atoms</CardTitle>
           </CardHeader>
           <CardContent>
             {isLoading ? <Skeleton className="h-[350px] w-full bg-graphite/10" /> : <FailureAtomsChart data={stats?.top_failing_atoms ?? []} />}
@@ -93,16 +91,16 @@ export function StatsPage() {
       {features?.agent_remediation_enabled === true ? <IncidentAnalytics /> : null}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card className="bg-midnight/30 border-graphite/30">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-text-3 uppercase tracking-wider">Top Failing Jobs</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <section className="border-y border-border">
+          <div className="pb-2">
+            <h3 className="text-xs font-bold text-text-3 lowercase">Top Failing Jobs</h3>
+          </div>
+          <div>
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent border-graphite/30">
-                  <TableHead className="text-[10px] uppercase tracking-widest text-text-4">Job Alias</TableHead>
-                  <TableHead className="text-right text-[10px] uppercase tracking-widest text-text-4">Failures</TableHead>
+                  <TableHead className="text-[11px] lowercase text-text-3">Job Alias</TableHead>
+                  <TableHead className="text-right text-[11px] lowercase text-text-3">Failures</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -116,33 +114,33 @@ export function StatsPage() {
                 ) : (
                   stats?.top_failing.map((job) => (
                     <TableRow key={job.job_id} className="border-graphite/10 hover:bg-graphite/5 transition-colors group">
-                      <TableCell className="font-mono text-sm text-cyan-dim group-hover:text-cyan-glow transition-colors">
+                      <TableCell className="text-sm text-cyan group-hover:text-cyan-glow transition-colors">
                         {job.alias || job.job_id}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm text-text-2">{job.failure_count}</TableCell>
+                      <TableCell className="text-right text-sm text-text-2">{job.failure_count}</TableCell>
                     </TableRow>
                   ))
                 )}
                 {!isLoading && stats?.top_failing.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={2} className="text-center text-text-4 h-24 italic text-sm">No failures recorded</TableCell>
+                    <TableCell colSpan={2} className="text-center text-text-3 h-24 italic text-sm">No failures recorded</TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
 
-        <Card className="bg-midnight/30 border-graphite/30">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-text-3 uppercase tracking-wider">Slowest Jobs</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <section className="border-y border-border">
+          <div className="pb-2">
+            <h3 className="text-xs font-bold text-text-3 lowercase">Slowest Jobs</h3>
+          </div>
+          <div>
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent border-graphite/30">
-                  <TableHead className="text-[10px] uppercase tracking-widest text-text-4">Job Alias</TableHead>
-                  <TableHead className="text-right text-[10px] uppercase tracking-widest text-text-4">Avg Duration</TableHead>
+                  <TableHead className="text-[11px] lowercase text-text-3">Job Alias</TableHead>
+                  <TableHead className="text-right text-[11px] lowercase text-text-3">Avg Duration</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -156,22 +154,22 @@ export function StatsPage() {
                 ) : (
                   stats?.slowest_jobs.map((job) => (
                     <TableRow key={job.job_id} className="border-graphite/10 hover:bg-graphite/5 transition-colors group">
-                      <TableCell className="font-mono text-sm text-text-2 group-hover:text-text-1 transition-colors">
+                      <TableCell className="text-sm text-text-2 group-hover:text-text-1 transition-colors">
                         {job.alias || job.job_id}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm text-text-2">{job.avg_duration_seconds.toFixed(2)}s</TableCell>
+                      <TableCell className="text-right text-sm text-text-2">{job.avg_duration_seconds.toFixed(2)}s</TableCell>
                     </TableRow>
                   ))
                 )}
                 {!isLoading && stats?.slowest_jobs.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={2} className="text-center text-text-4 h-24 italic text-sm">No data available</TableCell>
+                    <TableCell colSpan={2} className="text-center text-text-3 h-24 italic text-sm">No data available</TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -179,18 +177,9 @@ export function StatsPage() {
 
 function KPIItem({ title, value, isLoading }: { title: string; value: string | number | undefined; isLoading: boolean }) {
   return (
-    <Card className="bg-midnight/50 border-graphite/50 overflow-hidden relative group">
-      <div className="absolute inset-x-0 bottom-0 h-0.5 bg-gradient-to-r from-transparent via-cyan-glow/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1">
-        <CardTitle className="text-[10px] font-bold text-text-3 uppercase tracking-widest">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {isLoading ? (
-          <Skeleton className="h-8 w-24 bg-graphite/10" />
-        ) : (
-          <div className="text-2xl font-bold text-text-1 tracking-tight">{value ?? "--"}</div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="border-b border-border py-3">
+      <p className="mb-2 text-xs lowercase text-text-3">{title}</p>
+      {isLoading ? <Skeleton className="h-8 w-24" /> : <div className="text-[22px] text-text-1">{value ?? "--"}</div>}
+    </div>
   );
 }

@@ -50,7 +50,7 @@ test("triggers page renders cron next-fire and event summaries", async ({ page, 
   const cronRow = page.getByTestId("trigger-card").filter({ hasText: cronAlias }).first();
   await expect(cronRow).toBeVisible();
   await expect(cronRow).toContainText("*/2 * * * *");
-  await expect(cronRow).toContainText("Next:");
+  await expect(cronRow).toContainText("next fires in");
   await expect(cronRow).not.toContainText("Invalid cron");
 
   const eventRow = page.getByTestId("trigger-card").filter({ hasText: eventAlias }).first();
@@ -63,9 +63,9 @@ test("triggers page renders cron next-fire and event summaries", async ({ page, 
 test("triggers page distinguishes future minute, day, and yearly fires with UTC timestamps", async ({ page, request }) => {
   const suffix = uniqueSuffix();
   const schedules = [
-    { alias: `next-minute-${suffix}`, cron: "*/1 * * * *", relative: "in 1m", timestamp: "2026-09-14 12:01:00 UTC" },
-    { alias: `next-day-${suffix}`, cron: "0 0 * * *", relative: "in 12h", timestamp: "2026-09-15 00:00:00 UTC" },
-    { alias: `next-year-${suffix}`, cron: "0 0 1 1 *", relative: "in 109d", timestamp: "2027-01-01 00:00:00 UTC" },
+    { alias: `next-minute-${suffix}`, cron: "*/1 * * * *", relative: "01:00", timestamp: "2026-09-14 12:01:00 UTC" },
+    { alias: `next-day-${suffix}`, cron: "0 0 * * *", relative: "12:00:00", timestamp: "2026-09-15 00:00:00 UTC" },
+    { alias: `next-year-${suffix}`, cron: "0 0 1 1 *", relative: "108d 12:00:00", timestamp: "2027-01-01 00:00:00 UTC" },
   ];
   await applyDefinitions(request, ...schedules.map(({ alias, cron }) => futureCronDefinition(alias, cron)));
 
@@ -78,7 +78,7 @@ test("triggers page distinguishes future minute, day, and yearly fires with UTC 
   for (const schedule of schedules) {
     const row = page.getByTestId("trigger-card").filter({ hasText: schedule.alias }).first();
     const nextFire = row.getByTestId("trigger-next-fire");
-    await expect(nextFire).toContainText(`Next: ${schedule.relative}`);
+    await expect(nextFire).toContainText(`next fires in ${schedule.relative}`);
     await expect(nextFire).not.toContainText("just now");
     await expect(nextFire.getByTestId("trigger-next-fire-timestamp")).toHaveText(schedule.timestamp);
   }
@@ -92,7 +92,7 @@ test("triggers page recomputes a cron next-fire at its real minute boundary", as
   await page.goto("/triggers");
   const nextFire = page.getByTestId("trigger-card").filter({ hasText: alias }).first().getByTestId("trigger-next-fire");
   const timestamp = nextFire.getByTestId("trigger-next-fire-timestamp");
-  await expect(nextFire).toContainText(/^Next: in /);
+  await expect(nextFire).toContainText(/^next fires in /);
   const initialTimestamp = await timestamp.textContent();
   expect(initialTimestamp).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
   const toEpochMs = (value: string | null) => Date.parse(value?.replace(" UTC", "Z").replace(" ", "T") ?? "");
@@ -104,7 +104,7 @@ test("triggers page recomputes a cron next-fire at its real minute boundary", as
   await expect.poll(async () => timestamp.textContent(), { timeout: boundaryTimeoutMs, intervals: [500, 1_000] }).not.toBe(initialTimestamp);
   const nextTimestamp = await timestamp.textContent();
   expect(toEpochMs(nextTimestamp)).toBe(initialEpochMs + 60_000);
-  await expect(nextFire).toContainText(/^Next: in /);
+  await expect(nextFire).toContainText(/^next fires in /);
 });
 
 test("cache inventory renders a future expiry as a countdown", async ({ page, request }) => {

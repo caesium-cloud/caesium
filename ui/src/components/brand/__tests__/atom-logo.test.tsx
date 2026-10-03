@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import { AtomLogo } from "../atom-logo";
+import { clusterAtomProps } from "@/features/system/cluster-atom";
+import type { ClusterHealth } from "@/features/system/useClusterHealth";
+
+it("distinguishes an observed standalone server from missing cluster evidence", () => {
+  const health = { raw: { status: "healthy", checks: {} }, stale: false } as ClusterHealth;
+  const props = clusterAtomProps(health);
+  expect(props).toEqual({ voters: [], quorum: "unreported" });
+  const { container } = render(<AtomLogo {...props} />);
+  expect(container.querySelector('desc')).toHaveTextContent('0 voters. No raft cluster backs this deployment.');
+  expect(container.querySelector('[data-voter]')).toBeNull();
+  expect(clusterAtomProps({ ...health, raw: null }).quorum).toBe('unknown');
+});
 
 describe("<AtomLogo />", () => {
   it("renders a labelled SVG with three orbits, a nucleus, and three satellites", () => {
@@ -41,4 +53,21 @@ describe("<AtomLogo />", () => {
       "true",
     );
   });
+});
+
+it("deals seven voters 3/2/2, retains an unreachable voter, and marks quorum loss", () => {
+  const voters = Array.from({ length: 7 }, (_, i) => ({ id: String(i), leader: i === 0, reachable: i !== 4 }));
+  const { container } = render(<AtomLogo voters={voters} quorum="lost" />);
+  expect([...container.querySelectorAll('.atom-orbit')].map(orbit => orbit.querySelectorAll('[data-voter]').length)).toEqual([3, 2, 2]);
+  expect(container.querySelector('[data-voter="4"]')).toHaveAttribute('data-reachable', 'false');
+  expect(container.querySelectorAll('ellipse[stroke-dasharray="14 12"]')).toHaveLength(3);
+  expect(container.querySelector('.atom-nucleus')).toBeNull();
+});
+
+it("caps the drawing at nine without losing the actual voter count", () => {
+  const voters = Array.from({ length: 12 }, (_, i) => ({ id: String(i), leader: false, reachable: null }));
+  const { container } = render(<AtomLogo voters={voters} quorum="unknown" />);
+  expect(container.querySelectorAll('[data-voter]')).toHaveLength(9);
+  expect(container.querySelector('desc')).toHaveTextContent('12 voters. Cluster health unknown.');
+  expect(container.querySelector('.atom-nucleus')).toBeNull();
 });

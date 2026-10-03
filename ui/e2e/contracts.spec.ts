@@ -54,7 +54,7 @@ test("operator can inspect the feature-gated contract graph", async ({ page, req
   await page.goto("/contracts");
 
   await expect(page.locator("aside").getByRole("link", { name: /^Contracts\b/ })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Contract graph", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Contracts", exact: true })).toBeVisible();
   await expect(page.getByTestId(`contract-node:job:${producerAlias}`)).toContainText(producerAlias);
   await expect(page.getByTestId(`contract-node:job:${producerAlias}`)).toHaveAttribute("href", `/jobs/${producer.id}`);
   await expect(page.getByTestId(`contract-node:job:${consumerAlias}`)).toContainText(consumerAlias);

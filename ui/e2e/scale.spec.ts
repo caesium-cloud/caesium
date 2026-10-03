@@ -76,7 +76,7 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   // viewport explicit so the canvas and page containment are both exercised.
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const dagSection = page.getByTestId("run-interactive-dag-section");
   await expect(dagSection).toContainText(`${width + 2} nodes`);
@@ -89,7 +89,7 @@ test("a wide real DAG renders every node; none are silently dropped at scale", a
   // viewport's transform, proving the far edge of a wide DAG is reachable,
   // not merely present off-screen.
   await dagSection.getByRole("button", { name: /fit view/i }).click();
-  const leafNode = dagSection.locator(".react-flow__node", { hasText: "leaf-15" });
+  const leafNode = dagSection.locator(".react-flow__node").filter({ has: page.getByTestId("task-node-label").filter({ hasText: /^leaf-15$/ }) });
   await expect(leafNode).toBeVisible();
 
   // The fitted flow must use the visible clipping container, not a taller
@@ -159,7 +159,7 @@ test("SYNTHETIC: a fanned task's partition table stays reachable through virtual
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   await page.locator(".react-flow__node", { hasText: "process-file" }).click();
   const panel = page.getByTestId("task-detail-panel");
@@ -234,7 +234,7 @@ test("long log output remains fully reachable through the log viewer's search fi
   const run = await awaitRun(request, job.id, { status: "succeeded", timeoutMs: 60_000 });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   await page.locator(".react-flow__node").first().click();
   const panel = page.getByTestId("task-detail-panel");

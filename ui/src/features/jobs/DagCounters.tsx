@@ -1,37 +1,43 @@
+import { isTerminalRunStatus } from "./cache-utils";
+import { StatusBadge } from "@/components/ui/status-badge";
 import type { TaskRun } from "@/lib/api";
 
-export function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
+export function DagCounters({ tasks, runStatus }: { tasks?: TaskRun[]; runStatus?: string }) {
   if (!tasks || tasks.length === 0) return null;
 
-  const done = tasks.filter((task) => task.status === "succeeded" || task.status === "completed").length;
+  const succeeded = tasks.filter((task) => task.status === "succeeded" || task.status === "completed").length;
   const running = tasks.filter((task) => task.status === "running").length;
   const cached = tasks.filter((task) => task.status === "cached").length;
   const failed = tasks.filter((task) => task.status === "failed").length;
-  const blocked = tasks.filter((task) => task.status === "blocked" || task.status === "skipped").length;
+  const blocked = tasks.filter((task) => task.status === "blocked").length;
+  const skipped = tasks.filter((task) => task.status === "skipped").length;
+  const cancelled = tasks.filter((task) => task.status === "cancelled").length;
   const waiting = tasks.filter((task) => task.status === "pending" || task.status === "queued").length;
 
   const parts = [
-    { label: `${done} done`, className: "text-success/80" },
-    { label: `${failed} failed`, className: failed > 0 ? "text-danger/80" : "text-text-4" },
-    { label: `${blocked} blocked`, className: blocked > 0 ? "text-warning/80" : "text-text-4" },
+    { status: "succeeded", label: `${succeeded} succeeded`, count: succeeded },
+    { status: "failed", label: `${failed} failed`, count: failed },
+    { status: "skipped", label: `${skipped} skipped`, count: skipped },
   ];
 
+  if (blocked > 0) parts.push({ status: "blocked", label: `${blocked} blocked`, count: blocked });
+  if (cancelled > 0) parts.push({ status: "cancelled", label: `${cancelled} cancelled`, count: cancelled });
+
   if (running > 0) {
-    parts.push({ label: `${running} running`, className: "text-cyan-glow/80" });
+    parts.push({ status: isTerminalRunStatus(runStatus) ? "unknown" : "running", label: `${running} ${isTerminalRunStatus(runStatus) ? "unconfirmed" : "running"}`, count: running });
   }
   if (cached > 0) {
-    parts.push({ label: `${cached} cached`, className: "text-cached/80" });
+    parts.push({ status: "cached", label: `${cached} cached`, count: cached });
   }
   if (waiting > 0) {
-    parts.push({ label: `${waiting} waiting`, className: "text-text-4" });
+    parts.push({ status: isTerminalRunStatus(runStatus) ? "unknown" : "queued", label: `${waiting} ${isTerminalRunStatus(runStatus) ? "not started" : "waiting"}`, count: waiting });
   }
 
   return (
-    <div data-testid="dag-counters" className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono tabular-nums">
-      {parts.map((part, index) => (
+    <div data-testid="dag-counters" className="flex min-w-0 max-w-full flex-wrap items-center gap-x-4 gap-y-2 text-xs tabular-nums">
+      {parts.map((part) => (
         <span key={part.label} className="inline-flex items-center gap-1.5">
-          {index > 0 ? <span className="text-text-4">·</span> : null}
-          <span className={part.className}>{part.label}</span>
+          <StatusBadge status={part.status} label={part.label} size="sm" muted={part.count === 0} />
         </span>
       ))}
     </div>

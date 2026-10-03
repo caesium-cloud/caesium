@@ -1,3 +1,6 @@
+import { taskPresentation } from "./task-presentation";
+import { MetadataValue } from "@/components/ui/metadata-value";
+import { IdChip } from "@/components/ui/id-chip";
 import {
   useState,
   useEffect,
@@ -10,20 +13,13 @@ import {
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  X,
-  Info,
-  ScrollText,
-  AlertTriangle,
-  SkipForward,
-  Archive,
-  TimerReset,
-} from "lucide-react";
+import { X, Archive } from "lucide-react";
 import { toast } from "sonner";
+import { statusMeta } from "@/lib/status";
 import { cn, formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusGlyph, StatusBadge } from "@/components/ui/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
@@ -43,8 +39,8 @@ const PARTITION_STATUS_OPTIONS = ["succeeded", "failed", "running", "pending", "
  * materialized exactly one instance (the backend sets it to `n` whenever
  * `n > 1 || partition_value !== ""`), and is omitted entirely for an unfanned
  * one. Gating on `> 1` therefore hid the partition table for N=1 groups, which
- * still have full partition identity — a value, a fingerprint, its own TaskRun
- * and its own log — and are the shape a filtered upstream produces.
+ * still have full partition identity: a value, a fingerprint, its own TaskRun
+ * and its own log: and are the shape a filtered upstream produces.
  * `partition_value` is the belt-and-braces check for a payload that carries the
  * identity without the count.
  */
@@ -80,6 +76,8 @@ interface TaskDetailPanelProps {
   taskType?: string;
   jobId: string;
   runId: string;
+  runStatus?: string;
+  runCompletedAt?: string;
   incidents?: Incident[];
   onClose: () => void;
 }
@@ -98,15 +96,19 @@ export function TaskDetailPanel({
   taskType,
   jobId,
   runId,
+  runStatus,
+  runCompletedAt,
   incidents = [],
   onClose,
 }: TaskDetailPanelProps) {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<TabId>("logs");
   const [isVisible, setIsVisible] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
   const [panelWidth, setPanelWidth] = useState(() => getInitialPanelWidth());
   const [isResizing, setIsResizing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const hostLayoutRef = useRef<{
     host: HTMLElement;
     paddingRight: string;
@@ -117,6 +119,18 @@ export function TaskDetailPanel({
   // Without this, quickly switching from task A → B could have A's timer fire
   // and call onClose after B's panel has already opened.
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The slide-over owns keyboard focus while open and returns it to its node.
+  useLayoutEffect(() => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = panelRef.current;
+    panel?.querySelector<HTMLElement>("button")?.focus();
+    return () => {
+      if (panel?.contains(document.activeElement) && returnFocusRef.current?.isConnected) {
+        returnFocusRef.current.focus();
+      }
+    };
+  }, []);
 
   // Animate in on mount
   useLayoutEffect(() => {
@@ -135,6 +149,7 @@ export function TaskDetailPanel({
       transition: host.style.transition,
       boxSizing: host.style.boxSizing,
     };
+    // eslint-disable-next-line react-hooks/immutability -- imperative layout of the slide-over host
     host.style.boxSizing = "border-box";
     host.style.transition = appendTransition(host.style.transition, "padding-right 200ms ease-out");
     host.dataset.taskDetailPanelOpen = "true";
@@ -173,7 +188,11 @@ export function TaskDetailPanel({
   const handleClose = useCallback(() => {
     // Cancel any in-flight close before scheduling a new one.
     if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    setIsClosing(true);
     setIsVisible(false);
+    // Return focus before the outgoing panel becomes hidden. Its controls must
+    // also leave the tab order during the slide-out, before they are removed.
+    if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
     // 200 ms matches the `duration-200` slide-out transition on the panel.
     closeTimerRef.current = setTimeout(() => {
       closeTimerRef.current = null;
@@ -226,7 +245,8 @@ export function TaskDetailPanel({
   }, [panelWidth]);
 
   const resolvedType = taskType || "task";
-  const status = runTask?.status ?? "pending";
+  const presentation = taskPresentation(runTask ?? { status: "pending", updated_at: "" }, runStatus, runCompletedAt);
+  const status = presentation.status;
   const catalogTaskId = task?.id ?? runTask?.task_id ?? taskId;
   const cached = isTaskCached(runTask);
   const fanned = isFannedTask(runTask);
@@ -283,10 +303,10 @@ export function TaskDetailPanel({
     <div
       ref={panelRef}
       data-testid="task-detail-panel"
+      inert={isClosing}
       className={cn(
         "absolute inset-y-0 right-0 z-20 flex flex-col",
-        "border-l border-border/60 bg-card/95 backdrop-blur-xl",
-        "shadow-[-8px_0_32px_rgba(0,0,0,0.25)]",
+        "border-l border-border bg-midnight",
         "transition-transform duration-200 ease-out",
         isVisible ? "translate-x-0" : "translate-x-full",
         isResizing ? "select-none" : "",
@@ -312,15 +332,14 @@ export function TaskDetailPanel({
         <div className="flex items-center gap-3 min-w-0">
           <StatusDot status={status} />
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-foreground">
-              {taskId}
+            <h3 className="truncate text-sm font-bold text-foreground">
+              {task?.name || "task"}
             </h3>
             <div className="flex items-center gap-2 mt-0.5">
-              <Badge variant={cached ? "cached" : "outline"} className="text-[10px] px-1.5 py-0">
-                {status}
-              </Badge>
+              <StatusBadge status={status} label={presentation.label} size="sm" />
+              <IdChip value={runTask?.id || taskId} label="task run id" />
               {resolvedType !== "task" && (
-                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                <Badge variant="outline" className="text-[11px] px-1.5 py-0">
                   {resolvedType}
                 </Badge>
               )}
@@ -339,6 +358,7 @@ export function TaskDetailPanel({
         </Button>
       </div>
 
+      {presentation.note ? <p className="border-b border-border px-4 py-3 text-xs text-text-2">{presentation.note}</p> : null}
       {incidents.length > 0 ? (
         <div className="border-b border-border/60 p-3">
           <IncidentRibbon
@@ -354,13 +374,11 @@ export function TaskDetailPanel({
         <TabButton
           active={activeTab === "logs"}
           onClick={() => setActiveTab("logs")}
-          icon={<ScrollText className="h-3.5 w-3.5" />}
           label="Logs"
         />
         <TabButton
           active={activeTab === "details"}
           onClick={() => setActiveTab("details")}
-          icon={<Info className="h-3.5 w-3.5" />}
           label="Details"
         />
       </div>
@@ -374,25 +392,25 @@ export function TaskDetailPanel({
               <HoldSkipReason reason={runTask?.error} />
               {/* Error banner */}
               {runTask?.error && status === "skipped" ? (
-                <div className="rounded-lg border border-text-3/20 bg-text-3/10 px-3 py-2.5 flex gap-3 items-start">
-                  <SkipForward className="w-4 h-4 text-text-3 shrink-0 mt-0.5" />
+                <div className="rounded-md border border-text-3/20 bg-text-3/10 px-3 py-2.5 flex gap-3 items-start">
+
                   <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-text-3 uppercase tracking-wider">
+                    <span className="text-[11px] font-bold text-text-3 lowercase">
                       Skipped
                     </span>
-                    <span className="text-xs text-text-3/80 font-mono leading-relaxed break-all">
+                    <span className="text-xs text-text-3 leading-relaxed break-all">
                       {runTask.error}
                     </span>
                   </div>
                 </div>
               ) : runTask?.error ? (
-                <div className="rounded-lg border border-danger/20 bg-danger/10 px-3 py-2.5 flex gap-3 items-start">
-                  <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
+                <div data-testid="task-detail-error" className="rounded-md border border-danger/20 bg-danger/10 px-3 py-2.5 flex gap-3 items-start">
+                  <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
                   <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-danger uppercase tracking-wider">
+                    <span className="text-[11px] font-bold text-danger lowercase">
                       Error
                     </span>
-                    <span className="text-xs text-danger/90 font-mono leading-relaxed break-all">
+                    <span className="text-xs text-danger leading-relaxed break-all">
                       {runTask.error}
                     </span>
                   </div>
@@ -400,13 +418,13 @@ export function TaskDetailPanel({
               ) : null}
 
               {runTask?.rate_limit_retry_after ? (
-                <div data-testid="task-rate-limit-indicator" className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2.5 flex gap-3 items-start">
-                  <TimerReset className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+                <div data-testid="task-rate-limit-indicator" className="rounded-md border border-warning/20 bg-warning/10 px-3 py-2.5 flex gap-3 items-start">
+
                   <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-warning uppercase tracking-wider">
+                    <span className="text-[11px] font-bold text-warning lowercase">
                       Rate limited
                     </span>
-                    <span className="text-xs text-warning/90 font-mono leading-relaxed break-all">
+                    <span className="text-xs text-warning leading-relaxed break-all">
                       Rate-limited until {formatRetryAfter(runTask.rate_limit_retry_after)}
                     </span>
                   </div>
@@ -414,10 +432,10 @@ export function TaskDetailPanel({
               ) : null}
 
               {cached ? (
-                <div className="rounded-lg border border-cached/30 bg-cached/10 px-3 py-2.5 flex gap-3 items-start">
-                  <Archive className="w-4 h-4 text-cached shrink-0 mt-0.5" />
+                <div className="rounded-md border border-cached/30 bg-cached/10 px-3 py-2.5 flex gap-3 items-start">
+
                   <div className="flex flex-1 flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-cached uppercase tracking-wider">
+                    <span className="text-[11px] font-bold text-cached lowercase">
                       Reused successful output
                     </span>
                     <span className="text-xs text-cached">
@@ -425,10 +443,11 @@ export function TaskDetailPanel({
                     </span>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-cached">
                       {runTask?.cache_origin_run_id ? (
-                        <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: runTask.cache_origin_run_id }} className="font-mono hover:underline">
-                          Source run {runTask.cache_origin_run_id.slice(0, 8)}
+                        <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: runTask.cache_origin_run_id }} className="hover:underline">
+                          Source run
                         </Link>
                       ) : null}
+                      {runTask?.cache_origin_run_id ? <IdChip value={runTask.cache_origin_run_id} label="source run id" /> : null}
                       {runTask?.cache_created_at ? (
                         <span>cached {formatUTCTimestamp(runTask.cache_created_at, runTask.cache_created_at)}</span>
                       ) : null}
@@ -438,7 +457,7 @@ export function TaskDetailPanel({
                     </div>
                   </div>
                   <Button
-                    variant="outline"
+                    variant="destructive"
                     size="sm"
                     onClick={() => invalidateCacheMutation.mutate()}
                     disabled={invalidateCacheMutation.isPending || !task?.name}
@@ -450,7 +469,7 @@ export function TaskDetailPanel({
 
               {/* Metadata grid */}
               <div className="grid grid-cols-2 gap-3">
-                <MetadataCell label="Task ID" value={task?.id ?? runTask?.task_id ?? taskId} mono />
+                <MetadataCell label="Task ID" idChip value={task?.id ?? runTask?.task_id ?? taskId} mono />
                 <MetadataCell label="Trigger Rule" value={task?.trigger_rule ?? "all_success"} mono />
                 <MetadataCell label="Attempts" value={formatAttempts(runTask)} mono />
                 <MetadataCell label="Retries" value={String(task?.retries ?? 0)} mono />
@@ -495,13 +514,13 @@ export function TaskDetailPanel({
               {/* Outputs */}
               {runTask?.output && Object.keys(runTask.output).length > 0 && (
                 <div>
-                  <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  <div className="mb-1.5 text-xs font-normal lowercase text-muted-foreground">
                     Output
                   </div>
-                  <div className="rounded-lg border bg-muted/50 p-3 space-y-1">
+                  <div className="rounded-md border bg-muted/50 p-3 space-y-1">
                     {Object.entries(runTask.output).map(([key, value]) => (
-                      <div key={key} className="flex gap-2 font-mono text-xs">
-                        <span className="font-semibold text-muted-foreground">{key}:</span>
+                      <div key={key} className="flex gap-2 text-xs">
+                        <span className="font-bold text-muted-foreground">{key}:</span>
                         <span className="text-foreground">{value}</span>
                       </div>
                     ))}
@@ -517,7 +536,7 @@ export function TaskDetailPanel({
                 data-testid="log-partition-picker"
                 className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5"
               >
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <span className="text-[11px] font-bold lowercase text-muted-foreground">
                   Partition
                 </span>
                 <select
@@ -525,11 +544,11 @@ export function TaskDetailPanel({
                   aria-label="Log partition"
                   value={selectedInstance?.task_run_id ?? ""}
                   onChange={(event) => setSelectedTaskRunId(event.target.value)}
-                  className="min-w-0 flex-1 rounded border border-border/50 bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+                  className="min-w-0 flex-1 rounded border border-border/50 bg-card px-1.5 py-0.5 text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
                 >
                   {instances.map((instance) => (
                     <option key={instance.task_run_id} value={instance.task_run_id}>
-                      {(instance.value || `#${instance.index}`) + ` — ${instance.status}`}
+                      {(instance.value || `#${instance.index}`) + `: ${instance.status}`}
                     </option>
                   ))}
                 </select>
@@ -602,7 +621,7 @@ function PartitionTable({
   const matchedTotal = data?.total ?? rows.length;
 
   // The fingerprint/depends-on columns only carry information for a
-  // structured (ordered) group — hide them entirely for a plain bag of
+  // structured (ordered) group: hide them entirely for a plain bag of
   // partitions rather than rendering a column of dashes.
   const showOrderingColumns = rows.some(
     (row) => !!row.fingerprint || (row.depends_on?.length ?? 0) > 0,
@@ -612,6 +631,12 @@ function PartitionTable({
     mutationFn: (index: number) => api.retryPartition(jobId, runId, taskId, index),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["partitions", jobId, runId, taskId] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "why"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
       toast.success("Partition retry requested");
     },
     onError: (err: Error) => {
@@ -627,7 +652,7 @@ function PartitionTable({
     overscan: 8,
     // Without a real layout pass (e.g. under jsdom, or before the first
     // ResizeObserver callback fires in the browser) the scroll element's
-    // measured size is 0 and no rows would render at all — seed a
+    // measured size is 0 and no rows would render at all: seed a
     // reasonable size so the table is never empty before it is measured.
     initialRect: { width: 640, height: 240 },
   });
@@ -641,17 +666,17 @@ function PartitionTable({
       <div className="mb-1 flex items-center justify-between gap-2">
         <div
           data-testid="partition-table-total"
-          className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+          className="text-[11px] font-bold lowercase text-muted-foreground"
         >
           Partitions ×{groupTotal}
-          {statusFilter ? ` · ${matchedTotal} ${statusFilter}` : null}
+          {statusFilter ? `, ${matchedTotal} ${statusFilter}` : null}
         </div>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           data-testid="partition-status-filter"
           aria-label="Filter partitions by status"
-          className="rounded border border-border/50 bg-card px-1.5 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+          className="rounded border border-border/50 bg-card px-1.5 py-0.5 text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
         >
           <option value="">All statuses</option>
           {PARTITION_STATUS_OPTIONS.map((option) => (
@@ -664,7 +689,7 @@ function PartitionTable({
 
       <div className="rounded border border-border/60">
         <div
-          className="grid gap-0 border-b border-border/40 bg-muted/30 px-2 py-1 text-[10px] font-medium text-muted-foreground"
+          className="grid gap-0 border-b border-border/40 bg-muted/30 px-2 py-1 text-[11px] font-normal text-muted-foreground"
           style={{ gridTemplateColumns }}
         >
           <span>Value</span>
@@ -704,14 +729,14 @@ function PartitionTable({
                       transform: `translateY(${virtualRow.start}px)`,
                     }}
                   >
-                    <span className="truncate font-mono" title={row.value}>
+                    <span className="truncate" title={row.value}>
                       {row.value}
                     </span>
                     <span>
                       <StatusBadge status={row.status} size="sm" />
                     </span>
-                    <span className="font-mono">{row.attempt}</span>
-                    <span className="truncate font-mono">{row.duration ?? "—"}</span>
+                    <span className="">{row.attempt}</span>
+                    <span className="truncate">{row.duration ?? "—"}</span>
                     <span>
                       {row.cache_hit ? (
                         <Archive className="h-3 w-3 text-cached" aria-label="cache hit" />
@@ -720,12 +745,12 @@ function PartitionTable({
                       )}
                     </span>
                     {showOrderingColumns && (
-                      <span className="truncate font-mono" title={row.fingerprint}>
-                        {row.fingerprint ? row.fingerprint.slice(0, 12) : "—"}
+                      <span className="truncate" title={row.fingerprint}>
+                        {row.fingerprint ? <IdChip value={row.fingerprint} label="fingerprint" /> : "—"}
                       </span>
                     )}
                     {showOrderingColumns && (
-                      <span className="truncate font-mono" title={(row.depends_on ?? []).join(", ")}>
+                      <span className="truncate" title={(row.depends_on ?? []).join(", ")}>
                         {(row.depends_on ?? []).join(", ") || "—"}
                       </span>
                     )}
@@ -734,7 +759,7 @@ function PartitionTable({
                         <Button
                           size="sm"
                           variant="ghost"
-                          className="h-6 px-1.5 text-[10px]"
+                          className="h-6 px-1.5 text-[11px]"
                           data-testid="partition-logs-button"
                           aria-label={`View logs for partition ${row.value || row.index}`}
                           onClick={() => onShowLogs(row)}
@@ -746,7 +771,7 @@ function PartitionTable({
                         <Button
                           size="sm"
                           variant="outline"
-                          className="h-6 px-1.5 text-[10px]"
+                          className="h-6 px-1.5 text-[11px]"
                           data-testid="partition-retry-button"
                           disabled={retryPartition.isPending}
                           onClick={() => retryPartition.mutate(row.index)}
@@ -768,53 +793,29 @@ function PartitionTable({
 
 /* ── Small helpers ── */
 
-function StatusDot({ status }: { status: string }) {
-  const color =
-    status === "succeeded" || status === "completed"
-      ? "bg-success shadow-success/50"
-      : status === "cached"
-        ? "bg-cached shadow-cached/50"
-      : status === "failed"
-        ? "bg-danger shadow-danger/50"
-        : status === "running"
-          ? "bg-running shadow-running/50 animate-pulse"
-          : status === "skipped"
-            ? "bg-text-3"
-            : "bg-text-4";
-
-  return (
-    <span
-      className={cn(
-        "inline-block h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_6px]",
-        color,
-      )}
-    />
-  );
-}
+function StatusDot({ status }: { status: string }) { return <StatusGlyph meta={statusMeta(status)} />; }
 
 function TabButton({
   active,
   onClick,
-  icon,
   label,
 }: {
   active: boolean;
   onClick: () => void;
-  icon: ReactNode;
+  icon?: ReactNode;
   label: string;
 }) {
   return (
     <button
       onClick={onClick}
       className={cn(
-        "flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
+        "flex items-center gap-1.5 px-3 py-2 text-xs font-normal lowercase transition-colors",
         "border-b-2 -mb-px",
         active
           ? "border-primary text-foreground"
-          : "border-transparent text-muted-foreground hover:text-foreground/80",
+          : "border-transparent text-muted-foreground hover:text-foreground",
       )}
     >
-      {icon}
       {label}
     </button>
   );
@@ -824,23 +825,25 @@ function MetadataCell({
   label,
   value,
   mono = false,
+  idChip,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div>
-      <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="mb-0.5 text-[11px] font-normal lowercase text-muted-foreground">
         {label}
       </div>
       <div
         className={cn(
           "text-xs text-foreground",
-          mono && "font-mono",
+          mono && "",
         )}
       >
-        {value}
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </div>
     </div>
   );

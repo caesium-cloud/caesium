@@ -1020,6 +1020,7 @@ ui-e2e: build-release
             -v {{ sock }}:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
+            -e CAESIUM_DATABASE_CONSOLE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \

@@ -14,6 +14,7 @@ import (
 // runResponse matches the JSON returned by POST /v1/jobs/:id/run and
 // GET /v1/jobs/:id/runs/:run_id.
 type runResponse struct {
+	StartedAt  string            `json:"started_at"`
 	ID         string            `json:"id"`
 	JobID      string            `json:"job_id"`
 	Status     string            `json:"status"`

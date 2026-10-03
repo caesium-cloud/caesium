@@ -13,7 +13,8 @@ vi.mock("sonner", () => ({
   },
 }));
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   api: {
     getReceipt: vi.fn(),
     postVerify: vi.fn(),

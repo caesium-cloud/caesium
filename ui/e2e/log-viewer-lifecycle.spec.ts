@@ -17,7 +17,7 @@ test("switching and closing the log panel does not leave a disposed terminal cal
   });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-heading")).toBeVisible({ timeout: 30_000 });
 
   const fannedNode = page.locator(".react-flow__node", { hasText: "process-file" });
   const panel = page.getByTestId("task-detail-panel");

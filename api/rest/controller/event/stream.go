@@ -11,6 +11,7 @@ import (
 	"time"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	"github.com/caesium-cloud/caesium/api/streaming"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -74,7 +75,7 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid Last-Event-ID")
 	}
 
-	if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
+	if _, err := fmt.Fprintf(streaming.Writer(c.Response()), ": ping\n\n"); err != nil {
 		return nil
 	}
 	flusher.Flush()
@@ -127,7 +128,7 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
+			if _, err := fmt.Fprintf(streaming.Writer(c.Response()), ": ping\n\n"); err != nil {
 				return nil
 			}
 			flusher.Flush()
@@ -231,10 +232,10 @@ func writeEvent(c *echo.Context, evt event.Event) error {
 	}
 
 	if evt.Sequence > 0 {
-		if _, err := fmt.Fprintf(c.Response(), "id: %d\n", evt.Sequence); err != nil {
+		if _, err := fmt.Fprintf(streaming.Writer(c.Response()), "id: %d\n", evt.Sequence); err != nil {
 			return err
 		}
 	}
-	_, err = fmt.Fprintf(c.Response(), "event: %s\ndata: %s\n\n", evt.Type, data)
+	_, err = fmt.Fprintf(streaming.Writer(c.Response()), "event: %s\ndata: %s\n\n", evt.Type, data)
 	return err
 }

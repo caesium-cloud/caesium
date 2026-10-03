@@ -3,16 +3,52 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { cn } from "@/lib/utils";
+import { observePhase } from "@/lib/phase";
+import { cn, formatUTCTime } from "@/lib/utils";
 
-const TickContext = createContext<Date | null>(null);
+function createClock(intervalMs: number) {
+  let now = Date.now();
+  let timer: number | undefined;
+  const listeners = new Set<() => void>();
+  const tick = () => {
+    now = Date.now();
+    listeners.forEach(listener => listener());
+    if (listeners.size) timer = window.setTimeout(tick, intervalMs - Date.now() % intervalMs);
+  };
+  return {
+    getSnapshot: () => now,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      if (listeners.size === 1) {
+        tick();
+        document.addEventListener("visibilitychange", resync);
+      }
+      return () => {
+        listeners.delete(listener);
+        if (!listeners.size) {
+          window.clearTimeout(timer);
+          document.removeEventListener("visibilitychange", resync);
+        }
+      };
+    },
+  };
+  function resync() {
+    if (document.visibilityState === "visible") {
+      window.clearTimeout(timer);
+      tick();
+    }
+  }
+}
+
+const TickContext = createContext<ReturnType<typeof createClock> | null>(null);
+const noSubscription = () => () => {};
 
 /**
  * Provides a shared "ticking now()" to every `<UTCClock />` and any future
- * clock-driven primitive — so we never fan out a `setInterval` per consumer.
+ * clock-driven primitive: so we never fan out a `setInterval` per consumer.
  *
  * Mount once near the app root. Consumers that don't have the provider above
  * them will fall back to a local timer.
@@ -24,55 +60,36 @@ export function UTCClockProvider({
   children: ReactNode;
   intervalMs?: number;
 }) {
-  const [now, setNow] = useState<Date>(() => new Date());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), intervalMs);
-    return () => window.clearInterval(id);
-  }, [intervalMs]);
-  return <TickContext.Provider value={now}>{children}</TickContext.Provider>;
-}
-
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function formatUTC(date: Date): string {
-  return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+  const clock = useMemo(() => createClock(intervalMs), [intervalMs]);
+  useEffect(() => observePhase(), []);
+  return <TickContext.Provider value={clock}>{children}</TickContext.Provider>;
 }
 
 interface UTCClockProps {
   className?: string;
-  /** Suppress the gold pulse dot. Useful in dense layouts. */
-  hideDot?: boolean;
 }
 
-export function UTCClock({ className, hideDot = false }: UTCClockProps) {
-  const ctxNow = useContext(TickContext);
-  const hasProvider = ctxNow !== null;
-  const [localNow, setLocalNow] = useState<Date>(() => new Date());
+// eslint-disable-next-line react-refresh/only-export-components
+export function useUTCTick(enabled: boolean | ((now: number) => boolean) = true) {
+  const sharedClock = useContext(TickContext);
+  const localClock = useMemo(() => createClock(1000), []);
+  const clock = sharedClock ?? localClock;
+  const active = typeof enabled === "function" ? enabled(clock.getSnapshot()) : enabled;
+  const getSnapshot = useMemo(() => {
+    if (active) return clock.getSnapshot;
+    const frozen = clock.getSnapshot();
+    return () => frozen;
+  }, [clock, active]);
+  const now = useSyncExternalStore(active ? clock.subscribe : noSubscription, getSnapshot);
+  return new Date(now);
+}
 
-  // When a provider is mounted above us we let it drive the tick; otherwise
-  // we run our own interval.
-  useEffect(() => {
-    if (hasProvider) return;
-    const id = window.setInterval(() => setLocalNow(new Date()), 1000);
-    return () => window.clearInterval(id);
-  }, [hasProvider]);
-
-  const now = ctxNow ?? localNow;
-  const text = useMemo(() => formatUTC(now), [now]);
-
+export function UTCClock({ className }: UTCClockProps) {
+  const text = formatUTCTime(useUTCTick());
   return (
     <div className={cn("flex items-center gap-2", className)}>
-      {hideDot ? null : (
-        <span
-          aria-hidden="true"
-          className="inline-block h-[7px] w-[7px] rounded-full bg-gold animate-gold-pulse shadow-[0_0_12px_hsl(var(--gold)/0.7)]"
-        />
-      )}
-      <span className="font-mono tabular-nums text-[11px] tracking-[0.12em] text-text-2">
-        {text} UTC
-      </span>
+      <span className="text-base font-bold tabular-nums text-text-1">{text}</span>{" "}
+      <span className="text-[11px] text-text-3">UTC</span>
     </div>
   );
 }

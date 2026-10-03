@@ -1,11 +1,13 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronRight, LogOut, Menu } from "lucide-react";
+import { LogOut, Menu } from "lucide-react";
 import { type Ref, useState } from "react";
 import { ModeToggle } from "../mode-toggle";
-import { CommandMenu } from "../command-menu";
+import { AtomLogo, type AtomLogoProps } from "../brand/atom-logo";
+import { Oscillator } from "../ui/oscillator";
 import { Button } from "@/components/ui/button";
 import { UTCClock } from "@/components/ui/utc-clock";
 import { logout } from "@/lib/auth";
+import { formatUTCTime } from "@/lib/utils";
 import { NotificationsPopover } from "./NotificationsPopover";
 
 interface Crumb {
@@ -13,80 +15,35 @@ interface Crumb {
   to?: string;
 }
 
-const ROOT_CRUMB: Crumb = { label: "Caesium", to: "/jobs" };
-
-const ROUTE_LABELS: Record<string, string> = {
-  jobs: "Jobs",
-  triggers: "Triggers",
-  atoms: "Atoms",
-  stats: "Stats",
-  system: "System",
-  jobdefs: "JobDefs",
-  database: "Database",
-  logs: "Logs",
-  runs: "Runs",
-  tasks: "Tasks",
-  config: "Config",
-  yaml: "YAML",
-  backfills: "Backfills",
-  cache: "Cache",
-};
-
-function buildCrumbs(pathname: string): Crumb[] {
-  const segments = pathname.split("/").filter(Boolean);
-  if (segments.length === 0) return [ROOT_CRUMB];
-  const crumbs: Crumb[] = [ROOT_CRUMB];
-  let acc = "";
-  segments.forEach((segment, idx) => {
-    acc += `/${segment}`;
-    const isLast = idx === segments.length - 1;
-    const known = ROUTE_LABELS[segment.toLowerCase()];
-    const label = known ?? (segment.length > 12 ? `${segment.slice(0, 8)}…` : segment);
-    crumbs.push({ label, to: isLast ? undefined : acc });
-  });
-  return crumbs;
-}
-
-function Breadcrumb() {
+function Breadcrumb({ jobAlias, runStartedAt }: { jobAlias?: string; runStartedAt?: string }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const crumbs = buildCrumbs(pathname);
-  return (
-    <nav aria-label="Breadcrumb" className="hidden items-center gap-1.5 text-xs lg:flex">
-      {crumbs.map((crumb, idx) => {
-        const isLast = idx === crumbs.length - 1;
-        return (
-          <span key={`${crumb.label}-${idx}`} className="flex items-center gap-1.5">
-            {idx > 0 ? (
-              <ChevronRight aria-hidden="true" className="h-3 w-3 text-text-4" />
-            ) : null}
-            {crumb.to && !isLast ? (
-              <Link
-                to={crumb.to}
-                className="font-medium uppercase tracking-[0.18em] text-text-3 hover:text-text-1"
-              >
-                {crumb.label}
-              </Link>
-            ) : (
-              <span
-                aria-current={isLast ? "page" : undefined}
-                className="font-medium uppercase tracking-[0.18em] text-text-1"
-              >
-                {crumb.label}
-              </span>
-            )}
-          </span>
-        );
-      })}
-    </nav>
-  );
+  const segments = pathname.split("/").filter(Boolean);
+  const crumbs: Crumb[] = [{ label: "~", to: "/jobs" }];
+  let acc = "";
+  segments.forEach((segment, i) => {
+    acc += `/${segment}`;
+    if (segments[2] === "runs" && segments[3] && i === 2) return;
+    if (segments[0] === "jobs" && i === 1) segment = jobAlias ?? "pipeline";
+    if (segments[2] === "runs" && i === 3) segment = `run ${formatUTCTime(runStartedAt, { seconds: false, fallback: "unknown" })}`;
+    crumbs.push({ label: segment, to: i === segments.length - 1 ? undefined : acc });
+  });
+  return <nav aria-label="Breadcrumb" className="hidden min-w-0 items-center text-xs text-text-3 lg:flex">
+    {crumbs.map((crumb, i) => <span key={i} className="flex min-w-0 items-center">
+      {i > 0 ? <span aria-hidden="true">/</span> : null}
+      {crumb.to ? <Link to={crumb.to} className="truncate hover:text-text-1">{crumb.label}</Link> : <span aria-current="page" className="truncate text-text-1">{crumb.label}</span>}
+    </span>)}
+  </nav>;
 }
 
 interface HeaderProps {
+  atomProps?: AtomLogoProps;
+  jobAlias?: string;
+  runStartedAt?: string;
   onOpenNavigation?: () => void;
   navigationButtonRef?: Ref<HTMLButtonElement>;
 }
 
-export function Header({ onOpenNavigation, navigationButtonRef }: HeaderProps) {
+export function Header({ onOpenNavigation, navigationButtonRef, atomProps = { voters: [], quorum: "unknown" }, jobAlias, runStartedAt }: HeaderProps) {
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const handleSignOut = async () => {
@@ -103,7 +60,7 @@ export function Header({ onOpenNavigation, navigationButtonRef }: HeaderProps) {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border/70 bg-background/70 px-4 sm:px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header className="sticky top-0 z-30 flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border bg-void px-4 lg:px-6">
       <div className="flex min-w-0 items-center gap-2 sm:gap-4">
         <Button
           variant="ghost"
@@ -115,16 +72,14 @@ export function Header({ onOpenNavigation, navigationButtonRef }: HeaderProps) {
         >
           <Menu className="h-4 w-4" />
         </Button>
-        <div className="hidden items-center gap-2 lg:flex">
-          <span className="h-2 w-2 rounded-full bg-gold animate-gold-pulse shadow-[0_0_18px_hsl(var(--gold)/0.45)]" />
-          <span className="text-[0.62rem] font-medium uppercase tracking-[0.34em] text-text-3">
-            Operator Console
-          </span>
+        <div className="flex items-center gap-2">
+          <AtomLogo size={22} {...atomProps} />
+          <span className="hidden text-[13px] font-bold tracking-[.12em] sm:inline">CAESIUM</span>
         </div>
-        <Breadcrumb />
+        <Breadcrumb jobAlias={jobAlias} runStartedAt={runStartedAt} />
       </div>
       <div className="flex items-center gap-2">
-        <CommandMenu />
+        <Oscillator className="hidden xl:block" />
         <UTCClock className="hidden md:flex" />
         <NotificationsPopover />
         <Button

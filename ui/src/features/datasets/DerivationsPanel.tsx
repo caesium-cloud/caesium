@@ -1,12 +1,12 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { GitBranch, History } from "lucide-react";
+
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type DatasetDerivation, type DatasetProducingJob } from "@/lib/api";
-import { cn, shortId } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { consumedDatasetTarget, decisionLabel, displayNamespace } from "./freshness-utils";
 
 interface DerivationsPanelProps {
@@ -28,7 +28,6 @@ export function DerivationsPanel({ namespace, name, producingJob }: DerivationsP
       <EmptyState
         title="Select a dataset"
         subtitle="The derivation audit explains why freshness runs did or did not start."
-        icon={<History className="h-12 w-12 text-text-3" />}
         className="py-10"
       />
     );
@@ -59,7 +58,6 @@ export function DerivationsPanel({ namespace, name, producingJob }: DerivationsP
       <EmptyState
         title="No derivations recorded"
         subtitle="The evaluator has not appended a decision for this dataset yet."
-        icon={<History className="h-12 w-12 text-text-3" />}
         className="py-10"
       />
     );
@@ -90,11 +88,11 @@ function DerivationRow({
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs text-text-2">{formatClock(row.created_at)}</span>
+            <span className="text-xs text-text-2">{formatClock(row.created_at)}</span>
             <Badge
               variant="outline"
               className={cn(
-                "text-[10px]",
+                "text-[11px]",
                 isSkip ? "border-warning/30 bg-warning/10 text-warning" : "border-success/30 bg-success/10 text-success",
               )}
             >
@@ -103,14 +101,14 @@ function DerivationRow({
           </div>
           <p className="mt-2 text-sm text-text-1">{derivationSentence(row)}</p>
         </div>
-        <span className="shrink-0 text-[11px] text-text-4">
+        <span className="shrink-0 text-[11px] text-text-3">
           <RelativeTime date={row.created_at} />
         </span>
       </div>
 
       {consumed.length > 0 ? (
         <div className="mt-3 space-y-1.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-text-3">
+          <div className="text-[11px] font-bold lowercase text-text-3">
             Consumed arrivals
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -124,9 +122,9 @@ function DerivationRow({
                   className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-card px-2 py-1 text-[11px] text-text-2 transition-colors hover:border-cyan/40 hover:text-cyan-glow"
                   title={`${displayNamespace(target.namespace)} / ${target.name} @ ${watermark}`}
                 >
-                  <GitBranch className="h-3 w-3 shrink-0" />
-                  <span className="truncate font-mono">{target.name}</span>
-                  <span className="max-w-[9rem] truncate font-mono text-text-4">{watermark}</span>
+
+                  <span className="truncate">{target.name}</span>
+                  <span className="max-w-[9rem] truncate text-text-3">{watermark}</span>
                 </Link>
               );
             })}
@@ -140,9 +138,9 @@ function DerivationRow({
           <Link
             to="/jobs/$jobId/runs/$runId"
             params={{ jobId: producingJob.id, runId: row.run_id }}
-            className="font-mono text-cyan-glow hover:underline"
+            className="text-cyan-glow hover:underline"
           >
-            {shortId(row.run_id)}
+            open run
           </Link>
         </div>
       ) : null}

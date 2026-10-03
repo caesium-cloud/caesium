@@ -40,7 +40,7 @@ export function UsageBar({
         <div className="flex items-baseline justify-between gap-3 text-[11px]">
           {label ? <span className="text-text-3">{label}</span> : <span />}
           {showValue ? (
-            <span className="font-mono tabular-nums text-text-2">
+            <span className="tabular-nums" style={{ color: fill }}>
               {clamped.toFixed(0)}%
             </span>
           ) : null}
@@ -53,13 +53,14 @@ export function UsageBar({
         aria-valuenow={clamped}
         aria-valuetext={`${clamped.toFixed(0)} percent`}
         aria-label={label}
-        className="w-full overflow-hidden rounded-full bg-graphite/60"
+        className="relative w-full rounded-sm bg-obsidian"
         style={{ height }}
       >
         <div
-          className="h-full rounded-full transition-[width] duration-500"
+          className="h-full rounded-sm transition-[width] duration-500"
           style={{ width: `${clamped}%`, backgroundColor: fill }}
         />
+        {[USAGE_THRESHOLDS.warn, USAGE_THRESHOLDS.danger].map(threshold => <span key={threshold} aria-hidden="true" className="absolute -top-0.5 bottom-[-2px] border-l" style={{ left: `${threshold}%`, borderColor: threshold === USAGE_THRESHOLDS.warn ? "hsl(var(--gold))" : "hsl(var(--danger))" }} />)}
       </div>
     </div>
   );

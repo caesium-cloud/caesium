@@ -278,7 +278,7 @@ const routeTree = rootRoute.addChildren([
   jobDefsRoute,
 ]);
 
-export const router = createRouter({ routeTree });
+export const router = createRouter({ routeTree, scrollRestoration: true, scrollToTopSelectors: ["#main-content"] });
 
 declare module "@tanstack/react-router" {
   interface Register {

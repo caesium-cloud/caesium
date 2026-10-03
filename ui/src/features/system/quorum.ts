@@ -61,7 +61,7 @@ export interface QuorumView {
   status: QuorumViewStatus;
   /** Voters observed reachable. Null when liveness was never determined. */
   reachable: number | null;
-  /** Configured voters — membership, not availability. */
+  /** Configured voters: membership, not availability. */
   total: number;
   /** Majority needed for the cluster to serve writes. */
   required: number;
@@ -102,7 +102,7 @@ export function deriveQuorumView(
       required,
       label: total > 0 ? `?/${total}` : "?",
       tone: "warn",
-      detail: "Health data is stale — this observation has stopped updating",
+      detail: "Health data is stale: this observation has stopped updating",
     };
   }
 
@@ -134,7 +134,7 @@ export function deriveQuorumView(
       required,
       label,
       tone: "danger",
-      detail: `Quorum lost — ${reachable} of ${required} required voters reachable`,
+      detail: `Quorum lost: ${reachable} of ${required} required voters reachable`,
     };
   }
 
@@ -147,7 +147,7 @@ export function deriveQuorumView(
       required,
       label,
       tone: "warn",
-      detail: `Serving without full redundancy — ${missing}`,
+      detail: `Serving without full redundancy: ${missing}`,
     };
   }
 
@@ -188,7 +188,7 @@ export function deriveSystemBanner(
     return {
       tone: "danger",
       badge: "unknown",
-      headline: "Health check failed — API unreachable",
+      headline: "Health check failed: API unreachable",
     };
   }
 
@@ -198,7 +198,7 @@ export function deriveSystemBanner(
     return {
       tone: "warn",
       badge: "stale",
-      headline: "Health data is stale — the last observation has stopped updating",
+      headline: "Health data is stale: the last observation has stopped updating",
     };
   }
 
@@ -211,7 +211,7 @@ export function deriveSystemBanner(
     return {
       tone: "danger",
       badge: "unavailable",
-      headline: `Quorum lost — only ${quorum.reachable ?? 0} of ${quorum.total} voters reachable`,
+      headline: `Quorum lost: only ${quorum.reachable ?? 0} of ${quorum.total} voters reachable`,
     };
   }
 
@@ -223,7 +223,7 @@ export function deriveSystemBanner(
     return {
       tone: "warn",
       badge: degradedBadge,
-      headline: "Cluster liveness unknown — voters have not been verified",
+      headline: "Cluster liveness unknown: voters have not been verified",
     };
   }
 
@@ -231,7 +231,7 @@ export function deriveSystemBanner(
     return {
       tone: "warn",
       badge: "degraded",
-      headline: `Degraded — ${quorum.reachable} of ${quorum.total} voters reachable`,
+      headline: `Degraded: ${quorum.reachable} of ${quorum.total} voters reachable`,
     };
   }
 
@@ -239,7 +239,7 @@ export function deriveSystemBanner(
     return {
       tone: "warn",
       badge: "degraded",
-      headline: `Degraded — ${nodes.reachable} of ${nodes.total} cluster nodes reachable`,
+      headline: `Degraded: ${nodes.reachable} of ${nodes.total} cluster nodes reachable`,
     };
   }
 
@@ -247,12 +247,12 @@ export function deriveSystemBanner(
     return {
       tone: "warn",
       badge: degradedBadge,
-      headline: `Cluster liveness unknown — ${nodes.unknown} of ${nodes.total} nodes unverified`,
+      headline: `Cluster liveness unknown: ${nodes.unknown} of ${nodes.total} nodes unverified`,
     };
   }
 
   if (state === "degraded") {
-    return { tone: "warn", badge: "degraded", headline: "System degraded — review the failing checks" };
+    return { tone: "warn", badge: "degraded", headline: "System degraded: review the failing checks" };
   }
 
   if (state !== "operational") {

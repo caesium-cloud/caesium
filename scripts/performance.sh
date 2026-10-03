@@ -834,7 +834,7 @@ build_ui_bundle() {
     return 0
   fi
   set +e
-  node "$ROOT/ui/scripts/check-bundle-size.mjs" --dist "$src/ui/dist/assets" --json >"$dest"
+  node "$ROOT/ui/scripts/check-bundle-size.mjs" --dist "$src/ui/dist" --json >"$dest"
   set -e
 }
 

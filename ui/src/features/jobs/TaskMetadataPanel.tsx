@@ -1,7 +1,9 @@
+import { IdChip } from "@/components/ui/id-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 import type { JobTask, TaskRun } from "@/lib/api";
 import { formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import { isTaskCached } from "./cache-utils";
 
 interface TaskMetadataPanelProps {
@@ -40,11 +42,11 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
         {runTask?.error ? <MetadataRow label="Error" value={runTask.error} className="md:col-span-2" /> : null}
         {runTask?.output && Object.keys(runTask.output).length > 0 ? (
           <div className="md:col-span-2">
-            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Output</div>
+            <div className="mb-1 text-xs font-normal lowercase text-muted-foreground">Output</div>
             <div className="rounded-md border bg-muted/50 p-2">
               {Object.entries(runTask.output).map(([key, value]) => (
-                <div key={key} className="flex gap-2 font-mono text-xs">
-                  <span className="font-semibold text-muted-foreground">{key}:</span>
+                <div key={key} className="flex gap-2 text-xs">
+                  <span className="font-bold text-muted-foreground">{key}:</span>
                   <span className="text-foreground">{value}</span>
                 </div>
               ))}
@@ -65,12 +67,12 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
   }
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm">Task Metadata</CardTitle>
-      </CardHeader>
-      <CardContent>{content}</CardContent>
-    </Card>
+    <section className="border-b border-border py-3">
+      <div className="pb-3">
+        <h3 className="text-sm">Task Metadata</h3>
+      </div>
+      <div className="space-y-3">{content}</div>
+    </section>
   );
 }
 
@@ -98,13 +100,13 @@ interface MetadataRowProps {
 function MetadataRow({ label, value, mono = false, badge = false, badgeVariant = "outline", className }: MetadataRowProps) {
   return (
     <div className={className}>
-      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
-      {badge ? (
-        <Badge variant={badgeVariant} className="font-medium">
+      <div className="mb-1 text-xs font-normal lowercase text-muted-foreground">{label}</div>
+      {label === "Status" ? <StatusBadge status={value} /> : badge ? (
+        <Badge variant={badgeVariant} className="font-normal">
           {value}
         </Badge>
       ) : (
-        <div className={mono ? "font-mono text-xs text-foreground" : "text-foreground"}>{value}</div>
+        <div className={mono ? "text-xs text-foreground" : "text-foreground"}>{["Task ID", "Source Run"].includes(label) && value !== "Unknown" ? <IdChip value={value} label={label} /> : value}</div>
       )}
     </div>
   );
@@ -120,24 +122,24 @@ function OutputSchemaSection({ schema }: OutputSchemaSectionProps) {
 
   return (
     <div className="md:col-span-2">
-      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Output Schema</div>
+      <div className="mb-1 text-xs font-normal lowercase text-muted-foreground">Output Schema</div>
       <div className="rounded-md border bg-muted/50 p-2">
         {properties ? (
           Object.entries(properties).map(([key, prop]) => {
             const type = (prop as Record<string, unknown>).type as string | undefined;
             const isRequired = required?.includes(key);
             return (
-              <div key={key} className="flex gap-2 font-mono text-xs">
-                <span className="font-semibold text-muted-foreground">{key}:</span>
+              <div key={key} className="flex gap-2 text-xs">
+                <span className="font-bold text-muted-foreground">{key}:</span>
                 <span className="text-foreground">{type ?? "any"}</span>
                 {isRequired && (
-                  <Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">required</Badge>
+                  <Badge variant="outline" className="h-4 px-1 text-[11px] font-normal">required</Badge>
                 )}
               </div>
             );
           })
         ) : (
-          <span className="font-mono text-xs text-muted-foreground">schema defined</span>
+          <span className="text-xs text-muted-foreground">schema defined</span>
         )}
       </div>
     </div>
@@ -151,14 +153,14 @@ interface SchemaViolationsSectionProps {
 function SchemaViolationsSection({ violations }: SchemaViolationsSectionProps) {
   return (
     <div className="md:col-span-2">
-      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-warning">Schema Violations</div>
+      <div className="mb-1 text-xs font-normal lowercase text-warning">Schema Violations</div>
       <div className="rounded-md border border-warning/30 bg-warning/10 p-2">
         {violations.map((v, i) => (
-          <div key={i} className="flex gap-2 font-mono text-xs">
+          <div key={i} className="flex gap-2 text-xs">
             {v.key && (
-              <span className="font-semibold text-warning">{v.key}:</span>
+              <span className="font-bold text-warning">{v.key}:</span>
             )}
-            <span className="text-warning/90">{v.message}</span>
+            <span className="text-warning">{v.message}</span>
           </div>
         ))}
       </div>

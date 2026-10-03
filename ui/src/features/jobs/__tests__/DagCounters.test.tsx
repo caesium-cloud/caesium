@@ -23,9 +23,10 @@ describe("DagCounters", () => {
     render(<DagCounters tasks={[task("failed"), task("skipped"), task("blocked")]} />);
 
     const counters = screen.getByTestId("dag-counters");
-    expect(counters).toHaveTextContent("0 done");
+    expect(counters).toHaveTextContent("0 succeeded");
     expect(counters).toHaveTextContent("1 failed");
-    expect(counters).toHaveTextContent("2 blocked");
+    expect(counters).toHaveTextContent("1 blocked");
+    expect(counters).toHaveTextContent("1 skipped");
     expect(counters).not.toHaveTextContent("queued");
   });
 
@@ -33,7 +34,7 @@ describe("DagCounters", () => {
     render(<DagCounters tasks={[task("succeeded"), task("running"), task("cached"), task("pending")]} />);
 
     const counters = screen.getByTestId("dag-counters");
-    expect(counters).toHaveTextContent("1 done");
+    expect(counters).toHaveTextContent("1 succeeded");
     expect(counters).toHaveTextContent("1 running");
     expect(counters).toHaveTextContent("1 cached");
     expect(counters).toHaveTextContent("1 waiting");

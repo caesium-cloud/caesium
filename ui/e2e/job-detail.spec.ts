@@ -17,9 +17,10 @@ test("job detail DAG overlay reconciles failed task counts", async ({ page, requ
 
   const counters = page.getByTestId("dag-counters");
   await expect(counters).toBeVisible();
-  await expect(counters).toContainText("1 done");
+  await expect(counters).toContainText("1 succeeded");
   await expect(counters).toContainText("1 failed");
-  await expect(counters).toContainText("0 blocked");
+  await expect(counters).toContainText("0 skipped");
+  await expect(counters).not.toContainText("blocked");
   await expect(counters).not.toContainText("queued");
 });
 
@@ -81,7 +82,7 @@ test("job detail trigger requires confirmation and lands on the run page", async
   await page.getByRole("button", { name: "Confirm Trigger" }).click();
 
   await page.waitForURL(new RegExp(`/jobs/${job.id}/runs/[^/]+$`));
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   const runId = new URL(page.url()).pathname.split("/").at(-1);
   const response = await request.get(`/v1/jobs/${job.id}/runs/${runId}`);
   expect(response.ok()).toBe(true);

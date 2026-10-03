@@ -4,12 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseConsolePage } from "../DatabaseConsolePage";
 import { ApiError, type DatabaseQueryResponse, type DatabaseSchemaResponse } from "@/lib/api";
 
-vi.mock("@/lib/api", () => {
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
   const mockApi = {
     getDatabaseSchema: vi.fn(),
     queryDatabase: vi.fn(),
   };
   return {
+    ...actual,
     api: mockApi,
     ApiError: class extends Error {
       status: number;

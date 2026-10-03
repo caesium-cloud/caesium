@@ -1,4 +1,4 @@
-import { Search } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 
 interface LogSearchInputProps {
@@ -21,12 +21,12 @@ export function LogSearchInput({
         className,
       )}
     >
-      <Search className="h-3.5 w-3.5 shrink-0 text-text-4" />
+
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full bg-transparent text-xs text-text-1 outline-none placeholder:text-text-4"
+        className="w-full bg-transparent text-xs text-text-1 outline-none placeholder:text-text-3"
       />
     </div>
   );

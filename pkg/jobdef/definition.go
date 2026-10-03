@@ -1036,7 +1036,8 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 
 // UnmarshalJSON mirrors the YAML defaults so REST/UI JSON apply requests behave
 // the same as YAML manifests loaded from disk. Duration fields accept the
-// documented string syntax ("1s") as well as integer nanoseconds.
+// documented string syntax ("1s") as well as integer nanoseconds. Edges accept
+// the same scalar or list syntax as YAML.
 func (s *Step) UnmarshalJSON(data []byte) error {
 	type rawStep struct {
 		Name                         string                    `json:"name"`
@@ -1045,8 +1046,8 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		Image                        string                    `json:"image"`
 		Command                      []string                  `json:"command"`
 		NodeSelector                 map[string]string         `json:"nodeSelector"`
-		Next                         []string                  `json:"next"`
-		DependsOn                    []string                  `json:"dependsOn"`
+		Next                         any                       `json:"next"`
+		DependsOn                    any                       `json:"dependsOn"`
 		Retries                      int                       `json:"retries"`
 		RetryDelay                   json.RawMessage           `json:"retryDelay"`
 		RetryBackoff                 bool                      `json:"retryBackoff"`
@@ -1070,6 +1071,15 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &rs); err != nil {
 		return err
 	}
+	nextList, err := normalizeInterfaceList(rs.Next)
+	if err != nil {
+		return fmt.Errorf("step %s next: %w", rs.Name, err)
+	}
+	dependsList, err := normalizeInterfaceList(rs.DependsOn)
+	if err != nil {
+		return fmt.Errorf("step %s dependsOn: %w", rs.Name, err)
+	}
+
 	retryDelay, err := parseJSONDuration(rs.RetryDelay, "retryDelay")
 	if err != nil {
 		return err
@@ -1087,8 +1097,8 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.Image = rs.Image
 	s.Command = rs.Command
 	s.NodeSelector = rs.NodeSelector
-	s.Next = rs.Next
-	s.DependsOn = rs.DependsOn
+	s.Next = nextList
+	s.DependsOn = dependsList
 	s.Retries = rs.Retries
 	s.RetryDelay = retryDelay
 	s.RetryBackoff = rs.RetryBackoff

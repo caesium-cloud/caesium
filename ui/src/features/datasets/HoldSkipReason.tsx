@@ -15,7 +15,7 @@ export function HoldSkipReason({ reason }: { reason?: string }) {
       <Link
         to="/datasets/holds"
         search={identity}
-        className="font-mono text-fuchsia-300 hover:underline"
+        className="text-fuchsia-300 hover:underline"
       >
         {identity.namespace ? `${identity.namespace}/` : ""}
         {identity.name}

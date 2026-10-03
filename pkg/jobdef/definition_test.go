@@ -1188,6 +1188,41 @@ func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestStepUnmarshalJSONEdgeForms(t *testing.T) {
+	for _, field := range []string{"next", "dependsOn"} {
+		for _, tc := range []struct {
+			name string
+			json string
+			want []string
+			err  string
+		}{
+			{name: "scalar", json: `" upstream "`, want: []string{"upstream"}},
+			{name: "list", json: `["upstream", "other"]`, want: []string{"upstream", "other"}},
+			{name: "null", json: `null`},
+			{name: "empty list", json: `[]`, want: []string{}},
+			{name: "numeric scalar", json: `42`, err: "expected string or list"},
+			{name: "object", json: `{}`, err: "expected string or list"},
+			{name: "invalid list entry", json: `["upstream", 42]`, err: "entry 1 must be a string"},
+			{name: "empty list entry", json: `[""]`, err: "entry 0 cannot be empty"},
+		} {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				var step Step
+				err := json.Unmarshal([]byte(`{"name":"consumer","`+field+`":`+tc.json+`}`), &step)
+				if tc.err != "" {
+					require.ErrorContains(t, err, "step consumer "+field+": "+tc.err)
+					return
+				}
+				require.NoError(t, err)
+				got := step.Next
+				if field == "dependsOn" {
+					got = step.DependsOn
+				}
+				require.Equal(t, tc.want, got)
+			})
+		}
+	}
+}
+
 func TestStepUnmarshalJSONPreservesFalseCacheOverride(t *testing.T) {
 	var step Step
 	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.23","cache":false}`), &step)

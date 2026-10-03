@@ -14,7 +14,7 @@ export function RunCacheSummary({ run, compact = false }: RunCacheSummaryProps) 
     return null;
   }
 
-  const className = compact ? "text-[10px] px-1.5 py-0" : undefined;
+  const className = compact ? "text-[11px] px-1.5 py-0" : undefined;
 
   return (
     <div className="flex flex-wrap items-center gap-2">

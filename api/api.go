@@ -16,6 +16,7 @@ import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
+	"github.com/caesium-cloud/caesium/api/streaming"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -79,7 +80,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 		Handler:           e,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      streaming.WriteTimeout,
 	}
 	apiServer.Lock()
 	apiServer.srv = srv

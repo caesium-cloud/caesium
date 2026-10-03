@@ -6,13 +6,13 @@ import { useDataAssertionsEnabled } from "./useDataAssertions";
 export function AssertionEvidence({ violation }: { violation: DataViolation }) {
   return (
     <div className="space-y-1 text-xs" data-testid="assertion-evidence">
-      <div className="font-mono font-semibold text-text-1">
+      <div className="font-bold text-text-1">
         {violation.metric}.{violation.assertion}
-        {violation.seeding ? " · Seeding (not enforced)" : " · Violated"}
+        {violation.seeding ? ", Seeding (not enforced)" : ", Violated"}
       </div>
       <p className="text-text-2">{violation.message}</p>
       <p className="text-text-3">
-        Observed: {violation.observed ?? "missing"} ·{" "}
+        Observed: {violation.observed ?? "missing"},{" "}
         {violation.assertion === "deltaFromBaseline"
           ? "Allowed deviation"
           : violation.assertion === "maxLag"
@@ -24,8 +24,8 @@ export function AssertionEvidence({ violation }: { violation: DataViolation }) {
         <>
           <p className="text-text-3">
             Recorded baseline: median{" "}
-            {violation.baseline_median ?? "unavailable"} ·{" "}
-            {violation.baseline_samples ?? 0} samples · tolerance{" "}
+            {violation.baseline_median ?? "unavailable"},{" "}
+            {violation.baseline_samples ?? 0} samples, tolerance{" "}
             {violation.delta_from_baseline ?? "—"}
           </p>
           <BaselineSparkline violation={violation} />
@@ -44,10 +44,10 @@ export function DataAssertionsPanel({ task }: { task: TaskRun }) {
     return null;
   return (
     <section
-      className="space-y-3 rounded-lg border border-warning/30 bg-warning/5 p-3"
+      className="space-y-3 rounded-md border border-warning/30 bg-warning/5 p-3"
       data-testid="data-assertions-panel"
     >
-      <h3 className="text-xs font-semibold text-text-1">Recorded assertions</h3>
+      <h3 className="text-xs font-bold text-text-1">Recorded assertions</h3>
       {task.schema_violations?.map((violation, i) => (
         <p className="text-xs text-warning" key={`schema-${i}`}>
           {violation.key}: {violation.message}
@@ -62,7 +62,7 @@ export function DataAssertionsPanel({ task }: { task: TaskRun }) {
                 namespace: violation.namespace ?? "",
                 name: violation.dataset,
               }}
-              className="font-mono text-xs text-cyan-glow hover:underline"
+              className="text-xs text-cyan-glow hover:underline"
             >
               {violation.dataset}
             </Link>

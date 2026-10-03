@@ -14,17 +14,13 @@ describe("<StatusBadge />", () => {
     }
   });
 
-  it("supports filled, soft, and dot variants", () => {
-    const { container, rerender } = render(<StatusBadge status="running" variant="filled" />);
-    expect(container.querySelector('[data-variant="filled"]')).not.toBeNull();
-
-    rerender(<StatusBadge status="running" variant="soft" />);
-    expect(container.querySelector('[data-variant="soft"]')).not.toBeNull();
-
-    rerender(<StatusBadge status="running" variant="dot" />);
-    // dot variant has no [data-variant] attribute on the wrapper
-    expect(container.querySelector('[data-variant]')).toBeNull();
-    expect(container.querySelector('[data-status="running"]')).not.toBeNull();
+  it("renders words by default and keeps glyph-only status accessible", () => {
+    const { container, rerender } = render(<StatusBadge status="running" />);
+    expect(container.querySelector('[data-variant="word"]')).not.toBeNull();
+    expect(container.querySelector('[data-shape="ring"]')).not.toBeNull();
+    rerender(<StatusBadge status="failed" variant="glyph" />);
+    expect(container.querySelector('[data-variant="glyph"]')).toHaveAttribute("aria-label", "failed");
+    expect(container.querySelector('[data-shape="failed"]')).not.toBeNull();
   });
 
   it("falls back to 'unknown' for unrecognized statuses", () => {

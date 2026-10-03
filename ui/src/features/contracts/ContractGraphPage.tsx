@@ -1,3 +1,4 @@
+import { PageHeader as ConsolePageHeader } from "@/components/ui/page-header";
 import { type FormEvent, memo, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -13,23 +14,15 @@ import ReactFlow, {
   type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Database,
-  GitBranch,
-  RefreshCw,
-  Search,
-  ShieldAlert,
-} from "lucide-react";
+import { Database, GitBranch, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
 import { EmptyState } from "@/components/ui/empty-state";
 import { NotFoundState } from "@/components/not-found-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, api } from "@/lib/api";
-import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
 import {
   buildContractFlow,
   cleanDatasetFilter,
@@ -126,7 +119,6 @@ export function ContractGraph({
       <EmptyState
         title="Contract features unavailable"
         subtitle={featuresQuery.error instanceof Error ? featuresQuery.error.message : "The system feature endpoint returned an error."}
-        icon={<AlertTriangle className="h-12 w-12 text-danger" />}
       />
     );
   }
@@ -152,7 +144,6 @@ export function ContractGraph({
 
     return (
       <div className="space-y-5" data-testid="contracts-page">
-        <ContractBreadcrumb />
         <ContractHeader onRefresh={() => queryClient.invalidateQueries({ queryKey: ["contracts"] })} />
         <DatasetFilterForm
           datasetInput={datasetInput}
@@ -162,7 +153,6 @@ export function ContractGraph({
         <EmptyState
           title="Contract graph unavailable"
           subtitle={graphQuery.error instanceof Error ? graphQuery.error.message : "The contract graph endpoint returned an error."}
-          icon={<AlertTriangle className="h-12 w-12 text-danger" />}
         />
       </div>
     );
@@ -172,7 +162,6 @@ export function ContractGraph({
 
   return (
     <div className="space-y-5" data-testid="contracts-page">
-      <ContractBreadcrumb />
       <ContractHeader onRefresh={() => queryClient.invalidateQueries({ queryKey: ["contracts"] })} />
       <DatasetFilterForm
         datasetInput={datasetInput}
@@ -190,9 +179,9 @@ export function ContractGraph({
       {graphQuery.data && !hasEdges ? (
         <div data-testid="contracts-empty-state">
           <EmptyState
-            title="No contract edges yet"
-            subtitle="Contracts appear when job definitions declare dataset schemas or when lifecycle paramMapping chains infer producer and consumer relationships."
-            icon={<ShieldAlert className="h-12 w-12 text-text-3" />}
+            title={datasetFilter ? "No contracts match" : "No contract edges yet"}
+            subtitle={datasetFilter ? "Try another dataset or clear the filter." : "Contracts appear when job definitions declare dataset schemas or lifecycle parameter mappings connect producers and consumers."}
+            action={<Button variant="outline" asChild>{datasetFilter ? <Link to="/contracts" search={{ dataset: undefined }}>Clear filter</Link> : <Link to="/jobdefs">Apply a job definition</Link>}</Button>}
           />
         </div>
       ) : null}
@@ -207,7 +196,7 @@ export function ContractGraph({
           </div>
           <ContractLegend />
           <div
-            className="relative h-[620px] min-h-[520px] w-full overflow-hidden rounded-lg bg-dag-bg"
+            className="relative h-[620px] min-h-[520px] w-full overflow-hidden rounded-md bg-dag-bg"
             data-testid="contracts-graph"
           >
             <ReactFlow
@@ -220,7 +209,7 @@ export function ContractGraph({
               minZoom={0.1}
               maxZoom={1.5}
             >
-              <Background gap={20} />
+              <Background gap={24} size={1} />
               <Controls />
             </ReactFlow>
           </div>
@@ -242,36 +231,7 @@ function ContractGraphSkeleton() {
 }
 
 function ContractHeader({ onRefresh }: { onRefresh: () => void }) {
-  return (
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="min-w-0">
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3">
-          Contracts
-        </div>
-        <h1 className="text-xl font-semibold tracking-tight text-text-1">Contract graph</h1>
-      </div>
-      <Button type="button" variant="outline" size="sm" onClick={onRefresh}>
-        <RefreshCw className="h-3.5 w-3.5" />
-        Refresh
-      </Button>
-    </div>
-  );
-}
-
-function ContractBreadcrumb() {
-  return (
-    <div className="flex items-center gap-2 text-[11px] text-text-3">
-      <Link
-        to="/jobs"
-        className="flex items-center gap-1 transition-colors hover:text-text-2"
-      >
-        <ArrowLeft className="h-3 w-3" />
-        Jobs
-      </Link>
-      <span className="text-text-4">/</span>
-      <span>Contracts</span>
-    </div>
-  );
+  return <ConsolePageHeader title="Contracts" description="Producer and consumer schema relationships." actions={<Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>} />;
 }
 
 function DatasetFilterForm({
@@ -284,18 +244,12 @@ function DatasetFilterForm({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <Card className="border-graphite/40 bg-midnight/30">
-      <CardHeader className="border-b border-border/50 pb-3">
-        <CardTitle className="flex items-center gap-2 text-sm">
-          <Search className="h-4 w-4 text-cyan-glow" />
-          Dataset filter
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-4">
+    <section aria-label="Filter contracts">
+      <div>
         <form className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={onSubmit}>
           <label htmlFor="contract-dataset-filter" className="space-y-1.5">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-3">
-              Dataset
+            <span className="text-[11px] font-bold lowercase text-text-3">
+              Dataset filter
             </span>
             <input
               id="contract-dataset-filter"
@@ -303,28 +257,28 @@ function DatasetFilterForm({
               placeholder="lake/customers"
               data-testid="contract-dataset-filter"
               onChange={(event) => onDatasetInput(event.target.value)}
-              className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-ring"
+              className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-ring"
             />
           </label>
           <div className="flex items-end">
             <Button type="submit" size="sm" className="h-9 w-full md:w-auto" data-testid="contract-filter-submit">
-              <Search className="h-3.5 w-3.5" />
+
               Apply
             </Button>
           </div>
         </form>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
 function MetadataCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border/60 bg-card px-3 py-2">
-      <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-text-3">
+      <div className="text-[11px] font-normal lowercase text-text-3">
         {label}
       </div>
-      <div className="mt-1 truncate font-mono text-xs text-text-1" title={value}>
+      <div className="mt-1 truncate text-xs text-text-1" title={value}>
         {value}
       </div>
     </div>
@@ -358,17 +312,17 @@ function LegendLine({ label, className }: { label: string; className: string }) 
 }
 
 function LegendVerdict({ label, className }: { label: string; className: string }) {
-  return <span className={cn("rounded border px-2 py-0.5 text-[10px] font-semibold", className)}>{label}</span>;
+  return <span className={cn("rounded border px-2 py-0.5 text-[11px] font-bold", className)}>{label}</span>;
 }
 
 const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
   const isJob = data.kind === "job";
   const testId = contractNodeTestId(data);
   const className = cn(
-    "relative block h-[138px] w-[300px] overflow-hidden rounded-lg border-2 px-4 py-3 text-left shadow-sm transition-colors",
+    "relative block h-[80px] w-[260px] overflow-visible rounded-lg border px-3 py-2 text-left transition-colors",
     isJob
-      ? "border-caesium-cyan/45 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.16),hsl(var(--node-surface)/0.96)_62%)]"
-      : "border-gold/45 bg-[linear-gradient(155deg,hsl(var(--gold)/0.16),hsl(var(--node-surface)/0.96)_62%)]",
+      ? "border-caesium-cyan/45 bg-node-surface"
+      : "border-gold/45 bg-node-surface",
     isJob && data.jobId ? "cursor-pointer hover:border-caesium-cyan/80" : "",
   );
   const body = (
@@ -383,7 +337,7 @@ const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
         position={Position.Right}
         className={cn("h-3 w-3 border-2 border-dag-bg", isJob ? "bg-caesium-cyan" : "bg-gold")}
       />
-      <div className="flex h-full flex-col justify-between gap-3">
+      <div className="flex h-full flex-col justify-between gap-1">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             {isJob ? (
@@ -391,20 +345,18 @@ const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
             ) : (
               <Database className="h-4 w-4 shrink-0 text-gold" />
             )}
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-[11px]">
               {isJob ? "Job" : "Dataset"}
             </Badge>
           </div>
-          <div className="mt-3 truncate font-mono text-sm font-semibold text-text-1" title={data.label}>
+          <div className="truncate text-sm font-bold text-text-1" title={data.label}>
             {data.label}
           </div>
           <div className="mt-1 truncate text-[11px] text-text-3" title={data.detail}>
             {data.detail}
           </div>
         </div>
-        <div className="truncate font-mono text-[10px] text-text-4" title={data.id}>
-          {shortId(data.id, 28)}
-        </div>
+
       </div>
     </>
   );
@@ -479,7 +431,7 @@ const ContractEdge = memo(({
           data-edge-source={data?.sourceLabel}
           data-edge-target={data?.targetLabel}
           className={cn(
-            "nodrag nopan max-w-[220px] rounded-full border bg-card/95 px-2 py-1 text-[10px] font-semibold shadow-sm",
+            "nodrag nopan max-w-[220px] inline-flex h-5 items-center gap-2 rounded-[10px] border bg-obsidian px-2 text-[11px] font-normal",
             edgeLabelClass(data?.edgeClass, verdict),
           )}
           style={{
@@ -488,8 +440,8 @@ const ContractEdge = memo(({
           }}
           title={edgeTitle(data, findingLabel)}
         >
-          <span className="uppercase">{data?.edgeClass ?? "edge"}</span>
-          <span className="text-text-4"> · </span>
+          <ShieldCheck className="h-3 w-3" aria-hidden="true" /><span className="lowercase">{data?.edgeClass ?? "edge"}</span>
+          <span className="inline-block w-3" aria-hidden="true" />
           <span>{data?.edgeClass === "evidence" ? "observed" : verdict}</span>
         </div>
       </EdgeLabelRenderer>

@@ -133,7 +133,7 @@ async function waitForSucceededRun(
 
 async function openFirstTaskDetails(page: Page, jobId: string, runId: string) {
   await page.goto(`/jobs/${jobId}/runs/${runId}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   const node = page.locator(".react-flow__node").first();
   await expect(node).toBeVisible({ timeout: 30_000 });

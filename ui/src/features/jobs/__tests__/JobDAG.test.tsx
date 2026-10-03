@@ -85,7 +85,7 @@ vi.mock("reactflow", () => {
     Background: () => null,
     Controls: () => null,
     useNodesInitialized: () => true,
-    useReactFlow: () => ({ fitView }),
+    useReactFlow: () => ({ fitView, getNodes: () => [], viewportInitialized: true }),
     useStore: (selector: (state: typeof flowDimensions) => unknown) => selector(flowDimensions),
     MarkerType: { ArrowClosed: "arrow-closed" },
     Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
@@ -316,8 +316,8 @@ describe("JobDAG", () => {
     expect(screen.getByTestId("node-task-2")).toHaveAttribute("data-edge-incoming", "1");
     expect(screen.getByTestId("node-task-2")).toHaveAttribute("data-edge-outgoing", "0");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-contract-defined", "true");
-    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "hsl(var(--text-3))");
-    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-dasharray", "6 3");
+    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "hsl(var(--text-4))");
+    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-dasharray", "2 5");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-animated", "false");
   });
 

@@ -1159,6 +1159,8 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
                   "peak_memory_bytes":None if unsampled else 1048576}
             if url.endswith("/v1/jobs"):
                 print(json.dumps([{"id":"other","alias":"other"},{"id":"11111111-1111-4111-8111-111111111111","alias":"coverage-write-read"}]))
+            elif "/logs?task_id=" in url:
+                if os.environ.get("FAKE_SCENARIO") != "logs-empty": print("coverage-task-log")
             elif "/runs/" in url:
                 polls=root/"run-polls"
                 count=int(polls.read_text()) if polls.exists() else 0
@@ -1223,8 +1225,10 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         starts = [args for args in calls if "start" in args and "--job-id" in args]
         self.assertEqual(len(starts), 1)
         self.assertEqual(starts[0][starts[0].index("--job-id") + 1], "11111111-1111-4111-8111-111111111111")
-        polls = [args for args in calls if any("/runs/22222222-2222-4222-8222-222222222222" in a for a in args)]
+        polls = [args for args in calls if any(a.endswith("/runs/22222222-2222-4222-8222-222222222222") for a in args)]
         self.assertEqual(len(polls), 2, "the journey must keep reading the run until it is terminal")
+        logs = [args for args in calls if any("/logs?task_id=t1" in a for a in args)]
+        self.assertEqual(len(logs), 1, "the journey must read the executed task's retained log")
         partitions = [args for args in calls if "partitions" in args]
         self.assertEqual(len(partitions), 1)
         self.assertIn("22222222-2222-4222-8222-222222222222", partitions[0])
@@ -1237,6 +1241,13 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertIn("did not succeed with a sampled resource observation", output(result))
         cli = json.loads((self.profiles / "cli.provenance.json").read_text())
         self.assertFalse(cli["complete"])
+        report = json.loads((self.art / "report.json").read_text())
+        self.assertNotEqual(report["verdict"], "pass")
+
+    def test_missing_actual_task_log_output_fails_the_journey(self):
+        result = self.collect("logs-empty")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("retained log did not contain its actual output", output(result))
         report = json.loads((self.art / "report.json").read_text())
         self.assertNotEqual(report["verdict"], "pass")
 

@@ -1,7 +1,10 @@
+import { MetadataValue } from "@/components/ui/metadata-value";
+import { IdChip } from "@/components/ui/id-chip";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode } from "react";
-import { AlertTriangle, Archive, Info } from "lucide-react";
+
+import { StatusBadge } from "@/components/ui/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,7 +18,7 @@ import {
   type WhyTrigger,
   type WhyVerdict,
 } from "@/lib/api";
-import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
+import { cn, formatUTCTimestamp } from "@/lib/utils";
 
 interface TaskWhyViewProps {
   jobId: string;
@@ -35,12 +38,12 @@ export function TaskWhyView({ jobId, runId, taskName }: TaskWhyViewProps) {
   return (
     <section
       data-testid="task-why-container"
-      className="rounded-lg border border-border/60 bg-muted/30 p-3"
+      className="rounded-md border border-border/60 bg-muted/30 p-3"
     >
       <div className="mb-3 flex items-center gap-2">
-        <Info className="h-4 w-4 text-primary" />
+
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="text-xs font-bold lowercase text-muted-foreground">
             Why this status?
           </div>
           <div className="text-xs text-text-3">
@@ -53,7 +56,6 @@ export function TaskWhyView({ jobId, runId, taskName }: TaskWhyViewProps) {
         <EmptyState
           title="Task name unavailable"
           subtitle="The why endpoint explains a task by its step name."
-          icon={<AlertTriangle className="h-8 w-8 text-warning" />}
           className="py-5"
         />
       ) : whyQuery.isLoading ? (
@@ -66,7 +68,6 @@ export function TaskWhyView({ jobId, runId, taskName }: TaskWhyViewProps) {
         <EmptyState
           title="No explanation returned"
           subtitle="The server returned an empty why response for this task."
-          icon={<Info className="h-8 w-8 text-muted-foreground" />}
           className="py-5"
         />
       )}
@@ -89,14 +90,14 @@ function WhyError({ error }: { error: Error }) {
   return (
     <div className="rounded-md border border-warning/25 bg-warning/10 p-3 text-xs text-warning">
       <div className="flex items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span aria-hidden="true" className="cs-status-glyph cs-status-paused text-gold" />
         <div>
-          <div className="font-semibold">
+          <div className="font-bold">
             {isAccessError
               ? "Insufficient access for task explanation"
               : "Could not load task explanation"}
           </div>
-          <div className="mt-1 text-warning/80">
+          <div className="mt-1 text-warning">
             {isAccessError
               ? "Your current role cannot read this why endpoint."
               : error.message}
@@ -116,16 +117,14 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
         <Badge variant={verdictBadgeVariant(explanation.verdict)}>
           {formatVerdict(explanation.verdict)}
         </Badge>
-        <span className="rounded border border-border/60 px-1.5 py-0.5 font-mono text-[10px] text-text-3">
-          {explanation.status}
-        </span>
-        <span className="rounded border border-border/60 px-1.5 py-0.5 text-[10px] text-text-3">
+        <StatusBadge status={explanation.status} size="sm" />
+        <span className="rounded border border-border/60 px-1.5 py-0.5 text-[11px] text-text-3">
           cache {explanation.cacheEnabled ? "enabled" : "disabled"}
         </span>
       </div>
 
       <div className="rounded-md border border-border/50 bg-background/40 p-3">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="text-[11px] font-bold lowercase text-muted-foreground">
           Server summary
         </div>
         <p className="mt-1 text-xs leading-relaxed text-foreground">
@@ -198,7 +197,7 @@ function ChainNotes({ explanation }: { explanation: WhyExplanation }) {
       data-testid="task-why-chain-exclusion"
       className="rounded-md border border-border/50 bg-background/40 p-3 text-xs text-text-2"
     >
-      <div className="font-semibold text-foreground">How this key was built</div>
+      <div className="font-bold text-foreground">How this key was built</div>
       <ul className="mt-1 space-y-1">
         {notes.map((note) => (
           <li key={note}>{note}</li>
@@ -233,10 +232,10 @@ function DiscriminatingField({
           className="rounded-md border border-cached/30 bg-cached/10 p-3"
         >
           <div className="flex items-center gap-2">
-            <Archive className="h-3.5 w-3.5 text-cached" />
-            <span className="font-mono text-xs text-cached">hashEqual=true</span>
+
+            <span className="text-xs text-cached">hashEqual=true</span>
           </div>
-          <div className="mt-1 text-xs text-cached/90">
+          <div className="mt-1 text-xs text-cached">
             The backend reported identical subject and baseline hash inputs.
           </div>
         </div>
@@ -283,8 +282,8 @@ function DiffDetails({
           data-testid="task-why-degraded-reason"
           className="rounded-md border border-warning/25 bg-warning/10 p-3 text-xs text-warning"
         >
-          <div className="font-semibold">Field-level diff unavailable</div>
-          <div className="mt-1 text-warning/85">{diff.degraded}</div>
+          <div className="font-bold">Field-level diff unavailable</div>
+          <div className="mt-1 text-warning">{diff.degraded}</div>
         </div>
       ) : null}
 
@@ -320,32 +319,25 @@ function BaselineDetails({
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Baseline</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Kind" value={baseline?.kind || "none"} mono />
+        <DetailRow label="Kind" value={baseline?.kind ?? ""} mono />
         <div className="grid grid-cols-[96px_1fr] gap-2">
           <span className="text-muted-foreground">Run</span>
           {baseline?.runId ? (
-            <Link
-              to="/jobs/$jobId/runs/$runId"
-              params={{ jobId, runId: baseline.runId }}
-              data-testid={isCacheHit ? "task-why-source-run-link" : undefined}
-              className="font-mono text-primary hover:underline"
-            >
-              {isCacheHit ? "Source run " : "Baseline run "}
-              {shortId(baseline.runId)}
-              {isCacheHit && baseline.taskRunId ? (
-                <span className="text-primary/80">
-                  {" "}
-                  / task {shortId(baseline.taskRunId)}
-                </span>
-              ) : null}
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: baseline.runId }}
+                data-testid={isCacheHit ? "task-why-source-run-link" : undefined} className="text-primary hover:underline">
+                {isCacheHit ? "Source run" : "Baseline run"}
+              </Link>
+              <IdChip value={baseline.runId} label="run id" />
+            </div>
           ) : (
             <span className="text-text-3">none</span>
           )}
         </div>
         <DetailRow
           label="Task run"
-          value={baseline?.taskRunId ? shortId(baseline.taskRunId) : "none"}
+          value={baseline?.taskRunId ?? ""}
+          idChip
           mono
         />
         <DetailRow
@@ -364,7 +356,7 @@ function TriggerDetails({ trigger }: { trigger?: WhyTrigger | null }) {
       <SectionLabel>Trigger causation</SectionLabel>
       <div className="grid gap-2 text-xs">
         <DetailRow label="Type" value={trigger?.type || "unknown"} mono />
-        <DetailRow label="Alias" value={trigger?.alias || "none"} mono />
+        <DetailRow label="Alias" value={trigger?.alias ?? ""} mono />
         <DetailRow
           label="Fired"
           value={trigger?.firedAt ? formatDateTime(trigger.firedAt) : "unknown"}
@@ -374,7 +366,7 @@ function TriggerDetails({ trigger }: { trigger?: WhyTrigger | null }) {
           {params.length > 0 ? (
             <div className="space-y-1">
               {params.map(([key, value]) => (
-                <div key={key} className="font-mono text-text-2">
+                <div key={key} className="text-text-2">
                   {key}={value}
                 </div>
               ))}
@@ -393,9 +385,9 @@ function HashDetails({ explanation }: { explanation: WhyExplanation }) {
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Hashes</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Task hash" value={explanation.hash || "none"} mono wrap />
-        <DetailRow label="Subject" value={explanation.diff?.subjectHash || "none"} mono wrap />
-        <DetailRow label="Baseline" value={explanation.diff?.baselineHash || "none"} mono wrap />
+        <DetailRow idChip label="Task hash" value={explanation.hash ?? ""} mono wrap />
+        <DetailRow idChip label="Subject" value={explanation.diff?.subjectHash ?? ""} mono wrap />
+        <DetailRow idChip label="Baseline" value={explanation.diff?.baselineHash ?? ""} mono wrap />
       </div>
     </div>
   );
@@ -419,14 +411,14 @@ function FieldChangeRow({
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs font-semibold text-foreground">
+        <span className="text-xs font-bold text-foreground">
           {change.field}
         </span>
-        <span className="rounded border border-border/60 px-1.5 py-0.5 text-[10px] text-text-3">
+        <span className="rounded border border-border/60 px-1.5 py-0.5 text-[11px] text-text-3">
           {change.kind}
         </span>
         {change.redacted ? (
-          <span className="rounded border border-warning/30 px-1.5 py-0.5 text-[10px] text-warning">
+          <span className="rounded border border-warning/30 px-1.5 py-0.5 text-[11px] text-warning">
             redacted digest
           </span>
         ) : null}
@@ -443,17 +435,19 @@ function DetailRow({
   value,
   mono = false,
   wrap = false,
+  idChip = false,
 }: {
   label: string;
   value: string;
   mono?: boolean;
   wrap?: boolean;
+  idChip?: boolean;
 }) {
   return (
     <div className="grid grid-cols-[96px_1fr] gap-2">
       <span className="text-muted-foreground">{label}</span>
-      <span className={cn("text-text-2", mono && "font-mono", wrap && "break-all")}>
-        {value}
+      <span className={cn("text-text-2", mono && "", wrap && "break-all")}>
+        <MetadataValue value={value} label={label} idChip={idChip} />
       </span>
     </div>
   );
@@ -461,7 +455,7 @@ function DetailRow({
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="mb-1.5 text-[11px] font-bold lowercase text-muted-foreground">
       {children}
     </div>
   );

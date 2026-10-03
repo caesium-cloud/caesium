@@ -1,3 +1,4 @@
+import { RunStrip, RunStripAxis } from "@/components/ui/run-strip";
 import { useQuery } from "@tanstack/react-query";
 import { api, type DataViolation } from "@/lib/api";
 
@@ -56,6 +57,10 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
       className="mt-2 rounded border border-border/50 bg-obsidian/30 p-2"
       data-testid="baseline-sparkline"
     >
+      <div aria-label="Metric observations in the last 24 hours">
+        <RunStripAxis windowSeconds={86400} label="Observations" />
+        <RunStrip windowSeconds={86400} runs={[...query.data.series].reverse().map(sample => ({ status: sample.violated ? "failed" : sample.in_baseline ? "succeeded" : "queued", startedAt: sample.created_at, duration: 0 }))} />
+      </div>
       <svg
         viewBox="0 0 320 96"
         role="img"
@@ -98,7 +103,7 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
           points={values.map((value, i) => `${x(i)},${y(value)}`).join(" ")}
           fill="none"
           stroke="hsl(var(--text-2))"
-          strokeWidth="2"
+          strokeWidth="1.5"
         />
         {values.map((value, i) => (
           <circle
@@ -123,8 +128,8 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
         ) : null}
       </svg>
       <figcaption className="text-[11px] text-text-3">
-        Current clean baseline · last {values.length}/{query.data.window}{" "}
-        samples · p10–p90 band · gold point: recorded observation; dashed gold
+        Current clean baseline, last {values.length}/{query.data.window}{" "}
+        samples, p10–p90 band, gold point: recorded observation; dashed gold
         box: allowed range at breach.
         {query.data.seeding
           ? ` Seeding (${values.length}/${query.data.min_samples} samples).`

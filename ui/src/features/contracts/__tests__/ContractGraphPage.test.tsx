@@ -106,7 +106,8 @@ vi.mock("dagre", () => {
   };
 });
 
-vi.mock("@/lib/api", () => {
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
   class MockApiError extends Error {
     status: number;
     kind: string;
@@ -119,6 +120,7 @@ vi.mock("@/lib/api", () => {
   }
 
   return {
+    ...actual,
     ApiError: MockApiError,
     api: {
       getSystemFeatures: vi.fn(),

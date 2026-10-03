@@ -4,9 +4,9 @@ const PRIMARY_NAV: { label: string; heading: RegExp; urlMatch: RegExp }[] = [
   { label: "Jobs", heading: /^Jobs$/, urlMatch: /\/jobs$/ },
   { label: "Triggers", heading: /^Triggers$/, urlMatch: /\/triggers$/ },
   { label: "Atoms", heading: /^Atoms$/, urlMatch: /\/atoms$/ },
-  { label: "Stats", heading: /^Operator Statistics$/, urlMatch: /\/stats$/ },
+  { label: "Stats", heading: /^Stats$/, urlMatch: /\/stats$/ },
   { label: "System", heading: /^System$/, urlMatch: /\/system$/ },
-  { label: "JobDefs", heading: /^Job Definitions$/, urlMatch: /\/jobdefs$/ },
+  { label: "JobDefs", heading: /^JobDefs$/, urlMatch: /\/jobdefs$/ },
 ];
 
 test("sidebar navigates between every primary control-plane page", async ({ page }) => {
@@ -24,6 +24,14 @@ test("sidebar navigates between every primary control-plane page", async ({ page
     await sidebar.getByRole("link", { name: new RegExp(`^${item.label}\\b`) }).click();
     await page.waitForURL(item.urlMatch);
     await expect(page.getByRole("heading", { name: item.heading })).toBeVisible();
+    if (item.label === "System") {
+      // The coverage journey uses this real operator control to reach the
+      // server-log stream, rather than counting the logs page as navigation only.
+      await page.getByRole("link", { name: "Log console", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Log Console", exact: true })).toBeVisible();
+      await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+      await expect(page.locator("tbody tr").first()).toBeVisible();
+    }
   }
 });
 

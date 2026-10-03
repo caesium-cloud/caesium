@@ -28,8 +28,9 @@ describe("<EmptyState />", () => {
     expect(svg?.getAttribute("data-reduced-motion")).toBe("true");
   });
 
-  it("accepts a custom icon override", () => {
+  it("honors a supplied icon override", () => {
     render(<EmptyState title="No data" icon={<span data-testid="custom" />} />);
     expect(screen.getByTestId("custom")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Caesium" })).not.toBeInTheDocument();
   });
 });

@@ -109,7 +109,7 @@ describe("hold release boundary", () => {
         min: "24h",
       }),
     );
-    expect(await screen.findByText(/Dataset hold · released/)).toBeVisible();
+    expect(await screen.findByText(/Dataset hold, released/)).toBeVisible();
   });
   it("refuses to retry or retarget a conflicting historical hold", async () => {
     const release = vi
@@ -137,10 +137,10 @@ describe("hold producing-run evidence", () => {
       />,
     );
     expect(
-      screen.getByRole("link", { name: "producer · run" }),
+      screen.getByRole("link", { name: "opening run" }),
     ).toHaveAttribute("href", "/jobs/producer/runs/run");
     const latest = screen.getByTestId("hold-latest-breach-run");
-    expect(latest).toHaveTextContent("different-producer-run");
+    expect(screen.getByRole("button", { name: "Copy latest breach run id: different-producer-run" })).toHaveAttribute("title", "different-producer-run");
     expect(latest.querySelector("a")).toBeNull();
     expect(
       screen.queryByRole("link", { name: "different-producer-run" }),
@@ -275,7 +275,7 @@ describe("assertion evidence", () => {
         }
       />,
     );
-    const chart = await screen.findByRole("img");
+    const chart = await screen.findByRole("img", { name: /^Current clean baseline/ });
     expect(chart).toHaveAccessibleName(
       /3 samples, median 100.*Recorded observation 1,000/,
     );

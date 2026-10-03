@@ -1,10 +1,14 @@
+import { mergeRetriedRun } from "./run-updates";
+import { JobRunNavigation } from "./JobRunNavigation";
+import { RunIdentity } from "./RunIdentity";
+import { RunPicker } from "./RunPicker";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, FileJson, RotateCcw, Square, History } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { NotFoundState } from "@/components/not-found-state";
-import { RelativeTime } from "@/components/relative-time";
+import { Duration } from "@/components/duration";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -15,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Kbd } from "@/components/ui/kbd";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
@@ -27,6 +32,7 @@ import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { rerunParams } from "./rerun-params";
 import { CallbackRunsSection } from "./CallbackRunsSection";
+import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
 import { ReplayDialog } from "./ReplayDialog";
@@ -46,13 +52,24 @@ export function RunDetailPage() {
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [reproducibilityOpen, setReproducibilityOpen] = useState(false);
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const principal = usePrincipal();
+
+  const { data: job } = useQuery({ queryKey: ["job", jobId], queryFn: () => api.getJob(jobId) });
 
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
-    refetchInterval: (query) =>
-      !streamHealthy || isTerminalRunStatus(query.state.data?.status) ? 5000 : false,
+    // SSE is immediate; polling reconciles missed events across cluster replicas.
+    refetchInterval: streamHealthy ? 5000 : 3000,
+  });
+
+  const receiptQuery = useQuery({
+    queryKey: ["job", jobId, "runs", runId, "receipt"],
+    queryFn: () => api.getReceipt(jobId, runId),
+    enabled: isTerminalRunStatus(run?.status),
+    staleTime: 15_000,
+    retry: false,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -105,6 +122,7 @@ export function RunDetailPage() {
 
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     const onEvent = (e: CaesiumEvent) => {
+      if (e.job_id && e.job_id !== jobId) return;
       if (e.run_id && e.run_id !== runId) return;
 
       queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
@@ -113,16 +131,21 @@ export function RunDetailPage() {
         if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const finalRun = e.payload as JobRun;
           if (finalRun?.tasks) return mergeTerminalRunUpdate(old, finalRun);
-          toast.success("Run completed");
-          return { ...old, status: "succeeded" };
+          if (finalRun?.id && finalRun.id !== old.id) return old;
+          return { ...old, ...finalRun, status: finalRun?.status ?? (e.type === "run_terminal" ? old.status : "succeeded") };
         }
 
         if (e.type === "run_failed") {
-          toast.error("Run failed");
-          return { ...old, status: "failed" };
+          const failedRun = e.payload as JobRun | undefined;
+          return failedRun?.id === old.id ? mergeTerminalRunUpdate(old, { ...old, ...failedRun, status: "failed" }) : { ...old, status: "failed" };
+        }
+
+        if (e.type === "run_retried") {
+          return mergeRetriedRun(old, e.payload as JobRun | undefined);
         }
 
         if (e.type.startsWith("task_")) {
+          if (isTerminalRunStatus(old.status)) return old;
           const taskUpdate = e.payload as TaskRun | undefined;
           const taskID = taskUpdate?.task_id || e.task_id;
           if (!taskID) return old;
@@ -179,16 +202,21 @@ export function RunDetailPage() {
 
         return old;
       });
+      if (e.type === "run_retried") {
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "why"] });
+      }
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+    ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
       (type) => events.subscribe(type, onEvent),
     );
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+      ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
         (type) => events.unsubscribe(type, onEvent),
       );
     };
@@ -269,6 +297,26 @@ export function RunDetailPage() {
     onError: (err: Error) => toast.error(`Failed to trigger: ${err.message}`),
   });
 
+  useEffect(() => {
+    const shortcuts: Record<string, string> = { c: '[data-testid="run-compare-trigger"]', a: '[data-testid="all-runs-link"]', p: '[data-testid="run-replay-trigger"]', r: '[data-testid="run-rerun-trigger"]' };
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      const rerun = event.altKey && event.code === "KeyR";
+      if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || (event.altKey && !rerun) || target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
+      const selector = rerun ? shortcuts.r : event.key === "r" ? undefined : shortcuts[event.key];
+      if (selector && !document.querySelector('[role="dialog"]')) {
+        const control = document.querySelector<HTMLElement>(selector);
+        if (control && !control.hasAttribute('disabled')) {
+          event.preventDefault();
+          if (selector === shortcuts.c) setCompareOpen(true);
+          else control.click();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   if (isLoading) {
     return (
       <div className="space-y-4 p-8">
@@ -305,39 +353,28 @@ export function RunDetailPage() {
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="space-y-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Link
-              to="/jobs/$jobId"
-              params={{ jobId }}
-              className="flex items-center gap-1 text-[11px] text-text-3 hover:text-text-2 transition-colors"
-            >
-              <ArrowLeft className="h-3 w-3" />
-              Job
-            </Link>
-            <span className="text-text-4">/</span>
-            <span className="text-[11px] text-text-3">Run</span>
+          <div className="flex flex-wrap items-center gap-x-7 gap-y-2">
+            <h1 data-testid="run-heading" className="min-w-0 basis-full [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job?.alias || run.job_alias || "pipeline"}</h1>
+            <RunIdentity run={run} />
           </div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">
-            Run detail
-          </div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-semibold text-text-1 font-mono tracking-tight">
-              Run {shortId(runId)}
-            </h1>
-            <StatusBadge status={run.status} size="sm" />
-          </div>
-          <div className="mt-1 flex items-center gap-2 text-xs text-text-3">
-            <RelativeTime date={run.started_at} />
-            <span className="text-text-4">·</span>
-            <span className="font-mono text-text-4 text-[10px]">{runId}</span>
+          <div className="mt-3 flex flex-wrap items-center gap-x-7 gap-y-2 text-xs text-text-3">
+            <span>elapsed <Duration start={run.started_at} end={run.completed_at} /></span>
+            <span>trigger {run.trigger_type || "manual"}</span>
+            <span title="Completed includes succeeded, cached, failed, skipped, and cancelled tasks; blocked tasks remain separate.">tasks {(run.tasks ?? []).filter(task => ["succeeded", "completed", "cached", "failed", "skipped", "cancelled"].includes(task.status)).length}/{run.tasks?.length ?? 0} completed</span>
+            <span>receipt {isLive || receiptQuery.isPending ? "pending" : receiptQuery.data ? "available" : "unavailable"}</span>
           </div>
         </div>
 
+        <JobRunNavigation jobId={jobId} active="run" trailing={<RunPicker jobId={jobId} currentRun={run} runs={jobRuns?.runs} isLoading={isLoadingJobRuns} />} />
+
+        <DagCounters tasks={run.tasks} runStatus={run.status} />
+
         {/* Action cluster */}
-        <div className="flex flex-wrap items-center gap-2">
-          <DropdownMenu>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-border pt-3">
+          <div className="flex flex-wrap items-center gap-2" aria-label="Run navigation">
+          <DropdownMenu open={compareOpen} onOpenChange={setCompareOpen}>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="outline"
@@ -347,8 +384,7 @@ export function RunDetailPage() {
                 data-testid="run-compare-trigger"
                 title={compareDisabledReason}
               >
-                <ArrowLeftRight className="mr-1.5 h-3.5 w-3.5" />
-                Compare to run…
+                Compare to run… <Kbd>c</Kbd>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
@@ -366,9 +402,9 @@ export function RunDetailPage() {
                   }
                 >
                   <div className="min-w-0">
-                    <div className="truncate font-mono text-xs">Run {shortId(candidate.id)}</div>
-                    <div className="truncate text-[10px] text-text-3">
-                      {formatRunTimestamp(candidate)}
+                    <div className="truncate text-xs">run started {formatRunTimestamp(candidate)}</div>
+                    <div className="truncate text-[11px] text-text-3">
+                      <span title={candidate.id}>{shortId(candidate.id)}</span>
                     </div>
                   </div>
                   <StatusBadge status={candidate.status} size="sm" />
@@ -376,16 +412,9 @@ export function RunDetailPage() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="ghost" size="sm" className="h-8 text-xs" asChild>
-            <Link
-              to="/jobs/$jobId/runs"
-              params={{ jobId }}
-              data-testid="all-runs-link"
-            >
-              <History className="mr-1.5 h-3.5 w-3.5" />
-              All runs
-            </Link>
-          </Button>
+
+          </div>
+          <div className="flex flex-wrap items-center gap-2" aria-label="Run execution actions">
           {canLaunchReplay ? (
             <Button
               variant="outline"
@@ -393,9 +422,9 @@ export function RunDetailPage() {
               className="h-8 text-xs"
               onClick={() => setReplayDialogOpen(true)}
               data-testid="run-replay-trigger"
+              title="Configure a replay using this run as the baseline"
             >
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-              Replay…
+              Replay… <Kbd>p</Kbd>
             </Button>
           ) : (
             <span className="inline-flex" title={replayGateReason}>
@@ -408,8 +437,7 @@ export function RunDetailPage() {
                 aria-describedby="run-replay-gate-reason"
                 data-testid="run-replay-trigger"
               >
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                Replay…
+                  Replay… <Kbd>p</Kbd>
               </Button>
               <span
                 id="run-replay-gate-reason"
@@ -428,10 +456,11 @@ export function RunDetailPage() {
               const params = rerunParams(run.params);
               triggerMutation.mutate({ jobId, params });
             }}
+            title="Start a new run with the same parameters"
+            data-testid="run-rerun-trigger"
             disabled={triggerMutation.isPending}
           >
-            <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-            {triggerMutation.isPending ? "Re-running…" : "Re-run"}
+            {triggerMutation.isPending ? "Re-running…" : "Re-run"} <Kbd>Alt R</Kbd>
           </Button>
           {isLive && (
             <Button
@@ -441,10 +470,11 @@ export function RunDetailPage() {
               disabled
               title="Cancel not yet implemented"
             >
-              <Square className="mr-1.5 h-3.5 w-3.5" />
+
               Cancel
             </Button>
           )}
+          </div>
         </div>
       </div>
 
@@ -471,7 +501,7 @@ export function RunDetailPage() {
       />
 
       {/* Gantt timeline */}
-      <div data-testid="run-execution-timeline-section" className="rounded-md border border-border/50 bg-card overflow-hidden">
+      <div data-testid="run-execution-timeline-section" className="rounded-lg border border-border bg-midnight overflow-hidden">
         <button
           type="button"
           className="flex w-full items-center gap-2 px-4 py-2.5 text-left border-b border-border/50 hover:bg-obsidian/30 transition-colors"
@@ -484,22 +514,22 @@ export function RunDetailPage() {
           ) : (
             <ChevronRight className="h-3.5 w-3.5 text-text-3" />
           )}
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+          <span className="text-[11px] font-bold lowercase text-text-3">
             Execution timeline
           </span>
           {isLive && (
-            <span className="ml-2 text-[10px] text-cyan-glow/70 font-medium animate-pulse">Live</span>
+            <StatusBadge status="running" label="live" size="sm" />
           )}
-          <span className="ml-auto text-[10px] text-text-4">
+          <span className="ml-auto text-[11px] text-text-3">
             {run.tasks?.length ?? 0} tasks
           </span>
         </button>
         {timelineOpen && (
           <div id="run-execution-timeline-body" className="p-4">
             {run.tasks && run.tasks.length > 0 ? (
-              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} />
+              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} runStatus={run.status} runCompletedAt={run.completed_at} />
             ) : (
-              <div className="text-[12px] text-text-4 py-4 text-center">
+              <div className="text-[12px] text-text-3 py-4 text-center">
                 No task execution data yet.
               </div>
             )}
@@ -510,10 +540,10 @@ export function RunDetailPage() {
       {/* Interactive DAG with task selection */}
       <div data-testid="run-interactive-dag-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
         <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
-            Interactive DAG + task logs
+          <span className="text-[11px] font-bold lowercase text-text-3">
+            graph
           </span>
-          <span className="ml-auto text-[10px] text-text-4">
+          <span className="ml-auto text-[11px] text-text-3">
             {dag?.nodes?.length ?? 0} nodes
           </span>
         </div>
@@ -526,8 +556,11 @@ export function RunDetailPage() {
           {dag && atoms ? (
             <JobDAG
               dag={dag}
+              runStatus={run?.status}
+              runCompletedAt={run?.completed_at}
               atoms={atoms}
               taskDefinitions={taskDefinitions}
+              runStartedAt={run.started_at}
               taskMetadata={taskMetadata}
               taskRunData={runTasks}
               onNodeClick={handleTaskSelect}
@@ -540,6 +573,8 @@ export function RunDetailPage() {
               key={selectedTaskId}
               taskId={selectedTaskId}
               task={selectedTask}
+              runStatus={run?.status}
+              runCompletedAt={run?.completed_at}
               runTask={selectedRunTask}
               taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
               jobId={jobId}
@@ -564,8 +599,8 @@ export function RunDetailPage() {
           <CardContent className="grid gap-2 md:grid-cols-2">
             {Object.entries(run.params).map(([key, value]) => (
               <div key={key}>
-                <div className="text-[10px] uppercase tracking-wide text-text-3">{key}</div>
-                <div className="font-mono text-sm text-text-1">{value}</div>
+                <div className="text-[11px] lowercase text-text-3">{key}</div>
+                <div className="text-sm text-text-1">{value}</div>
               </div>
             ))}
           </CardContent>
@@ -586,11 +621,11 @@ export function RunDetailPage() {
           ) : (
             <ChevronRight className="h-3.5 w-3.5 text-text-3" />
           )}
-          <FileJson className="h-3.5 w-3.5 text-text-3" />
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+
+          <span className="text-[11px] font-bold lowercase text-text-3">
             Reproducibility
           </span>
-          <span className="ml-auto text-[10px] text-text-4">Receipt</span>
+          <span className="ml-auto text-[11px] text-text-3">Receipt</span>
         </button>
         {reproducibilityOpen ? (
           <div id="run-reproducibility-body" className="border-t border-border/50 p-4">

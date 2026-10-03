@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange } from "lucide-react";
+
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,11 +76,11 @@ export function BackfillDialog({ jobId, open, onOpenChange, disabled }: Backfill
     "w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground " +
     "focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50";
 
-  const labelClass = "block text-xs uppercase tracking-wide text-muted-foreground mb-1";
+  const labelClass = "block text-xs lowercase text-muted-foreground mb-1";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md p-4 sm:rounded-lg sm:p-6">
+      <DialogContent className="max-w-md p-4 sm:rounded-md sm:p-6">
         <DialogHeader>
           <DialogTitle>Start Backfill</DialogTitle>
         </DialogHeader>
@@ -134,9 +134,9 @@ export function BackfillDialog({ jobId, open, onOpenChange, disabled }: Backfill
                 disabled={mutation.isPending || disabled}
                 className={inputClass}
               >
-                <option value="none">None — skip existing</option>
-                <option value="failed">Failed — retry failures</option>
-                <option value="all">All — reprocess everything</option>
+                <option value="none">None: skip existing</option>
+                <option value="failed">Failed: retry failures</option>
+                <option value="all">All: reprocess everything</option>
               </select>
             </div>
           </div>
@@ -147,7 +147,7 @@ export function BackfillDialog({ jobId, open, onOpenChange, disabled }: Backfill
               size="sm"
               disabled={mutation.isPending || disabled}
             >
-              <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
+
               {mutation.isPending ? "Starting…" : "Start Backfill"}
             </Button>
           </div>

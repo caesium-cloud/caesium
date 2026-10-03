@@ -210,7 +210,7 @@ describe("SystemPage cluster health", () => {
     expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
     expect(screen.getByTestId("system-health-banner")).toHaveAttribute("data-tone", "warn");
     expect(screen.getByTestId("system-health-badge")).toHaveTextContent("degraded");
-    expect(screen.getByText("Degraded — 3 of 4 cluster nodes reachable")).toBeInTheDocument();
+    expect(screen.getByText("Degraded: 3 of 4 cluster nodes reachable")).toBeInTheDocument();
 
     const nodesRow = screen
       .getAllByTestId("health-check-row")
@@ -350,7 +350,7 @@ describe("SystemPage cluster health", () => {
   // Review round 5: when /health stops answering the hook returns raw: null,
   // but React Query keeps serving the cached node array. That used to be read
   // as a "no raft cluster" deployment, restoring the cached reachability as
-  // current — green rows beside a "Health check failed" banner.
+  // current: green rows beside a "Health check failed" banner.
   it("stops showing cached liveness as current once health polling fails", async () => {
     const healthy = cluster();
     mocked.getHealthStatus.mockResolvedValueOnce(health(healthy));

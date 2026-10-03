@@ -25,9 +25,8 @@ failOnUnexpectedPageErrors();
  *
  * Determinism strategy:
  *  - Fixed viewport for this whole file (`test.use` below).
- *  - Google Fonts network requests are blocked so the browser always falls
- *    back to the same platform font stack declared in src/index.css, instead
- *    of racing a network font swap.
+ *  - Self-hosted Sometype Mono is loaded and verified before capture.
+ *    External font requests fail this gate.
  *  - `animations: "disabled"` freezes/finishes CSS transitions and
  *    animations before the pixel capture.
  *  - Every screenshot is CLIPPED to one component locator, not the full
@@ -53,21 +52,14 @@ test.use({ viewport: { width: 1280, height: 960 } });
 test.beforeEach(async ({ page }, testInfo) => {
   testInfo.skip(process.platform !== "linux", "visual baselines are linux-only; see the file header comment above");
 
-  // Force the deterministic fallback font stack (see src/index.css
-  // --font-sans/--font-mono) instead of racing the network for Google Fonts.
-  // fulfill() with an empty, successful response rather than abort(): an
-  // aborted request makes Chrome log its own "Failed to load resource:
-  // net::ERR_FAILED" console error, which failOnUnexpectedPageErrors()
-  // (correctly) does not otherwise allowlist — an empty stylesheet response
-  // declares no @font-face rules (so no font file request follows) without
-  // the browser treating it as a failure.
-  await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) =>
-    route.fulfill({ status: 200, contentType: "text/css", body: "" }),
-  );
+  page.on("request", request => {
+    expect(request.url(), "fonts must be served by Caesium").not.toMatch(/fonts\.(googleapis|gstatic)\.com/);
+  });
 });
 
 async function readyForScreenshot(page: Page): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
+  expect(await page.evaluate(() => document.fonts.check('13px "Sometype Mono"'))).toBe(true);
 }
 
 /** Matches the elapsed-time text rendered by src/components/duration.tsx. */
@@ -98,7 +90,7 @@ test("a fixed-shape branching DAG renders deterministically once terminal", asyn
   const { job, run } = await applyAndRun(request, "branching.job.yaml", { status: "succeeded" });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   const dagSection = page.getByTestId("run-interactive-dag-section");
   const dagNodes = dagSection.locator(".react-flow__node");
@@ -139,6 +131,7 @@ test("a fixed-shape branching DAG renders deterministically once terminal", asyn
   const dynamicMasks: Locator[] = [
     dagSection.locator(".react-flow__node").getByText(DURATION_TEXT),
     branchSkipReason,
+    dagSection.getByTestId("task-node-note").filter({ hasText: /^started at/ }),
   ];
 
   await expect(dagSection).toHaveScreenshot("branching-dag.png", {
@@ -153,7 +146,7 @@ test("a fanned task's partition table renders deterministically", async ({ page,
   const { job, run } = await applyAndRun(request, "dynamic-fanout.job.yaml", { status: "succeeded" });
 
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
 
   await page.locator(".react-flow__node", { hasText: "process-file" }).click();
   const panel = page.getByTestId("task-detail-panel");

@@ -26,7 +26,7 @@ export function LogShell({
   className,
 }: LogShellProps) {
   return (
-    <div className={cn("flex h-full min-h-0 flex-col bg-obsidian", className)}>
+    <div className={cn("flex h-full min-h-0 flex-col bg-void", className)}>
       {banner}
       {toolbar}
       <div className="relative flex-1 overflow-hidden">

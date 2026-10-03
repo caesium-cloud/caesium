@@ -1,16 +1,6 @@
 import * as React from "react"
+import { Search } from "lucide-react"
 import { useNavigate } from "@tanstack/react-router"
-import {
-  Database,
-  LayoutDashboard,
-  BarChart,
-  Circle,
-  FileCode2,
-  Radio,
-  Server,
-  Search,
-} from "lucide-react"
-
 import {
   CommandDialog,
   CommandEmpty,
@@ -25,90 +15,54 @@ import { api } from "@/lib/api"
 import { shortId } from "@/lib/utils"
 import { RelativeTime } from "./relative-time"
 import { commandPaletteFilter } from "./command-filter"
+import { Kbd } from "./ui/kbd"
 
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
   const navigate = useNavigate()
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  const inputRef = React.useRef<HTMLInputElement>(null)
+  const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"
 
-  const { data: jobs } = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.getJobs,
-    enabled: open,
-  })
-
-  const { data: triggers } = useQuery({
-    queryKey: ["triggers"],
-    queryFn: api.getTriggers,
-    enabled: open,
-  })
-
-  const { data: atoms } = useQuery({
-    queryKey: ["atoms"],
-    queryFn: api.getAtoms,
-    enabled: open,
-  })
-
+  const { data: jobs } = useQuery({ queryKey: ["jobs"], queryFn: api.getJobs, enabled: open });
+  const { data: triggers } = useQuery({ queryKey: ["triggers"], queryFn: api.getTriggers, enabled: open });
+  const { data: atoms } = useQuery({ queryKey: ["atoms"], queryFn: api.getAtoms, enabled: open });
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault()
-        setOpen((open) => !open)
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable;
+      if (!e.repeat && ((e.key?.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) || (e.key === ":" && !typing))) {
+        e.preventDefault(); setOpen(value => !value);
       }
-    }
-
-    document.addEventListener("keydown", down)
-    return () => document.removeEventListener("keydown", down)
-  }, [])
-
+    };
+    document.addEventListener("keydown", down);
+    return () => document.removeEventListener("keydown", down);
+  }, []);
   const runCommand = React.useCallback((command: () => void) => {
-    setOpen(false)
-    command()
-  }, [])
+    setOpen(false); triggerRef.current?.focus(); command();
+  }, []);
+  const contents = (
 
-  return (
     <>
-      <button
-        type="button"
-        aria-label="Open search"
-        onClick={() => setOpen(true)}
-        className="flex h-9 w-9 items-center justify-center rounded-md border text-sm text-muted-foreground transition-colors hover:bg-muted sm:w-64 sm:justify-between sm:px-3"
-      >
-        <div className="hidden items-center gap-2 sm:flex">
-          <Search className="h-4 w-4" />
-          <span>Search...</span>
-        </div>
-        <Search className="h-4 w-4 sm:hidden" />
-        <kbd className="pointer-events-none hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground opacity-100 sm:inline-flex">
-          <span className="text-xs">⌘</span>K
-        </kbd>
-      </button>
-      <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>
-        <CommandInput placeholder="Type a command or search..." />
+        <CommandInput ref={inputRef} aria-label="Search pages, jobs, triggers, or atoms" placeholder="Search by name or ID…" />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
-          <CommandGroup heading="Suggestions">
+          <CommandGroup heading="Pages">
             <CommandItem value="jobs pipelines" onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
-              <LayoutDashboard className="mr-2 h-4 w-4" />
               <span>Jobs</span>
             </CommandItem>
             <CommandItem value="stats analytics" onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
-              <BarChart className="mr-2 h-4 w-4" />
               <span>Stats</span>
             </CommandItem>
             <CommandItem value="triggers schedules events" onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
-              <Radio className="mr-2 h-4 w-4" />
               <span>Triggers</span>
             </CommandItem>
             <CommandItem value="atoms containers" onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
-              <Database className="mr-2 h-4 w-4" />
               <span>Atoms</span>
             </CommandItem>
             <CommandItem value="system health nodes" onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
-              <Server className="mr-2 h-4 w-4" />
               <span>System</span>
             </CommandItem>
             <CommandItem value="job definitions manifests yaml" onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
-              <FileCode2 className="mr-2 h-4 w-4" />
               <span>Job Definitions</span>
             </CommandItem>
           </CommandGroup>
@@ -117,17 +71,16 @@ export function CommandMenu() {
             {jobs?.map((job) => (
               <CommandItem
                 key={job.id}
-                value={`job ${job.alias} ${shortId(job.id)}`}
-                keywords={[job.alias, shortId(job.id)]}
+                value={`job ${job.alias} ${job.id}`}
+                keywords={[job.alias, job.id]}
                 onSelect={() => runCommand(() => navigate({ to: "/jobs/$jobId", params: { jobId: job.id } }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex items-center">
-                  <Circle className="mr-2 h-4 w-4 text-running" />
-                  <span>{job.alias}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(job.id)}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={job.alias}>{job.alias}</div>
+                  <div className="text-xs text-text-3">{shortId(job.id)}</div>
                 </div>
-                <div className="text-[10px] text-muted-foreground">
+                <div className="shrink-0 text-xs text-text-3">
                   <RelativeTime date={job.created_at} />
                 </div>
               </CommandItem>
@@ -138,17 +91,16 @@ export function CommandMenu() {
             {triggers?.map((trigger) => (
               <CommandItem
                 key={trigger.id}
-                value={`trigger ${trigger.alias} ${shortId(trigger.id)}`}
-                keywords={[trigger.alias, shortId(trigger.id), trigger.type]}
+                value={`trigger ${trigger.alias} ${trigger.id}`}
+                keywords={[trigger.alias, trigger.id, trigger.type]}
                 onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex items-center">
-                  <Radio className="mr-2 h-4 w-4 text-cyan-glow" />
-                  <span>{trigger.alias}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(trigger.id)}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={trigger.alias}>{trigger.alias}</div>
+                  <div className="text-xs text-text-3">{shortId(trigger.id)}</div>
                 </div>
-                <div className="text-[10px] uppercase text-muted-foreground">{trigger.type}</div>
+                <div className="shrink-0 text-xs lowercase text-text-3">{trigger.type}</div>
               </CommandItem>
             ))}
           </CommandGroup>
@@ -157,22 +109,36 @@ export function CommandMenu() {
             {atoms?.map((atom) => (
               <CommandItem
                 key={atom.id}
-                value={`atom ${atom.image} ${atom.engine} ${shortId(atom.id)}`}
-                keywords={[atom.image, atom.engine, shortId(atom.id)]}
+                value={`atom ${atom.image} ${atom.engine} ${atom.id}`}
+                keywords={[atom.image, atom.engine, atom.id]}
                 onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}
                 className="flex items-center justify-between"
               >
-                <div className="flex min-w-0 items-center">
-                  <Database className="mr-2 h-4 w-4 shrink-0 text-success" />
-                  <span className="truncate">{atom.image}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(atom.id)}</span>
+                <div className="min-w-0">
+                  <div className="truncate" title={atom.image}>{atom.image.split("@")[0]}</div>
+                  <div className="text-xs text-text-3">{shortId(atom.id)}</div>
                 </div>
-                <div className="text-[10px] uppercase text-muted-foreground">{atom.engine}</div>
+                <div className="shrink-0 text-xs lowercase text-text-3">{atom.engine}</div>
               </CommandItem>
             ))}
           </CommandGroup>
         </CommandList>
-      </CommandDialog>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-2 text-xs text-text-3">
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>↑</Kbd><Kbd aria-hidden={false}>↓</Kbd> move</span>
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>↵</Kbd> open</span>
+          <span className="inline-flex items-center gap-1"><Kbd aria-hidden={false}>esc</Kbd> close</span>
+        </div>
     </>
-  )
+  );
+  return <footer className="relative z-30 h-11 shrink-0 border-t border-border bg-obsidian">
+    <button ref={triggerRef} type="button" aria-label="Open search" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(true)} className="flex h-full w-full items-center gap-3 px-4 text-left text-[13px] text-text-2 transition-colors hover:bg-graphite hover:text-foreground focus-visible:-outline-offset-4 lg:px-6">
+      <Search aria-hidden="true" className="size-4 shrink-0 text-cyan" />
+      <span className="min-w-0 flex-1 truncate"><span className="sm:hidden">Search pages and resources…</span><span className="hidden sm:inline">Search pages, jobs, triggers, or atoms…</span></span>
+      <Kbd>{shortcut}</Kbd>
+    </button>
+    <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }} contentProps={{
+      onOpenAutoFocus: (event) => { event.preventDefault(); inputRef.current?.focus(); },
+      onCloseAutoFocus: (event) => { event.preventDefault(); triggerRef.current?.focus(); },
+    }}>{contents}</CommandDialog>
+  </footer>;
 }

@@ -1,12 +1,9 @@
+import { copyText } from "@/lib/clipboard";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import {
-  AlertTriangle,
-  Copy,
-  SkipForward,
-} from "lucide-react";
+import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -91,31 +88,15 @@ export function LogViewer({
       cursorStyle: "bar",
       disableStdin: true,
       convertEol: true,
-      fontSize: 12,
-      fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, "Courier New", monospace',
+      fontSize: 13,
+      fontFamily: '"Sometype Mono", Menlo, monospace',
       scrollback: 10000,
       theme: {
-        background: "#020617",
-        foreground: "#e2e8f0",
-        cursor: "#38bdf8",
-        cursorAccent: "#020617",
-        selectionBackground: "rgba(56, 189, 248, 0.22)",
-        black: "#0f172a",
-        red: "#f87171",
-        green: "#34d399",
-        yellow: "#fbbf24",
-        blue: "#60a5fa",
-        magenta: "#f472b6",
-        cyan: "#22d3ee",
-        white: "#e2e8f0",
-        brightBlack: "#475569",
-        brightRed: "#fca5a5",
-        brightGreen: "#6ee7b7",
-        brightYellow: "#fcd34d",
-        brightBlue: "#93c5fd",
-        brightMagenta: "#f9a8d4",
-        brightCyan: "#67e8f9",
-        brightWhite: "#f8fafc",
+        background: "#060811", foreground: "#B9B3A6", cursor: "#33DAFF", cursorAccent: "#060811",
+        selectionBackground: "rgba(51,218,255,.25)", black: "#0B0E18", red: "#EA5353", green: "#28BD78", yellow: "#F6AA28",
+        blue: "#00C4F0", magenta: "#B9B3A6", cyan: "#33CCC7", white: "#F2EFE8",
+        brightBlack: "#857F74", brightRed: "#F17878", brightGreen: "#61D99E", brightYellow: "#FFC761",
+        brightBlue: "#33DAFF", brightMagenta: "#D0CABF", brightCyan: "#71DFDB", brightWhite: "#F7F4EE",
       },
     });
 
@@ -172,7 +153,7 @@ export function LogViewer({
     const abortController = new AbortController();
     // The structured-vs-freeform decision reads only the first
     // structuredScanMaxChars of the log, so once that head is complete the
-    // NEGATIVE decision is final too — stop rescanning it on every chunk.
+    // NEGATIVE decision is final too: stop rescanning it on every chunk.
     let structuredDecisionFinal = false;
     const appendLogChunk = (chunk: string) => {
       rawLogTextRef.current += chunk;
@@ -329,7 +310,7 @@ export function LogViewer({
     }
 
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.success("Copied task logs");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to copy task logs");
@@ -350,20 +331,20 @@ export function LogViewer({
   const banner = error && status === "skipped" ? (
     <div className="border-b border-text-3/20 bg-text-3/10 px-4 py-2.5">
       <div className="flex items-start gap-3">
-        <SkipForward className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-3" />
+
         <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-text-3">Skipped</div>
-          <div className="font-mono text-[10px] leading-relaxed text-text-3/80">{error}</div>
+          <div className="text-[11px] font-bold lowercase text-text-3">Skipped</div>
+          <div className="text-[11px] leading-relaxed text-text-3">{error}</div>
         </div>
       </div>
     </div>
   ) : error ? (
-    <div className="border-b border-danger/20 bg-danger/10 px-4 py-2.5">
+    <div data-testid="task-log-error" className="border-b border-danger/20 bg-danger/10 px-4 py-2.5">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
+        <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
         <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-danger">Task Error</div>
-          <div className="font-mono text-[10px] leading-relaxed text-danger/90">{error}</div>
+          <div className="text-[11px] font-bold lowercase text-danger">Task Error</div>
+          <div className="text-[11px] leading-relaxed text-danger">{error}</div>
         </div>
       </div>
     </div>
@@ -381,7 +362,7 @@ export function LogViewer({
             <LogStatusBadge
               testId="log-source-badge"
               label="Live stream"
-              tooltip="Logs are currently streaming from the running task."
+              tooltip={status === "running" ? "Logs are currently streaming from the running task." : "Logs were collected from this task's live stream."}
               className="border-success/30 bg-success/10 text-success"
             />
           )}
@@ -415,7 +396,7 @@ export function LogViewer({
         type="button"
         onClick={() => setCaseSensitive((current) => !current)}
         className={cn(
-          "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition-colors",
+          "rounded-md border px-2 py-1 text-[11px] font-bold lowercase transition-colors",
           caseSensitive
             ? "border-cyan/40 bg-cyan/10 text-cyan-glow"
             : "border-graphite/60 bg-midnight text-text-3 hover:border-graphite hover:text-text-1",
@@ -427,7 +408,7 @@ export function LogViewer({
       <Button
         type="button"
         variant="ghost"
-        className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-text-2 hover:bg-graphite/40 hover:text-text-1"
+        className="h-7 gap-1.5 px-2 text-[11px] font-bold lowercase text-text-2 hover:bg-graphite/40 hover:text-text-1"
         onClick={handleCopy}
         disabled={!hasVisibleOutput}
       >
@@ -471,7 +452,7 @@ export function LogViewer({
           */}
           <pre
             data-testid="task-log-structured-text"
-            className="m-0 min-w-max whitespace-pre break-normal px-3 py-2 font-mono text-[11px] leading-5 text-slate-200"
+            className="m-0 min-w-max whitespace-pre break-normal px-3 py-2 text-[11px] leading-5 text-text-1"
           >
             {filterResult.renderedText}
           </pre>

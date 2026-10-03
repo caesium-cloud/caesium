@@ -1,7 +1,8 @@
+import { IdChip } from "@/components/ui/id-chip";
 import { type FormEvent, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeftRight, Plus, RotateCcw, Trash2 } from "lucide-react";
+
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,6 @@ import {
 import { StatusBadge } from "@/components/ui/status-badge";
 import { InsufficientAccess } from "@/features/auth/InsufficientAccess";
 import { ApiError, api, type JobRun, type ReplayResponse } from "@/lib/api";
-import { shortId } from "@/lib/utils";
 import { RunDiffView } from "./RunDiffView";
 
 interface ReplayDialogProps {
@@ -115,13 +115,13 @@ export function ReplayDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-h-[90vh] max-w-5xl overflow-y-auto p-4 sm:rounded-lg sm:p-6"
+        className="max-h-[90vh] max-w-5xl overflow-y-auto p-4 sm:rounded-md sm:p-6"
         data-testid="replay-dialog"
       >
         <DialogHeader>
           <DialogTitle>Replay Run</DialogTitle>
           <DialogDescription>
-            Launch a quarantined replay from baseline run {shortId(baselineRunId)}.
+            Launch a quarantined replay from baseline run <IdChip value={baselineRunId} label="baseline run id" />.
           </DialogDescription>
         </DialogHeader>
 
@@ -129,7 +129,7 @@ export function ReplayDialog({
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <div className="text-xs font-bold lowercase text-muted-foreground">
                   --set overrides
                 </div>
                 <p className="mt-1 text-xs text-text-3">
@@ -144,7 +144,7 @@ export function ReplayDialog({
                 disabled={mutation.isPending}
                 data-testid="replay-add-set-row"
               >
-                <Plus className="h-3.5 w-3.5" />
+
                 Add
               </Button>
             </div>
@@ -177,7 +177,7 @@ export function ReplayDialog({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size="sm"
                     className="h-8 w-8 text-text-3"
                     onClick={() => removeOverrideRow(row.id)}
                     disabled={mutation.isPending}
@@ -185,7 +185,7 @@ export function ReplayDialog({
                     aria-label="Remove override"
                     data-testid={`replay-remove-set-${index}`}
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Remove override</span>
                   </Button>
                 </div>
               ))}
@@ -195,7 +195,7 @@ export function ReplayDialog({
           <div>
             <label
               htmlFor="replay-idempotency-key"
-              className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+              className="mb-1 block text-xs font-bold lowercase text-muted-foreground"
             >
               Idempotency key
             </label>
@@ -214,7 +214,7 @@ export function ReplayDialog({
             />
             {hasSubmittedKey ? (
               <p className="mt-1 text-xs text-text-3" data-testid="replay-idempotency-key-display">
-                Submitted key: <span className="font-mono">{submittedKey}</span>
+                Submitted key: <span className="">{submittedKey}</span>
               </p>
             ) : null}
           </div>
@@ -232,7 +232,7 @@ export function ReplayDialog({
                   role="alert"
                   className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
                 >
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
                   <span>{inlineError}</span>
                 </div>
               )}
@@ -246,7 +246,7 @@ export function ReplayDialog({
               disabled={mutation.isPending}
               data-testid="replay-submit"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
+
               {mutation.isPending ? "Submitting..." : "Launch Replay"}
             </Button>
           </div>
@@ -259,12 +259,12 @@ export function ReplayDialog({
           >
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <div className="mb-1 text-xs font-bold lowercase text-muted-foreground">
                   Replay run
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <span
-                    className="font-mono text-sm text-text-1"
+                    className="text-sm text-text-1"
                     data-testid="replay-result-run-id"
                   >
                     {replayResponse.run_id}
@@ -300,7 +300,7 @@ export function ReplayDialog({
                   onClick={() => setShowDiff((current) => !current)}
                   data-testid="replay-show-diff"
                 >
-                  <ArrowLeftRight className="h-3.5 w-3.5" />
+
                   {showDiff ? "Hide diff vs baseline" : "Show diff vs baseline"}
                 </Button>
               </div>

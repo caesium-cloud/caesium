@@ -67,10 +67,9 @@ const PRIMARY_ROUTES: { path: string; heading: RegExp }[] = [
   { path: "/jobs", heading: /^Jobs$/ },
   { path: "/triggers", heading: /^Triggers$/ },
   { path: "/system", heading: /^System$/ },
-  { path: "/jobdefs", heading: /^Job Definitions$/ },
+  { path: "/jobdefs", heading: /^JobDefs$/ },
 ];
 
-const RUN_HEADING = /Run /;
 
 type ProbeHeading = { text: string; t: number };
 type ProbeClick = { label: string; t: number };
@@ -413,6 +412,7 @@ test("live action-to-render: triggering a run paints the run heading", async ({ 
   test.slow();
 
   const alias = `perf-action-${uniqueSuffix()}`;
+  const runHeading = new RegExp(`^${alias}$`);
   const definition = {
     apiVersion: "v1",
     kind: "Job",
@@ -431,7 +431,7 @@ test("live action-to-render: triggering a run paints the run heading", async ({ 
   const started = Date.now();
   await row.locator('button[title="Trigger run"]').click();
   await page.waitForURL(/\/jobs\/[^/]+\/runs\/[^/]+$/);
-  await expect(page.getByRole("heading", { name: RUN_HEADING })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   const wallMs = Date.now() - started;
 
   const after = await probeSnapshot(page);
@@ -441,7 +441,7 @@ test("live action-to-render: triggering a run paints the run heading", async ({ 
   const clicks = after.clicks.slice(before.clicks.length).filter((click) => click.label === "Trigger run");
   expect(clicks, "exactly one Trigger run click must be observed in the page").toHaveLength(1);
   const clickedAt = clicks[0].t;
-  const renderMs = firstHeadingAt(after, RUN_HEADING, clickedAt) - clickedAt;
+  const renderMs = firstHeadingAt(after, runHeading, clickedAt) - clickedAt;
   expect(renderMs).toBeGreaterThan(0);
   await record("action_to_render_ms", roundMs(renderMs), {
     action: "trigger-run",

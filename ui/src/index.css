@@ -2,9 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* React Flow's unlayered focus reset otherwise overrides the shared base rule. */
+.react-flow__node.selectable:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
 :root {
-  --font-sans: "Space Grotesk", Inter, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Sometype Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
 
@@ -14,178 +21,177 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Caesium operator console — "Standard" design language.
+   Drop-in replacement for the @layer base { :root {…} .dark {…} } block in ui/src/index.css.
+   All colours are HSL triples consumed as hsl(var(--name) / alpha). Variable names unchanged. */
 @layer base {
   :root {
-    --background: 210 33% 98%;
-    --foreground: 235 24% 12%;
-
-    --card: 0 0% 100%;
-    --card-foreground: 235 24% 12%;
-
-    --popover: 0 0% 100%;
-    --popover-foreground: 235 24% 12%;
-
-    --primary: 191 100% 42%;
-    --primary-foreground: 240 33% 4%;
-
-    --secondary: 205 50% 94%;
-    --secondary-foreground: 235 24% 12%;
-
-    --muted: 205 38% 93%;
-    --muted-foreground: 228 14% 41%;
-
-    --accent: 38 92% 50%;
-    --accent-foreground: 240 33% 4%;
-
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 205 30% 87%;
-    --input: 205 30% 87%;
-    --ring: 191 100% 42%;
-
-    --radius: 0.5rem;
+    /* light: bright ops rooms and docs screenshots. Warm paper (the metal is pale gold), warm ink. */
+    --background: 60 8% 93%;          /* #EFEFEC paper, a hint of warmth */
+    --foreground: 40 14% 13%;         /* #26231D */
+    --card: 214 33% 96%;              /* #F1F4F8 cool panel on warm paper: timeline, graph, editors, dialogs */
+    --card-foreground: 40 14% 13%;
+    --popover: 214 33% 96%;
+    --popover-foreground: 40 14% 13%;
+    --primary: 191 100% 24%;          /* #006578 cyan, 5.3:1 on paper, 4.7:1 on obsidian */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 60 10% 87%;          /* #E2E2DC */
+    --secondary-foreground: 40 14% 13%;
+    --muted: 60 10% 87%;
+    --muted-foreground: 34 8% 38%;    /* #69625A warm grey */
+    --accent: 38 95% 26%;             /* #7F5203 gold, 5.4:1 on paper, 4.8:1 on obsidian */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 42%;         /* #B81E1E */
+    --destructive-foreground: 0 0% 100%;
+    --border: 60 9% 81%;              /* #D3D3CA */
+    --input: 60 8% 73%;               /* #BFBFB4 */
+    --ring: 191 100% 24%;
 
     --caesium-cyan: 191 100% 42%;
     --caesium-gold: 38 92% 50%;
-    --caesium-void: 240 33% 4%;
+    --caesium-void: 226 48% 5%;       /* #060811 */
 
-    /* Brand surfaces (light values; dark values override below) */
-    --void: 210 30% 98%;
-    --midnight: 0 0% 100%;
-    --obsidian: 210 25% 96%;
-    --graphite: 210 20% 91%;
-    --silt: 210 18% 84%;
+    --void: 60 8% 93%;
+    --midnight: 214 33% 96%;          /* cool, so live surfaces sit cooler than the page as they do in dark */
+    --obsidian: 60 10% 87%;
+    --graphite: 60 9% 81%;
+    --silt: 60 8% 73%;
 
-    /* Brand accent extensions */
-    --cyan: 191 100% 35%;
-    --cyan-glow: 191 100% 42%;
-    --cyan-dim: 191 80% 35%;
-    --gold: 38 92% 50%;
-    --gold-dim: 38 80% 42%;
+    --cyan: 191 100% 24%;
+    --cyan-glow: 191 100% 30%;
+    --cyan-dim: 191 80% 20%;
+    --gold: 38 95% 26%;
+    --gold-dim: 38 80% 21%;
 
-    /* Text levels */
-    --text-1: 235 30% 12%;
-    --text-2: 228 14% 38%;
-    --text-3: 220 10% 50%;
-    --text-4: 220 12% 70%;
+    --text-1: 40 14% 13%;
+    --text-2: 34 8% 32%;              /* #58524B */
+    --text-3: 32 8% 32%;              /* Secondary ink: 6.69:1 on paper, 5.87:1 on obsidian. */
+    --text-4: 32 8% 58%;              /* #9D958B, non-text use only */
 
-    /* Status semantic tokens */
-    --success: 152 65% 38%;
-    --warning: 38 92% 50%;
-    --danger: 0 78% 52%;
-    --running: 191 100% 42%;
-    --cached: 178 60% 42%;
+    --success: 152 65% 24%;           /* #156540 */
+    --warning: 38 95% 26%;
+    --danger: 0 72% 42%;              /* #B81E1E */
+    --running: 191 100% 24%;
+    --cached: 178 60% 25%;            /* #196562 */
 
-    /* Chart palette — maps shadcn chart-* names onto brand tones */
-    --chart-1: 191 100% 42%;
-    --chart-2: 38 92% 50%;
-    --chart-3: 152 65% 38%;
-    --chart-4: 0 78% 52%;
-    --chart-5: 178 60% 42%;
+    --chart-1: 191 100% 24%;
+    --chart-2: 38 95% 26%;
+    --chart-3: 152 65% 24%;
+    --chart-4: 0 72% 42%;
+    --chart-5: 178 60% 25%;
 
-    /* Sidebar */
-    --sidebar: 215 30% 97%;
-    --sidebar-foreground: 235 24% 15%;
-    --sidebar-border: 205 25% 88%;
-    --sidebar-muted: 228 12% 55%;
-    --sidebar-accent: 191 60% 94%;
+    --sidebar: 60 8% 93%;
+    --sidebar-foreground: 40 14% 13%;
+    --sidebar-border: 60 9% 81%;
+    --sidebar-muted: 32 8% 32%;
+    --sidebar-accent: 60 10% 87%;
 
-    /* DAG canvas */
-    --dag-bg: 215 25% 96%;
-    --dag-grid: 210 15% 84%;
+    --dag-bg: 213 25% 94%;            /* #EAEEF3 */
+    --dag-grid: 213 22% 83%;          /* #CBD3DE */
+    --node-surface: 216 45% 98%;      /* #F7F9FC */
+    --code-bg: 60 10% 87%;
+    --code-fg: 152 56% 26%;
 
-    /* Node surface (gradient endpoint in task nodes) */
-    --node-surface: 215 25% 97%;
-
-    /* Code / terminal blocks */
-    --code-bg: 220 18% 96%;
-    --code-fg: 152 56% 32%;
+    --radius: 0.25rem;                /* 4 px. Only controls and panels are rounded; rows and lists are not. */
   }
 
   .dark {
-    --background: 240 33% 4%;
-    --foreground: 210 40% 96%;
+    /* dark (default): spectral blue-black ground, warm metal ink. */
+    --background: 226 48% 5%;         /* #060811 */
+    --foreground: 40 28% 93%;         /* #F2EFE8 */
+    --card: 226 37% 7%;               /* #0B0E18 */
+    --card-foreground: 40 28% 93%;
+    --popover: 226 37% 7%;
+    --popover-foreground: 40 28% 93%;
+    --primary: 191 100% 47%;          /* #00C4F0 */
+    --primary-foreground: 226 48% 5%;
+    --secondary: 222 32% 9%;          /* #10141F */
+    --secondary-foreground: 40 28% 93%;
+    --muted: 222 32% 9%;
+    --muted-foreground: 36 10% 68%;   /* #B9B3A6 */
+    --accent: 38 92% 56%;             /* #F6AA28 */
+    --accent-foreground: 226 48% 5%;
+    --destructive: 0 78% 62%;         /* #EA5353 */
+    --destructive-foreground: 40 28% 93%;
+    --border: 225 30% 15%;            /* #1A2030 */
+    --input: 225 25% 19%;             /* #242B3C */
+    --ring: 191 100% 60%;             /* #33DAFF */
 
-    --card: 240 24% 7%;
-    --card-foreground: 210 40% 96%;
+    --void: 226 48% 5%;
+    --midnight: 226 37% 7%;
+    --obsidian: 222 32% 9%;
+    --graphite: 225 30% 15%;
+    --silt: 225 25% 19%;
 
-    --popover: 240 24% 7%;
-    --popover-foreground: 210 40% 96%;
-
-    --primary: 191 100% 47%;
-    --primary-foreground: 240 33% 4%;
-
-    --secondary: 236 19% 15%;
-    --secondary-foreground: 210 40% 96%;
-
-    --muted: 236 18% 18%;
-    --muted-foreground: 220 12% 68%;
-
-    --accent: 38 92% 56%;
-    --accent-foreground: 240 33% 4%;
-
-    --destructive: 0 78% 62%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 236 18% 16%;
-    --input: 236 18% 16%;
-    --ring: 191 100% 47%;
-
-    /* Brand surfaces */
-    --void: 240 33% 4%;
-    --midnight: 240 25% 7%;
-    --obsidian: 240 18% 11%;
-    --graphite: 240 14% 17%;
-    --silt: 240 10% 22%;
-
-    /* Brand accent extensions */
     --cyan: 191 100% 47%;
     --cyan-glow: 191 100% 60%;
     --cyan-dim: 191 80% 35%;
     --gold: 38 92% 56%;
     --gold-dim: 38 80% 42%;
 
-    /* Text levels — muted rungs stay ≥4.5:1 on card/graphite (WCAG AA). */
-    --text-1: 210 40% 96%;
-    --text-2: 220 14% 72%;
-    --text-3: 220 12% 66%;
-    --text-4: 220 12% 62%;
+    --text-1: 40 28% 93%;             /* #F2EFE8 */
+    --text-2: 36 10% 68%;             /* #B9B3A6, 8.7:1 on void */
+    --text-3: 32 7% 62%;              /* Secondary text, qualified against page and panel surfaces. */
+    --text-4: 225 20% 28%;            /* #3A4256, non-text use only (dashed guides, disabled strokes) */
 
-    /* Status semantic tokens */
-    --success: 152 65% 45%;
+    --success: 152 65% 45%;           /* #28BD78 */
     --warning: 38 92% 56%;
     --danger: 0 78% 62%;
-    --running: 191 100% 50%;
-    --cached: 178 60% 50%;
+    --running: 191 100% 60%;          /* #33DAFF */
+    --cached: 178 60% 50%;            /* #33CCC7 */
 
-    /* Chart palette */
     --chart-1: 191 100% 60%;
     --chart-2: 38 92% 56%;
     --chart-3: 152 65% 45%;
     --chart-4: 0 78% 62%;
     --chart-5: 178 60% 50%;
 
-    /* Sidebar */
-    --sidebar: 240 33% 4%;
-    --sidebar-foreground: 210 40% 96%;
-    --sidebar-border: 236 18% 16%;
-    --sidebar-muted: 220 12% 68%;
-    --sidebar-accent: 240 20% 12%;
+    --sidebar: 226 48% 5%;
+    --sidebar-foreground: 40 28% 93%;
+    --sidebar-border: 225 30% 15%;
+    --sidebar-muted: 36 10% 68%;
+    --sidebar-accent: 222 32% 9%;
 
-    /* DAG canvas */
-    --dag-bg: 240 33% 5%;
-    --dag-grid: 210 30% 22%;
+    --dag-bg: 226 48% 5%;
+    --dag-grid: 225 30% 15%;
+    --node-surface: 225 33% 8%;       /* #0E121D */
+    --code-bg: 226 48% 5%;
+    --code-fg: 36 10% 68%;            /* command text is warm grey; the $ prompt is cyan */
+  }
 
-    /* Node surface */
-    --node-surface: 240 33% 4%;
-
-    /* Code / terminal blocks */
-    --code-bg: 240 33% 4%;
-    --code-fg: 142 71% 45%;
+  body {
+    /* Replaces the two radial washes. No ambient gradient; the only light is live work. */
+    background-image: none;
+    font-family: "Sometype Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    font-feature-settings: "tnum" 1;
   }
 }
- 
+
+/* Self-hosted fonts (OFL). Place the .woff2 files in ui/public/fonts/ so the Go binary embeds them.
+   Variable weight 400–700 plus italic covers every weight in the spec. */
+@font-face { font-family: "Sometype Mono"; src: url("/fonts/SometypeMono[wght].woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: block; }
+@font-face { font-family: "Sometype Mono"; src: url("/fonts/SometypeMono-Italic[wght].woff2") format("woff2"); font-weight: 400 700; font-style: italic; font-display: block; }
+
+/* Motion. phase.ts aligns each CSS instrument through Animation.startTime at
+   insertion and when a hidden tab returns. Durations are whole seconds. */
+@keyframes cs-beat        { 0% { box-shadow: 0 0 0 0 hsl(var(--running) / .7) } 70%, 100% { box-shadow: 0 0 0 7px hsl(var(--running) / 0) } }
+@keyframes cs-beat-gold   { 0% { box-shadow: 0 0 0 0 hsl(var(--gold) / .6) } 70%, 100% { box-shadow: 0 0 0 7px hsl(var(--gold) / 0) } }
+@keyframes cs-nucleus     { 0% { transform: scale(1); opacity: 1 } 15% { transform: scale(1.25); opacity: .85 } 100% { transform: scale(1); opacity: 1 } }
+@keyframes cs-orbit       { to { offset-distance: 100% } }
+@keyframes cs-spin        { to { transform: rotate(360deg) } }
+@keyframes cs-wave        { to { transform: translateX(-40px) } }
+@keyframes cs-dash        { to { stroke-dashoffset: -14 } }
+@keyframes cs-live-glow   { 0%, 100% { box-shadow: 0 0 10px hsl(var(--running) / .5) } 50% { box-shadow: 0 0 16px hsl(var(--running) / .3) } }
+@keyframes cs-now-line    { 0%, 100% { opacity: .5 } 50% { opacity: .85 } }
+
+.animate-cyan-pulse { animation: cs-beat 1s ease-out infinite; }
+.animate-gold-pulse { animation: cs-beat-gold 2s ease-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-cyan-pulse, .animate-gold-pulse, .cs-animated, .cs-animated * { animation: none !important; }
+}
+
 @layer base {
   * {
     @apply border-border;
@@ -197,10 +203,6 @@
 
   body {
     @apply bg-background text-foreground;
-    background-image:
-      radial-gradient(circle at top left, hsl(var(--caesium-cyan) / 0.14), transparent 28%),
-      radial-gradient(circle at top right, hsl(var(--caesium-gold) / 0.1), transparent 24%);
-    background-attachment: fixed;
   }
 
   #root {
@@ -215,37 +217,6 @@
 @layer utilities {
   .fill-caesium-gold {
     fill: hsl(var(--caesium-gold));
-  }
-}
-
-/* ── Brand motion ── */
-@keyframes orbit-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-@keyframes nucleus-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.18); opacity: 0.85; }
-}
-@keyframes cyan-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--cyan) / 0.55), 0 0 14px 0 hsl(var(--cyan) / 0.5); }
-  70% { box-shadow: 0 0 0 9px hsl(var(--cyan) / 0), 0 0 14px 0 hsl(var(--cyan) / 0.5); }
-}
-@keyframes gold-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--gold) / 0.55), 0 0 12px 0 hsl(var(--gold) / 0.4); }
-  70% { box-shadow: 0 0 0 8px hsl(var(--gold) / 0), 0 0 12px 0 hsl(var(--gold) / 0.4); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* AtomLogo JS-driven animation classes */
-  .atom-orbit,
-  .atom-nucleus,
-  /* Tailwind utility classes generated from tailwind.config.js keyframes */
-  .animate-orbit-spin,
-  .animate-nucleus-pulse,
-  .animate-cyan-pulse,
-  .animate-gold-pulse {
-    animation: none !important;
   }
 }
 
@@ -271,4 +242,58 @@
 }
 .react-flow__attribution a {
   color: hsl(var(--muted-foreground)) !important;
+}
+
+/* Standard instruments. Shapes accompany every status word. */
+.cs-status-glyph { display: inline-block; flex: none; position: relative; width: 10px; height: 10px; }
+.cs-status-ring { border: 2px solid currentColor; border-radius: 50%; }
+.cs-status-solid { background: currentColor; border-radius: 2px; }
+.cs-status-failed { border: 1px solid currentColor; border-radius: 2px; }
+.cs-status-failed::before, .cs-status-failed::after { content: ''; position: absolute; top: 3px; left: 0; width: 8px; height: 1px; background: currentColor; transform: rotate(45deg); }
+.cs-status-failed::after { transform: rotate(-45deg); }
+.cs-status-hollow { border: 1px solid currentColor; border-radius: 2px; }
+.cs-status-paused { border-left: 3px solid currentColor; border-right: 3px solid currentColor; }
+.cs-status-dashed { border: 1px dashed currentColor; border-radius: 2px; }
+.cs-status-skipped { border: 1px solid currentColor; border-radius: 2px; background: linear-gradient(135deg, transparent 42%, currentColor 43%, currentColor 54%, transparent 55%); }
+.cs-wave { animation: cs-wave 1s linear infinite; }
+.cs-wave-flat { display: none; }
+.cs-electron { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: hsl(var(--gold)); pointer-events: none; }
+.cs-electron-running { top: 0; left: 0; offset-path: inset(0 round 6px); animation: cs-orbit 6s linear infinite; box-shadow: 0 0 8px 2px hsl(var(--gold) / .55); }
+.cs-electron-succeeded, .cs-electron-cached { top: -4px; right: -4px; }
+.cs-electron-cached { background: hsl(var(--cached)); }
+.cs-electron-queued { top: calc(50% - 4px); left: -4px; border: 1px solid hsl(var(--gold)); background: hsl(var(--void)); }
+.cs-now-head { animation: cs-beat 1s ease-out infinite; }
+.cs-history-now-line { opacity: .65; animation: cs-now-line 2s ease-in-out infinite; }
+.cs-live-bar { animation: cs-live-glow 2s ease-in-out infinite; }
+.cs-edge-running .react-flow__edge-path { animation: cs-dash 1.4s linear infinite; }
+.cs-timeline-legend .cs-status-glyph { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .cs-status-glyph, .cs-electron, .cs-now-head, .cs-history-now-line, .cs-live-bar, .cs-edge-running, .cs-edge-running .react-flow__edge-path { animation: none !important; }
+  .cs-electron { offset-distance: 0%; }
+  .cs-wave { display: none; }
+  .cs-wave-flat { display: block; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cs-time-mark { transition: none !important; }
+}
+
+@layer components {
+  .jobs-grid { display: grid; grid-template-columns: minmax(220px, .85fr) 108px 88px 80px minmax(240px, 1.65fr) 116px; column-gap: 12px; }
+  .jobs-grid > * { min-width: 0; }
+}
+@media (max-width: 767px) {
+  .jobs-grid { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; padding: 12px 0; }
+  .jobs-grid-header { display: none; }
+  .jobs-grid > :first-child { grid-column: 1 / -1; }
+  .jobs-grid > * { padding-top: 3px; padding-bottom: 3px; }
+  .jobs-grid > :nth-child(4) { grid-column: 2; grid-row: 3; padding-right: 0; text-align: right; align-self: center; }
+  .jobs-grid > :nth-child(5) { grid-column: 1; grid-row: 3; }
+  .jobs-grid > :last-child { grid-column: 1 / -1; justify-content: flex-start; }
+}
+@layer base {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+  }
 }

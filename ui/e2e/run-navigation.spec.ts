@@ -9,7 +9,7 @@ test("All runs always links to the current job after direct entry and re-run", a
   // A direct deep link has no useful browser history to traverse. The action
   // must still lead to the current job's complete list.
   await page.goto(`/jobs/${job.id}/runs/${run.id}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible();
+  await expect(page.getByTestId("run-heading")).toBeVisible();
   const allRuns = page.getByTestId("all-runs-link");
   await expect(allRuns).toHaveAttribute("href", runsURL);
   await allRuns.click();

@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from 'reactflow';
-import { ArrowRight, ShieldCheck } from 'lucide-react';
+import { ShieldCheck } from "lucide-react";
 
 export const DataFlowEdge = memo(({
   id,
@@ -43,28 +43,12 @@ export const DataFlowEdge = memo(({
           >
             <button
               type="button"
-              className="flex items-center gap-1.5 rounded-full border border-border/50 bg-card/90 px-2.5 py-1 shadow-sm backdrop-blur-sm transition-colors hover:border-border hover:bg-card"
+              className="flex items-center gap-1.5 h-5 rounded-[10px] border border-border bg-obsidian px-2 transition-colors hover:border-border hover:bg-card"
               onClick={onOpenDetails}
               title="View edge data details"
             >
-              {outputCount > 0 ? (
-                <>
-                  <ArrowRight className="h-2.5 w-2.5 text-success" />
-                  <span className="text-[9px] font-bold tabular-nums text-success">
-                    {outputCount} {outputCount === 1 ? 'output' : 'outputs'}
-                  </span>
-                </>
-              ) : null}
-              <div
-                className={`rounded-full border px-1.5 py-0.5 ${
-                  contractDefined
-                    ? 'border-running/35 bg-running/10'
-                    : 'border-text-3/30 bg-text-3/10'
-                }`}
-                title={contractDefined ? 'Data contract defined' : 'No data contract defined'}
-              >
-                <ShieldCheck className={`h-2.5 w-2.5 ${contractDefined ? 'text-running' : 'text-text-3'}`} />
-              </div>
+              <ShieldCheck className={`h-3 w-3 ${contractDefined ? 'text-running' : 'text-text-3'}`} aria-label={contractDefined ? 'Data contract defined' : 'No data contract defined'} />
+              <span className="text-[11px] text-text-2">{outputCount} {outputCount === 1 ? 'output' : 'outputs'}</span>
             </button>
           </div>
         </EdgeLabelRenderer>

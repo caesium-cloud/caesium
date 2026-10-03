@@ -71,7 +71,7 @@ test("authenticated operator releases the reviewed hold and a viewer cannot rele
   expect(released.tolerances).toEqual({ min: "24h" });
   expect(released.released_by).toBeTruthy();
   await expect(page.getByTestId("hold-panel")).toContainText(
-    "Dataset hold · released",
+    "Dataset hold, released",
   );
   await runHoldJob(request, consumer.id, "succeeded", headers);
 
@@ -86,7 +86,7 @@ test("authenticated operator releases the reviewed hold and a viewer cannot rele
     hold.id,
   );
   await expect(page.getByTestId("hold-panel")).toContainText(
-    "Dataset hold · released",
+    "Dataset hold, released",
   );
   await page.getByTestId("hold-list-row").filter({ hasText: name }).click();
   await expect(page.getByTestId("hold-panel")).toHaveAttribute(

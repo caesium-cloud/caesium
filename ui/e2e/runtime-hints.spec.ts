@@ -12,13 +12,13 @@ test("DAG view surfaces volume mounts and workload identity from applied job def
   await openJobDetail(page, volumeAlias);
   const volumeBadges = page.getByTestId("runtime-volume-badge");
   await expect(volumeBadges).toHaveCount(3);
-  await expect(volumeBadges).toHaveText(["1", "1", "1"]);
+  await expect(volumeBadges).toHaveText(["volume 1", "volume 1", "volume 1"]);
   await expect(page.getByTestId("runtime-identity-badge")).toHaveCount(0);
 
   await openJobDetail(page, identityAlias);
   const identityVolumeBadges = page.getByTestId("runtime-volume-badge");
   await expect(identityVolumeBadges).toHaveCount(2);
-  await expect(identityVolumeBadges).toHaveText(["1", "1"]);
+  await expect(identityVolumeBadges).toHaveText(["volume 1", "volume 1"]);
 
   const identityBadges = page.getByTestId("runtime-identity-badge");
   await expect(identityBadges).toHaveCount(2);

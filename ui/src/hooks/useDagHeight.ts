@@ -2,8 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 /**
  * Measures the remaining vertical space from a container element to the bottom
- * of the viewport, re-measuring on window resize and main-panel scroll so the
- * DAG always fills the visible area even after the user scrolls.
+ * of the main panel in unscrolled layout coordinates. Scrolling must not grow
+ * the graph and push the content below it out of reach.
  *
  * @param isLoading Pass `true` while data is still loading; the measurement is
  *   deferred until this becomes `false` so the layout has stabilised.
@@ -22,22 +22,16 @@ export function useDagHeight(
     const el = containerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    setDagHeight(Math.max(minHeight, window.innerHeight - rect.top - bottomPadding));
+    const main = el.closest("main");
+    const mainBottom = main?.getBoundingClientRect().bottom ?? window.innerHeight;
+    const layoutTop = rect.top + (main?.scrollTop ?? window.scrollY);
+    setDagHeight(Math.max(minHeight, Math.min(window.innerHeight, mainBottom) - layoutTop - bottomPadding));
   }, [bottomPadding, minHeight]);
 
   // Re-measure whenever the window resizes.
   useEffect(() => {
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [measure]);
-
-  // Re-measure when the AppShell <main> scroll container scrolls, because
-  // scrolling changes getBoundingClientRect().top for elements above the fold.
-  useEffect(() => {
-    const main = document.querySelector("main");
-    if (!main) return;
-    main.addEventListener("scroll", measure, { passive: true });
-    return () => main.removeEventListener("scroll", measure);
   }, [measure]);
 
   // Measure once loading finishes so the layout has settled.

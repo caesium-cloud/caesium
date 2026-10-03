@@ -1,19 +1,9 @@
 import { useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  BarChart,
-  Database,
-  FileCode2,
-  GitBranch,
-  LayoutDashboard,
-  Radio,
-  Server,
-  ShieldCheck,
-  Hand,
-  Siren,
-  type LucideIcon,
-} from "lucide-react";
+import { clusterAtomProps } from "@/features/system/cluster-atom";
+import type { AtomLogoProps } from "@/components/brand/atom-logo";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { AtomLogo } from "@/components/brand/atom-logo";
 import { INCIDENT_EVENT_TYPES, isAwaitingApproval } from "@/features/incidents/incident-utils";
 import { useNavCounts } from "@/features/jobs/useNavCounts";
@@ -22,11 +12,13 @@ import { useClusterHealth, type ClusterHealthState } from "@/features/system/use
 import { api } from "@/lib/api";
 import { events } from "@/lib/events";
 import { cn } from "@/lib/utils";
+import { Kbd } from "@/components/ui/kbd";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface NavItem {
   to: string;
   label: string;
-  icon: LucideIcon;
+  hint?: string;
   count: number | null;
 }
 
@@ -46,8 +38,8 @@ const STATE_META: Record<
   },
   unavailable: {
     label: "Unavailable",
-    dot: "bg-danger animate-pulse",
-    copy: "Quorum lost — cluster cannot serve writes",
+    dot: "bg-danger",
+    copy: "Quorum lost. Cluster cannot serve writes",
   },
   incident: {
     label: "Incident",
@@ -70,12 +62,7 @@ function formatUptime(seconds: number | null): string {
 }
 
 function CountBadge({ value }: { value: number | null }) {
-  if (value == null) return null;
-  return (
-    <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full border border-graphite bg-obsidian/70 px-1.5 font-mono text-[10px] tabular-nums text-text-2">
-      {value}
-    </span>
-  );
+  return <span data-nav-count className="text-right text-xs tabular-nums text-text-3">{value ?? ""}</span>;
 }
 
 interface SidebarProps {
@@ -134,69 +121,61 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
     ).length ?? null;
 
   const navItems: NavItem[] = [
-    { to: "/jobs", label: "Jobs", icon: LayoutDashboard, count: counts.jobs },
-    { to: "/triggers", label: "Triggers", icon: Radio, count: counts.triggers },
-    { to: "/atoms", label: "Atoms", icon: Database, count: counts.atoms },
+    { to: "/jobs", label: "Jobs", hint: "j", count: counts.jobs },
+    { to: "/triggers", label: "Triggers", hint: "t", count: counts.triggers },
+    { to: "/atoms", label: "Atoms", hint: "a", count: counts.atoms },
     ...(freshnessEnabled
-      ? [{ to: "/datasets", label: "Datasets", icon: GitBranch, count: null }]
+      ? [{ to: "/datasets", label: "Datasets", count: counts.datasets }]
       : []),
     ...(features?.data_assertions_enabled === true
-      ? [{ to: "/datasets/holds", label: "Holds", icon: Hand, count: counts.holds }]
+      ? [{ to: "/datasets/holds", label: "Holds", count: counts.holds }]
       : []),
     ...(contractEnforcementEnabled
-      ? [{ to: "/contracts", label: "Contracts", icon: ShieldCheck, count: null }]
+      ? [{ to: "/contracts", label: "Contracts", count: null }]
       : []),
     ...(incidentsEnabled
-      ? [{ to: "/incidents", label: "Incidents", icon: Siren, count: activeIncidentCount }]
+      ? [{ to: "/incidents", label: "Incidents", count: activeIncidentCount }]
       : []),
-    { to: "/stats", label: "Stats", icon: BarChart, count: null },
-    { to: "/system", label: "System", icon: Server, count: null },
-    { to: "/jobdefs", label: "JobDefs", icon: FileCode2, count: null },
+    { to: "/stats", label: "Stats", hint: "s", count: null },
+    { to: "/system", label: "System", hint: "y", count: null },
+    { to: "/jobdefs", label: "JobDefs", hint: "d", count: null },
   ];
 
   return (
-    <aside className={cn("relative flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground shadow-2xl shadow-sidebar/30", className)}>
-      {/* Gold accent rail on the left edge */}
-      <span
-        aria-hidden="true"
-        className="absolute inset-y-0 left-0 w-[2px] bg-gradient-to-b from-gold/0 via-gold/60 to-gold/0"
-      />
-
-      <div className="border-b border-sidebar-border px-5 py-5">
-        <div className="flex items-center gap-3">
-          <AtomLogo size={40} className="shrink-0 drop-shadow-[0_0_24px_hsl(var(--cyan)/0.35)]" />
-          <div className="min-w-0">
-            <div className="text-[0.62rem] font-medium uppercase tracking-[0.38em] text-gold/80">
-              Control Plane
-            </div>
-            <div className="truncate text-lg font-semibold uppercase tracking-[0.34em] text-sidebar-foreground">
-              Caesium
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3">
+    <aside className={cn("relative flex w-[208px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground", className)}>
+      <TooltipProvider delayDuration={350}>
+      <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-4">
         {navItems.map((item) => (
+          <Tooltip key={item.to}>
+          <TooltipTrigger asChild>
           <Link
-            key={item.to}
             to={item.to}
+            activeOptions={{ exact: item.to === "/datasets" }}
             activeProps={{
               className:
-                "bg-sidebar-accent text-sidebar-foreground shadow-[inset_2px_0_0_hsl(var(--gold))]",
+                "bg-sidebar-accent text-sidebar-foreground font-bold [&_.nav-caret]:visible",
             }}
             inactiveProps={{
               className: "text-sidebar-muted hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
             }}
             onClick={onNavigate}
-            className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
+            className="grid min-h-8 grid-cols-[12px_minmax(0,1fr)_32px] items-center gap-2 rounded-md px-2 text-[13px] lowercase transition-colors"
           >
-            <item.icon className="h-4 w-4 text-gold" />
+            <span aria-hidden="true" className="nav-caret invisible text-cyan">❯</span>
             <span>{item.label}</span>
             <CountBadge value={item.count} />
           </Link>
+          </TooltipTrigger>
+          {item.hint && (
+            <TooltipContent side="right" sideOffset={12} aria-label={`Keyboard shortcut: G, then ${item.hint.toUpperCase()}`} className="flex items-center gap-2 border border-border bg-obsidian text-text-2 shadow-md">
+              <span>Go to {item.label}</span>
+              <Kbd>g<span className="text-text-3">›</span>{item.hint}</Kbd>
+            </TooltipContent>
+          )}
+          </Tooltip>
         ))}
       </nav>
+      </TooltipProvider>
 
       <ClusterFooter
         state={health.state}
@@ -204,12 +183,18 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
         uptimeSeconds={health.uptimeSeconds}
         stateMeta={stateMeta}
         quorum={quorum}
+        atomProps={clusterAtomProps(health)}
+        leader={health.raw?.checks?.cluster?.quorum?.leader_address}
+        silentNode={health.raw?.checks?.cluster?.members.find((member) => member.reachability === "unreachable")?.address}
       />
     </aside>
   );
 }
 
 interface ClusterFooterProps {
+  atomProps: AtomLogoProps;
+  leader?: string;
+  silentNode?: string;
   state: ClusterHealthState;
   /** A health response arrived, whatever it said. */
   reported: boolean;
@@ -218,55 +203,52 @@ interface ClusterFooterProps {
   quorum: QuorumView;
 }
 
-const QUORUM_DOT: Record<QuorumView["tone"], string> = {
-  ok: "bg-success",
-  warn: "bg-warning",
-  danger: "bg-danger",
-  muted: "bg-text-4",
-};
-
-function ClusterFooter({ state, reported, uptimeSeconds, stateMeta, quorum }: ClusterFooterProps) {
+function ClusterFooter({ state, reported, uptimeSeconds, stateMeta, quorum, atomProps, leader, silentNode }: ClusterFooterProps) {
   // Hide the footer only when no health response arrived at all. The server
-  // also reports an overall status of "unknown" — meaning it is answering but
-  // could not determine cluster liveness — and that must stay visible rather
+  // also reports an overall status of "unknown": meaning it is answering but
+  // could not determine cluster liveness: and that must stay visible rather
   // than silently removing the cluster panel.
   if (state === "unknown" && !reported) {
     return null;
   }
   return (
-    <div className="border-t border-sidebar-border px-4 py-3">
-      <div className="text-[10px] font-medium uppercase tracking-[0.32em] text-text-3">
-        Cluster
-      </div>
+    <div role="region" aria-label="Cluster health" className="border-t border-sidebar-border px-4 py-3">
+      <AtomLogo size={112} {...atomProps} className="mx-auto mb-2" />
       <dl className="mt-2 space-y-1.5 text-xs">
         <div className="flex items-center justify-between">
           <dt className="text-text-3">Status</dt>
           <dd className="flex items-center gap-1.5 text-text-1">
-            <span className={cn("inline-block h-2 w-2 rounded-full", stateMeta.dot)} />
-            {stateMeta.label}
+            <StatusBadge status={state === "operational" ? "succeeded" : state === "degraded" ? "paused" : state === "unknown" ? "unknown" : "failed"} label={stateMeta.label} size="sm" />
           </dd>
         </div>
         {quorum.status !== "unreported" && (
           <div className="flex items-center justify-between">
             <dt className="text-text-3">Quorum</dt>
             <dd
-              className="flex items-center gap-1.5 font-mono tabular-nums text-text-2"
+              className="flex items-center gap-1.5 tabular-nums text-text-2"
               data-testid="sidebar-quorum"
             >
-              <span className={cn("inline-block h-2 w-2 rounded-full", QUORUM_DOT[quorum.tone])} />
+
               {quorum.label}
             </dd>
           </div>
         )}
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-text-3">leader</dt>
+          <dd className="truncate text-text-2" title={leader}>{leader || "unknown"}</dd>
+        </div>
+        {quorum.total > 9 ? <div className="flex justify-between"><dt className="text-text-3">voters</dt><dd>{quorum.total}</dd></div> : null}
+        {silentNode ? <div className="text-xs text-gold" title={silentNode}>silent node {silentNode}</div> : null}
         <div className="flex items-center justify-between">
           <dt className="text-text-3">Uptime</dt>
-          <dd className="font-mono tabular-nums text-text-2">{formatUptime(uptimeSeconds)}</dd>
+          <dd className="tabular-nums text-text-2">{formatUptime(uptimeSeconds)}</dd>
         </div>
         <div className="flex items-start justify-between gap-3">
           <dt className="text-text-3">Health</dt>
           <dd className="text-right text-[11px] text-text-3">{stateMeta.copy}</dd>
         </div>
       </dl>
+      <div className="mt-3 text-xs text-text-3">build unavailable</div>
     </div>
   );
 }

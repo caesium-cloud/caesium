@@ -65,7 +65,7 @@ test("network recovery selection retains every ordinary browser scenario", () =>
   const browserReport = path.join(uiRoot, "playwright-results.json");
   const reportBefore = existsSync(browserReport) ? readFileSync(browserReport) : undefined;
   const all = listedProjects();
-  expect([...all.keys()].sort()).toEqual(["auth", "cluster-recovery", "default", "network-recovery"]);
+  expect([...all.keys()].sort()).toEqual(["auth", "cluster-recovery", "default", "light", "network-recovery"]);
 
   const ordinary = all.get("default") ?? new Set<string>();
   const recovery = all.get("network-recovery") ?? new Set<string>();
@@ -88,7 +88,8 @@ test("network recovery selection retains every ordinary browser scenario", () =>
   expect([...cluster].every((identity) => identity.startsWith("cluster-recovery.spec.ts:"))).toBe(true);
 
   const selected = listedProjects("network-recovery");
-  expect([...selected.keys()].sort()).toEqual(["default", "network-recovery"]);
+  expect([...selected.keys()].sort()).toEqual(["default", "light", "network-recovery"]);
+  expect(selected.get("light")).toEqual(all.get("light"));
   expect(selected.get("default")).toEqual(ordinary);
   expect(selected.get("network-recovery")).toEqual(recovery);
   expect(union(...selected.values())).toEqual(union(ordinary, recovery));

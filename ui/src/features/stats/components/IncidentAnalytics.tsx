@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Bot, Clock, DollarSign, ShieldAlert } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -75,7 +75,7 @@ export function IncidentAnalytics() {
     return (
       <Card className="border-danger/30 bg-danger/5">
         <CardContent className="flex items-center gap-3 p-4 text-sm text-danger">
-          <AlertTriangle className="h-4 w-4" />
+          <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
           {incidentsQuery.error.message}
         </CardContent>
       </Card>
@@ -85,16 +85,16 @@ export function IncidentAnalytics() {
   return (
     <section className="space-y-4" data-testid="incident-analytics">
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <MetricCard icon={<ShieldAlert className="h-4 w-4" />} title="Incidents" value={analytics.total} />
-        <MetricCard icon={<Bot className="h-4 w-4" />} title="Autonomous rate" value={`${analytics.autonomousRate}%`} />
-        <MetricCard icon={<Clock className="h-4 w-4" />} title="MTTR with agent" value={analytics.mttrWithAgent} />
-        <MetricCard icon={<DollarSign className="h-4 w-4" />} title="Pages avoided" value={analytics.pagesAvoided} />
+        <MetricCard title="Incidents" value={analytics.total} />
+        <MetricCard title="Autonomous rate" value={`${analytics.autonomousRate}%`} />
+        <MetricCard title="MTTR with agent" value={analytics.mttrWithAgent} />
+        <MetricCard title="Pages avoided" value={analytics.pagesAvoided} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <Card className="border-graphite/30 bg-midnight/30">
           <CardHeader className="border-b border-border/50 pb-3">
-            <CardTitle className="text-xs font-semibold uppercase tracking-wider text-text-3">
+            <CardTitle className="text-xs font-bold lowercase text-text-3">
               Incidents by class over time
             </CardTitle>
           </CardHeader>
@@ -105,8 +105,8 @@ export function IncidentAnalytics() {
               analytics.byDay.map((day) => (
                 <div key={day.date} className="space-y-2">
                   <div className="flex items-center justify-between gap-3 text-xs">
-                    <span className="font-mono text-text-3">{day.date}</span>
-                    <span className="font-mono text-text-4">{day.total}</span>
+                    <span className="text-text-3">{day.date}</span>
+                    <span className="text-text-3">{day.total}</span>
                   </div>
                   <div className="flex h-3 overflow-hidden rounded-full bg-graphite/30">
                     {day.classes.map((entry) => (
@@ -120,7 +120,7 @@ export function IncidentAnalytics() {
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {day.classes.map((entry) => (
-                      <Badge key={entry.className} variant="outline" className="text-[10px]">
+                      <Badge key={entry.className} variant="outline" className="text-[11px]">
                         {formatIncidentClass(entry.className)} {entry.count}
                       </Badge>
                     ))}
@@ -134,7 +134,7 @@ export function IncidentAnalytics() {
         <div className="space-y-4">
           <Card className="border-graphite/30 bg-midnight/30">
             <CardHeader className="border-b border-border/50 pb-3">
-              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-text-3">
+              <CardTitle className="text-xs font-bold lowercase text-text-3">
                 Top recurring
               </CardTitle>
             </CardHeader>
@@ -146,11 +146,11 @@ export function IncidentAnalytics() {
                   <div key={incident.id} className="rounded-md border border-border/50 bg-background/50 p-3">
                     <div className="flex items-center justify-between gap-3">
                       <span className="truncate text-sm text-text-1">{formatIncidentClass(incident.class)}</span>
-                      <Badge variant="outline" className="font-mono text-[10px]">
+                      <Badge variant="outline" className="text-[11px]">
                         {incident.occurrence_count}x
                       </Badge>
                     </div>
-                    <div className="mt-1 truncate font-mono text-[10px] text-text-4">{incident.dedupe_key}</div>
+                    <div className="mt-1 truncate text-[11px] text-text-3">{incident.dedupe_key}</div>
                   </div>
                 ))
               )}
@@ -159,7 +159,7 @@ export function IncidentAnalytics() {
 
           <Card className="border-graphite/30 bg-midnight/30">
             <CardHeader className="border-b border-border/50 pb-3">
-              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-text-3">
+              <CardTitle className="text-xs font-bold lowercase text-text-3">
                 Token and cost by profile
               </CardTitle>
             </CardHeader>
@@ -170,8 +170,8 @@ export function IncidentAnalytics() {
                 analytics.profileCosts.map((profile) => (
                   <div key={profile.profile} className="grid grid-cols-[minmax(0,1fr)_80px_90px] gap-2 text-xs">
                     <span className="truncate text-text-2">{profile.profile}</span>
-                    <span className="text-right font-mono text-text-3">{profile.tokens}</span>
-                    <span className="text-right font-mono text-text-3">{formatMoney(profile.cost)}</span>
+                    <span className="text-right text-text-3">{profile.tokens}</span>
+                    <span className="text-right text-text-3">{formatMoney(profile.cost)}</span>
                   </div>
                 ))
               )}
@@ -270,13 +270,13 @@ function MetricCard({
   return (
     <Card className="border-graphite/40 bg-midnight/40">
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1">
-        <CardTitle className="text-[10px] font-bold uppercase tracking-widest text-text-3">
+        <CardTitle className="text-[11px] font-bold lowercase text-text-3">
           {title}
         </CardTitle>
         {icon ? <span className="text-cyan-glow">{icon}</span> : null}
       </CardHeader>
       <CardContent>
-        <div className="text-2xl font-bold tracking-tight text-text-1">{value}</div>
+        <div className="text-2xl font-bold text-text-1">{value}</div>
       </CardContent>
     </Card>
   );

@@ -1,32 +1,15 @@
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
+import { StatusGlyph } from "./status-badge";
+import { statusMeta } from "@/lib/status";
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
-  {
-    variants: {
-      variant: {
-        default:
-          "border-transparent bg-primary text-primary-foreground shadow hover:bg-primary/80",
-        secondary:
-          "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        destructive:
-          "border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/80",
-        success:
-          "border-transparent bg-success text-background shadow hover:bg-success/80",
-        running:
-          "border-transparent bg-caesium-cyan text-caesium-void shadow hover:bg-caesium-cyan/80",
-        cached:
-          "border-cached/35 bg-cached/10 text-cached shadow-none hover:bg-cached/15",
-        outline: "text-foreground",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-    },
-  }
+  "inline-flex items-center gap-2 text-xs font-normal text-text-3",
+  { variants: { variant: {
+    default: "text-text-3", secondary: "text-text-3", destructive: "text-danger", success: "text-success", running: "text-running", cached: "text-cached", outline: "text-text-3",
+  } }, defaultVariants: { variant: "default" } }
 )
 
 export interface BadgeProps
@@ -35,7 +18,10 @@ export interface BadgeProps
 
 function Badge({ className, variant, ...props }: BadgeProps) {
   return (
-    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+    <div className={cn(badgeVariants({ variant }), className)} {...props}>
+      {variant && ["destructive", "success", "running", "cached"].includes(variant) ? <StatusGlyph meta={statusMeta(variant === "destructive" ? "failed" : variant === "success" ? "succeeded" : variant)} /> : null}
+      {props.children}
+    </div>
   )
 }
 

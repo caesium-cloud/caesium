@@ -1,20 +1,12 @@
+import { StatusGlyph } from "@/components/ui/status-badge";
+import { statusMeta } from "@/lib/status";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import {
-  ArrowDown,
-  Circle,
-  Pause,
-  Play,
-  ScrollText,
-  Trash2,
-  Wifi,
-  WifiOff,
-} from "lucide-react";
+
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, formatUTCTime } from "@/lib/utils";
 import {
   LogBadge,
   LogSearchInput,
@@ -23,26 +15,6 @@ import {
   useAutoScroll,
 } from "@/components/logs";
 import { useLogStream, type LogEntry } from "./useLogStream";
-
-const LEVEL_COLORS: Record<string, string> = {
-  debug: "text-text-3 bg-text-3/10",
-  info: "text-running bg-running/10",
-  warn: "text-warning bg-warning/10",
-  error: "text-danger bg-danger/10",
-  dpanic: "text-danger bg-danger/15",
-  panic: "text-danger bg-danger/20",
-  fatal: "text-danger bg-danger/25",
-};
-
-const LEVEL_DOT_COLORS: Record<string, string> = {
-  debug: "fill-[hsl(var(--text-3))]",
-  info: "fill-[hsl(var(--running))]",
-  warn: "fill-[hsl(var(--warning))]",
-  error: "fill-[hsl(var(--danger))]",
-  dpanic: "fill-[hsl(var(--danger))]",
-  panic: "fill-[hsl(var(--danger))]",
-  fatal: "fill-[hsl(var(--danger))]",
-};
 
 const LEVELS = ["debug", "info", "warn", "error"] as const;
 
@@ -105,19 +77,19 @@ export function LogConsolePage() {
     return (
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Log Console</h1>
+          <h1 className="text-2xl font-bold lowercase text-text-1">Log Console</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
             Real-time server log viewer for operators and admins.
           </p>
         </div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <ScrollText className="h-4 w-4" />
+        <section>
+          <div>
+            <h3 className="text-base flex items-center gap-2">
+
               Log Console Disabled
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
+            </h3>
+          </div>
+          <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
               The log console is not enabled on this Caesium instance. To enable it, set the following
               environment variable and restart:
@@ -125,8 +97,8 @@ export function LogConsolePage() {
             <code className="block rounded bg-muted px-3 py-2 text-sm">
               CAESIUM_LOG_CONSOLE_ENABLED=true
             </code>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       </div>
     );
   }
@@ -150,16 +122,16 @@ export function LogConsolePage() {
           >
             {connected ? (
               <span className="inline-flex items-center gap-1.5">
-                <Wifi className="h-3 w-3" /> Connected
+                 Connected
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5">
-                <WifiOff className="h-3 w-3" /> Disconnected
+                 Disconnected
               </span>
             )}
           </LogBadge>
           {levelData?.level && (
-            <LogBadge className="font-mono">{levelData.level}</LogBadge>
+            <LogBadge>{levelData.level}</LogBadge>
           )}
         </>
       }
@@ -171,7 +143,7 @@ export function LogConsolePage() {
             key={lvl}
             onClick={() => setMinLevel(lvl)}
             className={cn(
-              "px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+              "px-2.5 py-1 text-xs font-normal capitalize transition-colors",
               minLevel === lvl
                 ? "bg-primary text-primary-foreground"
                 : "bg-midnight text-text-3 hover:bg-graphite/40 hover:text-text-1",
@@ -211,7 +183,7 @@ export function LogConsolePage() {
           className="h-7 px-2 text-xs text-text-2 hover:bg-graphite/40 hover:text-text-1"
           onClick={paused ? resume : pause}
         >
-          {paused ? <Play className="h-3 w-3 mr-1" /> : <Pause className="h-3 w-3 mr-1" />}
+          <StatusGlyph meta={statusMeta(paused ? "paused" : "running")} />
           {paused ? "Resume" : "Pause"}
         </Button>
         <Button
@@ -220,7 +192,7 @@ export function LogConsolePage() {
           className="h-7 px-2 text-xs text-text-2 hover:bg-graphite/40 hover:text-text-1"
           onClick={clear}
         >
-          <Trash2 className="h-3 w-3 mr-1" />
+
           Clear
         </Button>
       </div>
@@ -231,7 +203,7 @@ export function LogConsolePage() {
     <div className="flex flex-col h-[calc(100vh-7rem)] space-y-4">
       {/* Page header */}
       <div className="shrink-0">
-        <h1 className="text-2xl font-bold tracking-tight">Log Console</h1>
+        <h1 className="text-2xl font-bold lowercase text-text-1">Log Console</h1>
         <p className="text-sm text-muted-foreground mt-0.5">
           Real-time server log stream
         </p>
@@ -247,7 +219,7 @@ export function LogConsolePage() {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="h-full overflow-auto font-mono text-xs"
+          className="h-full overflow-auto text-xs"
         >
           <table className="w-full">
             <tbody>
@@ -273,7 +245,7 @@ export function LogConsolePage() {
               className="shadow-lg"
               onClick={jumpToBottom}
             >
-              <ArrowDown className="h-3 w-3 mr-1" />
+
               Jump to latest
             </Button>
           </div>
@@ -292,9 +264,8 @@ function LogRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const ts = new Date(entry.ts).toISOString().slice(11, 23); // HH:mm:ss.SSS
-  const dotColor = LEVEL_DOT_COLORS[entry.level] ?? "fill-[hsl(var(--text-3))]";
-  const badgeColor = LEVEL_COLORS[entry.level] ?? "text-text-3 bg-text-3/10";
+  const ts = formatUTCTime(entry.ts, { milliseconds: true });
+  const meta = { ...statusMeta(entry.level === "debug" ? "queued" : entry.level === "info" ? "succeeded" : entry.level === "warn" ? "paused" : "failed"), dotClass: "" };
   const hasFields = entry.fields && Object.keys(entry.fields).length > 0;
 
   return (
@@ -303,19 +274,18 @@ function LogRow({
         className="hover:bg-graphite/30 cursor-pointer border-b border-graphite/30"
         onClick={hasFields ? onToggle : undefined}
       >
-        <td className="py-0.5 px-2 text-text-4 whitespace-nowrap align-top w-[85px]">
+        <td className="py-0.5 px-2 text-text-3 whitespace-nowrap align-top w-[85px]">
           {ts}
         </td>
         <td className="py-0.5 px-1 align-top w-[52px]">
-          <span className={cn("inline-flex items-center gap-1 rounded px-1.5 py-0 text-[10px] font-semibold uppercase", badgeColor)}>
-            <Circle className={cn("h-1.5 w-1.5", dotColor)} />
-            {entry.level}
+          <span className="inline-flex items-center gap-2 text-xs font-bold lowercase" style={{ color: meta.fg }}>
+            <StatusGlyph meta={meta} />{entry.level}
           </span>
         </td>
-        <td className="py-0.5 px-2 text-text-1 break-all align-top">
+        <td className="py-0.5 px-2 text-text-2 break-all align-top">
           {entry.msg}
           {entry.caller && (
-            <span className="ml-2 text-text-4">{entry.caller}</span>
+            <span className="ml-2 text-text-3">{entry.caller}</span>
           )}
         </td>
       </tr>

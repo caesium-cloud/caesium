@@ -106,7 +106,7 @@ type RunListSummary struct {
 	JobID         uuid.UUID  `json:"-"`
 	Status        string     `json:"status"`
 	Duration      *float64   `json:"duration,omitempty"`
-	StartedAt     time.Time  `json:"-"`
+	StartedAt     time.Time  `json:"started_at"`
 	CompletedAt   *time.Time `json:"-"`
 	Error         string     `json:"-"`
 	CacheHits     int        `json:"-"`

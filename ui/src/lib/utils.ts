@@ -38,7 +38,7 @@ export function normalizeCommand(command?: string | string[]): string[] {
 
   try {
     const parsed = JSON.parse(trimmed)
-    if (Array.isArray(parsed)) {
+    if (Array.isArray(parsed) && parsed.every(arg => typeof arg === "string")) {
       return parsed.map(String)
     }
   } catch {
@@ -48,9 +48,12 @@ export function normalizeCommand(command?: string | string[]): string[] {
   return [command]
 }
 
-export function formatCommandForDisplay(command?: string | string[]): string {
+/** Display argv with explicit argument boundaries; preserve plain commands verbatim. */
+export function formatCommandForDisplay(command?: string | string[], fallback = "N/A"): string {
   const normalized = normalizeCommand(command)
-  return normalized.length > 0 ? normalized.join(" ") : "N/A"
+  if (!normalized.length) return fallback
+  if (typeof command === "string" && normalized.length === 1 && normalized[0] === command) return command
+  return normalized.map(arg => /^[A-Za-z0-9_./:@%+=,-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ")
 }
 
 export function formatDurationNs(value?: number | null): string {
@@ -98,6 +101,22 @@ export function shortId(value?: string | null, length = 8): string {
 
 function padUTC(value: number): string {
   return String(value).padStart(2, "0")
+}
+
+export function formatUTCTime(
+  value: string | number | Date | null | undefined,
+  { seconds = true, milliseconds = false, fallback = "Unknown time" }: {
+    seconds?: boolean;
+    milliseconds?: boolean;
+    fallback?: string;
+  } = {},
+): string {
+  if (value === null || value === undefined || value === "") return fallback
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) return fallback
+  const time = `${padUTC(date.getUTCHours())}:${padUTC(date.getUTCMinutes())}`
+  return time + (seconds || milliseconds ? `:${padUTC(date.getUTCSeconds())}` : "") +
+    (milliseconds ? `.${String(date.getUTCMilliseconds()).padStart(3, "0")}` : "")
 }
 
 export function formatUTCTimestamp(
