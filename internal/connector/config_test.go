@@ -638,6 +638,27 @@ func TestReviewRegressions(t *testing.T) {
 			t.Fatal("integers past 17 significant digits collapsed to one fingerprint")
 		}
 	})
+	t.Run("schema floats keep digits past float64", func(t *testing.T) {
+		const literal = "0.10000000000000000001"
+		low := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              multipleOf: "+literal+"\n              properties:\n                note:", 1)
+		high := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              multipleOf: 0.1\n              properties:\n                note:", 1)
+		cfg := mustParse(t, low, nil)
+		raw := cfg.Connections[0].Bindings[0].Actions[0].InputSchema
+		if !bytes.Contains(raw, []byte(literal)) {
+			t.Fatalf("stored schema = %s", raw)
+		}
+		left, err := Fingerprint(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := Fingerprint(mustParse(t, high, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if left == right {
+			t.Fatal("floats past 17 significant digits collapsed to one fingerprint")
+		}
+	})
 	t.Run("legitimate schemas", func(t *testing.T) {
 		cases := []string{
 			strings.Replace(validConfig, "properties:\n                note:\n                  type: string", "properties:\n                labels:\n                  type: object\n                  patternProperties:\n                    \"^[a-z_]+$\":\n                      type: string\n                note:\n                  type: string", 1),
