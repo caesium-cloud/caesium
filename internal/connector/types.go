@@ -6,6 +6,7 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -127,9 +128,12 @@ func (a ActorEnvelope) Validate() error {
 }
 
 // ApplyActor copies input and sets the reserved actor field to actor.
-// A caller-supplied value under that key is overwritten. Admission must call
-// this before a submitted payload is validated or dispatched. There is no
-// submission route in this package yet.
+// A caller-supplied value under that key is overwritten. Call this only after
+// the caller payload has passed the action schema. That schema does not
+// declare the reserved field, and additionalProperties false rejects it, so
+// validating the stamped payload fails every submission. AcceptActionInput
+// validates first and then calls ApplyActor. There is no submission route
+// in this package yet.
 func ApplyActor(input map[string]any, actor ActorEnvelope) (map[string]any, error) {
 	if err := actor.Validate(); err != nil {
 		return nil, err
@@ -147,6 +151,16 @@ func ApplyActor(input map[string]any, actor ActorEnvelope) (map[string]any, erro
 		"binding_version": actor.BindingVersion,
 	}
 	return out, nil
+}
+
+// AcceptActionInput validates the caller payload against the action schema
+// and then stamps the server-derived actor. The actor is not part of the
+// public schema. Validating after ApplyActor rejects every payload.
+func AcceptActionInput(schema json.RawMessage, input map[string]any, actor ActorEnvelope) (map[string]any, error) {
+	if err := validateCallerPayload(schema, input); err != nil {
+		return nil, err
+	}
+	return ApplyActor(input, actor)
 }
 
 // CorrelationEnvelope is the frozen v1 activity heartbeat/result hint.

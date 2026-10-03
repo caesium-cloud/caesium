@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,9 @@ var canonicalDecimal = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
 
 // jsonNumber is a JSON number literal. YAML hex, timestamps, and ".inf" are not.
 var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// draft202012Schema is the dialect this compiler embeds. It is not loaded.
+const draft202012Schema = "https://json-schema.org/draft/2020-12/schema"
 
 var yamlQuoted = regexp.MustCompile("`[^`]*`")
 
@@ -165,9 +170,9 @@ type fileActivity struct {
 }
 
 type fileAction struct {
-	Name         string         `yaml:"name"`
-	InputSchema  map[string]any `yaml:"inputSchema"`
-	ResultSchema map[string]any `yaml:"resultSchema"`
+	Name         string    `yaml:"name"`
+	InputSchema  yaml.Node `yaml:"inputSchema"`
+	ResultSchema yaml.Node `yaml:"resultSchema"`
 }
 
 // Parse validates connector YAML. resolver, when set, resolves secret://env
@@ -335,10 +340,19 @@ func validateEndpoint(endpoint string) error {
 	if strings.TrimSpace(endpoint) == "" || strings.ContainsAny(endpoint, " \t\r\n") {
 		return errors.New("endpoint is required")
 	}
-	// Userinfo (https://user:password@host) is an inline credential. The
-	// error stays generic so the password is not echoed.
-	if strings.Contains(endpoint, "@") {
-		return errors.New("endpoint must not include userinfo")
+	// gRPC targets are host:port. A scheme, path, query, fragment, or
+	// userinfo would be stored in the endpoint and the fingerprint. The
+	// error stays generic so a password or token is not echoed.
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" {
+		return errors.New("endpoint must be host:port")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || port != strconv.Itoa(portNum) || portNum < 0 || portNum > 65535 {
+		return errors.New("endpoint must be host:port")
+	}
+	if strings.ContainsAny(host, "/?#@") {
+		return errors.New("endpoint must be host:port")
 	}
 	return nil
 }
@@ -596,11 +610,11 @@ func compileActions(where string, raw []fileAction) ([]Action, error) {
 			return nil, fmt.Errorf("%s: duplicate action name %q", actionWhere, action.Name)
 		}
 		seen[action.Name] = struct{}{}
-		input, err := compileSchema(actionWhere+".inputSchema", action.InputSchema)
+		input, err := compileSchema(actionWhere+".inputSchema", &action.InputSchema)
 		if err != nil {
 			return nil, err
 		}
-		result, err := compileSchema(actionWhere+".resultSchema", action.ResultSchema)
+		result, err := compileSchema(actionWhere+".resultSchema", &action.ResultSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -609,20 +623,30 @@ func compileActions(where string, raw []fileAction) ([]Action, error) {
 	return actions, nil
 }
 
-func compileSchema(where string, schema map[string]any) (json.RawMessage, error) {
-	if len(schema) == 0 {
-		return nil, fmt.Errorf("%s: schema is required", where)
+func compileSchema(where string, node *yaml.Node) (json.RawMessage, error) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s: schema must be a JSON object schema", where)
 	}
-	if err := validateSchemaDocument(schema); err != nil {
+	// Build JSON from the YAML literals. Decoding the subtree into
+	// map[string]any turns integers past uint64 into float64 and drops digits.
+	raw, err := schemaNodeJSON(node)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", where, err)
+	}
+	decoded, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%s: schema is not valid JSON schema", where)
+	}
+	schema, ok := decoded.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: schema must be a JSON object schema", where)
 	}
 	schemaType, _ := schema["type"].(string)
 	if schemaType != "object" {
 		return nil, fmt.Errorf("%s: schema must be a JSON object schema", where)
 	}
-	raw, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("%s: schema is not valid JSON schema", where)
+	if err := validateSchemaDocument(schema); err != nil {
+		return nil, fmt.Errorf("%s: %w", where, err)
 	}
 	if err := compileJSONSchema(raw); err != nil {
 		return nil, fmt.Errorf("%s: schema is not valid JSON schema", where)
@@ -630,9 +654,93 @@ func compileSchema(where string, schema map[string]any) (json.RawMessage, error)
 	return raw, nil
 }
 
+func schemaNodeJSON(node *yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeSchemaJSON(&buf, node); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func writeSchemaJSON(buf *bytes.Buffer, node *yaml.Node) error {
+	if node == nil {
+		return errors.New("schema is not valid JSON schema")
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		keys := make([]int, 0, len(node.Content)/2)
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keys = append(keys, i)
+		}
+		sort.Slice(keys, func(a, b int) bool {
+			return node.Content[keys[a]].Value < node.Content[keys[b]].Value
+		})
+		buf.WriteByte('{')
+		for n, index := range keys {
+			if n > 0 {
+				buf.WriteByte(',')
+			}
+			key, err := json.Marshal(node.Content[index].Value)
+			if err != nil {
+				return err
+			}
+			buf.Write(key)
+			buf.WriteByte(':')
+			if err := writeSchemaJSON(buf, node.Content[index+1]); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte('}')
+	case yaml.SequenceNode:
+		buf.WriteByte('[')
+		for i, child := range node.Content {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := writeSchemaJSON(buf, child); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case yaml.ScalarNode:
+		return writeSchemaScalar(buf, node)
+	default:
+		return errors.New("schema is not valid JSON schema")
+	}
+	return nil
+}
+
+func writeSchemaScalar(buf *bytes.Buffer, node *yaml.Node) error {
+	switch node.ShortTag() {
+	case "!!int", "!!float":
+		// node.Value is the original literal, including digits past 2^53.
+		if !jsonNumber.MatchString(node.Value) {
+			return errors.New("schema scalar must be a JSON string, number, boolean, or null")
+		}
+		buf.WriteString(node.Value)
+	case "!!bool":
+		if node.Value != "true" && node.Value != "false" {
+			return errors.New("schema scalar must be a JSON string, number, boolean, or null")
+		}
+		buf.WriteString(node.Value)
+	case "!!null":
+		buf.WriteString("null")
+	case "!!str":
+		encoded, err := json.Marshal(node.Value)
+		if err != nil {
+			return err
+		}
+		buf.Write(encoded)
+	default:
+		return errors.New("schema scalar must be a JSON string, number, boolean, or null")
+	}
+	return nil
+}
+
 func validateSchemaDocument(schema map[string]any) error {
 	// The default additionalProperties is true, which would let a caller
 	// submit the reserved actor field even when no property declares it.
+	// Only the root object receives the envelope. Nested objects may stay open.
 	if schema["additionalProperties"] != false {
 		return errors.New("schema must set additionalProperties to false")
 	}
@@ -645,41 +753,37 @@ func validateSchemaDocument(schema map[string]any) error {
 	return nil
 }
 
-func schemaDeclaresReserved(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			if key == ReservedActorField {
-				return true
-			}
-			if key == "patternProperties" {
-				patterns, _ := child.(map[string]any)
-				for pattern := range patterns {
-					re, err := regexp.Compile(pattern)
-					if err == nil && re.MatchString(ReservedActorField) {
-						return true
-					}
-				}
-			}
-			if key == "propertyNames" && propertyNamesMatchReserved(child) {
-				return true
-			}
-			if schemaDeclaresReserved(child) {
+func schemaDeclaresReserved(schema map[string]any) bool {
+	if props, ok := schema["properties"].(map[string]any); ok {
+		if _, exists := props[ReservedActorField]; exists {
+			return true
+		}
+	}
+	if patterns, ok := schema["patternProperties"].(map[string]any); ok {
+		for pattern := range patterns {
+			if patternMatchesReserved(pattern) {
 				return true
 			}
 		}
-	case []any:
-		for _, child := range typed {
-			if schemaDeclaresReserved(child) {
-				return true
-			}
-		}
-	case string:
-		if typed == ReservedActorField {
+	}
+	if propertyNamesMatchReserved(schema["propertyNames"]) {
+		return true
+	}
+	required, ok := schema["required"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range required {
+		if item == ReservedActorField {
 			return true
 		}
 	}
 	return false
+}
+
+func patternMatchesReserved(pattern string) bool {
+	re, err := regexp.Compile(pattern)
+	return err == nil && re.MatchString(ReservedActorField)
 }
 
 func propertyNamesMatchReserved(schema any) bool {
@@ -688,25 +792,43 @@ func propertyNamesMatchReserved(schema any) bool {
 		return false
 	}
 	pattern, _ := obj["pattern"].(string)
-	if pattern == "" {
-		return false
-	}
-	re, err := regexp.Compile(pattern)
-	return err == nil && re.MatchString(ReservedActorField)
+	return pattern != "" && patternMatchesReserved(pattern)
 }
 
 func rejectExternalRefs(value any) error {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
-			if key == "$ref" || key == "$id" || key == "$schema" {
+			switch key {
+			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+				// Keys here are property names or patterns, not keywords.
+				props, ok := child.(map[string]any)
+				if !ok {
+					if err := rejectExternalRefs(child); err != nil {
+						return err
+					}
+					continue
+				}
+				for _, propSchema := range props {
+					if err := rejectExternalRefs(propSchema); err != nil {
+						return err
+					}
+				}
+			case "const", "enum", "default", "examples":
+				// Data keywords. A "$ref" inside them is a value, not a reference.
+			case "$ref", "$id":
+				if err := requireDocumentFragment(child); err != nil {
+					return err
+				}
+			case "$schema":
 				ref, ok := child.(string)
-				if !ok || !strings.HasPrefix(ref, "#") {
+				if !ok || (ref != draft202012Schema && !strings.HasPrefix(ref, "#")) {
 					return errors.New("schema references must be fragments inside this document")
 				}
-			}
-			if err := rejectExternalRefs(child); err != nil {
-				return err
+			default:
+				if err := rejectExternalRefs(child); err != nil {
+					return err
+				}
 			}
 		}
 	case []any:
@@ -719,6 +841,14 @@ func rejectExternalRefs(value any) error {
 	return nil
 }
 
+func requireDocumentFragment(value any) error {
+	ref, ok := value.(string)
+	if !ok || !strings.HasPrefix(ref, "#") {
+		return errors.New("schema references must be fragments inside this document")
+	}
+	return nil
+}
+
 type refuseExternalSchema struct{}
 
 func (refuseExternalSchema) Load(string) (any, error) {
@@ -726,18 +856,47 @@ func (refuseExternalSchema) Load(string) (any, error) {
 }
 
 func compileJSONSchema(raw json.RawMessage) error {
+	_, err := compiledSchema(raw)
+	return err
+}
+
+func compiledSchema(raw json.RawMessage) (*jsonschema.Schema, error) {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.UseLoader(refuseExternalSchema{})
 	const resource = "https://caesium.local/connector-schema.json"
 	if err := compiler.AddResource(resource, doc); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = compiler.Compile(resource)
-	return err
+	return compiler.Compile(resource)
+}
+
+func validateCallerPayload(schema json.RawMessage, input map[string]any) error {
+	if len(schema) == 0 {
+		return errors.New("action schema is required")
+	}
+	compiled, err := compiledSchema(schema)
+	if err != nil {
+		return errors.New("action schema is not valid JSON schema")
+	}
+	if input == nil {
+		input = map[string]any{}
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return errors.New("action payload is not valid JSON")
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
+	if err != nil {
+		return errors.New("action payload is not valid JSON")
+	}
+	if err := compiled.Validate(instance); err != nil {
+		return errors.New("action payload does not match the action schema")
+	}
+	return nil
 }
 
 func resolveRawEnvSecrets(raw fileDoc, resolver secret.Resolver) (map[string]string, error) {

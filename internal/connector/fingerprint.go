@@ -151,8 +151,10 @@ func canonicalBindingFrom(binding Binding) (canonicalBinding, error) {
 	sort.Slice(actions, func(i, j int) bool { return actions[i].Name < actions[j].Name })
 	canonicalActions := make([]canonicalAction, 0, len(actions))
 	for _, action := range actions {
-		// compileSchema already stored canonical JSON. Re-parsing it as
-		// float64 would collapse integers above 2^53 onto the same digest.
+		// compileSchema stored the schema's own JSON, with number literals
+		// taken from the YAML text. Re-parsing those bytes as float64 would
+		// collapse integers past 2^53, and past 17 significant digits, onto
+		// the same digest.
 		if len(action.InputSchema) == 0 || len(action.ResultSchema) == 0 {
 			return canonicalBinding{}, errors.New("connector schema is required")
 		}

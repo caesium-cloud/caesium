@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,7 +46,8 @@ func Clear() {
 // LoadFile reads, parses, and fingerprints the connector file. The OS error is
 // wrapped so a missing file, a permission failure, and a directory stay
 // distinguishable. The file must be a regular file no larger than
-// MaxConfigFileBytes.
+// MaxConfigFileBytes. Type and size are taken from the opened file, so a
+// symlink swap cannot check one inode and read another.
 func LoadFile(path string) (*Config, string, error) {
 	cfg, fingerprint, err := readConfigFile(path)
 	if err != nil {
@@ -59,30 +61,17 @@ func LoadFile(path string) (*Config, string, error) {
 }
 
 func readConfigFile(path string) (*Config, string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: not a regular file", path)
-	}
-	if info.Size() > MaxConfigFileBytes {
-		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: file exceeds %d bytes", path, MaxConfigFileBytes)
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: %w", path, err)
 	}
-	data, readErr := io.ReadAll(io.LimitReader(file, MaxConfigFileBytes+1))
+	data, readErr := readOpenConfig(file)
 	closeErr := file.Close()
 	if readErr != nil {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: %w", path, readErr)
 	}
 	if closeErr != nil {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: %w", path, closeErr)
-	}
-	if int64(len(data)) > MaxConfigFileBytes {
-		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: file exceeds %d bytes", path, MaxConfigFileBytes)
 	}
 	cfg, err := Parse(data, secret.NewEnvResolver())
 	if err != nil {
@@ -93,4 +82,25 @@ func readConfigFile(path string) (*Config, string, error) {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE rejected: %w", err)
 	}
 	return cfg, fingerprint, nil
+}
+
+func readOpenConfig(file *os.File) ([]byte, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	if info.Size() > MaxConfigFileBytes {
+		return nil, fmt.Errorf("file exceeds %d bytes", MaxConfigFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, MaxConfigFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > MaxConfigFileBytes {
+		return nil, fmt.Errorf("file exceeds %d bytes", MaxConfigFileBytes)
+	}
+	return data, nil
 }

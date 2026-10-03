@@ -1,9 +1,11 @@
 package connector
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -491,8 +493,22 @@ func TestReviewRegressions(t *testing.T) {
 	t.Run("endpoint userinfo", func(t *testing.T) {
 		doc := strings.Replace(validConfig, "frontend.temporal.svc:7233", "https://admin:hunter2@frontend.temporal.svc:7233", 1)
 		_, err := Parse([]byte(doc), nil)
-		if err == nil || !strings.Contains(err.Error(), "userinfo") || strings.Contains(err.Error(), "hunter2") {
+		if err == nil || !strings.Contains(err.Error(), "host:port") || strings.Contains(err.Error(), "hunter2") {
 			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("endpoint is host port only", func(t *testing.T) {
+		cases := []string{
+			"https://frontend.temporal.svc:7233/?api_key=hunter2hunter2",
+			"frontend.temporal.svc:7233#hunter2",
+			"https://frontend.temporal.svc:7233/hunter2hunter2",
+		}
+		for _, endpoint := range cases {
+			doc := strings.Replace(validConfig, "endpoint: frontend.temporal.svc:7233", "endpoint: "+strconv.Quote(endpoint), 1)
+			_, err := Parse([]byte(doc), nil)
+			if err == nil || !strings.Contains(err.Error(), "host:port") || strings.Contains(err.Error(), "hunter2") {
+				t.Fatalf("%s: error = %v", endpoint, err)
+			}
 		}
 	})
 	t.Run("disabled connection skips unset env", func(t *testing.T) {
@@ -600,6 +616,73 @@ func TestReviewRegressions(t *testing.T) {
 			t.Fatal("integers above 2^53 collapsed to one fingerprint")
 		}
 	})
+	t.Run("schema integers keep digits past uint64", func(t *testing.T) {
+		const literal = "18446744073709551617"
+		const neighbor = "18446744073709551618"
+		low := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              maximum: "+literal+"\n              properties:\n                note:", 1)
+		high := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              maximum: "+neighbor+"\n              properties:\n                note:", 1)
+		cfg := mustParse(t, low, nil)
+		raw := cfg.Connections[0].Bindings[0].Actions[0].InputSchema
+		if !bytes.Contains(raw, []byte(literal)) || bytes.Contains(raw, []byte("18446744073709552000")) {
+			t.Fatalf("stored schema = %s", raw)
+		}
+		left, err := Fingerprint(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := Fingerprint(mustParse(t, high, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if left == right {
+			t.Fatal("integers past 17 significant digits collapsed to one fingerprint")
+		}
+	})
+	t.Run("legitimate schemas", func(t *testing.T) {
+		cases := []string{
+			strings.Replace(validConfig, "properties:\n                note:\n                  type: string", "properties:\n                labels:\n                  type: object\n                  patternProperties:\n                    \"^[a-z_]+$\":\n                      type: string\n                note:\n                  type: string", 1),
+			strings.Replace(validConfig, "properties:\n                note:\n                  type: string", "properties:\n                \"$id\":\n                  type: string\n                note:\n                  type: string", 1),
+			strings.Replace(validConfig, "note:\n                  type: string", "note:\n                  type: string\n                  default:\n                    \"$ref\": x", 1),
+			strings.Replace(validConfig, "type: object\n              additionalProperties: false", "type: object\n              description: _caesium_actor\n              additionalProperties: false", 1),
+			strings.Replace(validConfig, "type: object\n              additionalProperties: false", "$schema: https://json-schema.org/draft/2020-12/schema\n              type: object\n              additionalProperties: false", 1),
+		}
+		for _, doc := range cases {
+			if _, err := Parse([]byte(doc), nil); err != nil {
+				t.Fatalf("schema rejected: %v\n%s", err, doc)
+			}
+		}
+	})
+	t.Run("validate before actor stamp", func(t *testing.T) {
+		cfg := mustParse(t, validConfig, nil)
+		schema := cfg.Connections[0].Bindings[0].Actions[0].InputSchema
+		actor, err := NewActorEnvelope(PrincipalKindUser, "user-1", "ada", "operator", "op-9", "1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		caller := map[string]any{"note": "hi"}
+		if err := validateCallerPayload(schema, caller); err != nil {
+			t.Fatal(err)
+		}
+		stamped, err := ApplyActor(caller, actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateCallerPayload(schema, stamped); err == nil {
+			t.Fatal("schema accepted a payload that already contained the actor")
+		}
+		accepted, err := AcceptActionInput(schema, caller, actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := accepted[ReservedActorField].(map[string]any)
+		if got["subject"] != "ada" || accepted["note"] != "hi" {
+			t.Fatalf("payload = %#v", accepted)
+		}
+		supplied := map[string]any{"note": "hi", ReservedActorField: map[string]any{"subject": "mallory"}}
+		if _, err := AcceptActionInput(schema, supplied, actor); err == nil {
+			t.Fatal("caller-supplied actor was accepted")
+		}
+	})
 	t.Run("short secret does not garble the error", func(t *testing.T) {
 		t.Setenv("TEMPORAL_TOKEN", "e")
 		_, err := Parse([]byte(withLimits(validConfig, "readsPerMinute: 61")), secret.NewEnvResolver())
@@ -663,6 +746,27 @@ func TestLoadFileReportsTheOSCause(t *testing.T) {
 		t.Fatalf("size: %v", err)
 	}
 
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, []byte(validConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEMPORAL_TOKEN", "temporal")
+	if _, _, err := LoadFile(link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	dirLink := filepath.Join(dir, "dirlink")
+	if err := os.Symlink(dir, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadFile(dirLink); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlink to directory: %v", err)
+	}
+
 	path := filepath.Join(t.TempDir(), "connectors.yaml")
 	if err := os.WriteFile(path, []byte(validConfig), 0o600); err != nil {
 		t.Fatal(err)
@@ -692,6 +796,46 @@ func (ledgerAdapter) Identity() ProviderIdentity {
 	return ProviderIdentity{
 		Name:         "ledger",
 		Capabilities: []Capability{CapabilityReceiptLookup},
+	}
+}
+
+func TestDocumentedConnectorExampleIsTheAgentFixture(t *testing.T) {
+	root := moduleRoot(t)
+	doc, err := os.ReadFile(filepath.Join(root, "docs/connectors.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(filepath.Join(root, "test/fixtures/connectors/connections.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), strings.TrimSpace(string(fixture))) {
+		t.Fatal("docs/connectors.md example is not the file the agent lane mounts")
+	}
+	if !strings.Contains(string(doc), "CAESIUM_AUTH_KEY_HASH_SECRET") || !strings.Contains(string(doc), "secretKeyRef") {
+		t.Fatal("helm example does not set CAESIUM_AUTH_KEY_HASH_SECRET from a Secret")
+	}
+	t.Setenv("TEMPORAL_TOKEN", "temporal")
+	if _, err := Parse(fixture, secret.NewEnvResolver()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not locate module root")
+		}
+		dir = parent
 	}
 }
 

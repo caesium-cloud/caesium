@@ -31,11 +31,11 @@ missing file, a permission error, and a directory keep the operating-system
 cause. The file must be a regular file of at most 1 MiB. Hot reload and UI
 edits are not part of this contract.
 
-The integration server started by `just integration-up` does not set this gate
-and does not mount a connector file. There is no connector command or HTTP
-route yet, so that server has nothing to execute. Startup proof on the
-integration server belongs to plan item C1 in
-`exec-plans/active/execution-connectors.md`.
+The main integration server started by `just integration-up` does not set this
+gate. The auth-enabled agent lane (`just integration-up-agent`) sets the gate
+and mounts the example below, so a file the parser rejects fails that lane
+before `/health` answers. The multi-node fingerprint rollout is still plan
+item C1 in `exec-plans/active/execution-connectors.md`.
 
 ```yaml
 version: 1
@@ -92,10 +92,12 @@ or run-id fields.
 
 Credential material is a `secret://` reference (`env`, `k8s` / `kubernetes`, or
 `vault`, the same providers as the rest of Caesium) or an absolute mounted
-certificate path. Inline tokens, PEM bodies, userinfo in a reference, a
-password in the endpoint (`https://user:secret@host`), and query parameters the
-resolver does not read are rejected. References use the resolver's own path
-shape: `secret://k8s/<secret>/<key>` or
+certificate path. Inline tokens, PEM bodies, userinfo in a reference, and
+query parameters the resolver does not read are rejected. The endpoint is
+`host:port` only. A scheme, path, query, fragment, or userinfo
+(`https://user:secret@host`, `host:7233?api_key=secret`, `host:7233#secret`,
+or a path) is rejected, and the error does not echo the value. References use
+the resolver's own path shape: `secret://k8s/<secret>/<key>` or
 `secret://k8s/<namespace>/<secret>/<key>`, and
 `secret://vault/<path>/<field>` or `?field=`. Fragments are rejected, because
 the resolvers do not read them. A connection with `enabled: false` stays in
@@ -123,21 +125,29 @@ Allocate a new id instead.
 Execution references are stateless. They are the connection id plus opaque
 coordinates chosen by the adapter, and they do not insert a catalog row.
 
-The reserved field `_caesium_actor` is a server-derived envelope. Public input
-and result schemas cannot declare it, including through `required`,
-`patternProperties`, or `propertyNames`, and each object schema sets
-`additionalProperties: false`. The config file cannot override it. Submission
-overwrites the field with `ApplyActor` before the payload is used. The
-envelope fields are `principal_kind` (`user` or `api_key`), `stable_id`,
-`subject`, `role`, `operation_id`, and `binding_version`. API keys stay
-identified as keys.
+The reserved field `_caesium_actor` is a server-derived envelope. The root
+object schema sets `additionalProperties: false`. Nested objects do not have
+to. That root schema cannot declare the field, including through `required`,
+`patternProperties`, or `propertyNames`. A nested `patternProperties` entry,
+a property named `$id` or `$ref`, and a data value such as a description are
+not declarations. The config file cannot override the field. Admission
+validates the caller payload against the action schema first.
+`AcceptActionInput` then stamps the envelope with `ApplyActor`. Validating
+after the stamp rejects every payload, because the field is not part of the
+public schema. The envelope fields are `principal_kind` (`user` or
+`api_key`), `stable_id`, `subject`, `role`, `operation_id`, and
+`binding_version`. API keys stay identified as keys.
 
-Action schemas are JSON Schema. `$ref`, `$id`, and `$schema` must be fragments
-inside the same document. `file://` and other external references are refused,
-so a schema change cannot hide outside the fingerprint. Schema scalars must be
-JSON strings, numbers, booleans, or null. YAML timestamps and hex integers are
-rejected; quote a date to keep it a string. An activity type belongs to one
-binding on a connection.
+Action schemas are JSON Schema. `$ref` and `$id` keywords must be fragments
+inside the same document. `$schema` may be
+`https://json-schema.org/draft/2020-12/schema` or a fragment. Property names,
+and values under `const`, `enum`, `default`, and `examples`, are data, not
+references. `file://` and other external references are refused, so a schema
+change cannot hide outside the fingerprint. Schema scalars must be JSON
+strings, numbers, booleans, or null. YAML timestamps and hex integers are
+rejected; quote a date to keep it a string. Numbers keep the digits written
+in the file, including integers past 2^53 and past 17 significant digits. An
+activity type belongs to one binding on a connection.
 
 The v1 correlation hint, carried on a recognized activity, is fixed:
 
@@ -165,9 +175,10 @@ different subset. Nothing in the registry requires a Temporal module.
 Equivalent files produce one canonical SHA-256 fingerprint. Key order,
 comments, and duration spellings that parse to the same budget do not change
 it. The fingerprint covers enabled configuration, immutable connection targets,
-credential references, bindings and schemas, and limits. Schema integers above
-2^53 stay distinct. The digest is the schema document itself, not a copy loaded
-from another file.
+credential references, bindings and schemas, and limits. Schema integers keep
+the digits written in the file, so values above 2^53 and integers with more
+than 17 significant digits stay distinct. The digest is the schema document
+itself, not a copy loaded from another file.
 
 It does not cover resolved secret bytes. Rotating a secret under the same
 `secret://` reference leaves the fingerprint unchanged.
@@ -192,6 +203,11 @@ config:
       value: "true"
     - name: CAESIUM_AUTH_MODE
       value: api-key
+    - name: CAESIUM_AUTH_KEY_HASH_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: caesium-auth
+          key: key-hash-secret
     - name: CAESIUM_CONNECTORS_CONFIG_FILE
       value: /etc/caesium/connectors/connections.yaml
     - name: CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT
@@ -206,10 +222,15 @@ extraVolumeMounts:
     readOnly: true
 ```
 
-Set `CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` to the fingerprint currently
-stored on the cluster before replacing the ConfigMap, then roll the replicas
-together so they all see one file. Secret rotation does not require that
-variable to change.
+`caesium start` logs the loaded fingerprint as `connector config loaded`.
+Nothing else stores it yet, and the previous-fingerprint check is not
+enforced. Copy that logged value into
+`CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` before replacing the
+ConfigMap, then roll the replicas together so they all see one file. Secret
+rotation does not require that variable to change. API-key mode also requires
+`CAESIUM_AUTH_KEY_HASH_SECRET` of at least 32 characters. The chart does not
+set it. The snippet above reads it from a Secret. A pod that sets
+`CAESIUM_AUTH_MODE=api-key` without that value exits on startup.
 
 See [kubernetes-deployment.md](kubernetes-deployment.md) for the Helm chart and
 [temporal.md](temporal.md) for the current REST-only way to call Caesium from
