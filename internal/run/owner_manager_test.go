@@ -120,6 +120,59 @@ func TestOwnerManager_RecoverThenLoopFlow(t *testing.T) {
 	require.Greater(t, aRow.TerminalSequence, int64(0), "owner completion must stamp a terminal_sequence > 0")
 }
 
+// A failed reset must leave recovery unpublished. Otherwise a checkpoint that
+// predates dispatch makes the task ready in memory while its durable row still
+// holds the dead worker's claim, and every replacement dispatch is rejected.
+func TestOwnerManager_RecoverRetriesFailedClaimReset(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	cfg := CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3}
+	previous := NewOwnerManager(store, cfg)
+	require.NoError(t, previous.Adopt(runID, 1))
+	previous.Drop(runID) // Persist the checkpoint before the worker claims a.
+	checkpoint, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	require.NoError(t, store.ClaimTaskForDispatch(runID, taskA, "dead-worker", 1, time.Minute, true))
+	var before models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&before).Error)
+
+	armed := failNextUpdate(t, db)
+	armed.Store(true)
+	mgr := NewOwnerManager(store, cfg)
+	_, err = mgr.Recover(runID, 2)
+	require.ErrorContains(t, err, "injected durable write failure")
+	require.False(t, armed.Load(), "the reset must actually hit the failed UPDATE")
+	require.False(t, mgr.Owns(runID), "a failed reset must not publish ownership")
+	require.Empty(t, mgr.ReadyForDispatch(runID))
+	afterCheckpoint, err := store.LatestFullCheckpoint(runID)
+	require.NoError(t, err)
+	require.Equal(t, checkpoint, afterCheckpoint, "failed recovery must not write a generation checkpoint")
+	var after models.TaskRun
+	require.NoError(t, db.First(&after, "id = ?", before.ID).Error)
+	require.Equal(t, before.Status, after.Status)
+	require.Equal(t, before.ClaimedBy, after.ClaimedBy)
+	require.Equal(t, before.ClaimExpiresAt, after.ClaimExpiresAt)
+
+	// The next dispatch tick recovers again, clears the claim, and can execute
+	// both the lost root and its successor through the normal owner path.
+	_, err = mgr.Recover(runID, 2)
+	require.NoError(t, err)
+	require.True(t, mgr.Owns(runID))
+	for index, taskID := range []uuid.UUID{taskA, taskB} {
+		ready := mgr.ReadyForDispatch(runID)
+		require.Len(t, ready, 1)
+		require.Equal(t, taskID, ready[0].TaskID)
+		require.NoError(t, store.ClaimTaskForDispatch(runID, taskID, "replacement-worker", 2, time.Minute, true))
+		mgr.MarkDispatched(runID, ready[0].ExecutionRef(), "replacement-worker", ready[0].Attempt, 0)
+		result, err := mgr.Complete(runID, ready[0].ExecutionRef(), TaskStatusSucceeded, "success", "", "replacement-worker", nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, index == 1, result.Complete)
+	}
+}
+
 // TestOwnerManager_RedeliveredCompletionKeepsTerminalSequence covers the worker
 // re-delivering an identical completion (it re-POSTs /internal/complete when the
 // owner answers 503 for transient dqlite contention).  The second delivery must
