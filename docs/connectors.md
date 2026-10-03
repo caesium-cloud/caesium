@@ -208,6 +208,11 @@ config:
         secretKeyRef:
           name: caesium-auth
           key: key-hash-secret
+    - name: TEMPORAL_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: caesium-connectors
+          key: temporal-token
     - name: CAESIUM_CONNECTORS_CONFIG_FILE
       value: /etc/caesium/connectors/connections.yaml
     - name: CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT
@@ -230,7 +235,10 @@ ConfigMap, then roll the replicas together so they all see one file. Secret
 rotation does not require that variable to change. API-key mode also requires
 `CAESIUM_AUTH_KEY_HASH_SECRET` of at least 32 characters. The chart does not
 set it. The snippet above reads it from a Secret. A pod that sets
-`CAESIUM_AUTH_MODE=api-key` without that value exits on startup.
+`CAESIUM_AUTH_MODE=api-key` without that value exits on startup. The example
+file resolves `secret://env/TEMPORAL_TOKEN` while the connection is enabled,
+so the same snippet sets `TEMPORAL_TOKEN` from a Secret. Without that
+variable every replica exits because the env var is unset.
 
 See [kubernetes-deployment.md](kubernetes-deployment.md) for the Helm chart and
 [temporal.md](temporal.md) for the current REST-only way to call Caesium from

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"golang.org/x/sys/unix"
 )
 
 const plantedSecret = "planted-secret-VALUE/9f3a"
@@ -787,6 +788,23 @@ func TestLoadFileReportsTheOSCause(t *testing.T) {
 	if _, _, err := LoadFile(dirLink); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("symlink to directory: %v", err)
 	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fifoErr := make(chan error, 1)
+	go func() {
+		_, _, err := LoadFile(fifo)
+		fifoErr <- err
+	}()
+	select {
+	case err := <-fifoErr:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("fifo: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("opening a FIFO blocked startup")
+	}
 
 	path := filepath.Join(t.TempDir(), "connectors.yaml")
 	if err := os.WriteFile(path, []byte(validConfig), 0o600); err != nil {
@@ -833,8 +851,13 @@ func TestDocumentedConnectorExampleIsTheAgentFixture(t *testing.T) {
 	if !strings.Contains(string(doc), strings.TrimSpace(string(fixture))) {
 		t.Fatal("docs/connectors.md example is not the file the agent lane mounts")
 	}
-	if !strings.Contains(string(doc), "CAESIUM_AUTH_KEY_HASH_SECRET") || !strings.Contains(string(doc), "secretKeyRef") {
-		t.Fatal("helm example does not set CAESIUM_AUTH_KEY_HASH_SECRET from a Secret")
+	helmAt := strings.Index(string(doc), "name: CAESIUM_AUTH_KEY_HASH_SECRET")
+	if helmAt < 0 {
+		t.Fatal("helm example does not set CAESIUM_AUTH_KEY_HASH_SECRET")
+	}
+	helm := string(doc)[helmAt:]
+	if !strings.Contains(helm, "secretKeyRef") || !strings.Contains(helm, "name: TEMPORAL_TOKEN") {
+		t.Fatal("helm example does not set TEMPORAL_TOKEN from a Secret")
 	}
 	t.Setenv("TEMPORAL_TOKEN", "temporal")
 	if _, err := Parse(fixture, secret.NewEnvResolver()); err != nil {

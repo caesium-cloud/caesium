@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"golang.org/x/sys/unix"
 )
 
 // MaxConfigFileBytes is the largest connector file caesium start will read.
@@ -46,8 +47,9 @@ func Clear() {
 // LoadFile reads, parses, and fingerprints the connector file. The OS error is
 // wrapped so a missing file, a permission failure, and a directory stay
 // distinguishable. The file must be a regular file no larger than
-// MaxConfigFileBytes. Type and size are taken from the opened file, so a
-// symlink swap cannot check one inode and read another.
+// MaxConfigFileBytes. The open uses O_NONBLOCK so a FIFO is refused instead
+// of waiting for a writer. Type and size are taken from that descriptor, so
+// a symlink swap cannot check one inode and read another.
 func LoadFile(path string) (*Config, string, error) {
 	cfg, fingerprint, err := readConfigFile(path)
 	if err != nil {
@@ -61,7 +63,9 @@ func LoadFile(path string) (*Config, string, error) {
 }
 
 func readConfigFile(path string) (*Config, string, error) {
-	file, err := os.Open(path)
+	// O_NONBLOCK returns at once when path is a FIFO. A blocking open would
+	// wait for a writer and never reach the regular-file check.
+	file, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE %q cannot be read: %w", path, err)
 	}
@@ -94,6 +98,11 @@ func readOpenConfig(file *os.File) ([]byte, error) {
 	}
 	if info.Size() > MaxConfigFileBytes {
 		return nil, fmt.Errorf("file exceeds %d bytes", MaxConfigFileBytes)
+	}
+	// File.Fd puts the descriptor back into blocking mode. A regular file
+	// opened with O_NONBLOCK must not surface EAGAIN on the read.
+	if err := unix.SetNonblock(int(file.Fd()), false); err != nil {
+		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(file, MaxConfigFileBytes+1))
 	if err != nil {
