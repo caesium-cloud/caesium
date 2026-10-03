@@ -1571,6 +1571,10 @@ published it as ready, causing repeated `task_not_running` refusals and the
 retained-history timeout. `TestOwnerManager_RecoverRetriesFailedClaimReset`
 injects a reset transaction failure, checks that ownership and checkpoints
 stay unpublished, then verifies the retry executes the root and its successor.
+The coverage collector also runs the real run-history browser regression with
+distributed execution and the in-memory owner enabled. This adds runtime
+coverage of owner recovery while preserving the local CLI/server collection;
+all three browser journeys must pass on their first attempt.
 
 F2 extends the F4 controller with `CAESIUM_LIFECYCLE_MODE=cluster`. Run it only
 in the exclusive Docker/kind/Helm lane from a clean, committed candidate;

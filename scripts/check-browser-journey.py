@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require both live Chromium coverage journeys to pass on their first attempt."""
+"""Require every live Chromium coverage journey to pass on its first attempt."""
 
 import json
 import sys
@@ -9,6 +9,7 @@ from pathlib import Path
 EXPECTED = {
     "sidebar navigates between every primary control-plane page",
     "operator can pause and unpause a job from the detail page",
+    "recovery reads the status of each real run history row before and after reload",
 }
 
 
@@ -29,7 +30,7 @@ def validate(doc):
     for suite in doc.get("suites", []):
         visit(suite)
     if any(results != [["passed"]] for results in observed.values()):
-        raise ValueError(f"browser journeys were not both first-attempt passes: {observed}")
+        raise ValueError(f"browser journeys were not all first-attempt passes: {observed}")
     return observed
 
 
@@ -40,7 +41,7 @@ def main():
         validate(json.loads(Path(sys.argv[1]).read_text()))
     except (OSError, json.JSONDecodeError, ValueError) as err:
         raise SystemExit(str(err)) from err
-    print("browser journeys: 2 first-attempt passes")
+    print(f"browser journeys: {len(EXPECTED)} first-attempt passes")
 
 
 if __name__ == "__main__":

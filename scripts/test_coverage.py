@@ -480,7 +480,7 @@ class BrowserJourneyResultTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "playwright.json"
 
-    def check(self, first="passed", second="passed", *, retry=False, missing=False):
+    def check(self, first="passed", second="passed", third="passed", *, retry=False, missing=False, missing_owner=False):
         specs = [{
             "title": "sidebar navigates between every primary control-plane page",
             "tests": [{"results": [{"status": first}]}],
@@ -491,17 +491,23 @@ class BrowserJourneyResultTests(unittest.TestCase):
                 "tests": [{"results": [{"status": "failed"}, {"status": second}]}]
                 if retry else [{"results": [{"status": second}]}],
             })
+        if not missing_owner:
+            specs.append({
+                "title": "recovery reads the status of each real run history row before and after reload",
+                "tests": [{"results": [{"status": third}]}],
+            })
         self.path.write_text(json.dumps({"suites": [{"specs": specs}]}))
         return subprocess.run(
             [sys.executable, str(BROWSER_CHECKER), str(self.path)],
             capture_output=True, text=True,
         )
 
-    def test_two_first_attempt_passes(self):
+    def test_three_first_attempt_passes(self):
         self.assertEqual(self.check().returncode, 0)
 
     def test_skip_retry_or_missing_journey_does_not_pass(self):
-        for kwargs in ({"first": "skipped"}, {"retry": True}, {"missing": True}):
+        for kwargs in ({"first": "skipped"}, {"retry": True}, {"missing": True},
+                       {"third": "skipped"}, {"third": "failed"}, {"missing_owner": True}):
             with self.subTest(kwargs=kwargs):
                 result = self.check(**kwargs)
                 self.assertNotEqual(result.returncode, 0, output(result))
@@ -1112,7 +1118,8 @@ if len(sys.argv)>1 and sys.argv[1]==os.environ["FAKE_BROWSER_JOURNEY"]:
     failed=os.environ.get("FAKE_SCENARIO")=="journey-failed"
     report=pathlib.Path(sys.argv[3]);report.write_text(json.dumps({"suites":[{"specs":[
       {"title":"sidebar navigates between every primary control-plane page","tests":[{"results":[{"status":"failed" if failed else "passed"}]}]},
-      {"title":"operator can pause and unpause a job from the detail page","tests":[{"results":[{"status":"passed"}]}]}
+      {"title":"operator can pause and unpause a job from the detail page","tests":[{"results":[{"status":"passed"}]}]},
+      {"title":"recovery reads the status of each real run history row before and after reload","tests":[{"results":[{"status":"passed"}]}]}
     ]}]}))
     raise SystemExit(subprocess.run([sys.executable,os.environ["FAKE_BROWSER_CHECKER"],str(report)]).returncode)
 os.execv("/bin/bash",["bash"]+sys.argv[1:])
