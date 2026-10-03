@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { applyDefinitions, awaitRun, failOnUnexpectedPageErrors, findJobByAlias, triggerJob, uniqueSuffix } from "./helpers/fixtures";
+import { applyDefinitions, awaitRun, failOnUnexpectedPageErrors, findJobByAlias, triggerJob, uniqueSuffix, type FixtureDefinition } from "./helpers/fixtures";
 import { readRunRows } from "./helpers/run-history";
 
 failOnUnexpectedPageErrors();
@@ -10,7 +10,7 @@ test("recovery reads the status of each real run history row before and after re
     apiVersion: "v1", kind: "Job", metadata: { alias },
     trigger: { type: "cron", configuration: { cron: "0 0 1 1 *" } },
     steps: [{ name: "history", engine: process.env.CAESIUM_E2E_ENGINE || "docker", image: "alpine:3.23", cache: false, command: ["sh", "-c", 'test "$CAESIUM_PARAM_OUTCOME" = succeeded'] }],
-  });
+  } as FixtureDefinition);
   const job = await findJobByAlias(request, alias);
   await triggerJob(request, job.id, { params: { OUTCOME: "succeeded" } });
   const succeeded = await awaitRun(request, job.id, { status: "succeeded" });
