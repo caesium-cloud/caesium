@@ -20,6 +20,7 @@ const MaxConfigFileBytes int64 = 1 << 20
 type runtime struct {
 	config      *Config
 	fingerprint string
+	registry    *Registry
 }
 
 var (
@@ -35,6 +36,14 @@ func Current() (*Config, string, bool) {
 		return nil, "", false
 	}
 	return runtimeState.config, runtimeState.fingerprint, true
+}
+
+// LoadedRegistry returns the adapter registry published with the loaded config.
+// A1 leaves it empty: loading a file does not register a provider.
+func LoadedRegistry() *Registry {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return runtimeState.registry
 }
 
 // Clear drops the loaded config. Server startup calls it when the gate is off.
@@ -56,8 +65,9 @@ func LoadFile(path string) (*Config, string, error) {
 		Clear()
 		return nil, "", err
 	}
+	// The registry stays empty. A1 does not register a provider adapter.
 	runtimeMu.Lock()
-	runtimeState = runtime{config: cfg, fingerprint: fingerprint}
+	runtimeState = runtime{config: cfg, fingerprint: fingerprint, registry: NewRegistry()}
 	runtimeMu.Unlock()
 	return cfg, fingerprint, nil
 }
@@ -79,6 +89,9 @@ func readConfigFile(path string) (*Config, string, error) {
 	}
 	cfg, err := Parse(data, secret.NewEnvResolver())
 	if err != nil {
+		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE rejected: %w", err)
+	}
+	if err := sealIdentities(cfg); err != nil {
 		return nil, "", fmt.Errorf("CAESIUM_CONNECTORS_CONFIG_FILE rejected: %w", err)
 	}
 	fingerprint, err := Fingerprint(cfg)

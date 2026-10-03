@@ -827,6 +827,20 @@ func TestLoadFileReportsTheOSCause(t *testing.T) {
 	if !ok || stored != first || cfg.Version != 1 {
 		t.Fatalf("current = %v %s %v", cfg, stored, ok)
 	}
+	registry := LoadedRegistry()
+	if registry == nil {
+		t.Fatal("loaded config did not publish a registry")
+	}
+	if _, registered := registry.Get(ProviderTemporal); registered {
+		t.Fatal("loading a temporal connection registered a Temporal adapter")
+	}
+}
+
+func TestSealIdentitiesRejectsAnEmptyID(t *testing.T) {
+	err := sealIdentities(&Config{Connections: []Connection{{ID: ""}}})
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("empty id: %v", err)
+	}
 }
 
 type ledgerAdapter struct{}

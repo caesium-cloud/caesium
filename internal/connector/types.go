@@ -195,6 +195,23 @@ type ConnectionIdentity struct {
 	Scope    string
 }
 
+// sealIdentities rejects a blank connection id before that identity is published.
+// Parsed files already have ids. This is the same immutable-identity rule a
+// later rollout uses, applied to the loaded identity before it becomes the
+// process baseline.
+func sealIdentities(cfg *Config) error {
+	if cfg == nil {
+		return errors.New("connector config is required")
+	}
+	for _, conn := range cfg.Connections {
+		baseline := conn.Identity()
+		if err := baseline.RefuseRepoint(conn.Identity()); err != nil {
+			return fmt.Errorf("connection %q: %w", conn.ID, err)
+		}
+	}
+	return nil
+}
+
 // RefuseRepoint reports an error when next keeps this id and changes the
 // provider, endpoint, or scope. A different id is a different connection.
 func (id ConnectionIdentity) RefuseRepoint(next ConnectionIdentity) error {

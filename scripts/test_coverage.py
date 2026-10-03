@@ -1139,9 +1139,17 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
             else: print("sha256:"+"c"*64)
     elif args and args[0]=="create": print("audit-export")
     elif args and args[0]=="port": print("127.0.0.1:12345")
+    elif args and args[0]=="logs":
+        if os.environ.get("FAKE_SCENARIO")=="connector-silent":
+            print("caesium start")
+        else:
+            print('{"msg":"connector config loaded"}')
     elif args and args[0]=="inspect":
-        killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
-        print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
+        if "--format" in args and "Running" in args[args.index("--format")+1]:
+            print("false" if os.environ.get("FAKE_SCENARIO")=="connector-silent" else "true")
+        else:
+            killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
+            print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
     elif args and args[0]=="run":
         if name and os.environ.get("FAKE_SCENARIO")=="retag":
             (root/"retagged").write_text("other candidate now owns the tag")
@@ -1222,6 +1230,15 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertIn("/var/run/docker.sock:/var/run/docker.sock", server)
         self.assertEqual(server[server.index("--group-add") + 1], "998")
         self.assertEqual(server[server.index("--user") + 1], "10001:10001")
+        self.assertNotIn("CAESIUM_CONNECTORS_ENABLED=true", server)
+        connector = next(args for args in calls if "--name" in args and args[args.index("--name") + 1] == "cov-test-connectors")
+        self.assertIn("CAESIUM_CONNECTORS_ENABLED=true", connector)
+        self.assertIn("CAESIUM_AUTH_MODE=api-key", connector)
+        self.assertIn("CAESIUM_AUTH_REQUIRE_TLS=false", connector)
+        self.assertIn("TEMPORAL_TOKEN=coverage-connector-token", connector)
+        self.assertIn("CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml", connector)
+        self.assertTrue(any(arg.endswith("connections.yaml:ro") for arg in connector))
+        self.assertEqual(connector[connector.index("--user") + 1], "10001:10001")
         starts = [args for args in calls if "start" in args and "--job-id" in args]
         self.assertEqual(len(starts), 1)
         self.assertEqual(starts[0][starts[0].index("--job-id") + 1], "11111111-1111-4111-8111-111111111111")
@@ -1233,6 +1250,11 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertEqual(len(partitions), 1)
         self.assertIn("22222222-2222-4222-8222-222222222222", partitions[0])
         self.assertIn("--json", partitions[0])
+
+    def test_connector_start_without_a_loaded_fingerprint_fails_the_journey(self):
+        result = self.collect("connector-silent")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("did not log a loaded fingerprint", output(result))
 
     def test_task_run_without_a_sampled_observation_fails_the_journey(self):
         result = self.collect("run-unsampled")
@@ -1424,6 +1446,10 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("system nodes list", text)
         self.assertIn("system nodes remove", text)
         self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", text)
+        self.assertIn("CAESIUM_CONNECTORS_ENABLED=true", text)
+        self.assertIn("connector config loaded", text)
+        self.assertIn("secret://k8s/temporal-creds/api-token", text)
+        self.assertIn("secret://vault/kv/data/temporal?field=token", text)
         self.assertIn("run start --job-id", text)
         self.assertIn("run partitions", text)
         self.assertIn("not_a_member", text)

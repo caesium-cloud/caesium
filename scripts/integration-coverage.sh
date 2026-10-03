@@ -69,6 +69,7 @@ fi
 # Never collide with the integration-up server or bind its fixed host port.
 [[ "$ID" != "caesium-server-test" ]] || die "refusing to use caesium-server-test as the coverage id"
 SERVER_NAME="${ID}-server"
+CONNECTOR_NAME="${ID}-connectors"
 BROWSER_SERVER_NAME="${ID}-browser"
 NETWORK="${ID}-net"
 IMAGE="${CAESIUM_COVERAGE_IMAGE:-caesiumcloud/caesium-coverage:latest}"
@@ -421,6 +422,7 @@ cleanup() {
   fi
   if command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
     "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
+    "$CONTAINER_CLI" rm -f "$CONNECTOR_NAME" >/dev/null 2>&1 || true
     "$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
     "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
   fi
@@ -682,8 +684,101 @@ EOF
   exit $?
 fi
 
+# The main server stays on CAESIUM_AUTH_MODE=none, where the connector gate
+# fails closed. A second instrumented start loads one file, then stops. That
+# file resolves an env secret and shape-checks Kubernetes and Vault references.
+# It does not dial either provider. Counters share the server GOCOVERDIR.
+# A start that never logs the fingerprint fails the journey.
+load_connector_for_coverage() {
+  cat > "$ARTIFACTS/connectors.yaml" <<'YAML'
+version: 1
+connections:
+  - id: primary
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: true
+    credentials:
+      secretRefs:
+        - secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN
+        - secret://k8s/temporal-creds/api-token
+        - secret://vault/kv/data/temporal?field=token
+      certificatePaths:
+        - /var/run/secrets/caesium/temporal/tls.crt
+    bindings:
+      - name: publication
+        version: "1"
+        displayName: Publication
+        statusQuery: publication_status
+        activityAllowlist:
+          - activityType: caesium.start
+            jobs: [publish, notify]
+        actions:
+          - name: approve_publication
+            inputSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                note:
+                  type: string
+            resultSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                approved:
+                  type: boolean
+YAML
+  chmod 0644 "$ARTIFACTS/connectors.yaml"
+  log "loading a connector config on an instrumented start"
+  "$CONTAINER_CLI" rm -f "$CONNECTOR_NAME" >/dev/null 2>&1 || true
+  if ! "$CONTAINER_CLI" run -d \
+    --name "$CONNECTOR_NAME" \
+    --platform "$PLATFORM" \
+    --network "$NETWORK" \
+    --user 10001:10001 \
+    --group-add "$SOCK_GID" \
+    -e GOCOVERDIR=/var/lib/caesium/coverage \
+    -e CAESIUM_DATABASE_PATH=/var/lib/caesium/dqlite \
+    -e CAESIUM_LOG_LEVEL=info \
+    -e CAESIUM_AUTH_MODE=api-key \
+    -e CAESIUM_AUTH_REQUIRE_TLS=false \
+    -e CAESIUM_AUTH_KEY_HASH_SECRET=coverage-connector-auth-key-hash-secret-0001 \
+    -e CAESIUM_CONNECTORS_ENABLED=true \
+    -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \
+    -e TEMPORAL_TOKEN=coverage-connector-token \
+    -v "$SOCK:/var/run/docker.sock" \
+    -v "$ARTIFACTS/connectors.yaml:/etc/caesium/connectors/connections.yaml:ro" \
+    -v "$RAW/server:/var/lib/caesium/coverage" \
+    "$IMAGE_ID" start >/dev/null; then
+    log "connector start could not be created"
+    return 1
+  fi
+  connector_ready=0
+  for _ in $(seq 1 60); do
+    if "$CONTAINER_CLI" logs "$CONNECTOR_NAME" 2>&1 | grep -q "connector config loaded"; then
+      connector_ready=1
+      break
+    fi
+    running="$("$CONTAINER_CLI" inspect -f '{{.State.Running}}' "$CONNECTOR_NAME" 2>/dev/null || true)"
+    if [[ "$running" == "false" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  "$CONTAINER_CLI" kill --signal=SIGUSR2 "$CONNECTOR_NAME" >/dev/null 2>&1 || true
+  sleep 1
+  "$CONTAINER_CLI" stop -t 60 "$CONNECTOR_NAME" >/dev/null 2>&1 || true
+  if [[ "$connector_ready" -ne 1 ]]; then
+    log "connector start did not log a loaded fingerprint; logs:"
+    "$CONTAINER_CLI" logs "$CONNECTOR_NAME" || true
+    return 1
+  fi
+  return 0
+}
+
 log "running request-to-write-to-read: job apply then job export"
 cli_rc=0
+load_connector_for_coverage || cli_rc=1
 "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
   --network "$NETWORK" \
   --user 0:0 \
