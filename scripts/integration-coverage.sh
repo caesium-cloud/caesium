@@ -755,7 +755,11 @@ YAML
   fi
   connector_ready=0
   for _ in $(seq 1 60); do
-    if "$CONTAINER_CLI" logs "$CONNECTOR_NAME" 2>&1 | grep -q "connector config loaded"; then
+    # Match a captured string. `docker logs | grep -q` under pipefail exits 141:
+    # grep closes the pipe on the first hit while caesium is still writing
+    # startup logs, so a present fingerprint line is reported missing.
+    connector_logs="$("$CONTAINER_CLI" logs "$CONNECTOR_NAME" 2>&1 || true)"
+    if [[ "$connector_logs" == *"connector config loaded"* ]]; then
       connector_ready=1
       break
     fi

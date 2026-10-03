@@ -1141,11 +1141,24 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
     elif args and args[0]=="port": print("127.0.0.1:12345")
     elif args and args[0]=="logs":
         if os.environ.get("FAKE_SCENARIO")=="connector-silent":
-            print("caesium start")
+            print("caesium start", flush=True)
         else:
-            print('{"msg":"connector config loaded"}')
+            # The needle is followed by a long startup tail. `logs | grep -q`
+            # closes the pipe on the first hit; the writer then dies of SIGPIPE
+            # and pipefail reports a miss. A captured string still matches.
+            print('{"msg":"connector config loaded"}', flush=True)
+            try:
+                for i in range(4000):
+                    print("startup", i, flush=True)
+            except BrokenPipeError:
+                raise SystemExit(141)
     elif args and args[0]=="inspect":
-        if "--format" in args and "Running" in args[args.index("--format")+1]:
+        fmt=""
+        if "--format" in args:
+            fmt=args[args.index("--format")+1]
+        elif "-f" in args:
+            fmt=args[args.index("-f")+1]
+        if "Running" in fmt:
             print("false" if os.environ.get("FAKE_SCENARIO")=="connector-silent" else "true")
         else:
             killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
@@ -1255,6 +1268,13 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         result = self.collect("connector-silent")
         self.assertNotEqual(result.returncode, 0, output(result))
         self.assertIn("did not log a loaded fingerprint", output(result))
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        log_calls = [args for args in calls if args and args[0] == "logs"]
+        self.assertLessEqual(len(log_calls), 3, "a stopped connector must not be polled for the full minute")
+        self.assertTrue(
+            any(args and args[0] == "inspect" and "-f" in args for args in calls),
+            "a stopped connector is noticed via inspect -f",
+        )
 
     def test_task_run_without_a_sampled_observation_fails_the_journey(self):
         result = self.collect("run-unsampled")
@@ -1448,6 +1468,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", text)
         self.assertIn("CAESIUM_CONNECTORS_ENABLED=true", text)
         self.assertIn("connector config loaded", text)
+        self.assertIn('*"connector config loaded"*', text)
+        self.assertNotIn('logs "$CONNECTOR_NAME" 2>&1 | grep', text)
         self.assertIn("secret://k8s/temporal-creds/api-token", text)
         self.assertIn("secret://vault/kv/data/temporal?field=token", text)
         self.assertIn("run start --job-id", text)
