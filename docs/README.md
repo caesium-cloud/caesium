@@ -33,6 +33,7 @@ authoring pipelines against a real server.
 - [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
 - [airflow-parity.md](airflow-parity.md): Implemented Airflow-style authoring and operator semantics.
 - [temporal.md](temporal.md): Driving Caesium from Temporal: an idempotent activity that starts a run and waits on it, event-routed starts, and handing off from a pipeline to a workflow.
+- [connectors.md](connectors.md): In progress, not shipped behavior. Provider-neutral connector configuration, the frozen v1 contract, fingerprint equality, `CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` rollout, and mounting one file on every Helm replica with existing `config.extraEnv`, `extraVolumes`, and `extraVolumeMounts`.
 - [infrastructure-deployment.md](infrastructure-deployment.md): Dependency-ordered Terraform (and other unit-pipeline binding) deployment via `cache.chain: values` and the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images.
 - [examples/](examples/): Example job manifests used by docs and conformance tests.
 

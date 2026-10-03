@@ -1,6 +1,9 @@
 package env
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,3 +229,143 @@ func (s *EnvTestSuite) TestResourceStatsGateAndSampleInterval() {
 	s.T().Setenv("CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL", "0")
 	s.ErrorContains(Process(), "CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL must be greater than 0")
 }
+
+func (s *EnvTestSuite) TestConnectorsDisabledIgnoresConfigFile() {
+	s.Require().NoError(Process())
+	baseline := Variables()
+
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", s.T().TempDir())
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT", "previous-fingerprint")
+	s.Require().NoError(Process())
+	got := Variables()
+	s.Equal(baseline.LogLevel, got.LogLevel)
+	s.Equal(baseline.Port, got.Port)
+	s.Equal(baseline.AuthMode, got.AuthMode)
+	s.Equal(baseline.DatabaseMaxOpenConns, got.DatabaseMaxOpenConns)
+	s.Equal(baseline.DatabaseVoters, got.DatabaseVoters)
+	s.Equal(baseline.WorkerPollInterval, got.WorkerPollInterval)
+	s.Equal(baseline.AuthSessionIdleTTL, got.AuthSessionIdleTTL)
+	s.False(got.ConnectorsEnabled)
+	s.False(got.SSOEnabled())
+	s.Equal("previous-fingerprint", got.ConnectorsConfigPreviousFingerprint)
+	_, _, loaded := ConnectorConfig()
+	s.False(loaded)
+
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "false")
+	s.Require().NoError(Process())
+	_, _, loaded = ConnectorConfig()
+	s.False(loaded)
+	s.Equal(8080, Variables().Port)
+	s.Equal("none", Variables().AuthMode)
+}
+
+func (s *EnvTestSuite) TestConnectorsEnabledRequiresAuth() {
+	const planted = "planted-secret-VALUE/env-auth"
+	path := filepath.Join(s.T().TempDir(), "connectors.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("token: "+planted+"\n"), 0o600))
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", path)
+
+	err := Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_CONNECTORS_ENABLED")
+	s.NotContains(err.Error(), planted)
+	_, _, loaded := ConnectorConfig()
+	s.False(loaded)
+
+	s.T().Setenv("CAESIUM_AUTH_MODE", "none")
+	err = Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_CONNECTORS_ENABLED")
+	s.NotContains(err.Error(), planted)
+}
+
+func (s *EnvTestSuite) TestConnectorsEnabledLoadsFileForAPIKeyAndSSO() {
+	path := writeConnectorFile(s.T())
+	const planted = "planted-secret-VALUE/env-load"
+	s.T().Setenv("TEMPORAL_TOKEN", planted)
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", path)
+	s.T().Setenv("CAESIUM_AUTH_MODE", "api-key")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT", "stored-a")
+	s.Require().NoError(Process())
+	_, first, loaded := ConnectorConfig()
+	s.True(loaded)
+	s.NotEmpty(first)
+	s.NotContains(first, planted)
+	s.Equal("stored-a", Variables().ConnectorsConfigPreviousFingerprint)
+	s.Equal(8080, Variables().Port)
+
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT", "stored-b")
+	s.T().Setenv("TEMPORAL_TOKEN", planted+"/rotated")
+	s.Require().NoError(Process())
+	_, second, loaded := ConnectorConfig()
+	s.True(loaded)
+	s.Equal(first, second)
+	s.Equal("stored-b", Variables().ConnectorsConfigPreviousFingerprint)
+
+	s.T().Setenv("CAESIUM_AUTH_MODE", "none")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
+	s.Require().NoError(Process())
+	s.True(Variables().SSOEnabled())
+	_, third, loaded := ConnectorConfig()
+	s.True(loaded)
+	s.Equal(first, third)
+}
+
+func (s *EnvTestSuite) TestConnectorsProcessAllowsSecretMatchingPublicText() {
+	path := writeConnectorFile(s.T())
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_MODE", "api-key")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", path)
+	s.T().Setenv("TEMPORAL_TOKEN", "temporal")
+	s.Require().NoError(Process())
+	_, first, loaded := ConnectorConfig()
+	s.True(loaded)
+	s.NotEmpty(first)
+
+	s.T().Setenv("TEMPORAL_TOKEN", "frontend.temporal.svc")
+	s.Require().NoError(Process())
+	_, second, loaded := ConnectorConfig()
+	s.True(loaded)
+	s.Equal(first, second)
+}
+
+func (s *EnvTestSuite) TestConnectorsProcessRedactsSecret() {
+	const planted = "planted-secret-VALUE/env-error"
+	path := filepath.Join(s.T().TempDir(), "connectors.yaml")
+	doc := strings.Replace(connectorConfigYAML, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", planted, 1)
+	s.Require().NoError(os.WriteFile(path, []byte(doc), 0o600))
+	s.T().Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_MODE", "api-key")
+	s.T().Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", path)
+	err := Process()
+	s.Require().Error(err)
+	s.NotContains(err.Error(), planted)
+	s.Contains(err.Error(), "CAESIUM_CONNECTORS_CONFIG_FILE")
+	_, _, loaded := ConnectorConfig()
+	s.False(loaded)
+}
+
+func writeConnectorFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	if err := os.WriteFile(path, []byte(connectorConfigYAML), 0o600); err != nil {
+		t.Fatalf("write connector config: %v", err)
+	}
+	return path
+}
+
+const connectorConfigYAML = `
+version: 1
+connections:
+  - id: primary
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    credentials:
+      secretRefs:
+        - secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN
+      certificatePaths:
+        - /var/run/secrets/caesium/temporal/tls.crt
+`
