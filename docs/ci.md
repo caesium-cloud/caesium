@@ -1187,8 +1187,9 @@ echo "D3 proof exit status: $rc"; (exit "$rc")
 `afterAll` restores the node, captures member logs and writes
 `d3-evidence.json` (no keys).
 
-The run-history reader follows each `run-history-row`'s execution link and
-reads `data-status` from that row's status cell. The badge and link are siblings
+The run-history badge exposes its raw status through `data-status`. The reader
+follows each `run-history-row`'s execution link and reads that attribute from
+the row's status cell. The badge and link are siblings
 in the operator console layout; a selector below the link cannot read the
 badge (#613, scheduled run 37107093673). Missing, unknown, or ambiguous badges
 remain unreadable evidence. `ui/e2e/run-history-status.spec.ts` exercises the
