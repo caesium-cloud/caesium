@@ -15,8 +15,9 @@ import (
 var variables = new(Environment)
 
 // Process the environment variables set for caesium.
+// The connector file is not read here. Every command calls Process, including
+// caesium version. caesium start loads the file after this gate has passed.
 func Process() error {
-	clearConnectorRuntime()
 	next := &Environment{MaxParallelTasks: runtime.NumCPU()}
 
 	if err := envconfig.Process("caesium", next); err != nil {
@@ -32,19 +33,11 @@ func Process() error {
 	}
 	variables = next
 	if err := validate(); err != nil {
-		clearConnectorRuntime()
 		return err
-	}
-	if variables.ConnectorsEnabled {
-		if err := loadConnectorConfig(); err != nil {
-			clearConnectorRuntime()
-			return err
-		}
 	}
 
 	// set the log level
 	if err := log.SetLevel(variables.LogLevel); err != nil {
-		clearConnectorRuntime()
 		return fmt.Errorf("failed to set log level: %w", err)
 	}
 
@@ -114,6 +107,22 @@ func validate() error {
 		return err
 	}
 
+	return nil
+}
+
+// validateConnectorGate checks the connector switch without reading the file.
+// caesium start loads the file after Process returns.
+func validateConnectorGate() error {
+	if !variables.ConnectorsEnabled {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
+	if mode != "api-key" && !variables.SSOEnabled() {
+		return errors.New("CAESIUM_CONNECTORS_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider")
+	}
+	if strings.TrimSpace(variables.ConnectorsConfigFile) == "" {
+		return errors.New("CAESIUM_CONNECTORS_CONFIG_FILE is required when CAESIUM_CONNECTORS_ENABLED=true")
+	}
 	return nil
 }
 

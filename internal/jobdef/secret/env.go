@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -33,14 +34,9 @@ func (r *EnvResolver) ResolveWithIdentity(_ context.Context, ref string) (string
 		return "", Identity{}, fmt.Errorf("env resolver cannot handle provider %q", reference.Provider)
 	}
 
-	name := reference.Query.Get("name")
-	if name == "" {
-		name = strings.Join(reference.Segments, "_")
-	}
-
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", Identity{}, fmt.Errorf("env secret %q requires a name", ref)
+	name, err := EnvVarName(reference)
+	if err != nil {
+		return "", Identity{}, err
 	}
 
 	value, ok := os.LookupEnv(name)
@@ -55,4 +51,24 @@ func (r *EnvResolver) ResolveWithIdentity(_ context.Context, ref string) (string
 		Verifiable:         false,
 		UnverifiableReason: "environment variables have no provider version identity",
 	}, nil
+}
+
+// EnvVarName returns the variable EnvResolver reads for reference.
+// It does not look the variable up.
+func EnvVarName(reference *Reference) (string, error) {
+	if reference == nil {
+		return "", errors.New("env secret reference requires a name")
+	}
+	name := ""
+	if reference.Query != nil {
+		name = reference.Query.Get("name")
+	}
+	if name == "" {
+		name = strings.Join(reference.Segments, "_")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("env secret %q requires a name", reference.Raw)
+	}
+	return name, nil
 }

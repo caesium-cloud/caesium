@@ -21,7 +21,17 @@ import (
 // idPattern keeps connection, binding, action, and adapter names stable tokens.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
+// canonicalDecimal is a JSON integer: no hex, octal, leading zeros, or fraction.
+var canonicalDecimal = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+
+// jsonNumber is a JSON number literal. YAML hex, timestamps, and ".inf" are not.
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
 var yamlQuoted = regexp.MustCompile("`[^`]*`")
+
+// minRedactedSecretLen skips substring replacement for values so short that
+// they occur inside ordinary error text. "e" must not rewrite "readsPerMinute".
+const minRedactedSecretLen = 8
 
 // Config is a validated, versioned connector file. Secret material is stored
 // only as references and mounted certificate paths.
@@ -161,35 +171,36 @@ type fileAction struct {
 }
 
 // Parse validates connector YAML. resolver, when set, resolves secret://env
-// references through the existing env resolver so callers can prove those
-// bytes stay out of errors and fingerprints. Non-env providers are accepted
-// as references and are not dialed. Resolved values are returned for the
-// fingerprint exclusion check and are not copied onto Config.
-func Parse(data []byte, resolver secret.Resolver) (*Config, map[string]string, error) {
+// references on enabled connections through the existing env resolver. That
+// check stays inside Parse: resolved bytes are not returned and are not part
+// of the fingerprint. Non-env providers are shape-checked and are not dialed.
+// A connection with enabled false is kept in the config and is not resolved,
+// so a parked connection does not fail startup when its env var is unset.
+func Parse(data []byte, resolver secret.Resolver) (*Config, error) {
 	root, err := decodeDocument(data)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	redact := newRedactor(credentialScalars(root))
+	redact := newRedactor(root)
 	if err := walkDocument(root, ""); err != nil {
-		return nil, nil, redact.wrap(err)
+		return nil, redact.wrap(err)
 	}
 	raw, err := decodeKnown(data)
 	if err != nil {
-		return nil, nil, redact.wrap(err)
+		return nil, redact.wrap(err)
 	}
 	// Resolve before the remaining checks so a later rejection cannot echo
 	// secret bytes that the env resolver already produced.
 	resolved, err := resolveRawEnvSecrets(raw, resolver)
-	redact.addMapValues(resolved)
+	redact.addSecrets(resolved)
 	if err != nil {
-		return nil, nil, redact.wrap(err)
+		return nil, redact.wrap(err)
 	}
 	cfg, err := compile(raw)
 	if err != nil {
-		return nil, nil, redact.wrap(err)
+		return nil, redact.wrap(err)
 	}
-	return cfg, resolved, nil
+	return cfg, nil
 }
 
 func decodeDocument(data []byte) (*yaml.Node, error) {
@@ -251,8 +262,8 @@ func compileConnection(index int, raw fileConnection) (Connection, error) {
 	if raw.Provider != ProviderTemporal {
 		return Connection{}, fmt.Errorf("%s: unsupported provider %q", where, raw.Provider)
 	}
-	if strings.TrimSpace(raw.Endpoint) == "" || strings.ContainsAny(raw.Endpoint, " \t\r\n") {
-		return Connection{}, fmt.Errorf("%s: endpoint is required", where)
+	if err := validateEndpoint(raw.Endpoint); err != nil {
+		return Connection{}, fmt.Errorf("%s: %w", where, err)
 	}
 	if strings.TrimSpace(raw.Scope) == "" || strings.ContainsAny(raw.Scope, " \t\r\n") {
 		return Connection{}, fmt.Errorf("%s: scope is required", where)
@@ -320,31 +331,73 @@ func compileCredentials(where string, raw *fileCredentials) ([]string, []string,
 	return refs, paths, nil
 }
 
+func validateEndpoint(endpoint string) error {
+	if strings.TrimSpace(endpoint) == "" || strings.ContainsAny(endpoint, " \t\r\n") {
+		return errors.New("endpoint is required")
+	}
+	// Userinfo (https://user:password@host) is an inline credential. The
+	// error stays generic so the password is not echoed.
+	if strings.Contains(endpoint, "@") {
+		return errors.New("endpoint must not include userinfo")
+	}
+	return nil
+}
+
 func validateSecretRef(ref string) error {
 	if strings.TrimSpace(ref) == "" || strings.ContainsAny(ref, " \t\r\n") {
 		return errors.New("credential must be a secret:// reference")
 	}
 	parsed, err := secret.Parse(ref)
-	if err != nil || parsed.URL.User != nil {
+	if err != nil || parsed.URL == nil || parsed.URL.User != nil {
 		return errors.New("credential must be a secret:// reference")
 	}
+	// Neither the env, Kubernetes, nor Vault resolver reads a fragment.
+	// secret://vault/kv/data/temporal#token is path kv/data and field temporal.
+	if parsed.URL.Fragment != "" {
+		return errors.New("secret reference cannot include a fragment")
+	}
 	switch parsed.Provider {
-	case "env", "k8s", "kubernetes", "vault":
+	case "env":
+		if err := validateQueryKeys(parsed, "name"); err != nil {
+			return err
+		}
+		if _, err := secret.EnvVarName(parsed); err != nil {
+			return errors.New("env secret reference requires a name")
+		}
+	case "k8s", "kubernetes":
+		if err := validateQueryKeys(parsed, "namespace", "name", "key"); err != nil {
+			return err
+		}
+		// Same segment rules as KubernetesResolver.parseReference. A lone
+		// ?key= does not make a one-segment path valid.
+		if err := secret.ValidateKubernetesReference(parsed); err != nil {
+			return errors.New("kubernetes secret reference must be secret://k8s/<secret>/<key> or secret://k8s/<namespace>/<secret>/<key>")
+		}
+	case "vault":
+		if err := validateQueryKeys(parsed, "field"); err != nil {
+			return err
+		}
+		if err := secret.ValidateVaultReference(parsed); err != nil {
+			return errors.New("vault secret reference must include a path and a field")
+		}
 	default:
 		return fmt.Errorf("unsupported secret provider %q", parsed.Provider)
 	}
-	if parsed.Provider == "env" {
-		name := parsed.Query.Get("name")
-		if name == "" {
-			name = strings.Join(parsed.Segments, "_")
-		}
-		if strings.TrimSpace(name) == "" {
-			return errors.New("env secret reference requires a name")
-		}
+	return nil
+}
+
+func validateQueryKeys(ref *secret.Reference, allowed ...string) error {
+	if ref == nil || len(ref.Query) == 0 {
 		return nil
 	}
-	if parsed.Path == "" && parsed.URL.Fragment == "" {
-		return errors.New("secret reference requires a path")
+	permit := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		permit[key] = struct{}{}
+	}
+	for key := range ref.Query {
+		if _, ok := permit[key]; !ok {
+			return errors.New("secret reference query contains an unsupported parameter")
+		}
 	}
 	return nil
 }
@@ -452,8 +505,9 @@ func parseMaxCount(value, maximum int, field string) error {
 func compileBindings(where string, raw []fileBinding) ([]Binding, error) {
 	bindings := make([]Binding, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
+	seenActivity := make(map[string]struct{})
 	for i, fileBinding := range raw {
-		binding, err := compileBinding(fmt.Sprintf("%s.bindings[%d]", where, i), fileBinding)
+		binding, err := compileBinding(fmt.Sprintf("%s.bindings[%d]", where, i), fileBinding, seenActivity)
 		if err != nil {
 			return nil, err
 		}
@@ -466,7 +520,7 @@ func compileBindings(where string, raw []fileBinding) ([]Binding, error) {
 	return bindings, nil
 }
 
-func compileBinding(where string, raw fileBinding) (Binding, error) {
+func compileBinding(where string, raw fileBinding, seenActivity map[string]struct{}) (Binding, error) {
 	if !idPattern.MatchString(raw.Name) {
 		return Binding{}, fmt.Errorf("%s: name must be a stable token", where)
 	}
@@ -479,7 +533,7 @@ func compileBinding(where string, raw fileBinding) (Binding, error) {
 	if strings.TrimSpace(raw.StatusQuery) == "" || strings.ContainsAny(raw.StatusQuery, " \t\r\n") {
 		return Binding{}, fmt.Errorf("%s: statusQuery is required", where)
 	}
-	allowlist, err := compileAllowlist(where, raw.ActivityAllowlist)
+	allowlist, err := compileAllowlist(where, raw.ActivityAllowlist, seenActivity)
 	if err != nil {
 		return Binding{}, err
 	}
@@ -497,9 +551,8 @@ func compileBinding(where string, raw fileBinding) (Binding, error) {
 	}, nil
 }
 
-func compileAllowlist(where string, raw []fileActivity) ([]ActivityJob, error) {
+func compileAllowlist(where string, raw []fileActivity, seen map[string]struct{}) ([]ActivityJob, error) {
 	allowlist := make([]ActivityJob, 0, len(raw))
-	seen := make(map[string]struct{}, len(raw))
 	for i, activity := range raw {
 		activityWhere := fmt.Sprintf("%s.activityAllowlist[%d]", where, i)
 		activityType := strings.TrimSpace(activity.ActivityType)
@@ -560,8 +613,8 @@ func compileSchema(where string, schema map[string]any) (json.RawMessage, error)
 	if len(schema) == 0 {
 		return nil, fmt.Errorf("%s: schema is required", where)
 	}
-	if containsReservedKey(schema) {
-		return nil, fmt.Errorf("%s: reserved field %q cannot be declared or overridden", where, ReservedActorField)
+	if err := validateSchemaDocument(schema); err != nil {
+		return nil, fmt.Errorf("%s: %w", where, err)
 	}
 	schemaType, _ := schema["type"].(string)
 	if schemaType != "object" {
@@ -577,12 +630,108 @@ func compileSchema(where string, schema map[string]any) (json.RawMessage, error)
 	return raw, nil
 }
 
+func validateSchemaDocument(schema map[string]any) error {
+	// The default additionalProperties is true, which would let a caller
+	// submit the reserved actor field even when no property declares it.
+	if schema["additionalProperties"] != false {
+		return errors.New("schema must set additionalProperties to false")
+	}
+	if schemaDeclaresReserved(schema) {
+		return fmt.Errorf("reserved field %q cannot be declared or overridden", ReservedActorField)
+	}
+	if err := rejectExternalRefs(schema); err != nil {
+		return err
+	}
+	return nil
+}
+
+func schemaDeclaresReserved(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == ReservedActorField {
+				return true
+			}
+			if key == "patternProperties" {
+				patterns, _ := child.(map[string]any)
+				for pattern := range patterns {
+					re, err := regexp.Compile(pattern)
+					if err == nil && re.MatchString(ReservedActorField) {
+						return true
+					}
+				}
+			}
+			if key == "propertyNames" && propertyNamesMatchReserved(child) {
+				return true
+			}
+			if schemaDeclaresReserved(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if schemaDeclaresReserved(child) {
+				return true
+			}
+		}
+	case string:
+		if typed == ReservedActorField {
+			return true
+		}
+	}
+	return false
+}
+
+func propertyNamesMatchReserved(schema any) bool {
+	obj, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+	pattern, _ := obj["pattern"].(string)
+	if pattern == "" {
+		return false
+	}
+	re, err := regexp.Compile(pattern)
+	return err == nil && re.MatchString(ReservedActorField)
+}
+
+func rejectExternalRefs(value any) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "$ref" || key == "$id" || key == "$schema" {
+				ref, ok := child.(string)
+				if !ok || !strings.HasPrefix(ref, "#") {
+					return errors.New("schema references must be fragments inside this document")
+				}
+			}
+			if err := rejectExternalRefs(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if err := rejectExternalRefs(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type refuseExternalSchema struct{}
+
+func (refuseExternalSchema) Load(string) (any, error) {
+	return nil, errors.New("external schema references are not allowed")
+}
+
 func compileJSONSchema(raw json.RawMessage) error {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
 	compiler := jsonschema.NewCompiler()
+	compiler.UseLoader(refuseExternalSchema{})
 	const resource = "https://caesium.local/connector-schema.json"
 	if err := compiler.AddResource(resource, doc); err != nil {
 		return err
@@ -591,31 +740,13 @@ func compileJSONSchema(raw json.RawMessage) error {
 	return err
 }
 
-func containsReservedKey(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			if key == ReservedActorField || containsReservedKey(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if containsReservedKey(child) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func resolveRawEnvSecrets(raw fileDoc, resolver secret.Resolver) (map[string]string, error) {
 	resolved := map[string]string{}
 	if resolver == nil {
 		return resolved, nil
 	}
 	for _, conn := range raw.Connections {
-		if conn.Credentials == nil {
+		if conn.Credentials == nil || (conn.Enabled != nil && !*conn.Enabled) {
 			continue
 		}
 		for _, ref := range conn.Credentials.SecretRefs {
@@ -654,11 +785,13 @@ func walkDocument(node *yaml.Node, fieldPath string) error {
 		return nil
 	}
 	switch node.Kind {
+	case yaml.AliasNode:
+		return fmt.Errorf("%s: YAML aliases are not allowed", fieldPath)
 	case yaml.MappingNode:
 		seen := make(map[string]struct{}, len(node.Content)/2)
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			key := node.Content[i]
-			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+			if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
 				return fmt.Errorf("%s: mapping key must be a string", fieldPath)
 			}
 			if _, exists := seen[key.Value]; exists {
@@ -682,63 +815,137 @@ func walkDocument(node *yaml.Node, fieldPath string) error {
 				return err
 			}
 		}
+	case yaml.ScalarNode:
+		if err := validateScalar(node, fieldPath); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func credentialScalars(node *yaml.Node) []string {
-	var values []string
-	collectCredentialScalars(node, "", &values)
-	return values
+func validateScalar(node *yaml.Node, fieldPath string) error {
+	if inSchema(fieldPath) {
+		return validateSchemaScalar(node, fieldPath)
+	}
+	if !isConfigInteger(fieldPath) {
+		return nil
+	}
+	if node.ShortTag() != "!!int" || !canonicalDecimal.MatchString(node.Value) {
+		return fmt.Errorf("%s must be a base-10 integer", fieldPath)
+	}
+	return nil
 }
 
-func collectCredentialScalars(node *yaml.Node, fieldPath string, values *[]string) {
-	if node == nil {
+func inSchema(fieldPath string) bool {
+	return strings.Contains(fieldPath, ".inputSchema") || strings.Contains(fieldPath, ".resultSchema") ||
+		fieldPath == "inputSchema" || fieldPath == "resultSchema"
+}
+
+func isConfigInteger(fieldPath string) bool {
+	if fieldPath == "version" {
+		return true
+	}
+	if !strings.Contains(fieldPath, ".limits.") {
+		return false
+	}
+	switch lastComponent(fieldPath) {
+	case "readsPerMinute", "queriesPerMinute", "maxInFlightRPCs", "maxPageEntries", "maxPageMetadataBytes", "maxUnreferencedSnapshots":
+		return true
+	default:
+		return false
+	}
+}
+
+func lastComponent(fieldPath string) string {
+	last := fieldPath
+	if i := strings.LastIndex(last, "."); i >= 0 {
+		last = last[i+1:]
+	}
+	if i := strings.Index(last, "["); i >= 0 {
+		last = last[:i]
+	}
+	return last
+}
+
+func validateSchemaScalar(node *yaml.Node, fieldPath string) error {
+	switch node.ShortTag() {
+	case "!!str":
+		return nil
+	case "!!bool":
+		if node.Value == "true" || node.Value == "false" {
+			return nil
+		}
+	case "!!null":
+		return nil
+	case "!!int":
+		if canonicalDecimal.MatchString(node.Value) {
+			return nil
+		}
+	case "!!float":
+		if jsonNumber.MatchString(node.Value) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: schema scalar must be a JSON string, number, boolean, or null", fieldPath)
+}
+
+func isCredentialValue(fieldPath string) bool {
+	return strings.Contains(fieldPath, ".credentials.secretRefs") ||
+		strings.Contains(fieldPath, ".credentials.certificatePaths") ||
+		strings.HasPrefix(fieldPath, "credentials.secretRefs") ||
+		strings.HasPrefix(fieldPath, "credentials.certificatePaths")
+}
+
+type redactor struct {
+	secrets []string
+	public  []string
+}
+
+func newRedactor(root *yaml.Node) *redactor {
+	redact := &redactor{}
+	collectRedaction(root, "", redact)
+	return redact
+}
+
+func collectRedaction(node *yaml.Node, fieldPath string, redact *redactor) {
+	if node == nil || redact == nil {
 		return
 	}
 	switch node.Kind {
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			key := node.Content[i]
+			if key.Value != "" {
+				redact.public = append(redact.public, key.Value)
+			}
 			childPath := key.Value
 			if fieldPath != "" {
 				childPath = fieldPath + "." + key.Value
 			}
-			collectCredentialScalars(node.Content[i+1], childPath, values)
+			collectRedaction(node.Content[i+1], childPath, redact)
 		}
 	case yaml.SequenceNode:
 		for i, child := range node.Content {
-			childPath := fmt.Sprintf("%s[%d]", fieldPath, i)
-			if child.Kind == yaml.ScalarNode && isCredentialLeaf(fieldPath) {
-				*values = append(*values, child.Value)
-			}
-			collectCredentialScalars(child, childPath, values)
+			collectRedaction(child, fmt.Sprintf("%s[%d]", fieldPath, i), redact)
 		}
 	case yaml.ScalarNode:
-		if isCredentialLeaf(fieldPath) {
-			*values = append(*values, node.Value)
+		if node.Value == "" {
+			return
 		}
+		if isCredentialValue(fieldPath) {
+			redact.secrets = append(redact.secrets, node.Value)
+			return
+		}
+		redact.public = append(redact.public, node.Value)
 	}
 }
 
-func isCredentialLeaf(fieldPath string) bool {
-	return strings.Contains(fieldPath, "secretRefs") || strings.Contains(fieldPath, "certificatePaths")
-}
-
-type redactor struct {
-	values []string
-}
-
-func newRedactor(values []string) *redactor {
-	return &redactor{values: append([]string(nil), values...)}
-}
-
-func (r *redactor) addMapValues(resolved map[string]string) {
+func (r *redactor) addSecrets(resolved map[string]string) {
 	if r == nil {
 		return
 	}
 	for _, value := range resolved {
-		r.values = append(r.values, value)
+		r.secrets = append(r.secrets, value)
 	}
 }
 
@@ -747,8 +954,8 @@ func (r *redactor) wrap(err error) error {
 		return err
 	}
 	message := err.Error()
-	for _, value := range r.values {
-		if value == "" {
+	for _, value := range r.secrets {
+		if len(value) < minRedactedSecretLen || r.publicContains(value) {
 			continue
 		}
 		message = strings.ReplaceAll(message, value, "[redacted]")
@@ -757,6 +964,15 @@ func (r *redactor) wrap(err error) error {
 		return err
 	}
 	return errors.New(message)
+}
+
+func (r *redactor) publicContains(value string) bool {
+	for _, public := range r.public {
+		if strings.Contains(public, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeYAMLError(err error) error {

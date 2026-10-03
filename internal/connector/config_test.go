@@ -1,6 +1,9 @@
 package connector
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,7 +95,7 @@ func TestParseRefusesClosedFailures(t *testing.T) {
     scope: other
     credentials:
       secretRefs:
-        - secret://k8s/other?key=token
+        - secret://k8s/other/token
   - id: primary
 `, 1),
 			want: "duplicate connection id",
@@ -170,7 +173,7 @@ func TestParseRefusesClosedFailures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := Parse([]byte(tc.doc), nil)
+			_, err := Parse([]byte(tc.doc), nil)
 			if err == nil {
 				t.Fatal("expected a closed refusal")
 			}
@@ -217,23 +220,31 @@ func TestParseAcceptsCeilingAndStricterBudgets(t *testing.T) {
 }
 
 func TestParseAcceptsEnvAndMountedCredentials(t *testing.T) {
-	doc := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://k8s/temporal-creds?key=api-token", 1)
+	doc := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://k8s/temporal-creds/api-token", 1)
 	cfg := mustParse(t, doc, nil)
-	if cfg.Connections[0].SecretRefs[0] != "secret://k8s/temporal-creds?key=api-token" {
+	if cfg.Connections[0].SecretRefs[0] != "secret://k8s/temporal-creds/api-token" {
 		t.Fatalf("refs = %#v", cfg.Connections[0].SecretRefs)
 	}
 	if cfg.Connections[0].CertificatePaths[0] != "/var/run/secrets/caesium/temporal/tls.crt" {
 		t.Fatalf("paths = %#v", cfg.Connections[0].CertificatePaths)
 	}
-	vault := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://vault/kv/data/temporal#token", 1)
-	if _, _, err := Parse([]byte(vault), nil); err != nil {
+	namespaced := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://kubernetes/ops/temporal-creds/api-token", 1)
+	if _, err := Parse([]byte(namespaced), nil); err != nil {
+		t.Fatalf("namespaced kubernetes reference: %v", err)
+	}
+	vault := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://vault/kv/data/temporal?field=token", 1)
+	if _, err := Parse([]byte(vault), nil); err != nil {
 		t.Fatalf("vault reference: %v", err)
+	}
+	vaultPath := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://vault/kv/data/temporal/token", 1)
+	if _, err := Parse([]byte(vaultPath), nil); err != nil {
+		t.Fatalf("vault path reference: %v", err)
 	}
 }
 
 func TestParseErrorOmitsResolvedSecretBytes(t *testing.T) {
 	t.Setenv("TEMPORAL_TOKEN", plantedSecret)
-	_, _, err := Parse([]byte(withLimits(validConfig, "readsPerMinute: 61")), secret.NewEnvResolver())
+	_, err := Parse([]byte(withLimits(validConfig, "readsPerMinute: 61")), secret.NewEnvResolver())
 	if err == nil {
 		t.Fatal("expected budget refusal")
 	}
@@ -246,8 +257,8 @@ func TestParseErrorOmitsResolvedSecretBytes(t *testing.T) {
 }
 
 func TestFingerprintEquivalentConfigsMatch(t *testing.T) {
-	left, _ := Fingerprint(mustParse(t, validConfig, nil), nil)
-	right, err := Fingerprint(mustParse(t, equivalentConfig, nil), nil)
+	left, _ := Fingerprint(mustParse(t, validConfig, nil))
+	right, err := Fingerprint(mustParse(t, equivalentConfig, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +268,7 @@ func TestFingerprintEquivalentConfigsMatch(t *testing.T) {
 }
 
 func TestFingerprintChangesOnContractMutations(t *testing.T) {
-	base, err := Fingerprint(mustParse(t, validConfig, nil), nil)
+	base, err := Fingerprint(mustParse(t, validConfig, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +285,7 @@ func TestFingerprintChangesOnContractMutations(t *testing.T) {
 	seen := map[string]string{base: "base"}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
-			fingerprint, err := Fingerprint(mustParse(t, mutation.doc, nil), nil)
+			fingerprint, err := Fingerprint(mustParse(t, mutation.doc, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -291,24 +302,24 @@ func TestFingerprintChangesOnContractMutations(t *testing.T) {
 
 func TestFingerprintIgnoresResolvedSecretBytes(t *testing.T) {
 	resolver := secret.NewEnvResolver()
+	if _, err := Parse([]byte(validConfig), resolver); err == nil {
+		t.Fatal("unset env var was accepted")
+	}
 	t.Setenv("TEMPORAL_TOKEN", plantedSecret+"/one")
-	firstCfg, firstResolved, err := Parse([]byte(validConfig), resolver)
+	firstCfg, err := Parse([]byte(validConfig), resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstResolved["secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN"] != plantedSecret+"/one" {
-		t.Fatalf("resolver result = %#v", firstResolved)
-	}
-	first, err := Fingerprint(firstCfg, firstResolved)
+	first, err := Fingerprint(firstCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("TEMPORAL_TOKEN", plantedSecret+"/two")
-	secondCfg, secondResolved, err := Parse([]byte(validConfig), resolver)
+	secondCfg, err := Parse([]byte(validConfig), resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Fingerprint(secondCfg, secondResolved)
+	second, err := Fingerprint(secondCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,39 +329,25 @@ func TestFingerprintIgnoresResolvedSecretBytes(t *testing.T) {
 	if strings.Contains(first, plantedSecret) || strings.Contains(second, "one") {
 		t.Fatalf("fingerprint contains secret material: %s", first)
 	}
-	unchangedRef, err := Fingerprint(firstCfg, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unchangedRef != first {
-		t.Fatal("dropping resolved bytes changed the fingerprint")
-	}
 }
 
 func TestFingerprintAllowsSecretThatMatchesPublicText(t *testing.T) {
 	resolver := secret.NewEnvResolver()
-	const ref = "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN"
 	t.Setenv("TEMPORAL_TOKEN", "temporal")
-	cfg, resolved, err := Parse([]byte(validConfig), resolver)
+	cfg, err := Parse([]byte(validConfig), resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved[ref] != "temporal" {
-		t.Fatalf("resolved = %#v", resolved)
-	}
-	first, err := Fingerprint(cfg, resolved)
+	first, err := Fingerprint(cfg)
 	if err != nil {
 		t.Fatalf("fingerprint rejected a secret that matches the provider name: %v", err)
 	}
 	t.Setenv("TEMPORAL_TOKEN", "frontend.temporal.svc")
-	rotated, rotatedBytes, err := Parse([]byte(validConfig), resolver)
+	rotated, err := Parse([]byte(validConfig), resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rotatedBytes[ref] != "frontend.temporal.svc" {
-		t.Fatalf("resolved = %#v", rotatedBytes)
-	}
-	second, err := Fingerprint(rotated, rotatedBytes)
+	second, err := Fingerprint(rotated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,9 +445,244 @@ func TestCorrelationEnvelopeContract(t *testing.T) {
 
 func TestActivityAllowlistRejectsEmptyJobs(t *testing.T) {
 	doc := strings.Replace(validConfig, "jobs:\n              - publish\n              - notify", "jobs: []", 1)
-	_, _, err := Parse([]byte(doc), nil)
+	_, err := Parse([]byte(doc), nil)
 	if err == nil || !strings.Contains(err.Error(), "local job") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReviewRegressions(t *testing.T) {
+	t.Run("external schema ref", func(t *testing.T) {
+		doc := strings.Replace(validConfig, "note:\n                  type: string", "note:\n                  $ref: file:///etc/caesium/note.json", 1)
+		_, err := Parse([]byte(doc), nil)
+		if err == nil || strings.Contains(err.Error(), "no such file") || !strings.Contains(err.Error(), "fragment") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("local schema ref", func(t *testing.T) {
+		doc := strings.Replace(validConfig, `properties:
+                note:
+                  type: string`, `properties:
+                note:
+                  $ref: "#/$defs/note"
+              $defs:
+                note:
+                  type: string`, 1)
+		if _, err := Parse([]byte(doc), nil); err != nil {
+			t.Fatalf("local fragment ref: %v", err)
+		}
+	})
+	t.Run("secret shapes the resolvers reject", func(t *testing.T) {
+		cases := []string{
+			"secret://k8s/temporal-creds?key=api-token",
+			"secret://k8s#token",
+			"secret://vault/kv/data/temporal#token",
+			"secret://vault#token",
+			"secret://env/TEMPORAL_TOKEN?password=hunter2",
+		}
+		for _, ref := range cases {
+			doc := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", ref, 1)
+			_, err := Parse([]byte(doc), nil)
+			if err == nil || strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), ref) {
+				t.Fatalf("%s: error = %v", ref, err)
+			}
+		}
+	})
+	t.Run("endpoint userinfo", func(t *testing.T) {
+		doc := strings.Replace(validConfig, "frontend.temporal.svc:7233", "https://admin:hunter2@frontend.temporal.svc:7233", 1)
+		_, err := Parse([]byte(doc), nil)
+		if err == nil || !strings.Contains(err.Error(), "userinfo") || strings.Contains(err.Error(), "hunter2") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("disabled connection skips unset env", func(t *testing.T) {
+		doc := strings.Replace(validConfig, "id: primary", "id: primary\n    enabled: false", 1)
+		doc = strings.ReplaceAll(doc, "TEMPORAL_TOKEN", "UNSET_CONNECTOR_TOKEN")
+		cfg, err := Parse([]byte(doc), secret.NewEnvResolver())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Connections[0].Enabled {
+			t.Fatal("connection stayed enabled")
+		}
+		enabled := strings.ReplaceAll(doc, "enabled: false", "enabled: true")
+		if _, err := Parse([]byte(enabled), secret.NewEnvResolver()); err == nil {
+			t.Fatal("enabled connection accepted an unset env var")
+		}
+	})
+	t.Run("actor schema bypasses", func(t *testing.T) {
+		cases := []struct {
+			name string
+			doc  string
+		}{
+			{
+				name: "patternProperties",
+				doc:  strings.Replace(validConfig, "additionalProperties: false\n              properties:", "additionalProperties: false\n              patternProperties:\n                \"^_caesium_actor$\":\n                  type: object\n              properties:", 1),
+			},
+			{
+				name: "required",
+				doc:  strings.Replace(validConfig, "type: object\n              additionalProperties: false", "type: object\n              additionalProperties: false\n              required: [_caesium_actor]", 1),
+			},
+			{
+				name: "additionalProperties default",
+				doc:  strings.Replace(validConfig, "              additionalProperties: false\n              properties:\n                note:", "              properties:\n                note:", 1),
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := Parse([]byte(tc.doc), nil)
+				if err == nil {
+					t.Fatal("schema was accepted")
+				}
+			})
+		}
+	})
+	t.Run("fractional integers", func(t *testing.T) {
+		_, err := Parse([]byte(withLimits(validConfig, "readsPerMinute: 60.9")), nil)
+		if err == nil || !strings.Contains(err.Error(), "base-10 integer") {
+			t.Fatalf("error = %v", err)
+		}
+		doc := strings.Replace(validConfig, "version: 1", "version: 1.7", 1)
+		_, err = Parse([]byte(doc), nil)
+		if err == nil || !strings.Contains(err.Error(), "base-10 integer") {
+			t.Fatalf("version error = %v", err)
+		}
+	})
+	t.Run("yaml schema scalars", func(t *testing.T) {
+		doc := strings.Replace(validConfig, "note:\n                  type: string", "note:\n                  enum: [2024-01-01, 0x10]", 1)
+		_, err := Parse([]byte(doc), nil)
+		if err == nil || !strings.Contains(err.Error(), "JSON") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("activity type unique per connection", func(t *testing.T) {
+		second := `      - name: cleanup
+        version: "1"
+        displayName: Cleanup
+        statusQuery: cleanup_status
+        activityAllowlist:
+          - activityType: caesium.start
+            jobs:
+              - delete-prod
+        actions:
+          - name: approve_cleanup
+            inputSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                note:
+                  type: string
+            resultSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                approved:
+                  type: boolean
+`
+		doc := strings.Replace(validConfig, "                approved:\n                  type: boolean\n", "                approved:\n                  type: boolean\n"+second, 1)
+		_, err := Parse([]byte(doc), nil)
+		if err == nil || !strings.Contains(err.Error(), "duplicate activity type") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("large schema integers change the fingerprint", func(t *testing.T) {
+		low := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              maximum: 9007199254740992\n              properties:\n                note:", 1)
+		high := strings.Replace(validConfig, "type: object\n              additionalProperties: false\n              properties:\n                note:", "type: object\n              additionalProperties: false\n              maximum: 9007199254740993\n              properties:\n                note:", 1)
+		left, err := Fingerprint(mustParse(t, low, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := Fingerprint(mustParse(t, high, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if left == right {
+			t.Fatal("integers above 2^53 collapsed to one fingerprint")
+		}
+	})
+	t.Run("short secret does not garble the error", func(t *testing.T) {
+		t.Setenv("TEMPORAL_TOKEN", "e")
+		_, err := Parse([]byte(withLimits(validConfig, "readsPerMinute: 61")), secret.NewEnvResolver())
+		if err == nil {
+			t.Fatal("expected budget refusal")
+		}
+		if !strings.Contains(err.Error(), "readsPerMinute must be at most 60") {
+			t.Fatalf("error = %s", err.Error())
+		}
+	})
+	t.Run("opaque ids do not collide", func(t *testing.T) {
+		left, err := NewExecutionReference("primary", map[string]string{"a=b": "c"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		right, err := NewExecutionReference("primary", map[string]string{"a": "b=c"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if left.OpaqueID() == right.OpaqueID() {
+			t.Fatal("different coordinates produced one id")
+		}
+	})
+	t.Run("actor overwrite", func(t *testing.T) {
+		actor, err := NewActorEnvelope(PrincipalKindUser, "user-1", "ada", "operator", "op-9", "1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := ApplyActor(map[string]any{ReservedActorField: map[string]any{"subject": "mallory"}, "note": "ok"}, actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := out[ReservedActorField].(map[string]any)
+		if got["subject"] != "ada" || got["stable_id"] != "user-1" || out["note"] != "ok" {
+			t.Fatalf("payload = %#v", out)
+		}
+	})
+}
+
+func TestLoadFileReportsTheOSCause(t *testing.T) {
+	t.Cleanup(Clear)
+	_, _, err := LoadFile(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err == nil || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("missing file: %v", err)
+	}
+	_, _, err = LoadFile(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory: %v", err)
+	}
+	tooBig := filepath.Join(t.TempDir(), "big.yaml")
+	file, err := os.Create(tooBig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(MaxConfigFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	_, _, err = LoadFile(tooBig)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("size: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	if err := os.WriteFile(path, []byte(validConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEMPORAL_TOKEN", "temporal")
+	_, first, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEMPORAL_TOKEN", "frontend.temporal.svc")
+	_, second, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("load fingerprints = %s vs %s", first, second)
+	}
+	cfg, stored, ok := Current()
+	if !ok || stored != first || cfg.Version != 1 {
+		t.Fatalf("current = %v %s %v", cfg, stored, ok)
 	}
 }
 
@@ -465,7 +697,7 @@ func (ledgerAdapter) Identity() ProviderIdentity {
 
 func mustParse(t *testing.T, doc string, resolver secret.Resolver) *Config {
 	t.Helper()
-	cfg, _, err := Parse([]byte(doc), resolver)
+	cfg, err := Parse([]byte(doc), resolver)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

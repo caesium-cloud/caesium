@@ -23,9 +23,19 @@ Connectors are off unless the process gate is set.
 
 Enabling the gate requires `CAESIUM_AUTH_MODE=api-key` or an enabled SSO provider
 (OIDC, SAML, or LDAP). `CAESIUM_AUTH_MODE` unset or `none`, with no SSO
-provider, fails closed. An invalid enabled file fails with an error that does
-not include credential bytes. The file is read when the process starts. Hot
-reload and UI edits are not part of this contract.
+provider, fails closed. That check runs for every command. Only `caesium start`
+reads the file, resolves env secrets, and computes the fingerprint. Other
+commands, including `caesium version`, leave the file untouched. An invalid
+enabled file fails with an error that does not include credential bytes. A
+missing file, a permission error, and a directory keep the operating-system
+cause. The file must be a regular file of at most 1 MiB. Hot reload and UI
+edits are not part of this contract.
+
+The integration server started by `just integration-up` does not set this gate
+and does not mount a connector file. There is no connector command or HTTP
+route yet, so that server has nothing to execute. Startup proof on the
+integration server belongs to plan item C1 in
+`exec-plans/active/execution-connectors.md`.
 
 ```yaml
 version: 1
@@ -82,11 +92,18 @@ or run-id fields.
 
 Credential material is a `secret://` reference (`env`, `k8s` / `kubernetes`, or
 `vault`, the same providers as the rest of Caesium) or an absolute mounted
-certificate path. Inline tokens, PEM bodies, and userinfo embedded in a
-reference are rejected.
+certificate path. Inline tokens, PEM bodies, userinfo in a reference, a
+password in the endpoint (`https://user:secret@host`), and query parameters the
+resolver does not read are rejected. References use the resolver's own path
+shape: `secret://k8s/<secret>/<key>` or
+`secret://k8s/<namespace>/<secret>/<key>`, and
+`secret://vault/<path>/<field>` or `?field=`. Fragments are rejected, because
+the resolvers do not read them. A connection with `enabled: false` stays in
+the fingerprint, and its env secrets are not resolved.
 
-Omitted `limits` use the hard ceilings below. A value may be stricter. These
-are rejected:
+Omitted `limits` use the hard ceilings below. A value may be stricter. Integer
+budgets are plain base-10 integers; `60.9` is rejected rather than truncated.
+These are rejected:
 
 - console refresh faster than 10 seconds
 - more than 60 reads per minute per principal
@@ -107,10 +124,20 @@ Execution references are stateless. They are the connection id plus opaque
 coordinates chosen by the adapter, and they do not insert a catalog row.
 
 The reserved field `_caesium_actor` is a server-derived envelope. Public input
-and result schemas cannot declare it, and the config file cannot override it.
-The envelope fields are `principal_kind` (`user` or `api_key`), `stable_id`,
+and result schemas cannot declare it, including through `required`,
+`patternProperties`, or `propertyNames`, and each object schema sets
+`additionalProperties: false`. The config file cannot override it. Submission
+overwrites the field with `ApplyActor` before the payload is used. The
+envelope fields are `principal_kind` (`user` or `api_key`), `stable_id`,
 `subject`, `role`, `operation_id`, and `binding_version`. API keys stay
 identified as keys.
+
+Action schemas are JSON Schema. `$ref`, `$id`, and `$schema` must be fragments
+inside the same document. `file://` and other external references are refused,
+so a schema change cannot hide outside the fingerprint. Schema scalars must be
+JSON strings, numbers, booleans, or null. YAML timestamps and hex integers are
+rejected; quote a date to keep it a string. An activity type belongs to one
+binding on a connection.
 
 The v1 correlation hint, carried on a recognized activity, is fixed:
 
@@ -138,7 +165,9 @@ different subset. Nothing in the registry requires a Temporal module.
 Equivalent files produce one canonical SHA-256 fingerprint. Key order,
 comments, and duration spellings that parse to the same budget do not change
 it. The fingerprint covers enabled configuration, immutable connection targets,
-credential references, bindings and schemas, and limits.
+credential references, bindings and schemas, and limits. Schema integers above
+2^53 stay distinct. The digest is the schema document itself, not a copy loaded
+from another file.
 
 It does not cover resolved secret bytes. Rotating a secret under the same
 `secret://` reference leaves the fingerprint unchanged.

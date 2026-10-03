@@ -323,8 +323,12 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Warn("failed to capture stderr for unified logging", "error", err)
 	}
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
 	vars := env.Variables()
+	if err := loadConnectorFile(vars); err != nil {
+		return err
+	}
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	var internalSrv *dispatch.InternalServer
 	shutdownCoordinator := newShutdownCoordinator(shutdownConfig{
 		cancel:      cancelFunc,

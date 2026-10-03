@@ -9,19 +9,14 @@ import (
 )
 
 // Fingerprint is the canonical SHA-256 of enabled configuration, connection
-// identity, credential references, bindings, schemas, and limits. resolved
-// carries secret bytes from the env resolver and is not read: the digest is
-// built only from cfg. A resolved value that also occurs in a public field,
-// such as the provider name "temporal", still succeeds. Rotation under an
-// unchanged reference does not change the result.
-func Fingerprint(cfg *Config, resolved map[string]string) (string, error) {
+// identity, credential references, bindings, schemas, and limits. Resolved
+// secret bytes are not an argument: rotation under an unchanged reference
+// does not change the result, including when the secret text also appears in
+// a public field such as the provider name.
+func Fingerprint(cfg *Config) (string, error) {
 	if cfg == nil {
 		return "", errors.New("connector config is required")
 	}
-	// Keep the parameter in the signature so callers pass resolver output
-	// through this function. Do not search cfg for those bytes: public fields
-	// can legitimately contain the same text.
-	_ = resolved
 	body, err := canonicalBytes(cfg)
 	if err != nil {
 		return "", err
@@ -156,19 +151,12 @@ func canonicalBindingFrom(binding Binding) (canonicalBinding, error) {
 	sort.Slice(actions, func(i, j int) bool { return actions[i].Name < actions[j].Name })
 	canonicalActions := make([]canonicalAction, 0, len(actions))
 	for _, action := range actions {
-		input, err := canonicalRaw(action.InputSchema)
-		if err != nil {
-			return canonicalBinding{}, err
+		// compileSchema already stored canonical JSON. Re-parsing it as
+		// float64 would collapse integers above 2^53 onto the same digest.
+		if len(action.InputSchema) == 0 || len(action.ResultSchema) == 0 {
+			return canonicalBinding{}, errors.New("connector schema is required")
 		}
-		result, err := canonicalRaw(action.ResultSchema)
-		if err != nil {
-			return canonicalBinding{}, err
-		}
-		canonicalActions = append(canonicalActions, canonicalAction{
-			Name:         action.Name,
-			InputSchema:  input,
-			ResultSchema: result,
-		})
+		canonicalActions = append(canonicalActions, canonicalAction(action))
 	}
 	if canonicalActivities == nil {
 		canonicalActivities = []canonicalActivity{}
@@ -181,19 +169,4 @@ func canonicalBindingFrom(binding Binding) (canonicalBinding, error) {
 		ActivityAllowlist: canonicalActivities,
 		Actions:           canonicalActions,
 	}, nil
-}
-
-func canonicalRaw(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 {
-		return nil, errors.New("connector schema is required")
-	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, errors.New("connector schema is not canonical JSON")
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, errors.New("connector schema is not canonical JSON")
-	}
-	return encoded, nil
 }

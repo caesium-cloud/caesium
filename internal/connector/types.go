@@ -126,6 +126,29 @@ func (a ActorEnvelope) Validate() error {
 	return nil
 }
 
+// ApplyActor copies input and sets the reserved actor field to actor.
+// A caller-supplied value under that key is overwritten. Admission must call
+// this before a submitted payload is validated or dispatched. There is no
+// submission route in this package yet.
+func ApplyActor(input map[string]any, actor ActorEnvelope) (map[string]any, error) {
+	if err := actor.Validate(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, len(input)+1)
+	for key, value := range input {
+		out[key] = value
+	}
+	out[ReservedActorField] = map[string]any{
+		"principal_kind":  string(actor.PrincipalKind),
+		"stable_id":       actor.StableID,
+		"subject":         actor.Subject,
+		"role":            actor.Role,
+		"operation_id":    actor.OperationID,
+		"binding_version": actor.BindingVersion,
+	}
+	return out, nil
+}
+
 // CorrelationEnvelope is the frozen v1 activity heartbeat/result hint.
 // queue_id and run_id are optional. Binding files cannot replace these fields.
 type CorrelationEnvelope struct {
@@ -208,9 +231,11 @@ func (r ExecutionReference) OpaqueID() string {
 	}
 	sort.Strings(keys)
 	digest := sha256.New()
-	_, _ = fmt.Fprintf(digest, "%s\n", r.ConnectionID)
+	// %q keeps connection ids and coordinates unambiguous. {"a=b":"c"} and
+	// {"a":"b=c"} must not share an id, and embedded newlines must not add pairs.
+	_, _ = fmt.Fprintf(digest, "%q\n", r.ConnectionID)
 	for _, key := range keys {
-		_, _ = fmt.Fprintf(digest, "%s=%s\n", key, r.Coordinates[key])
+		_, _ = fmt.Fprintf(digest, "%q=%q\n", key, r.Coordinates[key])
 	}
 	return hex.EncodeToString(digest.Sum(nil))
 }
