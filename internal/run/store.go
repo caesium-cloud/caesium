@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -6502,26 +6503,20 @@ func withStoreBusyRetry(fn func() error) error {
 }
 
 func withStoreBusyRetryContext(ctx context.Context, fn func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var err error
-	for attempt := 0; ; attempt++ {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		err = fn()
-		if err == nil || !isStoreContentionErr(err) {
-			return err
-		}
-		if attempt >= len(storeBusyRetryBackoffs) {
-			return err
-		}
+	return dbretry.Retry(ctx, storeBusyRetryPolicy(storeBusyRetryBackoffs, sleepStoreBusyRetry), fn)
+}
 
-		metrics.DBBusyRetriesTotal.Inc()
-		if sleepErr := sleepStoreBusyRetry(ctx, jitterStoreBusyRetryBackoff(storeBusyRetryBackoffs[attempt])); sleepErr != nil {
-			return sleepErr
-		}
+// Transaction scope and per-attempt resets remain in the callback. This policy
+// retains run-store cancellation, classification, jitter and retry metrics.
+func storeBusyRetryPolicy(backoffs []time.Duration, wait func(context.Context, time.Duration) error) dbretry.Policy {
+	return dbretry.Policy{
+		Backoffs:      backoffs,
+		Retryable:     isStoreContentionErr,
+		BeforeAttempt: true,
+		OnRetry:       func(error) { metrics.DBBusyRetriesTotal.Inc() },
+		Wait: func(ctx context.Context, base time.Duration) error {
+			return wait(ctx, jitterStoreBusyRetryBackoff(base))
+		},
 	}
 }
 

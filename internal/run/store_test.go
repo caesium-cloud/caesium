@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/lineage"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metricstestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -2330,5 +2333,62 @@ func TestCompletionFieldsOmitEmptyInputsAcrossUpdatePaths(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestStoreBusyRetryPolicyPreservesBudgetClassificationAndJitter(t *testing.T) {
+	busy := sqlite3.Error{Code: sqlite3.ErrBusy}
+	other := errors.New("not contention")
+	for _, tc := range []struct {
+		name              string
+		results           []error
+		want              error
+		attempts, retries int
+	}{
+		{"success", []error{nil}, nil, 1, 0},
+		{"classified retry", []error{busy, nil}, nil, 2, 1},
+		{"non-contention", []error{other}, other, 1, 0},
+		{"exhaustion", []error{busy, busy, busy}, busy, 3, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := 0
+			var waits []time.Duration
+			bases := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
+			before := metricstestutil.CounterValue(t, metrics.DBBusyRetriesTotal)
+			policy := storeBusyRetryPolicy(bases, func(ctx context.Context, delay time.Duration) error {
+				require.NotNil(t, ctx)
+				waits = append(waits, delay)
+				return nil
+			})
+			err := dbretry.Retry(nil, policy, func() error { err := tc.results[attempts]; attempts++; return err })
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, tc.attempts, attempts)
+			require.Len(t, waits, tc.retries)
+			for i, delay := range waits {
+				require.GreaterOrEqual(t, delay, bases[i]-bases[i]/5)
+				require.LessOrEqual(t, delay, bases[i])
+			}
+			require.Equal(t, float64(tc.retries), metricstestutil.CounterValue(t, metrics.DBBusyRetriesTotal)-before)
+		})
+	}
+}
+
+func TestStoreBusyRetryContextCancellationOrder(t *testing.T) {
+	for _, beforeAttempt := range []bool{true, false} {
+		t.Run(map[bool]string{true: "before operation", false: "during wait"}[beforeAttempt], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			if beforeAttempt {
+				cancel()
+			}
+			err := withStoreBusyRetryContext(ctx, func() error { calls++; cancel(); return sqlite3.Error{Code: sqlite3.ErrBusy} })
+			require.ErrorIs(t, err, context.Canceled)
+			if beforeAttempt {
+				require.Zero(t, calls)
+			} else {
+				require.Equal(t, 1, calls)
+			}
+		})
 	}
 }
