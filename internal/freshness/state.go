@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -146,24 +147,19 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 	in.RunOrder = order.UTC()
 
 	const maxAttempts = 5
-	var (
-		res AdvanceResult
-		err error
-	)
-	for range maxAttempts {
+	var res AdvanceResult
+	err := dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs:  make([]time.Duration, 4),
+		Retryable: func(err error) bool { return errors.Is(err, errStateRaceRetry) || isBusyErr(err) },
+	}, func() error {
+		var err error
 		res, err = s.advanceTx(ctx, in)
-		if err == nil {
-			return res, nil
-		}
-		// Retry only the narrow race window (row created/removed between our
-		// read and our conditional write) and transient store-busy errors;
-		// everything else propagates immediately.
-		if errors.Is(err, errStateRaceRetry) || isBusyErr(err) {
-			continue
-		}
+		return err
+	})
+	if err != nil {
 		return AdvanceResult{}, err
 	}
-	return AdvanceResult{}, err
+	return res, nil
 }
 
 // advanceTx runs one attempt of the advance/verify contract in a single
