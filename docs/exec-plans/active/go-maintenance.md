@@ -311,14 +311,16 @@ Completed local gates (each applies only to the recorded candidate):
 - Run-service authoritative-store reuse atf3edd43c native race + tagged vet PASS; lint flagged seven nil-context test calls, narrow test correction pending (run-service-native-f3edd43c.log).
 - Authoritative run-service lazy binding/manual reuse ata66eefed: native race bothpackages, taggedvet andlint0issues PASS; independent Sol review no blocker. Real coverage/join gate pending.
 - Hosted lifecycle-cluster and core-robustness run37173776053 at0d54be67 PASS. Later lazy service/manual adapter change has focused native proof; final affected runtime evidence pending.
+- C100 explicit whole-owner cancellation Store/worker native races and tagged vet atb6afaf8f PASS; early canceled-resume job race/SSO fixture/tagged vet/lint0issues atf97b784a PASS. Latest write-boundary follow-up independently accepted; refreshed fulljobrace found one prior admission diagnostic expectation, under assessment.
 
 Current qualification limits:
 
 - Standard hosted CI run37172950172 failed only coverage-ratchets and dependent ci-ok after successful one-time ARM image rerun; other standard jobs passed.
 - Enforcing short soak at1c448427 FAILED final drain: all five fault families passed, one completed task pod/exited container retained after worker SIGKILL, matches existing issue598; fresh base comparison not run. User confirmed #598 reaper remains separate; retain failed soak evidence.
 - Original-base performance ata66eefed FAILED correctness before speed: base UI npm ci ENOENT; samples completed but no comparison/SLO/fixed-baseline verdict. Strict nightly-performance manifest gate disabled. After host reboot and Docker restore, fresh workspace-base npm ci/build preflight passed; a new whole invocation remains pending.
-- C100 live shutdown ata66eefed: six local admission/retry/backfill/webhook/freshness cases passed. Distributed replay failed: successful process join/runtime removal left target TaskRun running after restart; timeout case not reached. Production finalization diagnosis in progress.
+- C100 live shutdown ata66eefed: six local admission/retry/backfill/webhook/freshness cases passed. Distributed replay failed: successful process join/runtime removal left target TaskRun running after restart; timeout case not reached. Atomic task settlement with explicit whole-owner cancellation marker implemented and independently reviewed; final native/live rerun pending.
 - Coverage journey expansion and live SSO/backend coverage remain in progress; source SSO fixture is integrated with offline protocol tests passing. Coverage floors/policy unchanged.
+- Native Podman prerequisite smoke passed with verified cleanup; no coverage contribution. Kubernetes prerequisite smoke is under diagnosis; actual same-image backend processes/profile hits remain pending.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
