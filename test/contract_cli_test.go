@@ -74,7 +74,7 @@ func (s *IntegrationTestSuite) TestContractCheckFailsOnBreakingLocalChange() {
 	})
 	defer os.RemoveAll(brokenDir)
 
-	output, err := s.runCLIExpectError("contract", "check", "--path", brokenDir, "--server", s.caesiumURL)
+	output, err := s.runCLIRaw("contract", "check", "--path", brokenDir, "--server", s.caesiumURL)
 	s.Require().Error(err)
 	s.Contains(output, consumer)
 	s.Contains(output, "customer_id")

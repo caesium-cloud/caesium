@@ -43,7 +43,7 @@ func (s *IntegrationTestSuite) TestContractEnforcementRejectsRemovedParamMapping
 		producer: contractProducerManifest(producer, []string{"row_count"}),
 	})
 	defer os.RemoveAll(brokenDir)
-	output, err := s.runCLIExpectError("job", "apply", "--path", brokenDir, "--server", s.caesiumURL)
+	output, err := s.runCLIRaw("job", "apply", "--path", brokenDir, "--server", s.caesiumURL)
 	s.Require().Error(err)
 	s.Contains(output, "customer_id")
 	s.Contains(output, consumer)
@@ -132,7 +132,7 @@ func (s *IntegrationTestSuite) TestContractEnforcementAllowBreakingAckLifecycle(
 	s.Contains(stderr, dataset)
 
 	time.Sleep(6 * time.Second)
-	output, err := s.runCLIExpectError("job", "apply", "--path", consumerDir, "--server", s.caesiumURL)
+	output, err := s.runCLIRaw("job", "apply", "--path", consumerDir, "--server", s.caesiumURL)
 	s.Require().Error(err)
 	s.Contains(output, "contract_breaking_change")
 	s.Contains(output, dataset)
