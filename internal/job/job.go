@@ -1050,6 +1050,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 	cancelCtx, releaseCancel := RegisterRunCancel(ctx, runID)
 	defer releaseCancel()
 	ctx = run.WithContext(cancelCtx, runID)
+	// Keep the registered owner context separate from the derived deadline
+	// context: its cleanup cancel runs before the completion defer below.
+	ownerCtx := ctx
 
 	var runErr error
 	finalizationHandled = true
@@ -1063,6 +1066,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 		if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
 			runErr = cause
 			err = cause
+		} else if ownerCtx.Err() == context.Canceled {
+			// Only cancellation of the whole-run owner has authority to settle
+			// every unfinished row. A canceled task/backend with a live owner
+			// remains an ordinary failure. Preserve a custom cancellation cause.
+			runErr = run.NewRunCancellationError(context.Cause(ownerCtx))
+			err = runErr
 		}
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)

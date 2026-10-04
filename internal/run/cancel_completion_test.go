@@ -15,7 +15,9 @@ import (
 )
 
 func TestCancelledOwnerCompletionBookkeeping(t *testing.T) {
-	for _, cause := range []error{context.Canceled, fmt.Errorf("owner stopped: %w", context.Canceled)} {
+	for _, cause := range []error{NewRunCancellationError(context.Canceled),
+		fmt.Errorf("owner stopped: %w", NewRunCancellationError(context.Canceled)),
+		NewRunCancellationError(errors.New("custom shutdown cause"))} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			t.Run("concrete instances, events, retry and idempotency", func(t *testing.T) {
 				testRunTerminationBookkeeping(t, cause)
@@ -48,7 +50,7 @@ func TestCancelledOwnerCompletionPreservesDurableCancellation(t *testing.T) {
 	var beforeEvents []models.ExecutionEvent
 	require.NoError(t, db.Where("run_id = ?", jr.ID).Order("sequence ASC").Find(&beforeEvents).Error)
 
-	finalized, err := store.CompleteIfActive(jr.ID, fmt.Errorf("server stopped: %w", context.Canceled))
+	finalized, err := store.CompleteIfActive(jr.ID, NewRunCancellationError(fmt.Errorf("server stopped: %w", context.Canceled)))
 	require.NoError(t, err)
 	require.False(t, finalized)
 	var afterRun models.JobRun
@@ -63,7 +65,7 @@ func TestCancelledOwnerCompletionPreservesDurableCancellation(t *testing.T) {
 }
 
 func TestOnlyWholeRunTerminationBypassesPendingRetryFence(t *testing.T) {
-	for _, cause := range []error{nil, errors.New("ordinary task failure"), context.DeadlineExceeded,
+	for _, cause := range []error{nil, errors.New("ordinary task failure"), context.Canceled, fmt.Errorf("backend stopped: %w", context.Canceled), context.DeadlineExceeded,
 		fmt.Errorf("task timeout: %w", context.DeadlineExceeded)} {
 		name := "success"
 		if cause != nil {
@@ -117,7 +119,7 @@ func TestCancelledCompletionFencesEachClaimAndUnrelatedRun(t *testing.T) {
 	require.NoError(t, db.Create(&rows).Error)
 	var untouched models.TaskRun
 	require.NoError(t, db.First(&untouched, "id = ?", rows[2].ID).Error)
-	require.NoError(t, store.Complete(jr.ID, context.Canceled))
+	require.NoError(t, store.Complete(jr.ID, NewRunCancellationError(context.Canceled)))
 	for _, row := range rows[:2] {
 		require.ErrorIs(t, store.EnsureTaskRunStartable(jr.ID, row.ID, row.ClaimedBy), ErrTaskClaimMismatch)
 		require.ErrorIs(t, store.CompleteTaskClaimed(jr.ID, row.ID, "success", row.ClaimedBy, nil, nil), ErrTaskClaimMismatch)
@@ -140,7 +142,7 @@ func TestCancelledCompletionFencesEachClaimAndUnrelatedRun(t *testing.T) {
 }
 
 func TestNonCancellationCompletionDoesNotSweepUnfinishedTasks(t *testing.T) {
-	for _, cause := range []error{nil, errors.New("ordinary task failure"), context.DeadlineExceeded} {
+	for _, cause := range []error{nil, errors.New("ordinary task failure"), context.Canceled, fmt.Errorf("backend stopped: %w", context.Canceled), context.DeadlineExceeded} {
 		name := "success"
 		if cause != nil {
 			name = cause.Error()
@@ -181,11 +183,25 @@ func TestCancelledCompletionPreservesEveryTerminalTaskState(t *testing.T) {
 	}
 	var before []models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ?", jr.ID).Order("id ASC").Find(&before).Error)
-	require.NoError(t, store.Complete(jr.ID, context.Canceled))
+	require.NoError(t, store.Complete(jr.ID, NewRunCancellationError(context.Canceled)))
 	var after []models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ?", jr.ID).Order("id ASC").Find(&after).Error)
 	require.Equal(t, before, after)
 	var count int64
 	require.NoError(t, db.Model(&models.ExecutionEvent{}).Where("run_id = ? AND type = ?", jr.ID, string(event.TypeTaskFailed)).Count(&count).Error)
 	require.Zero(t, count)
+}
+
+func TestRunCancellationMarkerPreservesAuthorityAndCause(t *testing.T) {
+	custom := errors.New("authoritative server stopped")
+	for _, cause := range []error{context.Canceled, fmt.Errorf("wrapped: %w", context.Canceled), custom} {
+		marked := NewRunCancellationError(cause)
+		require.Equal(t, cause.Error(), marked.Error())
+		require.ErrorIs(t, marked, cause)
+		require.True(t, IsRunCancellationError(fmt.Errorf("transport: %w", marked)))
+		require.False(t, IsRunCancellationError(cause))
+		require.False(t, IsRunDeadlineError(marked))
+	}
+	require.ErrorIs(t, NewRunCancellationError(nil), context.Canceled)
+	require.False(t, IsRunCancellationError(context.DeadlineExceeded))
 }

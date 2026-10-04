@@ -5081,7 +5081,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// An authoritative owner cancellation must settle its unfinished tasks too.
 	// Workers abandon canceled contexts without publishing a stale completion,
 	// and a terminal parent excludes those rows from lease recovery.
-	terminateUnfinished := IsRunDeadlineError(result) || errors.Is(result, context.Canceled)
+	terminateUnfinished := IsRunDeadlineError(result) || IsRunCancellationError(result)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
