@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/authmode"
 	"slices"
 	"strings"
 	"time"
@@ -692,11 +693,7 @@ const (
 // drift; the difference is only WHEN each runs (startup vs. every apply).
 func authModeActive() bool {
 	vars := env.Variables()
-	mode := strings.ToLower(strings.TrimSpace(vars.AuthMode))
-	if mode != "" && mode != "none" {
-		return true
-	}
-	return vars.SSOEnabled()
+	return authmode.Active(vars.AuthMode, vars.SSOEnabled())
 }
 
 // gitSynced reports whether a job's definition is owned by git-sync. Any

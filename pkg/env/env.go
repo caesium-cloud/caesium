@@ -3,6 +3,7 @@ package env
 import (
 	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/authmode"
 	"math"
 	"runtime"
 	"strings"
@@ -97,8 +98,7 @@ func validate() error {
 	}
 
 	if variables.AgentRemediationEnabled {
-		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
-		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
+		if !authmode.Active(variables.AuthMode, variables.SSOEnabled()) {
 			return fmt.Errorf("CAESIUM_AGENT_REMEDIATION_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider so the tier-3 approval routes are not reachable without authentication")
 		}
 	}
