@@ -581,9 +581,9 @@ func SummariseCheckpoints(obs []CheckpointObservation) CheckpointRetention {
 			sum.Pruned = append(sum.Pruned, s)
 		}
 	}
-	slices.SortFunc(sum.Written, cmp.Compare[string])
-	slices.SortFunc(sum.Pruned, cmp.Compare[string])
-	slices.SortFunc(sum.Final, cmp.Compare[string])
+	slices.SortFunc(sum.Written, cmp.Compare[int64])
+	slices.SortFunc(sum.Pruned, cmp.Compare[int64])
+	slices.SortFunc(sum.Final, cmp.Compare[int64])
 	return sum
 }
 
