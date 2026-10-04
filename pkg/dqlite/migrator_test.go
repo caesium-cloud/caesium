@@ -222,3 +222,48 @@ func TestAlterColumnPreservesEscapedDefaultAndGeneratedTableConstraint(t *testin
 	}
 	require.Error(t, db.Exec("INSERT INTO migration_columns (middle,last) VALUES ('m','l')").Error)
 }
+
+func TestAlterColumnRecognizesGeneratedConstraintsStructurally(t *testing.T) {
+	for _, tc := range []struct {
+		definition string
+		generated  bool
+	}{
+		{"first text DEFAULT GENERATED", false},
+		{"first text DEFAULT 'GENERATED'", false},
+		{"first text COLLATE GENERATED", false},
+		{"first text CONSTRAINT GENERATED CHECK(length(first)>0)", false},
+		{"first text REFERENCES GENERATED(id)", false},
+		{"first text CHECK(first <> 'AS')", false},
+		{"derived text GENERATED ALWAYS AS (upper(first)) VIRTUAL", true},
+		{"derived text AS (upper(first)) STORED", true},
+	} {
+		t.Run(tc.definition, func(t *testing.T) {
+			tokens, err := ddlTokens(tc.definition)
+			require.NoError(t, err)
+			_, generated, err := columnConstraints(tc.definition, tokens)
+			require.NoError(t, err)
+			require.Equal(t, tc.generated, generated)
+		})
+	}
+}
+
+func TestAlterColumnPreservesDefaultGeneratedKeywordValue(t *testing.T) {
+	assertDefaultGeneratedKeywordMigration(t, sqliteMigrationDB(t))
+}
+
+func assertDefaultGeneratedKeywordMigration(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Exec("CREATE TABLE migration_columns (first text DEFAULT GENERATED,middle text CONSTRAINT GENERATED CHECK(length(middle)>0),last text,derived text AS (upper(first)))").Error)
+	require.NoError(t, db.Exec("INSERT INTO migration_columns (first,middle,last) VALUES ('keep','middle','last')").Error)
+	require.NoError(t, db.Migrator().AlterColumn(&migrationColumns{}, "Last"))
+	require.NoError(t, db.Exec("INSERT INTO migration_columns (middle,last) VALUES ('next','last2')").Error)
+	var rows []struct{ First, Middle, Last, Derived string }
+	require.NoError(t, db.Table("migration_columns").Order("rowid").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	require.Equal(t, "keep", rows[0].First)
+	require.Equal(t, "middle", rows[0].Middle)
+	require.Equal(t, "last", rows[0].Last)
+	require.Equal(t, "KEEP", rows[0].Derived)
+	require.Equal(t, "GENERATED", rows[1].First)
+	require.Equal(t, "GENERATED", rows[1].Derived)
+}

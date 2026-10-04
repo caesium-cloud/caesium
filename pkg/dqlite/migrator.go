@@ -273,6 +273,13 @@ func alterColumnDDL(raw, name, dataType string) (string, error) {
 }
 
 func retainedColumnConstraints(definition string, tokens []ddlToken) (string, error) {
+	suffix, _, err := columnConstraints(definition, tokens)
+	return suffix, err
+}
+
+// Generated-column identity comes from the parsed constraint, never a token
+// appearing as a DEFAULT value, collation, reference or constraint name.
+func columnConstraints(definition string, tokens []ddlToken) (string, bool, error) {
 	upper := func(i int) string {
 		if i >= len(tokens) {
 			return ""
@@ -291,21 +298,22 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 		i++
 	}
 	if i == 1 {
-		return "", fmt.Errorf("missing column type")
+		return "", false, fmt.Errorf("missing column type")
 	}
 	var retained strings.Builder
+	generated := false
 	for i < len(tokens) {
 		start, keep := i, true
 		if upper(i) == "CONSTRAINT" {
 			i += 2
 			if i >= len(tokens) {
-				return "", fmt.Errorf("unfinished named constraint")
+				return "", false, fmt.Errorf("unfinished named constraint")
 			}
 		}
 		switch upper(i) {
 		case "NOT":
 			if upper(i+1) != "NULL" {
-				return "", fmt.Errorf("unsupported NOT constraint")
+				return "", false, fmt.Errorf("unsupported NOT constraint")
 			}
 			i += 2
 			keep = false
@@ -321,7 +329,7 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 			keep = false
 		case "PRIMARY":
 			if upper(i+1) != "KEY" {
-				return "", fmt.Errorf("unfinished primary key")
+				return "", false, fmt.Errorf("unfinished primary key")
 			}
 			i += 2
 			if upper(i) == "ASC" || upper(i) == "DESC" {
@@ -332,7 +340,7 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 		case "CHECK":
 			i++
 			if i >= len(tokens) || !strings.HasPrefix(tokens[i].text, "(") {
-				return "", fmt.Errorf("unfinished CHECK")
+				return "", false, fmt.Errorf("unfinished CHECK")
 			}
 			i++
 		case "COLLATE":
@@ -346,7 +354,7 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 				switch upper(i) {
 				case "ON":
 					if upper(i+1) != "DELETE" && upper(i+1) != "UPDATE" {
-						return "", fmt.Errorf("invalid reference action")
+						return "", false, fmt.Errorf("invalid reference action")
 					}
 					i += 2
 					switch upper(i) {
@@ -354,13 +362,13 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 						i += 2
 					case "NO":
 						if upper(i+1) != "ACTION" {
-							return "", fmt.Errorf("invalid reference action")
+							return "", false, fmt.Errorf("invalid reference action")
 						}
 						i += 2
 					case "CASCADE", "RESTRICT":
 						i++
 					default:
-						return "", fmt.Errorf("invalid reference action")
+						return "", false, fmt.Errorf("invalid reference action")
 					}
 				case "MATCH":
 					i += 2
@@ -387,18 +395,19 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 				}
 			}
 			if upper(i) != "AS" {
-				return "", fmt.Errorf("invalid generated constraint")
+				return "", false, fmt.Errorf("invalid generated constraint")
 			}
 			i++
 			if i >= len(tokens) || !strings.HasPrefix(tokens[i].text, "(") {
-				return "", fmt.Errorf("invalid generated expression")
+				return "", false, fmt.Errorf("invalid generated expression")
 			}
 			i++
 			if upper(i) == "STORED" || upper(i) == "VIRTUAL" {
 				i++
 			}
+			generated = true
 		default:
-			return "", fmt.Errorf("unsupported column constraint %s", upper(i))
+			return "", false, fmt.Errorf("unsupported column constraint %s", upper(i))
 		}
 		if upper(i) == "ON" && upper(i+1) == "CONFLICT" {
 			i += 3
@@ -407,14 +416,14 @@ func retainedColumnConstraints(definition string, tokens []ddlToken) (string, er
 			i++
 		}
 		if i > len(tokens) {
-			return "", fmt.Errorf("unfinished column constraint")
+			return "", false, fmt.Errorf("unfinished column constraint")
 		}
 		if keep {
 			retained.WriteByte(' ')
 			retained.WriteString(definition[tokens[start].start:tokens[i-1].end])
 		}
 	}
-	return retained.String(), nil
+	return retained.String(), generated, nil
 }
 
 func (m Migrator) DropColumn(value any, name string) error {
@@ -742,11 +751,9 @@ func (m Migrator) recreateTableWithIndexes(value any, tablePtr *string,
 				case "PRIMARY", "UNIQUE", "CHECK", "CONSTRAINT", "FOREIGN":
 					continue
 				}
-				generated := false
-				for _, token := range tokens[1:] {
-					if strings.EqualFold(token.text, "GENERATED") || strings.EqualFold(token.text, "AS") {
-						generated = true
-					}
+				_, generated, err := columnConstraints(definition, tokens)
+				if err != nil {
+					return fmt.Errorf("invalid copy column definition: %w", err)
 				}
 				if !generated {
 					columns = append(columns, stmt.Quote(ddlIdentifier(tokens[0].text)))

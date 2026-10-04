@@ -48,6 +48,7 @@ func TestNativePopulatedSAMLReplayMigrationAcrossRestart(t *testing.T) {
 		return db.WithContext(ctx)
 	}
 	db := start()
+	assertDefaultGeneratedKeywordMigration(t, db)
 	samlIndexes := assertPopulatedSAMLReplayMigration(t, db)
 	require.NoError(t, db.Exec("CREATE TABLE migration_parent (id INTEGER PRIMARY KEY)").Error)
 	require.NoError(t, db.Exec("INSERT INTO migration_parent VALUES (1)").Error)
