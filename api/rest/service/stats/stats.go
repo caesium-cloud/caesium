@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -104,33 +105,43 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	}
 
 	// Total distinct jobs (not windowed)
-	s.db.WithContext(s.ctx).Model(&models.Job{}).Count(&resp.Jobs.Total)
+	if err := s.db.WithContext(s.ctx).Model(&models.Job{}).Count(&resp.Jobs.Total).Error; err != nil {
+		return nil, err
+	}
 
 	// Recent runs (always 24h as per spec KPI)
 	recentSince := time.Now().UTC().Add(-24 * time.Hour)
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Where("started_at >= ? AND quarantine IS NOT TRUE", recentSince).
-		Count(&resp.Jobs.RecentRuns)
+		Count(&resp.Jobs.RecentRuns).Error; err != nil {
+		return nil, err
+	}
 
 	// Success rate in window
 	var totalCompleted int64
 	var totalSucceeded int64
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Where("status IN ? AND started_at >= ? AND quarantine IS NOT TRUE", []string{"succeeded", "failed"}, since).
-		Count(&totalCompleted)
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+		Count(&totalCompleted).Error; err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "succeeded", since).
-		Count(&totalSucceeded)
+		Count(&totalSucceeded).Error; err != nil {
+		return nil, err
+	}
 	if totalCompleted > 0 {
 		resp.Jobs.SuccessRate = float64(totalSucceeded) / float64(totalCompleted)
 	}
 
 	// Average duration in window
 	var avgResult struct{ Avg float64 }
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
-		Scan(&avgResult)
+		Scan(&avgResult).Error; err != nil {
+		return nil, err
+	}
 	resp.Jobs.AvgDurationSeconds = avgResult.Avg
 
 	// Top failing jobs (up to 5) in window
@@ -140,19 +151,25 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		LastFailure  *time.Time
 	}
 	var failRows []failRow
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("job_id, COUNT(*) as failure_count, MAX(completed_at) as last_failure").
 		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "failed", since).
 		Group("job_id").
 		Order("failure_count DESC").
 		Limit(5).
-		Scan(&failRows)
+		Scan(&failRows).Error; err != nil {
+		return nil, err
+	}
 
 	resp.TopFailing = make([]FailingJob, 0, len(failRows))
 	for _, row := range failRows {
+		alias, err := s.lookupAlias(row.JobID)
+		if err != nil {
+			return nil, err
+		}
 		resp.TopFailing = append(resp.TopFailing, FailingJob{
 			JobID:        row.JobID,
-			Alias:        s.lookupAlias(row.JobID),
+			Alias:        alias,
 			FailureCount: row.FailureCount,
 			LastFailure:  row.LastFailure,
 		})
@@ -164,7 +181,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		AtomName     string
 		FailureCount int64
 	}
-	s.db.WithContext(s.ctx).Model(&models.TaskRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.TaskRun{}).
 		Select("job_runs.job_id, tasks.name as atom_name, COUNT(*) as failure_count").
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Joins("JOIN tasks ON tasks.id = task_runs.task_id").
@@ -172,13 +189,19 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		Group("job_runs.job_id, tasks.name").
 		Order("failure_count DESC").
 		Limit(5).
-		Scan(&atomRows)
+		Scan(&atomRows).Error; err != nil {
+		return nil, err
+	}
 
 	resp.TopFailingAtoms = make([]FailingAtom, 0, len(atomRows))
 	for _, row := range atomRows {
+		alias, err := s.lookupAlias(row.JobID)
+		if err != nil {
+			return nil, err
+		}
 		resp.TopFailingAtoms = append(resp.TopFailingAtoms, FailingAtom{
 			JobID:        row.JobID,
-			Alias:        s.lookupAlias(row.JobID),
+			Alias:        alias,
 			AtomName:     row.AtomName,
 			FailureCount: row.FailureCount,
 		})
@@ -190,19 +213,25 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		Avg   float64
 	}
 	var slowRows []slowRow
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("job_id, AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
 		Group("job_id").
 		Order("avg DESC").
 		Limit(5).
-		Scan(&slowRows)
+		Scan(&slowRows).Error; err != nil {
+		return nil, err
+	}
 
 	resp.SlowestJobs = make([]SlowestJob, 0, len(slowRows))
 	for _, row := range slowRows {
+		alias, err := s.lookupAlias(row.JobID)
+		if err != nil {
+			return nil, err
+		}
 		resp.SlowestJobs = append(resp.SlowestJobs, SlowestJob{
 			JobID:              row.JobID,
-			Alias:              s.lookupAlias(row.JobID),
+			Alias:              alias,
 			AvgDurationSeconds: row.Avg,
 		})
 	}
@@ -227,12 +256,14 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		}
 	}
 
-	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select(pointExpr+" as point, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
 		Where("started_at >= ? AND status IN ? AND quarantine IS NOT TRUE", since, []string{"succeeded", "failed"}).
 		Group("point").
 		Order("point ASC").
-		Scan(&trendData)
+		Scan(&trendData).Error; err != nil {
+		return nil, err
+	}
 
 	trendMap := make(map[string]DailyStats, len(trendData))
 	for _, d := range trendData {
@@ -278,10 +309,13 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	return resp, nil
 }
 
-func (s *Service) lookupAlias(jobID string) string {
+func (s *Service) lookupAlias(jobID string) (string, error) {
 	var job models.Job
 	if err := s.db.WithContext(s.ctx).Unscoped().Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
-		return ""
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
 	}
-	return job.Alias
+	return job.Alias, nil
 }

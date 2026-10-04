@@ -2,6 +2,8 @@ package stats
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,70 @@ func (s *StatsSuite) TestEmptyDatabaseReturnsZeros() {
 		s.Equal(int64(0), day.RunCount)
 		s.Equal(float64(0), day.SuccessRate)
 	}
+}
+
+func (s *StatsSuite) TestSummaryReturnsCountError() {
+	want := errors.New("job count failed")
+	s.failQuery("stats_test_count_error", func(tx *gorm.DB) bool {
+		_, isCount := tx.Statement.Dest.(*int64)
+		return tx.Statement.Table == "jobs" && isCount
+	}, want)
+
+	resp, err := (&Service{ctx: context.Background(), db: s.db}).Summary("7d")
+	s.Nil(resp)
+	s.ErrorIs(err, want)
+}
+
+func (s *StatsSuite) TestSummaryReturnsScanError() {
+	want := errors.New("duration scan failed")
+	s.failQuery("stats_test_scan_error", func(tx *gorm.DB) bool {
+		if tx.Statement.Table != "job_runs" {
+			return false
+		}
+		for _, selection := range tx.Statement.Selects {
+			if strings.Contains(strings.ToUpper(selection), "AVG(") {
+				return true
+			}
+		}
+		return false
+	}, want)
+
+	resp, err := (&Service{ctx: context.Background(), db: s.db}).Summary("7d")
+	s.Nil(resp)
+	s.ErrorIs(err, want)
+}
+
+func (s *StatsSuite) TestSummaryReturnsAliasLookupError() {
+	jobID := s.createJob("alias-error")
+	now := time.Now().UTC()
+	completed := now.Add(-time.Minute)
+	s.createJobRun(jobID, "failed", now.Add(-2*time.Minute), &completed)
+
+	want := errors.New("alias lookup failed")
+	s.failQuery("stats_test_alias_error", func(tx *gorm.DB) bool {
+		_, isJobLookup := tx.Statement.Dest.(*models.Job)
+		return tx.Statement.Table == "jobs" && isJobLookup
+	}, want)
+
+	resp, err := (&Service{ctx: context.Background(), db: s.db}).Summary("7d")
+	s.Nil(resp)
+	s.ErrorIs(err, want)
+}
+
+func (s *StatsSuite) TestLookupAliasTreatsMissingJobAsEmpty() {
+	alias, err := (&Service{ctx: context.Background(), db: s.db}).lookupAlias(uuid.NewString())
+	s.NoError(err)
+	s.Empty(alias)
+}
+
+func (s *StatsSuite) failQuery(name string, matches func(*gorm.DB) bool, want error) {
+	callback := func(tx *gorm.DB) {
+		if matches(tx) {
+			tx.AddError(want)
+		}
+	}
+	s.Require().NoError(s.db.Callback().Query().Before("gorm:query").Register(name, callback))
+	s.Require().NoError(s.db.Callback().Row().Before("gorm:row").Register(name, callback))
 }
 
 func (s *StatsSuite) TestSuccessRateComputedCorrectly() {

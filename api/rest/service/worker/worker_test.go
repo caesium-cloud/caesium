@@ -64,7 +64,7 @@ func (s *WorkerStatusSuite) TestStatusAggregatesClaimsAndExpirations() {
 		status:         "running",
 		claimAttempt:   3,
 		claimExpiresAt: new(now.Add(2 * time.Minute)),
-		updatedAt:      now.Add(-5 * time.Second),
+		updatedAt:      now.Add(-5 * time.Second).In(time.FixedZone("east", 5*60*60)),
 	})
 	s.seedTaskRun(taskRunSeed{
 		claimedBy:      "node-a",
@@ -102,6 +102,7 @@ func (s *WorkerStatusSuite) TestStatusAggregatesClaimsAndExpirations() {
 	s.Equal(int64(10), resp.TotalClaimAttempts)
 	s.Require().NotNil(resp.LastActivityAt)
 	s.WithinDuration(now.Add(-5*time.Second), *resp.LastActivityAt, time.Second)
+	s.Equal(time.UTC, resp.LastActivityAt.Location())
 
 	s.Equal(int64(2), resp.ClaimedByStatus["running"])
 	s.Equal(int64(1), resp.ClaimedByStatus["succeeded"])

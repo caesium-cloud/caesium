@@ -9,56 +9,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRunListPageBoundsDefaultsAndValidates pins the parameter-validation
-// half of issue #499: an absent limit defaults rather than falling back to
-// "unbounded", and a negative/non-integer/oversized value is a 400 instead
-// of a silent clamp — mirroring partitionPageBounds' contract.
-func TestRunListPageBoundsDefaultsAndValidates(t *testing.T) {
-	t.Run("defaults when absent", func(t *testing.T) {
-		limit, offset, err := runListPageBounds("", "")
-		require.NoError(t, err)
-		assert.Equal(t, defaultRunListPageSize, limit)
-		assert.Equal(t, 0, offset)
-	})
-
-	t.Run("honours an explicit in-range limit and offset", func(t *testing.T) {
-		limit, offset, err := runListPageBounds("5", "10")
-		require.NoError(t, err)
-		assert.Equal(t, 5, limit)
-		assert.Equal(t, 10, offset)
-	})
-
-	t.Run("honours the documented ceiling", func(t *testing.T) {
-		limit, _, err := runListPageBounds("1000", "")
-		require.NoError(t, err)
-		assert.Equal(t, 1000, limit)
-	})
-
-	for name, limitParam := range map[string]string{
-		"zero":             "0",
-		"negative":         "-1",
-		"non-integer":      "abc",
-		"over the ceiling": "1001",
-	} {
-		t.Run("rejects "+name+" limit", func(t *testing.T) {
-			_, _, err := runListPageBounds(limitParam, "")
-			require.Error(t, err)
-			var httpErr *echo.HTTPError
-			require.ErrorAs(t, err, &httpErr)
-			assert.Equal(t, http.StatusBadRequest, httpErr.Code)
-		})
+func TestPageBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		limit      string
+		offset     string
+		wantLimit  int
+		wantOffset int
+		wantError  string
+	}{
+		{name: "defaults", wantLimit: defaultPageSize},
+		{name: "whitespace defaults", limit: " \t ", offset: "  ", wantLimit: defaultPageSize},
+		{name: "one", limit: "1", wantLimit: 1},
+		{name: "ceiling", limit: "1000", wantLimit: 1000},
+		{name: "trimmed values", limit: " 7 ", offset: " 9 ", wantLimit: 7, wantOffset: 9},
+		{name: "zero", limit: "0", wantError: "limit must be an integer between 1 and 1000"},
+		{name: "negative limit", limit: "-1", wantError: "limit must be an integer between 1 and 1000"},
+		{name: "oversized", limit: "1001", wantError: "limit must be an integer between 1 and 1000"},
+		{name: "invalid limit", limit: "abc", wantError: "limit must be an integer between 1 and 1000"},
+		{name: "negative offset", offset: "-1", wantError: "offset must be a non-negative integer"},
+		{name: "invalid offset", offset: "abc", wantError: "offset must be a non-negative integer"},
 	}
-
-	for name, offsetParam := range map[string]string{
-		"negative":    "-1",
-		"non-integer": "abc",
-	} {
-		t.Run("rejects "+name+" offset", func(t *testing.T) {
-			_, _, err := runListPageBounds("", offsetParam)
-			require.Error(t, err)
-			var httpErr *echo.HTTPError
-			require.ErrorAs(t, err, &httpErr)
-			assert.Equal(t, http.StatusBadRequest, httpErr.Code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limit, offset, err := pageBounds(tt.limit, tt.offset)
+			if tt.wantError != "" {
+				require.Error(t, err)
+				var httpErr *echo.HTTPError
+				require.ErrorAs(t, err, &httpErr)
+				assert.Equal(t, http.StatusBadRequest, httpErr.Code)
+				assert.Equal(t, tt.wantError, httpErr.Message)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantLimit, limit)
+			assert.Equal(t, tt.wantOffset, offset)
 		})
 	}
 }

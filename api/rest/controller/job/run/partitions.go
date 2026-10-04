@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
@@ -48,15 +47,6 @@ var (
 	// local-mode server actually executes the reset instance. Stubbed in handler
 	// tests; production wiring is kickoffPartitionRetryRun.
 	partitionKickoff = kickoffPartitionRetryRun
-)
-
-const (
-	// defaultPartitionPageSize is the page a client gets when it names no limit.
-	defaultPartitionPageSize = 100
-	// maxPartitionPageSize is the documented ceiling. A larger limit is a client
-	// bug worth reporting, not something to silently reduce: a caller that asked
-	// for 5000 and got 100 without being told believes it has the whole group.
-	maxPartitionPageSize = 1000
 )
 
 type partitionRow struct {
@@ -126,7 +116,7 @@ func ListPartitions(c *echo.Context) error {
 	statusFilter := c.QueryParam("status")
 	partitionFilter := c.QueryParam("partition")
 
-	limit, offset, err := partitionPageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
+	limit, offset, err := pageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
 	if err != nil {
 		return err
 	}
@@ -181,30 +171,6 @@ func ListPartitions(c *echo.Context) error {
 		"next_offset":   nextPartitionOffset(offset, len(rows), int(total)),
 		"status_counts": statusCounts,
 	})
-}
-
-// partitionPageBounds parses and validates the page window. An unparseable or
-// out-of-range limit is a 400 rather than a silent fallback: a client that asked
-// for 5000 rows and received 100 without being told has an incomplete view it
-// believes is complete.
-func partitionPageBounds(limitParam, offsetParam string) (limit, offset int, err error) {
-	limit = defaultPartitionPageSize
-	if raw := strings.TrimSpace(limitParam); raw != "" {
-		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed <= 0 || parsed > maxPartitionPageSize {
-			return 0, 0, echo.NewHTTPError(http.StatusBadRequest,
-				fmt.Sprintf("limit must be an integer between 1 and %d", maxPartitionPageSize))
-		}
-		limit = parsed
-	}
-	if raw := strings.TrimSpace(offsetParam); raw != "" {
-		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed < 0 {
-			return 0, 0, echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
-		}
-		offset = parsed
-	}
-	return limit, offset, nil
 }
 
 // nextPartitionOffset returns the offset a client should request next, or nil
