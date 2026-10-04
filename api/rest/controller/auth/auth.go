@@ -1,8 +1,8 @@
 package auth
 
 import (
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
-	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
 // Controller owns the dependencies required by the auth REST handlers.
@@ -16,11 +16,5 @@ func New(service *iauth.Service, auditor *iauth.AuditLogger) *Controller {
 	return &Controller{
 		service: service,
 		auditor: auditor,
-	}
-}
-
-func logAuditFailure(err error) {
-	if err != nil {
-		log.Warn("failed to write audit log", "error", err)
 	}
 }
