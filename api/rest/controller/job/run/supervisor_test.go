@@ -26,8 +26,11 @@ func supervisedRequestContext(t *testing.T) context.Context {
 }
 
 func TestSupervisedKickoffsKeepRequestValuesAndRunCancellation(t *testing.T) {
-	oldExecute := runExecution
-	t.Cleanup(func() { runExecution = oldExecute })
+	oldExecute, oldGet := runExecution, postGetRun
+	postGetRun = func(id uuid.UUID) (*runstorage.JobRun, error) {
+		return &runstorage.JobRun{ID: id, Status: runstorage.StatusRunning}, nil
+	}
+	t.Cleanup(func() { runExecution, postGetRun = oldExecute, oldGet })
 	for _, kind := range []string{"manual", "whole retry", "partition retry"} {
 		t.Run(kind, func(t *testing.T) {
 			type key struct{}

@@ -3,15 +3,20 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -67,6 +72,9 @@ var (
 	}
 	postFindIdempotentStart = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
 		return postRunStore().FindIdempotentStart(context.WithoutCancel(ctx), jobID, opts...)
+	}
+	postGetRun = func(runID uuid.UUID) (*runstorage.JobRun, error) {
+		return postRunStore().Get(runID)
 	}
 	postFinalizeCommittedRun = func(runID uuid.UUID, cause error) (bool, error) {
 		return postRunStore().CompleteIfActive(runID, cause)
@@ -199,10 +207,72 @@ func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, release
 		// CancelRun / concurrency-replace reach this engine's containers.
 		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, r.ID)
-		if err := runExecution(runCtx, j, r.Params); err != nil {
-			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
-		}
+		executeManualRun(runCtx, j, r)
 	}()
+}
+
+// The cancellation registry has no tombstones. Read durable state after
+// registration to cover cancellation committed before that registration existed.
+func executeManualRun(ctx context.Context, j *models.Job, r *runstorage.JobRun) {
+	ready, err := manualRunReady(ctx, r.ID)
+	if err == nil && ready {
+		// Cancellation may arrive during the read or immediately after it.
+		err = ctx.Err()
+	}
+	if err != nil {
+		cause := fmt.Errorf("manual run could not dispatch safely: %w", err)
+		if _, completeErr := postFinalizeCommittedRun(r.ID, cause); completeErr != nil {
+			log.Error("manual run: pre-dispatch failure could not be finalized; leaving it for an operator",
+				"job_id", j.ID, "run_id", r.ID, "error", completeErr)
+		}
+		return
+	}
+	if !ready {
+		return // Preserve terminal status and its original cause.
+	}
+	if err := runExecution(ctx, j, r.Params); err != nil {
+		log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
+	}
+}
+
+func manualRunReady(ctx context.Context, runID uuid.UUID) (bool, error) {
+	ready := false
+	err := dbretry.Retry(ctx, dbretry.Policy{
+		BeforeAttempt: true,
+		Backoffs:      db.BusyRetryBackoffs,
+		Retryable:     dqlite.IsContentionError,
+		Wait: func(ctx context.Context, delay time.Duration) error {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}, func() error {
+		current, err := postGetRun(runID)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if current == nil {
+			return fmt.Errorf("run %s not found", runID)
+		}
+		switch current.Status {
+		case runstorage.StatusRunning:
+			ready = true
+		case runstorage.StatusCancelled, runstorage.StatusSucceeded, runstorage.StatusFailed, runstorage.StatusSkipped:
+			ready = false
+		default:
+			return fmt.Errorf("run %s has unknown dispatch status %q", runID, current.Status)
+		}
+		return nil
+	})
+	return ready, err
 }
 
 var runExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
