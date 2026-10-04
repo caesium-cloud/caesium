@@ -26,14 +26,23 @@ import (
 // These journeys never seed catalog rows or invoke a scheduler/executor directly.
 // They characterize the instrumented server through its operator surfaces.
 func (s *IntegrationTestSuite) TestIncidentBundleFromRealFailure() {
-	s.Require().NotEmpty(s.authAPIKey, "the incident journey requires the authenticated remediation lane")
+	s.requireAuthLane()
+	s.Require().NotEmpty(s.authAPIKey, "the intended auth lane must carry its operator key")
+	cli, _ := s.maintenanceDockerPrerequisite()
 	alias := "maintenance-bundle-" + uuid.NewString()
-	marker := alias + "-observed"
-	jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "0 0 31 2 *", "", "echo "+marker+"; exit 17", ""))
+	marker := "bundle:" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "0 0 31 2 *", "  runTimeout: 30s\n", "echo "+marker+"; exit 17", ""))
 	runID := s.maintenanceStart(jobID)
+	var taskID string
+	s.T().Cleanup(func() {
+		if taskID == "" {
+			taskID = s.maintenanceTaskIDContext(context.WithoutCancel(s.T().Context()), jobID)
+		}
+		s.maintenanceRunCleanup(cli, jobID, runID, taskID, marker, map[int]string{})
+	})
+	taskID = s.maintenanceTaskID(jobID)
 	run := s.maintenanceAwaitRun(jobID, runID, 60*time.Second)
 	s.Require().Equal("failed", run.Status)
-	taskID := s.maintenanceTaskID(jobID)
 	partition := s.maintenancePartition(jobID, runID, taskID)
 	s.Require().Equal("failed", partition.Status)
 	s.Require().NotNil(partition.ExitCode)
@@ -123,20 +132,43 @@ func (s *IntegrationTestSuite) TestIncidentBundleFromRealFailure() {
 func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 	var features freshnessFeatures
 	s.maintenanceJSON("/v1/system/features", &features)
-	s.Require().True(features.FreshnessEnabled, "the server must enable the real freshness scheduler")
+	if !features.FreshnessEnabled {
+		s.T().Skipf("%s requires CAESIUM_FRESHNESS_ENABLED=true on the server", s.T().Name())
+	}
+	s.Require().True(features.FreshnessEnabled)
+	cli, _ := s.maintenanceDockerPrerequisite()
 	alias := "maintenance-cron-" + uuid.NewString()
 	dataset := "maintenance.cron." + uuid.NewString()
 	watermark := uuid.NewString()
-	metadata := "  datasets:\n    skipWhenFresh: true\n"
+	metadata := "  runTimeout: 30s\n  datasets:\n    skipWhenFresh: true\n"
 	step := fmt.Sprintf("    datasets:\n      produces:\n        - name: %s\n          freshness: 10m\n          maxStaleness: 20m\n          watermark:\n            key: wm\n", dataset)
 	command := fmt.Sprintf("echo '##caesium::output {\"wm\":\"%s\"}'", watermark)
 	registeredAfter := time.Now().UTC().Truncate(time.Minute)
 	jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "* * * * *", metadata, command, step))
 	journeyDeadline := time.Now().Add(150 * time.Second)
+	var taskID string
 	s.T().Cleanup(func() {
 		status, _ := s.maintenanceHTTPContext(context.WithoutCancel(s.T().Context()), http.MethodPut, "/v1/jobs/"+jobID+"/pause", nil)
-		s.Equal(http.StatusOK, status)
+		if !s.Equal(http.StatusOK, status) {
+			return
+		}
+		// Pause prevents future ticks; it does not cancel an already admitted run.
+		// Read every exact public admission and join its bounded production budget.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.T().Context()), 70*time.Second)
+		defer cancel()
+		status, body := s.maintenanceHTTPContext(ctx, http.MethodGet, "/v1/jobs/"+jobID+"/runs", nil)
+		var runs []maintenanceRun
+		if !s.Equal(http.StatusOK, status) || !s.NoError(json.Unmarshal(body, &runs)) {
+			return
+		}
+		if len(runs) > 0 && taskID == "" {
+			taskID = s.maintenanceTaskIDContext(ctx, jobID)
+		}
+		for _, run := range runs {
+			s.maintenanceRunCleanup(cli, jobID, run.ID, taskID, watermark, map[int]string{})
+		}
 	})
+	taskID = s.maintenanceTaskID(jobID)
 	var runID string
 	s.maintenancePoll(75*time.Second, func() bool {
 		runs := s.maintenanceRuns(jobID)
@@ -200,11 +232,10 @@ func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 }
 
 func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
-	s.Require().True(s.engineType == "" || s.engineType == "docker", "native retry timing requires the Docker lane")
-	cli := s.dockerClient()
-	s.T().Cleanup(func() { s.NoError(cli.Close()) })
-	image, err := cli.ImageInspect(s.T().Context(), "alpine:3.23")
-	s.Require().NoError(err, "the task image must already be loaded; the journey never pulls")
+	// Both configured policies must take the real positive-delay execution
+	// branch. Native lower bounds cannot prove wall-clock constant/backoff parity:
+	// container teardown/start overhead has no independent bounded upper limit.
+	cli, imageID := s.maintenanceDockerPrerequisite()
 	for _, backoff := range []bool{false, true} {
 		s.Run(fmt.Sprintf("backoff-%t", backoff), func() {
 			alias := "maintenance-retry-" + uuid.NewString()
@@ -220,7 +251,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 			ids := map[int]string{}
 			observed := map[string]map[events.Action]events.Message{}
 			concreteID := ""
-			s.T().Cleanup(func() { s.maintenanceRetryCleanup(cli, jobID, runID, taskID, alias, ids) })
+			s.T().Cleanup(func() { s.maintenanceRunCleanup(cli, jobID, runID, taskID, alias, ids) })
 			var terminal maintenanceRun
 			for {
 				select {
@@ -251,7 +282,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 							continue
 						}
 						s.Require().NoError(inspectErr)
-						s.Require().Equal(image.ID, inspect.Image)
+						s.Require().Equal(imageID, inspect.Image)
 						s.Require().Equal([]string{"sh", "-c", command}, inspect.Config.Cmd)
 						if inspect.State.Running {
 							ids[row.Attempt] = inspect.ID
@@ -293,7 +324,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 						want = 4 * time.Second
 					}
 					gap := time.Duration(start.TimeNano - observed[ids[attempt-1]][events.ActionDie].TimeNano)
-					s.Require().GreaterOrEqual(gap, want-10*time.Millisecond, "native die-to-start gap must include the configured automatic retry delay")
+					s.Require().GreaterOrEqual(gap, want-10*time.Millisecond, "the configured policy must reach positive automatic delay before the next native attempt")
 					s.T().Logf("automatic retry backoff=%t attempt=%d native gap=%s", backoff, attempt, gap)
 				}
 			}
@@ -303,6 +334,26 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 			s.Require().Len(s.maintenanceRuns(jobID), 1, "automatic retry must not create replacement job runs")
 		})
 	}
+}
+
+// Native image inspection is a prerequisite, never permission to pull. The
+// intended collector lanes require a top-level PASS, so every capability SKIP
+// below still refuses their named coverage admission.
+func (s *IntegrationTestSuite) maintenanceDockerPrerequisite() (*client.Client, string) {
+	s.T().Helper()
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Skipf("%s requires preloaded Docker tasks/native observation; engine=%s", s.T().Name(), s.engineType)
+	}
+	cli := s.dockerClient()
+	s.T().Cleanup(func() { s.NoError(cli.Close()) })
+	ctx, cancel := context.WithTimeout(s.T().Context(), 5*time.Second)
+	defer cancel()
+	image, err := cli.ImageInspect(ctx, "alpine:3.23")
+	if errdefs.IsNotFound(err) {
+		s.T().Skipf("%s requires preloaded alpine:3.23; no implicit pull", s.T().Name())
+	}
+	s.Require().NoError(err, "unexpected Docker prerequisite observation failure")
+	return cli, image.ID
 }
 
 // All HTTP observations require a complete bounded body, including read/close
@@ -429,11 +480,17 @@ func (s *IntegrationTestSuite) maintenanceAwaitRun(jobID, runID string, bound ti
 }
 
 func (s *IntegrationTestSuite) maintenanceTaskID(jobID string) string {
+	return s.maintenanceTaskIDContext(s.T().Context(), jobID)
+}
+
+func (s *IntegrationTestSuite) maintenanceTaskIDContext(ctx context.Context, jobID string) string {
 	var tasks []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	s.maintenanceJSON("/v1/jobs/"+jobID+"/tasks", &tasks)
+	status, body := s.maintenanceHTTPContext(ctx, http.MethodGet, "/v1/jobs/"+jobID+"/tasks", nil)
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().NoError(json.Unmarshal(body, &tasks))
 	s.Require().Len(tasks, 1)
 	s.Require().Equal("gate", tasks[0].Name)
 	_, err := uuid.Parse(tasks[0].ID)
@@ -494,8 +551,8 @@ func (s *IntegrationTestSuite) maintenanceLiveAttemptLogs(jobID, runID, taskID, 
 	s.Require().True(started && finished, "the witnessed native attempt must emit both actual live log markers")
 }
 
-func (s *IntegrationTestSuite) maintenanceRetryCleanup(cli *client.Client, jobID, runID, taskID, marker string, ids map[int]string) {
-	// There is no public whole-run cancel route. Keep the configured 60s run
+func (s *IntegrationTestSuite) maintenanceRunCleanup(cli *client.Client, jobID, runID, taskID, marker string, ids map[int]string) {
+	// There is no public whole-run cancel route. Keep the configured production run
 	// deadline authoritative and join durable completion before cleanup. On a
 	// failed assertion, also discover the exact current row through the public
 	// endpoint, so an unwitnessed later attempt cannot escape the ownership ledger.
@@ -515,7 +572,9 @@ func (s *IntegrationTestSuite) maintenanceRetryCleanup(cli *client.Client, jobID
 		if len(page.Partitions) == 1 && page.Partitions[0].RuntimeID != "" {
 			row := page.Partitions[0]
 			inspect, err := cli.ContainerInspect(ctx, row.RuntimeID)
-			if !errdefs.IsNotFound(err) && s.NoError(err) && s.NotNil(inspect.Config) && s.Contains(strings.Join(inspect.Config.Cmd, " "), marker) {
+			if errdefs.IsNotFound(err) {
+				ids[row.Attempt] = row.RuntimeID // exact public runtime is already absent
+			} else if s.NoError(err) && s.NotNil(inspect.Config) && s.Contains(strings.Join(inspect.Config.Cmd, " "), marker) {
 				ids[row.Attempt] = inspect.ID
 			}
 		}
@@ -525,9 +584,10 @@ func (s *IntegrationTestSuite) maintenanceRetryCleanup(cli *client.Client, jobID
 			return
 		}
 		if run.Status == "failed" || run.Status == "succeeded" {
+			s.NotNil(run.CompletedAt, "owned terminal run must have durable completion")
 			break
 		}
-		if !s.NoError(ctx.Err(), "owned retry run must finish before cleanup") {
+		if !s.NoError(ctx.Err(), "owned admitted run must finish before cleanup") {
 			return
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -545,6 +605,6 @@ func (s *IntegrationTestSuite) maintenanceRetryCleanup(cli *client.Client, jobID
 		}
 		s.NoError(cli.ContainerRemove(ctx, inspect.ID, container.RemoveOptions{Force: true}))
 		_, err = cli.ContainerInspect(ctx, inspect.ID)
-		s.True(errdefs.IsNotFound(err), "owned retry runtime must be absent after cleanup")
+		s.True(errdefs.IsNotFound(err), "owned admitted runtime must be absent after cleanup")
 	}
 }
