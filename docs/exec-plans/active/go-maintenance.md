@@ -20,7 +20,7 @@ Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 i
 
 ## Progress
 
-Current item states: assigned=1, implemented=252.
+Current item states: implemented=253.
 
 | Item | Candidates | Work | State | Evidence |
 | --- | --- | --- | --- | --- |
@@ -182,7 +182,7 @@ Current item states: assigned=1, implemented=252.
 | W151 | C042 | Share fan-out group detection | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W152 | C042 | Migrate run fan-out groups to the C042 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W153 | C050 | Introduce the bounded body reader | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W154 | C081 | Require complete HTTP evidence in test/lifecycle | assigned | pending |
+| W154 | C081 | Require complete HTTP evidence in test/lifecycle | implemented | 09614dcc complete mixed-protocol probe; final-qualification-receipt.md; live gates pending |
 | W155 | C081 | Require complete HTTP evidence in test/load | implemented | d8f47a02 complete load HTTP evidence; real-surface acceptance pending |
 | W156 | C081 | Require complete HTTP evidence in test/performance | implemented | 18828553 complete env probe; final acceptance pending |
 | W157 | C081 | Require complete HTTP evidence in test/robustness/cluster | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
@@ -301,6 +301,7 @@ Completed local gates (each applies only to the recorded candidate):
 - Full Reagents race with actual Terraform at167743bb passed; two redundant conversions fixed d15c97a4; final lint pending
 - Root module full native race/coverage + tagged vet + lint and TestJoinedCommand hermetic regression at7b2a8f0f passed (root-unit-fourth.log); later source needs refreshed proof
 - Reagents native-container lint/vet at7b2a8f0f passed0issues (reagents-lint-second.log)
+- Actual real CLI/REST/local-runtime integration at36447dc5 passed305 scenario PASS lines, 703s; auth/distributed/infra guards expected and not counted as proof (local-integration-go-maintenance-36447dc5.log)
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
