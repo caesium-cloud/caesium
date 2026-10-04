@@ -2240,3 +2240,29 @@ func TestUnresolvedIdentityOverwriteClearsPriorDigestAndEffectiveHash(t *testing
 	require.Empty(t, desc.Cache.EffectiveHash)
 	require.Equal(t, "unknown", desc.Cache.ComputedHash)
 }
+
+func TestTerminalTaskRunsSinceIncludesEveryTerminalStatusOnly(t *testing.T) {
+	f := newFanOutFixture(t, nil)
+	var wantIDs []uuid.UUID
+	for i, status := range []TaskStatus{TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached, TaskStatusCancelled} {
+		require.True(t, IsTerminal(status))
+		id := uuid.New()
+		wantIDs = append(wantIDs, id)
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: id, JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, Status: string(status), TerminalSequence: int64(i + 2)}).Error)
+	}
+	for i, status := range []TaskStatus{TaskStatusPending, TaskStatusRunning, TaskStatusSucceeded, TaskStatusFailed} {
+		seq := int64(100 + i)
+		if IsTerminal(status) {
+			seq = 1
+		}
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: uuid.New(), JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, Status: string(status), TerminalSequence: seq}).Error)
+	}
+	rows, err := f.store.TerminalTaskRunsSince(f.runID, 1)
+	require.NoError(t, err)
+	ids := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	require.Equal(t, wantIDs, ids)
+	require.Equal(t, terminalStatusStrings(), terminalTaskStatuses())
+}

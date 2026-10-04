@@ -232,13 +232,7 @@ func runDiffInstanceLabel(taskName, partition string) string {
 }
 
 func terminalTaskStatuses() []string {
-	return []string{
-		string(TaskStatusSucceeded),
-		string(TaskStatusFailed),
-		string(TaskStatusSkipped),
-		string(TaskStatusCached),
-		string(TaskStatusCancelled),
-	}
+	return terminalStatusStrings()
 }
 
 func laterTerminalTaskRun(candidate, current models.TaskRun) bool {
