@@ -1250,20 +1250,35 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	queue := make([]uuid.UUID, 0, len(tasks))
-	inQueue := make(map[uuid.UUID]bool, len(tasks))
-	processed := make(map[uuid.UUID]bool, len(tasks))
-	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
-	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
-	taskHashes := make(map[uuid.UUID]string, len(tasks))
-	taskQuarantine := make(map[uuid.UUID]bool, len(tasks))
-	taskAttempts := make(map[uuid.UUID]int, len(tasks))
-	terminalTasks := 0
+	local := &localRun{
+		ctx: ctx, j: j, store: store, snapshot: snapshot, currentRun: currentRun,
+		tasks: tasks, atomsByTask: atomsByTask, tasksByID: tasksByID, runners: runners,
+		taskOrder: taskOrder, triggerRuleByTask: triggerRuleByTask,
+		adjacency: adjacency, predecessors: predecessors, indegree: indegree,
+		vars: vars, secretResolver: secretResolver, runID: runID,
+		runQuarantined: runQuarantined, maxParallel: maxParallel, continueOnFailure: continueOnFailure,
+		queue:          make([]uuid.UUID, 0, len(tasks)),
+		inQueue:        make(map[uuid.UUID]bool, len(tasks)),
+		processed:      make(map[uuid.UUID]bool, len(tasks)),
+		taskOutcomes:   make(map[uuid.UUID]run.TaskStatus, len(tasks)),
+		taskOutputs:    make(map[uuid.UUID]map[string]string, len(tasks)),
+		taskHashes:     make(map[uuid.UUID]string, len(tasks)),
+		taskQuarantine: make(map[uuid.UUID]bool, len(tasks)),
+		taskAttempts:   make(map[uuid.UUID]int, len(tasks)),
+	}
+	inQueue := local.inQueue
+	processed := local.processed
+	taskOutcomes := local.taskOutcomes
+	taskOutputs := local.taskOutputs
+	taskHashes := local.taskHashes
+	taskQuarantine := local.taskQuarantine
+	taskAttempts := local.taskAttempts
 	imageIdentityChecksRequired := false
 	for _, taskState := range currentRun.Tasks {
 		imageIdentityChecksRequired = imageIdentityChecksRequired || taskState.CacheEnabled && taskState.CachePinDigests || taskState.HasUnresolvedImageIdentity
 	}
 
+	local.imageIdentityChecksRequired = imageIdentityChecksRequired
 	for _, taskState := range currentRun.Tasks {
 		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
 		taskAttempts[taskState.ID] = max(taskState.Attempt, 1)
@@ -1284,11 +1299,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if len(taskState.Output) > 0 {
 				taskOutputs[taskState.ID] = taskState.Output
 			}
-			terminalTasks++
+			local.terminalTasks++
 		case run.TaskStatusSkipped:
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSkipped
-			terminalTasks++
+			local.terminalTasks++
 		case run.TaskStatusFailed:
 			// A failure this re-entry does not reset is a settled outcome, not
 			// a reason to abandon the run: whole-run retry never leaves one
@@ -1300,72 +1315,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// replacement engines that bailed the same way.
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusFailed
-			terminalTasks++
+			local.terminalTasks++
 			if runErr == nil {
 				runErr = fmt.Errorf("task %s previously failed", taskState.ID)
 			}
 		}
 	}
 
-	push := func(id uuid.UUID) {
-		if processed[id] || inQueue[id] {
-			return
-		}
-		queue = append(queue, id)
-		inQueue[id] = true
-		slices.SortFunc(queue, func(a, b uuid.UUID) int {
-			return cmp.Compare(taskOrder[a], taskOrder[b])
-		})
-	}
+	push := local.push
 
-	propagateSkipped := func(start uuid.UUID) error {
-		queue := []uuid.UUID{start}
-		seen := map[uuid.UUID]struct{}{start: {}}
-
-		for len(queue) > 0 {
-			current := queue[0]
-			queue = queue[1:]
-
-			for _, successor := range adjacency[current] {
-				if processed[successor] {
-					continue
-				}
-				if _, ok := indegree[successor]; !ok {
-					continue
-				}
-				if indegree[successor] > 0 {
-					indegree[successor]--
-				}
-				if indegree[successor] != 0 {
-					continue
-				}
-
-				predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
-				if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
-					push(successor)
-					continue
-				}
-
-				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
-				if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
-					return err
-				}
-
-				taskOutcomes[successor] = run.TaskStatusSkipped
-				processed[successor] = true
-				terminalTasks++
-				delete(inQueue, successor)
-
-				if _, ok := seen[successor]; ok {
-					continue
-				}
-				seen[successor] = struct{}{}
-				queue = append(queue, successor)
-			}
-		}
-
-		return nil
-	}
+	propagateSkipped := local.propagateSkipped
 
 	// A resumed per-partition retry executes the reset instance and whatever
 	// its success releases — nothing else. Under the halt failure policy the
@@ -1399,12 +1358,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 	}
 
-	if len(queue) == 0 && terminalTasks < len(tasks) {
+	if len(local.queue) == 0 && local.terminalTasks < len(tasks) {
 		runErr = fmt.Errorf("job %s has no runnable tasks (verify DAG configuration)", j.id)
 		return runErr
 	}
 
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
+	local.paramEnv = paramEnv
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
 	// It returns the atom result string, any parsed task outputs, any branch
@@ -1760,13 +1720,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 	}
 
-	fanOutGroups := make(map[uuid.UUID]run.ExpandedGroup)
+	local.fanOutGroups = make(map[uuid.UUID]run.ExpandedGroup)
+	fanOutGroups := local.fanOutGroups
 	// fanOutGroups is written from whichever worker goroutine completes a
 	// producer and read by whichever goroutine next runs a fanned step; the
 	// two are only DAG-ordered relative to EACH OTHER, so an unrelated task
 	// running concurrently makes the map a shared mutable. Every access after
 	// the run loop starts goes through registerExpansion/lookupFanOutGroup.
-	var fanOutGroupsMu sync.Mutex
+	fanOutGroupsMu := &local.fanOutGroupsMu
 
 	// rehydrateFanOutGroups reconstructs already-expanded groups from the store.
 	//
@@ -3208,37 +3169,19 @@ func (j *job) Run(ctx context.Context) (err error) {
 	results := make(chan taskResult)
 	active := 0
 	halt := false
-	deferred := make(map[uuid.UUID]time.Time)
+	local.deferred = make(map[uuid.UUID]time.Time)
+	deferred := local.deferred
 	// dispatched records every node handed to the pool. The halt sweep below
 	// must never resolve one of these: its row is still `pending` in SQL until
 	// executeAtom's StartTask, so the store cannot tell it from a node this loop
 	// has not reached, and skipping it would record a container that ran as
 	// skipped.
-	dispatched := make(map[uuid.UUID]bool)
+	local.dispatched = make(map[uuid.UUID]bool)
+	dispatched := local.dispatched
 
-	moveDueDeferred := func() bool {
-		now := time.Now().UTC()
-		moved := false
-		for taskID, retryAfter := range deferred {
-			if retryAfter.After(now) {
-				continue
-			}
-			delete(deferred, taskID)
-			push(taskID)
-			moved = true
-		}
-		return moved
-	}
+	moveDueDeferred := local.moveDueDeferred
 
-	nextDeferredAt := func() (time.Time, bool) {
-		var next time.Time
-		for _, retryAfter := range deferred {
-			if next.IsZero() || retryAfter.Before(next) {
-				next = retryAfter
-			}
-		}
-		return next, !next.IsZero()
-	}
+	nextDeferredAt := local.nextDeferredAt
 
 	dispatch := func(taskID uuid.UUID) error {
 		// An EXPANDED fan-out step acquires its tokens per instance inside
@@ -3301,25 +3244,25 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			taskOutcomes[id] = run.TaskStatusSkipped
 			processed[id] = true
-			terminalTasks++
+			local.terminalTasks++
 			delete(inQueue, id)
 			delete(deferred, id)
 			if err := propagateSkipped(id); err != nil {
 				return err
 			}
 		}
-		queue = slices.DeleteFunc(queue, func(id uuid.UUID) bool { return processed[id] })
+		local.queue = slices.DeleteFunc(local.queue, func(id uuid.UUID) bool { return processed[id] })
 		return nil
 	}
 
-	for (!halt && (len(queue) > 0 || len(deferred) > 0)) || active > 0 {
+	for (!halt && (len(local.queue) > 0 || len(deferred) > 0)) || active > 0 {
 		if !halt && moveDueDeferred() {
 			continue
 		}
 
-		for !halt && active < maxParallel && len(queue) > 0 {
-			taskID := queue[0]
-			queue = queue[1:]
+		for !halt && active < maxParallel && len(local.queue) > 0 {
+			taskID := local.queue[0]
+			local.queue = local.queue[1:]
 			delete(inQueue, taskID)
 
 			if processed[taskID] {
@@ -3331,14 +3274,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 					runErr = err
 				}
 				halt = true
-				queue = queue[:0]
+				local.queue = local.queue[:0]
 				break
 			}
 		}
 
 		var result taskResult
 		gotResult := false
-		if halt && len(queue) == 0 && len(deferred) > 0 {
+		if halt && len(local.queue) == 0 && len(deferred) > 0 {
 			if active == 0 {
 				break
 			}
@@ -3349,7 +3292,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			active--
 			gotResult = true
-		} else if len(queue) == 0 && len(deferred) > 0 {
+		} else if len(local.queue) == 0 && len(deferred) > 0 {
 			next, ok := nextDeferredAt()
 			if !ok {
 				continue
@@ -3403,14 +3346,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 
 		processed[result.id] = true
-		terminalTasks++
+		local.terminalTasks++
 
 		if result.err != nil {
 			if errors.Is(result.err, errUnresolvedIdentityTerminalWrite) {
 				// A storage failure left the predecessor's identity uncertain.
 				// Drain admitted work but never dispatch downstream cache checks.
 				halt = true
-				queue = queue[:0]
+				local.queue = local.queue[:0]
 			}
 			taskOutcomes[result.id] = run.TaskStatusFailed
 			if run.IsRunDeadlineError(result.err) {
@@ -3421,7 +3364,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Do not apply ordinary task-failure policy here: it would turn
 				// unfinished siblings into skips just before that transition.
 				halt = true
-				queue = queue[:0]
+				local.queue = local.queue[:0]
 				continue
 			}
 			if runErr == nil {
@@ -3445,11 +3388,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 							runErr = err
 						}
 						halt = true
-						queue = queue[:0]
+						local.queue = local.queue[:0]
 					}
 					taskOutcomes[id] = run.TaskStatusSkipped
 					processed[id] = true
-					terminalTasks++
+					local.terminalTasks++
 					delete(inQueue, id)
 					if !halt {
 						if propErr := propagateSkipped(id); propErr != nil {
@@ -3458,7 +3401,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 								runErr = propErr
 							}
 							halt = true
-							queue = queue[:0]
+							local.queue = local.queue[:0]
 						}
 					}
 				},
@@ -3490,12 +3433,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 									runErr = err
 								}
 								halt = true
-								queue = queue[:0]
+								local.queue = local.queue[:0]
 								break
 							}
 							taskOutcomes[successor] = run.TaskStatusSkipped
 							processed[successor] = true
-							terminalTasks++
+							local.terminalTasks++
 							delete(inQueue, successor)
 							if err := propagateSkipped(successor); err != nil {
 								log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
@@ -3503,7 +3446,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 									runErr = err
 								}
 								halt = true
-								queue = queue[:0]
+								local.queue = local.queue[:0]
 								break
 							}
 						}
@@ -3524,7 +3467,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 						runErr = err
 					}
 					halt = true
-					queue = queue[:0]
+					local.queue = local.queue[:0]
 				}
 			}
 			continue
@@ -3544,7 +3487,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			skippedSet[skippedID] = true
 			taskOutcomes[skippedID] = run.TaskStatusSkipped
 			processed[skippedID] = true
-			terminalTasks++
+			local.terminalTasks++
 			delete(inQueue, skippedID)
 
 			if err := propagateSkipped(skippedID); err != nil {
@@ -3553,7 +3496,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					runErr = err
 				}
 				halt = true
-				queue = queue[:0]
+				local.queue = local.queue[:0]
 				break
 			}
 		}
@@ -3591,12 +3534,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 								runErr = err
 							}
 							halt = true
-							queue = queue[:0]
+							local.queue = local.queue[:0]
 							break
 						}
 						taskOutcomes[successor] = run.TaskStatusSkipped
 						processed[successor] = true
-						terminalTasks++
+						local.terminalTasks++
 						delete(inQueue, successor)
 						if err := propagateSkipped(successor); err != nil {
 							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
@@ -3604,7 +3547,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 								runErr = err
 							}
 							halt = true
-							queue = queue[:0]
+							local.queue = local.queue[:0]
 							break
 						}
 					}
@@ -3613,11 +3556,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 	}
 
-	if terminalTasks != liveTaskCount {
+	if local.terminalTasks != liveTaskCount {
 		if runErr != nil {
 			return runErr
 		}
-		return fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, terminalTasks, liveTaskCount)
+		return fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, local.terminalTasks, liveTaskCount)
 	}
 
 	if runErr != nil {
