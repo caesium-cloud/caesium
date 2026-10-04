@@ -98,7 +98,7 @@ func TestColdInjectedServiceDoesNotOpenDefaultDatabase(t *testing.T) {
 			require.EqualValues(t, 1, count)
 			_, err = svc.Get(result.Run.ID)
 			require.NoError(t, err)
-			nilContext := New(nil).WithStore(svc.runStore())
+			nilContext := New(nil).WithStore(svc.runStore()) //nolint:staticcheck // API intentionally accepts nil; detachedContext falls back to Background.
 			_, found, err = nilContext.FindIdempotentStart(j.ID, opts...)
 			require.NoError(t, err)
 			require.True(t, found)
@@ -126,19 +126,19 @@ func TestSetBusPublishesCapturedStoreWithoutChangingFirstDefault(t *testing.T) {
 	t.Cleanup(func() { jobdeftestutil.CloseDB(firstDB); jobdeftestutil.CloseDB(secondDB) })
 	first, second := runstorage.NewStore(firstDB), runstorage.NewStore(secondDB)
 	firstBus, secondBus := event.New(), event.New()
-	firstService := New(nil).WithStore(first)
+	firstService := New(t.Context()).WithStore(first)
 	firstService.SetBus(firstBus)
-	inherited := New(nil).(*runService)
+	inherited := New(t.Context()).(*runService)
 	require.Same(t, first, inherited.runStore())
 	require.Same(t, firstBus, first.Bus())
-	secondService := New(nil).WithStore(second)
+	secondService := New(t.Context()).WithStore(second)
 	secondService.SetBus(secondBus)
 	require.Same(t, secondBus, second.Bus())
 	require.Same(t, firstBus, first.Bus())
-	require.Same(t, first, New(nil).(*runService).runStore(), "later SetBus must not replace the first default")
+	require.Same(t, first, New(t.Context()).(*runService).runStore(), "later SetBus must not replace the first default")
 	firstService.WithStore(second)
 	require.Same(t, first, inherited.runStore(), "New captures an initialized singleton's binding")
-	require.Same(t, first, New(nil).(*runService).runStore(), "rebinding one wrapper must not change the singleton")
+	require.Same(t, first, New(t.Context()).(*runService).runStore(), "rebinding one wrapper must not change the singleton")
 }
 
 func TestConcurrentServiceReadsCaptureAnExplicitBinding(t *testing.T) {
@@ -151,7 +151,7 @@ func TestConcurrentServiceReadsCaptureAnExplicitBinding(t *testing.T) {
 		require.NoError(t, conn.Create(&models.JobRun{ID: runID, JobID: jobID, Status: string(runstorage.StatusRunning)}).Error)
 	}
 	first, second := runstorage.NewStore(firstDB), runstorage.NewStore(secondDB)
-	svc := New(nil).WithStore(first)
+	svc := New(t.Context()).WithStore(first)
 	var workers sync.WaitGroup
 	start := make(chan struct{})
 	errors := make(chan error, 8)
