@@ -449,6 +449,9 @@ func TestAdvanceSharesStateRaceAndContentionBudget(t *testing.T) {
 	for _, succeed := range []bool{false, true} {
 		t.Run(strconv.FormatBool(succeed), func(t *testing.T) {
 			conn := openRegistryDB(t)
+			sqlDB, err := conn.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 			calls := 0
 			last := errors.New("resource busy elsewhere")
 			require.NoError(t, conn.Callback().Query().Before("gorm:query").Register("test:race-and-busy", func(tx *gorm.DB) {

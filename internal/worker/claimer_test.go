@@ -695,6 +695,9 @@ func TestReclaimExpiredPublishesOnlyCommittedAttempt(t *testing.T) {
 			t.Cleanup(func() { jobdeftestutil.CloseDB(conn) })
 			runID := seedJobRun(t, conn, string(run.StatusRunning))
 			seedTaskRun(t, conn, seedTaskRunInput{status: string(run.TaskStatusRunning), jobRunID: &runID, claimedBy: "old", claimExpiresAt: new(time.Now().Add(-time.Minute)), createdAt: time.Now().Add(-time.Hour)})
+			// Match production autocommit updates; the seam owns only explicit
+			// reclaim transactions, not the later bus-dispatch marker update.
+			conn = conn.Session(&gorm.Session{SkipDefaultTransaction: true})
 			store := run.NewStore(conn)
 			bus := event.New()
 			store.SetBus(bus)
