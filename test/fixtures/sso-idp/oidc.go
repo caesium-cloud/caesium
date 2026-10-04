@@ -53,7 +53,7 @@ func (o *oidcFixture) authorize(w http.ResponseWriter, r *http.Request) {
 	o.mu.Unlock()
 	target, _ := url.Parse(q.Get("redirect_uri"))
 	target.RawQuery = url.Values{"code": {code}, "state": {q.Get("state")}}.Encode()
-	http.Redirect(w, r, target.String(), 302)
+	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 func (o *oidcFixture) token(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" || r.ParseForm() != nil {

@@ -39,7 +39,11 @@ func TestOIDCFixtureEnforcesPKCEAndSingleRedemption(t *testing.T) {
 	challenge := sha256.Sum256([]byte(verifier))
 	q := url.Values{"client_id": {clientID}, "redirect_uri": {"http://server.invalid/auth/sso/oidc/callback"}, "response_type": {"code"}, "scope": {"openid profile"}, "state": {"state-value"}, "nonce": {"nonce-value"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}}
 	c := client()
-	res, err := c.Get(server.URL + "/authorize?" + q.Encode())
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/authorize?"+q.Encode(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
