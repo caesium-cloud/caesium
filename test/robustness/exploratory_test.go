@@ -59,6 +59,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/faults"
@@ -750,8 +751,31 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 		return startOutcome{Err: err.Error()}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	b, readErr := bodylimit.Read(resp.Body, 1<<20)
 	out := startOutcome{HTTPStatus: resp.StatusCode, Raw: truncate(b, 400), Replayed: resp.Header.Get("Idempotent-Replayed") == "true"}
+	if readErr != nil {
+		var partial struct {
+			Outcome string `json:"outcome"`
+			ID      string `json:"id"`
+			RunID   string `json:"run_id"`
+			QueueID string `json:"queue_id"`
+		}
+		if json.Unmarshal(b, &partial) == nil {
+			out.Outcome = partial.Outcome
+			id := partial.ID
+			if partial.Outcome == "skipped" {
+				id = partial.RunID
+			}
+			if _, err := uuid.Parse(id); err == nil {
+				out.RunID = id
+			}
+			if _, err := uuid.Parse(partial.QueueID); err == nil {
+				out.QueueID = partial.QueueID
+			}
+		}
+		out.Err = fmt.Sprintf("HTTP %d body incomplete, admission uncertain: %v", resp.StatusCode, readErr)
+		return out
+	}
 	if resp.StatusCode != http.StatusAccepted {
 		return out
 	}
