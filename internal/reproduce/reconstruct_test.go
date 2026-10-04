@@ -526,9 +526,9 @@ func TestPredecessorProjectionPreservesFallbackAndDescriptorOwnership(t *testing
 	require.Equal(t, "kept", env["CAESIUM_OUTPUT_NO_NAME_VALUE"])
 	require.Len(t, warnings, 3)
 	require.Equal(t, []Warning{
-		{Code: WarningOutputMissingName, Message: "predecessor output orphan-id had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env"},
 		{Code: WarningOutputRefUnresolved, Message: "output ref CAESIUM_OUTPUT_EXTRACT_STEP_FRAME_PATH points at recorded path /recorded/frame; ensure local storage is mounted or remapped"},
 		{Code: WarningOutputRefUnresolved, Message: "output ref CAESIUM_OUTPUT_ORPHAN_ID_FRAME_PATH points at recorded path /recorded/frame; ensure local storage is mounted or remapped"},
+		{Code: WarningOutputMissingName, Message: "predecessor output orphan-id had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env"},
 	}, warnings)
 	details := outputRefFidelityDetails(desc)
 	require.Len(t, details, 2)
