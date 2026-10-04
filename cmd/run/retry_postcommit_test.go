@@ -117,8 +117,9 @@ func TestLocalWholeRetryPostCommitFailureFinalizesSynchronouslyBeforeReturning(t
 				return r, err
 			},
 			store.CompleteIfActive,
-			func(context.Context, *models.Job, *runstorage.JobRun, func()) {
-				t.Fatal("committed error must never launch an engine")
+			func(_ context.Context, _ *models.Job, _ *runstorage.JobRun, release func()) {
+				t.Error("committed error must never launch an engine")
+				release()
 			})
 		done <- err
 	}()
