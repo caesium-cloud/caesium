@@ -2266,3 +2266,69 @@ func TestTerminalTaskRunsSinceIncludesEveryTerminalStatusOnly(t *testing.T) {
 	require.Equal(t, wantIDs, ids)
 	require.Equal(t, terminalStatusStrings(), terminalTaskStatuses())
 }
+
+func TestFailureMessageMappingsAndOwnerOverride(t *testing.T) {
+	for _, tc := range []struct{ result, want string }{
+		{"failure", "command exited with non-zero status"},
+		{"startup_failure", "atom failed to start (check image/command)"},
+		{"resource_failure", "atom exhausted resources (e.g. OOM)"},
+		{"killed", "atom was forcefully killed"},
+		{"terminated", "atom was gracefully terminated"},
+		{"provider-specific failure", "provider-specific failure"},
+	} {
+		require.Equal(t, tc.want, failureMessage(tc.result))
+	}
+	for _, explicit := range []string{"", "owner-specific failure"} {
+		t.Run(explicit, func(t *testing.T) {
+			f := newFanOutFixture(t, nil)
+			require.NoError(t, f.store.CompleteTaskOwner(f.runID, f.consumer.ID, TaskStatusFailed, "failure", explicit, "", nil, nil, 1, 1, nil, nil))
+			row := f.instances(t)[0]
+			want := explicit
+			if want == "" {
+				want = failureMessage("failure")
+			}
+			require.Equal(t, want, row.Error)
+		})
+	}
+}
+
+func TestCompletionFieldsOmitEmptyInputsAcrossUpdatePaths(t *testing.T) {
+	for _, path := range []string{"sql", "cache", "owner"} {
+		for _, shape := range []string{"nil", "empty", "values"} {
+			t.Run(path+"/"+shape, func(t *testing.T) {
+				f := newFanOutFixture(t, nil)
+				row := f.instances(t)[0]
+				oldOutput := datatypes.JSON(`{"old":"value"}`)
+				oldBranches := datatypes.JSON(`["old"]`)
+				require.NoError(t, f.db.Model(&row).Updates(map[string]any{"output": oldOutput, "branch_selections": oldBranches}).Error)
+				var output map[string]string
+				var branches []string
+				switch shape {
+				case "empty":
+					output = map[string]string{}
+					branches = []string{}
+				case "values":
+					output = map[string]string{"new": "value"}
+					branches = []string{"new"}
+				}
+				switch path {
+				case "sql":
+					require.NoError(t, f.store.CompleteTask(f.runID, f.consumer.ID, "success", output, branches))
+				case "cache":
+					_, err := f.store.CacheHitTask(f.runID, f.consumer.ID, CacheHitSource{RunID: uuid.New()}, "success", output, branches)
+					require.NoError(t, err)
+				case "owner":
+					require.NoError(t, f.store.CompleteTaskOwner(f.runID, f.consumer.ID, TaskStatusSucceeded, "success", "", "", output, branches, 1, 1, nil, nil))
+				}
+				row = f.instances(t)[0]
+				if shape == "values" {
+					require.JSONEq(t, `{"new":"value"}`, string(row.Output))
+					require.JSONEq(t, `["new"]`, string(row.BranchSelections))
+				} else {
+					require.Equal(t, oldOutput, row.Output)
+					require.Equal(t, oldBranches, row.BranchSelections)
+				}
+			})
+		}
+	}
+}

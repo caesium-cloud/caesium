@@ -2943,20 +2943,11 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return seqErr
 			}
 			updates["terminal_sequence"] = seq
-			if len(output) > 0 {
-				encoded, marshalErr := json.Marshal(output)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling task output: %w", marshalErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, marshalErr := json.Marshal(branchSelections)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 
 			resultUpdate := updateQuery.Updates(updates)
 			if resultUpdate.Error != nil {
@@ -4077,35 +4068,13 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 				"cache_expires_at":        nil,
 				"partition_retry_pending": false,
 			}
-			if len(output) > 0 {
-				encoded, marshalErr := json.Marshal(output)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling task output: %w", marshalErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, marshalErr := json.Marshal(branchSelections)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 			if status == TaskStatusFailed {
-				msg := result
-				switch Result(result) {
-				case "failure":
-					msg = "command exited with non-zero status"
-				case "startup_failure":
-					msg = "atom failed to start (check image/command)"
-				case "resource_failure":
-					msg = "atom exhausted resources (e.g. OOM)"
-				case "killed":
-					msg = "atom was forcefully killed"
-				case "terminated":
-					msg = "atom was gracefully terminated"
-				}
-				updates["error"] = msg
+				updates["error"] = failureMessage(result)
 			}
 
 			resultUpdate := updateQuery.Updates(updates)
@@ -4468,20 +4437,11 @@ func (s *Store) CompleteTaskOwner(
 				"cache_hit":               status == TaskStatusCached,
 				"partition_retry_pending": false,
 			}
-			if len(output) > 0 {
-				encoded, mErr := json.Marshal(output)
-				if mErr != nil {
-					return fmt.Errorf("marshalling task output: %w", mErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, mErr := json.Marshal(branchSelections)
-				if mErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", mErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 			if status == TaskStatusFailed {
 				if errMsg != "" {
 					updates["error"] = errMsg
@@ -4611,6 +4571,27 @@ func (s *Store) CompleteTaskOwner(
 		s.publishEvents(pendingEvents...)
 	}
 	return err
+}
+
+// taskCompletionFieldUpdates omits empty fields so a partial completion never
+// erases existing output or branch evidence.
+func taskCompletionFieldUpdates(output map[string]string, branchSelections []string) (map[string]any, error) {
+	fields := make(map[string]any, 2)
+	if len(output) > 0 {
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling task output: %w", err)
+		}
+		fields["output"] = encoded
+	}
+	if len(branchSelections) > 0 {
+		encoded, err := json.Marshal(branchSelections)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling branch selections: %w", err)
+		}
+		fields["branch_selections"] = encoded
+	}
+	return fields, nil
 }
 
 // failureMessage maps a failure result string to a human-readable error, matching

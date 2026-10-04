@@ -11,8 +11,8 @@ import (
 )
 
 // cache_chain_test.go covers the LOCAL executor's half of infra-deploy A3: the
-// resolved cache.chain reaching cache.HashInput through the single construction
-// site every step and every fan-out instance shares (buildTaskHashInput).
+// resolved cache.chain reaching cache.HashInput directly in both the unfanned
+// and per-instance execution paths.
 //
 // The cross-run, cross-lane behaviour — a values-mode step actually reported
 // `cached` by a live server after its predecessor re-ran — is asserted end to end
@@ -91,7 +91,7 @@ func TestLocalLane_ChainReachesPersistedBlob(t *testing.T) {
 }
 
 // partitionChainArgs is chainArgs plus the per-instance fields a fanned
-// consumer folds in. The two construction sites share buildTaskHashInput, so
+// consumer folds in. Both construction sites use cache.HashInput directly, so
 // this is the same composition the local dispatcher uses for every instance.
 func partitionChainArgs(chain, predHash, predOutput, key, fingerprint string) cache.HashInput {
 	args := chainArgs(chain, predHash, predOutput)
