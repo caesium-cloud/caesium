@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Hermetic refusal/provenance tests; never invokes Docker or a backend API."""
+"""Hermetic guard/loopback HTTP tests; never invokes Docker or a real backend."""
 import base64
 import copy
+from contextlib import contextmanager
+import http.client
 import hashlib
 import importlib.util
 import io
 import json
 from pathlib import Path
 import subprocess
+import socketserver
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -345,6 +349,126 @@ class BackendGuards(unittest.TestCase):
         link.symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(b.Refused):
             b.fresh_directory(link / 'new')
+
+
+@contextmanager
+def loopback_http(responses):
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.settimeout(2)
+            self.request.recv(65536)
+            self.server.requests += 1
+            if not self.server.responses:
+                raise AssertionError('unexpected loopback request')
+            response = self.server.responses.pop(0)
+            if response:
+                try:
+                    self.request.sendall(response)
+                except ConnectionError:
+                    pass  # The bounded reader may close its own oversized stream.
+    server = socketserver.TCPServer(('127.0.0.1', 0), Handler)
+    server.responses, server.requests = list(responses), 0
+    server.base = 'http://127.0.0.1:' + str(server.server_address[1])
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01}, daemon=True)
+    thread.start()
+    try:
+        opener = b.urllib.request.build_opener(b.urllib.request.ProxyHandler({}))
+        with patch.object(b.urllib.request, 'urlopen', side_effect=opener.open):
+            yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        if thread.is_alive():
+            raise AssertionError('owned loopback listener did not stop')
+
+
+def finite_response(body, length=None, status='200 OK'):
+    length = len(body) if length is None else length
+    return ('HTTP/1.1 ' + status + '\r\nContent-Length: ' + str(length) + '\r\nConnection: close\r\n\r\n').encode() + body
+
+
+class BackendHTTPGuards(unittest.TestCase):
+    def driver(self, base):
+        driver = object.__new__(b.Driver)
+        driver.base, driver.server_id = base, 'owned-server-id'
+        return driver
+
+    def test_actual_disconnect_and_bad_protocol_become_refused(self):
+        for response in (b'', b'not an HTTP response\r\n\r\n'):
+            with self.subTest(response=response), loopback_http([response]) as server:
+                with self.assertRaises(b.Refused) as raised:
+                    self.driver(server.base).http('/health')
+                self.assertIsInstance(raised.exception.__cause__, http.client.HTTPException)
+                self.assertEqual(server.requests, 1)
+
+    def test_actual_disconnect_is_retried_only_during_owned_readiness(self):
+        with loopback_http([b'', finite_response(b'{"healthy":true}')]) as server:
+            driver = self.driver(server.base)
+            with patch.object(driver, 'owned', return_value={'State': {'Running': True}}, create=True) as owned:
+                driver._wait_for_server()
+            self.assertEqual(server.requests, 2)
+            self.assertEqual(server.responses, [])
+            owned.assert_called_with('container', 'owned-server-id')
+        # A finite non-readiness request propagates instead of retrying.
+        with loopback_http([b'', finite_response(b'{"healthy":true}')]) as server:
+            with self.assertRaises(b.Refused): self.driver(server.base).http('/v1/jobs')
+            self.assertEqual(server.requests, 1)
+            self.assertEqual(len(server.responses), 1)
+
+    def test_readiness_refuses_exited_owner_and_keeps_its_deadline(self):
+        with loopback_http([b'', finite_response(b'{"healthy":true}')]) as server:
+            driver = self.driver(server.base)
+            with patch.object(driver, 'owned', side_effect=[{'State': {'Running': True}}, {'State': {'Running': False}}], create=True):
+                with self.assertRaisesRegex(b.Refused, 'exited before health'):
+                    driver._wait_for_server()
+            self.assertEqual(server.requests, 1)
+        driver = self.driver('http://unused-loopback')
+        with patch.object(driver, 'owned', return_value={'State': {'Running': True}}, create=True), \
+             patch.object(driver, 'http', side_effect=b.Refused('disconnect')), \
+             patch.object(b.time, 'monotonic', side_effect=[0, 0, 91]), patch.object(b.time, 'sleep'):
+            with self.assertRaisesRegex(b.Refused, 'deadline waiting for actual main readiness'):
+                driver._wait_for_server()
+
+    def test_finite_valid_json_prefix_cannot_hide_declared_truncation(self):
+        body = b'{"healthy":true}'
+        chunked = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + format(len(body), 'x').encode() + b'\r\n' + body + b'\r\n'
+        ambiguous = ('HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)) + '\r\nContent-Length: 86\r\n\r\n').encode() + body
+        for response in (finite_response(body, len(body) + 64), chunked, ambiguous):
+            with self.subTest(chunked=response is chunked), loopback_http([response]) as server:
+                with self.assertRaises(b.Refused): self.driver(server.base).http('/health')
+        with loopback_http([finite_response(b'complete text', 86)]) as server:
+            with self.assertRaisesRegex(b.Refused, 'body incomplete'):
+                self.driver(server.base).http('/logs', text=True)
+
+    def test_finite_cap_encoding_and_status_fail_closed(self):
+        maximum = 2 * 1024 * 1024
+        responses = [finite_response(b'{}', maximum + 1),
+                     b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n' + b'x' * (maximum + 1),
+                     finite_response(b'not JSON'), finite_response(b'\xff'), finite_response(b'{}', status='503 Unavailable')]
+        for response in responses:
+            with self.subTest(prefix=response[:65]), loopback_http([response]) as server:
+                with self.assertRaises(b.Refused): self.driver(server.base).http('/health')
+        with loopback_http([finite_response(b'\xff')]) as server:
+            with self.assertRaises(b.Refused): self.driver(server.base).http('/logs', text=True)
+
+    def test_complete_finite_json_and_text_remain_valid(self):
+        with loopback_http([finite_response(b'{"healthy":true}'), finite_response('actual text \u2713'.encode())]) as server:
+            driver = self.driver(server.base)
+            self.assertEqual(driver.http('/health'), {'healthy': True})
+            self.assertEqual(driver.http('/logs', text=True), 'actual text \u2713')
+
+    def test_live_log_transport_refuses_but_complete_prefix_stays_partial(self):
+        task_id = '11111111-1111-4111-8111-111111111111'
+        task = {'id': task_id, 'task_id': task_id, 'partition_count': 0}
+        for error in (http.client.RemoteDisconnected('closed'), http.client.IncompleteRead(b'partial'), ConnectionResetError('reset')):
+            with patch.object(b.urllib.request, 'urlopen', side_effect=error):
+                with self.assertRaises(b.Refused):
+                    self.driver('http://unused-loopback').live_deadline_log('job', 'run', task, 'owned')
+        # The real streaming path is intentionally prefix-only: no full-body length requirement.
+        response = b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100000\r\n\r\nDEADLINE_owned\n'
+        with loopback_http([response]) as server:
+            self.assertEqual(self.driver(server.base).live_deadline_log('job', 'run', task, 'owned'), 'DEADLINE_owned\n')
 
 
 if __name__ == '__main__':

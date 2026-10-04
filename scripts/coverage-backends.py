@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -360,11 +361,28 @@ class Driver:
         try:
             with urllib.request.urlopen(req, timeout=12) as response:
                 require(response.status in (200, 202), 'public HTTP status mismatch')
-                body = response.read(2 * 1024 * 1024 + 1)
-        except (urllib.error.URLError, TimeoutError) as exc:
+                maximum = 2 * 1024 * 1024
+                lengths = response.headers.get_all('Content-Length', [])
+                require(len(lengths) <= 1, 'ambiguous public response length')
+                declared = lengths[0] if lengths else None
+                if declared is not None:
+                    require(re.fullmatch(r'[0-9]+', declared.strip()) and len(declared.strip()) <= 10, 'invalid public response length')
+                    declared = int(declared)
+                    require(declared <= maximum, 'public response too large')
+                body = response.read(maximum + 1)
+                require(declared is None or len(body) == declared, 'public response body incomplete')
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    exc.close()
+                except (OSError, http.client.HTTPException) as close_error:
+                    raise Refused('public HTTP error response close failed') from close_error
             raise Refused('public backend HTTP request failed') from exc
-        require(len(body) <= 2 * 1024 * 1024, 'public response too large')
-        return body.decode() if text else json.loads(body)
+        require(len(body) <= maximum, 'public response too large')
+        try:
+            return body.decode() if text else json.loads(body)
+        except (UnicodeError, ValueError) as exc:
+            raise Refused('public response encoding invalid') from exc
 
     def live_deadline_log(self, job_id, run_id, task, marker):
         # Cancellation removes the native object without a persisted raw log
@@ -376,10 +394,18 @@ class Driver:
             with urllib.request.urlopen(req, timeout=8) as response:
                 require(response.status == 200 and response.headers.get('Content-Type', '').split(';')[0] == 'text/plain', 'live deadline log status/content mismatch')
                 line = response.readline(64 * 1024 + 1)
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    exc.close()
+                except (OSError, http.client.HTTPException) as close_error:
+                    raise Refused('live deadline log error response close failed') from close_error
             raise Refused('live deadline log request incomplete') from exc
         require(time.monotonic() - started <= 8 and 0 < len(line) <= 64 * 1024 and line.endswith(b'\n'), 'live deadline log prefix incomplete/oversized/late')
-        text = line.decode()
+        try:
+            text = line.decode()
+        except UnicodeError as exc:
+            raise Refused('live deadline log encoding invalid') from exc
         require('DEADLINE_' + marker in text, 'live deadline log marker absent')
         return text
 
@@ -571,14 +597,18 @@ class Driver:
         require(len(bindings) == 1 and bindings[0]['HostIp'] == '127.0.0.1', 'unexpected backend server port binding')
         self.base = 'http://127.0.0.1:' + bindings[0]['HostPort']
         self.server_name = name
+        self._wait_for_server()
+        self.server_raw = raw
+
+    def _wait_for_server(self):
         def ready():
+            require(self.owned('container', self.server_id)['State']['Running'], 'backend server exited before health')
             try:
                 return self.http('/health')
             except Refused:
                 require(self.owned('container', self.server_id)['State']['Running'], 'backend server exited before health')
                 return None
         self.wait(ready, 'actual main readiness', 90)
-        self.server_raw = raw
 
     def record_process(self, source, obj, raw, command, stop_rc=None, flush_rc=None):
         state = obj['State']
