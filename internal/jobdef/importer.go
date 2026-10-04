@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caesium-cloud/caesium/internal/contract"
-	contractenforce "github.com/caesium-cloud/caesium/internal/dbretry"
+	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
