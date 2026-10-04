@@ -149,9 +149,65 @@ class BackendGuards(unittest.TestCase):
                 b.verify_outcome(dict(deadline, error=cause), 'deadline', 'owned')
         with self.assertRaises(b.Refused):
             b.verify_outcome(dict(deadline, tasks=[dict(task, status='running', completed_at=None)]), 'deadline', 'owned')
-        for bad_task in (dict(task, runtime_id=''), dict(task, cache_hit=True)):
+        for bad_task in (dict(task, runtime_id=''), dict(task, cache_hit=True), dict(task, completed_at=None)):
             with self.assertRaises(b.Refused):
                 b.verify_outcome(dict(success, tasks=[bad_task, task]), 'success', 'owned')
+
+    def test_collapsed_public_task_id_is_not_a_concrete_log_selector(self):
+        catalog_id = '11111111-1111-4111-8111-111111111111'
+        actual_instance_id = '22222222-2222-4222-8222-222222222222'
+        # Store collapseFanOutGroups exposes head.ID=TaskID, not concrete PK.
+        public = {'id': catalog_id, 'task_id': catalog_id, 'runtime_id': actual_instance_id, 'partition_count': 0}
+        path = b.unfanned_log_path('job', 'run', public)
+        self.assertTrue(path.endswith('/logs?task_id=' + catalog_id))
+        self.assertNotIn('task_run_id=', path)
+        self.assertNotIn(actual_instance_id, path)
+        for unexpected in (dict(public, partition_count=2), dict(public, partition_value='a')):
+            with self.assertRaises(b.Refused):
+                b.unfanned_log_path('job', 'run', unexpected)
+
+    def test_deadline_log_reads_only_live_bounded_prefix_and_closes_reader(self):
+        driver = object.__new__(b.Driver)
+        driver.base = 'http://owned-server'
+        task = {'id': '11111111-1111-4111-8111-111111111111', 'task_id': '11111111-1111-4111-8111-111111111111', 'partition_count': 0}
+        class Stream:
+            status = 200
+            headers = {'Content-Type': 'text/plain; charset=utf-8'}
+            def __init__(self, line): self.line, self.closed = line, False
+            def __enter__(self): return self
+            def __exit__(self, *args): self.closed = True
+            def readline(self, maximum): return self.line[:maximum]
+            def read(self, *args): raise AssertionError('whole live stream must not be drained')
+        stream = Stream(b'DEADLINE_owned\n')
+        with patch.object(b.urllib.request, 'urlopen', return_value=stream) as request:
+            self.assertEqual(driver.live_deadline_log('job', 'run', task, 'owned'), 'DEADLINE_owned\n')
+        self.assertTrue(stream.closed)
+        self.assertEqual(request.call_args.kwargs['timeout'], 8)
+        self.assertNotIn('task_run_id', request.call_args.args[0].full_url)
+        for line, status, content in [(b'', 204, 'text/plain'), (b'DEADLINE_owned\n', 200, 'application/json'),
+                                      (b'DEADLINE_owned', 200, 'text/plain'), (b'other\n', 200, 'text/plain'),
+                                      (b'DEADLINE_owned' + b'x' * 65536 + b'\n', 200, 'text/plain')]:
+            bad = Stream(line)
+            bad.status, bad.headers = status, {'Content-Type': content}
+            with patch.object(b.urllib.request, 'urlopen', return_value=bad):
+                with self.assertRaises(b.Refused): driver.live_deadline_log('job', 'run', task, 'owned')
+            self.assertTrue(bad.closed)
+        with patch.object(b.urllib.request, 'urlopen', return_value=Stream(b'DEADLINE_owned\n')), patch.object(b.time, 'monotonic', side_effect=[0, 9]):
+            with self.assertRaises(b.Refused): driver.live_deadline_log('job', 'run', task, 'owned')
+
+    def test_native_running_witness_binds_exact_run_task_and_runtime(self):
+        driver = object.__new__(b.Driver)
+        driver.backend, driver.owner, driver.task_image = 'podman', 'owned', IMAGE
+        task = {'runtime_id': 'a' * 64, 'task_id': 'catalog-task'}
+        native = {'Id': task['runtime_id'], 'Name': 'catalog-task-run-id', 'Image': IMAGE.removeprefix('sha256:'),
+                  'Config': {'Env': ['COVERAGE_BACKEND_OWNER=owned']}, 'State': {'Status': 'running'}}
+        driver.podman = lambda *args: subprocess.CompletedProcess(args, 0, json.dumps([native]), '')
+        witness = driver.native('run-id', task)
+        self.assertEqual((witness['run_id'], witness['task_id'], witness['runtime_id']), ('run-id', 'catalog-task', 'a' * 64))
+        native['Name'] = 'another-task-run-id'
+        with self.assertRaises(b.Refused): driver.native('run-id', task)
+        native['Name'], native['Id'] = 'catalog-task-run-id', 'b' * 64
+        with self.assertRaises(b.Refused): driver.native('run-id', task)
 
     def test_raw_pair_does_not_accept_missing_empty_or_symlink_counters(self):
         raw = self.raw()

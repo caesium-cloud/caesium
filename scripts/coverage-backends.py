@@ -189,9 +189,18 @@ def coverage_files(path):
     return {p.name: digest(p) for p in sorted(files)}
 
 
+def unfanned_log_path(job_id, run_id, task):
+    # Public run detail rewrites .id to the catalog task ID even for one row.
+    # This fixture has no fan-out; the handler resolves its unique concrete
+    # instance authoritatively. Never pass the collapsed .id as task_run_id.
+    require(task.get('partition_count', 0) == 0 and not task.get('partition_value'), 'backend fixture unexpectedly fanned; exact log instance unavailable')
+    task_id = str(uuid.UUID(task['task_id']))
+    return '/v1/jobs/' + job_id + '/runs/' + run_id + '/logs?task_id=' + task_id
+
+
 def verify_outcome(run, case, marker):
     tasks = run.get('tasks', [])
-    require(tasks and all(t.get('runtime_id') and not t.get('cache_hit') for t in tasks), 'real uncached backend tasks required')
+    require(tasks and all(t.get('runtime_id') and t.get('completed_at') and not t.get('cache_hit') for t in tasks), 'real uncached backend tasks required')
     if case == 'success':
         require(run.get('status') == 'succeeded' and len(tasks) == 2 and all(t.get('status') == 'succeeded' and t.get('exit_code') == 0 for t in tasks), 'success task/exit outcome mismatch')
         require(any(t.get('output', {}).get('marker') == marker for t in tasks), 'structured producer output was not persisted')
@@ -309,6 +318,23 @@ class Driver:
             raise Refused('public backend HTTP request failed') from exc
         require(len(body) <= 2 * 1024 * 1024, 'public response too large')
         return body.decode() if text else json.loads(body)
+
+    def live_deadline_log(self, job_id, run_id, task, marker):
+        # Cancellation removes the native object without a persisted raw log
+        # snapshot. Read its actual public stream while Running, then close our
+        # own HTTP reader; do not wait for the long task/whole stream to finish.
+        started = time.monotonic()
+        req = urllib.request.Request(self.base + unfanned_log_path(job_id, run_id, task))
+        try:
+            with urllib.request.urlopen(req, timeout=8) as response:
+                require(response.status == 200 and response.headers.get('Content-Type', '').split(';')[0] == 'text/plain', 'live deadline log status/content mismatch')
+                line = response.readline(64 * 1024 + 1)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise Refused('live deadline log request incomplete') from exc
+        require(time.monotonic() - started <= 8 and 0 < len(line) <= 64 * 1024 and line.endswith(b'\n'), 'live deadline log prefix incomplete/oversized/late')
+        text = line.decode()
+        require('DEADLINE_' + marker in text, 'live deadline log marker absent')
+        return text
 
     def volume(self, suffix):
         name = self.owner + '-' + suffix
@@ -562,17 +588,17 @@ class Driver:
         if self.backend == 'podman':
             obj = json.loads(self.podman('inspect', runtime).stdout)[0]
             env = obj.get('Config', {}).get('Env', [])
-            require('COVERAGE_BACKEND_OWNER=' + self.owner in env and run_id in obj.get('Name', '') and 'sha256:' + obj.get('Image', '').removeprefix('sha256:') == self.task_image, 'foreign or wrong-image native Libpod object')
+            require('COVERAGE_BACKEND_OWNER=' + self.owner in env and run_id in obj.get('Name', '') and task['task_id'] in obj.get('Name', '') and obj.get('Id') == runtime and 'sha256:' + obj.get('Image', '').removeprefix('sha256:') == self.task_image, 'foreign or wrong-image native Libpod object')
             if obj.get('State', {}).get('Status') != 'running':
                 return None
-            return {'runtime_id': runtime, 'native_id': obj['Id'], 'image_id': self.task_image, 'status': 'running', 'engine': 'podman'}
+            return {'run_id': run_id, 'task_id': task['task_id'], 'runtime_id': runtime, 'native_id': obj['Id'], 'image_id': self.task_image, 'status': 'running', 'engine': 'podman'}
         result = self.kubectl('-n', self.namespace, 'get', 'pod', runtime, '-o', 'json', check=False)
         if result.returncode:
             require('NotFound' in result.stderr and runtime in result.stderr, 'native pod lookup failed')
             return None
         obj = json.loads(result.stdout)
         metadata, spec, status = obj['metadata'], obj['spec'], obj.get('status', {})
-        require(metadata.get('namespace') == self.namespace and run_id in metadata['name'] and len(spec.get('containers', [])) == 1, 'foreign backend pod identity')
+        require(metadata.get('namespace') == self.namespace and run_id in metadata['name'] and task['task_id'] in metadata['name'] and metadata['name'] == runtime and len(spec.get('containers', [])) == 1, 'foreign backend pod identity')
         container = spec['containers'][0]
         require(container.get('image') == self.task_ref and {'name': 'COVERAGE_BACKEND_OWNER', 'value': self.owner} in container.get('env', []), 'pod image/owner input mismatch')
         if status.get('phase') != 'Running' or not status.get('containerStatuses'):
@@ -582,7 +608,7 @@ class Driver:
         image_id = status['containerStatuses'][0].get('imageID', '')
         digest_match = re.search(r'sha256:[a-f0-9]{64}', image_id)
         require(digest_match and digest_match.group() in self.nodes[node]['image_digests'], 'observed task image differs from verified imported content')
-        return {'runtime_id': runtime, 'native_id': metadata['uid'], 'node': node, 'image_id': image_id, 'status': 'Running', 'engine': 'kubernetes'}
+        return {'run_id': run_id, 'task_id': task['task_id'], 'runtime_id': runtime, 'native_id': metadata['uid'], 'node': node, 'image_id': image_id, 'status': 'Running', 'engine': 'kubernetes'}
 
     def native_absent(self, runtime):
         if self.backend == 'podman':
@@ -596,7 +622,8 @@ class Driver:
         if result.returncode == 0:
             return False
         require(re.fullmatch(r'Error from server \(NotFound\): pods "' + re.escape(runtime) + r'" not found', result.stderr.strip()), 'native pod absence not proved')
-        require(self.kubectl('get', 'namespace', self.namespace, '-o', 'json').returncode == 0, 'owned namespace unavailable after absence')
+        namespace = json.loads(self.kubectl('get', 'namespace', self.namespace, '-o', 'json').stdout)
+        require(namespace['metadata']['uid'] == self.namespace_uid and namespace['metadata']['labels'].get('caesium.coverage.backend-owner') == self.owner, 'owned namespace identity unavailable after absence')
         return True
 
     def manifest(self, case):
@@ -633,6 +660,7 @@ class Driver:
         run_id = self.cli('run', 'start', '--job-id', job_id)
         require(str(uuid.UUID(run_id)) == run_id, 'public CLI start did not return an exact run identity')
         witnessed = {}
+        live_logs = {}
         start = time.monotonic()
         def observe():
             run = self.http('/v1/jobs/' + job_id + '/runs/' + run_id)
@@ -641,14 +669,17 @@ class Driver:
                     witness = self.native(run_id, task)
                     if witness:
                         witnessed[task['runtime_id']] = witness
+                        if case == 'deadline':
+                            live_logs[task['id']] = self.live_deadline_log(job_id, run_id, task, marker)
             return run if run.get('status') in ('succeeded', 'failed', 'cancelled', 'skipped') else None
         run = self.wait(observe, 'real backend ' + case + ' outcome', 120)
         verify_outcome(run, case, marker)
         require(all(task.get('engine') == self.backend and task.get('image') == self.task_ref for task in run['tasks']), 'durable backend/image identity mismatch')
         require(set(witnessed) == {t['runtime_id'] for t in run['tasks']}, 'each backend task must be observed natively Running before completion')
-        logs = {}
+        logs = dict(live_logs)
         for task in run['tasks']:
-            logs[task['id']] = self.http('/v1/jobs/' + job_id + '/runs/' + run_id + '/logs?task_id=' + task['task_id'] + '&task_run_id=' + task['id'], text=True)
+            if case != 'deadline':
+                logs[task['id']] = self.http(unfanned_log_path(job_id, run_id, task), text=True)
             self.wait(lambda: self.native_absent(task['runtime_id']), 'exact native backend cleanup', 30)
         combined = '\n'.join(logs.values())
         expected_log = {'success': 'CONSUMED_' + marker + ':' + marker, 'failure': 'FAILURE_' + marker, 'deadline': 'DEADLINE_' + marker}[case]
@@ -661,7 +692,7 @@ class Driver:
                 require(not any(e.get('reason') in ('Pulling', 'FailedPull', 'ErrImagePull', 'ImagePullBackOff') for e in events.get('items', [])), 'task image attempted a registry pull')
         result = {'case': case, 'status': 'pass', 'job_id': job_id, 'run_id': run_id, 'run_status': run['status'],
                   'task_statuses': [t['status'] for t in run['tasks']], 'exit_codes': [t.get('exit_code') for t in run['tasks']],
-                  'native_running': list(witnessed.values()), 'native_absent': True, 'logs': logs, 'elapsed_seconds': time.monotonic() - start}
+                  'native_running': list(witnessed.values()), 'native_absent': True, 'logs': logs, 'log_evidence': 'live-running-prefix' if case == 'deadline' else 'terminal-public-replay', 'elapsed_seconds': time.monotonic() - start}
         self.report['cases'].append(result)
         self.save(case + '.json', result)
 
