@@ -1,12 +1,14 @@
 package backfill
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -214,24 +216,16 @@ func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, logicalDate string) (st
 // dramatically improves per-retry success when one of the pooled connections
 // has been poisoned by a prior `checkpoint in progress` error.
 func (s *Store) withBusyRetry(fn func() error) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = fn()
-		if err == nil || !isContentionErr(err) {
-			return err
-		}
-		if attempt >= len(busyRetryBackoffs) {
-			return err
-		}
-
-		if isPoisonedConnErr(err) {
-			// Errors from this Exec are intentionally ignored — see comment above.
-			_ = s.db.Exec("ROLLBACK").Error
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		time.Sleep(jitterBackoff(busyRetryBackoffs[attempt]))
-	}
+	return dbretry.Retry(context.Background(), dbretry.Policy{
+		Backoffs: busyRetryBackoffs, Retryable: isContentionErr,
+		BeforeRetry: func(err error) {
+			if isPoisonedConnErr(err) {
+				_ = s.db.Exec("ROLLBACK").Error
+			}
+		},
+		OnRetry: func(error) { metrics.DBBusyRetriesTotal.Inc() },
+		Wait:    func(_ context.Context, base time.Duration) error { time.Sleep(jitterBackoff(base)); return nil },
+	}, fn)
 }
 
 // isPoisonedConnErr matches the narrow case where a pooled connection has

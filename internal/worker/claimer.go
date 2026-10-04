@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -580,24 +581,15 @@ func (c *Claimer) observeBusyRetry(error) {
 }
 
 func withBusyRetry(ctx context.Context, backoffs []time.Duration, fn func() error, onRetry func(error)) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = fn()
-		if err == nil || !isClaimContentionErr(err) {
-			return err
-		}
-		if attempt >= len(backoffs) {
-			return err
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		if onRetry != nil {
-			onRetry(err)
-		}
-		if sleepErr := sleepBusyRetry(ctx, backoffs[attempt]); sleepErr != nil {
-			return sleepErr
-		}
-	}
+	return dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs: backoffs, Retryable: isClaimContentionErr, Wait: sleepBusyRetry,
+		OnRetry: func(err error) {
+			metrics.DBBusyRetriesTotal.Inc()
+			if onRetry != nil {
+				onRetry(err)
+			}
+		},
+	}, fn)
 }
 
 func sleepBusyRetry(ctx context.Context, base time.Duration) error {

@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
+	"github.com/caesium-cloud/caesium/internal/contract"
+	contractenforce "github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -283,25 +284,10 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 }
 
 func withImporterBusyRetry(ctx context.Context, fn func() error) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		err = fn()
-		if err == nil || !isImporterContentionErr(err) {
-			return err
-		}
-		if attempt >= len(importerBusyRetryBackoffs) {
-			return err
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		if sleepErr := sleepImporterBusyRetry(ctx, importerBusyRetryBackoffs[attempt]); sleepErr != nil {
-			return sleepErr
-		}
-	}
+	return dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs: importerBusyRetryBackoffs, Retryable: isImporterContentionErr, BeforeAttempt: true,
+		OnRetry: func(error) { metrics.DBBusyRetriesTotal.Inc() }, Wait: sleepImporterBusyRetry,
+	}, fn)
 }
 
 func sleepImporterBusyRetry(ctx context.Context, base time.Duration) error {
