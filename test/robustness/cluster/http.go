@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/google/uuid"
@@ -97,7 +98,7 @@ func (h *HTTP) Do(ctx context.Context, method, url string, body any) (status int
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err = bodylimit.Read(resp.Body, 4<<20)
 	return resp.StatusCode, raw, err
 }
 
@@ -117,7 +118,7 @@ func (h *HTTP) Apply(ctx context.Context, base string, defs []jobdef.Definition)
 		"definitions": defs,
 	})
 	if err != nil {
-		return err
+		return uncertainExchange("apply", status, err)
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("apply status %d: %s", status, truncate(raw, 1024))
@@ -155,7 +156,7 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 	}
 	status, raw, err := h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
 	if err != nil {
-		return Run{}, raw, err
+		return Run{}, raw, uncertainExchange("trigger", status, err)
 	}
 	if status != http.StatusAccepted {
 		return Run{}, raw, fmt.Errorf("trigger status %d: %s", status, truncate(raw, 1024))
@@ -174,6 +175,15 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 		return Run{}, raw, fmt.Errorf("run job_id %s does not match %s", run.JobID, id)
 	}
 	return run, raw, nil
+}
+
+func uncertainExchange(operation string, status int, err error) error {
+	if status == 0 {
+		// Preserve existing request/transport diagnostics. Only a received
+		// response with incomplete evidence is classified here.
+		return err
+	}
+	return fmt.Errorf("inconclusive: %s may have committed (response status %d): %w", operation, status, err)
 }
 
 func (h *HTTP) ListJobTasks(ctx context.Context, base, jobID string) ([]CatalogTask, error) {

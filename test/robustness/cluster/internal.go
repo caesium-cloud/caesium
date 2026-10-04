@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 )
 
@@ -246,9 +247,12 @@ func (c *InternalClient) Post(ctx context.Context, base, path string, payload an
 		return ex
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := bodylimit.Read(resp.Body, 1<<20)
 	ex.Status = resp.StatusCode
 	ex.Body = string(raw)
+	if err != nil {
+		ex.Err = uncertainExchange("internal POST "+path, ex.Status, err).Error()
+	}
 	return ex
 }
 

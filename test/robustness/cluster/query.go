@@ -64,7 +64,7 @@ func (h *HTTP) RetryRun(ctx context.Context, base, jobID, runID string) (status 
 	}
 	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+jid.String()+"/runs/"+rid.String()+"/retry", map[string]any{})
 	if err != nil {
-		return status, Run{}, raw, err
+		return status, Run{}, raw, uncertainExchange("run retry", status, err)
 	}
 	if status == http.StatusAccepted {
 		if err := json.Unmarshal(raw, &run); err != nil {
@@ -90,7 +90,11 @@ func (h *HTTP) RetryPartition(ctx context.Context, base, jobID, runID, taskID st
 	}
 	url := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry",
 		strings.TrimRight(base, "/"), jid, rid, tid, index)
-	return h.Do(ctx, http.MethodPost, url, map[string]any{})
+	status, raw, err = h.Do(ctx, http.MethodPost, url, map[string]any{})
+	if err != nil {
+		err = uncertainExchange("partition retry", status, err)
+	}
+	return status, raw, err
 }
 
 // Metrics scrapes GET /metrics from one member.
@@ -111,7 +115,11 @@ func (h *HTTP) TriggerRunRaw(ctx context.Context, base, jobID string) (status in
 	if err != nil {
 		return 0, nil, fmt.Errorf("job id is not a uuid: %w", err)
 	}
-	return h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+	if err != nil {
+		err = uncertainExchange("trigger", status, err)
+	}
+	return status, raw, err
 }
 
 // WithTimeout returns a shallow copy using a client with the given timeout.
