@@ -383,7 +383,7 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 
 // ExecutePolicy runs a deterministic server-side action as actor=policy: no
 // playbook allowlist gate (a deterministic rule is pre-approved by being
-// deterministic) and no agent session, but the same audit recording, metric, and
+// deterministic) below TierApproval and no agent session, but the same audit recording, metric, and
 // dispatch path. Used by the Phase-0 deterministic rules (rules.go).
 func (e *Executor) ExecutePolicy(ctx context.Context, incidentID uuid.UUID, actionType string, params ActionParams) (*models.AgentAction, error) {
 	tier, ok := ActionTier(actionType)
@@ -404,6 +404,11 @@ func (e *Executor) ExecutePolicy(ctx context.Context, incidentID uuid.UUID, acti
 	}, tier, models.AgentActionActorPolicy)
 	if err := e.store.DB().WithContext(ctx).Create(action).Error; err != nil {
 		return nil, fmt.Errorf("incident: record policy action: %w", err)
+	}
+	if tier >= TierApproval {
+		err := errors.New("incident: policy action requires approval")
+		e.finish(ctx, action, models.AgentActionStatusFailed, map[string]any{"error": err.Error()})
+		return action, err
 	}
 	result, execErr := e.dispatch(ctx, actionType, inc, action, params, Playbook{})
 	if execErr != nil {
