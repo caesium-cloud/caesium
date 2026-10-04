@@ -650,51 +650,66 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 	// then refuses, and the classification is simply repeated, a bounded
 	// number of times, exactly as the normal completion path does.
 	var finalized bool
-	for attempt := 0; ; attempt++ {
-		if attempt >= 2 {
-			// Bounded like the normal completion path: the last word is a
-			// hand-off (itself retried), never a return that strands a retry.
-			for range 3 {
-				handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, j.params)
-				if handedOff {
-					return
-				}
-				if handoffErr != nil {
-					cause = errors.Join(cause, handoffErr)
-				}
-				finalized, err = store.CompleteIfActive(runID, cause)
-				if !errors.Is(err, run.ErrRunHasPendingWork) {
-					break
-				}
-			}
-			if err != nil {
-				log.Error("aborted resume could not be finalized or handed off; leaving the run for an operator",
-					"job_id", j.id, "run_id", runID, "error", err)
-				return
-			}
-			break
-		}
-		handedOff, updated, err := j.recoverPendingPartitionRetries(ctx, store, runID, j.params, cause)
-		if err != nil {
-			log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
-			return
-		}
-		if handedOff {
-			return
-		}
-		cause = updated
+	if ctx.Err() == context.Canceled {
+		// This resume already owns an admitted run, but cancellation won
+		// before the normal finalizer was armed. Settle its unfinished rows
+		// atomically instead of handing work to a closed owner supervisor.
+		cause = run.NewRunCancellationError(context.Cause(ctx))
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
 		}
 		finalized, err = store.CompleteIfActive(runID, cause)
-		if errors.Is(err, run.ErrRunHasPendingWork) {
-			continue
-		}
 		if err != nil {
-			log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+			log.Error("cancelled aborted resume could not be finalized", "job_id", j.id, "run_id", runID, "error", err)
 			return
 		}
-		break
+	} else {
+		for attempt := 0; ; attempt++ {
+			if attempt >= 2 {
+				// Bounded like the normal completion path: the last word is a
+				// hand-off (itself retried), never a return that strands a retry.
+				for range 3 {
+					handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, j.params)
+					if handedOff {
+						return
+					}
+					if handoffErr != nil {
+						cause = errors.Join(cause, handoffErr)
+					}
+					finalized, err = store.CompleteIfActive(runID, cause)
+					if !errors.Is(err, run.ErrRunHasPendingWork) {
+						break
+					}
+				}
+				if err != nil {
+					log.Error("aborted resume could not be finalized or handed off; leaving the run for an operator",
+						"job_id", j.id, "run_id", runID, "error", err)
+					return
+				}
+				break
+			}
+			handedOff, updated, err := j.recoverPendingPartitionRetries(ctx, store, runID, j.params, cause)
+			if err != nil {
+				log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
+				return
+			}
+			if handedOff {
+				return
+			}
+			cause = updated
+			if j.beforeComplete != nil {
+				j.beforeComplete(runID)
+			}
+			finalized, err = store.CompleteIfActive(runID, cause)
+			if errors.Is(err, run.ErrRunHasPendingWork) {
+				continue
+			}
+			if err != nil {
+				log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
+				return
+			}
+			break
+		}
 	}
 	if !finalized {
 		// Another path finalized the run between the status read and this
