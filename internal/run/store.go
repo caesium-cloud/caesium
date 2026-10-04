@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
@@ -2339,14 +2340,7 @@ func descriptorSecretRefs(spec container.Spec) []models.TaskExecutionSecretRef {
 	return refs
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 // StartTask marks a task run as running. taskRef is resolved by
 // loadTaskRunByIDOrUnique, so it may be either a TaskRun primary key (required
