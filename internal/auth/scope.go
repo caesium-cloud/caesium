@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -119,21 +118,11 @@ func (s *Service) JobAliasByBackfillID(ctx context.Context, id uuid.UUID) (strin
 	return s.JobAliasByID(ctx, backfill.JobID)
 }
 
-// normalizeJobAliases always returns an allocated slice, including for empty input.
+// normalizeJobAliases retains an allocated empty result for scope decoding.
 func normalizeJobAliases(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	jobs := make([]string, 0, len(in))
-	for _, alias := range in {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
-			continue
-		}
-		if _, ok := seen[alias]; ok {
-			continue
-		}
-		seen[alias] = struct{}{}
-		jobs = append(jobs, alias)
+	jobs := normalizeAllowlist(in)
+	if jobs == nil {
+		return []string{}
 	}
-	sort.Strings(jobs)
 	return jobs
 }
