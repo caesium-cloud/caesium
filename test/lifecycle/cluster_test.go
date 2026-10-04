@@ -129,7 +129,7 @@ func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, pub
 	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, claim_attempt, runtime_id, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
 	response, _, err := h.Query(ctx, base, sql, 2)
 	if err != nil {
-		return clusterTaskProof{}, fmt.Errorf("%w: %v", errTaskProofUnavailable, err)
+		return clusterTaskProof{}, fmt.Errorf("%w: %w", errTaskProofUnavailable, err)
 	}
 	return parseClusterTaskProof(response, rid.String(), tid.String())
 }
