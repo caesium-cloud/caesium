@@ -161,7 +161,8 @@ func waitForBackfillSlot(
 // with a semaphore controlling max concurrency.
 //
 // It honours ctx cancellation: when cancelled, no new runs are started but
-// any in-flight runs are allowed to finish.
+// any in-flight runs are allowed to finish. Server lifetime cancellation still
+// reaches those independently reserved child runs.
 func RunBackfill(
 	ctx context.Context,
 	b *models.Backfill,
@@ -169,8 +170,15 @@ func RunBackfill(
 	schedule cron.Schedule,
 	loc *time.Location,
 ) {
-	bStore := backfillstore.Default()
-	rStore := runstore.Default()
+	runBackfill(ctx, b, j, schedule, loc, backfillstore.Default(), runstore.Default(), func(ctx context.Context, j *models.Job, params map[string]string) error {
+		return New(j, WithTriggerID(nil), WithParams(params)).Run(ctx)
+	})
+}
+
+// runBackfill keeps driver/store ownership in one lexical scope. Execution is
+// injected privately so lifecycle tests exercise the real enumeration and joins.
+func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedule cron.Schedule, loc *time.Location,
+	bStore *backfillstore.Store, rStore *runstore.Store, execute func(context.Context, *models.Job, map[string]string) error) {
 
 	metrics.BackfillsActive.WithLabelValues(j.Alias).Inc()
 	defer metrics.BackfillsActive.WithLabelValues(j.Alias).Dec()
@@ -273,8 +281,16 @@ func RunBackfill(
 		logicalDate := d.UTC().Format(time.RFC3339)
 		params := map[string]string{"logical_date": logicalDate}
 
+		workCtx, releaseWork, err := reserveLocalChild(ctx)
+		if err != nil {
+			sem.Release(1)
+			cancelled = true
+			log.Info("backfill: child submission refused", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
+			break
+		}
 		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
 		if err != nil {
+			releaseWork()
 			sem.Release(1)
 			if backfillDateOutcome(err) == backfillDateSkipped {
 				log.Warn("backfill: date skipped by admission policy",
@@ -289,6 +305,14 @@ func RunBackfill(
 			continue
 		}
 
+		if r == nil {
+			releaseWork()
+			sem.Release(1)
+			skipCount.Add(1)
+			metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateSkipped).Inc()
+			continue
+		}
+		cancelCtx, releaseCancel := RegisterRunCancel(workCtx, r.ID)
 		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateStarted).Inc()
 
 		wg.Add(1)
@@ -296,13 +320,13 @@ func RunBackfill(
 		go func(id uuid.UUID, ld string) {
 			defer wg.Done()
 			defer sem.Release(1)
+			defer releaseWork()
+			defer releaseCancel()
 
 			// Each backfill run is independently cancellable: cancelling one of
 			// them must stop that run's container, not the whole backfill.
-			cancelCtx, release := RegisterRunCancel(context.Background(), id)
-			defer release()
 			runCtx := runstore.WithContext(cancelCtx, id)
-			runErr := New(j, WithTriggerID(nil), WithParams(params)).Run(runCtx)
+			runErr := execute(runCtx, j, params)
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
