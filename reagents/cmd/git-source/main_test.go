@@ -58,7 +58,7 @@ func (r *testRepo) git(args ...string) string {
 	if err != nil {
 		r.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
-	return string(out)
+	return out
 }
 
 func (r *testRepo) url() string { return "file://" + r.dir }

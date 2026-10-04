@@ -478,7 +478,7 @@ func gitInFixture(t *testing.T, dir string, args ...string) string {
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
-	return string(out)
+	return out
 }
 
 func commitFixtureRepo(t *testing.T, dir, msg string) {
