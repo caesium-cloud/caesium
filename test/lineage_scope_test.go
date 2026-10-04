@@ -3,10 +3,9 @@
 package test
 
 import (
-	"context"
 	"encoding/json"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -98,10 +97,5 @@ func getWithBearer(t *testing.T, target, token string) (int, string) {
 
 func freeLoopbackAddress(t *testing.T) string {
 	t.Helper()
-
-	var lc net.ListenConfig
-	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	return ln.Addr().String()
+	return testutil.FreeLoopbackAddress(t)
 }

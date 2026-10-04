@@ -5,7 +5,7 @@ package db
 import (
 	"context"
 	"database/sql"
-	"net"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"slices"
 	"strings"
 	"testing"
@@ -20,12 +20,7 @@ import (
 // pkg/dqlite tests bind while the two packages run in parallel.
 func freeLoopbackAddress(t *testing.T) string {
 	t.Helper()
-	var lc net.ListenConfig
-	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	address := l.Addr().String()
-	require.NoError(t, l.Close())
-	return address
+	return testutil.FreeLoopbackAddress(t)
 }
 
 func startNoDelayTestNode(t *testing.T) (*dqliteapp.App, int) {
