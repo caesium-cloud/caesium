@@ -14,6 +14,51 @@ COVERAGE_JOURNEY_SECRET_FILES=()
 COVERAGE_JOURNEY_CLI_DIRS=()
 COVERAGE_JOURNEY_SERVER_DIRS=()
 COVERAGE_JOURNEY_NAMES=()
+COVERAGE_BACKEND_PRODUCER_INPUTS=""
+COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256=""
+
+stage_coverage_backend_inputs() {
+  local source="${CAESIUM_COVERAGE_BACKEND_INPUTS:-}"
+  local staged="$ARTIFACTS/backend-producer-inputs.json"
+  if [[ -z "$source" || "$source" != /* || ! -f "$source" || -L "$source" ]]; then
+    coverage_journey_fail "CAESIUM_COVERAGE_BACKEND_INPUTS must name an absolute regular prereq JSON file"
+    return 1
+  fi
+  if [[ -e "$staged" || -L "$staged" ]]; then
+    coverage_journey_fail "refusing pre-existing backend prereq artifact $staged"
+    return 1
+  fi
+  COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256="$(python3 - "$source" "$staged" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+try:
+    data = source.read_bytes()
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise ValueError("prerequisite must be an object")
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    with os.fdopen(descriptor, "wb") as staged:
+        staged.write(data)
+    os.chmod(destination, 0o400)
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit("backend prerequisite could not be staged as immutable JSON")
+print(hashlib.sha256(data).hexdigest())
+PY
+)" || {
+    coverage_journey_fail "could not stage the backend producer prereq file"
+    return 1
+  }
+  [[ "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+    coverage_journey_fail "staged backend prereq digest is invalid"
+    return 1
+  }
+  COVERAGE_BACKEND_PRODUCER_INPUTS="$staged"
+}
 
 coverage_journey_fail() {
   log "ERROR: coverage journey: $*"

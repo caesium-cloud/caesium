@@ -478,6 +478,7 @@ fi
 rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys"
 mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys" "$PROFILES" "$AUDIT"
 rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
+stage_coverage_backend_inputs || die "real backend coverage prereq staging failed"
 
 if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
   "$CONTAINER_CLI" image inspect "$IMAGE" >/dev/null 2>&1 \
