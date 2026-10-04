@@ -132,6 +132,13 @@ func TestClosedOwnerReplacementResolvesRetryAndCompletesFailed(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, reopened)
 		owner.CloseAndCancel()
+		// Reserve propagates owner cancellation through an AfterFunc. This
+		// fixture exercises an already-canceled owner at the completion boundary.
+		select {
+		case <-workCtx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("server cancellation did not reach reserved work before completion")
+		}
 	}
 	returned := runner.Run(workCtx)
 	require.ErrorIs(t, returned, context.Canceled)
