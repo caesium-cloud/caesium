@@ -3,7 +3,7 @@ package imagecheck
 
 import (
 	"context"
-	"strings"
+	"github.com/containerd/errdefs"
 
 	"github.com/docker/docker/client"
 )
@@ -43,5 +43,5 @@ func Check(ctx context.Context, images []string) []Result {
 }
 
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "No such image")
+	return errdefs.IsNotFound(err)
 }
