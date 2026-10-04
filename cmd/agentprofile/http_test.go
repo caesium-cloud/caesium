@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -90,4 +91,28 @@ func TestRequestPolicy(t *testing.T) {
 	cmd.SetContext(context.Background())
 	_, err := doRequest(cmd, http.MethodGet, "http://example.invalid", nil, 200, "policy")
 	require.NoError(t, err)
+}
+
+func TestListResponseStreams(t *testing.T) {
+	oldServer, oldKey := serverFlag, apiKeyFlag
+	t.Cleanup(func() { serverFlag, apiKeyFlag = oldServer, oldKey })
+	apiKeyFlag = ""
+	t.Setenv("CAESIUM_AGENTPROFILE_API_KEY", "")
+	t.Setenv("CAESIUM_API_KEY", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/v1/agentprofiles", r.URL.Path)
+		require.Empty(t, r.Header.Get("Content-Type"))
+		_, _ = w.Write([]byte(`{"records":[]}`))
+	}))
+	defer server.Close()
+	serverFlag = server.URL
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	require.NoError(t, listCmd.RunE(cmd, nil))
+	require.Equal(t, "{\n  \"records\": []\n}\n", stdout.String())
+	require.Empty(t, stderr.String())
 }

@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 type descriptorTransport func(*http.Request) (*http.Response, error)

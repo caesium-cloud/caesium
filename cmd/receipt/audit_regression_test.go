@@ -2,9 +2,10 @@ package receipt
 
 import (
 	"bytes"
+	"testing"
+
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestLeafCommandsRejectUnexpectedArgumentBeforeRun(t *testing.T) {
