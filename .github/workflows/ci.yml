@@ -1704,6 +1704,58 @@ jobs:
           echo "diff base $base; $(wc -l <.tmp/coverage-diff/changed-paths.txt) changed Go path(s)"
           echo "CAESIUM_COVERAGE_DIFF_BASE=$base" >>"$GITHUB_ENV"
           echo "CAESIUM_COVERAGE_CHANGED_PATHS=$PWD/.tmp/coverage-diff/changed-paths.txt" >>"$GITHUB_ENV"
+      - name: Backend journey tools
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/coverage-tools"
+          mkdir -p "$tools"
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o "$tools/kind"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $tools/kind" | sha256sum -c -
+          curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o "$tools/kubectl"
+          echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  $tools/kubectl" | sha256sum -c -
+          chmod +x "$tools/kind" "$tools/kubectl"
+          echo "$tools" >>"$GITHUB_PATH"
+      - name: Pin isolated backend prerequisites
+        run: |
+          set -euo pipefail
+          prereqs="$PWD/.tmp/coverage-backends"
+          mkdir -p "$prereqs"
+          podman_image=quay.io/podman/stable@sha256:c70aa78a604fafa95076aae36bdc91d1173d2bff05e2749bf7d79c88c248acc0
+          docker pull --platform linux/amd64 "$podman_image"
+          docker pull --platform linux/amd64 kindest/node:v1.36.1
+          docker pull --platform linux/amd64 alpine:3.23
+          docker image save alpine:3.23 -o "$prereqs/task.tar"
+          python3 - "$prereqs" "$podman_image" <<'PY'
+          import hashlib, json, pathlib, subprocess, sys, tarfile
+          root = pathlib.Path(sys.argv[1]).resolve()
+          archive = root / 'task.tar'
+          def inspect(ref):
+              image = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))[0]
+              assert image['Os'] == 'linux' and image['Architecture'] == 'amd64', 'backend prerequisite platform mismatch'
+              return image['Id']
+          with tarfile.open(archive) as image_archive:
+              manifest = json.load(image_archive.extractfile('manifest.json'))
+              assert len(manifest) == 1 and manifest[0]['RepoTags'] == ['alpine:3.23'], 'unexpected task archive'
+              config = image_archive.extractfile(manifest[0]['Config']).read()
+              task_config = json.loads(config)
+              assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64'
+          inputs = {
+              'schema_version': 1, 'platform': 'linux/amd64',
+              'docker_socket': '/var/run/docker.sock',
+              'task_archive': str(archive),
+              'task_archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+              'task_image_ref': 'alpine:3.23',
+              'task_image_id': 'sha256:' + hashlib.sha256(config).hexdigest(),
+              'task_docker_image_id': inspect('alpine:3.23'),
+              'kind_image_ref': 'kindest/node:v1.36.1',
+              'kind_image_id': inspect('kindest/node:v1.36.1'),
+              'podman_service_image_ref': sys.argv[2],
+              'podman_service_image_id': inspect(sys.argv[2]),
+              'podman_privileged_approved': True,
+          }
+          (root / 'backend-producer-inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
+          PY
+          echo "CAESIUM_COVERAGE_BACKEND_INPUTS=$prereqs/backend-producer-inputs.json" >>"$GITHUB_ENV"
       - name: Coverage collection against the ratchets
         run: just tag=${{ env.IMAGE_TAG }}-amd64 coverage-ratchets
       - name: Upload lane report
