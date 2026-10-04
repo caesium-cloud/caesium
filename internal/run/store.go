@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -596,8 +597,7 @@ func (e *RunCommittedError) Unwrap() error { return e.Err }
 
 // CommittedRunID reports the run a failed start already committed, if any.
 func CommittedRunID(err error) (uuid.UUID, bool) {
-	var committed *RunCommittedError
-	if errors.As(err, &committed) && committed.RunID != uuid.Nil {
+	if committed, ok := errors.AsType[*RunCommittedError](err); ok && committed.RunID != uuid.Nil {
 		return committed.RunID, true
 	}
 	return uuid.Nil, false
@@ -2319,11 +2319,7 @@ func descriptorSecretRefs(spec container.Spec) []models.TaskExecutionSecretRef {
 		return nil
 	}
 	refs := make([]models.TaskExecutionSecretRef, 0)
-	keys := make([]string, 0, len(spec.Env))
-	for key := range spec.Env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(spec.Env))
 	for _, key := range keys {
 		ref := strings.TrimSpace(spec.Env[key])
 		if !strings.HasPrefix(ref, "secret://") {

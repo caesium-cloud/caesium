@@ -7,7 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -177,11 +178,7 @@ func (s *Store) FindIdempotentStart(ctx context.Context, jobID uuid.UUID, opts .
 // before any enricher runs, and the priority override — so a reused key can be
 // told apart from a retry.
 func startRequestHash(params map[string]string, priority string) string {
-	keys := make([]string, 0, len(params))
-	for key := range params {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 	pairs := make([][2]string, 0, len(keys))
 	for _, key := range keys {
 		pairs = append(pairs, [2]string{key, params[key]})
