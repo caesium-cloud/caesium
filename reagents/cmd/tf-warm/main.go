@@ -655,14 +655,12 @@ func mirrorRound(ctx context.Context, cfg config, group []tf.LockedProvider, dir
 		return fmt.Errorf("write synthetic lock file: %w", err)
 	}
 
-	terraform, err := tfexec.NewTerraform(dir, cfg.ExecPath)
+	terraform, _, err := tf.NewTerraform(dir, cfg.ExecPath, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("initialize terraform: %w", err)
 	}
 	// stdout belongs to the marker protocol alone; Terraform's own chatter goes
 	// to stderr where it is still visible in the task log.
-	terraform.SetStdout(os.Stderr)
-	terraform.SetStderr(os.Stderr)
 	if err := terraform.SetEnv(tfexec.CleanEnv(tf.EnvironmentWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
 		return fmt.Errorf("configure terraform environment: %w", err)
 	}

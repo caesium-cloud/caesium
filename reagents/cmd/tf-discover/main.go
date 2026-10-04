@@ -153,15 +153,13 @@ func discoverMulti(ctx context.Context, cfg config, e *protocol.Emitter) error {
 
 // fingerprintStack resolves one root module's module graph and digests it.
 func fingerprintStack(ctx context.Context, cfg config, dir string) ([]fingerprint.Input, string, error) {
-	terraform, err := tfexec.NewTerraform(dir, cfg.ExecPath)
+	terraform, _, err := tf.NewTerraform(dir, cfg.ExecPath, os.Stderr)
 	if err != nil {
 		return nil, "", fmt.Errorf("initialize terraform in %s: %w", dir, err)
 	}
 	// Terraform's own stdout goes to STDERR. stdout belongs to the marker
 	// protocol alone: a `Downloading …` line landing between the markers would
 	// be harmless, but a line that happens to contain a marker prefix would not.
-	terraform.SetStdout(os.Stderr)
-	terraform.SetStderr(os.Stderr)
 
 	// Relocate Terraform's data directory out of the source tree. Discover
 	// mounts the source read-only (design §5.5) and, in multi-root mode, walks
