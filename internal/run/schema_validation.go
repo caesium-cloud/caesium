@@ -16,6 +16,10 @@ import (
 // ValidateTaskOutputSchema validates a task's captured output against its declared schema,
 // persists any violations, and escalates them according to the configured validation mode.
 func ValidateTaskOutputSchema(store *Store, runID, taskID uuid.UUID, output map[string]string, outputSchema []byte, schemaValidation string) error {
+	return validateTaskOutputSchema(store, runID, taskID, taskID, nil, output, outputSchema, schemaValidation)
+}
+
+func validateTaskOutputSchema(store *Store, runID, taskID, violationRef uuid.UUID, taskRunID *uuid.UUID, output map[string]string, outputSchema []byte, schemaValidation string) error {
 	if len(outputSchema) == 0 || schemaValidation == "" {
 		return nil
 	}
@@ -34,9 +38,13 @@ func ValidateTaskOutputSchema(store *Store, runID, taskID uuid.UUID, output map[
 		return nil
 	}
 
-	log.Warn("task output schema violations", "task_id", taskID, "violations", len(violations))
-	if saveErr := store.SaveSchemaViolations(runID, taskID, violations); saveErr != nil {
-		log.Warn("failed to persist schema violations", "task_id", taskID, "error", saveErr)
+	fields := []any{"task_id", taskID}
+	if taskRunID != nil {
+		fields = append(fields, "task_run_id", *taskRunID)
+	}
+	log.Warn("task output schema violations", append(fields, "violations", len(violations))...)
+	if saveErr := store.SaveSchemaViolations(runID, violationRef, violations); saveErr != nil {
+		log.Warn("failed to persist schema violations", append(fields, "error", saveErr)...)
 	}
 
 	if schemaValidation == jobdef.SchemaValidationFail {

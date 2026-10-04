@@ -508,11 +508,6 @@ func (s *Store) expandFanOutSuccessors(
 	return expansion, nil
 }
 
-// fanOutTemplateExpandable reports whether a successor's TaskRun is still the
-// pre-expansion template: pending (nothing has resolved it) and unfanned
-// (partition_count 0, so it has not already been expanded by an earlier
-// completion or a replayed one). Anything else — a terminal row, or a row that
-// is already one of N — must be left exactly as it is.
 // materializeFanOutTaskRun applies already-planned instance identity and
 // predecessor totals while retaining the template's immutable execution fields.
 func materializeFanOutTaskRun(template *models.TaskRun, inst ExpandedInstance, count int) (*models.TaskRun, error) {
@@ -541,6 +536,11 @@ func materializeFanOutTaskRun(template *models.TaskRun, inst ExpandedInstance, c
 	return &row, nil
 }
 
+// fanOutTemplateExpandable reports whether a successor's TaskRun is still the
+// pre-expansion template: pending (nothing has resolved it) and unfanned
+// (partition_count 0, so it has not already been expanded by an earlier
+// completion or a replayed one). Anything else — a terminal row, or a row that
+// is already one of N — must be left exactly as it is.
 func fanOutTemplateExpandable(template *models.TaskRun) bool {
 	if template == nil {
 		return false
