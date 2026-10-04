@@ -11,6 +11,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/history"
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/google/uuid"
 )
 
@@ -57,7 +58,7 @@ func readPersistedEvents(ctx context.Context, h *cluster.HTTP, base, runID strin
 		return nil, history.Scope{}, fmt.Errorf("event query status %d: %s", status, truncate(raw, 512))
 	}
 	var resp cluster.QueryResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	if err := sqlcell.Decode(raw, &resp); err != nil {
 		return nil, history.Scope{}, fmt.Errorf("decode event query: %w", err)
 	}
 
@@ -71,13 +72,20 @@ func readPersistedEvents(ctx context.Context, h *cluster.HTTP, base, runID strin
 		if len(row) < 3 {
 			return nil, scope, fmt.Errorf("event row has %d columns, want at least 3", len(row))
 		}
+		sequence, err := persistedSequence(row[0])
+		if err != nil {
+			return nil, scope, fmt.Errorf("persisted event sequence: %w", err)
+		}
 		ev := persistedEvent{
-			Sequence: uint64(anyInt64(row[0])),
+			Sequence: sequence,
 			Type:     fmt.Sprint(row[1]),
 			RunID:    fmt.Sprint(row[2]),
 		}
 		if len(row) > 3 {
-			ev.BusPending = anyBool(row[3])
+			ev.BusPending, err = sqlcell.Bool(row[3])
+			if err != nil {
+				return nil, scope, fmt.Errorf("persisted event %d bus_dispatch_pending: %w", sequence, err)
+			}
 		}
 		if len(row) > 4 && row[4] != nil {
 			ev.DispatchedAt = strings.TrimSpace(fmt.Sprint(row[4]))
@@ -187,16 +195,23 @@ func anyInt64(v any) int64 {
 	}
 }
 
-func anyBool(v any) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	case string:
-		s := strings.ToLower(strings.TrimSpace(t))
-		return s == "1" || s == "true" || s == "t"
-	default:
-		return anyInt64(v) != 0
+func persistedSequence(value any) (uint64, error) {
+	// Persisted event readers historically accept native bool cells as 0/1.
+	// Keep that adapter local; other strict SQL counters reject bool cells.
+	if v, ok := value.(bool); ok {
+		if v {
+			return 1, nil
+		}
+		return 0, nil
 	}
+	n, err := sqlcell.Int64(value)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("negative sequence %d", n)
+	}
+	return uint64(n), nil
 }
 
 // latestSequence returns the store's highest sequence, used only as a resume
@@ -214,11 +229,15 @@ func latestSequence(ctx context.Context, h *cluster.HTTP, base string) (uint64, 
 		return 0, fmt.Errorf("max sequence query status %d: %s", status, truncate(raw, 512))
 	}
 	var resp cluster.QueryResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return 0, err
+	if err := sqlcell.Decode(raw, &resp); err != nil {
+		return 0, fmt.Errorf("decode max sequence query: %w", err)
 	}
 	if len(resp.Rows) == 0 || len(resp.Rows[0]) == 0 || resp.Rows[0][0] == nil {
 		return 0, nil
 	}
-	return uint64(anyInt64(resp.Rows[0][0])), nil
+	sequence, err := persistedSequence(resp.Rows[0][0])
+	if err != nil {
+		return 0, fmt.Errorf("max event sequence: %w", err)
+	}
+	return sequence, nil
 }
