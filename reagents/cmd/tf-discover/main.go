@@ -47,12 +47,12 @@ import (
 const roleName = "tf-discover"
 
 func main() {
-	protocol.Run(roleName, func(e *protocol.Emitter) error {
+	protocol.RunWithSignalContext(roleName, func(ctx context.Context, e *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return discover(context.Background(), cfg, e)
+		return discover(ctx, cfg, e)
 	})
 }
 

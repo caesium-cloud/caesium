@@ -62,12 +62,12 @@ import (
 const roleName = "tf-warm"
 
 func main() {
-	protocol.Run(roleName, func(*protocol.Emitter) error {
+	protocol.RunWithSignalContext(roleName, func(ctx context.Context, _ *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return warm(context.Background(), cfg, os.Stderr)
+		return warm(ctx, cfg, os.Stderr)
 	})
 }
 

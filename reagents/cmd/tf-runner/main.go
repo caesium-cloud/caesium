@@ -104,12 +104,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	protocol.Run(name, func(e *protocol.Emitter) error {
+	protocol.RunWithSignalContext(name, func(ctx context.Context, e *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return phase(context.Background(), cfg, e, os.Stderr)
+		return phase(ctx, cfg, e, os.Stderr)
 	})
 }
 

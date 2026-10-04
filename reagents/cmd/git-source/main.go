@@ -48,12 +48,12 @@ import (
 const roleName = "git-source"
 
 func main() {
-	protocol.Run(roleName, func(e *protocol.Emitter) error {
+	protocol.RunWithSignalContext(roleName, func(ctx context.Context, e *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return materialize(context.Background(), cfg, e)
+		return materialize(ctx, cfg, e)
 	})
 }
 
