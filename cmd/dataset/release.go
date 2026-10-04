@@ -92,7 +92,7 @@ func releaseConflict(cmd *cobra.Command, namespace, name, holdID string, conflic
 		return fmt.Errorf("%w; no active hold is currently recorded for dataset %s", conflict, identity)
 	}
 	if err != nil {
-		return fmt.Errorf("%w; current hold state for dataset %s could not be verified: %v", conflict, identity, err)
+		return fmt.Errorf("%w; current hold state for dataset %s could not be verified: %w", conflict, identity, err)
 	}
 	if currentID != holdID {
 		return fmt.Errorf("%w; dataset %s is still held by newer active hold %s; inspect it before retrying release", conflict, identity, currentID)
