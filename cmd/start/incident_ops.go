@@ -70,11 +70,15 @@ func newIncidentActionOps(conn *gorm.DB, bus event.Bus, eventStore *event.Store)
 
 func (o *incidentActionOps) RetryFromFailure(_ context.Context, runID uuid.UUID) error {
 	_, err := o.runStore.RetryFromFailureAdmitted(runID)
+	return incidentRetryError(err)
+}
+
+func incidentRetryError(err error) error {
 	// A paused job or an exhausted concurrency slot is a transient, retryable
 	// refusal: surface it as incident.ErrRetryDeferred so a fired snooze_retry
 	// timer re-arms instead of dropping the retry.
 	if err != nil && (errors.Is(err, run.ErrJobPaused) || errors.Is(err, run.ErrMaxConcurrentRunsReached)) {
-		return fmt.Errorf("%w: %v", incident.ErrRetryDeferred, err)
+		return fmt.Errorf("%w: %w", incident.ErrRetryDeferred, err)
 	}
 	return err
 }

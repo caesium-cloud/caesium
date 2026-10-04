@@ -41,6 +41,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/internal/runqueue"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
@@ -304,6 +305,7 @@ var (
 	// Cmd is the start command.
 	Cmd = &cobra.Command{
 		Use:        usage,
+		Args:       cobra.NoArgs,
 		Short:      short,
 		Long:       long,
 		Aliases:    []string{"s"},
@@ -329,9 +331,12 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
+	supervisor := runlife.New(context.WithoutCancel(ctx))
+	ctx = runlife.WithSupervisor(ctx, supervisor)
 	var internalSrv *dispatch.InternalServer
 	shutdownCoordinator := newShutdownCoordinator(shutdownConfig{
 		cancel:      cancelFunc,
+		supervisor:  supervisor,
 		gracePeriod: vars.ShutdownGracePeriod,
 		internalShutdown: func(ctx context.Context) error {
 			if internalSrv == nil {
