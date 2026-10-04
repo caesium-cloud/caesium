@@ -12,6 +12,7 @@ import (
 	backfillstore "github.com/caesium-cloud/caesium/internal/backfill"
 	internalJob "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	croncfg "github.com/caesium-cloud/caesium/internal/trigger/cron"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -55,7 +56,7 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "end must be after start")
 	}
 
-	j, err := jsvc.Service(ctx).Get(jobID)
+	j, err := backfillGetJob(ctx, jobID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -67,7 +68,7 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusConflict, "job is paused")
 	}
 
-	trigger, err := tsvc.Service(ctx).Get(j.TriggerID)
+	trigger, err := backfillGetTrigger(ctx, j.TriggerID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, "job trigger not found")
@@ -109,26 +110,38 @@ func Post(c *echo.Context) error {
 		Reprocess:     reprocess,
 	}
 
-	if err := backfillstore.Default().Create(b); err != nil {
+	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+	if err := backfillCreate(b); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	bCtx, cancel := context.WithCancel(context.Background())
+	bCtx, cancel := context.WithCancel(workCtx)
 
 	cancelFuncsMu.Lock()
 	cancelFuncs[b.ID] = cancel
 	cancelFuncsMu.Unlock()
 
 	go func() {
+		defer release()
 		defer func() {
 			cancelFuncsMu.Lock()
 			delete(cancelFuncs, b.ID)
 			cancelFuncsMu.Unlock()
 			cancel()
 		}()
-		internalJob.RunBackfill(bCtx, b, j, schedule, loc)
+		backfillExecute(bCtx, b, j, schedule, loc)
 	}()
 
+	transferred = true
 	return c.JSON(http.StatusAccepted, b)
 }
 
@@ -140,7 +153,7 @@ func List(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	if _, err := jsvc.Service(ctx).Get(jobID); err != nil {
+	if _, err := backfillGetJob(ctx, jobID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
 		}
@@ -209,3 +222,10 @@ func Cancel(c *echo.Context) error {
 
 	return c.JSON(http.StatusOK, updated)
 }
+
+var (
+	backfillGetJob     = func(ctx context.Context, id uuid.UUID) (*models.Job, error) { return jsvc.Service(ctx).Get(id) }
+	backfillGetTrigger = func(ctx context.Context, id uuid.UUID) (*models.Trigger, error) { return tsvc.Service(ctx).Get(id) }
+	backfillCreate     = func(b *models.Backfill) error { return backfillstore.Default().Create(b) }
+	backfillExecute    = internalJob.RunBackfill
+)
