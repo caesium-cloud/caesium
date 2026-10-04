@@ -12,7 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/internal/testutil"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -617,10 +617,10 @@ func (d *completingDispatcher) DispatchReplay(ctx context.Context, runID uuid.UU
 
 func serviceJSON(t *testing.T, v any) datatypes.JSON {
 	t.Helper()
-	return datatypes.JSON(testutil.MustJSONBytes(t, v))
+	return datatypes.JSON(fixturejson.MustJSONBytes(t, v))
 }
 
 func serviceJSONString(t *testing.T, v any) string {
 	t.Helper()
-	return string(testutil.MustJSONBytes(t, v))
+	return string(fixturejson.MustJSONBytes(t, v))
 }
