@@ -777,12 +777,6 @@ func longestOwner(prefixes map[string]struct{}, key string) (string, bool) {
 	return best, best != ""
 }
 
-// normalizeStepName mirrors pkg/task.NormalizeStepName, which is how Caesium
-// spells a step name inside an environment variable. The reagents cannot import
-// Caesium (the contract between them is the marker protocol, not a Go API), so
-// the rule is restated here; test/infra_deploy_test.go drives the real server,
-// which is what would catch a divergence.
-
 // ---------------------------------------------------------------------------
 // tf-apply
 // ---------------------------------------------------------------------------

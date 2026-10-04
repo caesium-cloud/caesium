@@ -666,6 +666,7 @@ func mirrorRound(ctx context.Context, cfg config, group []tf.LockedProvider, dir
 	}
 	// stdout belongs to the marker protocol alone; Terraform's own chatter goes
 	// to stderr where it is still visible in the task log.
+	// TF_DATA_DIR points at scratch; the source tree remains read-only.
 	if err := terraform.SetEnv(tfexec.CleanEnv(tf.EnvironmentWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
 		return fmt.Errorf("configure terraform environment: %w", err)
 	}
@@ -755,7 +756,3 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return nil
 }
-
-// envWith is this process's environment plus one override. Terraform's own
-// TF_DATA_DIR must point at scratch: the synthetic root module is temporary and
-// nothing may be written into the (read-only) source tree.
