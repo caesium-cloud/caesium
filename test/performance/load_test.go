@@ -50,46 +50,22 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/bodylimit"
+	"github.com/caesium-cloud/caesium/test/internal/workloadcatalog"
 )
 
 const catalogFile = "workloads.json"
 
-type catalog struct {
-	SchemaVersion int            `json:"schema_version"`
-	Workloads     []catalogEntry `json:"workloads"`
-}
-
-type catalogEntry struct {
-	Name        string         `json:"name"`
-	Tier        string         `json:"tier"`
-	Description string         `json:"description"`
-	Requires    requires       `json:"requires"`
-	Driver      map[string]any `json:"driver"`
-	Expect      map[string]any `json:"expect"`
-}
-
-type requires struct {
-	ServerEnv []string `json:"server_env"`
-	Reason    string   `json:"reason"`
-}
+type catalog = workloadcatalog.Catalog
+type catalogEntry = workloadcatalog.Entry
+type requires = workloadcatalog.Requires
 
 func loadCatalog(t *testing.T) catalog {
 	t.Helper()
-	raw, err := os.ReadFile(catalogFile)
+	c, err := workloadcatalog.Load(catalogFile)
 	if err != nil {
-		t.Fatalf("read %s: %v", catalogFile, err)
+		t.Fatalf("load %s: %v", catalogFile, err)
 	}
-	var c catalog
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatalf("parse %s: %v", catalogFile, err)
-	}
-	if c.SchemaVersion != 1 {
-		t.Fatalf("%s schema_version=%d, this runner understands 1", catalogFile, c.SchemaVersion)
-	}
-	if len(c.Workloads) == 0 {
-		t.Fatalf("%s declares no workloads", catalogFile)
-	}
-	return c
+	return *c
 }
 
 // selected returns the workloads this invocation should run and rejects every
@@ -408,18 +384,19 @@ func assertExpectations(t *testing.T, entry catalogEntry, res driverResult) {
 	t.Helper()
 	report := res.report
 	checked := 0
-	for key, want := range entry.Expect {
+	if entry.Expect.ExitCode != nil {
 		checked++
-		switch key {
-		case "exit_code":
-			if got := float64(res.exitCode); got != want.(float64) {
-				t.Errorf("exit code %d, want %v\nfailure=%v %v\nstderr:\n%s",
-					res.exitCode, want, report["failure_class"], report["failure_detail"], truncate(res.stderr, 6000))
-			}
-		case "accounting_identity":
-			if want != true {
-				continue
-			}
+		want := *entry.Expect.ExitCode
+		if got := float64(res.exitCode); got != want {
+			t.Errorf("exit code %d, want %v\nfailure=%v %v\nstderr:\n%s",
+				res.exitCode, want, report["failure_class"], report["failure_detail"], truncate(res.stderr, 6000))
+		}
+	}
+
+	if entry.Expect.AccountingIdentity != nil {
+		checked++
+		want := *entry.Expect.AccountingIdentity
+		if want {
 			for _, flag := range []string{"offered_equals_dropped_plus_attempted", "admitted_equals_settled"} {
 				value, ok := lookup(report, "accounting", flag)
 				if !ok || value != true {
@@ -433,130 +410,206 @@ func assertExpectations(t *testing.T, entry catalogEntry, res driverResult) {
 			if offered != sum {
 				t.Errorf("offered=%v but the buckets sum to %v", offered, sum)
 			}
-		case "min_offered":
-			if got := number(t, report, "accounting", "offered"); got < want.(float64) {
-				t.Errorf("offered=%v, want >= %v", got, want)
-			}
-		case "min_admitted":
-			if got := number(t, report, "accounting", "admitted"); got < want.(float64) {
-				t.Errorf("admitted=%v, want >= %v", got, want)
-			}
-		case "min_succeeded":
-			if got := number(t, report, "counts", "succeeded"); got < want.(float64) {
-				t.Errorf("succeeded=%v, want >= %v", got, want)
-			}
-		case "max_unreconciled":
-			if got := number(t, report, "accounting", "unreconciled"); got > want.(float64) {
-				t.Errorf("unreconciled=%v, want <= %v; an admitted run that never reached a terminal status is never a pass", got, want)
-			}
-		case "min_overload_signal":
-			signal := number(t, report, "accounting", "dropped") +
-				number(t, report, "accounting", "rejected") +
-				number(t, report, "accounting", "queued_or_skipped")
-			if signal < want.(float64) {
-				t.Errorf("overload produced only %v drop/reject/skip outcomes, want >= %v: overload that is not counted is overload that is not measured", signal, want)
-			}
-		case "sustained_verdict":
-			value, _ := lookup(report, "throughput", "verdict")
-			if value != want {
-				t.Errorf("throughput.verdict=%v, want %v (backlog slope %v)", value, want, mustLookup(report, "backlog", "slope_per_second"))
-			}
-		case "max_backlog_final":
-			if got := number(t, report, "backlog", "final"); got > want.(float64) {
-				t.Errorf("backlog.final=%v, want <= %v", got, want)
-			}
-		case "require_drain_complete":
-			if want != true {
-				continue
-			}
+		}
+	}
+
+	if entry.Expect.MinOffered != nil {
+		checked++
+		want := *entry.Expect.MinOffered
+		if got := number(t, report, "accounting", "offered"); got < want {
+			t.Errorf("offered=%v, want >= %v", got, want)
+		}
+	}
+
+	if entry.Expect.MinAdmitted != nil {
+		checked++
+		want := *entry.Expect.MinAdmitted
+		if got := number(t, report, "accounting", "admitted"); got < want {
+			t.Errorf("admitted=%v, want >= %v", got, want)
+		}
+	}
+
+	if entry.Expect.MinSucceeded != nil {
+		checked++
+		want := *entry.Expect.MinSucceeded
+		if got := number(t, report, "counts", "succeeded"); got < want {
+			t.Errorf("succeeded=%v, want >= %v", got, want)
+		}
+	}
+
+	if entry.Expect.MaxUnreconciled != nil {
+		checked++
+		want := *entry.Expect.MaxUnreconciled
+		if got := number(t, report, "accounting", "unreconciled"); got > want {
+			t.Errorf("unreconciled=%v, want <= %v; an admitted run that never reached a terminal status is never a pass", got, want)
+		}
+	}
+
+	if entry.Expect.MinOverloadSignal != nil {
+		checked++
+		want := *entry.Expect.MinOverloadSignal
+		signal := number(t, report, "accounting", "dropped") +
+			number(t, report, "accounting", "rejected") +
+			number(t, report, "accounting", "queued_or_skipped")
+		if signal < want {
+			t.Errorf("overload produced only %v drop/reject/skip outcomes, want >= %v: overload that is not counted is overload that is not measured", signal, want)
+		}
+	}
+
+	if entry.Expect.SustainedVerdict != nil {
+		checked++
+		want := *entry.Expect.SustainedVerdict
+		value, _ := lookup(report, "throughput", "verdict")
+		if value != want {
+			t.Errorf("throughput.verdict=%v, want %v (backlog slope %v)", value, want, mustLookup(report, "backlog", "slope_per_second"))
+		}
+	}
+
+	if entry.Expect.MaxBacklogFinal != nil {
+		checked++
+		want := *entry.Expect.MaxBacklogFinal
+		if got := number(t, report, "backlog", "final"); got > want {
+			t.Errorf("backlog.final=%v, want <= %v", got, want)
+		}
+	}
+
+	if entry.Expect.RequireDrainComplete != nil {
+		checked++
+		want := *entry.Expect.RequireDrainComplete
+		if want {
 			value, _ := lookup(report, "drain", "all_admitted_reconciled")
 			if value != true {
 				t.Errorf("drain did not reconcile every admitted run: %v", report["drain"])
 			}
-		case "max_queue_depth_final":
-			status, _ := lookup(report, "drain", "queue_status")
-			if status != "ok" {
-				t.Errorf("queue depth unavailable after drain (%v): %v", status, mustLookup(report, "drain", "queue_reason"))
-				continue
-			}
-			if got := number(t, report, "drain", "queue_depth_final"); got > want.(float64) {
-				t.Errorf("queue_depth_final=%v, want <= %v", got, want)
-			}
-		case "min_queued_or_skipped":
-			if got := number(t, report, "accounting", "queued_or_skipped"); got < want.(float64) {
-				t.Errorf("queued_or_skipped=%v, want >= %v", got, want)
-			}
-		case "min_cache_hit_ratio", "max_cache_hit_ratio":
-			status, _ := lookup(report, "cache", "status")
-			if status == "unavailable" {
-				t.Errorf("cache ratio unavailable: %v", mustLookup(report, "cache", "reason"))
-				continue
-			}
-			got := number(t, report, "cache", "hit_ratio")
-			if key == "min_cache_hit_ratio" && got < want.(float64) {
-				t.Errorf("cache hit ratio %v, want >= %v (%v)", got, want, report["cache"])
-			}
-			if key == "max_cache_hit_ratio" && got > want.(float64) {
-				t.Errorf("cache hit ratio %v, want <= %v (%v)", got, want, report["cache"])
-			}
-		case "min_api_reads_ok":
-			status, _ := lookup(report, "api_reads", "status")
-			if status != "ok" {
-				t.Errorf("api_reads unavailable: %v", report["api_reads"])
-				continue
-			}
-			if got := number(t, report, "api_reads", "ok"); got < want.(float64) {
-				t.Errorf("api_reads.ok=%v, want >= %v", got, want)
-			}
-		case "min_subscriber_events":
-			if got := number(t, report, "subscribers", "events_received"); got < want.(float64) {
-				t.Errorf("subscribers received %v events, want >= %v: %v", got, want, report["subscribers"])
-			}
-		case "min_subscriber_coverage":
-			// events_received alone is satisfiable by one frame per stream
-			// followed by a disconnect, which leaves the window running with
-			// none of the fan-out the workload claims. Coverage is the check
-			// that the subscriptions were actually held open.
-			if got := number(t, report, "subscribers", "coverage_ratio"); got < want.(float64) {
-				t.Errorf("subscribers held the event stream for only %.3f of the measured interval, want >= %v: %v",
-					got, want, report["subscribers"])
-			}
-		case "require_lifecycle_ok":
-			for _, raw := range want.([]any) {
-				name := raw.(string)
-				status, ok := lookup(report, "lifecycle", "intervals", name, "status")
-				if !ok {
-					t.Errorf("lifecycle interval %q is absent from the result", name)
-					continue
-				}
-				if status != "ok" {
-					reasons, _ := lookup(report, "lifecycle", "intervals", name, "unavailable_reasons")
-					t.Errorf("lifecycle interval %q is %v: %v", name, status, reasons)
-				}
-			}
-		case "require_unavailable_reason":
-			for name, reason := range want.(map[string]any) {
-				reasons, ok := lookup(report, "lifecycle", "intervals", name, "unavailable_reasons")
-				if !ok {
-					t.Errorf("lifecycle interval %q is absent from the result", name)
-					continue
-				}
-				asMap, _ := reasons.(map[string]any)
-				if asMap[reason.(string)] == nil {
-					t.Errorf("lifecycle interval %q does not carry the %q marker: %v", name, reason, reasons)
-				}
-				if status, _ := lookup(report, "lifecycle", "intervals", name, "status"); status != "unavailable" {
-					t.Errorf("lifecycle interval %q reports %v although it cannot be measured", name, status)
-				}
-			}
-		case "max_duration_seconds":
-			if res.elapsed.Seconds() > want.(float64) {
-				t.Errorf("workload took %s, want <= %vs: a bounded driver must not hang under overload", res.elapsed, want)
-			}
-		default:
-			t.Fatalf("workload %q declares expectation %q, which this runner does not implement", entry.Name, key)
 		}
 	}
+
+	if entry.Expect.MaxQueueDepthFinal != nil {
+		checked++
+		want := *entry.Expect.MaxQueueDepthFinal
+		status, _ := lookup(report, "drain", "queue_status")
+		if status != "ok" {
+			t.Errorf("queue depth unavailable after drain (%v): %v", status, mustLookup(report, "drain", "queue_reason"))
+		} else {
+			if got := number(t, report, "drain", "queue_depth_final"); got > want {
+				t.Errorf("queue_depth_final=%v, want <= %v", got, want)
+			}
+		}
+	}
+
+	if entry.Expect.MinQueuedOrSkipped != nil {
+		checked++
+		want := *entry.Expect.MinQueuedOrSkipped
+		if got := number(t, report, "accounting", "queued_or_skipped"); got < want {
+			t.Errorf("queued_or_skipped=%v, want >= %v", got, want)
+		}
+	}
+
+	if entry.Expect.MinCacheHitRatio != nil {
+		checked++
+		want := *entry.Expect.MinCacheHitRatio
+		status, _ := lookup(report, "cache", "status")
+		if status == "unavailable" {
+			t.Errorf("cache ratio unavailable: %v", mustLookup(report, "cache", "reason"))
+		} else {
+			got := number(t, report, "cache", "hit_ratio")
+			if got < want {
+				t.Errorf("cache hit ratio %v, want >= %v (%v)", got, want, report["cache"])
+			}
+		}
+	}
+
+	if entry.Expect.MaxCacheHitRatio != nil {
+		checked++
+		want := *entry.Expect.MaxCacheHitRatio
+		status, _ := lookup(report, "cache", "status")
+		if status == "unavailable" {
+			t.Errorf("cache ratio unavailable: %v", mustLookup(report, "cache", "reason"))
+		} else {
+			got := number(t, report, "cache", "hit_ratio")
+			if got > want {
+				t.Errorf("cache hit ratio %v, want <= %v (%v)", got, want, report["cache"])
+			}
+		}
+	}
+
+	if entry.Expect.MinAPIReadsOK != nil {
+		checked++
+		want := *entry.Expect.MinAPIReadsOK
+		status, _ := lookup(report, "api_reads", "status")
+		if status != "ok" {
+			t.Errorf("api_reads unavailable: %v", report["api_reads"])
+		} else {
+			if got := number(t, report, "api_reads", "ok"); got < want {
+				t.Errorf("api_reads.ok=%v, want >= %v", got, want)
+			}
+		}
+	}
+
+	if entry.Expect.MinSubscriberEvents != nil {
+		checked++
+		want := *entry.Expect.MinSubscriberEvents
+		if got := number(t, report, "subscribers", "events_received"); got < want {
+			t.Errorf("subscribers received %v events, want >= %v: %v", got, want, report["subscribers"])
+		}
+	}
+
+	if entry.Expect.MinSubscriberCoverage != nil {
+		checked++
+		want := *entry.Expect.MinSubscriberCoverage
+		// events_received alone is satisfiable by one frame per stream
+		// followed by a disconnect, which leaves the window running with
+		// none of the fan-out the workload claims. Coverage is the check
+		// that the subscriptions were actually held open.
+		if got := number(t, report, "subscribers", "coverage_ratio"); got < want {
+			t.Errorf("subscribers held the event stream for only %.3f of the measured interval, want >= %v: %v",
+				got, want, report["subscribers"])
+		}
+	}
+
+	if entry.Expect.RequireLifecycleOK != nil {
+		checked++
+		want := entry.Expect.RequireLifecycleOK
+		for _, name := range want {
+			status, ok := lookup(report, "lifecycle", "intervals", name, "status")
+			if !ok {
+				t.Errorf("lifecycle interval %q is absent from the result", name)
+				continue
+			}
+			if status != "ok" {
+				reasons, _ := lookup(report, "lifecycle", "intervals", name, "unavailable_reasons")
+				t.Errorf("lifecycle interval %q is %v: %v", name, status, reasons)
+			}
+		}
+	}
+
+	if entry.Expect.RequireUnavailableReason != nil {
+		checked++
+		want := entry.Expect.RequireUnavailableReason
+		for name, reason := range want {
+			reasons, ok := lookup(report, "lifecycle", "intervals", name, "unavailable_reasons")
+			if !ok {
+				t.Errorf("lifecycle interval %q is absent from the result", name)
+				continue
+			}
+			asMap, _ := reasons.(map[string]any)
+			if asMap[reason] == nil {
+				t.Errorf("lifecycle interval %q does not carry the %q marker: %v", name, reason, reasons)
+			}
+			if status, _ := lookup(report, "lifecycle", "intervals", name, "status"); status != "unavailable" {
+				t.Errorf("lifecycle interval %q reports %v although it cannot be measured", name, status)
+			}
+		}
+	}
+
+	if entry.Expect.MaxDurationSeconds != nil {
+		checked++
+		want := *entry.Expect.MaxDurationSeconds
+		if res.elapsed.Seconds() > want {
+			t.Errorf("workload took %s, want <= %vs: a bounded driver must not hang under overload", res.elapsed, want)
+		}
+	}
+
 	if checked == 0 {
 		t.Fatalf("workload %q asserted nothing", entry.Name)
 	}
