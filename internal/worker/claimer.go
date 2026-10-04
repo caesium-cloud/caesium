@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -394,11 +394,7 @@ func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, 
 		return "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '')", nil, nil
 	}
 
-	keys := make([]string, 0, len(c.nodeLabels))
-	for key := range c.nodeLabels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(c.nodeLabels))
 
 	args := make([]any, 0, len(keys)*3)
 	inPlaceholders := make([]string, 0, len(keys))

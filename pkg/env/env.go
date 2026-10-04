@@ -25,8 +25,8 @@ func Process() error {
 		// credential mapping that value is exactly what an operator might have
 		// mistakenly set to a literal credential, so report the key and cause
 		// without the value.
-		var perr *envconfig.ParseError
-		if errors.As(err, &perr) && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
+		perr, ok := errors.AsType[*envconfig.ParseError](err)
+		if ok && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
 			return fmt.Errorf("failed to process environment variables: %s: %w", perr.KeyName, perr.Err)
 		}
 		return fmt.Errorf("failed to process environment variables: %w", err)

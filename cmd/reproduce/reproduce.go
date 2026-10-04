@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	osexec "os/exec"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -629,11 +630,7 @@ func resultTaskLabel(env *ireproduce.Envelope) string {
 
 func sortedMapKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 func validateModeFlags(shellMode, diffMode, dryRunMode, jsonMode bool) error {
@@ -680,8 +677,8 @@ func ExitCode(err error) (int, bool) {
 }
 
 func printExitError(w io.Writer, err error) error {
-	var exitErr *exitError
-	if errors.As(err, &exitErr) && exitErr.msg != "" {
+	exitErr, ok := errors.AsType[*exitError](err)
+	if ok && exitErr.msg != "" {
 		_, _ = fmt.Fprintln(w, exitErr.msg)
 	}
 	return err

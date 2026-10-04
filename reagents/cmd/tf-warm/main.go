@@ -43,10 +43,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -389,11 +391,7 @@ func mirrorDirectoryReady(path string, providers []tf.LockedProvider, platforms 
 			wanted[filepath.Join(providerDir, name)] = struct{}{}
 		}
 	}
-	paths := make([]string, 0, len(wanted))
-	for rel := range wanted {
-		paths = append(paths, rel)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(wanted))
 	for _, rel := range paths {
 		present, err := regularMirrorFile(path, rel)
 		if err != nil {

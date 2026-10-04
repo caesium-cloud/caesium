@@ -264,10 +264,10 @@ func runDriver(t *testing.T, binary, catalogPath, workload string, extra ...stri
 	began := time.Now()
 	err := cmd.Run()
 	res := driverResult{stdout: []byte(stdout.String()), stderr: stderr.String(), elapsed: time.Since(began)}
-	var exitErr *exec.ExitError
+	exitErr, isExitErr := errors.AsType[*exec.ExitError](err)
 	switch {
 	case err == nil:
-	case errors.As(err, &exitErr):
+	case isExitErr:
 		res.exitCode = exitErr.ExitCode()
 	default:
 		t.Fatalf("run driver for %s: %v\nstderr:\n%s", workload, err, res.stderr)

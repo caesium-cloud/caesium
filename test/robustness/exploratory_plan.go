@@ -14,11 +14,12 @@ package robustness
 // against which pod/node/container) next to the seed.
 
 import (
+	"cmp"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -404,7 +405,9 @@ func ExpectQueue(subs []QueueSubmission, maxDepth int) QueueExpectation {
 			return 2
 		}
 	}
-	sort.SliceStable(ordered, func(i, j int) bool { return rank(ordered[i].Priority) > rank(ordered[j].Priority) })
+	slices.SortStableFunc(ordered, func(a, b QueueSubmission) int {
+		return cmp.Compare(rank(b.Priority), rank(a.Priority))
+	})
 	for _, s := range ordered {
 		exp.StartOrder = append(exp.StartOrder, s.Seq)
 	}
@@ -457,7 +460,7 @@ func RunIntervals(events []recorder.Event, runIDs []string) ([]RunInterval, []st
 		}
 		out = append(out, *iv)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	slices.SortFunc(out, func(a, b RunInterval) int { return a.Start.Compare(b.Start) })
 	return out, missing
 }
 
@@ -466,7 +469,7 @@ func RunIntervals(events []recorder.Event, runIDs []string) ([]RunInterval, []st
 // attempts of the same run are legal and never reach this check.
 func OverlappingRuns(ivs []RunInterval) []string {
 	sorted := append([]RunInterval(nil), ivs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start.Before(sorted[j].Start) })
+	slices.SortFunc(sorted, func(a, b RunInterval) int { return a.Start.Compare(b.Start) })
 	var out []string
 	for i := range sorted {
 		for j := i + 1; j < len(sorted); j++ {
@@ -578,9 +581,9 @@ func SummariseCheckpoints(obs []CheckpointObservation) CheckpointRetention {
 			sum.Pruned = append(sum.Pruned, s)
 		}
 	}
-	sort.Slice(sum.Written, func(i, j int) bool { return sum.Written[i] < sum.Written[j] })
-	sort.Slice(sum.Pruned, func(i, j int) bool { return sum.Pruned[i] < sum.Pruned[j] })
-	sort.Slice(sum.Final, func(i, j int) bool { return sum.Final[i] < sum.Final[j] })
+	slices.SortFunc(sum.Written, cmp.Compare[string])
+	slices.SortFunc(sum.Pruned, cmp.Compare[string])
+	slices.SortFunc(sum.Final, cmp.Compare[string])
 	return sum
 }
 

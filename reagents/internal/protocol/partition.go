@@ -1,8 +1,10 @@
 package protocol
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"unicode/utf8"
 )
@@ -139,7 +141,7 @@ func (e *Emitter) Partitions(parts []Partition) error {
 		return fmt.Errorf("partitions: no units discovered")
 	}
 	sorted := append([]Partition(nil), parts...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
+	slices.SortFunc(sorted, func(a, b Partition) int { return cmp.Compare(a.Key, b.Key) })
 
 	keys := make(map[string]struct{}, len(sorted))
 	for _, p := range sorted {

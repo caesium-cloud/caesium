@@ -26,10 +26,12 @@ package lifecycle
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,7 +150,9 @@ func writeStaleRemovalPlan(t *testing.T, caseName, stage string, topo cluster.To
 			followers = append(followers, target)
 		}
 	}
-	sort.Slice(followers, func(i, j int) bool { return byAddr[followers[i].Address] < byAddr[followers[j].Address] })
+	slices.SortFunc(followers, func(a, b staleRemovalTarget) int {
+		return cmp.Compare(byAddr[a.Address], byAddr[b.Address])
+	})
 	if plan.Leader.ID == "" || len(followers) != 2 || len(plan.Stale) == 0 {
 		blockf(t, caseName, "cannot plan the removal: leader %q, %d live followers, %d stale entries in %v",
 			views[0].Leader, len(followers), len(plan.Stale), views[0].Members)

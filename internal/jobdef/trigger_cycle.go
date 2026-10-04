@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"sort"
@@ -343,11 +344,7 @@ func rejectTriggerChainCycle(graph map[string][]string) error {
 		sort.Strings(graph[node])
 	}
 
-	nodes := make([]string, 0, len(graph))
-	for node := range graph {
-		nodes = append(nodes, node)
-	}
-	sort.Strings(nodes)
+	nodes := slices.Sorted(maps.Keys(graph))
 
 	state := make(map[string]int, len(graph))
 	stack := make([]string, 0, len(graph))

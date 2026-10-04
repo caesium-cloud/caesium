@@ -16,10 +16,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -375,11 +376,7 @@ func renderGroup(out io.Writer, group *groupSummary) {
 	_, _ = fmt.Fprintf(out, "Fan-out group (%d partitions):\n", group.PartitionCount)
 
 	gw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	statuses := make([]string, 0, len(group.StatusCounts))
-	for status := range group.StatusCounts {
-		statuses = append(statuses, status)
-	}
-	sort.Strings(statuses)
+	statuses := slices.Sorted(maps.Keys(group.StatusCounts))
 	for _, status := range statuses {
 		_, _ = fmt.Fprintf(gw, "%s\t%d\n", strings.ToUpper(status), group.StatusCounts[status])
 	}

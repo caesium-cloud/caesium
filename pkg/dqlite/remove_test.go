@@ -66,8 +66,8 @@ func startVoters(t *testing.T, ctx context.Context, addrs []string) []*dqliteapp
 
 func requireRefusal(t *testing.T, err error, reason RemovalReason) *MemberRemovalRefusal {
 	t.Helper()
-	var refusal *MemberRemovalRefusal
-	require.Truef(t, errors.As(err, &refusal), "want a %s refusal, got %v", reason, err)
+	refusal, ok := errors.AsType[*MemberRemovalRefusal](err)
+	require.Truef(t, ok, "want a %s refusal, got %v", reason, err)
 	require.Equal(t, reason, refusal.Reason, refusal.Detail)
 	return refusal
 }
@@ -213,8 +213,8 @@ func TestRemoveStaleMemberAfterDiskLoss(t *testing.T) {
 			require.Len(t, removed[idx].Members, 3)
 			continue
 		}
-		var refusal *MemberRemovalRefusal
-		require.Truef(t, errors.As(err, &refusal), "caller %d: want a refusal, got %v", idx, err)
+		refusal, ok := errors.AsType[*MemberRemovalRefusal](err)
+		require.Truef(t, ok, "caller %d: want a refusal, got %v", idx, err)
 		require.Containsf(t, []RemovalReason{RemovalNotAMember, RemovalConfigurationChange}, refusal.Reason,
 			"caller %d lost the race with an unexpected reason: %s", idx, refusal.Detail)
 	}

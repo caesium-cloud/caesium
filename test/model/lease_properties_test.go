@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/test/model"
@@ -156,10 +157,5 @@ func TestLeaseOwnershipProperties(t *testing.T) {
 }
 
 func containsString(haystack []string, want string) bool {
-	for _, s := range haystack {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, want)
 }

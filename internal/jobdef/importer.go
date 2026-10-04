@@ -191,8 +191,8 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 // ContractBreakResponse returns the stable 409 payload for an apply-time
 // contract enforcement error.
 func ContractBreakResponse(err error) (any, bool) {
-	var enforcementErr *contractenforce.EnforcementError
-	if !errors.As(err, &enforcementErr) {
+	enforcementErr, ok := errors.AsType[*contractenforce.EnforcementError](err)
+	if !ok {
 		return nil, false
 	}
 	return enforcementErr.Response, true

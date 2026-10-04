@@ -55,8 +55,8 @@ func newReleaseCommand() *cobra.Command {
 			}
 			body, err := request(cmd, http.MethodPost, serverBase()+"/v1/datasets/holds/"+url.PathEscape(holdID)+"/release", bytes.NewReader(payload))
 			if err != nil {
-				var statusErr *httpStatusError
-				if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
+				statusErr, ok := errors.AsType[*httpStatusError](err)
+				if ok && statusErr.StatusCode == http.StatusConflict {
 					return releaseConflict(cmd, namespace, name, holdID, err)
 				}
 				return err

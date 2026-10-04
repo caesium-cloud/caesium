@@ -66,9 +66,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -900,11 +902,7 @@ func outputNamesIndexes(
 	siblings map[string]struct{},
 ) (map[string]map[string]string, error) {
 	out := make(map[string]map[string]string, len(named))
-	prefixes := make([]string, 0, len(named))
-	for prefix := range named {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Strings(prefixes)
+	prefixes := slices.Sorted(maps.Keys(named))
 	for _, prefix := range prefixes {
 		step := named[prefix]
 		publishedCountEnv := prefix + normalizeStepName(publishedCountKey)
@@ -1043,11 +1041,7 @@ func isSyntheticOutputDigest(prefix, rest string, envValues map[string]string, i
 func validateOutputNamesIndex(index map[string]string, suffixes map[string]struct{}, publishedCount int) error {
 	originals := make(map[string]string, len(index))
 	applicationMappings := 0
-	indexedSuffixes := make([]string, 0, len(index))
-	for suffix := range index {
-		indexedSuffixes = append(indexedSuffixes, suffix)
-	}
-	sort.Strings(indexedSuffixes)
+	indexedSuffixes := slices.Sorted(maps.Keys(index))
 	for _, suffix := range indexedSuffixes {
 		original := index[suffix]
 		if prior, duplicate := originals[original]; duplicate {
@@ -1074,11 +1068,7 @@ func validateOutputNamesIndex(index map[string]string, suffixes map[string]struc
 			return fmt.Errorf("protocol suffix %s must map to %q, not %q", suffix, original, got)
 		}
 	}
-	transportedSuffixes := make([]string, 0, len(suffixes))
-	for suffix := range suffixes {
-		transportedSuffixes = append(transportedSuffixes, suffix)
-	}
-	sort.Strings(transportedSuffixes)
+	transportedSuffixes := slices.Sorted(maps.Keys(suffixes))
 	for _, suffix := range transportedSuffixes {
 		if _, exists := index[suffix]; !exists {
 			return fmt.Errorf("transported output suffix %s is missing from the index", suffix)

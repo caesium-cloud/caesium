@@ -7,6 +7,7 @@
 package fingerprint
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"fmt"
 	"hash"
@@ -14,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -208,9 +210,9 @@ func moduleFiles(dir string, excluded []string) ([]moduleFile, error) {
 	}
 
 	// WalkDir already visits lexically, but the order the digest depends on is
-	// stated here rather than inherited: sort.Slice is a byte comparison, which
-	// no locale collation on another runner can reorder.
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	// stated here rather than inherited: cmp.Compare orders strings by bytes,
+	// which no locale collation on another runner can reorder.
+	slices.SortFunc(files, func(a, b moduleFile) int { return cmp.Compare(a.name, b.name) })
 	return files, nil
 }
 
@@ -241,11 +243,11 @@ func generatedState(name string) bool {
 // per-input output rows.
 func Combine(inputs []Input, extras ...string) (string, error) {
 	sorted := append([]Input(nil), inputs...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Name != sorted[j].Name {
-			return sorted[i].Name < sorted[j].Name
+	slices.SortFunc(sorted, func(a, b Input) int {
+		if order := cmp.Compare(a.Name, b.Name); order != 0 {
+			return order
 		}
-		return sorted[i].Identity < sorted[j].Identity
+		return cmp.Compare(a.Identity, b.Identity)
 	})
 	for i := 1; i < len(sorted); i++ {
 		if sorted[i].Name == sorted[i-1].Name {

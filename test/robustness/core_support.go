@@ -3,13 +3,14 @@
 package robustness
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -128,7 +129,7 @@ func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, 
 		}
 		fp.Tasks = append(fp.Tasks, tf)
 	}
-	sort.Slice(fp.Tasks, func(i, j int) bool { return fp.Tasks[i].ID < fp.Tasks[j].ID })
+	slices.SortFunc(fp.Tasks, func(a, b TaskFingerprint) int { return cmp.Compare(a.ID, b.ID) })
 	for _, ev := range fe.sink.Events() {
 		if ev.RunID == runID && strings.TrimSpace(ev.Nonce) != "" {
 			fp.EffectNonces = append(fp.EffectNonces, ev.Nonce)

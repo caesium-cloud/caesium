@@ -10,6 +10,7 @@ import (
 	"maps"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1200,11 +1201,7 @@ func outputParamMappingRefs(cfg map[string]any) ([]outputRef, error) {
 		return nil, nil
 	}
 
-	params := make([]string, 0, len(mapping))
-	for param := range mapping {
-		params = append(params, param)
-	}
-	sort.Strings(params)
+	params := slices.Sorted(maps.Keys(mapping))
 
 	refs := make([]outputRef, 0, len(mapping))
 	for _, param := range params {

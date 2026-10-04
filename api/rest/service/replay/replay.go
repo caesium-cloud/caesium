@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
@@ -299,11 +299,7 @@ func normalizeOverrides(overrides map[string]string) []overridePair {
 	if len(overrides) == 0 {
 		return []overridePair{}
 	}
-	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(overrides))
 
 	normalized := make([]overridePair, 0, len(keys))
 	for _, key := range keys {

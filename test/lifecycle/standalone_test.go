@@ -29,6 +29,7 @@ package lifecycle
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -562,7 +564,7 @@ func (c *client) schema(ctx context.Context) (schemaSnapshot, error) {
 		sort.Strings(entry.Columns)
 		snap.Tables = append(snap.Tables, entry)
 	}
-	sort.Slice(snap.Tables, func(i, j int) bool { return snap.Tables[i].Name < snap.Tables[j].Name })
+	slices.SortFunc(snap.Tables, func(a, b tableSchema) int { return cmp.Compare(a.Name, b.Name) })
 	return snap, nil
 }
 
@@ -637,7 +639,7 @@ func (r apiRun) fixture() runFixture {
 			CompletedAt: task.CompletedAt,
 		})
 	}
-	sort.Slice(out.Tasks, func(i, j int) bool { return out.Tasks[i].ID < out.Tasks[j].ID })
+	slices.SortFunc(out.Tasks, func(a, b taskRunFixture) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -870,11 +872,11 @@ func runCLI(t *testing.T, args ...string) cliResult {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	res := cliResult{Stdout: stdout.String(), Stderr: stderr.String()}
-	var exitErr *exec.ExitError
+	exitErr, isExitErr := errors.AsType[*exec.ExitError](err)
 	switch {
 	case err == nil:
 		res.ExitCode = 0
-	case errors.As(err, &exitErr):
+	case isExitErr:
 		res.ExitCode = exitErr.ExitCode()
 	default:
 		t.Fatalf("caesium %s could not be executed: %v (stderr: %s)", strings.Join(args, " "), err, stderr.String())

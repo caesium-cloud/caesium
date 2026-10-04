@@ -7,9 +7,11 @@ package lifecycle
 // anchors never select the table tests below.
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -35,7 +37,7 @@ type ordinalZeroView struct {
 func newOrdinalZeroView(name, address string, leader dqclient.NodeInfo, nodes []dqclient.NodeInfo) ordinalZeroView {
 	view := ordinalZeroView{Name: name, Address: address, Leader: fmt.Sprintf("%d/%s", leader.ID, leader.Address)}
 	view.nodes = append([]dqclient.NodeInfo(nil), nodes...)
-	sort.Slice(view.nodes, func(i, j int) bool { return view.nodes[i].ID < view.nodes[j].ID })
+	slices.SortFunc(view.nodes, func(a, b dqclient.NodeInfo) int { return cmp.Compare(a.ID, b.ID) })
 	for _, n := range view.nodes {
 		view.Members = append(view.Members, fmt.Sprintf("%d/%s/%s", n.ID, n.Address, strings.ToLower(n.Role.String())))
 	}

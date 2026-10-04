@@ -1,9 +1,10 @@
 package system
 
 import (
+	"cmp"
 	"context"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -185,7 +186,7 @@ func (s *Service) Nodes() ([]Node, error) {
 			WorkersTotal: env.Variables().WorkerPoolSize,
 		})
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Address < nodes[j].Address })
+	slices.SortFunc(nodes, func(a, b Node) int { return cmp.Compare(a.Address, b.Address) })
 	return nodes, nil
 }
 

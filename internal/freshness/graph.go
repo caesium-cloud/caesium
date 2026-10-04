@@ -3,6 +3,8 @@ package freshness
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -112,20 +114,12 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 
 func sortedMapKeys(m map[string]map[string]struct{}) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(m))...)
 }
 
 func sortedSetKeys(m map[string]struct{}) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(m))...)
 }
 
 // detectGraphCycle returns a readable node path if the directed graph contains a
@@ -140,11 +134,7 @@ func detectGraphCycle(graph map[string]map[string]struct{}) []string {
 	state := make(map[string]int, len(graph))
 	stack := make([]string, 0, len(graph))
 
-	nodes := make([]string, 0, len(graph))
-	for node := range graph {
-		nodes = append(nodes, node)
-	}
-	sort.Strings(nodes)
+	nodes := slices.Sorted(maps.Keys(graph))
 
 	var visit func(string) []string
 	visit = func(node string) []string {

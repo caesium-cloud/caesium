@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -880,20 +882,12 @@ func additionalPropertiesFalse(schema map[string]any) bool {
 
 func sortedKeys(values map[string]any) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 func sortedSetKeys(values map[string]struct{}) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 type schemaPath []string

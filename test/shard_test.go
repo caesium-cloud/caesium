@@ -3,6 +3,7 @@
 package test
 
 import (
+	"cmp"
 	_ "embed"
 	"encoding/json"
 	"flag"
@@ -10,7 +11,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,11 +37,11 @@ func balancedIntegrationShards(methods []string, count int, timings map[string]i
 		return 1000
 	}
 	methods = append([]string(nil), methods...)
-	sort.Slice(methods, func(i, j int) bool {
-		if cost(methods[i]) != cost(methods[j]) {
-			return cost(methods[i]) > cost(methods[j])
+	slices.SortFunc(methods, func(a, b string) int {
+		if order := cmp.Compare(cost(b), cost(a)); order != 0 {
+			return order
 		}
-		return methods[i] < methods[j]
+		return cmp.Compare(a, b)
 	})
 	shards := make([][]string, count)
 	totals := make([]int, count)

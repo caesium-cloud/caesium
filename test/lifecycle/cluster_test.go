@@ -7,15 +7,18 @@ package lifecycle
 // raw-effect surfaces. A missing observation is blocked, never a pass.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -376,11 +379,7 @@ func verifyQueuedHeldAttempt(run apiRun, wantRunID, wantJobID, wantToken string,
 			starts[raw.Nonce] = true
 		}
 	}
-	nonces := make([]string, 0, len(starts))
-	for nonce := range starts {
-		nonces = append(nonces, nonce)
-	}
-	sort.Strings(nonces)
+	nonces := slices.Sorted(maps.Keys(starts))
 	if len(nonces) == 0 {
 		return nil, fmt.Errorf("queued run %s current durable runtime has no raw start nonce", run.ID)
 	}
@@ -570,7 +569,7 @@ func memberEvidence(topo cluster.Topology, membership cluster.Membership) []clus
 			PVC: m.PVCName, Volume: m.VolumeName, Image: m.Image, ImageID: m.ImageID,
 			DqliteID: n.ID, Address: n.Address})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b clusterMemberEvidence) int { return cmp.Compare(a.Name, b.Name) })
 	return out
 }
 
@@ -869,9 +868,7 @@ func TestLifecycleClusterSeed(t *testing.T) {
 		if err := verifySeedHeldAttempt(fx.DurableTasks[run.ID], rawBefore, run.Events); err != nil {
 			blockf(t, "retained-history-and-raw-effects", "seed held run %s lacks current durable attempt proof: %v", run.ID, err)
 		}
-		for nonce := range rawStartNonceSet(run.ID, rawBefore) {
-			fx.RawStartNonces[run.ID] = append(fx.RawStartNonces[run.ID], nonce)
-		}
+		fx.RawStartNonces[run.ID] = append(fx.RawStartNonces[run.ID], slices.Sorted(maps.Keys(rawStartNonceSet(run.ID, rawBefore)))...)
 		require.NotEmptyf(t, fx.RawStartNonces[run.ID], "seed run %s has no raw start nonce", run.ID)
 		sort.Strings(fx.RawStartNonces[run.ID])
 	}
@@ -2044,11 +2041,7 @@ func snapshotReadbackBases(expected, observed []corev1.Pod) map[string]string {
 // diagnostic evidence only: the caller still fails the snapshot phase.
 func readSnapshotDisputedWrite(ctx context.Context, h *cluster.HTTP, bases map[string]string,
 	jobID, expected string, timeout time.Duration) []snapshotDisputedReadback {
-	names := make([]string, 0, len(bases))
-	for name := range bases {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(bases))
 	readbacks := make([]snapshotDisputedReadback, 0, len(names))
 	for _, name := range names {
 		base := bases[name]

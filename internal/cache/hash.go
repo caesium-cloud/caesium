@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -402,11 +403,7 @@ func (h HashInput) Compute() string {
 	w(digest, "command:%s\n", strings.Join(h.Command, "\x00"))
 
 	// Sorted env vars
-	envKeys := make([]string, 0, len(h.Env))
-	for k := range h.Env {
-		envKeys = append(envKeys, k)
-	}
-	sort.Strings(envKeys)
+	envKeys := slices.Sorted(maps.Keys(h.Env))
 	for _, k := range envKeys {
 		w(digest, "env:%s=%s\n", k, h.Env[k])
 	}
@@ -437,11 +434,7 @@ func (h HashInput) Compute() string {
 		if h.Kubernetes.AutomountServiceAccountToken != nil {
 			w(digest, "kubernetes.automount:%t\n", *h.Kubernetes.AutomountServiceAccountToken)
 		}
-		keys := make([]string, 0, len(h.Kubernetes.PodAnnotations))
-		for k := range h.Kubernetes.PodAnnotations {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(h.Kubernetes.PodAnnotations))
 		for _, k := range keys {
 			w(digest, "kubernetes.annotation:%s=%s\n", k, h.Kubernetes.PodAnnotations[k])
 		}
@@ -509,18 +502,10 @@ func (h HashInput) Compute() string {
 	if h.excludesPredecessorHashes() {
 		w(digest, "pred_outputs:%s\n", canonicalJSON(framedPredecessorOutputs(h.PredecessorOutputs)))
 	} else {
-		predNames := make([]string, 0, len(h.PredecessorOutputs))
-		for name := range h.PredecessorOutputs {
-			predNames = append(predNames, name)
-		}
-		sort.Strings(predNames)
+		predNames := slices.Sorted(maps.Keys(h.PredecessorOutputs))
 		for _, name := range predNames {
 			outputs := h.PredecessorOutputs[name]
-			outKeys := make([]string, 0, len(outputs))
-			for k := range outputs {
-				outKeys = append(outKeys, k)
-			}
-			sort.Strings(outKeys)
+			outKeys := slices.Sorted(maps.Keys(outputs))
 			for _, k := range outKeys {
 				w(digest, "pred_output:%s:%s=%s\n", name, k, outputs[k])
 			}
@@ -528,11 +513,7 @@ func (h HashInput) Compute() string {
 	}
 
 	// Sorted run params
-	paramKeys := make([]string, 0, len(h.RunParams))
-	for k := range h.RunParams {
-		paramKeys = append(paramKeys, k)
-	}
-	sort.Strings(paramKeys)
+	paramKeys := slices.Sorted(maps.Keys(h.RunParams))
 	for _, k := range paramKeys {
 		w(digest, "param:%s=%s\n", k, h.RunParams[k])
 	}

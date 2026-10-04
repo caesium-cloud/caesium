@@ -1,8 +1,10 @@
 package jobdef
 
 import (
+	"cmp"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -158,14 +160,14 @@ func contractSummary(steps []schema.Step) string {
 		return ""
 	}
 
-	sort.Slice(contracts, func(i, j int) bool {
-		if contracts[i].producer != contracts[j].producer {
-			return contracts[i].producer < contracts[j].producer
+	slices.SortFunc(contracts, func(a, b contract) int {
+		if order := cmp.Compare(a.producer, b.producer); order != 0 {
+			return order
 		}
-		if contracts[i].consumer != contracts[j].consumer {
-			return contracts[i].consumer < contracts[j].consumer
+		if order := cmp.Compare(a.consumer, b.consumer); order != 0 {
+			return order
 		}
-		return strings.Join(contracts[i].keys, "\x00") < strings.Join(contracts[j].keys, "\x00")
+		return cmp.Compare(strings.Join(a.keys, "\x00"), strings.Join(b.keys, "\x00"))
 	})
 
 	parts := make([]string, 0, len(contracts))

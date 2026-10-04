@@ -40,6 +40,7 @@ package robustness
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -49,6 +50,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -548,7 +550,7 @@ func (sr *soakRunner) queryMembership(ctx context.Context, topo []cluster.Member
 			_, isLive := live[n.Address]
 			view = append(view, soakMember{ID: n.ID, Address: n.Address, Role: strings.ToLower(n.Role.String()), Live: isLive})
 		}
-		sort.Slice(view, func(i, j int) bool { return view[i].ID < view[j].ID })
+		slices.SortFunc(view, func(a, b soakMember) int { return cmp.Compare(a.ID, b.ID) })
 		sig := jsonString(view)
 		if reference == "" {
 			reference = sig

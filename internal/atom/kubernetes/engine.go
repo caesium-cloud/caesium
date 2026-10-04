@@ -498,8 +498,8 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 }
 
 func containerLogsPending(err error, pod string) bool {
-	var status *apierrors.StatusError
-	if !errors.As(err, &status) {
+	status, ok := errors.AsType[*apierrors.StatusError](err)
+	if !ok {
 		return false
 	}
 	if apierrors.IsNotFound(err) {

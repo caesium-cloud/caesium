@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -197,11 +198,7 @@ func formatQueueParams(params map[string]string) string {
 	if len(params) == 0 {
 		return "-"
 	}
-	keys := make([]string, 0, len(params))
-	for key := range params {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 
 	parts := make([]string, 0, len(keys))
 	replacer := strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")

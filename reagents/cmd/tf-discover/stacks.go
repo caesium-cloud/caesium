@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -88,6 +90,6 @@ func readStacksFile(path string) ([]stack, error) {
 		sort.Strings(deps)
 		stacks = append(stacks, stack{Name: name, Root: root, DependsOn: deps})
 	}
-	sort.Slice(stacks, func(i, j int) bool { return stacks[i].Name < stacks[j].Name })
+	slices.SortFunc(stacks, func(a, b stack) int { return cmp.Compare(a.Name, b.Name) })
 	return stacks, nil
 }

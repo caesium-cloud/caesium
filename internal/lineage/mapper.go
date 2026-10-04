@@ -3,6 +3,8 @@ package lineage
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -724,11 +726,7 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 	// Each predecessor in inputSchema becomes an input Dataset, referencing the
 	// predecessor step's logical output namespace within the same job.
 	// Sort predecessor names so the Inputs slice order is deterministic.
-	predNames := make([]string, 0, len(payload.InputSchema))
-	for predStepName := range payload.InputSchema {
-		predNames = append(predNames, predStepName)
-	}
-	sort.Strings(predNames)
+	predNames := slices.Sorted(maps.Keys(payload.InputSchema))
 	for _, predStepName := range predNames {
 		schema := payload.InputSchema[predStepName]
 		facets := map[string]any{
