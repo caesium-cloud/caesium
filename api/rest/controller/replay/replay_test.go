@@ -19,7 +19,7 @@ func TestDecodePostRequestRejectsOversizedBody(t *testing.T) {
 
 	_, err := decodePostRequest(c)
 	require.Error(t, err)
-	maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err)
+	_, ok := errors.AsType[*http.MaxBytesError](err)
 	require.True(t, ok, "expected MaxBytesReader overflow, got %v", err)
 }
 
