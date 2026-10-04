@@ -131,7 +131,7 @@ func runTriggerRuleScenario(t *testing.T, tc triggerRuleRunScenario) {
 	}
 	edges := make(models.TaskEdges, 0, len(tc.edges))
 	for _, edge := range tc.edges {
-		edges = append(edges, models.TaskEdge{
+		edges = append(edges, &models.TaskEdge{
 			ID: uuid.New(), JobID: jobID, FromTaskID: taskIDs[edge[0]], ToTaskID: taskIDs[edge[1]],
 		})
 	}
