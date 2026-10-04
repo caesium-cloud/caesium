@@ -8,6 +8,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -29,9 +30,9 @@ func TestRuntimePredecessorEnvPrecedenceWithoutCache(t *testing.T) {
 	addWorkerPredecessor(t, f, `{"value":"output"}`)
 	var atomModel models.Atom
 	require.NoError(t, f.db.First(&atomModel, "id = ?", f.taskRun.AtomID).Error)
-	env, err := json.Marshal(map[string]string{"CAESIUM_PARAM_BRANCH": "base", "CAESIUM_OUTPUT_UPSTREAM_VALUE": "base", "KEEP": "base"})
+	env, err := json.Marshal(container.Spec{Env: map[string]string{"CAESIUM_PARAM_BRANCH": "base", "CAESIUM_OUTPUT_UPSTREAM_VALUE": "base", "KEEP": "base"}})
 	require.NoError(t, err)
-	require.NoError(t, f.db.Model(&atomModel).Update("env", env).Error)
+	require.NoError(t, f.db.Model(&atomModel).Update("spec", datatypes.JSON(env)).Error)
 	require.NoError(t, f.db.Model(f.jobRun).Update("params", datatypes.JSON(`{"branch":"parameter"}`)).Error)
 	engine := &captureCreateEngine{}
 	sink := &fakeSink{}
