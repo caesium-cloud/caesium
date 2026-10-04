@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -23,6 +24,12 @@ type PredecessorInputs struct {
 // return no partial inputs. Legacy status/trigger readers remain best-effort.
 func (s *Store) PredecessorExecutionInputs(ctx context.Context, runID, taskID uuid.UUID) (PredecessorInputs, error) {
 	var result PredecessorInputs
+	var options []*sql.TxOptions
+	if s.db.Dialector.Name() == "postgres" {
+		// READ COMMITTED would let the graph/name and output queries observe
+		// different commits. SQLite/dqlite already keep one read view per txn.
+		options = []*sql.TxOptions{{Isolation: sql.LevelRepeatableRead, ReadOnly: true}}
+	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		refs, err := s.resolvePredecessorsWithPolicyTx(tx, runID, taskID, true)
 		if err != nil {
@@ -74,7 +81,7 @@ func (s *Store) PredecessorExecutionInputs(ctx context.Context, runID, taskID uu
 			result.OutputsByName = nil
 		}
 		return ctx.Err()
-	})
+	}, options...)
 	if err != nil {
 		return PredecessorInputs{}, err
 	}
