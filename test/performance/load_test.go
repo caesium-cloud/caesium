@@ -39,7 +39,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -49,6 +48,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 )
 
 const catalogFile = "workloads.json"
@@ -225,7 +226,14 @@ func probeServerEnv() serverEnvProbe {
 		return serverEnvProbe{reason: fmt.Sprintf("inspect %s: %v", container, err)}
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return readServerEnvResponse(resp, container)
+}
+
+func readServerEnvResponse(resp *http.Response, container string) serverEnvProbe {
+	body, readErr := bodylimit.Read(resp.Body, 1<<20)
+	if readErr != nil {
+		return serverEnvProbe{reason: fmt.Sprintf("inspect %s: HTTP %d incomplete body (%s): %v", container, resp.StatusCode, body, readErr)}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return serverEnvProbe{reason: fmt.Sprintf("inspect %s: HTTP %d", container, resp.StatusCode)}
 	}
