@@ -81,7 +81,7 @@ func TestLocalWholeRetryRejectsUnrelatedCommittedOrPreloadedIdentity(t *testing.
 			entry := &runstorage.JobRun{ID: runID, JobID: j.ID, Params: map[string]string{"input": "durable"}}
 			markerID := runID
 			fault := errors.New("retry failed")
-			var admissionErr error = fmt.Errorf("wrapped: %w", &runstorage.RunCommittedError{RunID: markerID, JobID: j.ID, Err: fault})
+			admissionErr := fmt.Errorf("wrapped: %w", &runstorage.RunCommittedError{RunID: markerID, JobID: j.ID, Err: fault})
 			switch kind {
 			case "unrelated marker":
 				admissionErr = &runstorage.RunCommittedError{RunID: uuid.New(), JobID: j.ID, Err: fault}
