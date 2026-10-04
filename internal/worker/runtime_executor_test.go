@@ -919,7 +919,7 @@ func (e *captureCreateEngine) Wait(*atom.EngineWaitRequest) (atom.Atom, error) {
 	return &fakeMonitorAtom{id: "runtime", result: result}, nil
 }
 
-func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
+func (e *captureCreateEngine) Stop(req *atom.EngineStopRequest) error {
 	e.stopCalls++
 	e.stopReq = req
 	return e.stopErr
