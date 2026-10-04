@@ -77,7 +77,9 @@ func RecoverRunStateWithFanOut(
 		rs = NewRunState(topo, 0)
 	}
 
-	rs.RehydrateInGroupEdges(instanceRows, catalog)
+	if err := rs.RehydrateInGroupEdges(instanceRows, catalog); err != nil {
+		return nil, RecoveryResult{}, err
+	}
 
 	var res RecoveryResult
 	expected := start + 1
