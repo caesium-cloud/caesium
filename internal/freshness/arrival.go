@@ -162,18 +162,15 @@ func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent
 // advanced a source dataset. RunID is nil (no producing run) so the evaluator
 // starts downstream derivation at trigger depth 0.
 func (o *ArrivalObserver) publishDatasetAdvanced(namespace *string, name string) {
-	if o.bus == nil {
+	publishDatasetAdvanced(o.bus, namespace, name, uuid.Nil, uuid.Nil)
+}
+
+func publishDatasetAdvanced(bus event.Bus, namespace *string, name string, jobID, runID uuid.UUID) {
+	if bus == nil {
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"namespace": nsValue(namespace),
-		"name":      name,
-	})
-	o.bus.Publish(event.Event{
-		Type:      event.TypeDatasetAdvanced,
-		Timestamp: time.Now().UTC(),
-		Payload:   payload,
-	})
+	payload, _ := json.Marshal(map[string]any{"namespace": nsValue(namespace), "name": name})
+	bus.Publish(event.Event{Type: event.TypeDatasetAdvanced, JobID: jobID, RunID: runID, Timestamp: time.Now().UTC(), Payload: payload})
 }
 
 type arrivalBinding struct {

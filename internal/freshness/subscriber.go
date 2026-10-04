@@ -203,20 +203,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 // watermark moved, so it can reactively re-derive downstream consumers off
 // post-advance state. Payload carries the {namespace, name} dataset identity.
 func (c *Capturer) publishDatasetAdvanced(namespace *string, name string, jobID, runID uuid.UUID) {
-	if c.bus == nil {
-		return
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"namespace": nsValue(namespace),
-		"name":      name,
-	})
-	c.bus.Publish(event.Event{
-		Type:      event.TypeDatasetAdvanced,
-		JobID:     jobID,
-		RunID:     runID,
-		Timestamp: time.Now().UTC(),
-		Payload:   payload,
-	})
+	publishDatasetAdvanced(c.bus, namespace, name, jobID, runID)
 }
 
 // capturedRun is the job_runs projection the completion path needs: whether the
@@ -353,7 +340,7 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 	return out, nil
 }
 
-// consumedSnapshot reads the current watermark of every consumed dataset in a
+// consumedSnapshot reads the current watermark of every consumed dataset through
 // bounded batch queries (no per-name N+1), keyed on the nil→"" namespace mapping.
 //
 // It is a point-in-time read of whenever it is called: StartParamsEnricher calls

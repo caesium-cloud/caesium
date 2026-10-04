@@ -149,7 +149,7 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 	const maxAttempts = 5
 	var res AdvanceResult
 	err := dbretry.Retry(ctx, dbretry.Policy{
-		Backoffs:  make([]time.Duration, 4),
+		Backoffs:  make([]time.Duration, maxAttempts-1),
 		Retryable: func(err error) bool { return errors.Is(err, errStateRaceRetry) || isBusyErr(err) },
 	}, func() error {
 		var err error
