@@ -315,6 +315,7 @@ Completed local gates (each applies only to the recorded candidate):
 - Final cancellation write-boundary owner sampling atdf7c69c1: fulljobrace, integration-taggedvet andlint0issues PASS; stale closed-owner admission diagnostic regression corrected to assert exact canceledcause/terminalrows/no-extraCreate/join. No atomic claim for context sample-to-DBcommit interval.
 - Fresh df7c69c1 image all-eight real C100shutdown cases PASS: admission/start/retry/partition/backfill/webhook/freshness plus distributedreplay durabletasksettlement/restart and timeoutnegative(exit1); cleanownedcleanup. HeldDB/receipt persistence remains separate nativeproof.
 - Fresh original-base performance atff0fbd9a: all20bench samples0, bothUIbundlesPASS, cold/warm workload and livebrowser phasesPASS; attempt1 comparison targetbase/SLOno_significant_difference, fixedbaselinewithin_budget; boundednoninferiority, not equivalence. OldfailedUIinvocation retained. WrapperFAILdisablednightly-performance registry is separatequalificationlimit.
+- Native86b7beb5: all50closed-owner barrier race repetitions PASS, fullroot race/coverage +integrationtaggedvet +lint0issues PASS. Earlier5c6b failed only fixture async cancellation barrier; exactsource/test correction independentlyread, no productionchange. No unitprofilepromotion.
 
 Current qualification limits:
 
