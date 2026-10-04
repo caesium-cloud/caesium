@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -193,4 +194,38 @@ func TestPredecessorExecutionInputsReplayUsesFrozenNamesAndRefs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[string]map[string]string{"baseline_name": {"v": "frozen"}}, got.OutputsByName)
 	require.Equal(t, "old", got.DescriptorHashes[f.producer.ID])
+}
+
+// A commit error invalidates the complete projection just as a read error does.
+type predecessorCommitFaultPool struct {
+	*sql.DB
+	err error
+}
+
+func (p *predecessorCommitFaultPool) BeginTx(ctx context.Context, options *sql.TxOptions) (gorm.ConnPool, error) {
+	tx, err := p.DB.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &predecessorCommitFaultTx{Tx: tx, err: p.err}, nil
+}
+
+type predecessorCommitFaultTx struct {
+	*sql.Tx
+	err error
+}
+
+func (tx *predecessorCommitFaultTx) Commit() error { return tx.err }
+
+func TestPredecessorExecutionInputsCommitFailureReturnsZero(t *testing.T) {
+	f := newFanOutFixture(t, nil)
+	require.NoError(t, f.db.Model(f.producerRow(t)).Updates(map[string]any{"output": datatypes.JSON(`{"v":"valid"}`), "hash": "valid", "status": string(TaskStatusSucceeded)}).Error)
+	sqlDB, err := f.db.DB()
+	require.NoError(t, err)
+	commitErr := errors.New("input snapshot commit failed")
+	db := f.db.Session(&gorm.Session{NewDB: true}).WithContext(context.Background())
+	db.Statement.ConnPool = &predecessorCommitFaultPool{DB: sqlDB, err: commitErr}
+	got, err := NewStore(db).PredecessorExecutionInputs(context.Background(), f.runID, f.consumer.ID)
+	require.ErrorIs(t, err, commitErr)
+	require.Equal(t, PredecessorInputs{}, got)
 }
