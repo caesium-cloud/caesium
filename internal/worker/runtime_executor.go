@@ -591,18 +591,11 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		// Compute retry delay (retryDelay * 2^(attempt-1) if backoff, else retryDelay).
-		var delay time.Duration
-		if descriptor != nil && descriptor.Runtime.RetryDelay > 0 {
-			delay = descriptor.Runtime.RetryDelay
-			if descriptor.Runtime.RetryBackoff {
-				delay = descriptor.Runtime.RetryDelay * (1 << uint(attempt-1))
-			}
-		} else if hasTaskModel && taskModel.RetryDelay > 0 {
-			delay = taskModel.RetryDelay
-			if taskModel.RetryBackoff {
-				delay = taskModel.RetryDelay * (1 << uint(attempt-1))
-			}
+		var retryModel *models.Task
+		if hasTaskModel {
+			retryModel = &taskModel
 		}
+		delay := workerRetryDelay(descriptor, retryModel, attempt)
 
 		log.Info("retrying worker task", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 
@@ -751,6 +744,18 @@ func (e *runtimeExecutor) haltRunAfterFailure(taskRun *models.TaskRun) {
 	if _, err := e.store.HaltUnstartedTasks(taskRun.JobRunID, taskRun.TaskID, nil); err != nil {
 		log.Error("failed to halt unstarted tasks after failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
 	}
+}
+
+// workerRetryDelay retains the frozen positive-delay preference and the
+// legacy task-model fallback; attempt selection is unchanged at the caller.
+func workerRetryDelay(descriptor *models.TaskExecutionDescriptor, taskModel *models.Task, attempt int) time.Duration {
+	if descriptor != nil && descriptor.Runtime.RetryDelay > 0 {
+		return run.ComputeRetryDelay(descriptor.Runtime.RetryDelay, descriptor.Runtime.RetryBackoff, attempt)
+	}
+	if taskModel != nil && taskModel.RetryDelay > 0 {
+		return run.ComputeRetryDelay(taskModel.RetryDelay, taskModel.RetryBackoff, attempt)
+	}
+	return 0
 }
 
 // sleepRetryDelay sleeps for the given duration, respecting context cancellation.
