@@ -453,6 +453,8 @@ cleanup_resources() {
   COVERAGE_CLEANUP_DONE=1
 }
 
+# The EXIT trap invokes this function indirectly.
+# shellcheck disable=SC2329
 cleanup() {
   local original_rc=$?
   trap - EXIT
