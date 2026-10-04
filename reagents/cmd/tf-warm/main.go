@@ -443,13 +443,18 @@ func regularMirrorFile(root, rel string) (bool, error) {
 // the repair crash-safe: a killed repair leaves either the old directory, a
 // complete new directory, or a quarantine the next always-run warm can ignore
 // while promoting its own complete staging tree.
-func promoteMirror(
+func promoteMirror(staging, mirrorDir, cacheDir, key string, providers []tf.LockedProvider, platforms []string, logOut io.Writer) error {
+	return promoteMirrorWithRename(staging, mirrorDir, cacheDir, key, providers, platforms, logOut, os.Rename)
+}
+
+func promoteMirrorWithRename(
 	staging, mirrorDir, cacheDir, key string,
 	providers []tf.LockedProvider,
 	platforms []string,
 	logOut io.Writer,
+	rename func(string, string) error,
 ) error {
-	if err := os.Rename(staging, mirrorDir); err == nil {
+	if err := rename(staging, mirrorDir); err == nil {
 		complete, checkErr := mirrorDirectoryReady(mirrorDir, providers, platforms)
 		if checkErr != nil {
 			return checkErr
@@ -479,11 +484,11 @@ func promoteMirror(
 			return fmt.Errorf("prepare quarantine %s: %w", quarantine, removeErr)
 		}
 
-		if quarantineErr := os.Rename(mirrorDir, quarantine); quarantineErr != nil {
+		if quarantineErr := rename(mirrorDir, quarantine); quarantineErr != nil {
 			// Another repair may have moved the incomplete directory. Compete at
 			// the atomic promotion seam instead; exactly one complete staging tree
 			// wins and every loser can adopt it.
-			if promoteErr := os.Rename(staging, mirrorDir); promoteErr == nil {
+			if promoteErr := rename(staging, mirrorDir); promoteErr == nil {
 				complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
 				if checkErr != nil {
 					return checkErr
@@ -505,7 +510,7 @@ func promoteMirror(
 			return fmt.Errorf("quarantine incomplete mirror %s: %w", mirrorDir, quarantineErr)
 		}
 
-		if promoteErr := os.Rename(staging, mirrorDir); promoteErr != nil {
+		if promoteErr := rename(staging, mirrorDir); promoteErr != nil {
 			complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
 			if checkErr == nil && complete {
 				_ = os.RemoveAll(quarantine)
@@ -514,8 +519,8 @@ func promoteMirror(
 			}
 			// Best-effort rollback only when nobody else installed a winner.
 			if _, statErr := os.Lstat(mirrorDir); errors.Is(statErr, fs.ErrNotExist) {
-				if restoreErr := os.Rename(quarantine, mirrorDir); restoreErr != nil {
-					return fmt.Errorf("promote repaired mirror %s: %v (also could not restore quarantine %s: %w)",
+				if restoreErr := rename(quarantine, mirrorDir); restoreErr != nil {
+					return fmt.Errorf("promote repaired mirror %s: %w (also could not restore quarantine %s: %w)",
 						mirrorDir, promoteErr, quarantine, restoreErr)
 				}
 			}
