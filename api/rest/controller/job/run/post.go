@@ -8,7 +8,6 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
-	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -59,14 +58,18 @@ type StartOutcomeResponse struct {
 // Seams the tests replace to drive Post against a test database without
 // launching containers.
 var (
-	postGetJob = func(ctx context.Context, id uuid.UUID) (*models.Job, error) {
+	postRunStore = runstorage.Default
+	postGetJob   = func(ctx context.Context, id uuid.UUID) (*models.Job, error) {
 		return jsvc.Service(ctx).Get(id)
 	}
 	postStartRun = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, error) {
-		return runsvc.New(ctx).StartWithResult(jobID, nil, opts...)
+		return postRunStore().StartWithResult(context.WithoutCancel(ctx), jobID, nil, opts...)
 	}
 	postFindIdempotentStart = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
-		return runsvc.New(ctx).FindIdempotentStart(jobID, opts...)
+		return postRunStore().FindIdempotentStart(context.WithoutCancel(ctx), jobID, opts...)
+	}
+	postFinalizeCommittedRun = func(runID uuid.UUID, cause error) (bool, error) {
+		return postRunStore().CompleteIfActive(runID, cause)
 	}
 	postLaunchRun = launchRun
 )
@@ -134,6 +137,15 @@ func Post(c *echo.Context) error {
 
 	result, err := postStartRun(ctx, j.ID, startOpts...)
 	if err != nil {
+		// A readback failure can follow durable admission. Finalize only the
+		// exact committed row before releasing its server reservation. The
+		// store owns bounded contention retries; unresolved writes stay visible.
+		if committedID, ok := runstorage.CommittedRunID(err); ok {
+			if _, completeErr := postFinalizeCommittedRun(committedID, err); completeErr != nil {
+				log.Error("manual run: committed admission could not be finalized; leaving it for an operator",
+					"job_id", j.ID, "run_id", committedID, "error", completeErr)
+			}
+		}
 		return startError(err)
 	}
 	if result.Outcome == runstorage.StartOutcomeCreated && result.Run != nil && !result.Replayed {
