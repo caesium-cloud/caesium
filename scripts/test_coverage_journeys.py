@@ -76,6 +76,60 @@ class FaultChecks(unittest.TestCase):
         self.assertFalse(b.missing_object(subprocess.CompletedProcess([], 1, '[{}]', 'Error: No such container: owned'), 'container', 'owned'))
         self.assertTrue(b.missing_object(subprocess.CompletedProcess([], 1, '', 'Error: No such container: owned'), 'container', 'owned'))
 
+    def test_owned_sso_bridge_supports_loopback_publication_and_keeps_identity_checks(self):
+        c = self.collector()
+        network_id = 'f' * 64
+        calls = []
+
+        def daemon(*args, check=True, **kwargs):
+            calls.append(args)
+            if args == ('network', 'inspect', c.network_name):
+                return subprocess.CompletedProcess(args, 1, '',
+                    'Error response from daemon: network ' + c.network_name + ' not found')
+            if args[:2] == ('network', 'create'):
+                # Docker's internal-only bridge drops host publications. Model
+                # that protocol distinction, rather than accepting any create.
+                daemon.published = '--internal' not in args
+                return subprocess.CompletedProcess(args, 0, network_id, '')
+            if args == ('network', 'inspect', network_id):
+                return subprocess.CompletedProcess(args, 0, json.dumps([{
+                    'Id': network_id, 'Labels': {b.LABEL_OWNER: OWNER, b.LABEL_RUN: c.run_id}}]), '')
+            if args == ('port', CID, '8080/tcp'):
+                if not daemon.published:
+                    raise b.JourneyError('container command failed (1): port')
+                return subprocess.CompletedProcess(args, 0, '127.0.0.1:49152\n', '')
+            self.fail('unexpected daemon operation: ' + repr(args))
+
+        c.docker_run = daemon
+        c.create_network()
+        self.assertEqual(c.network_id, network_id)
+        self.assertEqual(c.host_api_base(CID), 'http://127.0.0.1:49152')
+        create = next(args for args in calls if args[:2] == ('network', 'create'))
+        self.assertIn(b.LABEL_OWNER + '=' + OWNER, create)
+        self.assertIn(b.LABEL_RUN + '=' + c.run_id, create)
+        self.assertEqual(create[-1], c.network_name)
+
+        for field, invalid in (('Id', 'foreign'), ('Labels', {b.LABEL_OWNER: 'foreign', b.LABEL_RUN: c.run_id})):
+            c = self.collector()
+            valid = {'Id': network_id, 'Labels': {b.LABEL_OWNER: OWNER, b.LABEL_RUN: c.run_id}}
+            valid[field] = invalid
+            c.docker_run = lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, '',
+                'Error response from daemon: network ' + c.network_name + ' not found')
+            c.docker_stdout = lambda *args: network_id if args[:2] == ('network', 'create') else json.dumps([valid])
+            with self.assertRaises(b.JourneyError):
+                c.create_network()
+
+    def test_host_api_port_refuses_absence_wildcard_multiple_and_command_failure(self):
+        c = self.collector()
+        for mapping in ('', '0.0.0.0:49152', '[::]:49152', '127.0.0.1:49152\n127.0.0.1:49153'):
+            with self.subTest(mapping=mapping):
+                c.docker_stdout = lambda *args: mapping
+                with self.assertRaises(b.JourneyError):
+                    c.host_api_base(CID)
+        with patch.object(c, 'docker_stdout', side_effect=b.JourneyError('container command failed (1): port')):
+            with self.assertRaises(b.JourneyError):
+                c.host_api_base(CID)
+
     def test_socket_inventory_failure_cannot_remove_or_prove_absence(self):
         for action in ('absent', 'remove'):
             command, state = self.command(fault='socket')

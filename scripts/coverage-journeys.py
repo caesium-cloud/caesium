@@ -504,7 +504,6 @@ class Collector:
         created = self.docker_stdout(
             "network",
             "create",
-            "--internal",
             "--label",
             f"{LABEL_OWNER}={self.sha}",
             "--label",
