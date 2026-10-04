@@ -5078,7 +5078,10 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""
-	runTimedOut := IsRunDeadlineError(result)
+	// An authoritative owner cancellation must settle its unfinished tasks too.
+	// Workers abandon canceled contexts without publishing a stale completion,
+	// and a terminal parent excludes those rows from lease recovery.
+	terminateUnfinished := IsRunDeadlineError(result) || errors.Is(result, context.Canceled)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
@@ -5093,17 +5096,17 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// the gauge bookkeeping below never depends on a separate best-effort read
 	// that could fail and leak the active-runs gauge.
 	var (
-		pendingEvents []event.Event
-		jobID         uuid.UUID
-		startedAt     time.Time
-		quarantine    bool
-		timedOutTasks []models.TaskRun
-		counts        dbWriteCounts
+		pendingEvents   []event.Event
+		jobID           uuid.UUID
+		startedAt       time.Time
+		quarantine      bool
+		terminatedTasks []models.TaskRun
+		counts          dbWriteCounts
 	)
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 2)
-		var attemptTimedOutTasks []models.TaskRun
+		var attemptTerminatedTasks []models.TaskRun
 		var (
 			attemptJobID      uuid.UUID
 			attemptStartedAt  time.Time
@@ -5145,7 +5148,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// waits on a dependency the engine has not resolved is stranded by
 			// a terminal run just the same, and RetryPartition already refuses
 			// the retries no engine could ever release.
-			if !runTimedOut {
+			if !terminateUnfinished {
 				var pending int64
 				if err := tx.Model(&models.TaskRun{}).
 					Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
@@ -5158,16 +5161,15 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				}
 			}
 
-			// A genuine metadata.runTimeout expiry resolves every unfinished task
-			// in the same transaction as the run. Clearing claims makes the
-			// worker's liveness sweep cancel old binaries, while new workers share
-			// this absolute deadline and stop the exact atom themselves. Terminal
-			// completion predicates below reject any result racing this write.
-			if runTimedOut {
-				var timeoutErr error
-				attemptTimedOutTasks, timeoutErr = s.failUnfinishedTasksForRunTimeoutTx(tx, runID, errMsg, now, &attemptEvents, &counts)
-				if timeoutErr != nil {
-					return timeoutErr
+			// A whole-run deadline or owner cancellation resolves every unfinished
+			// task in the same transaction as the run. Clearing claims fences
+			// workers and makes their liveness sweep stop remaining runtimes.
+			// Terminal completion predicates reject any result racing this write.
+			if terminateUnfinished {
+				var terminationErr error
+				attemptTerminatedTasks, terminationErr = s.failUnfinishedTasksForRunTerminationTx(tx, runID, errMsg, now, &attemptEvents, &counts)
+				if terminationErr != nil {
+					return terminationErr
 				}
 			}
 
@@ -5207,7 +5209,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
 					return err
 				}
-				if runTimedOut {
+				if terminateUnfinished {
 					counts.addEventInsert(1)
 				}
 				attemptEvents = append(attemptEvents, completionEvent)
@@ -5223,7 +5225,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
 					return err
 				}
-				if runTimedOut {
+				if terminateUnfinished {
 					counts.addEventInsert(1)
 				}
 				attemptEvents = append(attemptEvents, terminalEvent)
@@ -5236,7 +5238,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			jobID = attemptJobID
 			startedAt = attemptStartedAt
 			quarantine = attemptQuarantine
-			timedOutTasks = attemptTimedOutTasks
+			terminatedTasks = attemptTerminatedTasks
 		}
 		return txErr
 	})
@@ -5255,7 +5257,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	jobIDStr := jobID.String()
 	counts.commit()
 	if !quarantine {
-		for _, task := range timedOutTasks {
+		for _, task := range terminatedTasks {
 			if task.Quarantine {
 				continue
 			}
@@ -5285,11 +5287,12 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	return true, nil
 }
 
-// failUnfinishedTasksForRunTimeoutTx runs after the caller has finalized and
-// locked the JobRun. Each concrete unfinished row receives its own replay
-// sequence and failure event, without invoking ordinary task failure cascades.
+// failUnfinishedTasksForRunTerminationTx runs after a whole-run deadline or
+// owner cancellation has finalized and locked the JobRun. Each concrete
+// unfinished row receives its own replay sequence and failure event, without
+// invoking ordinary task failure cascades.
 // Evidence and terminal rows are preserved; metrics are emitted after commit.
-func (s *Store) failUnfinishedTasksForRunTimeoutTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
+func (s *Store) failUnfinishedTasksForRunTerminationTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
 	var rows []models.TaskRun
 	if err := tx.Select("id", "task_id", "engine", "started_at", "quarantine").
 		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).

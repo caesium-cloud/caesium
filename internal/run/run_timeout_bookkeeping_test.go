@@ -36,6 +36,11 @@ func timeoutDurationCount(t *testing.T, jobID uuid.UUID) uint64 {
 }
 
 func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
+	testRunTerminationBookkeeping(t, NewRunDeadlineError(time.Second))
+}
+
+func testRunTerminationBookkeeping(t *testing.T, cause error) {
+	t.Helper()
 	for _, retry := range []bool{false, true} {
 		name := "commit"
 		if retry {
@@ -58,6 +63,8 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 				{ID: uuid.New(), JobRunID: jr.ID, TaskID: taskID, Engine: models.AtomEngineDocker, Status: string(TaskStatusPending), PartitionCount: 4, PartitionIndex: 3, PartitionValue: "retry waiting", PartitionRetryPending: true},
 			}
 			require.NoError(t, db.Create(&rows).Error)
+			var originalTerminal []models.TaskRun
+			require.NoError(t, db.Where("id IN ?", []uuid.UUID{rows[0].ID, rows[1].ID}).Order("terminal_sequence ASC").Find(&originalTerminal).Error)
 			beforeTasks := timeoutCounter(t, metrics.TaskRunsTotal, jobID.String(), taskID.String(), "docker", "failed")
 			beforeWrites := timeoutCounter(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus)
 			beforeEvents := timeoutCounter(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert)
@@ -78,7 +85,7 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 				}))
 				t.Cleanup(func() { _ = db.Callback().Create().Remove(callback) })
 			}
-			finalized, err := store.CompleteIfActive(jr.ID, NewRunDeadlineError(time.Second))
+			finalized, err := store.CompleteIfActive(jr.ID, cause)
 			require.NoError(t, err)
 			require.True(t, finalized)
 			if retry {
@@ -87,6 +94,12 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 			var persisted []models.TaskRun
 			require.NoError(t, db.Where("job_run_id = ?", jr.ID).Order("terminal_sequence ASC").Find(&persisted).Error)
 			require.Len(t, persisted, 5)
+			require.Equal(t, originalTerminal, persisted[:2], "terminal evidence and original causes must remain unchanged")
+			var parent models.JobRun
+			require.NoError(t, db.First(&parent, "id = ?", jr.ID).Error)
+			require.Equal(t, string(StatusFailed), parent.Status)
+			require.Equal(t, cause.Error(), parent.Error)
+			require.NotNil(t, parent.CompletedAt)
 			require.Equal(t, string(TaskStatusSucceeded), persisted[0].Status)
 			require.JSONEq(t, `{"kept":"success"}`, string(persisted[0].Output))
 			require.Equal(t, "original skip", persisted[1].Error)
@@ -94,8 +107,10 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 			for i, row := range persisted[2:] {
 				require.Equal(t, int64(10+i), row.TerminalSequence)
 				require.Equal(t, string(TaskStatusFailed), row.Status)
-				require.Contains(t, row.Error, "run timed out after 1s")
+				require.Equal(t, cause.Error(), row.Error)
 				require.Empty(t, row.ClaimedBy)
+				require.Nil(t, row.ClaimExpiresAt)
+				require.NotNil(t, row.CompletedAt)
 				require.False(t, row.PartitionRetryPending)
 				transitioned[row.ID] = row
 			}
@@ -113,12 +128,22 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 				require.False(t, seen[task.ID], "each concrete instance has exactly one failure event")
 				seen[task.ID] = true
 			}
+			var terminal models.ExecutionEvent
+			require.NoError(t, db.Where("run_id = ? AND type = ?", jr.ID, string(event.TypeRunTerminal)).First(&terminal).Error)
+			require.Greater(t, terminal.Sequence, recorded[len(recorded)-1].Sequence)
+			var terminalPayload JobRun
+			require.NoError(t, json.Unmarshal(terminal.Payload, &terminalPayload))
+			require.Equal(t, StatusFailed, terminalPayload.Status)
+			require.Equal(t, cause.Error(), terminalPayload.Error)
+			for _, task := range terminalPayload.Tasks {
+				require.True(t, IsTerminal(task.Status), "parent event must carry settled task state")
+			}
 			require.Equal(t, beforeTasks+3, timeoutCounter(t, metrics.TaskRunsTotal, jobID.String(), taskID.String(), "docker", "failed"))
 			require.Equal(t, beforeDuration+1, timeoutDurationCount(t, jobID), "only the task that started contributes a duration")
 			require.Equal(t, beforeWrites+3, timeoutCounter(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus))
 			require.Equal(t, beforeStatements+3, timeoutCounter(t, metrics.DBStatementsTotal, metrics.DBWriteCategoryTaskRunStatus))
 			require.Equal(t, beforeEvents+5, timeoutCounter(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert))
-			finalized, err = store.CompleteIfActive(jr.ID, NewRunDeadlineError(time.Second))
+			finalized, err = store.CompleteIfActive(jr.ID, cause)
 			require.NoError(t, err)
 			require.False(t, finalized)
 			require.Equal(t, beforeDuration+1, timeoutDurationCount(t, jobID))
@@ -132,6 +157,11 @@ func TestRunTimeoutBookkeepingIsAtomicAndPerConcreteTask(t *testing.T) {
 }
 
 func TestRunTimeoutEventFailureRollsBackTaskAndRunBookkeeping(t *testing.T) {
+	testRunTerminationRollback(t, NewRunDeadlineError(time.Second))
+}
+
+func testRunTerminationRollback(t *testing.T, cause error) {
+	t.Helper()
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
@@ -149,7 +179,7 @@ func TestRunTimeoutEventFailureRollsBackTaskAndRunBookkeeping(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { _ = db.Callback().Create().Remove("test:timeout_event_failure") })
-	finalized, err := store.CompleteIfActive(jr.ID, NewRunDeadlineError(time.Second))
+	finalized, err := store.CompleteIfActive(jr.ID, cause)
 	require.ErrorIs(t, err, writeErr)
 	require.False(t, finalized)
 	var gotRun models.JobRun
@@ -169,6 +199,11 @@ func TestRunTimeoutEventFailureRollsBackTaskAndRunBookkeeping(t *testing.T) {
 }
 
 func TestRunTimeoutKeepsQuarantinedTaskMetricsIsolated(t *testing.T) {
+	testRunTerminationQuarantine(t, NewRunDeadlineError(time.Second), false)
+}
+
+func testRunTerminationQuarantine(t *testing.T, cause error, quarantineRun bool) {
+	t.Helper()
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
@@ -176,9 +211,12 @@ func TestRunTimeoutKeepsQuarantinedTaskMetricsIsolated(t *testing.T) {
 	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "timeout-quarantine"}).Error)
 	jr, err := store.Start(jobID, nil)
 	require.NoError(t, err)
-	row := models.TaskRun{ID: uuid.New(), JobRunID: jr.ID, TaskID: taskID, Engine: models.AtomEngineDocker, Status: string(TaskStatusRunning), Quarantine: true}
+	if quarantineRun {
+		require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", jr.ID).Update("quarantine", true).Error)
+	}
+	row := models.TaskRun{ID: uuid.New(), JobRunID: jr.ID, TaskID: taskID, Engine: models.AtomEngineDocker, Status: string(TaskStatusRunning), Quarantine: !quarantineRun}
 	require.NoError(t, db.Create(&row).Error)
-	finalized, err := store.CompleteIfActive(jr.ID, NewRunDeadlineError(time.Second))
+	finalized, err := store.CompleteIfActive(jr.ID, cause)
 	require.NoError(t, err)
 	require.True(t, finalized)
 	require.Zero(t, timeoutCounter(t, metrics.TaskRunsTotal, jobID.String(), taskID.String(), "docker", "failed"))
